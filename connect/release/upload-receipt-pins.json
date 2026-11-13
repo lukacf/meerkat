@@ -1,5 +1,5 @@
 {
-  "schema": "release-upload-receipt-check/pins/2",
+  "schema": "release-upload-receipt-check/pins/3",
   "targets": {
     "linux-x86_64": {
       "names": "holds-target",
@@ -7,7 +7,9 @@
       "rules_sha256": null,
       "non_published_list_sha256": null,
       "detector_pinned_sha256": "32ff711494f2e18ab58e3e8f5df32a5ddfe2ce01384879fa94bb0a41c95f7582",
-      "detector_current_sha256": "88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509"
+      "detector_current_sha256": "88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509",
+      "detector_pinned_default_rules_sha256": null,
+      "detector_current_default_rules_sha256": null
     },
     "macos-arm64": {
       "names": "holds-target",
@@ -15,7 +17,9 @@
       "rules_sha256": null,
       "non_published_list_sha256": null,
       "detector_pinned_sha256": null,
-      "detector_current_sha256": null
+      "detector_current_sha256": null,
+      "detector_pinned_default_rules_sha256": null,
+      "detector_current_default_rules_sha256": null
     },
     "release": {
       "names": [
@@ -29,7 +33,9 @@
       "rules_sha256": null,
       "non_published_list_sha256": null,
       "detector_pinned_sha256": null,
-      "detector_current_sha256": null
+      "detector_current_sha256": null,
+      "detector_pinned_default_rules_sha256": null,
+      "detector_current_default_rules_sha256": null
     }
   }
 }

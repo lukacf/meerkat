@@ -19,7 +19,7 @@ finding counts. What leaves that place is a receipt, and only it: the upload rec
 (release-upload-receipt-check.py), accept-publication, publish-accepted and the release workflow
 read the receipt and never a full report.
 
-The receipt (schema release-upload-receipt/3) holds exactly what the check reads:
+The receipt (schema release-upload-receipt/4) holds exactly what the check reads:
   {"schema": ..., "target": TARGET,
    "payload": [{"name", "bytes", "sha256"}],   the target's files, as both reports name them
    "privacy": {"status", "release", "exit_code", "generated_at", "tool_commit", "tool_sha256",
@@ -29,8 +29,12 @@ The receipt (schema release-upload-receipt/3) holds exactly what the check reads
                "accepted_only_with_proof": true, "accepted_proof_tools": {TOOL: entries},
                "report_sha256"},
    "credential": {"status", "release", "generated_at", "tool_commit", "tool_sha256",
-                  "detector_pinned_sha256", "detector_current_sha256", "nothing_refused": true,
+                  "detector_pinned_sha256", "detector_current_sha256",
+                  "detector_pinned_default_rules_sha256", "detector_current_default_rules_sha256",
+                  "nothing_refused": true,
                   "nothing_pending": true, "nothing_unread_unaccepted": true, "report_sha256"}}
+The two default rules digests are of the rules file each build read with, as the credential
+report states them (detector_builds, default_rules_sha256): the check holds them to its pins.
 Digests, times, the status word, seven facts as true or false, and the names of the tools whose
 proofs the used acceptance entries carry, each with the number of entries it proved (so that
 whoever reads a receipt before an upload sees which tools vouched, and for how much). No category
@@ -104,7 +108,7 @@ import re
 import sys
 from pathlib import Path
 
-SCHEMA = "release-upload-receipt/3"
+SCHEMA = "release-upload-receipt/4"
 CHECK_NAME = "release-upload-receipt-check.py"
 # The file of each scan, beside this tool: what a report's tool_sha256 is the digest of.
 SCAN_FILES = {"privacy report": "release-payload-privacy-scan.py", "credential report": "release-payload-credential-scan.py"}
@@ -402,11 +406,16 @@ def main() -> int:
         report, shared, credential_rows = credential
         scan_file_is_its_commits(label, report, checkout, problems)
         class_list_is_its_commits(label, report, checkout, problems)
-        builds, seen = report.get("detector_builds"), {}
+        builds, seen, rules = report.get("detector_builds"), {}, {}
         if isinstance(builds, list) and len(builds) == 2 and all(isinstance(row, dict) for row in builds):
             seen = {row.get("role"): row.get("sha256") for row in builds}
+            rules = {row.get("role"): row.get("default_rules_sha256") for row in builds}
         if set(seen) != {"pinned", "current"} or not all(digest(value) for value in seen.values()):
             problems.append(f"{label}: detector_builds does not name a pinned and a current build with their sha256")
+        # The rules file each build read with. The check holds it to a pin: a build's digest does not fix it.
+        elif not all(digest(value) for value in rules.values()):
+            problems.append(f"{label}: detector_builds does not state the sha256 of the default rules file each build "
+                            "read with (default_rules_sha256)")
         for group, field in (("findings", "refused"), ("findings", "pending_owner"), ("unread", "unaccepted")):
             value = report.get(group, {}).get(field) if isinstance(report.get(group), dict) else None
             if not count(value) or value != 0:
@@ -425,6 +434,8 @@ def main() -> int:
         if len(problems) == before:
             scans["credential"] = {
                 **shared, "detector_pinned_sha256": seen["pinned"], "detector_current_sha256": seen["current"],
+                "detector_pinned_default_rules_sha256": rules["pinned"],
+                "detector_current_default_rules_sha256": rules["current"],
                 "nothing_refused": True, "nothing_pending": True, "nothing_unread_unaccepted": True}
 
     # The rows: every file both reports name with the same bytes, each under the one target given

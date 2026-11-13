@@ -1243,15 +1243,16 @@ def stamp():
 
 
 REAL_PINS = {"name_list_sha256": "a1" * 32, "rules_sha256": "8b" * 32, "non_published_list_sha256": "d5" * 32,
-             "detector_pinned_sha256": "b2" * 32, "detector_current_sha256": "c3" * 32}
+             "detector_pinned_sha256": "b2" * 32, "detector_current_sha256": "c3" * 32,
+             "detector_pinned_default_rules_sha256": "5e" * 32, "detector_current_default_rules_sha256": "4d" * 32}
 REAL_EXCEPTIONS = '{"schema": "release-payload-privacy-scan/coverage-exceptions/1", "exceptions": []}\n'
-REAL_PINS_FILE = json.dumps({"schema": "release-upload-receipt-check/pins/2", "targets": {
+REAL_PINS_FILE = json.dumps({"schema": "release-upload-receipt-check/pins/3", "targets": {
     PLATFORM: {"names": "holds-target", **REAL_PINS},
     RELEASE: {"names": ["RELEASE-MANIFEST.json", "SHA256SUMS", "source-manifest.json",
                         "madeup_toolkit-<version>-py3-none-any.whl", "madeup-toolkit-<version>.tgz"], **REAL_PINS}}}, indent=2) + "\n"
 
 
-REAL_RECEIPT_SCHEMA = "release-upload-receipt/3"
+REAL_RECEIPT_SCHEMA = "release-upload-receipt/4"
 
 
 @unittest.skipUnless(getattr(load("the_repository_check", REAL_CHECK), "RECEIPT_SCHEMA", None) == REAL_RECEIPT_SCHEMA,
@@ -1275,7 +1276,10 @@ class WithTheRepositorysCheck(Fixture):
                              "accepted_proof_tools": {}, **changes.get("privacy", {})},
                  "credential": {**scan, "tool_sha256": "7c" * 32, "report_sha256": "2c" * 32,
                                 "detector_pinned_sha256": REAL_PINS["detector_pinned_sha256"],
-                                "detector_current_sha256": REAL_PINS["detector_current_sha256"], "nothing_refused": True,
+                                "detector_current_sha256": REAL_PINS["detector_current_sha256"],
+                                "detector_pinned_default_rules_sha256": REAL_PINS["detector_pinned_default_rules_sha256"],
+                                "detector_current_default_rules_sha256": REAL_PINS["detector_current_default_rules_sha256"],
+                                "nothing_refused": True,
                                 "nothing_pending": True, "nothing_unread_unaccepted": True, **changes.get("credential", {})}}
         self.count += 1
         path = self.root / "lane" / (name or f"receipt-{target}-{self.count}.json")
@@ -1292,6 +1296,8 @@ class WithTheRepositorysCheck(Fixture):
     def test_a_receipt_the_check_refuses_attaches_nothing(self):
         for label, target, changes in (("a scan that did not pass", RELEASE, {"privacy": {"status": "REFUSED"}}),
                                        ("another detector build", PLATFORM, {"credential": {"detector_current_sha256": "0" * 64}}),
+                                       ("another rules file for a detector build", PLATFORM,
+                                        {"credential": {"detector_pinned_default_rules_sha256": "0" * 64}}),
                                        ("a scan with an exemption", RELEASE, {"privacy": {"no_exemptions": False}}),
                                        ("an acceptance without proof", PLATFORM, {"privacy": {"accepted_only_with_proof": False}}),
                                        ("a stale scan", PLATFORM, {"credential": {"generated_at": "2020-01-01T00:00:00Z"}})):

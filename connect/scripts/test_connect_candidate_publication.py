@@ -74,7 +74,8 @@ def verified_statement(path, request):
 # of the target, and the coverage exceptions file, from the commit of the checkout it runs from. So
 # these tests run a copy of the check in made-up checkouts (scratch git repositories).
 RECEIPT_PINS = {'name_list_sha256': 'a1' * 32, 'rules_sha256': '8b' * 32, 'non_published_list_sha256': 'd5' * 32,
-                'detector_pinned_sha256': 'b2' * 32, 'detector_current_sha256': 'c3' * 32}
+                'detector_pinned_sha256': 'b2' * 32, 'detector_current_sha256': 'c3' * 32,
+                'detector_pinned_default_rules_sha256': '5e' * 32, 'detector_current_default_rules_sha256': '4d' * 32}
 RECEIPT_EXCEPTIONS = '{"schema": "release-payload-privacy-scan/coverage-exceptions/1", "exceptions": []}\n'
 # The check as the candidate tool finds it: the file beside it, in its own checkout.
 CHECKOUT_RECEIPT_CHECK = p.RECEIPT_CHECK
@@ -87,7 +88,7 @@ def receipt_checkout(root, pins):
     (root / 'release').mkdir()
     shutil.copyfile(CHECKOUT_RECEIPT_CHECK, root / 'scripts' / CHECKOUT_RECEIPT_CHECK.name)
     dump(root / 'release/upload-receipt-pins.json',
-         {'schema': 'release-upload-receipt-check/pins/2',
+         {'schema': 'release-upload-receipt-check/pins/3',
           'targets': {target: {'names': 'holds-target', **pins} for target in p.TARGETS}})
     (root / 'release/payload-scan-coverage-exceptions.json').write_text(RECEIPT_EXCEPTIONS)
     environment = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
@@ -135,11 +136,13 @@ def scan_receipt(c, **changes):
     credential = {**scan, 'tool_sha256': '7c' * 32, 'report_sha256': '2c' * 32,
                   'detector_pinned_sha256': RECEIPT_PINS['detector_pinned_sha256'],
                   'detector_current_sha256': RECEIPT_PINS['detector_current_sha256'],
+                  'detector_pinned_default_rules_sha256': RECEIPT_PINS['detector_pinned_default_rules_sha256'],
+                  'detector_current_default_rules_sha256': RECEIPT_PINS['detector_current_default_rules_sha256'],
                   'nothing_refused': True, 'nothing_pending': True, 'nothing_unread_unaccepted': True}
     for part, own in ((privacy, 'privacy'), (credential, 'credential')):
         part.update(changes.get('both', {}))
         part.update(changes.get(own, {}))
-    document = {'schema': 'release-upload-receipt/3', 'target': c.target, 'payload': rows, 'privacy': privacy,
+    document = {'schema': 'release-upload-receipt/4', 'target': c.target, 'payload': rows, 'privacy': privacy,
                 'credential': credential, **changes.get('top', {})}
     scan_receipt.count += 1
     path = c.root / f'upload-receipt-in-{scan_receipt.count}.json'

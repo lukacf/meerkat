@@ -31,17 +31,22 @@ CONVERTER = HERE / "privacy-rules-from-names.py"
 TARGET, OTHER_TARGET = "linux-x86_64", "macos-arm64"
 NAME_LIST, RULES = "a1" * 32, "8b" * 32
 PINNED, CURRENT = "b2" * 32, "c3" * 32
+# The default rules file each made-up build reads with.
+PINNED_RULES, CURRENT_RULES = "5e" * 32, "4d" * 32
 NON_PUBLISHED = "d5" * 32
-RECEIPT_SCHEMA = "release-upload-receipt/3"
+RECEIPT_SCHEMA = "release-upload-receipt/4"
 # The made-up tools whose proofs the made-up acceptance entries carry, with the entries each proved.
 PROOF_TOOLS = {"zq-prover-one": 1, "zq-prover-two": 1}
 PINS_NAME = "upload-receipt-pins.json"
-PINS_SCHEMA = "release-upload-receipt-check/pins/2"
+PINS_SCHEMA = "release-upload-receipt-check/pins/3"
 EXCEPTIONS_NAME = "payload-scan-coverage-exceptions.json"
 EMPTY_LIST_NAME = "library-non-published-source-members-empty.json"
 # The pins of one target: what a release scan of that target's files must have run with.
 PINS = {"name_list_sha256": NAME_LIST, "rules_sha256": RULES, "non_published_list_sha256": NON_PUBLISHED,
-        "detector_pinned_sha256": PINNED, "detector_current_sha256": CURRENT}
+        "detector_pinned_sha256": PINNED, "detector_current_sha256": CURRENT,
+        "detector_pinned_default_rules_sha256": PINNED_RULES, "detector_current_default_rules_sha256": CURRENT_RULES}
+# The pins of the schema before this one: the builds were pinned, the rules file each read with was not.
+FORMER_PINS = {name: value for name, value in PINS.items() if "default_rules" not in name}
 OTHER_PINS = {name: "f0" * 32 if name == "detector_current_sha256" else "e9" * 32 for name in PINS}
 # The name rule of a target: its files hold its name, or they are exactly these names.
 HOLDS = "holds-target"
@@ -53,7 +58,9 @@ VERSION = "1.2.3"
 PIN_FIELDS = {"name_list_sha256": "privacy.name_list_sha256", "rules_sha256": "privacy.rules_sha256",
               "non_published_list_sha256": "privacy.non_published_list_sha256",
               "detector_pinned_sha256": "credential.detector_pinned_sha256",
-              "detector_current_sha256": "credential.detector_current_sha256"}
+              "detector_current_sha256": "credential.detector_current_sha256",
+              "detector_pinned_default_rules_sha256": "credential.detector_pinned_default_rules_sha256",
+              "detector_current_default_rules_sha256": "credential.detector_current_default_rules_sha256"}
 # Every option that once gave the check a pin, a full report or an acceptance input.
 FORMER_OPTIONS = tuple(f"--{name}-{form}" for name in ("name-list", "non-published-list", "detector-pinned", "detector-current",
                                                        "privacy-accepted", "credential-accepted", "credential-pending")
@@ -259,8 +266,8 @@ class Fixture(unittest.TestCase):
         return {"schema": "release-payload-credential-scan/report/1", "name": "X0", "label": "X0", "release": True,
                 "status": "PASS", "generated_at": stamp(), "tool_commit": COMMIT, "tool_sha256": CREDENTIAL_TOOL,
                 "receipt": "CREDENTIAL-LEG PASS X0 files=2", "payload": self.payload(),
-                "detector_builds": [{"role": "pinned", "version": "0.0.1", "sha256": PINNED, "default_rules_sha256": "5e" * 32},
-                                    {"role": "current", "version": "0.0.2", "sha256": CURRENT, "default_rules_sha256": "4d" * 32}],
+                "detector_builds": [{"role": "pinned", "version": "0.0.1", "sha256": PINNED, "default_rules_sha256": PINNED_RULES},
+                                    {"role": "current", "version": "0.0.2", "sha256": CURRENT, "default_rules_sha256": CURRENT_RULES}],
                 "accepted": {"count": 3, "sha256": "a7" * 32, "positions": 3}, "pending": {"count": 0, "sha256": None},
                 "findings": {"total": 3, "refused": 0, "pending_owner": 0, "by_rule": {"made-up-rule": {"accepted position": 3}}},
                 "unread": {"total": 4, "unaccepted": 0, "files": {"made-up reason": 4}},
@@ -278,7 +285,8 @@ class Fixture(unittest.TestCase):
                             "name_rules_all_blocking": True, "no_exemptions": True, "accepted_only_with_proof": True,
                             "accepted_proof_tools": dict(PROOF_TOOLS)},
                 "credential": {**scan, "tool_sha256": CREDENTIAL_TOOL, "report_sha256": "2c" * 32, "detector_pinned_sha256": PINNED,
-                               "detector_current_sha256": CURRENT, "nothing_refused": True, "nothing_pending": True,
+                               "detector_current_sha256": CURRENT, "detector_pinned_default_rules_sha256": PINNED_RULES,
+                               "detector_current_default_rules_sha256": CURRENT_RULES, "nothing_refused": True, "nothing_pending": True,
                                "nothing_unread_unaccepted": True}}
 
     def write(self, name, value):
@@ -374,13 +382,19 @@ class ReceiptCheck(Fixture):
             self.refused(self.check(proof), "receipt", "PROOF-ONLY")
         named = [{**row, "name": "PROOF-ONLY-" + row["name"]} for row in self.payload()]
         self.refused(self.check(change(self.receipt(), "payload", named)), "receipt", "PROOF-ONLY")
-        for schema in ("release-upload-receipt/1", "release-upload-receipt/2", "release-upload-receipt/4",
+        for schema in ("release-upload-receipt/1", "release-upload-receipt/2", "release-upload-receipt/3", "release-upload-receipt/5",
                        "release-payload-privacy-scan/report/3", None):
             self.refused(self.check(change(self.receipt(), "schema", schema)), "receipt", RECEIPT_SCHEMA)
         # A receipt as it was written before the two newer facts existed is not one.
         former = change(change(self.receipt(), "schema", "release-upload-receipt/2"), "privacy.accepted_only_with_proof", DROP)
         former = change(former, "privacy.accepted_proof_tools", DROP)
         self.refused(self.check(former), "receipt", RECEIPT_SCHEMA)
+        # Nor is one as it was written before a receipt stated the rules file each build read with:
+        # under its own schema, and under this one without those two digests.
+        former = change(change(self.receipt(), "credential.detector_pinned_default_rules_sha256", DROP),
+                        "credential.detector_current_default_rules_sha256", DROP)
+        self.refused(self.check(change(former, "schema", "release-upload-receipt/3")), "receipt", RECEIPT_SCHEMA)
+        self.refused(self.check(former), "credential", "not exactly the fields")
 
     def test_a_receipt_holds_exactly_its_fields_and_a_full_report_is_none(self):
         receipt = self.receipt()
@@ -398,7 +412,9 @@ class ReceiptCheck(Fixture):
                      "privacy.no_exemptions", "privacy.accepted_only_with_proof", "privacy.accepted_proof_tools",
                      "credential.status", "credential.release",
                      "credential.generated_at", "credential.tool_commit", "credential.tool_sha256", "credential.report_sha256",
-                     "credential.detector_pinned_sha256", "credential.detector_current_sha256", "credential.nothing_refused",
+                     "credential.detector_pinned_sha256", "credential.detector_current_sha256",
+                     "credential.detector_pinned_default_rules_sha256", "credential.detector_current_default_rules_sha256",
+                     "credential.nothing_refused",
                      "credential.nothing_pending", "credential.nothing_unread_unaccepted", "payload.0.sha256", "payload.1.bytes"):
             with self.subTest(less=path):
                 self.refused(self.check(change(receipt, path, DROP)))
@@ -550,6 +566,22 @@ class ReceiptCheck(Fixture):
         for field in ("nothing_refused", "nothing_pending", "nothing_unread_unaccepted"):
             for value in (False, None, 0, 1, "true"):
                 self.refused(self.check(change(receipt, "credential." + field, value)), "credential", field)
+
+    def test_the_credential_scan_needs_the_pinned_default_rules_file_of_each_build(self):
+        # A build's digest does not say which rules file the scan gave it, and a file that lacks a
+        # rule finds less. A receipt of a scan in which a build read with another rules file refuses,
+        # and so does one that states no digest there, a build's digest, or the two the other way round.
+        receipt = self.receipt()
+        fields = ("credential.detector_pinned_default_rules_sha256", "credential.detector_current_default_rules_sha256")
+        swapped = change(change(receipt, fields[0], CURRENT_RULES), fields[1], PINNED_RULES)
+        for number, value in enumerate([change(receipt, field, other) for field in fields for other in ("0" * 64, None, "", PINNED)]
+                                       + [swapped]):
+            with self.subTest(case=number):
+                done = self.check(value)
+                self.refused(done, "credential", "default rules files")
+                # The builds are the pinned ones in every case: the one reason is the rules file.
+                self.assertNotIn("are not the two pinned builds", done.stdout)
+                self.assertEqual(len(done.stdout.strip().splitlines()), 2, done.stdout)
 
     def test_the_pins_are_the_ones_the_checkouts_commit_holds(self):
         # Each receipt field is held to the committed pin of the target: a checkout whose commit pins
@@ -723,6 +755,12 @@ class ReceiptCheck(Fixture):
         cases = {"another schema": json.dumps({**whole, "schema": "release-upload-receipt-check/pins/0"}),
                  "the former schema": json.dumps({**whole, "schema": "release-upload-receipt-check/pins/1"}),
                  "the former file": json.dumps({"schema": "release-upload-receipt-check/pins/1", "targets": {TARGET: PINS}}),
+                 # The schema before this one, which pinned the builds and not the rules file each reads with:
+                 # as it was, under this schema's name, and with this schema's pins under its own.
+                 "the schema before this one": json.dumps({"schema": "release-upload-receipt-check/pins/2",
+                                                           "targets": {TARGET: section(FORMER_PINS)}}),
+                 "no pin for the rules files": json.dumps({**whole, "targets": {TARGET: section(FORMER_PINS)}}),
+                 "the name of the schema before": json.dumps({**whole, "schema": "release-upload-receipt-check/pins/2"}),
                  "no schema": json.dumps({"targets": {TARGET: one}}),
                  "one key more": json.dumps({**whole, "max_age_hours": 1000}),
                  "pins beside the targets": json.dumps({**whole, **PINS}),
@@ -1118,12 +1156,13 @@ class ReceiptWrite(Fixture):
                         "accepted_only_with_proof": True, "accepted_proof_tools": PROOF_TOOLS},
             "credential": {**scan, "generated_at": reports[1]["generated_at"], "tool_sha256": CREDENTIAL_TOOL,
                            "report_sha256": sha256(credential.read_bytes()), "detector_pinned_sha256": PINNED,
-                           "detector_current_sha256": CURRENT, "nothing_refused": True, "nothing_pending": True,
+                           "detector_current_sha256": CURRENT, "detector_pinned_default_rules_sha256": PINNED_RULES,
+                           "detector_current_default_rules_sha256": CURRENT_RULES, "nothing_refused": True, "nothing_pending": True,
                            "nothing_unread_unaccepted": True}})
         # Nothing else of the full reports is in it: no category or rule name, no count, no label.
         text = raw.decode()
         for word in ("madeupclass", "made-up", "X0", "CREDENTIAL-LEG", "total", "count", "hits", "by_rule", "reasons",
-                     '"exemptions"', "label", "version", "engine", "e5" * 32, "a7" * 32, "d4" * 32, "5e" * 32, "6f" * 32):
+                     '"exemptions"', "label", "version", "engine", "e5" * 32, "a7" * 32, "d4" * 32, "6f" * 32):
             self.assertNotIn(word, text, word)
         self.assertFalse(any(isinstance(value, int) and not isinstance(value, bool)
                              for part in ("privacy", "credential") for key, value in json.loads(raw)[part].items()
@@ -1184,6 +1223,10 @@ class ReceiptWrite(Fixture):
                                   ("detector_builds", credential["detector_builds"][:1], "detector_builds"),
                                   ("detector_builds", DROP, "detector_builds"), ("detector_builds.1.role", "pinned", "detector_builds"),
                                   ("detector_builds.0.sha256", None, "detector_builds"), ("accepted", DROP, "accepted"),
+                                  # A report that does not state the rules file a build read with.
+                                  ("detector_builds.0.default_rules_sha256", DROP, "default_rules_sha256"),
+                                  ("detector_builds.1.default_rules_sha256", None, "default_rules_sha256"),
+                                  ("detector_builds.1.default_rules_sha256", "short", "default_rules_sha256"),
                                   ("pending.count", DROP, "pending")):
             with self.subTest(credential=path, value=value):
                 self.not_written(credential=change(credential, path, value), words=("credential", word))
@@ -1192,7 +1235,24 @@ class ReceiptWrite(Fixture):
         self.assertEqual(done.returncode, 0, done.stdout)
         written = json.loads(receipt.read_text())["credential"]
         self.assertEqual((written["detector_pinned_sha256"], written["detector_current_sha256"]), (CURRENT, PINNED))
+        self.assertEqual((written["detector_pinned_default_rules_sha256"], written["detector_current_default_rules_sha256"]),
+                         (CURRENT_RULES, PINNED_RULES))
         self.refused(self.check(receipt), "credential", "detector")
+
+    def test_a_receipt_of_a_scan_that_read_with_another_rules_file_is_refused_by_the_check(self):
+        # The writer holds no pin: it states the rules file each build read with, as the report does.
+        # The check holds that to the pins of its checkout, for each build.
+        for row, role in enumerate(("pinned", "current")):
+            with self.subTest(build=role):
+                other = change(self.credential(), "detector_builds.%d.default_rules_sha256" % row, "0" * 64)
+                done, receipt = self.written(credential=other)
+                self.assertEqual(done.returncode, 0, done.stdout)
+                self.assertEqual(json.loads(receipt.read_text())["credential"]["detector_%s_default_rules_sha256" % role], "0" * 64)
+                checked = self.check(receipt)
+                self.refused(checked, "credential", "default rules files")
+                self.assertNotIn("are not the two pinned builds", checked.stdout)
+                # A checkout whose commit pins that rules file passes the same receipt.
+                self.passed(self.check(receipt, tool=self.checkout({**PINS, "detector_%s_default_rules_sha256" % role: "0" * 64})))
 
     def test_no_receipt_is_written_when_a_build_gives_no_proof_of_read_for_a_file(self):
         # A file that one build was handed and left unread for lack of proof of read, and an
@@ -1621,9 +1681,11 @@ class ReceiptWrite(Fixture):
         fixtures = load("credential_scan_fixtures", HERE / "test_release_payload_credential_scan.py")
         pinned, current = fixtures.write_builds(self.root / "builds")
         # One checkout holds the scan, the writer, the check and the pins of the two builds the scan
-        # runs with: the commit that is released is its head.
+        # runs with and of the default rules file beside each: the commit that is released is its head.
         tool = self.checkout({**PINS, "detector_pinned_sha256": sha256(Path(pinned).read_bytes()),
-                              "detector_current_sha256": sha256(Path(current).read_bytes())})
+                              "detector_current_sha256": sha256(Path(current).read_bytes()),
+                              "detector_pinned_default_rules_sha256": sha256(Path(pinned).with_name("gitleaks.toml").read_bytes()),
+                              "detector_current_default_rules_sha256": sha256(Path(current).with_name("gitleaks.toml").read_bytes())})
         scanner = tool.parent.parent
         for source in (fixtures.TOOL, fixtures.EXTRACTOR):
             shutil.copyfile(source, scanner / "scripts" / source.name)
@@ -1632,21 +1694,39 @@ class ReceiptWrite(Fixture):
         head = git(scanner, "rev-parse", "HEAD")
         product = self.files[0]
         product.write_bytes(fixtures.tar_bytes({"pkg/notes.txt": b"plain\n"}))
-        report = self.root / "credential-report.json"
-        done = subprocess.run([sys.executable, "-I", str(scanner / "scripts" / fixtures.TOOL.name), "--name", "X0",
-                               "--gitleaks-pinned", str(pinned), "--gitleaks-current", str(current), "--receipt", str(self.root / "receipt.txt"),
-                               "--report", str(report), "--work", str(self.root), *map(str, self.files)], capture_output=True, text=True)
-        self.assertEqual(done.returncode, 0, done.stderr)
+
+        def scanned(name, *extra):
+            """The report of a scan of the files by the checkout's scan, with the two stand-in builds."""
+            report = self.root / (name + "-report.json")
+            done = subprocess.run([sys.executable, "-I", str(scanner / "scripts" / fixtures.TOOL.name), "--name", "X0",
+                                   "--gitleaks-pinned", str(pinned), "--gitleaks-current", str(current),
+                                   "--receipt", str(self.root / (name + "-receipt.txt")), "--report", str(report),
+                                   "--work", str(self.root), *extra, *map(str, self.files)], capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return report
+
+        report = scanned("credential")
         self.assertEqual(json.loads(report.read_text())["tool_commit"], head)
         self.assertEqual(json.loads(report.read_text())["tool_sha256"], sha256(fixtures.TOOL.read_bytes()))
         done, receipt = self.written(privacy=change(self.privacy(), "tool_commit", head), credential=report, tool=tool)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        # The checkout judges it: it pins the two builds the scan ran with.
+        # The checkout judges it: it pins the two builds the scan ran with, and their rules files.
         self.passed(self.check(receipt, commit=head, tool=tool))
         # The writer of a checkout that does not hold that commit cannot tell whose tool wrote the report.
         self.not_written(privacy=change(self.privacy(), "tool_commit", head), credential=report, words=("tool_commit",))
         self.refused(self.check(receipt, commit="d" * 40, tool=tool), "tool_commit")
         self.refused(self.check(receipt, commit=head), "credential", "detector")
+        # The same scan with another rules file for one build, one that finds what the build's own
+        # finds here (the same text and a comment): the scan passes, and the receipt written from its
+        # report is refused. The builds are the pinned ones; the rules file one of them read with is not.
+        other = self.root / "other-rules.toml"
+        other.write_text(fixtures.DEFAULT_RULES + "# the same rules, other bytes\n")
+        report = scanned("other-rules", "--default-config-current", str(other))
+        done, receipt = self.written(privacy=change(self.privacy(), "tool_commit", head), credential=report, tool=tool)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        checked = self.check(receipt, commit=head, tool=tool)
+        self.refused(checked, "credential", "default rules files")
+        self.assertNotIn("are not the two pinned builds", checked.stdout)
 
 
 if __name__ == "__main__":

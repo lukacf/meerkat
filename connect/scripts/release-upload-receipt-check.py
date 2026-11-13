@@ -7,7 +7,7 @@
 FILE... are the files about to be uploaded, as they are now, all of one target: every file of the
 receipt, and no other. Nothing may be uploaded unless this tool exits 0.
 
-The receipt (schema release-upload-receipt/3) is written by release-upload-receipt-write.py, where
+The receipt (schema release-upload-receipt/4) is written by release-upload-receipt-write.py, where
 the scans ran, from the two full scan reports: the private-text report of
 release-payload-privacy-scan.py and the credential report of release-payload-credential-scan.py.
 It holds exactly what this check reads: the target, the payload rows, and per scan the status
@@ -53,14 +53,20 @@ and, for the private-text scan:
     this tool's checkout commits it: a scan that ran with another exceptions file refuses;
 and, for the credential scan:
   - detector_pinned_sha256 and detector_current_sha256 are the two pinned builds;
+  - detector_pinned_default_rules_sha256 and detector_current_default_rules_sha256 are the pinned
+    default rules files of those builds. A build's digest does not say which rules file the scan
+    gave it: the scan reads with the file beside the build or the file it is given, and a file
+    that lacks a rule finds less. So the rules file is pinned too, byte for byte;
   - nothing_refused, nothing_pending and nothing_unread_unaccepted are true.
 
 Pins. What a receipt is held to is not the caller's to say. It is read from the checkout this
 tool runs from: release/upload-receipt-pins.json (beside scripts/), schema
-release-upload-receipt-check/pins/2:
+release-upload-receipt-check/pins/3:
   {"schema": ..., "targets": {TARGET: {"names": "holds-target" | [PATTERN, ...],
     "name_list_sha256": HEX|null, "rules_sha256": HEX|null, "non_published_list_sha256": HEX|null,
-    "detector_pinned_sha256": HEX|null, "detector_current_sha256": HEX|null}}}
+    "detector_pinned_sha256": HEX|null, "detector_current_sha256": HEX|null,
+    "detector_pinned_default_rules_sha256": HEX|null,
+    "detector_current_default_rules_sha256": HEX|null}}}
 Each target has its own pins. The file holds digests only: a name list, its rules and a list that
 names members a library leaves out are private and are in no repository (a target that leaves
 nothing out pins the empty list, which names nothing). This tool has no option, environment
@@ -122,7 +128,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
-RECEIPT_SCHEMA = "release-upload-receipt/3"
+RECEIPT_SCHEMA = "release-upload-receipt/4"
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?\Z")
 STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
@@ -133,9 +139,9 @@ TOOL = Path(__file__).resolve()
 RELEASE = TOOL.parent.parent / "release"
 PINS_FILE = RELEASE / "upload-receipt-pins.json"
 EXCEPTIONS_FILE = RELEASE / "payload-scan-coverage-exceptions.json"
-PINS_SCHEMA = "release-upload-receipt-check/pins/2"
+PINS_SCHEMA = "release-upload-receipt-check/pins/3"
 PINS = ("name_list_sha256", "rules_sha256", "non_published_list_sha256", "detector_pinned_sha256",
-        "detector_current_sha256")
+        "detector_current_sha256", "detector_pinned_default_rules_sha256", "detector_current_default_rules_sha256")
 # The name rule of a target: its files hold its name, or they are exactly the names of a list.
 HOLDS_TARGET = "holds-target"
 TARGET_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
@@ -151,8 +157,8 @@ SCAN = ("status", "release", "generated_at", "tool_commit", "tool_sha256", "repo
 PRIVACY = (*SCAN, "exit_code", "rules_sha256", "name_list_sha256", "non_published_list_sha256",
            "coverage_exceptions_sha256", "blocking_rules", "name_rules_all_blocking", "no_exemptions",
            "accepted_only_with_proof", "accepted_proof_tools")
-CREDENTIAL = (*SCAN, "detector_pinned_sha256", "detector_current_sha256", "nothing_refused", "nothing_pending",
-              "nothing_unread_unaccepted")
+CREDENTIAL = (*SCAN, "detector_pinned_sha256", "detector_current_sha256", "detector_pinned_default_rules_sha256",
+              "detector_current_default_rules_sha256", "nothing_refused", "nothing_pending", "nothing_unread_unaccepted")
 ROW = ("name", "bytes", "sha256")
 # The one form of a proof tool's name, as the private-text scan and the receipt writer hold it: a
 # lower-case letter or a digit, then lower-case letters, digits and single hyphens, 64 at most.
@@ -503,6 +509,12 @@ def check(target: str, receipt: Path, release_commit: str, files, *, version: st
         if pins is not None and (credential["detector_pinned_sha256"], credential["detector_current_sha256"]) != (
                 pins["detector_pinned_sha256"], pins["detector_current_sha256"]):
             problems.append(f"{label}: detector_pinned_sha256 and detector_current_sha256 are not the two pinned builds")
+        # The rules file each build read with: a build's digest does not fix it.
+        if pins is not None and (credential["detector_pinned_default_rules_sha256"],
+                                 credential["detector_current_default_rules_sha256"]) != (
+                pins["detector_pinned_default_rules_sha256"], pins["detector_current_default_rules_sha256"]):
+            problems.append(f"{label}: detector_pinned_default_rules_sha256 and detector_current_default_rules_sha256 are not "
+                            "the pinned default rules files of the two builds")
         for field in ("nothing_refused", "nothing_pending", "nothing_unread_unaccepted"):
             if credential[field] is not True:
                 problems.append(f"{label}: {field} is not true")

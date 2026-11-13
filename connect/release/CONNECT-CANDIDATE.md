@@ -526,7 +526,7 @@ python3 scripts/release-upload-receipt-check.py \
 
 - The full reports stay where the scans ran. They hold category names and
   counts of rules, findings and accepted entries. The receipt (schema
-  `release-upload-receipt/3`) holds exactly what the check reads: the target,
+  `release-upload-receipt/4`) holds exactly what the check reads: the target,
   each file's name, size and sha256, and for each scan the status word,
   `release`, the time, the tool's commit and sha256, the digests of the inputs
   the scan ran with, the sha256 of the full report, and seven facts as true or
@@ -588,18 +588,26 @@ python3 scripts/release-upload-receipt-check.py \
   the pinned name list, the pinned list of left-out members and the coverage
   exceptions file of the checkout (`coverage_exceptions_sha256` equals the
   committed `release/payload-scan-coverage-exceptions.json`). The credential
-  scan must have run with the two pinned detector builds and left nothing
-  refused, pending or unread and unaccepted.
+  scan must have run with the two pinned detector builds, each reading with
+  its pinned default rules file, and left nothing refused, pending or unread
+  and unaccepted. A build's digest does not say which rules file the scan
+  gave it, and a file that lacks a rule finds less: the receipt states the
+  sha256 of the rules file each build read with, and the check holds it to
+  a pin, byte for byte.
 
 Where the pins come from:
 
 - The check reads them from the checkout it runs from, as that checkout's
   commit holds them: `release/upload-receipt-pins.json` (schema
-  `release-upload-receipt-check/pins/2`). Each target has a name rule and five
+  `release-upload-receipt-check/pins/3`). Each target has a name rule and seven
   pins: `name_list_sha256`, `rules_sha256`, `non_published_list_sha256`,
-  `detector_pinned_sha256` and `detector_current_sha256`. They are digests
+  `detector_pinned_sha256`, `detector_current_sha256`,
+  `detector_pinned_default_rules_sha256` and
+  `detector_current_default_rules_sha256`. They are digests
   only. A name list, its rules and a list that names left-out members are
-  private and enter no repository, workflow input, artifact or log.
+  private and enter no repository, workflow input, artifact or log. The two
+  default rules pins are the sha256 of the file `gitleaks.toml` beside each
+  pinned build (the file `config/gitleaks.toml` of that version's source).
 - When a detector pin or a build's default rules file changes, two counts are
   measured again, per default rules file, before the new pin is accepted: the
   rules that can report only at the first byte of a file (an alternative

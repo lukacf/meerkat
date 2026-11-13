@@ -167,10 +167,9 @@ Security, Upgrade and Changed.
   console does not know or that has none. A request made while the first
   attempt of that read is running waits for it, at most five seconds. A
   console that serves several runtimes waits for the read of each runtime
-  it serves, and no longer for a runtime it has stopped serving. Once the
-  read has succeeded, a console that can identify nobody serves its one
-  operator as before, except for what belongs to an agent it now knows as
-  private to a person.
+  it serves, while it serves it. Once the read has succeeded, a console
+  that can identify nobody serves its one operator as before, except for
+  what belongs to an agent it now knows as private to a person.
 - The session of an agent that was private to a person is answered as a
   session that does not exist to everyone but that person and an
   administrator, also after the agent has ended and also on a console that

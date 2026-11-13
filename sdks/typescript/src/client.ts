@@ -4132,7 +4132,7 @@ export class MeerkatClient {
 
   /**
    * Point-in-time aggregate of a mob's status plus its member list.
-   * Wraps the `mob/snapshot` RPC (DELETE_ME C2).
+   * Wraps the `mob/snapshot` RPC.
    */
   async mobSnapshot(mobId: string): Promise<{
     mobId: string;
@@ -4165,7 +4165,7 @@ export class MeerkatClient {
 
   /**
    * Destroy a mob and surface the structured `MobDestroyReport`.
-   * Wraps the `mob/destroy` RPC (DELETE_ME C3). Unlike `mob/lifecycle`
+   * Wraps the `mob/destroy` RPC. Unlike `mob/lifecycle`
    * with `action: "destroy"`, this dedicated endpoint has a predictable
    * response shape that does not require branching on an action string.
    * A refusal `kind` this SDK does not know reads as `{ kind: "unknown" }`.
@@ -4208,7 +4208,7 @@ export class MeerkatClient {
 
   /**
    * Rotate the supervisor bridge for all members of a mob.
-   * Wraps the `mob/rotate_supervisor` RPC (DELETE_ME C10). Returns the
+   * Wraps the `mob/rotate_supervisor` RPC. Returns the
    * full `SupervisorRotationReport` so operators can inspect per-member
    * rotation outcomes instead of getting a bare `ok: true`.
    */
@@ -4250,7 +4250,7 @@ export class MeerkatClient {
 
   /**
    * Submit a unit of work to a mob member through the work lane.
-   * Wraps the `mob/submit_work` RPC (DELETE_ME C4). Work lane was
+   * Wraps the `mob/submit_work` RPC. Work lane was
    * Rust-only prior to this; `origin` is `"external"` for
    * user-originated turns and `"internal"` for mob-orchestration work.
    * When `workRef` is omitted the server generates a fresh UUID.
@@ -4348,7 +4348,7 @@ export class MeerkatClient {
 
   /**
    * Cancel all in-flight work for a specific mob member.
-   * Wraps the `mob/cancel_all_work` RPC (DELETE_ME C4).
+   * Wraps the `mob/cancel_all_work` RPC.
    */
   async mobCancelAllWork(args: {
     memberRef: string;

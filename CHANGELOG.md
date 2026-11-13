@@ -356,6 +356,88 @@ them.
   attempt, and so does a failed `mcp.toml` write. Affects 0.3.3 through
   0.9.14.
 
+- `meerkat-mob`: a kickoff notice to a wired peer that was being woken held
+  the whole mob for 30 seconds (0.9.7 through 0.9.14: since a send to a member
+  that is not live began to wake it). When a member's kickoff changed phase,
+  for example resolved, while a wired peer's wake was between its applied
+  plan and its readiness, the mob's actor sent the notice on its own step.
+  The send joined the peer's wake, the wake's next step needed the actor, and
+  the step ended only when the send's budget did (`wake_timed_out`). Until
+  then every other command of the mob waited: a spawn, a wire, an identity
+  change, a status read, a stop. The notice was not delivered, and the peer
+  was woken without it. The actor now prepares each kickoff notice and hands
+  its send to a task it owns on the peer delivery lane, for live recipients
+  and recipients that are not live alike, so the peer's wake is served while
+  the notice waits for it. A kickoff notice still wakes a peer that is not
+  live. What holds for the notices now:
+  - Order: the notices of one member to one peer are sent one at a time, in
+    the order the kickoff went through its phases. Notices to different
+    peers, and of different members, are independent, so a peer that cannot
+    be reached delays only the notices owed to it. A notice behind one that
+    cannot be delivered is attempted when that one's send budget has ended.
+    The budget is the sending member's comms ack timeout (30 seconds by
+    default), not a constant of the lane.
+  - Bound: at most eight notices of one member are pending for one peer, the
+    one being sent included. A notice owed beyond that takes the place of the
+    oldest one still queued, never of the one being sent, so the latest phase
+    (a failure or a cancellation included) reaches the peer and the notices
+    that stay keep their order. There is no bound across peers or members:
+    the lane holds at most eight notices for every wired pair of members.
+  - A notice the lane cannot confirm is logged at WARN with the member
+    (`from`), the peer (`to`), the notice's kind (`intent`) and a `class`
+    (`preparation_failed`, `send_failed`, `pending_bound` or `cancelled`),
+    and is not sent again. The messages are `a kickoff notice to a peer that
+    was not materialized was not confirmed`, `a kickoff notice to a live peer
+    was not confirmed` (before: `failed to emit kickoff lifecycle notice`,
+    without the peer) and `a kickoff notice could not be prepared for a peer
+    and was not sent`. A notice whose preparation or send fails for one peer
+    no longer skips the member's remaining peers. Not confirmed is not the
+    same as not delivered: a notice whose send budget ended, or that was
+    cancelled, after its recipient had admitted it can still arrive, once.
+    Three cases have no such record: a sending member with no comms runtime
+    (nothing is prepared), a placed sending member (logged without the peer
+    and the class), and notices still pending when the mob's actor exits.
+  - Cancel: a stop, a complete, a reset, a destroy or a shutdown of the mob,
+    an unwire of the edge, a retirement of either member and the rollback of
+    a failed spawn cancel the notices that are pending when they start, as
+    they cancel a pending peer message. A notice such a command emits itself
+    (the cancellation of a kickoff that a stop closes) is handed to the lane
+    after that cancel and ends within its send budget; the stop does not
+    wait for it, and nothing is delivered after a destroy. A member released
+    to Dormant keeps its pending notices: they are still true of it, and
+    their send wakes nothing.
+
+- `meerkat-mob`: a member that was being woken could not be wired, messaged
+  or notified for a short span of its wake (0.9.7 through 0.9.14: since
+  members are woken on demand). A wake creates the member's session, and
+  with it its comms runtime, before it binds the member's operation record.
+  To find a member's peer endpoint the mob read its recorded endpoint first
+  for a member that is not materialized, but for a member that is being woken
+  only after a lookup of its comms runtime had found nothing. In that span
+  the lookup found the runtime, and the call was refused with `missing
+  generated owner operation binding`. A spawn wired to the member by the
+  definition's wiring rules was refused; when the refused spawn's rollback
+  met the same member, the spawn answered `rollback remains owned for retry`
+  and the new member stayed seated with part of its edges until the
+  rollback's next attempt, seconds later. A kickoff notice owed to the member
+  was dropped with a log record. A host peer message to it was refused. A
+  member woken at the same time recorded its edge to it as owing a repair.
+  The mob now reads the recorded endpoint, without looking the comms runtime
+  up, for a member that is not materialized and for one whose wake has not
+  yet applied its plan and whose endpoint is recorded: when it wires,
+  messages or notifies the member, and when a retirement or the rollback of
+  a refused spawn removes an edge to it. Such a member takes the edge on its
+  own side when its wake restores its wiring. A member whose wake has applied
+  its plan, and one being woken with no recorded endpoint yet, are wired
+  through their comms runtime, as before. A rollback that read a peer's
+  recorded endpoint and finds, when it removes its edges, that the peer's
+  wake has applied its plan meanwhile ends that attempt, so that the peer is
+  not left trusting a member that is gone: the spawn then still answers
+  `rollback remains owned for retry`, and the rollback's next attempt,
+  seconds later, removes the edge on both sides. (A peer that was not
+  materialized when a rollback began and was woken during it could be left
+  with such a trust entry in the same releases.)
+
 - `meerkat-copilot` (GitHub Copilot device sign-in): an account no longer
   keeps the model list and the API base of an earlier sign-in after a new
   sign-in whose token exchange is temporarily unavailable. Through 0.9.14
@@ -588,6 +670,14 @@ them.
   pre-0.9 state rewrites it: that second writer gives the file the
   permissions the manifest had). Keep the directories that hold them closed
   to other accounts, or run under a umask of 077.
+
+- `meerkat-mob`: a spawn rollback that is still owed when the mob is
+  stopped (the refused spawn answered `rollback remains owned for retry`)
+  is finished by a later resume, and it can take more than one, because a
+  resume can answer `LifecycleOperationProgressStalled` before a later one
+  succeeds and the member is removed; and a mob that is restarted from its
+  storage before the rollback has recorded its start has the member seated
+  with part of its edges and does not remove it by itself.
 
 ## [0.9.14] - 2026-11-11
 

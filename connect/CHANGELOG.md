@@ -33,6 +33,12 @@ guides give the conditional wording for Connect 0.9.14.
 
 ## [Unreleased]
 
+### Fixed
+
+- On macOS, a prompt whose input is a socket failed with "Operation not
+  supported on socket"; it now treats that answer like a pipe or socket with
+  nothing to discard.
+
 ## [0.9.14] - 2026-11-11
 
 Meerkat Connect 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14

@@ -330,16 +330,25 @@ pub struct ReasoningEffortRefusal {
     /// The route the request would be served on. `None` when the client
     /// that serves the request reports no route: a route nobody observed
     /// is never guessed.
-    #[cfg_attr(feature = "schema", schemars(required))]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(required, schema_with = "nullable_route_schema")
+    )]
     pub route: Option<ReasoningRoute>,
     /// Why the level is refused.
     pub reason: ReasoningEffortRefusalReason,
     /// The levels the route accepts for the model: `None` when unknown or
     /// unavailable, empty when the route or the model takes no effort.
-    #[cfg_attr(feature = "schema", schemars(required))]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(required, schema_with = "nullable_levels_schema")
+    )]
     pub supported: Option<Vec<EffortLevel>>,
     /// The source of `supported`.
-    #[cfg_attr(feature = "schema", schemars(required))]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(required, schema_with = "nullable_facts_schema")
+    )]
     pub facts: Option<ReasoningFactsSource>,
     /// For a conflict: the path of the conflicting setting, for example
     /// `provider_params.provider_tag.effort`.
@@ -349,6 +358,24 @@ pub struct ReasoningEffortRefusal {
     /// level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflicting_level: Option<EffortLevel>,
+}
+
+// A refusal's `route`, `supported` and `facts` are always serialized, as
+// `null` when absent. Their schemas are the nullable ones of their types; a
+// member marked required alone would lose the `null`.
+#[cfg(feature = "schema")]
+fn nullable_route_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    generator.subschema_for::<Option<ReasoningRoute>>()
+}
+
+#[cfg(feature = "schema")]
+fn nullable_levels_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    generator.subschema_for::<Option<Vec<EffortLevel>>>()
+}
+
+#[cfg(feature = "schema")]
+fn nullable_facts_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    generator.subschema_for::<Option<ReasoningFactsSource>>()
 }
 
 /// ` on <backend>/<api>` in a refusal's text, or nothing for a refusal that

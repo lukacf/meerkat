@@ -1156,12 +1156,46 @@ pub(crate) fn rebuild_seat_resume_spec(
     durable: &super::handle::ResumedMemberView,
     seat_build: Option<&super::SeatBuild>,
 ) -> Result<super::handle::SpawnMemberSpec, MobError> {
-    let mut spec = member_resume_spec(entry, &durable.session_id);
+    customize_seat_resume_request(
+        mob_id,
+        customizer,
+        entry,
+        durable,
+        seat_resume_request(entry, &durable.session_id, seat_build),
+    )
+}
+
+/// The request of [`rebuild_seat_resume_spec`] before the customizer is
+/// asked: [`member_resume_spec`], with `seat_build` set on an ordinary
+/// member's. A member's restore composes it further before the customizer
+/// runs over it (the host's composition of a store-owned identity's seat,
+/// [`super::MemberBuildPreparer::prepare_store_owned_seat`]).
+pub(crate) fn seat_resume_request(
+    entry: &RosterEntry,
+    session_id: &SessionId,
+    seat_build: Option<&super::SeatBuild>,
+) -> super::handle::SpawnMemberSpec {
+    let mut spec = member_resume_spec(entry, session_id);
+    if entry.fork_source.is_none()
+        && let Some(seat_build) = seat_build
+    {
+        seat_build.apply_to(&mut spec);
+    }
+    spec
+}
+
+/// The second half of [`rebuild_seat_resume_spec`]: ask the host's spawn
+/// `customizer` about `spec`, an ordinary member's request
+/// ([`seat_resume_request`]); a fork-derived member's is not customized.
+pub(crate) fn customize_seat_resume_request(
+    mob_id: &MobId,
+    customizer: Option<&Arc<dyn super::handle::SpawnMemberCustomizer>>,
+    entry: &RosterEntry,
+    durable: &super::handle::ResumedMemberView,
+    mut spec: super::handle::SpawnMemberSpec,
+) -> Result<super::handle::SpawnMemberSpec, MobError> {
     if entry.fork_source.is_some() {
         return Ok(spec);
-    }
-    if let Some(seat_build) = seat_build {
-        seat_build.apply_to(&mut spec);
     }
     if let Some(customizer) = customizer {
         customizer.customize_resume(

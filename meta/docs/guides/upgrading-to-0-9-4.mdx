@@ -732,7 +732,10 @@ meta_gateway identity-reset --state-dir <dir> --identity <identity> --apply
   run identity-reset again for the resets made since. `--mob-store <path>`
   names the mob store as for `storage-migrate-native`.
 - The next roster compile that lists the identity carries the row out, as
-  [The first boot](#the-first-boot) describes: a live member is replaced by
+  [The first boot](#the-first-boot) describes (for an identity whose record
+  is its row in the mob's identity store, which no roster lists, the next
+  start's roster pass carries it out the same way, building nothing): a
+  live member is replaced by
   its successor on a fresh session and stays live; a retired identity gets
   a fresh session and stays dormant. The old session stays in Core's store,
   bound to nothing. As for the online reset, a live member's old session is

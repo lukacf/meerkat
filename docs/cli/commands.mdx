@@ -211,6 +211,8 @@ rkat -m claude-sonnet-4-6 \
   "triage this incident"
 ```
 
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
 `--reasoning-effort <LEVEL>` sets the provider-neutral
 [reasoning effort](/concepts/providers#reasoning-effort) of the session:
 `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. Meerkat checks
@@ -237,7 +239,9 @@ rkat run --resume last --no-reasoning-effort "continue"
 ```
 
 `--param reasoning_effort=high` is the same setting; a command that gives
-both must give the same level.
+both must give the same level. Otherwise the command exits 2 (an invalid
+request), and with `--output json` its failure document has the code
+`INVALID_PARAMS`.
 
 Structured output is file-friendly:
 

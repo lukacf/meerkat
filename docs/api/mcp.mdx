@@ -1137,11 +1137,13 @@ extraction calls.
   recorded. It is the same setting as `provider_params.reasoning_effort`; an
   input that gives both must ask for one outcome (refused as invalid params
   otherwise). A level the model or its route does not accept is refused
-  before any provider request: the tool call fails with the refusal's
-  message (`reasoning effort '<level>' is not supported by ...`), which names
-  the model, the route and the supported levels. The MCP surface carries
-  this refusal as the tool error's text; JSON-RPC, REST and the CLI carry it
-  as typed data.
+  before any provider request: the tool call fails with a typed tool error
+  in the shape JSON-RPC uses, code `-32602` (invalid params) with the data
+  `{"kind": "reasoning_effort_refused", "retryable": <bool>, "reasoning_effort_refusal": {...}}`
+  (see [Reasoning effort refusal data](/api/rpc#reasoning-effort-refusal-data)).
+  After a call created its session, the data also names the session
+  (`session_id`, `session_ref`, `session_created`, `resumable`). Read the
+  data, never the message. From 0.9.15.
 </ParamField>
 
 <ParamField body="stream" type="bool" default="false">

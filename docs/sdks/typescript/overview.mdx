@@ -476,6 +476,8 @@ The turn options also carry `maxTokens`, `outputSchema`, and
 `INVALID_PARAMS`: they are build settings, so set them on `createSession(...)`
 or `createDeferredSession(...)`.
 
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
 `reasoningEffort` sets the session's provider-neutral
 [reasoning effort](/concepts/providers#reasoning-effort) level. On
 `createSession(...)` (and the streaming and deferred variants) it is a level.
@@ -484,8 +486,9 @@ the turn's tri-state: a level sets it from that turn on,
 `{ action: "clear" }` removes it, and leaving it out keeps it. The client
 sends it only to a server whose contract is 0.9.15 or later and throws
 `CapabilityUnavailableError` otherwise, before anything is written. A level
-the model or its route does not accept rejects the call with
-`INVALID_PARAMS`; `reasoningEffortRefusal(error)` returns the typed refusal
+the model or its route does not accept rejects the call with a
+`MeerkatError` whose `code` is `"-32602"` (invalid params);
+`reasoningEffortRefusal(error)` returns the typed refusal
 (`requested`, `provider`, `model`, `route`, `reason`, `supported`, `facts`,
 `conflictingParam`, `conflictingLevel`, `transient`), or `undefined` for any
 other error:
@@ -510,7 +513,9 @@ try {
 (`REASONING_EFFORT_REFUSAL_REASONS`); `transient` is true only for
 `supported_levels_unavailable`. A refusal with a reason this SDK does not
 know is not parsed, and `error.details` keeps the data as sent. The route's
-names and `facts` are advisory and kept as strings. `reasoningEffortReport(result)`
+names and `facts` are advisory and kept as strings. `route`, `supported` and
+`facts` are always present in the refusal data: `null` when they have no
+value, never left out. `reasoningEffortReport(result)`
 reads the `reasoning_effort` block of a run result (the level requested and
 one `sent` row per distinct resolution), and
 `parseReasoningEffortResolution(...)` the resolution `run_started`,

@@ -427,19 +427,38 @@ auto_compact_threshold = 60000
 # Profile fields that win over durable session metadata when a member
 # resumes. Without this, editing `model` in the definition does NOT apply to
 # resumed durable sessions. Vocabulary: model | provider | provider_params |
-# reasoning_effort.
+# reasoning_effort (from 0.9.15).
 resume_overrides = ["model", "provider"]
 ```
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 A profile sets its members' provider-neutral
 [reasoning effort](/concepts/providers#reasoning-effort) level in its
 provider params: `provider_params = { reasoning_effort = "high" }`. The
 member's build checks the level against the profile's model and route like
 any session's, and refuses it with the same typed `reasoning_effort_refused`
-data. A resumed member keeps the level its session recorded, also when
-`provider_params` is in `resume_overrides`; add `reasoning_effort` to
-`resume_overrides` to make the profile decide the level on resume: the level
-its `provider_params` name, or none.
+data. A resumed member keeps the level its session recorded. With
+`provider_params` in `resume_overrides`, a level the profile's params name is
+seated with them, and params that name no level leave the recorded level in
+place; add `reasoning_effort` to `resume_overrides` to make the profile
+decide the level on resume in every case: the level its `provider_params`
+name, or none. A member host that runs 0.9.14 refuses
+a member spec that carries a level: it fails closed with a spec digest
+mismatch and does not ignore the level, so upgrade member hosts before a
+profile sets a level.
+
+If the route stops accepting the profile's level between a member's spawn
+and its resume (an account's model list changed, or the model was swapped),
+only that member is affected. Under on-demand restore it stays dormant until
+its first wake and is then listed as broken with the reason; under eager
+restore it is broken at start. The mob keeps running and nothing is lost: the
+member keeps its seat, its session and its conversation. To recover, make
+the route accept the level again or change the level, then respawn that
+member (the same session, the conversation kept) or restart the host. A
+plain retry does not seat it, and removing the level from the profile alone
+does not help, because a resumed member keeps the level its session
+recorded.
 
 A profile's `auth_binding` is an explicit build input: its members build on
 that binding, a resumed member included, and a spawn that names its own

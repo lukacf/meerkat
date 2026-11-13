@@ -141,19 +141,24 @@ timestamp_ms, payload}`; `payload.type` is the event type.
   turns; no public turn input accepts it; `minimal` is refused). It holds the
   batch disposition (`{"disposition": "apply", "level": ...}`,
   `superseded_by_explicit`, `conflicting` or `mixed_with_unpreferred`);
-  `request_reasoning_lowered {requested, baseline, outcome?}` reports what
-  each provider attempt sent. The preference is judged by the route of the
-  client that serves the request: on a GitHub Copilot route by the levels
-  the account's model list states for the model (`unsupported_level` where
-  the entry does not state the level, `unknown_supported_levels` where the
-  account states nothing or its list is not loaded), on a self-hosted route
-  by the operator's declared levels, otherwise by the model's catalog row.
+  `request_reasoning_lowered {requested, baseline, outcome?}` reports the
+  level judged for each provider attempt the turn prepares, including a
+  fallback attempt that is then skipped (no request is sent for it). The
+  preference is judged by the model's catalog row, except where the route
+  of the client that serves the request states levels itself: on a GitHub
+  Copilot route whose account entry for the model states levels, the entry
+  decides (`unsupported_level` where it does not state the level; an entry
+  that states none, or a list that is not loaded, leaves the catalog row to
+  decide), and on a self-hosted route with operator-declared levels the
+  declaration decides (`no_catalog_fact` where none are declared).
 - Reasoning effort level: `request_reasoning_effort_resolved {turn_number?,
   fallback_attempt?, resolution}` reports each provider request that was
-  sent with a session's provider-neutral `reasoning_effort` level, after the
-  request settled (it states what was sent; a request refused before it was
-  sent reports nothing); `run_started.reasoning_effort` (and `run_resumed`)
-  hold the resolution when the run starts.
+  handed to the provider client with a session's provider-neutral
+  `reasoning_effort` level, after the call settled (it states the level the
+  request was handed over with; a call that failed after the hand-over is
+  counted, a request refused before it reports nothing);
+  `run_started.reasoning_effort` (and `run_resumed`) hold the resolution
+  when the run starts.
 - Other: `skills_resolved`, `skill_resolution_failed`,
   `peer_content_ingested`, `boundary_append_applied`,
   `boundary_appends_discarded`, `background_job_completed`,

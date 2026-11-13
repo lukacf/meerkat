@@ -366,6 +366,8 @@ wire has stricter placement rules.
 
 ## Reasoning Effort
 
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
 `reasoning_effort` is one provider-neutral setting for how much reasoning a
 model spends: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`
 (one spelling each; `x_high` is not accepted here). Meerkat checks the level
@@ -401,7 +403,8 @@ that turn and the turns after it, `{"action": "clear"}` removes it, and
 leaving the field out keeps it. It is independent of the other provider
 params: a turn that replaces or clears `provider_params` keeps the level
 unless it also names `reasoning_effort` (or its new params name the nested
-key).
+key). The level applies to the session's own model requests; requests to a
+bound controller do not carry it.
 
 **What Meerkat writes.** The level is translated to the field of the route
 that serves the request:
@@ -463,8 +466,11 @@ it cannot honour is refused before any provider request with
 `route` names the endpoint as `backend` (for example `openai_api`,
 `anthropic_api`, `bedrock`, `vertex`, `google_genai`, `copilot`,
 `self_hosted`) and `api` (`responses`, `chat_completions`, `messages`,
-`generate_content`, `realtime`); it is `null` when the client that serves the
-request reports no route. `facts` is the source of `supported`: `catalog`,
+`generate_content`, `realtime`). `route`, `supported` and `facts` are always
+present, never left out: `route` is `null` when the client that serves the
+request reports no route, and `supported` and `facts` are `null` when no
+source states the levels or the source cannot be read now. `facts` is the
+source of `supported`: `catalog`,
 `account` or `operator`. The reason vocabulary is closed. The route names and
 `facts` may grow, so a client keeps a value it does not know. Read the fields,
 never the message text.
@@ -483,11 +489,14 @@ it report nothing new.
 
 - `run_started` and `run_resumed` carry `reasoning_effort`: the resolution
   against the session's route at the start of the run.
-- `request_reasoning_effort_resolved` is emitted once per provider request
-  that carries the level (turn requests, structured-output extraction,
-  compaction summaries, fallback attempts).
+- `request_reasoning_effort_resolved` is emitted once per request handed to
+  the provider client with the level (turn requests, structured-output
+  extraction, compaction summaries, fallback attempts), after the call
+  settled. A call that failed after the hand-over is counted even when
+  nothing reached the provider.
 - The run result carries `reasoning_effort`: the level requested and each
-  distinct resolution the run sent, in first-use order, with a request count.
+  distinct resolution of those requests (`sent`), in first-use order, with
+  a request count.
 
 ```json
 "reasoning_effort": {
@@ -528,9 +537,12 @@ model = "claude-opus-4-8"
 provider_params = { reasoning_effort = "high" }
 ```
 
-A resumed member keeps the level its session recorded. Add
+A resumed member keeps the level its session recorded, unless
+`provider_params` is in the profile's `resume_overrides` and the profile's
+params name a level, which is then seated with them. Add
 `"reasoning_effort"` to the profile's `resume_overrides` to make the profile
-decide it on resume: the level its `provider_params` name, or none.
+decide it on resume in every case: the level its `provider_params` name, or
+none.
 
 ## Provider Parameters
 

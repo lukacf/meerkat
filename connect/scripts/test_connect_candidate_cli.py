@@ -887,6 +887,42 @@ def test_the_tool_dependency_listing_is_the_fetch_steps_closure_command_and_forc
                        str(CONNECT.parent / "Cargo.toml"), *fetch.TOOL_CLOSURE_ARGUMENTS]
     assert call[1][-2:] == ["--color", "never"]
     assert call[3] is True and call[2] == {"RUST_LANE_ID": "connect-macos-arm64", "CARGO_TERM_COLOR": "never"}
+    assert call[1] == [str(item) for item in p.macos_tool_dependencies_argv()]
+
+
+def test_every_cargo_command_of_the_macos_steps_asks_for_plain_output_itself(lane):
+    # Every Cargo call whose log the producer reads (the listing, and the JSON messages of each build)
+    # says `--color never` on its own command line and gets CARGO_TERM_COLOR=never from the producer:
+    # neither depends on what the job's Rust setup exported.
+    lane.through("check-cli")
+    lane.step("check-consumer", from_checkout=True)
+    wrapper = str(CONNECT / "scripts/repo-cargo")
+    cargo = [call for call in lane.calls if call[1][0] == wrapper and call[1][1] != "--print-env"]
+    assert sorted(call[0] for call in cargo) == sorted(
+        ["tool-" + name for name, _feature in p.MACOS_TOOLS]
+        + ["tool-dependencies", "native-build", "test-build", "rkat-build"])
+    for name, argv, env, inherit in cargo:
+        assert argv.count("--color") == 1 and argv[argv.index("--color") + 1] == "never", name
+        assert env["CARGO_TERM_COLOR"] == "never" and env["RUST_LANE_ID"] == "connect-macos-arm64", name
+        assert inherit is True, name
+    # No other command of these steps is Cargo: a new one must be added to the list above.
+    assert not [call[0] for call in lane.calls if call[1][0].endswith("/cargo") or call[1][0] == "cargo"
+                if call[0] != "cargo-version"]
+    assert [call[1] for call in lane.calls if call[0] == "rkat-build"] == [[str(item) for item in p.macos_rkat_argv()]]
+
+
+def test_the_dependency_lines_are_the_package_lines_of_the_merged_log():
+    # The recorder keeps stdout and stderr in one log. Cargo's own status lines are left out by shape.
+    said = ("    Updating crates.io index\n  Downloaded serde v1.0.228\nserde v1.0.228\n"
+            "syn v2.0.117 (proc-macro)\ntoolkit-package v0.9.15 (/inert/connect/crates/toolkit-package)\n"
+            "serde v1.0.228 (*)\nwarning: inert\n")
+    assert p.macos_tool_dependency_lines(said) == [
+        "serde v1.0.228", "syn v2.0.117 (proc-macro)",
+        "toolkit-package v0.9.15 (/inert/connect/crates/toolkit-package)", "serde v1.0.228 (*)"]
+    with pytest.raises(ValueError, match="empty"):
+        p.macos_tool_dependency_lines("    Updating crates.io index\n")
+    with pytest.raises(ValueError, match="escape"):
+        p.macos_tool_dependency_lines(said + "syn v2.0.117 \x1b[33m\x1b[2m(*)\x1b[39m\x1b[22m\n")
 
 
 @pytest.mark.parametrize("line", (

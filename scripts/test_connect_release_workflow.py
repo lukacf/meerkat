@@ -1187,7 +1187,8 @@ class ConnectMacosStageTests(unittest.TestCase):
             with self.subTest(job=job):
                 self.assertEqual(job_mapping(job, "env"), {
                     "CONNECT_CHECKOUT": CHECKOUT_ROOT, "CONNECT_WORK": WORK_ROOT, "CONNECT_PINS": PINS_DIRECTORY,
-                    "CONNECT_RESOLVED_PINS": RESOLVED_PINS, "PYTHONDONTWRITEBYTECODE": "1"})
+                    "CONNECT_RESOLVED_PINS": RESOLVED_PINS, "PYTHONDONTWRITEBYTECODE": "1",
+                    "CARGO_TERM_COLOR": "never"})
                 checkout = step_block("Checkout the dispatched source", job)
                 for line in ("ref: ${{ needs.resolve.outputs.source_ref }}", "fetch-depth: 0",
                              "persist-credentials: false"):
@@ -1316,6 +1317,18 @@ class ConnectMacosStageTests(unittest.TestCase):
                         read.append((job, step))
                         self.assertIn(" --color never ", command, f"{job}: {step}")
         self.assertEqual(read, [("stage_macos_build", "Fetch the pinned public inputs")])
+
+    def test_the_three_jobs_ask_cargo_for_plain_output_before_the_rust_setup_can_ask_for_colour(self):
+        # The second line behind the per-command `--color never`: the Rust setup action writes
+        # CARGO_TERM_COLOR=always into the job only when the variable is unset, so a job that sets it
+        # keeps `never` for every step. No step of the three jobs sets another value, and the
+        # per-command flag stays (the test above): a command must not depend on this variable.
+        for job in (*STAGE_JOBS, "assemble_macos"):
+            with self.subTest(job=job):
+                block = job_block(job)
+                self.assertEqual(job_mapping(job, "env").get("CARGO_TERM_COLOR"), "never")
+                self.assertEqual(re.findall(r"(?m)^ +CARGO_TERM_COLOR:.*$", block), ["      CARGO_TERM_COLOR: never"])
+                self.assertNotIn("CARGO_TERM_COLOR=", re.sub(r"(?m)^ *#.*$", "", block))
 
     def work_root(self, scratch: Path):
         work = scratch / "private" / "cw"
@@ -1568,7 +1581,7 @@ class ConnectMacosAssembleTests(unittest.TestCase):
     def test_the_assembly_runs_at_the_stages_own_paths(self):
         self.assertEqual(job_mapping(self.JOB, "env"), {
             "CONNECT_CHECKOUT": CHECKOUT_ROOT, "CONNECT_WORK": WORK_ROOT, "CONNECT_STAGE": STAGE_DIRECTORY,
-            "CONNECT_ASSEMBLY": ASSEMBLY_DIRECTORY, "PYTHONDONTWRITEBYTECODE": "1"})
+            "CONNECT_ASSEMBLY": ASSEMBLY_DIRECTORY, "PYTHONDONTWRITEBYTECODE": "1", "CARGO_TERM_COLOR": "never"})
         for step in ("Checkout the dispatched source", "Check the runner layout", "Select Python"):
             with self.subTest(step=step):
                 self.assertEqual(step_block(step, self.JOB).rstrip(), step_block(step, "stage_macos_check").rstrip())

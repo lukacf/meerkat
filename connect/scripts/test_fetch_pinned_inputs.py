@@ -729,6 +729,36 @@ class CommittedPinFileTests(unittest.TestCase):
         self.assertEqual(crates, FETCH.crate_rows(plain, lock))
         self.assertGreater(len(crates), 50)
 
+    @unittest.skipUnless(os.environ.get("CONNECT_PINS_TOOL_CLOSURE") == "1",
+                         "needs Cargo and the registry: set CONNECT_PINS_TOOL_CLOSURE=1 (the macOS stage run does)")
+    def test_the_producers_dependency_listing_is_this_closure_when_the_environment_asks_cargo_for_colour(self):
+        # The producer's library step runs the closure command through its recorder, which keeps Cargo's
+        # stdout and stderr in ONE log, keeps the package lines of it and hands them to the install kit.
+        # With Cargo itself, under the colour a hosted runner's Rust setup asks for: the producer's own
+        # command and line reader keep exactly the listing the fetch step reads (nothing dropped, nothing
+        # coloured), and the install kit's reader finds exactly the crates the fetch step pins.
+        producer = load("connect_candidate_for_the_pin_tests", ROOT / "scripts/connect-candidate.py")
+        kit = load("connect_install_kit_for_the_pin_tests", ROOT / "scripts/package-agent-install-kit.py")
+        argv = [str(item) for item in producer.macos_tool_dependencies_argv()]
+        self.assertEqual(argv, [str(ROOT / "scripts/repo-cargo"), "tree", "--locked", "--manifest-path",
+                                str(REPOSITORY / "Cargo.toml"), *FETCH.TOOL_CLOSURE_ARGUMENTS])
+        lock = (REPOSITORY / "Cargo.lock").read_text(encoding="utf-8")
+        closure = self.tool_closure()
+        pinned = sorted((row["name"], row["version"]) for row in FETCH.crate_rows(closure, lock))
+        asked = {"CARGO_TERM_COLOR": "always", "CLICOLOR_FORCE": "1", "CARGO_TERM_HYPERLINKS": "true",
+                 "CARGO_TERM_UNICODE": "true"}
+        for name, environment in (("the command line alone", asked),
+                                  ("as the producer runs it", {**asked, **producer.macos_cargo_environment()})):
+            with self.subTest(name=name):
+                result = subprocess.run(argv, cwd=REPOSITORY, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        text=True, stdin=subprocess.DEVNULL, env={**os.environ, **environment})
+                self.assertEqual(result.returncode, 0, result.stdout[-2000:])
+                lines = producer.macos_tool_dependency_lines(result.stdout)
+                self.assertEqual(lines, closure.splitlines())
+                registry, workspace = kit.tool_dependencies(("\n".join(lines) + "\n").encode("utf-8"))
+                self.assertEqual(registry, pinned)
+                self.assertIn("toolkit-package", {crate for crate, _version in workspace})
+
 
 if __name__ == "__main__":
     unittest.main()

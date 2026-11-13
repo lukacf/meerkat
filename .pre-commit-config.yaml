@@ -320,6 +320,14 @@ repos:
         always_run: true
         stages: [manual]
 
+      - id: release-registration-check-contract
+        name: release registration check refuses each defect
+        entry: scripts/test_check_release_binary_registrations.py
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [manual]
+
       - id: release-asset-provenance-contract
         name: release asset provenance accepts an earlier run only through its build gate
         entry: scripts/test-verify-release-asset-provenance.sh

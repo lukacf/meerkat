@@ -668,6 +668,12 @@ jobs:
       - name: Release SQLite lock profile check refuses each defect
         run: scripts/test-check-release-binary-sqlite-profile.sh
 
+      # A release binary whose link-time registrations do not run reports no
+      # capabilities and carries no built-in skill; the check asks the built
+      # binary and compares its answer with the source registrations.
+      - name: Release registration check refuses each defect
+        run: python3 scripts/test_check_release_binary_registrations.py
+
       # Stubbed cargo and a file:// index: levels in order, bounded overlap,
       # skip of a published version, and stop at the first failing crate.
       - name: Level-parallel crate publisher keeps its order and failure semantics

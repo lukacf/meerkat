@@ -1,0 +1,681 @@
+#!/usr/bin/env python3
+"""check-release-binary-registrations: refuse a release binary whose link-time
+registrations do not run.
+
+Capabilities and built-in skills are registered at link time
+(`inventory::submit!`): each registration is a constructor the process runs
+before `main`. A linker that leaves those constructors out of the table the
+process start runs still produces a working binary, which then reports no
+capabilities, carries no built-in skill (the skill text is in the file, the
+registration never happens) and drops every project skill that requires a
+capability. The Linux x86_64 BuildBuddy lane shipped such binaries while it
+linked with gold from binutils 2.35.2, which writes the `#[used]`
+constructors (they carry SHF_GNU_RETAIN) into a second `.init_array` table
+that process start never runs.
+
+What the check does with a built binary:
+
+READ (every target; the file is not run). For an ELF file: the dynamic section
+names at most one init-array table (`DT_INIT_ARRAY`). This proves the absence
+of that one link defect, the measured one; it does not prove that the
+constructors run. A Mach-O or PE file has no such table to count, so nothing
+is read from it.
+
+RUN (a target this host runs natively; with --if-runnable-target, any other
+target is reported as not run). One configuration, which needs no provider
+secret and no network: an empty home, an empty state root, the default
+configuration, and a project whose only content is one project skill that
+declares `requires_capabilities: [sessions]`. The binary is asked, through its
+own surface, for its capability list and its skill list:
+
+   rkat      `rkat capabilities`, `rkat skill list --json`
+   rkat-rpc  JSON-RPC over stdio: `capabilities/get`, `skills/list`
+   rkat-mcp  MCP over stdio: tools `meerkat_capabilities`, `meerkat_skills`
+   rkat-rest HTTP on a loopback port: `GET /capabilities`, `GET /skills`
+
+and must answer:
+
+(a) capability ids equal to the ones the checked-out source registers (every
+    `inventory::submit!` of a `CapabilityRegistration` under `crates/*/src`),
+    minus the rows of NOT_REPORTED for that binary (a named capability and
+    its reason; a row that names a capability the source does not register
+    fails the check). `sessions` is one of them.
+(b) every built-in skill the source registers with no required capability
+    (`requires_capabilities: &[]`), by name, and no built-in skill the source
+    does not register. The other built-in skills are listed or not according
+    to the capabilities each surface's own skill runtime has by default, which
+    differ per surface, so they are not asserted.
+(c) the project skill, which the capability filter drops when `sessions` is
+    not registered.
+
+The expected names come from the source, so a registration added to the
+source is expected of every binary from that commit on.
+
+--if-runnable-target <triple>: RUN only when this host runs <triple>
+natively; otherwise say so and keep READ. For a job that packages binaries for
+several targets on one runner.
+
+--surface <name>: which of the four binaries the file is, when its file name
+is not the binary's name (Bazel's `rkat_rpc_bin`).
+
+Usage: check-release-binary-registrations [--if-runnable-target <triple>]
+         [--source-root <dir>] [--surface <name>] <binary>
+Exit 0 = the registrations run (or, for a target this host does not run, the
+file passed READ), 1 = a registration is missing or the file has more than
+one init-array table, 2 = usage error or the binary did not answer.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import platform
+import queue
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+SURFACES = ("rkat", "rkat-rpc", "rkat-mcp", "rkat-rest")
+ANSWER_TIMEOUT_SECS = 120
+REQUIRED_CAPABILITY = "sessions"
+PROJECT_SKILL = "registration-check-probe"
+PROJECT_SKILL_TEXT = f"""---
+name: {PROJECT_SKILL}
+description: Listed only when the binary registers the sessions capability
+requires_capabilities: [{REQUIRED_CAPABILITY}]
+---
+
+# Registration Check Probe
+
+Written by scripts/check-release-binary-registrations into a scratch project.
+"""
+
+# Capabilities the source registers that a binary does not report, by binary,
+# each with its reason. Empty: all four binaries link every registering crate.
+# A row must name a registered capability, or the check fails.
+NOT_REPORTED: dict[str, dict[str, str]] = {surface: {} for surface in SURFACES}
+
+
+class Refused(Exception):
+    """The binary fails the check (exit 1)."""
+
+
+class NoAnswer(Exception):
+    """The binary could not be asked (exit 2)."""
+
+
+def usage() -> None:
+    print(
+        "usage: check-release-binary-registrations [--if-runnable-target <triple>] "
+        "[--source-root <dir>] [--surface <name>] <binary>",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def host_target() -> str:
+    return {
+        ("Linux", "x86_64"): "x86_64-unknown-linux-gnu",
+        ("Linux", "aarch64"): "aarch64-unknown-linux-gnu",
+        ("Linux", "arm64"): "aarch64-unknown-linux-gnu",
+        ("Darwin", "arm64"): "aarch64-apple-darwin",
+        ("Darwin", "x86_64"): "x86_64-apple-darwin",
+        ("Windows", "AMD64"): "x86_64-pc-windows-msvc",
+    }.get((platform.system(), platform.machine()), "")
+
+
+# ---------------------------------------------------------------------------
+# READ: one init-array table (ELF).
+# ---------------------------------------------------------------------------
+
+PT_DYNAMIC = 2
+DT_INIT_ARRAY = 25
+
+
+def elf_init_array_tables(path: Path) -> int | None:
+    """Number of DT_INIT_ARRAY entries in an ELF file's dynamic section; None
+    when the file is not a 64-bit little-endian ELF with a dynamic section."""
+    data = path.read_bytes()
+    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        return None
+    phoff = int.from_bytes(data[32:40], "little")
+    phentsize = int.from_bytes(data[54:56], "little")
+    phnum = int.from_bytes(data[56:58], "little")
+    for index in range(phnum):
+        entry = data[phoff + index * phentsize : phoff + (index + 1) * phentsize]
+        if len(entry) < 56 or int.from_bytes(entry[0:4], "little") != PT_DYNAMIC:
+            continue
+        offset = int.from_bytes(entry[8:16], "little")
+        size = int.from_bytes(entry[32:40], "little")
+        tables = 0
+        for at in range(offset, min(offset + size, len(data) - 15), 16):
+            tag = int.from_bytes(data[at : at + 8], "little")
+            if tag == 0:
+                break
+            if tag == DT_INIT_ARRAY:
+                tables += 1
+        return tables
+    return None
+
+
+# ---------------------------------------------------------------------------
+# What the source registers.
+# ---------------------------------------------------------------------------
+
+SUBMIT = "inventory::submit!"
+SKILL_HEAD = re.compile(r"\s*\{\s*(?:[A-Za-z_]+::)*SkillRegistration\s*\{\s*id:\s*([^,\n]+),")
+SKILL_REQUIRES = re.compile(r"requires_capabilities:\s*&\[([^\]]*)\]")
+CAPABILITY_HEAD = re.compile(
+    r"\s*\{\s*(?:[A-Za-z_]+::)*CapabilityRegistration\s*\{\s*id:\s*(?:[A-Za-z_]+::)*CapabilityId::([A-Za-z0-9]+)\s*,"
+)
+
+
+def crate_sources(source_root: Path):
+    """Yield the source texts by path of every crate under crates/."""
+    crates = source_root / "crates"
+    if not crates.is_dir():
+        raise NoAnswer(f"{source_root} has no crates/ directory: pass --source-root <checkout>")
+    for manifest in sorted(crates.glob("*/Cargo.toml")):
+        src = manifest.parent / "src"
+        if src.is_dir():
+            yield {path: path.read_text(encoding="utf-8") for path in sorted(src.rglob("*.rs"))}
+
+
+def snake_case(variant: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", variant).lower()
+
+
+def resolve_const(name: str, texts) -> str | None:
+    pattern = re.compile(
+        r"const\s+" + re.escape(name) + r"\s*:\s*&(?:'static\s+)?str\s*=\s*\"([^\"\\]+)\"\s*;"
+    )
+    for text in texts:
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return None
+
+
+def registered(source_root: Path) -> tuple[dict[str, str], dict[str, tuple[str, list[str]]]]:
+    """(capability id -> registering file, built-in skill id -> (registering
+    file, required capabilities)) for every `inventory::submit!` under
+    crates/*/src."""
+    capabilities: dict[str, str] = {}
+    skills: dict[str, tuple[str, list[str]]] = {}
+    for texts in crate_sources(source_root):
+        for path, text in texts.items():
+            where = path.relative_to(source_root).as_posix()
+            for block in text.split(SUBMIT)[1:]:
+                capability = CAPABILITY_HEAD.match(block)
+                if capability:
+                    key = snake_case(capability.group(1))
+                    if key in capabilities:
+                        raise NoAnswer(f"capability `{key}` is registered twice: {capabilities[key]} and {where}")
+                    capabilities[key] = where
+                    continue
+                skill = SKILL_HEAD.match(block)
+                if not skill:
+                    continue
+                expr = skill.group(1).strip()
+                literal = re.fullmatch(r'"([^"\\]+)"', expr)
+                key = literal.group(1) if literal else resolve_const(expr.rsplit("::", 1)[-1], texts.values())
+                if key is None:
+                    raise NoAnswer(f"{where}: cannot resolve the skill id `{expr}` to a string constant")
+                requires = SKILL_REQUIRES.search(block)
+                if not requires:
+                    raise NoAnswer(f"{where}: the registration of `{key}` names no requires_capabilities")
+                if key in skills:
+                    raise NoAnswer(f"skill `{key}` is registered twice: {skills[key][0]} and {where}")
+                skills[key] = (where, re.findall(r'"([^"]+)"', requires.group(1)))
+    if REQUIRED_CAPABILITY not in capabilities or not any(not needs for _, needs in skills.values()):
+        raise NoAnswer(
+            f"{source_root / 'crates'} registers {len(capabilities)} capabilities and {len(skills)} built-in "
+            f"skills, without `{REQUIRED_CAPABILITY}` or without a skill that requires no capability: not a "
+            "Meerkat checkout, or the registrations moved"
+        )
+    return capabilities, skills
+
+
+# ---------------------------------------------------------------------------
+# RUN: ask the binary.
+# ---------------------------------------------------------------------------
+
+
+def clean_env(scratch: Path) -> dict[str, str]:
+    keep = (
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+    )
+    env = {key: value for key, value in os.environ.items() if key in keep}
+    home = scratch / "home"
+    env.update(
+        HOME=str(home),
+        USERPROFILE=str(home),
+        XDG_CONFIG_HOME=str(home / ".config"),
+        XDG_DATA_HOME=str(home / ".local" / "share"),
+        XDG_CACHE_HOME=str(home / ".cache"),
+        XDG_STATE_HOME=str(home / ".local" / "state"),
+    )
+    return env
+
+
+def realm_args(scratch: Path) -> list[str]:
+    # The user-global convention root is named too: on Windows the home
+    # directory does not follow the environment.
+    return [
+        "--context-root",
+        str(scratch / "project"),
+        "--state-root",
+        str(scratch / "realms"),
+        "--user-config-root",
+        str(scratch / "home"),
+    ]
+
+
+def ask_rkat(binary: Path, scratch: Path) -> tuple[dict, list]:
+    answers = []
+    for command in (["capabilities"], ["skill", "list", "--json"]):
+        done = subprocess.run(
+            [str(binary), *realm_args(scratch), *command],
+            cwd=scratch / "project",
+            env=clean_env(scratch),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=ANSWER_TIMEOUT_SECS,
+            check=False,
+        )
+        if done.returncode != 0:
+            raise NoAnswer(f"`{' '.join(command)}` exited {done.returncode}: {done.stderr.strip()[-600:]}")
+        try:
+            answers.append(json.loads(done.stdout))
+        except ValueError as err:
+            raise NoAnswer(f"`{' '.join(command)}` printed no JSON: {err}") from err
+    return answers[0], answers[1]
+
+
+def stdio_exchange(binary: Path, scratch: Path, requests: list[dict], wanted: list[int]) -> dict[int, dict]:
+    """Send newline-delimited JSON-RPC requests, then read lines until every
+    wanted id has answered. Stdin stays open while reading: both servers stop
+    at end of input."""
+    process = subprocess.Popen(
+        [str(binary), *realm_args(scratch)],
+        cwd=scratch / "project",
+        env=clean_env(scratch),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    answers: dict[int, dict] = {}
+    lines: queue.Queue = queue.Queue()
+    stderr_text: list[str] = []
+
+    def read_stdout() -> None:
+        for line in process.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    def read_stderr() -> None:
+        stderr_text.append(process.stderr.read())
+
+    readers = [
+        threading.Thread(target=read_stdout, daemon=True),
+        threading.Thread(target=read_stderr, daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    try:
+        for request in requests:
+            process.stdin.write(json.dumps(request) + "\n")
+        process.stdin.flush()
+        deadline = time.monotonic() + ANSWER_TIMEOUT_SECS
+        while len(answers) < len(wanted):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                line = lines.get(timeout=remaining)
+            except queue.Empty:
+                break
+            if line is None:
+                break
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(message, dict) and message.get("id") in wanted:
+                answers[message["id"]] = message
+    except OSError as err:
+        raise NoAnswer(f"stopped reading requests: {err}") from err
+    finally:
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        for reader in readers:
+            reader.join(timeout=5)
+    missing = [request_id for request_id in wanted if request_id not in answers]
+    if missing:
+        raise NoAnswer(f"no answer to request {missing}: {''.join(stderr_text).strip()[-600:]}")
+    for request_id, message in answers.items():
+        if message.get("error"):
+            raise NoAnswer(f"request {request_id} failed: {json.dumps(message['error'])[:600]}")
+    return answers
+
+
+def ask_rkat_rpc(binary: Path, scratch: Path) -> tuple[dict, dict]:
+    answers = stdio_exchange(
+        binary,
+        scratch,
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "capabilities/get"},
+            {"jsonrpc": "2.0", "id": 3, "method": "skills/list"},
+        ],
+        [2, 3],
+    )
+    return answers[2]["result"], answers[3]["result"]
+
+
+def mcp_tool_payload(message: dict) -> dict:
+    result = message.get("result") or {}
+    if result.get("isError"):
+        raise NoAnswer(f"tool call failed: {json.dumps(result)[:600]}")
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        return structured
+    for block in result.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            try:
+                payload = json.loads(block.get("text", ""))
+            except ValueError:
+                continue
+            if isinstance(payload, dict):
+                return payload
+    raise NoAnswer(f"tool answer carries no JSON payload: {json.dumps(result)[:600]}")
+
+
+def ask_rkat_mcp(binary: Path, scratch: Path) -> tuple[dict, dict]:
+    def call(request_id: int, tool: str, arguments: dict) -> dict:
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments},
+        }
+
+    answers = stdio_exchange(
+        binary,
+        scratch,
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "check-release-binary-registrations", "version": "1"},
+                },
+            },
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            call(2, "meerkat_capabilities", {}),
+            call(3, "meerkat_skills", {"action": "list"}),
+        ],
+        [2, 3],
+    )
+    return mcp_tool_payload(answers[2]), mcp_tool_payload(answers[3])
+
+
+def free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def ask_rkat_rest(binary: Path, scratch: Path) -> tuple[dict, dict]:
+    # The server binds the address its realm's configuration names, and a
+    # realm it creates takes the default port. It is therefore started in the
+    # reserved `global` realm, whose configuration is the user-global document
+    # of the scratch home; the only setting this check writes there is the
+    # loopback address.
+    port = free_loopback_port()
+    user_rkat = scratch / "home" / ".rkat"
+    user_rkat.mkdir(parents=True, exist_ok=True)
+    (user_rkat / "config.toml").write_text(f'[rest]\nhost = "127.0.0.1"\nport = {port}\n', encoding="utf-8")
+    stderr_path = scratch / "rest.stderr"
+    with open(stderr_path, "w", encoding="utf-8") as stderr:
+        process = subprocess.Popen(
+            [str(binary), *realm_args(scratch), "--realm", "global"],
+            cwd=scratch / "project",
+            env=clean_env(scratch),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr,
+        )
+    try:
+        deadline = time.monotonic() + ANSWER_TIMEOUT_SECS
+        answers = []
+        for route in ("/capabilities", "/skills"):
+            while True:
+                if process.poll() is not None:
+                    tail = stderr_path.read_text(encoding="utf-8", errors="replace").strip()[-600:]
+                    raise NoAnswer(f"exited {process.returncode} before answering: {tail}")
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}{route}", timeout=10) as response:
+                        answers.append(json.loads(response.read().decode("utf-8")))
+                    break
+                except urllib.error.HTTPError as err:
+                    raise NoAnswer(f"GET {route} answered {err.code}: {err.read()[:300]!r}") from err
+                except (urllib.error.URLError, ConnectionError, TimeoutError, ValueError) as err:
+                    if time.monotonic() >= deadline:
+                        raise NoAnswer(f"GET {route} did not answer on port {port}: {err}") from err
+                    time.sleep(0.2)
+        return answers[0], answers[1]
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+ASK = {
+    "rkat": ask_rkat,
+    "rkat-rpc": ask_rkat_rpc,
+    "rkat-mcp": ask_rkat_mcp,
+    "rkat-rest": ask_rkat_rest,
+}
+
+
+def capability_ids(answer) -> list[str]:
+    capabilities = answer.get("capabilities") if isinstance(answer, dict) else None
+    if not isinstance(capabilities, list):
+        raise NoAnswer(f"the capability answer has no `capabilities` list: {json.dumps(answer)[:300]}")
+    return sorted(str(entry.get("id")) for entry in capabilities if isinstance(entry, dict))
+
+
+def listed_skills(answer) -> dict[str, list[str]]:
+    """Scope -> the skill names listed with that scope."""
+    skills = answer.get("skills") if isinstance(answer, dict) else answer
+    if not isinstance(skills, list):
+        raise NoAnswer(f"the skill answer is not a list: {json.dumps(answer)[:300]}")
+    by_scope: dict[str, list[str]] = {}
+    for entry in skills:
+        key = entry.get("key") if isinstance(entry, dict) else None
+        name = key.get("skill_name") if isinstance(key, dict) else None
+        if not isinstance(name, str):
+            raise NoAnswer(f"a skill entry has no key.skill_name: {json.dumps(entry)[:300]}")
+        by_scope.setdefault(str(entry.get("scope")), []).append(name)
+    return {scope: sorted(names) for scope, names in by_scope.items()}
+
+
+def check(name: str, binary: Path, source_root: Path, runnable_target: str) -> None:
+    surface = name[: -len(".exe")] if name.endswith(".exe") else name
+    if surface not in SURFACES:
+        raise NoAnswer(f"not a release binary name (expected one of {', '.join(SURFACES)}; pass --surface)")
+
+    tables = elf_init_array_tables(binary)
+    read_refusal = ""
+    if tables is not None and tables > 1:
+        read = f"READ: {tables} init-array tables"
+        read_refusal = (
+            f"READ: the file has {tables} init-array tables (DT_INIT_ARRAY). Process start runs one, so "
+            "the constructors in the other never run: no capability and no built-in skill is registered. "
+            "The linker did not merge the `#[used]` constructors (SHF_GNU_RETAIN) into `.init_array`; "
+            "gold from binutils before 2.36 does that. Link with one that merges them "
+            "(`--linkopt=-fuse-ld=bfd` on the Bazel release build)."
+        )
+    elif tables is None:
+        read = "READ: not an ELF file, nothing to read"
+    else:
+        read = f"READ: {'one init-array table' if tables == 1 else 'no init-array table'}"
+
+    if runnable_target and runnable_target != host_target():
+        not_run = (
+            f"NOT RUN: built for {runnable_target}, which this {platform.system()} "
+            f"{platform.machine()} runner does not run; its registrations are not asked for here"
+        )
+        if read_refusal:
+            raise Refused(f"{read_refusal} {not_run}")
+        print(f"{name}: {read}. {not_run}")
+        return
+
+    registered_capabilities, registered_skills = registered(source_root)
+    not_reported = NOT_REPORTED[surface]
+    stale = sorted(set(not_reported) - set(registered_capabilities))
+    if stale:
+        raise Refused(
+            f"NOT_REPORTED in scripts/check-release-binary-registrations names {stale} for {surface}, "
+            "which the source does not register: remove the rows"
+        )
+    expected_capabilities = set(registered_capabilities) - set(not_reported)
+    ungated = {skill for skill, (_, needs) in registered_skills.items() if not needs}
+
+    scratch = Path(tempfile.mkdtemp(prefix="meerkat-registrations."))
+    try:
+        (scratch / "home").mkdir()
+        probe = scratch / "project" / ".rkat" / "skills" / PROJECT_SKILL
+        probe.mkdir(parents=True)
+        (probe / "SKILL.md").write_text(PROJECT_SKILL_TEXT, encoding="utf-8")
+        try:
+            try:
+                capabilities_answer, skills_answer = ASK[surface](binary, scratch)
+            except subprocess.TimeoutExpired as err:
+                raise NoAnswer(f"no answer within {ANSWER_TIMEOUT_SECS} s: {err}") from err
+            except OSError as err:
+                raise NoAnswer(f"could not be started: {err}") from err
+        except NoAnswer as failure:
+            if read_refusal:
+                raise Refused(f"{read_refusal} RUN: no answer: {failure}") from failure
+            raise
+    finally:
+        # A file the binary still holds must not turn the verdict into an
+        # error of the scratch directory.
+        shutil.rmtree(scratch, ignore_errors=True)
+
+    capabilities = set(capability_ids(capabilities_answer))
+    skills = listed_skills(skills_answer)
+    builtin = set(skills.get("builtin", []))
+    problems = []
+    missing = sorted(expected_capabilities - capabilities)
+    extra = sorted(capabilities - expected_capabilities)
+    if missing or extra:
+        detail = f"(a) it reports {len(capabilities)} capabilities, the source registers {len(expected_capabilities)} for it"
+        if missing:
+            detail += "; missing: " + ", ".join(f"{item} ({registered_capabilities[item]})" for item in missing)
+        if extra:
+            detail += "; not registered in the source for it: " + ", ".join(extra)
+        problems.append(detail)
+    missing = sorted(ungated - builtin)
+    extra = sorted(builtin - set(registered_skills))
+    if missing or extra:
+        detail = f"(b) it lists {len(builtin)} built-in skills"
+        if missing:
+            detail += "; missing, though they require no capability: " + ", ".join(
+                f"{item} ({registered_skills[item][0]})" for item in missing
+            )
+        if extra:
+            detail += "; not registered in the source: " + ", ".join(extra)
+        problems.append(detail)
+    if PROJECT_SKILL not in skills.get("project", []):
+        problems.append(
+            f"(c) it does not list the project skill `{PROJECT_SKILL}`, which requires only "
+            f"`{REQUIRED_CAPABILITY}` (project skills listed: {skills.get('project', [])})"
+        )
+    if problems or read_refusal:
+        run = "RUN: the answers match the source registrations."
+        if problems:
+            run = (
+                "RUN: "
+                + "; ".join(problems)
+                + ". The binary's link-time registrations (`inventory::submit!`) did not run or do not "
+                "match the checked-out source."
+            )
+        raise Refused(f"{read_refusal or read + '.'} {run}")
+    print(
+        f"{name}: {read}. RUN: {len(capabilities)} capabilities, equal to the source registrations; "
+        f"{len(builtin)} built-in skills listed, among them the {len(ungated)} that require no capability "
+        f"({', '.join(sorted(ungated))}); the project skill that requires `{REQUIRED_CAPABILITY}` is listed"
+    )
+
+
+def main(argv: list[str]) -> int:
+    runnable_target = ""
+    source_root = Path.cwd()
+    surface = ""
+    args = list(argv)
+    while args and args[0].startswith("--"):
+        flag = args.pop(0)
+        if flag == "--if-runnable-target" and args:
+            runnable_target = args.pop(0)
+        elif flag == "--source-root" and args:
+            source_root = Path(args.pop(0))
+        elif flag == "--surface" and args:
+            surface = args.pop(0)
+        else:
+            usage()
+    if len(args) != 1:
+        usage()
+    binary = Path(args[0])
+    name = surface or binary.name
+    if not binary.is_file():
+        print(f"{name}: no such binary", file=sys.stderr)
+        return 2
+    try:
+        check(name, binary.resolve(), source_root, runnable_target)
+    except Refused as refusal:
+        print(f"{name}: {refusal}", file=sys.stderr)
+        return 1
+    except NoAnswer as failure:
+        print(f"{name}: {failure}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -24142,7 +24142,7 @@ mod tests {
                 .roster()
                 .await
                 .find_by_bridge_session_id(&seated)
-                .is_some_and(|entry| entry.agent_identity == AgentIdentity::from("ann-peer")),
+                .is_some_and(|entry| entry.agent_identity == "ann-peer"),
             "the caller's session is bound to a member of the destroyed mob"
         );
 

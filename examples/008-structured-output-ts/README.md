@@ -32,11 +32,27 @@ Standard JSON Schema. Meerkat validates and auto-retries:
 ```
 
 ## Run
+
+With the released SDK, in a directory of its own (see
+[003](../003-hello-meerkat-ts/) for what it downloads and verifies on first
+use):
+
 ```bash
-# From the repository root, first build the local TypeScript SDK and RPC binary:
-# npm --prefix sdks/typescript install && npm --prefix sdks/typescript run build
-# (cd examples && npm install)
-# ./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
-# export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
+mkdir structured-output && cd structured-output
+npm init -y
+npm install @rkat/sdk tsx
+cp /path/to/meerkat/examples/008-structured-output-ts/main.ts .
+ANTHROPIC_API_KEY=sk-... npx tsx main.ts
+```
+
+To run against this checkout instead, build the SDK and the runtime from the
+repository root first; the SDK built from source refuses to download a
+runtime, so point it at the one you build:
+
+```bash
+npm --prefix sdks/typescript install && npm --prefix sdks/typescript run build
+(cd examples && npm install)
+./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
+export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
 ANTHROPIC_API_KEY=sk-... npx tsx examples/008-structured-output-ts/main.ts
 ```

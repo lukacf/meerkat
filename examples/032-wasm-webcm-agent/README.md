@@ -26,13 +26,19 @@ implement, and review code in a sandboxed Linux VM — no backend required.
 cd examples/032-wasm-webcm-agent
 ./examples.sh
 # Open http://127.0.0.1:4032
-# Enter API keys (pre-filled from env if ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY are set)
+# Enter API keys (the dev server pre-fills them from ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY)
 # Click "Boot VM & Start"
 ```
 
 The script downloads the WebCM RISC-V emulator (~30 MB), rebuilds the current
 repo-local Meerkat WASM runtime, syncs it into `web/public/meerkat-pkg/`,
 installs npm dependencies, and starts the Vite dev server.
+
+The pre-fill is a convenience of the local dev server, which listens on
+127.0.0.1 only. `npm --prefix web run build` never writes a key into `dist/`:
+a built page starts with empty key fields. Keys typed into the page stay in
+the browser and go to the providers from there, so host a build only where
+its users are meant to enter their own keys.
 
 Use `./examples.sh --clean` to force a fresh download/rebuild.
 The download cache is reused only when both WebCM files are nonempty; failed

@@ -1972,6 +1972,56 @@ async fn a_console_counts_no_runtime_out_that_another_console_of_its_controller_
     Ok(())
 }
 
+/// A runtime that a route which holds it found owing its read stays counted
+/// when the console's aggregator, whose reading found the read owed first,
+/// stops serving it: the operator of a console that identifies nobody is
+/// kept apart until a reading of the runtime finds its record read.
+#[tokio::test]
+async fn a_runtime_a_route_holds_stays_counted_when_its_aggregator_stops_serving_it() -> TestResult
+{
+    let own_state = tempfile::tempdir()?;
+    let own_mob =
+        persistent_gateway_runtime_in(own_state.path(), "kept-apart-held-runtime", "", "").await?;
+    let own = runtime_whose_first_read_failed(&own_mob).await;
+    let operator = console_request_auth_context(
+        &console_that_identifies_nobody(&own),
+        &HeaderMap::new(),
+        &Uri::from_static("/console/rpc"),
+    )
+    .expect("the console admits its operator")
+    .audience;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.register_runtime_handles_with_policy(
+        "default",
+        "",
+        own.clone(),
+        None,
+        crate::unified_runtime::ConsoleEventStore::new(),
+        Arc::new(AllowAllConsoleVisibilityPolicy),
+    );
+    // The reading of the served runtimes finds the read owed first, then a
+    // route that holds the runtime finds it owed too.
+    prime_access_cache_from_aggregator(&aggregator, &operator.controller()).await;
+    prime_access_cache_from_runtime(&own, &operator.controller()).await;
+    // The aggregator stops serving the runtime; the console still holds it.
+    aggregator.unregister_runtime("default");
+    prime_access_cache_from_aggregator(&aggregator, &operator.controller()).await;
+    assert_eq!(
+        kept_apart_rules(&operator),
+        (true, false, true),
+        "the console's own runtime still owes its read"
+    );
+    let own_handle = own.handle();
+    assert!(own.private_owners().seeded(&own_handle).await.landed());
+    prime_access_cache_from_runtime(&own, &operator.controller()).await;
+    assert_eq!(
+        kept_apart_rules(&operator),
+        (false, true, false),
+        "the runtime's record is read: the operator is kept apart no longer"
+    );
+    Ok(())
+}
+
 /// A member whose run is in flight is retired. The run ends on the console
 /// with a failure record that names the run's session: it carries the
 /// member's witness, so everyone who may view the member reads that the run

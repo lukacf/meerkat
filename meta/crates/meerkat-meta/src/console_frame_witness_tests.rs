@@ -975,6 +975,68 @@ async fn a_send_to_a_member_with_no_row_is_not_witnessed_by_a_member_of_another_
     Ok(())
 }
 
+/// A member that carries its own identity as its `agent_identity` label, as
+/// every identity's own member does, is the member a send to it is made to:
+/// a send to it with no session carries that member. One that is private to
+/// a person is then served to that person and an administrator only, and a
+/// shared one to every person who may view it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_to_a_member_listed_under_its_own_identity_carries_that_member() -> TestResult {
+    let (_state, runtime, aggregator) = runtime_and_aggregator("witness-own-label").await?;
+    let named = |member: &str, mut labels: BTreeMap<String, String>| {
+        labels.insert("agent_identity".to_string(), member.to_string());
+        let mut spec =
+            SpawnMemberSpec::new("worker", AgentIdentity::from(member)).with_labels(labels);
+        spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+        spec
+    };
+    let seated = Box::pin(runtime.mob_runtime().handle().seat_dormant_members(vec![
+        named("named", BTreeMap::new()),
+        named("named-own", private_to_alice()),
+    ]))
+    .await?;
+    assert!(
+        seated.len() == 2
+            && seated
+                .iter()
+                .all(|outcome| matches!(outcome, meerkat_mob::DormantSeatOutcome::Seated { .. })),
+        "both members are seated and not woken: {seated:?}"
+    );
+    let readers = readers();
+    for (identity, content, another_person_reads) in [
+        ("named", "send-to-named", true),
+        ("named-own", "send-to-named-own", false),
+    ] {
+        let reserved = aggregator
+            .reserve_identity_first_interaction(send_request(identity, content), None)
+            .await;
+        assert!(
+            reserved.is_ok(),
+            "the send to {identity} is reserved with no session"
+        );
+        let sent = stored_frame(&aggregator, identity, content)
+            .await
+            .ok_or("the send is stored")?;
+        let witness = sent
+            .source
+            .member_provenance
+            .as_ref()
+            .map(|witness| witness.member.agent_identity.clone());
+        assert_eq!(
+            (
+                witness.as_deref(),
+                timeline_frame_visible_to(&readers.alice, &sent),
+                timeline_frame_visible_to(&readers.bob, &sent),
+                timeline_frame_visible_to(&readers.root, &sent)
+            ),
+            (Some(identity), true, another_person_reads, true),
+            "the send to {identity} carries the member it was sent to"
+        );
+    }
+    let _ = runtime.shutdown().await;
+    Ok(())
+}
+
 /// A member a spawn made shows its first message on its own page from its
 /// own session history, with its own witness, on a console log that holds
 /// nothing else of it: no kickoff record is needed for it. And every frame

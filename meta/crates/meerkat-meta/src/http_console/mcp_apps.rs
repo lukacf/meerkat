@@ -1435,6 +1435,66 @@ mcp_apps_sandbox_url = " "
         Ok(())
     }
 
+    /// The app route of a console that holds a runtime of its own reads that
+    /// runtime as its own: while the runtime has not read who its members
+    /// are private to, the one operator of a console that identifies nobody
+    /// stays kept apart, whatever the console's aggregator serves.
+    #[tokio::test]
+    async fn the_app_route_counts_a_consoles_own_runtime_whatever_its_aggregator_serves()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use super::super::tests::{
+            build_empty_console_test_runtime, spawn_identity_control_test_member,
+        };
+        let (_directory, built) = build_empty_console_test_runtime("mcp-app-own-runtime").await?;
+        let member = "rt:review:apps:0";
+        spawn_identity_control_test_member(&built, member, "review:apps").await?;
+        let session = built
+            .handle()
+            .resolve_bridge_session_id_observation(&crate::member_comms_id::mob_member_id(member))
+            .await
+            .expect("native member session");
+        // The same mob, read through a runtime whose first read has failed.
+        let runtime = MobRuntime::from_handle(built.handle());
+        assert!(
+            !runtime
+                .private_owners()
+                .seeded(&UnreadableRecord)
+                .await
+                .landed()
+        );
+        // The console's aggregator serves no runtime.
+        let aggregator = MetaConsoleAggregator::in_memory();
+        let controller = AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec!["admin@example.test".into()],
+            ..Default::default()
+        })?;
+        let operator = controller.view_for_subject(None).on_console(false);
+        let before = operator.kept_apart_from_other_people();
+        let mut state = state(Some(runtime));
+        state.console_aggregator = Some(aggregator.clone());
+        state.access = Some(controller.clone());
+        // The app route reads the console's own runtime, whatever it then
+        // answers.
+        let routed = route(state, request(&session), Operation::CallTool)
+            .await
+            .is_ok();
+        let after_the_app_route = operator.kept_apart_from_other_people();
+        super::super::prime_access_cache_from_aggregator(&aggregator, &controller).await;
+        let after_the_served_runtimes_are_read = operator.kept_apart_from_other_people();
+        assert_eq!(
+            (
+                before,
+                after_the_app_route,
+                after_the_served_runtimes_are_read
+            ),
+            (false, true, true),
+            "kept apart for as long as the console's own runtime owes its read (the route \
+             answered: {routed})"
+        );
+        Ok(())
+    }
+
     /// A candidate launch calls no member's tool: its call-tool answers 409
     /// `candidate_launch` before anything is resolved, while resolving an app
     /// stays open. An authoritative launch's call-tool is not refused so: it

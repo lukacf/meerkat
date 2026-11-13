@@ -151,7 +151,7 @@ describe("question set decision params", () => {
     expect(reversed.answers.map((answer) => answer.question_id)).toEqual(["q1", "q2"]);
   });
 
-  it("sends free text without its surrounding whitespace and names no approver", () => {
+  it("sends free text without the whitespace at its ends and names no approver", () => {
     const params = questionSetAnswerParams(set(), { q2: { kind: "free_text", text: "  next week \n" } });
     expect(params.answers).toEqual([{ question_id: "q2", answer: { kind: "free_text", text: "next week" } }]);
     expect("approver_id" in params).toBe(false);
@@ -309,6 +309,28 @@ describe("createQuestionSetResource", () => {
     expect(resource.getSnapshot().decisions[PENDING_ID]).toMatchObject({ phase: "failed", action: "dismiss", error: "network" });
     expect(resource.getSnapshot().sets.length).toBe(1);
     resource.dispose();
+  });
+
+  it("takes only the question set's own result for its own outcome as confirmed", async () => {
+    for (const [action, result] of [
+      ["answer", { pending_id: PENDING_ID, kind: "approval", outcome: "answered", decided_at_ms: 42 }],
+      ["answer", { pending_id: PENDING_ID, kind: "question_set", outcome: "dismissed", decided_at_ms: 42 }],
+      ["answer", { pending_id: "decision:other", kind: "question_set", outcome: "answered", decided_at_ms: 42 }],
+      ["dismiss", { pending_id: PENDING_ID, kind: "question_set", outcome: "answered", decided_at_ms: 42 }],
+    ] as const) {
+      const c = clock();
+      const resource = createQuestionSetResource({
+        scopeKey: "a", environment: c.environment,
+        load: async () => ({ question_sets: [wire()] }),
+        decide: async () => result,
+      });
+      await tick();
+      if (action === "answer") await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+      else await resource.dismiss(PENDING_ID);
+      expect(resource.getSnapshot().decisions[PENDING_ID].phase).toBe("failed");
+      expect(resource.getSnapshot().closed).toEqual([]);
+      resource.dispose();
+    }
   });
 
   it("reads an older gateway as unsupported: nothing listed, no error, no further reads", async () => {

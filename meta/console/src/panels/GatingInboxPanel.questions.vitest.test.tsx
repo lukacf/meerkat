@@ -59,6 +59,15 @@ describe("GatingInboxPanel question sets", () => {
     expect(view.getByText("No pending approvals.")).toBeTruthy();
   });
 
+  it("shows the questions in an inbox that lists its requests without the shared approval resource", () => {
+    const view = render(
+      <GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()}
+        questions={{ snapshot: sets(), onAnswer: vi.fn(), onDismiss: vi.fn() }} />,
+    );
+    expect(view.getByTestId(`question-set:${PENDING_ID}`)).toBeTruthy();
+    expect(view.getByText("No pending items.")).toBeTruthy();
+  });
+
   it("shows a read-only caller the questions with nothing to send", () => {
     const view = render(
       <GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={approvals([])} readOnly

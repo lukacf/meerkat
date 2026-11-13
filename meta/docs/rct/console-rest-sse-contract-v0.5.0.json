@@ -1348,6 +1348,26 @@
             }
           ]
         },
+        "meta/gating/questions": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "success": {
+            "required_fields": [
+              "question_sets"
+            ],
+            "note": "The open question sets agents asked with the ask_user tool, soonest deadline first, each with pending_id (the id meta/gating/decide takes), origin {identity} (the asking agent), an optional title, questions (id, prompt, choices of {id, label}, optional allow_free_text and recommended), created_at_ms, deadline_at_ms and subject_digest. A set is listed only while it is open and only while the caller may view the asking agent: a set of a member private to someone else is not listed. gating.view is needed while access control is enforced. A set is not part of meta/gating/pending. A gateway older than question sets answers -32601."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32004,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
         "meta/gating/audit": {
           "policy_error_refs": [
             "#/surfaces/rpc/policy_errors/access_denied"
@@ -1454,7 +1474,9 @@
               "decision"
             ],
             "optional_fields": [
-              "reason"
+              "reason",
+              "presented_digest",
+              "answers"
             ],
             "refused_fields": [
               "approver_id"
@@ -1465,10 +1487,11 @@
               "escalate",
               "deny"
             ],
-            "note": "The HTTP console takes the approver from the connection: a verified, current person decides as its access principal, with the approver ids it holds through the access configuration. A request that carries approver_id is invalid params (-32602). deny is an HTTP compatibility alias for reject. SDK/stdin requires approver_id and accepts only approve/reject/escalate, and its decisions record deciding_assurance device_trusted."
+            "note": "The HTTP console takes the approver from the connection: a verified, current person decides as its access principal, with the approver ids it holds through the access configuration. A request that carries approver_id is invalid params (-32602). deny is an HTTP compatibility alias for reject. SDK/stdin requires approver_id and accepts only approve/reject/escalate, and its decisions record deciding_assurance device_trusted. A pending_id from meta/gating/questions names a question set: approve with presented_digest (the set's subject_digest) and answers (one {question_id, answer} per answered question, answer being {kind: choice, choice_id} or {kind: free_text, text}; at least one; a question left out reaches the agent as unanswered) answers it, reject with presented_digest dismisses it, and escalate is invalid params. An invalid answer set, a set that is no longer open and an unknown id are invalid params (-32602); a caller who may not view the asking agent is refused access_denied."
           },
           "success": {
-            "body": "gating_decision_result"
+            "body": "gating_decision_result",
+            "note": "A question set answers {pending_id, kind: question_set, outcome: answered or dismissed, decided_at_ms} instead."
           },
           "errors": [
             {

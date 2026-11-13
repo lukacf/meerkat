@@ -486,6 +486,7 @@ export type {
 } from "./timeline-subscription";
 
 export * from "./pending-approvals";
+export * from "./pending-questions";
 export * from "./host-attention";
 export * from "./console-attention";
 

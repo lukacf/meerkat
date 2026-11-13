@@ -8,6 +8,7 @@ import {
   type QuestionSetDecisionState,
   type QuestionSetSnapshot,
 } from "../../../console-core/src/pending-questions";
+import { ConversationApprovals } from "./conversation-approvals";
 import { ConversationQuestionSets, QuestionSetCard, QuestionSetsProvider, type QuestionSetCardProps } from "./question-set-card";
 
 afterEach(cleanup);
@@ -263,6 +264,13 @@ describe("QuestionSetCard", () => {
     expect(stale.card.dataset.state).toBe("stale");
     expect(send(stale.view).disabled).toBe(true);
     expect(dismiss(stale.view).disabled).toBe(true);
+    cleanup();
+    // An uncertain send stays uncertain when the caller's access then became
+    // read-only: the card keeps saying so and offers nothing to send.
+    const locked = show({ decision: { phase: "failed", action: "answer", error: "network" }, readOnly: true });
+    expect(locked.card.dataset.state).toBe("failed");
+    expect(dismiss(locked.view).disabled).toBe(true);
+    expect((locked.view.getAllByRole("radio") as HTMLInputElement[]).every((input) => input.disabled)).toBe(true);
   });
 
   it("puts names first: the identity and every id only inside the collapsed Technical details", () => {
@@ -310,6 +318,18 @@ describe("ConversationQuestionSets", () => {
     expect(view.queryByText("Billing check")).toBeNull();
     fireEvent.click(view.getByRole("button", { name: "Dismiss" }));
     expect(onDismiss).toHaveBeenCalledWith(PENDING_ID);
+  });
+
+  it("sits with the conversation's own approvals, once: never beside a turn's approvals", () => {
+    const value = { snapshot: snapshot(), onAnswer: vi.fn(), onDismiss: vi.fn() };
+    const view = render(
+      <QuestionSetsProvider value={value}>
+        <ConversationApprovals approvalIdentity={IDENTITY} interactionIds={["interaction-1"]} />
+        <ConversationApprovals approvalIdentity={IDENTITY} interactionIds={[]} />
+        <ConversationApprovals approvalIdentity={IDENTITY} />
+      </QuestionSetsProvider>,
+    );
+    expect(view.getAllByTestId(`question-set:${PENDING_ID}`).length).toBe(1);
   });
 
   it("shows nothing without a provider, for another agent, or on a gateway without question sets", () => {

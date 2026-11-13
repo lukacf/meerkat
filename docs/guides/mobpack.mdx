@@ -287,6 +287,13 @@ const result = await session.turn("Your prompt here");
 const events = session.pollEvents();
 ```
 
+The key in that call is in the page: anyone who can load the page can read
+it. Use a real provider key this way only on your own machine or when it is
+the key of the person using the page. For a page you serve to other people,
+give the runtime a dummy key and the base URL of your authenticated proxy,
+which adds the real key on the server; see
+[Initialize runtime](/examples/wasm#initialize-runtime).
+
 For production, set `mobpackTrust.policy` to `"strict"` and supply
 `mobpackTrust.trustedSigners`, mapping each verified signer id to its
 Ed25519 public key as 64 hex characters. Verify that mapping through a trusted

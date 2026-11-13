@@ -218,6 +218,12 @@ pub struct IdentityEntryFacts {
     pub profile: String,
     /// Its authority labels.
     pub authority_labels: BTreeMap<String, String>,
+    /// Every label its record carries, as an update reads them: a reserved
+    /// label the update leaves as it is stays, and one it would change or
+    /// drop is refused. Empty when the caller gives none
+    /// ([`Self::with_labels`]); every reserved label of an update is then
+    /// refused.
+    pub labels: BTreeMap<String, String>,
 }
 
 impl IdentityEntryFacts {
@@ -237,7 +243,15 @@ impl IdentityEntryFacts {
             revision,
             profile: profile.into(),
             authority_labels,
+            labels: BTreeMap::new(),
         }
+    }
+
+    /// This identity, whose record carries `labels`.
+    #[must_use]
+    pub fn with_labels(mut self, labels: BTreeMap<String, String>) -> Self {
+        self.labels = labels;
+        self
     }
 }
 
@@ -1397,7 +1411,26 @@ pub fn normalize_update(
     };
     let new_context = given_context(new_context.as_ref(), "set.context")?;
     if let Some(labels) = descriptive_labels {
+        // The labels are replaced whole, so a reserved label the identity
+        // carries is in the new set exactly when the update leaves it: one
+        // the update drops or changes is refused, and one it leaves as it
+        // is stays the identity's, checked no further.
+        if let Some(dropped) = entry.labels.keys().find(|key| {
+            policy.is_reserved_label(key)
+                && policy.authority_field(key).is_none()
+                && !labels.contains_key(*key)
+        }) {
+            return Err(refused(
+                IdentityRefusalKind::ReservedKey {
+                    key: dropped.clone(),
+                },
+                "set.labels",
+            ));
+        }
         for (key, value) in labels {
+            if policy.is_reserved_label(key) && entry.labels.get(key) == Some(value) {
+                continue;
+            }
             descriptive_label(policy, key, value, "set.labels")?;
         }
     }

@@ -164,6 +164,18 @@ pub trait PeerVisibility: Send + Sync {
     fn sees_every_agent(&self) -> bool {
         false
     }
+
+    /// Whether the caller may see the agent `name` as its own record reads
+    /// it: an agent of the profile `profile` that carries `labels`. The
+    /// family asks it of every agent it read for a caller, after
+    /// [`Self::sees`] admitted the name, so that a rule about an agent's
+    /// profile or labels is decided on the agent's own record, whether or
+    /// not a member is seated for it. The default decides by the name
+    /// alone.
+    fn sees_record(&self, name: &str, profile: &str, labels: &BTreeMap<String, String>) -> bool {
+        let _ = (profile, labels);
+        self.sees(name)
+    }
 }
 
 impl IdentityFamilySlot {
@@ -388,6 +400,7 @@ impl AgentFacts {
             self.spec.profile.as_str(),
             self.authority_labels(policy),
         )
+        .with_labels(self.spec.labels.clone())
     }
 
     fn peer(&self, policy: &IdentityCreationPolicy) -> PeerFacts {
@@ -809,12 +822,26 @@ impl IdentityGate {
         self.seen.as_ref().is_none_or(|seen| seen.sees(name))
     }
 
+    /// Whether the caller's view of the mob shows `agent` as its own record
+    /// reads it: its name, its profile and its labels. Every agent, for a
+    /// call that has no view. What a view decides of an agent's profile or
+    /// labels it decides here, on the record, so an agent no member is
+    /// seated for (an archived one, one owed its seat) is decided as a
+    /// seated one is.
+    fn view_shows_record(&self, agent: &AgentFacts) -> bool {
+        self.seen.as_ref().is_none_or(|seen| {
+            seen.sees_record(&agent.name, agent.spec.profile.as_str(), &agent.spec.labels)
+        })
+    }
+
     /// Whether `requester` is shown `agent`: the one rule every read of the
     /// family goes through, and every target of a change. A caller is shown
-    /// the agents its view of the mob shows it, and an agent is shown no
-    /// agent that is private to a person, whatever view its call has.
+    /// the agents its view of the mob shows it, by name and as their own
+    /// records read, and an agent is shown no agent that is private to a
+    /// person, whatever view its call has.
     fn sees(&self, mob: &MobHandle, requester: &ChangeRequester, agent: &AgentFacts) -> bool {
         self.view_shows(&agent.name)
+            && self.view_shows_record(agent)
             && !(matches!(requester, ChangeRequester::Agent { .. })
                 && self.is_private_agent(mob, agent))
     }
@@ -841,15 +868,15 @@ impl IdentityGate {
 
     /// Whether `requester` is shown the agent `name`, for the places that
     /// hold a name and no record: the same rule, after a read of the
-    /// agent's record. A requester that is no agent is shown every agent
-    /// its view shows, so nothing of the record decides and it is not
-    /// read. For an agent, a name whose record cannot be read is not
-    /// shown.
+    /// agent's record. A requester that is no agent and whose call has no
+    /// view is shown every agent, so nothing of the record decides and it
+    /// is not read. For every other caller a name whose record cannot be
+    /// read is not shown.
     async fn sees_named(&self, mob: &MobHandle, requester: &ChangeRequester, name: &str) -> bool {
         if !self.view_shows(name) {
             return false;
         }
-        if !matches!(requester, ChangeRequester::Agent { .. }) {
+        if self.seen.is_none() && !matches!(requester, ChangeRequester::Agent { .. }) {
             return true;
         }
         match self.agent(mob, name).await {
@@ -1167,8 +1194,9 @@ impl IdentityGate {
     /// What normalization knows of the existing agents `names` name as
     /// peers: a name no agent holds is left out, and refused `peer_unknown`
     /// there. So is a name the caller's view hides, whose record is not
-    /// read, and an agent that is private to a person, which is nobody's
-    /// peer whoever asks: nothing tells either from a name no agent holds.
+    /// read, an agent the view hides as its record reads, and an agent
+    /// that is private to a person, which is nobody's peer whoever asks:
+    /// nothing tells any of them from a name no agent holds.
     async fn peer_facts(
         &self,
         mob: &MobHandle,
@@ -1181,6 +1209,7 @@ impl IdentityGate {
                 continue;
             }
             if let Some(agent) = self.agent(mob, name).await?
+                && self.view_shows_record(&agent)
                 && !self.is_private_agent(mob, &agent)
             {
                 peers.insert(name.clone(), agent.peer(policy));
@@ -2241,6 +2270,12 @@ impl AgentSpecs for GateSpecs {
 /// the gate at once, or the decisions' driver after a person approved. So a
 /// create a person approved is prepared exactly as one the rules allow at
 /// once.
+///
+/// It is also the one place that tells the identity runtime to forget what
+/// it read of the record of each agent a change names
+/// ([`IdentityRuntime::forget_unseated_record`]): however the attempt ends
+/// (an outcome, an error that may have committed, a caller that stopped
+/// waiting), so a record read before a change is never decided on after it.
 struct LaunchExecutor {
     core: CoreChangeExecutor,
     /// The launch's identity policy, whose `preparation` says how the host
@@ -2252,10 +2287,36 @@ struct LaunchExecutor {
     schedules: Option<Arc<dyn AgentSchedules>>,
 }
 
+/// Forgets, when it is dropped, what the identity runtime read of the
+/// records of the agents `names`.
+struct ForgetRecordsRead {
+    identities: Weak<IdentityRuntime>,
+    names: Vec<String>,
+}
+
+impl Drop for ForgetRecordsRead {
+    fn drop(&mut self) {
+        if let Some(identities) = self.identities.upgrade() {
+            for name in &self.names {
+                identities.forget_unseated_record(name);
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl IdentityChangeExecutor for LaunchExecutor {
     async fn commit(&self, commit: ChangeCommit<'_>) -> Result<ChangeCommitted, ExecutorError> {
         let (mob, request) = (commit.mob, commit.request);
+        let forget = ForgetRecordsRead {
+            identities: Weak::clone(&self.identities),
+            names: request
+                .action
+                .identities()
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        };
         // A commit that names no preparation gets the launch's: every
         // create of the launch commits an agent of a prepared profile
         // pending its preparation.
@@ -2263,7 +2324,12 @@ impl IdentityChangeExecutor for LaunchExecutor {
             (Some(policy), None) => commit.with_preparations(policy.preparations()),
             _ => commit,
         };
-        let mut committed = self.core.commit(commit).await?;
+        let committed = self.core.commit(commit).await;
+        // Core answered: whatever it answered, the records the change names
+        // are read again from here on. A caller that stops waiting before
+        // this line drops the guard, which forgets them the same.
+        drop(forget);
+        let mut committed = committed?;
         // Each agent the change wrote is served from its record from now
         // on: registered, registered again or forgotten, with no wake.
         if let Some(identities) = self.identities.upgrade() {

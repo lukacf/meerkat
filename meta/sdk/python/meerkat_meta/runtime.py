@@ -2335,11 +2335,15 @@ class MetaRuntime:
 
         Host-only. ``target`` is ``{"kind": "mob"}`` (every member of the
         gateway's mob), ``{"kind": "profile", "profile": ...}`` or
-        ``{"kind": "member", "identity": ...}``. The slot is ``namespace``
-        (one your host owns) and ``key``; ``revision`` is at least 1 and
-        strictly increasing per slot; ``body`` is the exact text, at most
-        256 KiB. ``content_sha256`` (``"sha256:<hex>"`` of the body), when
-        given, must be the body's.
+        ``{"kind": "member", "identity": ...}``. A member target is for that
+        member alone: Meta's verb refuses a target that carries
+        ``include_forks``, and a record for a member and its forks is
+        written by a Rust host that embeds Meta, through the mob handle's
+        ``set_operator_instruction`` (:meth:`instruction_status` shows it).
+        The slot is ``namespace`` (one your host owns) and ``key``;
+        ``revision`` is at least 1 and strictly increasing per slot;
+        ``body`` is the exact text, at most 256 KiB. ``content_sha256``
+        (``"sha256:<hex>"`` of the body), when given, must be the body's.
 
         Returns Meerkat's write receipt once the record is durable:
         ``disposition`` (``"committed"``, or ``"duplicate"`` for an exact

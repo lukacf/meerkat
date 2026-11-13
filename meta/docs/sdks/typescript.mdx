@@ -72,7 +72,11 @@ await rt.revokeInstruction("app.example", "tone", 2);
 
 A write resolves once the record is durable (`disposition` `"committed"`, or
 `"duplicate"` for an exact repeat); a refusal rejects with an RPC error whose
-`data.instruction_set_code` names it (for example `stale_revision`). The
+`data.instruction_set_code` names it (for example `stale_revision`). A
+member target is for that member alone: `setInstruction` refuses a target
+that carries `include_forks`, and a record for a member and its forks is
+written by a Rust host that embeds Meta, through the mob handle's
+`set_operator_instruction` (`instructionStatus` shows it). The
 status read never wakes a member and names each member by its `identity`;
 its advisory values (a pending or blocked `reason`, `residency`) may be new
 to this SDK, so keep them as they are. These replace

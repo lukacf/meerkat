@@ -86,9 +86,12 @@ All notable changes to the Python SDK are documented here.
 - A 0.9.15 client against a 0.9.14 gateway was exercised in one keyless run
   only (the Meta Python SDK's own tests that start a real gateway without a
   provider key, against a gateway built at the 0.9.14 commit); no other
-  client and no 0.9.14 runtime was exercised. The methods for agents created
-  at run time (meta/identity) need a 0.9.15 gateway: upgrade the gateway
-  before the SDKs that call them.
+  client and no 0.9.14 runtime was exercised. Of the tests in that run that
+  start a real gateway, the five that existed at 0.9.14 and need no provider
+  key passed; the failures were in tests new in 0.9.15 (the identity methods
+  and cross-mob delivery between gateways) or in tests that need a provider
+  key. The methods for agents created at run time (meta/identity) need a
+  0.9.15 gateway: upgrade the gateway before the SDKs that call them.
 
 ## 0.9.14
 

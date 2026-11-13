@@ -112,6 +112,14 @@ read from the session's stored metadata, which `rkat` and the JSON-RPC, REST
 and MCP servers keep; a session on the in-memory ephemeral session service,
 which keeps none, delegates on the route it was built with.
 
+A session's implicit mob (its delegates and the forks seated there) and the
+mobs its agent created belong to the session, and they end with it: they are
+destroyed when the session is archived. Besides that, only the route change
+described above replaces the implicit mob, and a mob the agent created ends
+when it is destroyed by name. A turn that fails, is cancelled or is
+abandoned, a request that is cancelled, and a stop of the host end none of
+them: the session keeps its mobs for its next turn.
+
 For recurring teams, use explicit mobs instead of a chain of ad hoc delegates.
 
 A mob member can also fork itself with `fork_off`. The child starts from the

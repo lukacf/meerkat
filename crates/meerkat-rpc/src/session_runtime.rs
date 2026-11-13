@@ -42068,6 +42068,11 @@ mod tests {
             )
         }
 
+        /// The typed kind of a failed turn's error.
+        fn turn_error_kind(error: &RpcError) -> Option<&str> {
+            error.data.as_ref()?.get("error")?.get("kind")?.as_str()
+        }
+
         async fn turn_answer(turn: FailedStartTurn) -> Result<(), String> {
             match tokio::time::timeout(Duration::from_secs(10), turn).await {
                 Ok(joined) => joined
@@ -42184,6 +42189,11 @@ mod tests {
             .unwrap()
             .expect_err("the model switch fails at the turn's start");
         assert_eq!(
+            FailedStartSession::turn_error_kind(&failed),
+            Some("runtime_apply_failure"),
+            "the turn failed while it was applied: {failed:?}"
+        );
+        assert_eq!(
             session.client.calls.load(AtomicOrdering::SeqCst),
             1,
             "the failed turn made no model request"
@@ -42234,6 +42244,11 @@ mod tests {
             .unwrap()
             .expect_err("the recovery build fails at the turn's start");
         assert_eq!(
+            FailedStartSession::turn_error_kind(&failed),
+            Some("runtime_apply_failure"),
+            "the turn failed while it was applied: {failed:?}"
+        );
+        assert_eq!(
             session.client.calls.load(AtomicOrdering::SeqCst),
             1,
             "the failed turn made no model request"
@@ -42246,11 +42261,13 @@ mod tests {
         );
     }
 
-    /// A recovery that fails on a runtime registration the request itself
-    /// created (the first request for a stored session after a restart)
-    /// takes that registration back, and is no archive of the session: the
-    /// session keeps the child mob it owns with its member, and its implicit
-    /// mob, and its next turn runs.
+    /// The surface's cleanup of a recovery that fails on a runtime
+    /// registration it created itself takes that registration back, and is
+    /// no archive of the session: the session keeps the child mob it owns
+    /// with its member, and its implicit mob, and its next turn runs. The
+    /// row drives the cleanup through the test-only direct recovery; in a
+    /// shipped build the same cleanup follows a failed create of a new
+    /// session, and a turn's recovery finds its registration already there.
     #[cfg(all(feature = "mob", feature = "mcp"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_failed_recovery_on_a_new_registration_keeps_what_the_session_owns() {
@@ -42320,6 +42337,281 @@ mod tests {
                 .contains_key(&session.session_id),
             "the next turn attaches the session's MCP adapter again"
         );
+    }
+
+    /// A realtime open of a stored session that is not live rebuilds it. A
+    /// rebuild that fails there (its provider client is not available) takes
+    /// back the runtime registration the open created and is no archive of
+    /// the session: the session keeps the child mob it owns with its member,
+    /// and its implicit mob, and its next turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_realtime_open_rebuild_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+        // The session is stored, with no live session and no runtime
+        // registration, as after a restart.
+        session
+            .runtime
+            .service
+            .discard_live_session(&session.session_id)
+            .await
+            .expect("discard the live session");
+        session
+            .runtime
+            .runtime_adapter
+            .unregister_session(&session.session_id)
+            .await
+            .expect("unregister the session's runtime");
+
+        // The rebuild's first read of the client's provider answers a
+        // provider that cannot serve the session; nothing holds it.
+        session
+            .client
+            .held_read_answers_another_provider
+            .store(true, AtomicOrdering::SeqCst);
+        session
+            .client
+            .provider_read_released
+            .store(true, AtomicOrdering::SeqCst);
+        session
+            .client
+            .hold_next_provider_read
+            .store(true, AtomicOrdering::SeqCst);
+        let opened = session
+            .runtime
+            .realtime_session_open_config(
+                &session.session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await;
+        assert!(
+            opened.is_err(),
+            "the realtime open is refused: its session cannot be rebuilt"
+        );
+        assert!(
+            session
+                .client
+                .provider_read_held
+                .load(AtomicOrdering::SeqCst),
+            "the open's rebuild read the client's provider"
+        );
+
+        assert_eq!(
+            session.holdings().await,
+            (true, 1, true, true, false, false, true),
+            "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+             runtime registration, stored session) after the failed realtime open"
+        );
+        let next = session.spawn_turn("next", None);
+        session.release_request(2, "the next turn").await;
+        next.await.unwrap().expect("the next turn runs");
+    }
+
+    /// A caller's cancel of a running turn ends that turn and costs the
+    /// session nothing it owns: its mobs and their member stay, and its next
+    /// turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_running_turn_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+
+        let running = session.spawn_turn("running", None);
+        assert!(
+            session.request_entered(2, Duration::from_secs(10)).await,
+            "the running turn reaches the provider"
+        );
+        session
+            .runtime
+            .interrupt(&session.session_id)
+            .await
+            .expect("the caller cancels the running turn");
+        let cancelled = tokio::time::timeout(Duration::from_secs(20), running)
+            .await
+            .expect("the cancelled turn is answered")
+            .expect("the turn task");
+        assert!(
+            cancelled.is_err(),
+            "the cancelled turn does not complete: {cancelled:?}"
+        );
+
+        assert_eq!(
+            session.holdings().await,
+            (true, 1, true, true, true, true, true),
+            "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+             runtime registration, stored session) after the cancelled turn"
+        );
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let next = session.spawn_turn("next", None);
+        session.release_request(requests + 1, "the next turn").await;
+        next.await.unwrap().expect("the next turn runs");
+    }
+
+    /// A request cancelled while its turn is still queued ends that one
+    /// input, and is no archive of the session: the session keeps the child
+    /// mob it owns with its member, and its implicit mob. The turn request
+    /// queues behind another request's rebuild of the stored session, and is
+    /// cancelled as the JSON-RPC cancel notification cancels it: by its
+    /// exact input.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_queued_request_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+        session
+            .runtime
+            .service
+            .discard_live_session(&session.session_id)
+            .await
+            .expect("the session is stored and no longer live");
+
+        // The first request's rebuild is held (its held read answers the
+        // session's own provider, so the rebuild succeeds once released),
+        // and a second turn request queues behind it.
+        let first = session
+            .start_turn_held_in_its_apply("rebuilds the session", None)
+            .await;
+        let first_inputs = session
+            .runtime
+            .runtime_adapter
+            .list_active_inputs(&session.session_id)
+            .await
+            .expect("list the active inputs");
+        let queued = session.spawn_turn("the queued request", None);
+        session.wait_for_active_inputs(2).await;
+        let queued_input = session
+            .runtime
+            .runtime_adapter
+            .list_active_inputs(&session.session_id)
+            .await
+            .expect("list the active inputs")
+            .into_iter()
+            .find(|input| !first_inputs.contains(input))
+            .expect("the queued request's input");
+
+        session
+            .runtime
+            .runtime_adapter
+            .cancel_input_if_present(&session.session_id, &queued_input, "RPC request cancelled")
+            .await
+            .expect("the queued request's input is cancelled");
+
+        // The first request's rebuild goes on. The cancelled request is
+        // answered once its cleanup has retired the session's runtime,
+        // which waits for the rebuild in flight to end.
+        session
+            .client
+            .provider_read_released
+            .store(true, AtomicOrdering::SeqCst);
+        if session.request_entered(2, Duration::from_secs(5)).await {
+            session.client.release.notify_one();
+        }
+        let cancelled = tokio::time::timeout(Duration::from_secs(20), queued)
+            .await
+            .expect("the cancelled request is answered")
+            .expect("the request task");
+        assert!(
+            cancelled.is_err(),
+            "the cancelled request does not complete: {cancelled:?}"
+        );
+        let first = FailedStartSession::turn_answer(first).await;
+
+        let (child_mob, members, member_session, implicit_mob, _, _, stored) =
+            session.holdings().await;
+        assert_eq!(
+            (child_mob, members, member_session, implicit_mob, stored),
+            (true, 1, true, true, true),
+            "(child mob, its members, its member's session, implicit mob, stored session) \
+             after the queued request was cancelled; the first request was answered {first:?}"
+        );
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let next = session.spawn_turn("next", None);
+        session.release_request(requests + 1, "the next turn").await;
+        next.await.unwrap().expect("the next turn runs");
+    }
+
+    /// An ordinary stop of the host with a turn in flight keeps the turn for
+    /// the next start and destroys nothing the session owns: after the stop
+    /// neither the session nor the member of its child mob is archived.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ordinary_stop_with_a_turn_in_flight_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+
+        let running = session.spawn_turn("running", None);
+        assert!(
+            session.request_entered(2, Duration::from_secs(10)).await,
+            "the running turn reaches the provider"
+        );
+        session
+            .runtime
+            .try_shutdown()
+            .await
+            .expect("the runtime shuts down");
+        let stopped = tokio::time::timeout(Duration::from_secs(20), running)
+            .await
+            .expect("the turn in flight is answered by the stop")
+            .expect("the turn task")
+            .expect_err("the turn in flight does not complete in this process");
+        assert_eq!(
+            stopped.data.as_ref().map(|data| &data["kind"]),
+            Some(&serde_json::json!("requeued_across_stop")),
+            "the turn in flight is kept across the stop: {stopped:?}"
+        );
+
+        // A destroyed mob retires its members and archives their sessions:
+        // the stores still say what the stop left.
+        assert_eq!(
+            (
+                session
+                    .stored_and_not_archived(&session.child_member_session)
+                    .await,
+                session.stored_and_not_archived(&session.session_id).await,
+            ),
+            (true, true),
+            "(the child mob member's session, the session) stored and not archived after \
+             the stop"
+        );
+    }
+
+    /// The cleanup the completion relay runs is the same for every outcome
+    /// that asks for it (a turn that could not be applied, a result that
+    /// could not be saved, a turn abandoned or cancelled with no live
+    /// session, a runtime that ended): its scope comes from the cleanup
+    /// authority's archive fact alone. For a session that is not archived
+    /// it retires the live runtime and keeps what the session owns; for an
+    /// archived one it destroys the session's mobs. This row runs that
+    /// cleanup at the relay's own call, with the rule's answer for each
+    /// archive fact, and reads the mob state.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_an_archived_sessions_cleanup_destroys_what_the_session_owns() {
+        for (archived_by_authority, after_the_cleanup) in [
+            (false, (true, 1, true, true, false, false, true)),
+            (true, (false, 0, false, false, false, false, true)),
+        ] {
+            let session = FailedStartSession::materialized().await;
+            session
+                .runtime
+                .service
+                .discard_live_session(&session.session_id)
+                .await
+                .expect("the relay discards the live session first");
+            session
+                .runtime
+                .archive_runtime_cleanup()
+                .run_scoped(
+                    &session.session_id,
+                    RuntimeCleanupScope::of_completion_cleanup(archived_by_authority),
+                )
+                .await
+                .expect("the completion cleanup runs");
+            assert_eq!(
+                session.holdings().await,
+                after_the_cleanup,
+                "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+                 runtime registration, stored session) after a completion cleanup whose \
+                 authority says archived = {archived_by_authority}"
+            );
+        }
     }
 
     /// The guard of the rows above: archiving the session still destroys

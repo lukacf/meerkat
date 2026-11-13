@@ -289,6 +289,13 @@ impl ArchiveRuntimeCleanup {
     /// cleanup: both the typed, session-bound observation and an already-absent
     /// registration are required, so the completion relay never treats bare
     /// registry absence as terminal proof.
+    ///
+    /// This form is the cleanup of an archived session: it destroys the mobs
+    /// the session owns. A completion cleanup says what became of the session
+    /// with [`Self::run_after_runtime_termination_scoped`].
+    #[deprecated(
+        note = "use `run_after_runtime_termination_scoped`; this form is the cleanup of an archived session and destroys the mobs the session owns"
+    )]
     pub async fn run_after_runtime_termination(
         &self,
         session_id: &SessionId,

@@ -530,6 +530,10 @@ image_generation = {live_images}
                     "hide-origin" => Some("agent.view"),
                     // A viewer who may not spawn members: no side chat fork.
                     "no-spawn" => Some("agent.spawn"),
+                    // A viewer who is no administrator of the runtime: a
+                    // change of an agent tells it how many schedules follow,
+                    // not which.
+                    "no-admin" => Some("runtime.admin"),
                     _ => return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":"unknown access mode"}))),
                 };
                 let mut rules = vec![meerkat_meta::AccessRule {

@@ -231,7 +231,10 @@ turn that outlasted the retries, `kind` `retry_exhausted`, carries it): its
 class can succeed on a later attempt. A typed error before the turn prints its own code
 and data; a check made by the CLI itself prints `INTERNAL_ERROR` without
 `details`. Exit statuses do not change with the output mode (a failed turn
-exits 1 whatever the document's code) and stderr keeps its `Error:` line.
+exits 1 whatever the document's code, except a turn refused for its
+reasoning effort level, which exits 2 like the refused build; see Reasoning
+effort refusal in the CLI configuration reference) and stderr keeps its
+`Error:` line.
 With `--stream` the streamed text precedes the document. An argument the
 parser refuses (exit 2) prints no document, text and HTML output print none,
 and no command other than `rkat run` prints one (`rkat help --output json`

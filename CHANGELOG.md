@@ -629,9 +629,13 @@ them.
   with `--output json` ends stdout with one failure document, `{"error":
   {"code", "category", "message", "details"}}`, whose `details` is the typed
   refusal with `retryable` (`true` only for `supported_levels_unavailable`,
-  the one transient refusal). A successful run's JSON result carries the
-  `reasoning_effort` block: the level requested and what was sent, per
-  model and route.
+  the one transient refusal). A turn that ended because its level was
+  refused is the one exception to the rule that a failed turn exits 1 (see
+  the failure document entry under Changed): it exits 2 like the refused
+  build, and its failure document is the refusal's (`INVALID_PARAMS`, the
+  typed refusal as `details`), not a failed turn's. A successful run's JSON
+  result carries the `reasoning_effort` block: the level requested and what
+  was sent, per model and route.
 
   `models/catalog` lists `reasoning_effort_levels` in a model's profile: the
   levels of the model's direct provider route. Levels that depend on an

@@ -1706,6 +1706,63 @@ async fn route_calls_made_while_the_first_read_is_in_flight_wait_for_that_one_re
     Ok(())
 }
 
+/// A runtime a console no longer serves keeps none of its callers apart. A
+/// console that serves several runtimes reads who the members of each are
+/// private to, and while one of them has not read that record the one
+/// operator of a console that identifies nobody is kept apart like everybody
+/// else. Once that runtime is unregistered the console serves the runtime
+/// whose record it has read, and nothing reads the other record again: the
+/// operator is kept apart no longer.
+#[tokio::test]
+async fn a_runtime_a_console_no_longer_serves_keeps_no_caller_apart() -> TestResult {
+    let home_state = tempfile::tempdir()?;
+    let home = persistent_gateway_runtime_in(home_state.path(), "kept-apart-home", "", "").await?;
+    let home_handle = home.handle();
+    assert!(home.private_owners().seeded(&home_handle).await.landed());
+    let team_state = tempfile::tempdir()?;
+    let team_mob =
+        persistent_gateway_runtime_in(team_state.path(), "kept-apart-team", "", "").await?;
+    let team = runtime_whose_first_read_failed(&team_mob).await;
+
+    // One console over both runtimes, each under its own namespace.
+    let aggregator = MetaConsoleAggregator::in_memory();
+    for (key, runtime) in [("home", &home), ("team", &team)] {
+        aggregator.register_runtime_handles_with_policy(
+            key,
+            key,
+            runtime.clone(),
+            None,
+            crate::unified_runtime::ConsoleEventStore::new(),
+            Arc::new(AllowAllConsoleVisibilityPolicy),
+        );
+    }
+    let operator = console_request_auth_context(
+        &console_that_identifies_nobody(&home),
+        &HeaderMap::new(),
+        &Uri::from_static("/console/timeline"),
+    )
+    .expect("the console admits its operator")
+    .audience;
+    // The audience is primed as every route of a console with no runtime of
+    // its own primes it: from each runtime the console serves.
+    prime_access_cache_from_aggregator(&aggregator, &operator.controller()).await;
+    assert_eq!(
+        kept_apart_rules(&operator),
+        (true, false, true),
+        "while the console serves a runtime that has not read who its members are private to, \
+         its operator is kept apart"
+    );
+
+    aggregator.unregister_runtime("team");
+    prime_access_cache_from_aggregator(&aggregator, &operator.controller()).await;
+    assert_eq!(
+        kept_apart_rules(&operator),
+        (false, true, false),
+        "once the console no longer serves that runtime, its operator is kept apart no longer"
+    );
+    Ok(())
+}
+
 /// A member whose run is in flight is retired. The run ends on the console
 /// with a failure record that names the run's session: it carries the
 /// member's witness, so everyone who may view the member reads that the run

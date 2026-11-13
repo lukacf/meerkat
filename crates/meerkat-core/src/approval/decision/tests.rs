@@ -1357,6 +1357,13 @@ fn a_gating_release_decision_is_decided_by_people_only() {
     assert_decided_by_people_only("gating.release");
 }
 
+/// A set of questions an agent asks a person is answered by a person: a
+/// model never answers for one.
+#[test]
+fn an_ask_user_questions_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("ask_user.questions");
+}
+
 /// The control: a kind a reviewer may decide keeps its review stage.
 #[test]
 fn a_release_decision_keeps_its_review_stage() {

@@ -17087,6 +17087,10 @@ mod scoped_classification_tests {
 /// and lane (host-human or not): all sixteen. Each condition of the check is
 /// pinned on its own, so no single mutation of it survives.
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "a decode the row depends on failing is a test failure"
+)]
 mod requester_lane_tests {
     use super::requester_lane_refusal;
     use meerkat_core::RequesterOrigin;

@@ -1772,6 +1772,8 @@ CODESIGN = "/usr/bin/codesign"
 # macOS allows 104 bytes for a Unix socket path; the installed checks keep theirs under the work root.
 MACOS_WORK_ROOT_LIMIT = 24
 MACOS_BUILD_SECONDS = 5 * 3600
+# How much of a failed command's log a macOS step shows on stderr (the whole log stays in the records).
+FAILED_LOG_TAIL_BYTES = 16 * 1024
 MACOS_LANE = "connect-macos-arm64"
 MACOS_STEPS = ("preflight", "library", "resources", "build", "stage", "check-gateway", "check-cli",
                "check-consumer", "check-conversation", "check-official-install", "stage-record")
@@ -1906,7 +1908,45 @@ class StepRecorder(Recorder):
 
     def run(self, name, argv, **kwargs):
         self.commands.append(name)
-        return super().run(name, argv, **kwargs)
+        try:
+            return super().run(name, argv, **kwargs)
+        except ValueError as refusal:
+            if str(refusal) == "command did not succeed: " + name:  # it ran and failed, or ran out of time
+                self.say_failed(name)
+            raise
+
+    def say_failed(self, name):
+        """Say on stderr how a command that did not succeed ended: the end of its log.
+
+        A refusal names only the command, and its log lies in the work root, which a hosted runner
+        discards when the job fails. The macOS steps hold no token or key, so their commands' logs may be
+        shown; what is shown is bounded, and it is text: every line is prefixed, control characters are
+        written as escapes, and a workflow command marker is broken up, so nothing a command printed is
+        acted on by the terminal or the runner that reads this step's output.
+        """
+        try:
+            log, record = self.records / (name + ".log"), self.records / (name + ".json")
+            with log.open("rb") as stream:
+                size = stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, size - FAILED_LOG_TAIL_BYTES))
+                text = stream.read(FAILED_LOG_TAIL_BYTES).decode("utf-8", errors="replace")
+            if size > FAILED_LOG_TAIL_BYTES:
+                text = text.split("\n", 1)[-1]  # the first line shown is a whole line
+            ended = "its end is not recorded"
+            if record.is_file():
+                value = read_json(record)
+                ended = "timed out" if value.get("timed_out") else "exit " + str(
+                    value.get("exit_code") if value.get("exit_code") is not None else value.get("process_exit_code"))
+            shown = "".join(character if character in "\n\t" or character.isprintable()
+                            else character.encode("unicode_escape").decode("ascii") for character in text)
+            print(f"connect-candidate macos {self.step}: command {name} did not succeed ({ended}); the end of its "
+                  f"log records/{name}.log ({size} bytes, at most the last {FAILED_LOG_TAIL_BYTES} shown):",
+                  file=sys.stderr)
+            for line in shown.splitlines():
+                print("  | " + line.replace("##[", "# #["), file=sys.stderr)
+        except Exception as unreadable:  # the command's own failure is what the caller must see
+            print(f"connect-candidate macos {self.step}: command {name} did not succeed; its log could not be "
+                  f"shown ({type(unreadable).__name__})", file=sys.stderr)
 
 
 def macos_environment(work, **extra):

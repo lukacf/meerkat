@@ -931,7 +931,9 @@ def test_a_failed_macos_command_leaves_the_bounded_end_of_its_log_on_stderr(tmp_
     assert lines and all(line.startswith("  | ") for line in lines)
     assert lines[-1] == "  | packaging refused: invalid_pin_file"
     assert "  | early line 3999" in lines and "  | early line 0" not in lines, "the end of the log, not all of it"
-    assert len(said.encode()) <= p.FAILED_LOG_TAIL_BYTES + 4096
+    # Bounded by the log bytes read; the prefix and the escapes written for control characters come on top.
+    assert sum(len(line.encode()) - len("  | ") + 1 for line in lines) <= p.FAILED_LOG_TAIL_BYTES + 64
+    assert len(lines) < 2000
     assert "\x1b" not in said and "  | \\x1b[31mcoloured\\x1b[0m text" in lines
     assert not any("##[" in line for line in lines) and "  | ::error::not a command" in lines
     # The whole log stays in the records, and a command that succeeds says nothing.

@@ -2795,7 +2795,10 @@ def run_sources(target: str) -> dict:
 
 
 def run_pins(path: Path) -> tuple[bytes, list]:
-    """The committed pin file (connect-library-pins/1). Nothing is fetched here."""
+    """The pin file given as --pins (connect-library-pins/1). Nothing is fetched here.
+
+    It is the file the fetch step writes: `use` is a non-empty list of labels, as the pin schema has it.
+    """
     raw = read_outside(path)
     document = json.loads(raw, object_pairs_hook=unique_object)
     rows = document.get("pins") if isinstance(document, dict) else None
@@ -2806,7 +2809,9 @@ def run_pins(path: Path) -> tuple[bytes, list]:
     for row in rows:
         if (not isinstance(row, dict)
                 or row.get("kind") not in {"pypi-wheel", "npm-tarball", "crate", "release-download"}
-                or any(not isinstance(row.get(key), str) or not row[key] for key in ("name", "version", "file", "use"))
+                or any(not isinstance(row.get(key), str) or not row[key] for key in ("name", "version", "file"))
+                or not isinstance(row.get("use"), list) or not row["use"]
+                or any(not isinstance(label, str) or not label for label in row["use"])
                 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+@-]{0,199}", row["file"])
                 or any(row.get(key) is not None and (not isinstance(row[key], str)
                        or not re.fullmatch("[0-9a-f]{%d}" % size, row[key]))
@@ -2816,6 +2821,14 @@ def run_pins(path: Path) -> tuple[bytes, list]:
             raise PackageError("invalid_pin_file")
         seen.add((row["kind"], row["file"]))
     return raw, rows
+
+
+OFFICIAL_PIN_KINDS = {"official github": "release-download", "official playwright": "npm-tarball"}
+
+
+def run_official_pins(rows: list, label: str) -> list:
+    """The pin rows of one official component: its kind, and its label among the row's `use` labels."""
+    return [row for row in rows if row["kind"] == OFFICIAL_PIN_KINDS[label] and label in row["use"]]
 
 
 def run_pinned(directory: Path, row: dict) -> bytes:
@@ -2891,7 +2904,7 @@ def compose_official(inputs: Inputs, rows: list, pinned_inputs: Path) -> tuple[d
     for name in ("README.md", "github/UPSTREAM-PROFILE.md", "playwright/UPSTREAM-PROFILE.md"):
         files[name] = (inputs.read(RUN_TEXTS + "/official/" + name), 0o644)
     # The GitHub server: exactly the pinned upstream release archive of the declared version.
-    selected = [row for row in rows if row["kind"] == "release-download" and row["use"] == "official github"]
+    selected = run_official_pins(rows, "official github")
     # The pin row names the release by its version or by its tag (the version with a leading "v").
     if (len(selected) != 1 or selected[0]["file"] != github["asset"]
             or selected[0]["version"] not in (github["version"], "v" + github["version"])):
@@ -2931,7 +2944,7 @@ def compose_official(inputs: Inputs, rows: list, pinned_inputs: Path) -> tuple[d
         "source_archive": {"bytes": len(asset), "sha256": digest(asset)},
         "source_revision": github["source_revision"], "target": "macos-arm64"}
     # Playwright: the three pinned registry tarballs, a project and lock written from them.
-    selected = {row["name"]: row for row in rows if row["kind"] == "npm-tarball" and row["use"] == "official playwright"}
+    selected = {row["name"]: row for row in run_official_pins(rows, "official playwright")}
     if (set(selected) != set(packages) or any(selected[name]["version"] != packages[name] for name in packages)
             or any(row["sha512"] is None or not isinstance(row.get("url"), str)
                    or not row["url"].startswith("https://registry.npmjs.org/") for row in selected.values())):

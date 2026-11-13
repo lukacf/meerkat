@@ -277,7 +277,10 @@ def regular_file(path, maximum):
 
 
 def load_pins(path):
-    """The committed pin file (connect-library-pins/1): rows by (kind, file). Nothing is fetched here."""
+    """The pin file given as --pins (connect-library-pins/1): rows by (kind, file). Nothing is fetched here.
+
+    It is the file the fetch step writes: `use` is a non-empty list of labels, as the pin schema has it.
+    """
     try:
         raw, _ = regular_file(path, MAX_PINS)
         document = json.loads(raw, object_pairs_hook=unique_object)
@@ -287,7 +290,9 @@ def load_pins(path):
         rows = {}
         for row in document["pins"]:
             if (not isinstance(row, dict) or row.get("kind") not in PIN_KINDS
-                    or any(not isinstance(row.get(key), str) or not row[key] for key in ("name", "version", "file", "use"))
+                    or any(not isinstance(row.get(key), str) or not row[key] for key in ("name", "version", "file"))
+                    or not isinstance(row.get("use"), list) or not row["use"]
+                    or any(not isinstance(label, str) or not label for label in row["use"])
                     or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+@-]{0,199}", row["file"])
                     or any(row.get(key) is not None and (not isinstance(row[key], str)
                            or not re.fullmatch("[0-9a-f]{%d}" % size, row[key]))
@@ -436,7 +441,7 @@ def run_built_files(*, checkout, lock, pins, pinned_inputs, tools, tool_dependen
     if unlocked:
         raise Rejected("tool_crate_not_locked", unlocked)
     selected = {crate: rows.get(("crate", archive_name(crate))) for crate in registry}
-    unpinned = [archive_name(crate) for crate, row in selected.items() if row is None or row["use"] != CRATE_USE]
+    unpinned = [archive_name(crate) for crate, row in selected.items() if row is None or CRATE_USE not in row["use"]]
     if unpinned:
         raise Rejected("tool_crate_not_pinned", unpinned)
     different = [archive_name(crate) for crate, row in selected.items() if row["sha256"] != locked[crate][1]]

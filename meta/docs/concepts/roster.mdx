@@ -497,9 +497,12 @@ update's result:
   seated as a fork of an agent, so Meerkat counts in each agent's set, beside
   those, the records one other agent passes to its forks (the agent that
   passes the most): with these records alone, one record of the 64 and, of
-  the 1 MiB, the longest instruction record of another agent. The
-  instruction records of the two agents with the longest texts therefore
-  fit in 1 MiB together with the records for every member or a profile.
+  the 1 MiB, the longest instruction record of another agent (not the
+  records of every other agent). The instruction records of the two agents
+  with the longest texts therefore fit in 1 MiB together with the records
+  for every member or a profile; one record holds at most 256 KiB, so two
+  agents' records alone never reach the limit, and the bound is met only
+  with such shared records beside them.
   The change of an agent whose set would be full is not recorded
   (`slot_limit_exceeded`, `active_set_budget_exceeded`); it applies from the
   agent's next fresh conversation.

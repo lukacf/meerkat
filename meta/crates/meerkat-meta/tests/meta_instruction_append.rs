@@ -547,6 +547,28 @@ impl Rig {
         }
     }
 
+    /// How many operator instruction slots are in effect in `name`'s durable
+    /// conversation, as Meerkat reads its entry rows.
+    async fn slots_in_effect(&self, name: &str) -> usize {
+        let session_id = self
+            .mob()
+            .resolve_bridge_session_id(&Self::member(name))
+            .await
+            .expect("the member has a session binding");
+        let session = self
+            .runtime
+            .mob_runtime()
+            .session_service()
+            .expect("the mob's session service")
+            .load_persisted_session_tolerating_tail(&session_id)
+            .await
+            .expect("the session reads")
+            .expect("the session is stored");
+        meerkat_core::effective_operator_instructions(session.id(), session.messages())
+            .expect("the conversation's entry rows are well formed")
+            .active_count()
+    }
+
     /// Wait until `member`, a member that is no agent of the roster (a
     /// fork), recorded the mob's current snapshot: its row on the status
     /// page of `name`'s slot.
@@ -3407,6 +3429,360 @@ async fn an_update_of_an_agent_with_a_live_fork_reaches_the_forks_next_run_once(
         record["target"],
         json!({"kind": "member", "identity": CREATED, "include_forks": true}),
         "the record is the agent's and its forks': {record:#?}"
+    );
+    rig.shutdown().await;
+}
+
+/// The fork of the rows that follow a record after it reached a live fork.
+const LIVE_FORK: &str = "live-fork";
+
+/// One turn of `fork`, a member that is no agent of the roster: the message
+/// is sent, the run ends, and the messages of its request are answered.
+async fn fork_turn(rig: &mut Rig, fork: &str, marker: &str) -> Vec<Value> {
+    let message = rig
+        .rpc(
+            "meta/send_message",
+            json!({"member_id": fork, "message": marker}),
+        )
+        .await;
+    assert!(message["error"].is_null(), "{message:#?}");
+    assert!(
+        rig.asked(marker).await,
+        "{fork} runs the turn asked {marker}"
+    );
+    run_ended(rig, fork, marker).await;
+    rig.request_messages(marker)
+}
+
+/// An agent created at run time with a live durable fork ([`LIVE_FORK`]),
+/// after a change of the agent's instructions reached both: the fork was
+/// taken before the change, the agent was updated, and the fork ran once on
+/// the change. Answers the rig and the fork's one entry.
+async fn edited_agent_with_a_live_fork(state: &Path) -> (Rig, String) {
+    let mut rig = boot(state, &fresh_mob_id(), vec![configured_spec(&[])]).await;
+    rig.create_spec(created_spec_on("forker", &["Keep ALPHA records."]))
+        .await;
+    rig.turn(CREATED, "FIRST-TURN").await;
+    let forked = rig
+        .runtime
+        .fork_member(
+            CREATED,
+            meerkat_mob::SpawnMemberSpec::new("forker", LIVE_FORK),
+            None,
+        )
+        .await;
+    assert!(forked.is_ok(), "the durable fork commits: {forked:?}");
+    let before = fork_turn(&mut rig, LIVE_FORK, "FORK-BEFORE-THE-CHANGE").await;
+    assert!(
+        entries(&before).is_empty(),
+        "before the change the fork holds no entry"
+    );
+    rig.update_spec(
+        "update-one",
+        created_spec_on("forker", &["Keep ALPHA records."]),
+        created_spec_on("forker", &["Keep BETA records."]),
+    )
+    .await;
+    assert_eq!(
+        rig.after_update(&["Keep ALPHA records."], &["Keep BETA records."])
+            .await,
+        InstructionOutcome::AppliesAtNextRun
+    );
+    rig.recorded(CREATED).await;
+    rig.member_recorded(CREATED, LIVE_FORK).await;
+    let on_the_change = entries(&fork_turn(&mut rig, LIVE_FORK, "FORK-ON-THE-CHANGE").await);
+    assert_eq!(
+        on_the_change.len(),
+        1,
+        "the fork runs on the agent's changed instructions: {on_the_change:#?}"
+    );
+    assert!(
+        carries(&on_the_change[0], &["Keep BETA records."]),
+        "the fork's entry carries the whole current text: {}",
+        on_the_change[0]
+    );
+    assert_eq!(
+        rig.slots_in_effect(LIVE_FORK).await,
+        1,
+        "the agent's record is in effect in the fork"
+    );
+    let entry = on_the_change[0].clone();
+    (rig, entry)
+}
+
+/// The removal of an agent revokes its record, and the record is the
+/// agent's and its forks': a fork that is live and holds the entry is told
+/// at its next run, by one appended revoke entry. The entry it held stays
+/// in its conversation as it was and is no longer in effect, the run after
+/// that repeats nothing, and nothing in the fork's conversation is
+/// rewritten.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removal_of_an_agent_revokes_its_record_at_a_live_forks_next_run_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut rig, entry) = edited_agent_with_a_live_fork(temp.path()).await;
+    let before = rig.transcript(LIVE_FORK).await;
+
+    let removed = rig
+        .mob()
+        .remove_identity(
+            meerkat_mob::IdentityRemoval::new(operation("remove"), host(), CREATED),
+            allow(),
+        )
+        .await;
+    assert!(
+        matches!(
+            removed,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "{removed:?}"
+    );
+    rig.runtime
+        .identity_runtime()
+        .expect("identity runtime installed")
+        .after_removal(&rig.mob(), CREATED)
+        .await;
+    let record = rig
+        .rpc(
+            "meta/instruction_status",
+            json!({"namespace": NAMESPACE, "key": CREATED}),
+        )
+        .await["result"]["desired"][0]
+        .clone();
+    assert_eq!(
+        (record["revision"].clone(), record["effect"].clone()),
+        (json!(2), json!("absent")),
+        "the removal revoked the record: {record:#?}"
+    );
+    rig.member_recorded(CREATED, LIVE_FORK).await;
+
+    // The fork's next run: the entry it held, as it was, and one revoke
+    // entry behind it. Nothing of the record is in effect any more.
+    let after = entries(&fork_turn(&mut rig, LIVE_FORK, "FORK-AFTER-THE-REMOVAL").await);
+    assert_eq!(
+        after.len(),
+        2,
+        "the fork's next run holds the entry and one revoke entry: {after:#?}"
+    );
+    assert_eq!(after[0], entry, "the entry the fork held is not rewritten");
+    assert!(
+        after[1].contains("change=\"revoke\"")
+            && after[1].contains(&format!("key=\"{CREATED}\""))
+            && after[1].contains("revokes=1")
+            && !after[1].contains("Keep BETA records."),
+        "the second entry revokes the agent's record and carries no text: {}",
+        after[1]
+    );
+    assert_eq!(
+        rig.slots_in_effect(LIVE_FORK).await,
+        0,
+        "nothing of the record is in effect in the fork"
+    );
+
+    // Once: the run after that holds the same two entries, and every row
+    // the fork's conversation held before the removal is byte-identical.
+    let later = entries(&fork_turn(&mut rig, LIVE_FORK, "FORK-LATER-TURN").await);
+    assert_eq!(later, after, "the revoke reaches the fork once");
+    assert_eq!(rig.slots_in_effect(LIVE_FORK).await, 0);
+    let transcript = rig.transcript(LIVE_FORK).await;
+    assert_eq!(
+        transcript[..before.len()],
+        before[..],
+        "every earlier row of the fork's conversation is byte-identical"
+    );
+    rig.shutdown().await;
+}
+
+/// The bytes of one agent's set of operator instructions, measured. An
+/// agent's record is also its forks', and any member may be seated as a
+/// fork of an agent, so the 1 MiB of one agent's set holds the shared
+/// records, the agent's own record and the record of ONE other agent, the
+/// longest: not the records of every other agent.
+///
+/// The host keeps 600,000 bytes of shared records. A first agent's record
+/// of about 240,000 bytes fits. A second agent's record of the same size
+/// does not (600,000 + 240,000 + 240,000 is past 1,048,576): its update
+/// answers `active_set_budget_exceeded`, nothing is written and every
+/// earlier record stays as it was. A record of about 200,000 bytes fits for
+/// the second agent, and for a third one too, although the three agents'
+/// records and the shared ones together are past 1 MiB.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_agents_set_counts_the_longest_record_of_one_other_agent() {
+    const SHARED: usize = 200_000;
+    const LONG: usize = 240_000;
+    const SHORTER: usize = 200_000;
+    const LIMIT: usize = 1024 * 1024;
+    fn spec(name: &str, instructions: String) -> meerkat_mob::CreatedIdentitySpec {
+        meerkat_mob::CreatedIdentitySpec::new(name, "worker")
+            .with_additional_instructions(vec![instructions])
+    }
+    /// Update `name`'s row from `previous` to `current` through Core and
+    /// answer what the step after the commit says of the instructions.
+    async fn update(
+        rig: &Rig,
+        name: &str,
+        operation: &str,
+        previous: String,
+        current: String,
+    ) -> InstructionOutcome {
+        rig.update_spec(
+            operation,
+            spec(name, previous.clone()),
+            spec(name, current.clone()),
+        )
+        .await;
+        rig.runtime
+            .identity_runtime()
+            .expect("identity runtime installed")
+            .after_update(&rig.mob(), &changed(name, vec![previous], vec![current]))
+            .await
+    }
+    /// Every record of the mob, the host's and the agents', as the status
+    /// read shows them.
+    async fn records(rig: &Rig) -> Value {
+        rig.rpc("meta/instruction_status", json!({})).await["result"]["desired"].clone()
+    }
+    let names = ["agent-a", "agent-b", "agent-c"];
+    let first = |name: &str| format!("First text of {name}.");
+    let sized = |name: &str, bytes: usize| format!("Text of {name}: {}", "x".repeat(bytes));
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id(), vec![configured_spec(&[])]).await;
+    let created = rig
+        .mob()
+        .create_store_owned_identities(
+            meerkat_mob::StoreOwnedIdentityCreate::new(
+                operation("create-three"),
+                host(),
+                names
+                    .iter()
+                    .map(|name| meerkat_mob::CreatedIdentityRequest::new(spec(name, first(name))))
+                    .collect(),
+            ),
+            allow(),
+        )
+        .await
+        .map(|created| created.change);
+    assert!(
+        matches!(
+            created,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "Core creates the agents: {created:?}"
+    );
+    for name in names {
+        rig.turn(name, &format!("FIRST-TURN-OF-{name}.")).await;
+    }
+
+    // The host's shared records: three of 200,000 bytes, for every member.
+    for key in ["shared-1", "shared-2", "shared-3"] {
+        let set = rig
+            .rpc(
+                "meta/set_instruction",
+                json!({
+                    "namespace": "app.example",
+                    "key": key,
+                    "revision": 1,
+                    "body": "s".repeat(SHARED),
+                    "target": {"kind": "mob"},
+                }),
+            )
+            .await;
+        assert!(set["error"].is_null(), "the host writes {key}: {set:#?}");
+    }
+
+    // The first agent's long record fits beside the shared ones.
+    let long_a = sized("agent-a", LONG);
+    assert_eq!(
+        update(
+            &rig,
+            "agent-a",
+            "update-a",
+            first("agent-a"),
+            long_a.clone()
+        )
+        .await,
+        InstructionOutcome::AppliesAtNextRun,
+        "the first agent's record fits: shared {} + its own {}",
+        3 * SHARED,
+        body_of(&[&long_a]).len()
+    );
+    let before = records(&rig).await;
+    assert_eq!(
+        before.as_array().map_or(0, Vec::len),
+        4,
+        "three shared records and the first agent's: {before:#?}"
+    );
+
+    // The second agent's long record does not: its set would also hold
+    // the first agent's record.
+    let long_b = sized("agent-b", LONG);
+    let total = 3 * SHARED + body_of(&[&long_b]).len() + body_of(&[&long_a]).len();
+    assert!(
+        3 * SHARED + body_of(&[&long_b]).len() <= LIMIT && total > LIMIT,
+        "the second record fits alone and not beside the first: {total}"
+    );
+    assert_eq!(
+        update(
+            &rig,
+            "agent-b",
+            "update-b",
+            first("agent-b"),
+            long_b.clone()
+        )
+        .await,
+        InstructionOutcome::AppliesAtNextSession {
+            reason: InstructionNextSessionReason::ActiveSetBudgetExceeded
+        },
+        "the second agent's record is refused for the bytes: {total} bytes"
+    );
+    assert_eq!(
+        rig.record("agent-b").await,
+        None,
+        "nothing is written for the second agent"
+    );
+    assert_eq!(
+        records(&rig).await,
+        before,
+        "every earlier record stays as it was"
+    );
+
+    // A shorter record fits for the second agent, beside the first's.
+    let shorter_b = sized("agent-b", SHORTER);
+    let total = 3 * SHARED + body_of(&[&shorter_b]).len() + body_of(&[&long_a]).len();
+    assert!(total <= LIMIT, "{total}");
+    assert_eq!(
+        update(
+            &rig,
+            "agent-b",
+            "update-b-shorter",
+            long_b,
+            shorter_b.clone()
+        )
+        .await,
+        InstructionOutcome::AppliesAtNextRun,
+        "the second agent's shorter record fits: {total} bytes"
+    );
+
+    // And for a third agent: its set holds the longest record of ONE other
+    // agent, not both others' (all three and the shared ones are past the
+    // limit together).
+    let shorter_c = sized("agent-c", SHORTER);
+    let one_other = 3 * SHARED + body_of(&[&shorter_c]).len() + body_of(&[&long_a]).len();
+    let every_other = one_other + body_of(&[&shorter_b]).len();
+    assert!(
+        one_other <= LIMIT && every_other > LIMIT,
+        "{one_other} {every_other}"
+    );
+    assert_eq!(
+        update(&rig, "agent-c", "update-c", first("agent-c"), shorter_c).await,
+        InstructionOutcome::AppliesAtNextRun,
+        "the third agent's record fits: {one_other} bytes with one other agent's record, \
+         {every_other} with both"
+    );
+    let after = records(&rig).await;
+    assert_eq!(
+        after.as_array().map_or(0, Vec::len),
+        6,
+        "three shared records and one record per agent: {after:#?}"
     );
     rig.shutdown().await;
 }

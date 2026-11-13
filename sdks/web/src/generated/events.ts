@@ -784,7 +784,7 @@ export type ReasoningNotAppliedReason = "no_catalog_fact" | "unsupported_level" 
 
 export type RequestedCompactionSkipReason = "first_model_request" | "nothing_to_fold";
 
-export type RequesterOrigin = "console_signed_in" | "host_attested";
+export type RequesterOrigin = string;
 
 export type RevisedPromptDisposition = {
   disposition: "not_requested";

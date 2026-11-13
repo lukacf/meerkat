@@ -6150,9 +6150,9 @@ export function supportsFlowRunIdempotencyKey(
  * host's opaque, stable id for that person.
  *
  * Reading a turn's requester back (events, tool callbacks), its `origin` is
- * an open value: `"console_signed_in"` and `"host_attested"` today. Treat any
- * value you do not know as "not attested"; a later third value is not a
- * breaking change.
+ * an open string (`RequesterOrigin` is `string`): `"console_signed_in"` and
+ * `"host_attested"` today. Treat any other value (including `"unknown"`) as
+ * "not attested"; a later third value is not a breaking change.
  */
 export interface HostAttestedRequester {
   kind: "person";

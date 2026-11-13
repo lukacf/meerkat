@@ -86,9 +86,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   as the `meta/console/send` handlers already refuse it (`-32602`).
 - The requester a turn records (as tool callbacks and turn and transcript
   events carry it) gains an `origin` field when the admitting door recorded
-  one (`console_signed_in` or `host_attested`). SDK readers treat the value
-  as open: one they do not know reads as not attested, never clean, so a
-  later third value is not a breaking change.
+  one (`console_signed_in` or `host_attested`). The field is open: the wire
+  schema is a string, the SDK types are `str` (Python) and `string`
+  (TypeScript), and Rust loads a value it does not know as
+  `RequesterOrigin::Unknown`. An unknown value is not attested and never
+  clean: the row loads, its content is not trusted, and a later third value
+  is not a breaking change.
 
 ### Added
 
@@ -109,7 +112,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   records the person as the turn's direct requester with origin
   `console_signed_in`; a redispatch of a recorded send derives the origin
   from what the send's frame recorded (its sender and origin kind), which
-  grants nothing new. A scheduled fire, an operator probe and every internal
+  grants nothing new. A recorded origin kind this build cannot read is not a
+  signed-in send: the redispatch keeps the person as requester but records
+  no origin. A scheduled fire, an operator probe and every internal
   emitter name the person (a fire) or no one, but never an origin.
 - Neither door stamps the turn as typed text (`TranscriptTurnInput::
   TypedText`). That stamp keeps its one existing reader, the live voice
@@ -2379,6 +2384,7 @@ approvals read-only to a caller it cannot name as a signed-in person.
   resolves its credentials through the realm. Their session service keeps
   no retained session metadata, which is where `delegate` reads the
   current identity (Meerkat's known limitation for `EphemeralSessionService`).
+
 
 - Meta does not register identities created at runtime yet (Core's created
   entries, whose records the mob's identity store owns): no roster pass

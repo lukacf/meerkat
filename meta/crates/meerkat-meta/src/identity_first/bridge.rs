@@ -2649,6 +2649,28 @@ struct InternalBridgeWork<'a> {
     sender_label: Option<&'a meerkat_mob::SenderLabel>,
 }
 
+/// Why a delivery's requester may not ride the lane it asks for, if it may
+/// not. A requester rides the local host-human lane (a Console person's
+/// turn), or ordinary work only when the host attests it (origin
+/// `host_attested`); a host-attested origin needs a requester and never rides
+/// the host-human lane. `None` when the combination is admissible.
+pub(crate) fn requester_lane_refusal(
+    has_requester: bool,
+    origin: Option<meerkat_core::RequesterOrigin>,
+    host_human_lane: bool,
+) -> Option<&'static str> {
+    let host_attested = origin == Some(meerkat_core::RequesterOrigin::HostAttested);
+    if has_requester && !host_human_lane && !host_attested {
+        return Some(
+            "a requester is carried only on the local host-human lane or a host-attested send",
+        );
+    }
+    if host_attested && (!has_requester || host_human_lane) {
+        return Some("a host-attested requester rides only a host send that names one");
+    }
+    None
+}
+
 /// Which lane a submission runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BridgeSubmitMode {
@@ -11472,17 +11494,12 @@ impl MobSessionBridge {
         }
         let requester = delivery.requester.as_ref();
         let requester_origin = delivery.requester_origin;
-        let host_attested = requester_origin == Some(meerkat_core::RequesterOrigin::HostAttested);
-        if requester.is_some() && host_human_session.is_none() && !host_attested {
-            return Err(BridgeAdmissionError::InvalidInput(
-                "a requester is carried only on the local host-human lane or a host-attested send"
-                    .to_string(),
-            ));
-        }
-        if host_attested && (requester.is_none() || host_human_session.is_some()) {
-            return Err(BridgeAdmissionError::InvalidInput(
-                "a host-attested requester rides only a host send that names one".to_string(),
-            ));
+        if let Some(refusal) = requester_lane_refusal(
+            requester.is_some(),
+            requester_origin,
+            host_human_session.is_some(),
+        ) {
+            return Err(BridgeAdmissionError::InvalidInput(refusal.to_string()));
         }
         let request_only_context = delivery.request_only_context.as_ref();
         if request_only_context.is_some() && host_human_session.is_none() {
@@ -16492,6 +16509,52 @@ mod scoped_classification_tests {
                 "{refusal:?}"
             );
             assert!(!refusal.admission_possible(), "{refusal:?}");
+        }
+    }
+}
+
+/// Delta read 3 item 5: the bridge's requester lane check, every combination
+/// of requester, origin and lane. Each condition of the check is pinned on
+/// its own, so no single mutation of it survives.
+#[cfg(test)]
+mod requester_lane_tests {
+    use super::requester_lane_refusal;
+    use meerkat_core::RequesterOrigin::{ConsoleSignedIn, HostAttested};
+
+    const ONLY_LANE: &str =
+        "a requester is carried only on the local host-human lane or a host-attested send";
+    const HOST_SEND: &str = "a host-attested requester rides only a host send that names one";
+
+    #[test]
+    fn row_bridge_requester_lane_check_every_combination() {
+        // (has_requester, origin, host_human_lane) -> refusal
+        let cases = [
+            // Nothing carried: admissible on either lane.
+            (false, None, false, None),
+            (false, None, true, None),
+            // A requester on the host-human lane, with or without the
+            // console's origin: admissible.
+            (true, None, true, None),
+            (true, Some(ConsoleSignedIn), true, None),
+            // A requester on ordinary work: only when host-attested.
+            (true, None, false, Some(ONLY_LANE)),
+            (true, Some(ConsoleSignedIn), false, Some(ONLY_LANE)),
+            (true, Some(HostAttested), false, None),
+            // A host-attested origin needs a requester and never rides the
+            // host-human lane.
+            (false, Some(HostAttested), false, Some(HOST_SEND)),
+            (false, Some(HostAttested), true, Some(HOST_SEND)),
+            (true, Some(HostAttested), true, Some(HOST_SEND)),
+            // An origin without a requester that is not host-attested is not
+            // this check's to refuse (mob refuses it before admission).
+            (false, Some(ConsoleSignedIn), false, None),
+        ];
+        for (has_requester, origin, lane, want) in cases {
+            assert_eq!(
+                requester_lane_refusal(has_requester, origin, lane),
+                want,
+                "requester {has_requester}, origin {origin:?}, host-human lane {lane}"
+            );
         }
     }
 }

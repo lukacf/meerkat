@@ -1939,14 +1939,8 @@ class PrincipalRef(TypedDict, total=False):
     qualification: NotRequired[PrincipalQualification]
 
 
-# How a turn's requester was attested at the ingress that admitted it.
-#
-# Core carries the value and never interprets it: it names which host door
-# vouched for the principal, not who the principal is or what it may do.
-# Readers treat it as open (`#[non_exhaustive]` here; SDK readers treat an
-# unknown value as "not attested"), so a later variant is not a breaking
-# change for them.
-RequesterOrigin = Literal['console_signed_in', 'host_attested']
+# How a turn's requester was attested at the ingress that admitted it: `console_signed_in` (a person signed in to the host's console sent the input) or `host_attested` (the host relayed the input and attested the person). Open: treat any other value (including `unknown`) as not attested.
+RequesterOrigin = str
 
 
 class TurnRequester(TypedDict, total=False):

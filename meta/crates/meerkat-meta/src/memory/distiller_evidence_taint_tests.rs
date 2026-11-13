@@ -1786,12 +1786,16 @@ pub(crate) async fn cross_check_status(
         crate::memory::distiller::proven_clean_row(&row),
         matches!(
             &row,
-            Message::User(user) if user
-                .identity
-                .requester
-                .as_ref()
-                .and_then(meerkat_core::TurnRequester::origin)
-                .is_some()
+            Message::User(user) if matches!(
+                user.identity
+                    .requester
+                    .as_ref()
+                    .and_then(meerkat_core::TurnRequester::origin),
+                Some(
+                    meerkat_core::RequesterOrigin::ConsoleSignedIn
+                        | meerkat_core::RequesterOrigin::HostAttested
+                )
+            )
         ),
         "rule 3 holds exactly for the rows with an attested origin"
     );
@@ -1846,6 +1850,45 @@ async fn cross_check_schedule_fire_is_quarantined() -> Result<(), Box<dyn Error>
         "My appointment is on Friday at eight",
     )
     .await?;
+    assert!(
+        !statuses.is_empty() && statuses.iter().all(is_quarantined),
+        "QUARANTINED: {statuses:?}"
+    );
+    Ok(())
+}
+
+/// Delta read 3 item 2: an origin value this build does not know (a newer
+/// host wrote it) still LOADS the stored transcript row, as
+/// `RequesterOrigin::Unknown`, but the row is not attested: it is not
+/// rule-3 clean, and its fact after a tainted peer message is QUARANTINED.
+#[tokio::test]
+async fn row_unknown_origin_loads_the_row_but_its_content_is_not_trusted()
+-> Result<(), Box<dyn Error>> {
+    let mut stored = serde_json::to_value(console_signed_in_send(
+        "My appointment is on Friday at eight.",
+    ))?;
+    let origin = stored
+        .pointer_mut("/identity/requester/origin")
+        .ok_or("the stored row records its origin")?;
+    assert_eq!(*origin, serde_json::json!("console_signed_in"));
+    *origin = serde_json::json!("a_door_from_a_newer_host");
+    let row: Message = serde_json::from_value(stored)?;
+    let Message::User(user) = &row else {
+        return Err("the row loads as a user row".into());
+    };
+    assert_eq!(
+        user.identity
+            .requester
+            .as_ref()
+            .and_then(meerkat_core::TurnRequester::origin),
+        Some(meerkat_core::RequesterOrigin::Unknown),
+        "an unknown origin loads as Unknown"
+    );
+    assert!(
+        !crate::memory::distiller::proven_clean_row(&row),
+        "an unknown origin is never clean"
+    );
+    let statuses = cross_check_status(row, "My appointment is on Friday at eight").await?;
     assert!(
         !statuses.is_empty() && statuses.iter().all(is_quarantined),
         "QUARANTINED: {statuses:?}"

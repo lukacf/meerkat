@@ -17438,19 +17438,8 @@
         ]
       },
       "RequesterOrigin": {
-        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.\nReaders treat it as open (`#[non_exhaustive]` here; SDK readers treat an\nunknown value as \"not attested\"), so a later variant is not a breaking\nchange for them.",
-        "oneOf": [
-          {
-            "const": "console_signed_in",
-            "description": "A person signed in to the host's console sent the input themselves.",
-            "type": "string"
-          },
-          {
-            "const": "host_attested",
-            "description": "The host relayed the input under its own host authority and attested\nthe person it acts for.",
-            "type": "string"
-          }
-        ]
+        "description": "How a turn's requester was attested at the ingress that admitted it: `console_signed_in` (a person signed in to the host's console sent the input) or `host_attested` (the host relayed the input and attested the person). Open: treat any other value (including `unknown`) as not attested.",
+        "type": "string"
       },
       "ResponseStatus": {
         "description": "Typed status for response interactions.\n\nMirrors `CommsStatus` from `meerkat-comms` — the comms runtime converts at the boundary.",

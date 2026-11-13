@@ -9,27 +9,52 @@
 //! that no Meta or mob source stamps it.
 #![allow(
     clippy::expect_used,
-    reason = "source-pin rows: an unreadable source is a test failure"
+    clippy::panic,
+    reason = "source-pin rows: an unreadable source or a pinned token is a test failure"
 )]
 
 use std::path::{Path, PathBuf};
 
 /// The tokens that create or carry an attested requester origin: the
-/// host-attested send and its work-spec setter, and either origin value (the
-/// Console's live person send records `ConsoleSignedIn`).
+/// host-attested send and its work-spec setter, either origin value (the
+/// Console's live person send records `ConsoleSignedIn`), and the setters
+/// that FORWARD an origin from one carrier to the next (a work spec's
+/// `with_requester_origin`, a `requester_origin = ...` assignment). A
+/// requester's own `with_origin(...)` is checked in files that name
+/// `TurnRequester` (see [`names_a_forwarding_setter`]).
 const HOST_ATTESTED_TOKENS: &[&str] = &[
     "send_host_attested",
     "with_host_attested_requester",
     "RequesterOrigin::HostAttested",
     "host_requester",
     "RequesterOrigin::ConsoleSignedIn",
+    "with_requester_origin",
+    "requester_origin =",
 ];
+
+/// Whether `text` names an attested-origin token, the forwarding setters
+/// included. `with_origin(` counts only in a source that names
+/// `TurnRequester`: other types (an identity entry's origin) have their own
+/// unrelated `with_origin`.
+fn names_a_forwarding_setter(text: &str) -> Option<&'static str> {
+    if let Some(token) = HOST_ATTESTED_TOKENS
+        .iter()
+        .find(|token| names_token(text, token))
+    {
+        return Some(token);
+    }
+    (text.contains("TurnRequester") && text.contains(".with_origin(")).then_some(".with_origin(")
+}
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
 
-/// Every non-test Rust source under `path` (a file or a directory).
+/// Every Rust source under `path` (a file or a directory) except test
+/// modules by convention: a `tests` directory, `tests.rs` and `*_tests.rs`.
+/// A file whose name merely contains "test" (a test-support bridge, a
+/// `test_support.rs`) is read: it may hold product code. Inline test modules
+/// inside a read file are dropped by [`without_inline_test_modules`].
 fn sources(path: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if path.is_file() {
@@ -48,7 +73,7 @@ fn sources(path: &Path) -> Vec<PathBuf> {
                 if name != "tests" {
                     stack.push(path);
                 }
-            } else if name.ends_with(".rs") && !name.contains("test") {
+            } else if name.ends_with(".rs") && name != "tests.rs" && !name.ends_with("_tests.rs") {
                 out.push(path);
             }
         }
@@ -63,11 +88,12 @@ fn assert_door_names_no_host_attested_requester(door: &str, paths: &[&str]) {
         let path = root.join(relative);
         assert!(path.exists(), "{door}: {relative} exists");
         for file in sources(&path) {
-            let text = std::fs::read_to_string(&file).expect("read the door's source");
+            let text = without_inline_test_modules(
+                &std::fs::read_to_string(&file).expect("read the door's source"),
+            );
             read += 1;
-            for token in HOST_ATTESTED_TOKENS {
-                assert!(
-                    !text.contains(token),
+            if let Some(token) = names_a_forwarding_setter(&text) {
+                panic!(
                     "{door}: {} names {token}; only the host route may",
                     file.display()
                 );
@@ -202,12 +228,14 @@ fn names_token(text: &str, token: &str) -> bool {
 }
 
 /// The only callers, across the WHOLE workspace (every crate under `crates/`,
-/// `meta/crates/` and `connect/crates/`, inline test modules excluded): the
-/// host route's `meta/send` handler calls the send; the identity runtime
-/// defines it and carries it on its lanes; the bridge sets the work-spec
-/// requester from it; mob defines the setter and checks it; the Console's
-/// live person send records its origin; the Distiller's rule 3 reads the
-/// origin. No other shipped source names any of these tokens.
+/// `meta/crates/` and `connect/crates/`, test modules excluded): the host
+/// route's `meta/send` handler calls the send; the identity runtime defines
+/// it and carries it on its lanes; the bridge sets the work-spec requester
+/// from it; mob defines the setters, checks them and forwards the origin to
+/// the runtime input; Core's turn semantics carry it; the runtime stamps the
+/// input header's origin onto the turn's requester; the Console's live
+/// person send records its origin; the Distiller's rule 3 reads it. No other
+/// shipped source names any of these tokens or forwarding setters.
 #[test]
 fn only_the_host_route_names_a_host_attested_requester() {
     let root = repo_root();
@@ -217,6 +245,11 @@ fn only_the_host_route_names_a_host_attested_requester() {
         "meta/crates/meerkat-meta/src/identity_first/bridge.rs",
         "crates/meerkat-mob/src/ids.rs",
         "crates/meerkat-mob/src/runtime/actor.rs",
+        // Core's turn semantics carry the origin from the host to the turn.
+        "crates/meerkat-core/src/service/mod.rs",
+        // The runtime stamps the admitted input's origin onto the requester.
+        "crates/meerkat-runtime/src/input.rs",
+        "crates/meerkat-runtime/src/runtime_loop.rs",
         // The Console's live person send (its recorded origin).
         "meta/crates/meerkat-meta/src/mob_handle_runtime.rs",
         // The Distiller's rule 3 reads the recorded origin (never sets it).
@@ -241,12 +274,8 @@ fn only_the_host_route_names_a_host_attested_requester() {
                     &std::fs::read_to_string(&file).expect("read source"),
                 );
                 read += 1;
-                for token in HOST_ATTESTED_TOKENS {
-                    assert!(
-                        !names_token(&text, token),
-                        "{} names {token}; only the host route may",
-                        file.display()
-                    );
+                if let Some(token) = names_a_forwarding_setter(&text) {
+                    panic!("{} names {token}; only the host route may", file.display());
                 }
             }
         }
@@ -274,6 +303,23 @@ fn the_workspace_scan_skips_inline_tests_and_matches_whole_tokens() {
         "runtime.tool_grant_host_requester()",
         "host_requester"
     ));
+    assert_eq!(
+        names_a_forwarding_setter("spec.with_requester_origin(origin)"),
+        Some("with_requester_origin")
+    );
+    assert_eq!(
+        names_a_forwarding_setter("delivery.requester_origin = origin;"),
+        Some("requester_origin =")
+    );
+    assert_eq!(
+        names_a_forwarding_setter("TurnRequester::direct(p).with_origin(o)"),
+        Some(".with_origin(")
+    );
+    assert_eq!(
+        names_a_forwarding_setter("entry.with_origin(IdentityEntryOrigin::Created)"),
+        None,
+        "another type's with_origin is not the requester's"
+    );
     let out_of_line = "#[cfg(test)]\nmod door_tests;\nfn shipped() { send_host_attested(); }\n";
     assert!(names_token(
         &without_inline_test_modules(out_of_line),

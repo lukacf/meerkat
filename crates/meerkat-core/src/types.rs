@@ -84,10 +84,13 @@ pub struct TurnRequester {
 ///
 /// Core carries the value and never interprets it: it names which host door
 /// vouched for the principal, not who the principal is or what it may do.
-/// Readers treat it as open (`#[non_exhaustive]` here; SDK readers treat an
-/// unknown value as "not attested"), so a later variant is not a breaking
-/// change for them.
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+///
+/// The value is open for readers. A value this build does not know (one a
+/// newer host wrote) still loads: it reads as [`Self::Unknown`], which no
+/// reader may treat as an attestation, so the row loads and its content is
+/// not trusted. The wire schema is an open string for the same reason, and
+/// the SDKs type the field as a string. A later variant is therefore not a
+/// breaking change for readers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -97,6 +100,28 @@ pub enum RequesterOrigin {
     /// The host relayed the input under its own host authority and attested
     /// the person it acts for.
     HostAttested,
+    /// An origin this build does not know. It is never an attestation: a
+    /// reader acts as if the requester had none. It is written back as
+    /// `unknown` (the original value is not kept), which fails closed.
+    #[serde(other)]
+    Unknown,
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for RequesterOrigin {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "RequesterOrigin".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "How a turn's requester was attested at the ingress that admitted it: \
+                `console_signed_in` (a person signed in to the host's console sent the input) \
+                or `host_attested` (the host relayed the input and attested the person). \
+                Open: treat any other value (including `unknown`) as not attested."
+        })
+    }
 }
 
 impl TurnRequester {

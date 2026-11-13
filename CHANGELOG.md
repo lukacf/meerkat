@@ -61,6 +61,19 @@ them.
 
 ### Added
 
+- `meerkat-core`: `RequesterOrigin` (`ConsoleSignedIn`, `HostAttested`, and
+  `Unknown`, which a value this build does not know loads as) and
+  `TurnRequester::{with_origin, origin}`: the turn's requester records how its
+  ingress attested it. Core carries the value and never interprets it; an
+  `Unknown` origin is never an attestation. Its wire schema is an open
+  string. Rows written before it read back with no origin. A caller-authored
+  transcript rewrite keeps a row's requester but clears its origin.
+- `meerkat-mob`: `WorkSpec::{with_host_attested_requester,
+  with_requester_origin, requester_origin}`. Ordinary (not host-human) work
+  carries a requester only when it is host-attested; an origin that does not
+  match the work's authorship, or an origin without a requester, is refused
+  before admission. Neither setter marks the turn as typed text.
+
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
   requests themselves (see Security).
   `meerkat_core::redact::redact_credentials` removes credentials from text
@@ -396,19 +409,6 @@ them.
   targets are unchanged.
 
 ### Added
-
-- `meerkat-core`: `RequesterOrigin` (`ConsoleSignedIn`, `HostAttested`) and
-  `TurnRequester::{with_origin, origin}`: the turn's requester records how its
-  ingress attested it. Core carries the value and never interprets it. Rows
-  written before it read back with no origin.
-- `meerkat-mob`: `WorkSpec::{with_host_attested_requester,
-  with_requester_origin, with_person_typed_text, requester_origin}`. Ordinary
-  (not host-human) work carries a requester only when it is host-attested; an
-  origin that does not match the work's authorship, an origin without a
-  requester, or typed-text authorship without a requester, is refused before
-  admission. Typed-text authorship is stamped on the turn's rows as
-  `TranscriptTurnInput::TypedText` and survives the work's interaction
-  identity.
 
 - `meerkat-core`: `OpenAiContinuityIssuer` (a kind of service,
   `OpenAiContinuityService`, at an endpoint: `at_base_url`,
@@ -5595,6 +5595,7 @@ them.
   in place beside an override entry of its id (a duplicate id), or beside
   any other override. Affects 0.9.1 through 0.9.10.
 
+
 ### Security
 
 - `meerkat-sandbox`: on Linux, compiling a confinement requirement opened
@@ -5696,6 +5697,7 @@ them.
   Downgrade: an earlier release ignores the record on spawn rows and
   rebuilds those fork children without the admission again, and seats
   policy members without one.
+
 
 ### Upgrade notes
 
@@ -6207,6 +6209,7 @@ them.
   before it committed the grant, leaves that grant live: the end found no
   grant to end. A later member of the name in the same mob incarnation then
   holds it. Revoke such a grant (`tool_grants/revoke`).
+
 
 ## [0.9.10] - 2026-11-04
 
@@ -27097,6 +27100,7 @@ them.
   client fails to build: each request fails with that build error instead.
   Browser (wasm32) redirect handling is unchanged.
 
+
 - Behaviour-only (not measured by the gate): `McpOAuthPendingLogin::cancel`
   now returns a failed callback listener retirement as
   `McpOAuthError::Callback` where it used to return `Ok(())` (see Fixed).
@@ -33067,6 +33071,7 @@ them.
   pull-request jobs queued for up to 11 minutes. Nightly now takes about
   three hours instead of about two and a half.
 
+
 ## [0.8.49] - 2026-09-30
 
 0.8.48 was tagged but never published to crates.io or GitHub Releases, so
@@ -36876,6 +36881,7 @@ first ship in 0.8.49.
   `cancel_queued_live_delegation`, and `authorize_live_delegation_narration`;
   `MobMcpState::workgraph_service` exposes the host WorkGraph service as the
   host scoped it.
+
 
 - Live context mirror: an assistant row committed from the live channel
   itself (realtime materialization, no context observation) now carries a
@@ -42075,6 +42081,7 @@ first ship in 0.8.49.
   rather than their contents, and is mutation-proven: restoring the 0.8.23
   order turns it red with the intended diagnostic.
 
+
 - **A self-hosted model no longer resolves its credential by provider CLASS, so
   one server's secret can no longer be sent to another server's endpoint.**
   `self_hosted` classifies a private vLLM box and a hosted OpenAI-compatible
@@ -45704,6 +45711,7 @@ identities permanently refused resume).
   recorded bodies (mirroring the empty-chain arm); and the revision
   ancestry walk is bounded so cyclic revision-parent metadata fails closed
   instead of hanging the boundary commit.
+
 
 ## [0.7.17] - 2026-07-05
 

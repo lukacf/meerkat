@@ -575,6 +575,15 @@ pub struct InlineImageExternalization {
     pub payloads: Vec<InlineImagePayload>,
 }
 
+/// Clear how a row's requester was attested, keeping the requester. The
+/// origin is recorded by the door that admitted the input; a caller-authored
+/// transcript rewrite cannot carry it (fail closed).
+fn clear_requester_origin(identity: &mut crate::types::TranscriptMessageIdentity) {
+    if let Some(requester) = identity.requester.take() {
+        identity.requester = Some(requester.with_origin(None));
+    }
+}
+
 fn canonicalize_digest_image_blocks(blocks: &mut [crate::types::ContentBlock]) {
     for block in blocks.iter_mut() {
         if let crate::types::ContentBlock::Image {
@@ -9202,8 +9211,13 @@ impl Session {
                     user.identity.realtime_origin = None;
                     // Turn-input authorship is stamped at admission from the
                     // turn's work attribution; a caller cannot author it.
+                    // Nor can it author how a requester was attested: the
+                    // origin is recorded by the door that admitted the input,
+                    // so a caller-authored row keeps its requester without
+                    // one (fail closed: such a row is never attested).
                     if provenance == RewriteReplacementProvenance::CallerAuthored {
                         user.identity.turn_input = None;
+                        clear_requester_origin(&mut user.identity);
                     }
                 }
                 Message::BlockAssistant(assistant) => {
@@ -9219,6 +9233,7 @@ impl Session {
                         RewriteReplacementProvenance::CallerAuthored => {
                             assistant.assistant_message_id = None;
                             assistant.identity.turn_input = None;
+                            clear_requester_origin(&mut assistant.identity);
                         }
                         // A row core read from this session's retained
                         // history is the committed occurrence itself.
@@ -10925,6 +10940,49 @@ mod tests {
             if user.text_content() == "rewritten request" && user.identity.turn_input.is_none()));
         assert!(matches!(&messages[1], Message::BlockAssistant(assistant)
             if assistant.identity.turn_input.is_none()));
+        Ok(())
+    }
+
+    /// Delta read 3 item 4: how a requester was attested is session-owned
+    /// provenance recorded by the admitting door. A caller-authored rewrite
+    /// that claims an attested origin on its replacement rows commits them
+    /// with the requester kept and the origin CLEARED (fail closed), on user
+    /// and assistant rows alike.
+    #[test]
+    fn caller_rewrite_clears_the_requester_origin() -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("before".to_string())));
+        let person = crate::PrincipalRef::new(crate::PrincipalKind::Human, "person-1")?;
+        let attested = crate::TurnRequester::direct(person.clone())
+            .with_origin(Some(crate::RequesterOrigin::ConsoleSignedIn));
+        let mut user = UserMessage::text("rewritten request".to_string());
+        user.identity.requester = Some(attested.clone());
+        let mut assistant = BlockAssistantMessage::snapshot(vec![AssistantBlock::Text {
+            text: "rewritten reply".to_string(),
+            meta: None,
+        }]);
+        assistant.identity.requester =
+            Some(attested.with_origin(Some(crate::RequesterOrigin::HostAttested)));
+        session.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::User(user), Message::BlockAssistant(assistant)],
+            TranscriptRewriteReason::new("unit-test"),
+            Some("unit-test".to_string()),
+            None,
+        )?;
+        let messages = session.messages();
+        let unattested = Some(crate::TurnRequester::direct(person));
+        assert!(
+            matches!(&messages[0], Message::User(user) if user.identity.requester == unattested),
+            "the user row keeps its requester without the origin: {:?}",
+            messages[0]
+        );
+        assert!(
+            matches!(&messages[1], Message::BlockAssistant(assistant)
+                if assistant.identity.requester == unattested),
+            "the assistant row keeps its requester without the origin: {:?}",
+            messages[1]
+        );
         Ok(())
     }
 

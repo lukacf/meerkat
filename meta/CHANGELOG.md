@@ -39,12 +39,13 @@ Security, Upgrade and Changed.
 - A frame's member attributes are now those of the exact member its record
   names, and never those of whoever holds the member's name: the member of
   the session the record names; for a console send to a member that has no
-  session yet, the member the send was made to, captured at the send; and
-  for the failure record of such a send, the attributes stored with the
-  send. This also holds when the console projects retained records again
-  (when it starts to read a runtime, or catches up after a lag). A record
-  that names none of these is stored without attributes and is shown to an
-  administrator only (see Changed for the kinds).
+  session yet, the member the send was made to, captured at the send, and
+  never another member listed under the same name; and for the failure
+  record of such a send, the attributes stored with the send. This also
+  holds when the console projects retained records again (when it starts
+  to read a runtime, or catches up after a lag). A record that names none
+  of these is stored without attributes and is shown to an administrator
+  only (see Changed for the kinds).
 - The initial message of a spawn is no longer copied from the spawning
   agent's session history under the name the call gave, which in 0.9.11
   through 0.9.14 could put the text of a private member's call on another
@@ -164,8 +165,10 @@ Security, Upgrade and Changed.
   frame stored without member attributes and no memory scope of an agent
   the console does not know, and attaches no session whose owner the
   console does not know or that has none. A request made while the first
-  attempt of that read is running waits for it, at most five seconds. Once
-  the read has succeeded, a console that can identify nobody serves its one
+  attempt of that read is running waits for it, at most five seconds. A
+  console that serves several runtimes waits for the read of each runtime
+  it serves, and no longer for a runtime it has stopped serving. Once the
+  read has succeeded, a console that can identify nobody serves its one
   operator as before, except for what belongs to an agent it now knows as
   private to a person.
 - The session of an agent that was private to a person is answered as a

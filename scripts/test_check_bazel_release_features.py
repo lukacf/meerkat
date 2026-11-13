@@ -575,6 +575,45 @@ class ReleaseFeatureGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("@crates__tokio-1.52.3: cannot find the rendered rust_library 'tokio'", result.stderr)
 
+    # A repository whose library is an alias of another repository's library
+    # (crate_universe's override_target_lib) builds no tokio of its own: the
+    # library it names is checked where it is rendered.
+
+    TOKIO_REDIRECTED = 'alias(\n    name = "tokio",\n    actual = "@@rules_rust++crate+crates//:tokio",\n)\n'
+
+    def test_repository_whose_library_is_another_repositorys_passes(self) -> None:
+        self.use_external_policy(
+            {"crates__tokio-1.52.3": TOKIO_RENDERED, "meerkat_live_crates__tokio-1.53.3": self.TOKIO_REDIRECTED}
+        )
+        result = self.run_checker()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_library_it_is_redirected_to_is_still_checked(self) -> None:
+        self.use_external_policy(
+            {
+                "crates__tokio-1.52.3": TOKIO_RENDERED.replace(TOKIO_STRIPPED_FEATURES, TOKIO_STATIC_FEATURE),
+                "meerkat_live_crates__tokio-1.53.3": self.TOKIO_REDIRECTED,
+            }
+        )
+        self.assert_fails("@crates__tokio-1.52.3//:tokio enables non-shipping feature 'test-util'")
+
+    def test_only_redirected_repositories_of_a_listed_crate_fail_closed(self) -> None:
+        self.use_external_policy({"meerkat_live_crates__tokio-1.53.3": self.TOKIO_REDIRECTED})
+        result = self.run_checker()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("renders no crate_universe repository of tokio", result.stderr)
+
+    def test_alias_of_another_name_is_no_library(self) -> None:
+        self.use_external_policy(
+            {
+                "crates__tokio-1.52.3": TOKIO_RENDERED,
+                "meerkat_live_crates__tokio-1.53.3": self.TOKIO_REDIRECTED.replace("//:tokio", "//:tokio_util"),
+            }
+        )
+        result = self.run_checker()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("@meerkat_live_crates__tokio-1.53.3: cannot find the rendered rust_library 'tokio'", result.stderr)
+
     def test_malformed_external_policy_fails_closed(self) -> None:
         self.use_external_policy({"crates__tokio-1.52.3": TOKIO_RENDERED})
         (self.root / "scripts/non-shipping-features.json").write_text(

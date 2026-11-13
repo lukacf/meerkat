@@ -426,10 +426,22 @@ def check_external_crates(root: pathlib.Path, external: dict[str, set[str]]) -> 
         crate = match.group("crate")
         library = crate.replace("-", "_")
         libraries = []
+        redirected = False
         for rule in RULE.finditer(strip_comments(content)):
             kind, attrs = rule.group(1), attributes(rule.group(2))
             if kind == "rust_library" and QUOTED.findall(attrs.get("name", ""))[:1] == [library]:
                 libraries.append(attrs)
+            # crate_universe's `override_target_lib`: the repository builds no
+            # library of its own, its name is an alias of another
+            # repository's library (MODULE.bazel points the live stack's
+            # tokio at the main one). What links it links that library,
+            # which is checked where it is rendered.
+            if kind == "alias" and QUOTED.findall(attrs.get("name", ""))[:1] == [library]:
+                actual = QUOTED.findall(attrs.get("actual", ""))[:1]
+                if actual and re.fullmatch(rf"@@?[A-Za-z0-9_.+~-]+//:{re.escape(library)}", actual[0]):
+                    redirected = True
+        if not libraries and redirected:
+            continue
         if not libraries:
             raise GuardError(f"@{repository}: cannot find the rendered rust_library {library!r}")
         rendered[crate] += 1

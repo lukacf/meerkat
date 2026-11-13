@@ -580,10 +580,12 @@ class ReleaseFeatureGateTests(unittest.TestCase):
     # library it names is checked where it is rendered.
 
     TOKIO_REDIRECTED = 'alias(\n    name = "tokio",\n    actual = "@@rules_rust++crate+crates//:tokio",\n)\n'
+    # The hub repository the alias names, as the lock records it.
+    HUB = {"crates": 'alias(\n    name = "tokio",\n    actual = "@crates__tokio-1.52.3//:tokio",\n)\n'}
 
     def test_repository_whose_library_is_another_repositorys_passes(self) -> None:
         self.use_external_policy(
-            {"crates__tokio-1.52.3": TOKIO_RENDERED, "meerkat_live_crates__tokio-1.53.3": self.TOKIO_REDIRECTED}
+            {**self.HUB, "crates__tokio-1.52.3": TOKIO_RENDERED, "meerkat_live_crates__tokio-1.53.3": self.TOKIO_REDIRECTED}
         )
         result = self.run_checker()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -591,6 +593,7 @@ class ReleaseFeatureGateTests(unittest.TestCase):
     def test_library_it_is_redirected_to_is_still_checked(self) -> None:
         self.use_external_policy(
             {
+                **self.HUB,
                 "crates__tokio-1.52.3": TOKIO_RENDERED.replace(TOKIO_STRIPPED_FEATURES, TOKIO_STATIC_FEATURE),
                 "meerkat_live_crates__tokio-1.53.3": self.TOKIO_REDIRECTED,
             }
@@ -598,14 +601,45 @@ class ReleaseFeatureGateTests(unittest.TestCase):
         self.assert_fails("@crates__tokio-1.52.3//:tokio enables non-shipping feature 'test-util'")
 
     def test_only_redirected_repositories_of_a_listed_crate_fail_closed(self) -> None:
-        self.use_external_policy({"meerkat_live_crates__tokio-1.53.3": self.TOKIO_REDIRECTED})
+        self.use_external_policy({**self.HUB, "meerkat_live_crates__tokio-1.53.3": self.TOKIO_REDIRECTED})
         result = self.run_checker()
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("renders no crate_universe repository of tokio", result.stderr)
 
+    def test_alias_of_a_repository_the_lock_does_not_render_is_no_library(self) -> None:
+        # The same alias without the hub in the lock, and an alias of some
+        # other repository: neither is a crate repository's library.
+        for redirected in (
+            self.TOKIO_REDIRECTED,
+            self.TOKIO_REDIRECTED.replace("@@rules_rust++crate+crates//", "@some_other_repository//"),
+        ):
+            self.use_external_policy(
+                {"crates__tokio-1.52.3": TOKIO_RENDERED, "meerkat_live_crates__tokio-1.53.3": redirected}
+            )
+            result = self.run_checker()
+            self.assertEqual(result.returncode, 2, redirected + result.stdout + result.stderr)
+            self.assertIn("@meerkat_live_crates__tokio-1.53.3: cannot find the rendered rust_library 'tokio'", result.stderr)
+
+    def test_alias_whose_actual_is_not_one_plain_label_is_no_library(self) -> None:
+        # A select whose first string is such a label, and an alias of the
+        # repository itself.
+        for actual in (
+            'select({"//conditions:default": "@@rules_rust++crate+crates//:tokio"})',
+            '"@@rules_rust++crate+crates//:tokio" + ""',
+            '"@meerkat_live_crates__tokio-1.53.3//:tokio"',
+        ):
+            redirected = f'alias(\n    name = "tokio",\n    actual = {actual},\n)\n'
+            self.use_external_policy(
+                {**self.HUB, "crates__tokio-1.52.3": TOKIO_RENDERED, "meerkat_live_crates__tokio-1.53.3": redirected}
+            )
+            result = self.run_checker()
+            self.assertEqual(result.returncode, 2, actual + result.stdout + result.stderr)
+            self.assertIn("@meerkat_live_crates__tokio-1.53.3: cannot find the rendered rust_library 'tokio'", result.stderr)
+
     def test_alias_of_another_name_is_no_library(self) -> None:
         self.use_external_policy(
             {
+                **self.HUB,
                 "crates__tokio-1.52.3": TOKIO_RENDERED,
                 "meerkat_live_crates__tokio-1.53.3": self.TOKIO_REDIRECTED.replace("//:tokio", "//:tokio_util"),
             }

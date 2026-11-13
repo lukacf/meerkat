@@ -9,6 +9,7 @@ crate_universe repository). The rows feed it closures through its
 
 from __future__ import annotations
 
+import os
 import pathlib
 import shutil
 import subprocess
@@ -130,6 +131,19 @@ class OneTokioTests(unittest.TestCase):
         result = self.run_in(self.checkout('"crates__tokio-1.54.1": {}\n'))
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("does not render tokio for both", result.stderr)
+
+    def test_failed_query_shows_what_bazel_said(self) -> None:
+        # A Bazel that fails: the check stops with its error text, so a
+        # hosted failure shows its cause.
+        bazel = self.dir / "bazel"
+        bazel.write_text("#!/usr/bin/env bash\necho 'ERROR: no such package crates/meerkat-cli' >&2\nexit 7\n", encoding="utf-8")
+        bazel.chmod(0o755)
+        result = subprocess.run(
+            [str(CHECK)], capture_output=True, text=True, check=False, env={**os.environ, "BAZEL": str(bazel)}
+        )
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("bazel query failed for //crates/meerkat-cli:rkat", result.stderr)
+        self.assertIn("ERROR: no such package crates/meerkat-cli", result.stderr)
 
     def test_repository_lock_renders_one_major(self) -> None:
         self.closures()

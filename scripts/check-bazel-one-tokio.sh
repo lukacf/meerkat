@@ -70,10 +70,14 @@ for target in "${targets[@]}"; do
     [[ -f "${file}" ]] || { echo "check-bazel-one-tokio: no closure file ${file} for ${target}" >&2; exit 2; }
     labels="$(cat "${file}")"
   else
-    if ! labels="$(cd -- "${root}" && "${BAZEL:-bazel}" query "kind('rust_library', deps(${target}))" --output=label "$@" 2>/dev/null)"; then
-      echo "check-bazel-one-tokio: bazel query failed for ${target}" >&2
+    errors="$(mktemp)"
+    if ! labels="$(cd -- "${root}" && "${BAZEL:-bazel}" query "kind('rust_library', deps(${target}))" --output=label "$@" 2>"${errors}")"; then
+      echo "check-bazel-one-tokio: bazel query failed for ${target}:" >&2
+      tail -40 "${errors}" >&2
+      rm -f "${errors}"
       exit 2
     fi
+    rm -f "${errors}"
   fi
   tokio="$(printf '%s\n' "${labels}" | grep -E '__tokio-[0-9][^/]*//:tokio$' | LC_ALL=C sort -u || true)"
   count="$(printf '%s' "${tokio}" | grep -c . || true)"

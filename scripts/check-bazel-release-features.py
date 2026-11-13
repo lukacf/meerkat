@@ -411,6 +411,24 @@ def crate_universe_build_files(root: pathlib.Path):
                     yield repository, content
 
 
+def crate_universe_repositories(root: pathlib.Path) -> set[str]:
+    """The name of every repository the crate extension generates in
+    MODULE.bazel.lock: the hubs and their crates' repositories."""
+    try:
+        lock = json.loads(read(root, MODULE_LOCK))
+    except ValueError as error:
+        raise GuardError(f"{MODULE_LOCK} is not JSON: {error}") from error
+    names: set[str] = set()
+    extensions = lock.get("moduleExtensions") if isinstance(lock, dict) else None
+    for key, extension in sorted((extensions or {}).items()) if isinstance(extensions, dict) else []:
+        if not key.endswith(CRATE_EXTENSION_SUFFIX) or not isinstance(extension, dict):
+            continue
+        for scope in extension.values():
+            specs = scope.get("generatedRepoSpecs", {}) if isinstance(scope, dict) else {}
+            names.update(specs)
+    return names
+
+
 def check_external_crates(root: pathlib.Path, external: dict[str, set[str]]) -> tuple[list[str], int]:
     """No rendered repository of a listed external crate enables a listed
     feature in a release build of its library."""
@@ -419,6 +437,7 @@ def check_external_crates(root: pathlib.Path, external: dict[str, set[str]]) -> 
     errors = []
     checked = 0
     rendered = {crate: 0 for crate in external}
+    repositories = crate_universe_repositories(root)
     for repository, content in crate_universe_build_files(root):
         match = CRATE_REPO.match(repository)
         if match is None or match.group("crate") not in external:
@@ -435,10 +454,14 @@ def check_external_crates(root: pathlib.Path, external: dict[str, set[str]]) -> 
             # library of its own, its name is an alias of another
             # repository's library (MODULE.bazel points the live stack's
             # tokio at the main one). What links it links that library,
-            # which is checked where it is rendered.
+            # which is checked where it is rendered. Only a plain label
+            # counts (one string literal, no select), and only one of a
+            # repository this lock's crate extension generates: its last
+            # `+` part, the name the lock records, for a canonical label.
             if kind == "alias" and QUOTED.findall(attrs.get("name", ""))[:1] == [library]:
-                actual = QUOTED.findall(attrs.get("actual", ""))[:1]
-                if actual and re.fullmatch(rf"@@?[A-Za-z0-9_.+~-]+//:{re.escape(library)}", actual[0]):
+                actual = attrs.get("actual", "").strip()
+                target = re.fullmatch(rf'"@@?([A-Za-z0-9_.+~-]+)//:{re.escape(library)}"', actual)
+                if target and target.group(1).rsplit("+", 1)[-1] in repositories - {repository}:
                     redirected = True
         if not libraries and redirected:
             continue

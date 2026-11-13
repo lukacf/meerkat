@@ -539,6 +539,12 @@ kept its mark is resumed with its target, and one whose mark was dropped
 stays paused when its target comes back, until it is resumed by name. See
 [Schedules paused for their target, and a rollback](#schedules-paused-for-their-target%2C-and-a-rollback).
 
+**A member rotation in flight.** A member rotation that a 0.9.15 process
+started and did not finish (a respawn interrupted by a crash) is finished by
+the process that restarts. Restarting on 0.9.14 in that state has not been
+run, and whether 0.9.14 finishes it is not established: let a respawn
+complete on 0.9.15 before rolling back.
+
 ## Upgrading to 0.9.14
 
 This section is for systems running 0.9.13. The full list of changes is in

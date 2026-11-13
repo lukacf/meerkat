@@ -760,39 +760,323 @@ struct AdmittedDestroy {
     /// The host's release hook, run once the native destroy completed and
     /// the mob left the managed set.
     after_destroy: Option<MobAfterDestroy>,
-    /// The members the mob's host hides from this destroy's caller, read
-    /// before the destroy starts (their rows are gone after it): the report
-    /// the caller is answered, now or when it collects it later, names none
-    /// of them.
-    hidden_from_caller: BTreeSet<AgentIdentity>,
+    /// The members this destroy's caller is shown, read before the destroy
+    /// starts (their rows are gone after it): the report the caller is
+    /// answered, now or when it collects it later, and the refusal of a
+    /// destroy that did not start name no other member.
+    shown_to_caller: DestroyMemberView,
 }
 
-/// Cut `report` for a caller the mob's host hides the members `hidden`
-/// from: they leave its member lists, and an error text that names one of
-/// them is dropped. Nothing else changes; with no hidden member the report
-/// is untouched.
+/// The members a destroy's caller is shown: the only members its report
+/// and its refusal name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DestroyMemberView {
+    /// The host's own destroy ([`MobDestroyCaller::Console`]): every member.
+    Every,
+    /// An agent's destroy: the members in `shown` and no other. A member
+    /// the mob seats after the read, a name the roster held no row for at
+    /// the read, and every member of a roster that answered no row are not
+    /// in it, so none of them is named.
+    Only {
+        /// The roster's members at the read that the host's member tool
+        /// audience does not hide from the caller.
+        shown: BTreeSet<AgentIdentity>,
+        /// The roster's members at the read that it hides from the caller.
+        /// An error text of the report carries no typed member, so a text
+        /// is dropped when it holds one of these names.
+        withheld: BTreeSet<AgentIdentity>,
+    },
+}
+
+impl DestroyMemberView {
+    /// The view of an agent caller over a roster read of `members`, of
+    /// which the host's member tool audience hides `hidden` from it.
+    fn of_agent(members: Vec<AgentIdentity>, hidden: BTreeSet<AgentIdentity>) -> Self {
+        let shown = members
+            .into_iter()
+            .filter(|member| !hidden.contains(member))
+            .collect();
+        Self::Only {
+            shown,
+            withheld: hidden,
+        }
+    }
+}
+
+/// Cut `report` for a caller with `view`: only members the caller is shown
+/// stay in its member lists, and an error text that names a member the
+/// roster held at the read and the caller is not shown is dropped. A caller
+/// shown no member is answered no error text at all. Nothing else changes;
+/// a caller shown every member gets the report untouched.
 fn cut_destroy_report_for_caller(
     report: &mut meerkat_mob::MobDestroyReport,
-    hidden: &BTreeSet<AgentIdentity>,
+    view: &DestroyMemberView,
 ) {
-    if hidden.is_empty() {
+    let DestroyMemberView::Only { shown, withheld } = view else {
         return;
-    }
+    };
     report
         .force_destroyed_members
-        .retain(|member| !hidden.contains(member));
+        .retain(|member| shown.contains(member));
     report
         .orphaned_remote_members
-        .retain(|member| !hidden.contains(member));
+        .retain(|member| shown.contains(member));
     report
         .reloaded_members
-        .retain(|member| !hidden.contains(member));
+        .retain(|member| shown.contains(member));
     report
         .member_reload_refusals
-        .retain(|refusal| !hidden.contains(&refusal.member));
-    report
-        .errors
-        .retain(|error| !hidden.iter().any(|member| error.contains(member.as_str())));
+        .retain(|refusal| shown.contains(&refusal.member));
+    if shown.is_empty() {
+        report.errors.clear();
+    } else {
+        report.errors.retain(|error| {
+            !withheld
+                .iter()
+                .any(|member| error.contains(member.as_str()))
+        });
+    }
+}
+
+/// What an agent caller is answered in place of a destroy's refusal that
+/// names a member it is not shown: no member, no session and no cause.
+const DESTROY_REFUSED_FOR_A_MEMBER: &str = "mob destroy refused: a member's state could not be \
+     restored. The destroy can be retried; the host's log has the cause.";
+
+/// What an agent caller is answered in place of any other refusal of a
+/// destroy that is not known to name only what the caller is shown.
+const DESTROY_REFUSED: &str =
+    "mob destroy refused. The destroy can be retried; the host's log has the cause.";
+
+/// A type no value of which carries a member's name, a session id or a
+/// text made from either: counts, epochs and cursors, fixed texts of the
+/// code, the mob's lifecycle state and incarnation, and closed kinds. A
+/// field of a destroy's refusal passes [`names_no_member`] only when its
+/// type is listed here, so a classified variant whose field changes its
+/// type stops compiling until it is classified again.
+trait NamesNoMember {}
+
+impl NamesNoMember for usize {}
+impl NamesNoMember for u64 {}
+impl NamesNoMember for Option<u64> {}
+impl NamesNoMember for &'static str {}
+impl NamesNoMember for meerkat_mob::MobState {}
+impl NamesNoMember for ControlScope {}
+impl NamesNoMember for BTreeSet<ControlScope> {}
+impl NamesNoMember for meerkat_mob::MobAdmissionCloseReason {}
+impl NamesNoMember for meerkat_mob::MobDefinitionProjectionMismatchKind {}
+impl NamesNoMember for meerkat_mob::store::FrameAtomicOperation {}
+impl NamesNoMember for meerkat_mob::ForkedParticipantLeaseOperation {}
+impl NamesNoMember for meerkat_mob::machines::mob_machine::MobSpawnMemberAdmissionKind {}
+impl NamesNoMember for meerkat_core::service::MobIncarnationId {}
+impl NamesNoMember for Option<meerkat_core::service::MobIncarnationId> {}
+
+/// Compiles only for a field whose type is [`NamesNoMember`].
+fn names_no_member<T: NamesNoMember>(_field: &T) {}
+
+/// What a destroy's refusal names, as far as the fields of its variant say.
+enum DestroyRefusalSubject<'a> {
+    /// No member, no session and no free text: the variant has no field, or
+    /// every field is [`NamesNoMember`].
+    Nothing,
+    /// As [`Self::Nothing`], and the id of one mob.
+    Mob(&'a MobId),
+    /// One member's deferred custody restore
+    /// ([`MobError::MemberCustodyDeferred`]): that member, its own session
+    /// and the cause its own restore met.
+    DeferredMember(&'a AgentIdentity),
+    /// Anything else: a member or a session in a field this code does not
+    /// read, a free text, another error, or a variant added since.
+    Unclassified,
+}
+
+/// Classify `error` by its variant and the types of its fields, never by a
+/// text. Every classified variant is matched with all of its fields, so a
+/// field added to one stops this from compiling; a variant not listed here,
+/// also one added later, is [`DestroyRefusalSubject::Unclassified`].
+fn destroy_refusal_subject(error: &MobError) -> DestroyRefusalSubject<'_> {
+    use DestroyRefusalSubject::{DeferredMember, Mob, Nothing, Unclassified};
+    match error {
+        MobError::MemberCustodyDeferred {
+            member_id,
+            session_id: _,
+            restore: _,
+            cause: _,
+        } => DeferredMember(member_id),
+
+        // Variants without a field.
+        MobError::FlowTurnTimedOut
+        | MobError::PlacedCompletionDeliveryRejected
+        | MobError::PlacedCompletionHostNoEffect
+        | MobError::PlacedCompletionHostCancelled
+        | MobError::PlacedCompletionDisposed
+        | MobError::ResetBarrier
+        | MobError::ActorCommandChannelClosed
+        | MobError::ActorReplyChannelClosed
+        | MobError::RuntimeOwnerConflict => Nothing,
+
+        // Counts, epochs and cursors.
+        MobError::PlacedCompletionCleanupPending { pending, resolved }
+        | MobError::PlacedKickoffCleanupPending { pending, resolved } => {
+            names_no_member(pending);
+            names_no_member(resolved);
+            Nothing
+        }
+        MobError::AutonomousStopInterruptsPending { pending } => {
+            names_no_member(pending);
+            Nothing
+        }
+        MobError::SupervisorEpochExhausted { current_epoch } => {
+            names_no_member(current_epoch);
+            Nothing
+        }
+        MobError::MobDefinitionAuthorityChanged {
+            expected_epoch,
+            expected_event_cursor,
+            actual_epoch,
+            actual_event_cursor,
+        } => {
+            names_no_member(expected_epoch);
+            names_no_member(expected_event_cursor);
+            names_no_member(actual_epoch);
+            names_no_member(actual_event_cursor);
+            Nothing
+        }
+        MobError::StaleEventCursor {
+            after_cursor,
+            latest_cursor,
+        } => {
+            names_no_member(after_cursor);
+            names_no_member(latest_cursor);
+            Nothing
+        }
+
+        // The mob's lifecycle state, fixed texts of the code and closed
+        // kinds.
+        MobError::InvalidTransition { from, to } => {
+            names_no_member(from);
+            names_no_member(to);
+            Nothing
+        }
+        MobError::DrainRequiresStoppedMob { state } => {
+            names_no_member(state);
+            Nothing
+        }
+        MobError::ActorCommandTimedOut {
+            command_kind,
+            stage,
+        } => {
+            names_no_member(command_kind);
+            names_no_member(stage);
+            Nothing
+        }
+        MobError::ScopeDenied(ScopeDenial {
+            required,
+            presented,
+        }) => {
+            names_no_member(required);
+            names_no_member(presented);
+            Nothing
+        }
+        MobError::FrameAtomicPersistenceUnavailable { operation } => {
+            names_no_member(operation);
+            Nothing
+        }
+        MobError::SpawnMemberAdmissionDenied { admission } => {
+            names_no_member(admission);
+            Nothing
+        }
+        MobError::ForkedParticipantRemoteLeaseUnsupported { operation } => {
+            names_no_member(operation);
+            Nothing
+        }
+
+        // One mob's id beside fields that name no member.
+        MobError::MobNotFound(mob_id) | MobError::ShutdownInProgress { mob_id } => Mob(mob_id),
+        MobError::AdmissionClosed { mob_id, reason } => {
+            names_no_member(reason);
+            Mob(mob_id)
+        }
+        MobError::SpecRevisionConflict {
+            mob_id,
+            expected,
+            actual,
+        } => {
+            names_no_member(expected);
+            names_no_member(actual);
+            Mob(mob_id)
+        }
+        MobError::MobDefinitionProjectionMismatch {
+            mob_id,
+            authority_epoch,
+            projection_revision,
+            kind,
+        } => {
+            names_no_member(authority_epoch);
+            names_no_member(projection_revision);
+            names_no_member(kind);
+            Mob(mob_id)
+        }
+        MobError::IncarnationDestroyed {
+            mob_id,
+            incarnation,
+        } => {
+            names_no_member(incarnation);
+            Mob(mob_id)
+        }
+        MobError::IncarnationMismatch {
+            mob_id,
+            expected,
+            current,
+        } => {
+            names_no_member(expected);
+            names_no_member(current);
+            Mob(mob_id)
+        }
+
+        _ => Unclassified,
+    }
+}
+
+/// The refusal `error` of mob `mob_id`'s destroy, as the caller with `view`
+/// is answered it. A caller shown every member is answered `error` itself.
+///
+/// An agent caller is answered `error` itself only when its variant and
+/// the types of its fields say what it names ([`destroy_refusal_subject`])
+/// and the caller is shown all of it: a refusal that names no member, a
+/// refusal that names no member and this mob, and a member's deferred
+/// custody restore when the member is one the caller is shown. Every other
+/// refusal (a deferred custody restore of any other member, a free text
+/// that may name a member, another mob, a variant this code does not
+/// classify) is logged whole and answered as a fixed text, so its message
+/// and its structured data name no member, no session and no cause.
+fn destroy_refusal_for_caller(
+    mob_id: &MobId,
+    error: MobError,
+    view: &DestroyMemberView,
+) -> MobError {
+    let DestroyMemberView::Only { shown, .. } = view else {
+        return error;
+    };
+    let answered = match destroy_refusal_subject(&error) {
+        DestroyRefusalSubject::Nothing => None,
+        DestroyRefusalSubject::Mob(named) if named == mob_id => None,
+        DestroyRefusalSubject::DeferredMember(member) if shown.contains(member) => None,
+        DestroyRefusalSubject::DeferredMember(_) => Some(DESTROY_REFUSED_FOR_A_MEMBER),
+        DestroyRefusalSubject::Mob(_) | DestroyRefusalSubject::Unclassified => {
+            Some(DESTROY_REFUSED)
+        }
+    };
+    let Some(answered) = answered else {
+        return error;
+    };
+    tracing::warn!(
+        mob_id = %mob_id,
+        error = %error,
+        "a mob destroy was refused; its agent caller is answered a fixed text in place of \
+         this refusal, which may name a member the caller is not shown"
+    );
+    MobError::Internal(answered.to_string())
 }
 
 impl AdmittedDestroy {
@@ -814,7 +1098,7 @@ impl AdmittedDestroy {
             retired_mobs,
             mob_set_epoch,
             after_destroy,
-            hidden_from_caller,
+            shown_to_caller,
         } = self;
         let incarnation = bound.incarnation();
         let destroy_result = bound.destroy().await;
@@ -823,26 +1107,31 @@ impl AdmittedDestroy {
         // observer that cleanup drains.
         drop(bound);
         // The report is cut for the caller before it is answered or
-        // recorded, so every answer of this destroy is the cut one.
+        // recorded, so every answer of this destroy is the cut one. The
+        // refusal of a destroy that answered no report is cut for the caller
+        // the same way.
         let report = match destroy_result {
             Ok(mut report) => {
-                cut_destroy_report_for_caller(&mut report, &hidden_from_caller);
+                cut_destroy_report_for_caller(&mut report, &shown_to_caller);
                 report
             }
             Err(meerkat_mob::MobDestroyError::Incomplete { mut report }) => {
-                cut_destroy_report_for_caller(&mut report, &hidden_from_caller);
+                cut_destroy_report_for_caller(&mut report, &shown_to_caller);
                 return Err(MobMcpDestroyError::Incomplete { report });
             }
-            Err(meerkat_mob::MobDestroyError::Mob(error)) => {
-                return Err(MobMcpDestroyError::Mob(error));
-            }
-            Err(other) => {
-                // MobDestroyError is #[non_exhaustive]; future variants we
-                // haven't coded for fall through to a generic internal
-                // error so the caller still gets a readable message.
-                return Err(MobMcpDestroyError::Mob(MobError::Internal(format!(
-                    "mob destroy failed: {other}"
-                ))));
+            Err(refused) => {
+                let error = match refused {
+                    meerkat_mob::MobDestroyError::Mob(error) => error,
+                    // MobDestroyError is #[non_exhaustive]; future variants
+                    // we haven't coded for become a generic internal error,
+                    // so a host's own destroy still gets a readable message.
+                    other => MobError::Internal(format!("mob destroy failed: {other}")),
+                };
+                return Err(MobMcpDestroyError::Mob(destroy_refusal_for_caller(
+                    &mob_id,
+                    error,
+                    &shown_to_caller,
+                )));
             }
         };
         let retired = Arc::new(RetiredMob {
@@ -6442,11 +6731,13 @@ impl MobMcpState {
         };
         #[cfg(target_arch = "wasm32")]
         let storage = None;
-        // What the mob's host hides from the caller's member tools, asked
-        // while the roster still holds every member's row: an agent's
-        // destroy is asked about as the member its session is bound to in
-        // this mob, if any. A host's own destroy is shown every member.
-        let hidden_from_caller = match &caller {
+        // The members the caller is shown, read while the roster still holds
+        // every member's row: an agent's destroy is asked about as the
+        // member its session is bound to in this mob, if any, and is shown
+        // the roster's members that the mob's host does not hide from that
+        // member's tools, and no other. A host's own destroy is shown every
+        // member.
+        let shown_to_caller = match &caller {
             MobDestroyCaller::Agent {
                 owner_bridge_session_id,
                 ..
@@ -6459,12 +6750,13 @@ impl MobMcpState {
                     .list()
                     .map(|entry| entry.agent_identity.clone())
                     .collect::<Vec<_>>();
-                managed
+                let hidden = managed
                     .handle
                     .members_hidden_from(member.as_ref(), &members)
-                    .await
+                    .await;
+                DestroyMemberView::of_agent(members, hidden)
             }
-            MobDestroyCaller::Console => BTreeSet::new(),
+            MobDestroyCaller::Console => DestroyMemberView::Every,
         };
         let destroy = AdmittedDestroy {
             mob_id: mob_id.clone(),
@@ -6484,7 +6776,7 @@ impl MobMcpState {
             retired_mobs: Arc::clone(&self.retired_mobs),
             mob_set_epoch: self.mob_set_epoch.clone(),
             after_destroy: self.after_destroy.get().cloned(),
-            hidden_from_caller,
+            shown_to_caller,
         };
         drop(managed);
         // The destroy is the state's own task, so its caller holds nothing of
@@ -14781,18 +15073,22 @@ mod tests {
         assert!(data.get("destroy_report").is_some());
     }
 
-    /// A destroy report cut for a caller names none of the members hidden
-    /// from it, in a member list or in an error text, and keeps every entry
-    /// of the members the caller is shown, the flags and the texts that
-    /// name no member. With no hidden member the report is untouched.
+    /// A destroy report cut for an agent caller names only members the
+    /// caller is shown: a member hidden from it, and a member the roster
+    /// held no row for when the caller's view was read (a member seated
+    /// since, or a name from another source), leave every member list. An
+    /// error text that names a hidden member is dropped. Every entry of the
+    /// members the caller is shown, the flags and the texts that name no
+    /// hidden member stay. A caller shown every member gets the report
+    /// untouched.
     #[test]
-    fn a_cut_destroy_report_names_no_hidden_member() {
+    fn a_cut_destroy_report_names_only_members_the_caller_is_shown() {
         let id = AgentIdentity::from;
         let full = || {
             let mut report = meerkat_mob::MobDestroyReport::default();
-            report.force_destroyed_members = vec![id("cut-kept"), id("cut-shown")];
-            report.orphaned_remote_members = vec![id("cut-shown"), id("cut-kept")];
-            report.reloaded_members = vec![id("cut-kept")];
+            report.force_destroyed_members = vec![id("cut-kept"), id("cut-shown"), id("cut-late")];
+            report.orphaned_remote_members = vec![id("cut-shown"), id("cut-kept"), id("cut-late")];
+            report.reloaded_members = vec![id("cut-kept"), id("cut-late")];
             report.remote_cleanup_deadline_exceeded = true;
             report.errors = vec![
                 "cut-kept: archive failed".to_string(),
@@ -14802,9 +15098,15 @@ mod tests {
             ];
             report
         };
+        // The roster held `cut-shown` and `cut-kept` at the read, and the
+        // host hides `cut-kept` from the caller; `cut-late` had no row.
+        let view = DestroyMemberView::of_agent(
+            vec![id("cut-kept"), id("cut-shown")],
+            BTreeSet::from([id("cut-kept")]),
+        );
 
         let mut cut = full();
-        cut_destroy_report_for_caller(&mut cut, &BTreeSet::from([id("cut-kept")]));
+        cut_destroy_report_for_caller(&mut cut, &view);
         assert_eq!(cut.force_destroyed_members, vec![id("cut-shown")]);
         assert_eq!(cut.orphaned_remote_members, vec![id("cut-shown")]);
         assert!(cut.reloaded_members.is_empty());
@@ -14823,12 +15125,211 @@ mod tests {
         );
 
         let mut untouched = full();
-        cut_destroy_report_for_caller(&mut untouched, &BTreeSet::new());
+        cut_destroy_report_for_caller(&mut untouched, &DestroyMemberView::Every);
         assert_eq!(untouched.errors, full().errors);
         assert_eq!(
             untouched.force_destroyed_members,
             full().force_destroyed_members
         );
+        assert_eq!(
+            untouched.orphaned_remote_members,
+            full().orphaned_remote_members
+        );
+        assert_eq!(untouched.reloaded_members, full().reloaded_members);
+    }
+
+    /// A member's deferred custody restore, as a destroy refuses with it.
+    fn custody_deferred(member: &str, session: &SessionId) -> MobError {
+        MobError::MemberCustodyDeferred {
+            member_id: AgentIdentity::from(member),
+            session_id: session.clone(),
+            restore: meerkat_mob::MemberCustodyRestore::CleanupDelivery,
+            cause: Arc::new(MobError::SessionError(SessionError::Store(Box::new(
+                meerkat_core::SessionStoreError::Internal(format!(
+                    "{STORE_CANNOT_SERVE}: session {session}"
+                )),
+            )))),
+        }
+    }
+
+    /// The message, the debug form and the structured data of a mob error.
+    fn mob_error_forms(error: &MobError) -> String {
+        format!(
+            "{error} | {error:?} | {}",
+            error
+                .structured_data()
+                .map(|data| data.to_string())
+                .unwrap_or_default()
+        )
+    }
+
+    /// Whether `answered` is the fixed text `fixed` and nothing else: an
+    /// internal error with no structured data.
+    fn is_fixed_refusal(answered: &MobError, fixed: &str) -> bool {
+        matches!(answered, MobError::Internal(text) if text == fixed)
+            && answered.structured_data().is_none()
+    }
+
+    /// The refusal of a destroy is answered to an agent caller as it is only
+    /// when its variant says what it names and the caller is shown all of
+    /// it. A deferred custody restore of a member the caller is shown, a
+    /// refusal whose fields can name no member, and one that names this mob
+    /// beside such fields are answered whole. A deferred custody restore of
+    /// a member hidden from the caller, or of a member the roster held no
+    /// row for, is answered as the fixed member text; a refusal that carries
+    /// a free text, or names another mob, as the other fixed text. Neither
+    /// fixed answer has structured data. The host's own destroy is answered
+    /// every refusal whole.
+    #[test]
+    fn a_destroy_refusal_is_answered_an_agent_only_for_what_it_is_shown() {
+        let id = AgentIdentity::from;
+        let mob_id = MobId::from("refusal-mob");
+        let session = SessionId::new();
+        let view = DestroyMemberView::of_agent(
+            vec![id("refusal-kept"), id("refusal-shown")],
+            BTreeSet::from([id("refusal-kept")]),
+        );
+        let answer = |error: MobError| destroy_refusal_for_caller(&mob_id, error, &view);
+
+        // A member the caller is shown: the typed deferral, whole.
+        let shown = answer(custody_deferred("refusal-shown", &session));
+        assert!(
+            matches!(
+                &shown,
+                MobError::MemberCustodyDeferred { member_id, session_id, .. }
+                    if member_id == &id("refusal-shown") && session_id == &session
+            ),
+            "{shown:?}"
+        );
+
+        // A member hidden from the caller, and a member with no roster row
+        // at the read: the fixed member text, which names nothing of either.
+        for member in ["refusal-kept", "refusal-late"] {
+            let answered = answer(custody_deferred(member, &session));
+            assert!(
+                is_fixed_refusal(&answered, DESTROY_REFUSED_FOR_A_MEMBER),
+                "{member}: {answered:?}"
+            );
+            let forms = mob_error_forms(&answered);
+            assert!(
+                !forms.contains(member)
+                    && !forms.contains(&session.to_string())
+                    && !forms.contains(STORE_CANNOT_SERVE),
+                "{member}: {forms}"
+            );
+        }
+
+        // Refusals that carry a free text, another error or another mob's
+        // id cannot be said to name only what the caller is shown: the
+        // other fixed text. An unknown variant of the destroy's own error
+        // is formatted into such a text before it is cut.
+        for unattributed in [
+            MobError::Internal("mob destroy failed: member refusal-kept is not restored".into()),
+            MobError::Internal("restore of member refusal-shown failed".into()),
+            MobError::LifecycleOperationPending {
+                intent: "explicit_resume member refusal-kept".into(),
+            },
+            MobError::SessionError(SessionError::NotFound {
+                id: session.clone(),
+            }),
+            MobError::MemberNotFound(id("refusal-kept")),
+            MobError::SharedLifecycleFailure(Arc::new(custody_deferred("refusal-shown", &session))),
+            MobError::MobNotFound(MobId::from("refusal-kept")),
+            MobError::ShutdownInProgress {
+                mob_id: MobId::from("another-mob"),
+            },
+        ] {
+            let before = format!("{unattributed:?}");
+            let answered = answer(unattributed);
+            assert!(
+                is_fixed_refusal(&answered, DESTROY_REFUSED),
+                "{before} is answered {answered:?}"
+            );
+        }
+
+        // Refusals whose fields can name no member, and refusals that name
+        // this mob beside such fields, stay readable.
+        for readable in [
+            MobError::PlacedCompletionCleanupPending {
+                pending: 2,
+                resolved: 1,
+            },
+            MobError::ActorCommandChannelClosed,
+            MobError::ActorReplyChannelClosed,
+            MobError::InvalidTransition {
+                from: meerkat_mob::MobState::Destroyed,
+                to: meerkat_mob::MobState::Destroyed,
+            },
+            MobError::ActorCommandTimedOut {
+                command_kind: "destroy",
+                stage: "reply",
+            },
+            MobError::ScopeDenied(ScopeDenial {
+                required: ControlScope::Retire,
+                presented: BTreeSet::new(),
+            }),
+            MobError::MobNotFound(mob_id.clone()),
+            MobError::ShutdownInProgress {
+                mob_id: mob_id.clone(),
+            },
+            MobError::AdmissionClosed {
+                mob_id: mob_id.clone(),
+                reason: meerkat_mob::MobAdmissionCloseReason::Destroyed,
+            },
+        ] {
+            let before = mob_error_forms(&readable);
+            let answered = answer(readable);
+            assert_eq!(mob_error_forms(&answered), before);
+        }
+
+        // The host's own destroy is answered every refusal whole.
+        for whole in [
+            custody_deferred("refusal-kept", &session),
+            MobError::Internal("mob destroy failed: member refusal-kept is not restored".into()),
+        ] {
+            let before = mob_error_forms(&whole);
+            let answered = destroy_refusal_for_caller(&mob_id, whole, &DestroyMemberView::Every);
+            assert_eq!(mob_error_forms(&answered), before);
+        }
+    }
+
+    /// A caller shown no member is told no member: with a roster read that
+    /// answered no row, a deferred custody restore is answered as the fixed
+    /// member text, every member leaves the report's lists, and no error
+    /// text of the report is answered at all.
+    #[test]
+    fn a_destroy_caller_shown_no_member_is_told_no_member() {
+        let id = AgentIdentity::from;
+        let mob_id = MobId::from("unread-mob");
+        let session = SessionId::new();
+        let view = DestroyMemberView::of_agent(Vec::new(), BTreeSet::new());
+
+        let answered =
+            destroy_refusal_for_caller(&mob_id, custody_deferred("unread-worker", &session), &view);
+        assert!(
+            is_fixed_refusal(&answered, DESTROY_REFUSED_FOR_A_MEMBER),
+            "{answered:?}"
+        );
+
+        let mut report = meerkat_mob::MobDestroyReport::default();
+        report.force_destroyed_members = vec![id("unread-worker")];
+        report.orphaned_remote_members = vec![id("unread-worker")];
+        report.reloaded_members = vec![id("unread-worker")];
+        report.remote_cleanup_deadline_exceeded = true;
+        report.errors = vec![
+            "unread-worker: archive failed".to_string(),
+            "destroy marker append failed".to_string(),
+        ];
+        cut_destroy_report_for_caller(&mut report, &view);
+        assert!(report.force_destroyed_members.is_empty());
+        assert!(report.orphaned_remote_members.is_empty());
+        assert!(report.reloaded_members.is_empty());
+        assert!(
+            report.errors.is_empty(),
+            "a caller shown no member is answered no error text: {:?}",
+            report.errors
+        );
+        assert!(report.remote_cleanup_deadline_exceeded);
     }
 
     #[tokio::test]

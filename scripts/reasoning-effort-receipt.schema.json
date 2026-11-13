@@ -376,7 +376,11 @@
         "gap"
       ],
       "properties": {
-        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_.]*/([a-z][a-z0-9_]*|#[0-9]+)$" },
+        "id": {
+          "description": "row/cell; row/cell:level where the row has an entry for each level it asks for on the cell; row/#n for an observed cell.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.]*/([a-z][a-z0-9_]*(:[a-z]+)?|#[0-9]+)$"
+        },
         "row": { "$ref": "#/$defs/row_id" },
         "cell": { "oneOf": [{ "$ref": "#/$defs/token" }, { "type": "null" }] },
         "title": { "$ref": "#/$defs/sentence" },

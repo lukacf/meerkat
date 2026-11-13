@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   CELL_LINE_PREFIX,
+  LEVELS,
   MANIFEST_PATH,
   MODES,
   RECEIPT_JSON_NAME,
@@ -81,6 +82,7 @@ function manifest() {
     rules: [
       { id: "catalog_model", text: "A model of the catalog that states levels." },
       { id: "accepted_level", text: "A level the route accepts." },
+      { id: "refused_levels", text: "Every level the row refuses on the route." },
     ],
     cells: [
       { id: "direct", provider_family: "openai", backend: "openai_api", api: "responses" },
@@ -105,11 +107,12 @@ function manifest() {
       {
         id: "routes.unsupported",
         leg: "routes",
-        title: "A level outside the set is refused.",
+        title: "Each level outside the set is refused.",
+        lines: "per_level",
         test: routesTest("unsupported_level_is_refused"),
         outcome: { kind: "refused", reason: "unsupported_level" },
         model: { rule: "catalog_model" },
-        requested_level: { level: "max" },
+        requested_level: { rule: "refused_levels" },
         cells: [{ cell: "direct" }, { cell: "copilot" }],
       },
       {
@@ -172,7 +175,10 @@ function routesJson({ cellLines = true } = {}) {
         cellLine("resumed_level_is_sent", "direct", "catalog-model-9", "low", "openai_api/responses"),
       ]
     : [];
-  const failedOutput = cellLines ? `${cellLine("unsupported_level_is_refused", "direct", "catalog-model-9", "max", "openai_api/responses")}\n${CAPTURED}\n` : CAPTURED;
+  // The row that refuses prints a line for each level it refuses, here the higher one first.
+  const failedOutput = cellLines
+    ? `${cellLine("unsupported_level_is_refused", "direct", "catalog-model-9", "max", "openai_api/responses")}\n${cellLine("unsupported_level_is_refused", "direct", "catalog-model-9", "none", "openai_api/responses")}\n${CAPTURED}\n`
+    : CAPTURED;
   return [
     suite("started", "demo-facade", "effort_routes", "test"),
     testEvent("started", "demo-facade::effort_routes$supported_level_is_sent"),
@@ -646,7 +652,7 @@ row("deterministic bytes: the Markdown file is the rendering of the JSON file", 
   assert.equal(markdown, renderMarkdown(JSON.parse(json)));
   assert.deepEqual(verifyReceipt({ jsonText: json, markdownText: markdown, results: input().results, host: HOST }), []);
   assert.deepEqual(
-    verifyReceipt({ jsonText: json, markdownText: markdown.replace("| 6 | 6 | 4 | 2 |", "| 6 | 6 | 6 | 0 |"), host: HOST }),
+    verifyReceipt({ jsonText: json, markdownText: markdown.replace("| 7 | 7 | 4 | 3 |", "| 7 | 7 | 7 | 0 |"), host: HOST }),
     ["the Markdown file is not the rendering of the receipt"],
     "a Markdown file edited by hand is found",
   );
@@ -683,28 +689,37 @@ row("not-run cells are listed: every cell of every row is an entry, whatever ran
     ["no leg ran", nothingRan],
   ]) {
     const receipt = buildReceipt(change);
+    // A cell has one entry, or one for each level its row printed for it.
+    const listed = receipt.entries.map((entry) => `${entry.row}/${entry.cell ?? "-"}`);
     assert.deepEqual(
-      receipt.entries.map((entry) => entry.id),
+      listed.filter((cell, index) => cell !== listed[index - 1]),
       expected,
       `${what}: the entries are the manifest's cells, in its order`,
     );
+    assert.equal(new Set(receipt.entries.map((entry) => entry.id)).size, receipt.entries.length, `${what}: every entry has an id of its own`);
     for (const entry of receipt.entries) {
       assert.equal(entry.status === "executed", entry.gap === null, `${entry.id}: an entry is executed or a stated gap`);
     }
     const stated = receipt.gaps.filter((gap) => gap.scope === "entry").map((gap) => gap.id);
     assert.deepEqual(stated, receipt.entries.filter((entry) => entry.status !== "executed").map((entry) => entry.id), `${what}: every unexecuted entry is under gaps`);
     const { entries: totals, by_mode: byMode } = receipt.totals;
-    assert.equal(totals.total, expected.length);
+    assert.equal(totals.total, receipt.entries.length);
+    assert.ok(totals.total >= expected.length);
     assert.equal(totals.executed + totals.source_only + totals.not_run, totals.total);
     assert.equal(totals.passed + totals.failed, totals.executed);
     assert.deepEqual(byMode.map((mode) => mode.mode), MODES);
     assert.equal(byMode.reduce((sum, mode) => sum + mode.total, 0), totals.total);
     assert.equal(receipt.totals.gaps, receipt.gaps.length);
     const markdown = renderMarkdown(receipt);
-    for (const id of expected) assert.ok(markdown.includes(`| \`${id}\` |`), `${what}: the Markdown matrix lists ${id}`);
+    for (const { id } of receipt.entries) assert.ok(markdown.includes(`| \`${id}\` |`), `${what}: the Markdown matrix lists ${id}`);
   }
 
   const receipt = buildReceipt(nothingRan);
+  assert.deepEqual(
+    receipt.entries.map((entry) => entry.id),
+    expected,
+    "nothing ran: one entry for each cell of the manifest",
+  );
   assert.equal(receipt.totals.entries.executed, 0);
   assert.deepEqual(receipt.totals.leg_tests, { run: 0, passed: 0, failed: 0, skipped: 0 });
   assert.deepEqual(
@@ -749,11 +764,11 @@ row("an entry is executed only on its own recorded result at the product commit"
   const copilot = entryOf(receipt, "routes.supported/copilot");
   assert.deepEqual([copilot.route, copilot.model, copilot.requested_level], ["copilot/responses", { id: "fixture-model-1" }, { level: "low" }], "a cell's own model and level win");
 
-  const failed = entryOf(receipt, "routes.unsupported/direct");
+  const failed = entryOf(receipt, "routes.unsupported/direct:max");
   assert.deepEqual([failed.status, failed.result, failed.outcome], ["executed", "fail", { kind: "refused", reason: "unsupported_level" }], "a failed test is an executed entry that failed");
   assert.equal(entryOf(receipt, "routes.resumed/direct").tries, 2, "a pass on the second try says so");
   assert.equal(entryOf(receipt, "routes.table/direct").status, "executed", "a library test is found by its target");
-  assert.deepEqual(receipt.totals.entries, { total: 9, executed: 6, passed: 4, failed: 2, source_only: 1, not_run: 2 });
+  assert.deepEqual(receipt.totals.entries, { total: 10, executed: 7, passed: 4, failed: 3, source_only: 1, not_run: 2 });
   assert.deepEqual(receipt.totals.leg_tests, { run: 4, passed: 3, failed: 1, skipped: 1 });
   for (const entry of receipt.entries) {
     assert.equal(entry.result_file !== null, entry.status === "executed", `${entry.id}: only an executed entry names a result file`);
@@ -886,15 +901,16 @@ row("the rows' cell lines name the model and level a row picked, and are the onl
   const direct = { test: "supported_level_is_sent", cell: "direct", model: "catalog-model-9", level: "high", route: "openai_api/responses" };
   const copilot = { test: "supported_level_is_sent", cell: "copilot", model: "fixture-model-1", level: "low", route: "copilot/responses" };
   const refused = { test: "unsupported_level_is_refused", cell: "direct", model: "catalog-model-9", level: "max", route: "openai_api/responses" };
+  const refusedNone = { ...refused, level: "none" };
   // Whole lines of a run with --no-capture, and the line inside a failed test's output; sorted.
   const resumed = { test: "resumed_level_is_sent", cell: "direct", model: "catalog-model-9", level: "low", route: "openai_api/responses" };
-  assert.deepEqual(parseNextestJson(routesJson()).cell_lines, [resumed, copilot, direct, refused]);
+  assert.deepEqual(parseNextestJson(routesJson()).cell_lines, [resumed, copilot, direct, refusedNone, refused], "by test, cell and level, the lowest level first");
   assert.deepEqual(parseNextestJson(routesJson({ cellLines: false })).cell_lines, []);
   // The log of a run that shows a passing test's output, indented as nextest prints it.
   assert.deepEqual(parseNextestLog(routesLog()).cell_lines, [direct]);
   assert.deepEqual(parseNextestLog(routesLog({ quiet: true })).cell_lines, []);
   const result = routesResult();
-  assert.deepEqual(result.cell_lines, [resumed, copilot, direct, refused]);
+  assert.deepEqual(result.cell_lines, [resumed, copilot, direct, refusedNone, refused]);
   assert.ok(!serialize(result).includes("quota"), "the rest of a failed test's output is not kept");
 
   // In the receipt: the picked values replace the rule, on executed entries only.
@@ -905,8 +921,8 @@ row("the rows' cell lines name the model and level a row picked, and are the onl
   };
   assert.deepEqual(entry("routes.supported/direct"), [{ id: "catalog-model-9" }, { level: "high" }, { kind: "sent", level: { level: "high" } }, "row_output"]);
   assert.deepEqual(entry("routes.supported/copilot"), [{ id: "fixture-model-1" }, { level: "low" }, { kind: "sent", level: { level: "low" } }, "row_output"]);
-  assert.deepEqual(entry("routes.unsupported/direct"), [{ id: "catalog-model-9" }, { level: "max" }, { kind: "refused", reason: "unsupported_level" }, "row_output"]);
-  assert.deepEqual(entry("routes.unsupported/copilot"), [{ rule: "catalog_model" }, { level: "max" }, { kind: "refused", reason: "unsupported_level" }, "manifest"], "a cell without a line keeps the manifest's rule");
+  assert.deepEqual(entry("routes.unsupported/direct:max"), [{ id: "catalog-model-9" }, { level: "max" }, { kind: "refused", reason: "unsupported_level" }, "row_output"]);
+  assert.deepEqual(entry("routes.unsupported/copilot"), [{ rule: "catalog_model" }, { rule: "refused_levels" }, { kind: "refused", reason: "unsupported_level" }, "manifest"], "a cell without a line keeps the manifest's rule");
   assert.deepEqual(entry("routes.resumed/direct"), [{ id: "catalog-model-9" }, { level: "low" }, { kind: "sent", level: { level: "low" } }, "row_output"], "a level the row picks by rule is the level it printed");
   assert.deepEqual(entry("binary.supported/direct"), [null, null, { kind: "sent", level: null }, null]);
   assert.deepEqual(entryOf(receipt, "live.matrix/-").values_basis, null);
@@ -974,10 +990,131 @@ row("the rows' cell lines name the model and level a row picked, and are the onl
   refuses(() => buildReceipt(edited((lines) => (lines[2].route = "openai_api/chat_completions"))), /row routes\.supported reports the route openai_api\/chat_completions for the cell direct, and the manifest says openai_api\/responses/, "another route than the manifest's cell");
   refuses(() => buildReceipt(edited((lines) => (lines[1].model = "fixture-model-2"))), /reports the model fixture-model-2 for the cell copilot, and the manifest says fixture-model-1/, "another model than the manifest fixes");
   refuses(() => buildReceipt(edited((lines) => (lines[2].level = "low"))), /reports the level low for the cell direct, and the manifest says high/, "another level than the manifest fixes");
-  refuses(() => buildReceipt(edited((lines) => lines.push(lines[0]))), /two cell lines of one cell of one test/, "one cell twice in a result file");
+  refuses(() => buildReceipt(edited((lines) => lines.push(lines[0]))), /two cell lines of one level of one cell of one test/, "one level of one cell twice in a result file");
   const twoRows = manifest();
   twoRows.rows.push({ ...twoRows.rows[0], id: "routes.supported_again" });
   refuses(() => buildReceipt(input({ manifestText: serialize(twoRows) })), /which is not a cell of exactly one row/, "a line two rows would claim");
+});
+
+row("a row that asks for several levels on a cell has an entry for each level it printed", () => {
+  const change = input();
+  const receipt = buildReceipt(change);
+  const digest = sha256(change.results.get("routes.json"));
+  const unsupported = receipt.entries.filter((entry) => entry.row === "routes.unsupported");
+  assert.deepEqual(
+    unsupported.map((entry) => [entry.id, entry.cell, entry.model, entry.requested_level, entry.values_basis, entry.status, entry.result]),
+    [
+      ["routes.unsupported/direct:none", "direct", { id: "catalog-model-9" }, { level: "none" }, "row_output", "executed", "fail"],
+      ["routes.unsupported/direct:max", "direct", { id: "catalog-model-9" }, { level: "max" }, "row_output", "executed", "fail"],
+      ["routes.unsupported/copilot", "copilot", { rule: "catalog_model" }, { rule: "refused_levels" }, "manifest", "executed", "fail"],
+    ],
+    "one entry for each level the row printed, the lowest first whatever order it printed them in; a cell without a line keeps its one entry",
+  );
+  for (const entry of unsupported) {
+    assert.deepEqual([entry.outcome, entry.route.split("/")[1], entry.result_file, entry.test.name], [{ kind: "refused", reason: "unsupported_level" }, "responses", { name: "routes.json", sha256: digest }, "unsupported_level_is_refused"]);
+  }
+  const markdown = renderMarkdown(receipt);
+  assert.ok(markdown.includes("| `routes.unsupported/direct:none` | openai | `catalog-model-9` | responses | `openai_api/responses` | `none` | refused: `unsupported_level` |"));
+  assert.ok(markdown.includes("| `routes.unsupported/direct:max` | openai | `catalog-model-9` | responses | `openai_api/responses` | `max` | refused: `unsupported_level` |"));
+
+  // Every level a cell can be asked for, printed in no order: listed lowest first.
+  assert.deepEqual(LEVELS, schemas().receipt.$defs.level.enum, "the order of the levels is the schema's");
+  const every = structuredClone(routesResult());
+  every.cell_lines = every.cell_lines.filter((line) => line.test !== "unsupported_level_is_refused");
+  for (const level of ["max", "xhigh", "none", "medium", "minimal", "low", "high"]) {
+    every.cell_lines.push({ test: "unsupported_level_is_refused", cell: "copilot", model: "listed-model-a", level, route: "copilot/responses" });
+  }
+  const ladder = buildReceipt(withResult("routes.json", every)).entries.filter((entry) => entry.row === "routes.unsupported");
+  assert.deepEqual(
+    ladder.map((entry) => entry.id),
+    ["routes.unsupported/direct", ...LEVELS.map((level) => `routes.unsupported/copilot:${level}`)],
+  );
+  assert.deepEqual(ladder.slice(1).map((entry) => entry.requested_level.level), LEVELS);
+
+  // A row that did not run here has one entry for a cell, whatever lines its result holds.
+  for (const [what, result, gap] of [
+    ["a leg that did not run", buildNotRunResult({ leg: "routes", reason: "not_scheduled" }), "leg_not_run"],
+    ["a run at another commit", routesResult({ commit: OTHER_COMMIT }), "ran_at_another_commit"],
+  ]) {
+    assert.deepEqual(
+      buildReceipt(withResult("routes.json", result))
+        .entries.filter((entry) => entry.row === "routes.unsupported")
+        .map((entry) => [entry.id, entry.requested_level, entry.status, entry.gap]),
+      [
+        ["routes.unsupported/direct", { rule: "refused_levels" }, "source_only", gap],
+        ["routes.unsupported/copilot", { rule: "refused_levels" }, "source_only", gap],
+      ],
+      what,
+    );
+  }
+
+  // The reader keeps a line for each level of a cell, and refuses two that disagree on one level.
+  const opening = JSON.stringify(suite("started", "demo-facade", "effort_routes", "test"));
+  const lines = (...items) => parseNextestJson([opening, ...items].join("\n")).cell_lines;
+  assert.deepEqual(
+    lines(cellLine("a_row", "direct", "m-1", "max", "openai_api/responses"), cellLine("a_row", "direct", "m-1", "low", "openai_api/responses"), cellLine("a_row", "direct", "m-1", "max", "openai_api/responses")).map((line) => line.level),
+    ["low", "max"],
+    "two levels of one cell are two lines; the same line twice is one",
+  );
+  refuses(
+    () => lines(cellLine("a_row", "direct", "m-1", "low", "openai_api/responses"), cellLine("a_row", "direct", "m-2", "low", "openai_api/responses")),
+    /says another thing of a_row, cell direct, level low/,
+    "two lines of one level that disagree",
+  );
+
+  // Only a row the manifest gives an entry per level may print several levels for a cell.
+  const result = routesResult();
+  const edited = (edit) => {
+    const copy = structuredClone(result);
+    edit(copy.cell_lines);
+    return withResult("routes.json", copy);
+  };
+  const supported = result.cell_lines.find((line) => line.test === "supported_level_is_sent" && line.cell === "direct");
+  refuses(
+    () => buildReceipt(edited((items) => items.push({ ...supported, level: "low" }))),
+    /two cell lines of supported_level_is_sent, cell direct, and row routes\.supported of the manifest has one entry for a cell/,
+    "a second level for a cell of a row with one entry for a cell",
+  );
+  // Each line of such a row is held to the manifest's cell and to the model it fixes.
+  const refused = result.cell_lines.filter((line) => line.test === "unsupported_level_is_refused");
+  assert.equal(refused.length, 2);
+  refuses(() => buildReceipt(edited((items) => (items.at(-1).route = "openai_api/chat_completions"))), /row routes\.unsupported reports the route openai_api\/chat_completions for the cell direct/, "a second line on another route");
+  const fixing = manifest();
+  fixing.rows[1].cells[0].model = { id: "catalog-model-9" };
+  assert.equal(buildReceipt(input({ manifestText: serialize(fixing) })).totals.entries.executed, 7);
+  refuses(
+    () => buildReceipt({ ...edited((items) => (items.at(-1).model = "catalog-model-8")), manifestText: serialize(fixing) }),
+    /row routes\.unsupported reports the model catalog-model-8 for the cell direct, and the manifest says catalog-model-9/,
+    "a second line with another model than the manifest fixes",
+  );
+  // The manifest names the levels of such a row by rule: one fixed level would be one of several.
+  for (const [what, edit] of [
+    ["a level fixed for the row", (rows) => (rows[1].requested_level = { level: "max" })],
+    ["a level fixed for a cell", (rows) => (rows[1].cells[1].requested_level = { level: "high" })],
+  ]) {
+    const copy = manifest();
+    edit(copy.rows);
+    refuses(() => buildReceipt(input({ manifestText: serialize(copy) })), /row routes\.unsupported of the manifest has an entry for each level and fixes one level for the cell/, what);
+  }
+  const misnamed = manifest();
+  misnamed.rows[1].lines = "per_test";
+  refuses(() => buildReceipt(input({ manifestText: serialize(misnamed) })), /manifest does not match its schema/, "another word for how a row prints");
+  // Without the mark the same lines are one too many.
+  const unmarked = manifest();
+  delete unmarked.rows[1].lines;
+  refuses(() => buildReceipt(input({ manifestText: serialize(unmarked) })), /two cell lines of unsupported_level_is_refused, cell direct, and row routes\.unsupported of the manifest has one entry for a cell/, "a row without the mark");
+
+  // The receipt schema takes the level in an executed entry's id and nowhere else.
+  const { receipt: schema } = schemas();
+  const withId = (id, status) => {
+    const copy = structuredClone(receipt);
+    copy.entries.find((entry) => entry.status === status).id = id;
+    return schemaErrors(schema, schema, copy);
+  };
+  assert.deepEqual(withId("routes.unsupported/direct:xhigh", "executed"), []);
+  assert.notDeepEqual(withId("routes.unsupported/direct:", "executed"), []);
+  assert.notDeepEqual(withId("routes.unsupported/direct:High", "executed"), []);
+  assert.notDeepEqual(withId("routes.unsupported/direct:max", "source_only"), [], "an entry that did not run is one for its cell");
 });
 
 row("--check fails on a failed entry and on a gap of the offline legs, never on a gap of a live leg", () => {
@@ -985,7 +1122,8 @@ row("--check fails on a failed entry and on a gap of the offline legs, never on 
   // log did not name, the built-binary row without a test; the live gaps.
   const receipt = buildReceipt(input());
   assert.deepEqual(checkReceipt(receipt), [
-    "entry routes.unsupported/direct failed",
+    "entry routes.unsupported/direct:none failed",
+    "entry routes.unsupported/direct:max failed",
     "entry routes.unsupported/copilot failed",
     "leg binary is a gap of the offline legs: rows_not_built",
     "entry binary.supported/direct is a gap of the offline legs: no_test_row",
@@ -1133,6 +1271,18 @@ row("the committed manifest matches its schema, names tests the tree defines, an
     committed.rows.filter((item) => item.test?.source === routesSource).map((item) => item.test.name).sort(),
     "the tests that print their cells are the manifest's route rows",
   );
+  // The one row with an entry for each level prints its line inside its loop
+  // over the levels it refuses, and nowhere else.
+  const refusing = "unsupported_level_is_refused_before_any_provider_request";
+  assert.deepEqual(
+    committed.rows.filter((item) => item.lines === "per_level").map((item) => item.test.name),
+    [refusing],
+  );
+  assert.ok(
+    new RegExp(`for level in levels \\{\\s*(?://[^\\n]*\\s*)*param\\.report_cell\\(\\s*"${refusing}",\\s*&fixture\\.model,\\s*level,\\s*\\);`, "u").test(routes),
+    "the refusing row prints a line for each level it refuses",
+  );
+  assert.equal([...routes.matchAll(new RegExp(`report_cell\\(\\s*"${refusing}"`, "gu"))].length, 1);
   // Every route of the matrix has a row that sends a level and a row that refuses one.
   for (const cell of committed.cells) {
     for (const kind of ["sent", "refused"]) {
@@ -1175,7 +1325,7 @@ row("the command line records a run, generates both files from the commit, and v
   writeFileSync(output, routesJson());
   const recorded = cli(["record", "--leg", "routes", "--commit", head, "--command", COMMAND, "--exit-status", "100", "--nextest-json", output, "--output", join(results, "routes.json")], { env });
   assert.equal(recorded.status, 0, recorded.stdout + recorded.stderr);
-  assert.equal(recorded.stdout, "recorded leg routes: 4 run, 3 passed, 1 failed, 1 skipped, 5 named, 4 cell lines\n");
+  assert.equal(recorded.stdout, "recorded leg routes: 4 run, 3 passed, 1 failed, 1 skipped, 5 named, 5 cell lines\n");
   assert.equal(readFileSync(join(results, "routes.json"), "utf8"), serialize(routesResult({ commit: head })), "record writes the leg result as built");
   for (const [leg, reason] of [
     ["binary", "rows_not_built"],
@@ -1187,7 +1337,7 @@ row("the command line records a run, generates both files from the commit, and v
   const out = join(work, "out");
   const generated = cli(["generate", "--results", results, "--output-dir", out, "--repo", repo], { env });
   assert.equal(generated.status, 0, generated.stdout + generated.stderr);
-  assert.equal(generated.stdout, `wrote ${RECEIPT_JSON_NAME} and ${RECEIPT_MARKDOWN_NAME}: 9 entries, 6 executed (4 passed, 2 failed), 1 source only, 2 not run, 5 gaps\n`);
+  assert.equal(generated.stdout, `wrote ${RECEIPT_JSON_NAME} and ${RECEIPT_MARKDOWN_NAME}: 10 entries, 7 executed (4 passed, 3 failed), 1 source only, 2 not run, 5 gaps\n`);
   const json = readFileSync(join(out, RECEIPT_JSON_NAME), "utf8");
   const markdown = readFileSync(join(out, RECEIPT_MARKDOWN_NAME), "utf8");
   const receipt = JSON.parse(json);
@@ -1212,17 +1362,18 @@ row("the command line records a run, generates both files from the commit, and v
   const checked = cli(["generate", "--results", results, "--output-dir", checkedOut, "--repo", repo, "--commit", head, "--check"], { env });
   assert.equal(checked.status, 3, checked.stdout + checked.stderr);
   assert.deepEqual(checked.stdout.split("\n").slice(1), [
-    "check: entry routes.unsupported/direct failed",
+    "check: entry routes.unsupported/direct:none failed",
+    "check: entry routes.unsupported/direct:max failed",
     "check: entry routes.unsupported/copilot failed",
     "check: leg binary is a gap of the offline legs: rows_not_built",
     "check: entry binary.supported/direct is a gap of the offline legs: no_test_row",
-    "check failed: 4 failed entries or gaps of the offline legs",
+    "check failed: 5 failed entries or gaps of the offline legs",
     "",
   ]);
   assert.equal(readFileSync(join(checkedOut, RECEIPT_JSON_NAME), "utf8"), json, "the receipt a failed check leaves is the receipt");
   assert.equal(readFileSync(join(checkedOut, RECEIPT_MARKDOWN_NAME), "utf8"), markdown);
   const verifiedAndChecked = cli(["verify", join(out, RECEIPT_JSON_NAME), "--check"], { env });
-  assert.deepEqual([verifiedAndChecked.status, verifiedAndChecked.stdout.split("\n")[0], verifiedAndChecked.stdout.split("\n").at(-2)], [3, "the receipt holds", "check failed: 4 failed entries or gaps of the offline legs"]);
+  assert.deepEqual([verifiedAndChecked.status, verifiedAndChecked.stdout.split("\n")[0], verifiedAndChecked.stdout.split("\n").at(-2)], [3, "the receipt holds", "check failed: 5 failed entries or gaps of the offline legs"]);
   // A receipt whose only gaps are live passes it.
   const liveOnly = manifest();
   liveOnly.rows = liveOnly.rows.filter((item) => item.leg === "live");
@@ -1239,7 +1390,7 @@ row("the command line records a run, generates both files from the commit, and v
   // A receipt that does not hold is refused before it is judged.
   writeFileSync(join(checkedOut, RECEIPT_JSON_NAME), json.replace('"schema_version": 1', '"schema_version": 4'));
   assert.equal(cli(["verify", join(checkedOut, RECEIPT_JSON_NAME), "--check"], { env }).status, 1);
-  writeFileSync(join(out, RECEIPT_MARKDOWN_NAME), markdown.replace("6 | 4 | 2", "6 | 6 | 0"));
+  writeFileSync(join(out, RECEIPT_MARKDOWN_NAME), markdown.replace("7 | 4 | 3", "7 | 7 | 0"));
   const edited = cli(["verify", join(out, RECEIPT_JSON_NAME), "--markdown", join(out, RECEIPT_MARKDOWN_NAME)], { env });
   assert.deepEqual([edited.status, edited.stdout], [1, "refused: the Markdown file is not the rendering of the receipt\n"]);
 

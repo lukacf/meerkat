@@ -146,6 +146,10 @@
         "id": { "$ref": "#/$defs/row_id" },
         "leg": { "$ref": "#/$defs/token" },
         "title": { "$ref": "#/$defs/sentence" },
+        "lines": {
+          "description": "How many cell lines the row prints for a cell. per_cell (the default): one, the model and level of the cell. per_level: one for each level the row asks for on the cell; an executed cell then has one entry per line, and the manifest names the levels by rule.",
+          "enum": ["per_cell", "per_level"]
+        },
         "test": { "oneOf": [{ "$ref": "#/$defs/test_ref" }, { "type": "null" }] },
         "outcome": {
           "oneOf": [

@@ -15,8 +15,8 @@
       "text": "A level the route accepts for the model: high where it is accepted, else low, else the lowest active level it accepts."
     },
     {
-      "id": "level_outside_the_set",
-      "text": "The lowest active level the route does not accept for the model."
+      "id": "levels_outside_the_set",
+      "text": "Every level the row refuses on the route: the lowest active level the route does not accept for the model; none on a Claude model; minimal on the Copilot Gemini route; and on a Copilot route a level the model's catalog row lists and the account's entry does not."
     }
   ],
   "cells": [
@@ -91,7 +91,8 @@
     {
       "id": "routes.unsupported",
       "leg": "routes",
-      "title": "A level outside the set the route accepts is refused with the typed refusal before any request is sent.",
+      "title": "Each level outside the set the route accepts is refused with the typed refusal before any request is sent.",
+      "lines": "per_level",
       "test": {
         "package": "meerkat",
         "target": "reasoning_effort_routes",
@@ -100,26 +101,18 @@
       },
       "outcome": { "kind": "refused", "reason": "unsupported_level" },
       "model": { "rule": "catalog_model" },
-      "requested_level": { "rule": "level_outside_the_set" },
+      "requested_level": { "rule": "levels_outside_the_set" },
       "cells": [
         { "cell": "openai_direct" },
         { "cell": "claude_direct" },
         { "cell": "gemini_direct" },
-        { "cell": "self_hosted_chat", "model": { "id": "remote-model" }, "requested_level": { "level": "medium" } },
-        { "cell": "self_hosted_responses", "model": { "id": "remote-model" }, "requested_level": { "level": "medium" } },
-        { "cell": "copilot_responses", "requested_level": { "level": "high" } },
-        {
-          "cell": "copilot_responses_uncatalogued",
-          "model": { "id": "fixture-reasoner-1" },
-          "requested_level": { "level": "high" }
-        },
-        { "cell": "copilot_chat", "model": { "id": "fixture-reasoner-1" }, "requested_level": { "level": "high" } },
-        {
-          "cell": "copilot_claude",
-          "model": { "rule": "catalog_model_listed_with_a_dot" },
-          "requested_level": { "level": "high" }
-        },
-        { "cell": "copilot_gemini", "requested_level": { "level": "high" } }
+        { "cell": "self_hosted_chat", "model": { "id": "remote-model" } },
+        { "cell": "self_hosted_responses", "model": { "id": "remote-model" } },
+        { "cell": "copilot_responses" },
+        { "cell": "copilot_responses_uncatalogued", "model": { "id": "fixture-reasoner-1" } },
+        { "cell": "copilot_chat", "model": { "id": "fixture-reasoner-1" } },
+        { "cell": "copilot_claude", "model": { "rule": "catalog_model_listed_with_a_dot" } },
+        { "cell": "copilot_gemini" }
       ]
     },
     {

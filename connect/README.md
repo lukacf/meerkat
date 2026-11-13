@@ -12,7 +12,7 @@ Install [Meerkat Core 0.9.14](https://github.com/lukacf/meerkat/releases/tag/v0.
 for the ordinary `rkat` agent. Connect supplies its own Python, Node/npm,
 integration library and setup resources.
 
-0.9.15 is not published yet; this section describes the coming release.
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 Until Connect 0.9.15 is published, the Connect release to
 use with Core 0.9.15 and Meta 0.9.15 is Connect 0.9.14. A Python environment
 with the `native-host` extra of Connect 0.9.14's `meerkat-toolkit` cannot

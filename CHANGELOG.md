@@ -1762,7 +1762,7 @@ them.
   new revision, with `include_forks`; they then select the forks seated
   from then on.
 
-- Before rolling back to 0.9.13 or earlier, clear the reasoning effort level
+- Before rolling back to 0.9.15 or earlier, clear the reasoning effort level
   from every session that set it, and let accepted turns that carry it
   finish. Two kinds of stored record carry `reasoning_effort`, and a release
   without the field refuses both, because those records refuse unknown

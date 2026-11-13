@@ -1316,6 +1316,59 @@ fn apply_seeded_mob_input(
     Ok(())
 }
 
+/// Record a fork-derived member's fork lineage root for operator
+/// instructions again, from the spawn row that stores it
+/// (`RecordMemberInstructionLineage`), right after the replay seated the
+/// row's member.
+///
+/// A refusal never fails the resume. MobMachine refuses the record for a
+/// member whose session already recorded a snapshot under this seat, which
+/// a replay can meet where the live mob could not: a second row of one
+/// incarnation whose seat replays through an arm that keeps what the first
+/// row's seat recorded. When MobMachine already holds this root for the
+/// member (an earlier row of the same seat recorded it) nothing is lost. A
+/// refused record that leaves the member without its root is logged: the
+/// member is then not under the records written for that root and its
+/// forks until it is seated as a fork again. (The live seat's own record is
+/// different: a refusal there stops the actor.)
+fn recover_member_instruction_lineage(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    agent_identity: &AgentIdentity,
+    root: &AgentIdentity,
+    context: &'static str,
+) {
+    use crate::machines::mob_machine as mob_dsl;
+
+    let member = mob_dsl::AgentIdentity::from_domain(agent_identity);
+    let root_identity = mob_dsl::AgentIdentity::from_domain(root);
+    let Err(error) = apply_seeded_mob_input(
+        authority,
+        mob_dsl::MobMachineInput::RecordMemberInstructionLineage {
+            agent_identity: member.clone(),
+            root_identity: root_identity.clone(),
+        },
+        context,
+    ) else {
+        return;
+    };
+    if authority.state().member_instruction_lineage.get(&member) == Some(&root_identity) {
+        tracing::debug!(
+            agent_identity = %agent_identity,
+            root = %root,
+            context,
+            "a spawn row's operator instruction lineage root was already recorded for its member"
+        );
+    } else {
+        tracing::warn!(
+            agent_identity = %agent_identity,
+            root = %root,
+            context,
+            %error,
+            "the replay could not record a member's operator instruction lineage root again; the member is not under the records written for that root and its forks until it is seated as a fork again"
+        );
+    }
+}
+
 fn bind_owner_bridge_session_authority_for_create(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     binding: &OwnerBridgeSessionCreateAuthority,
@@ -1400,6 +1453,87 @@ pub(super) fn register_seeded_member_peer(
         },
         context,
     )
+}
+
+/// The member, other than `agent_identity`, whose current or prior endpoint
+/// in `state` carries the peer id of `endpoint`. MobMachine admits a peer id
+/// for one identity (`peer_id_available_for_identity`), so while that member
+/// holds it, it refuses this endpoint for `agent_identity`.
+pub(super) fn member_endpoint_key_holder(
+    state: &crate::machines::mob_machine::MobMachineState,
+    agent_identity: &crate::machines::mob_machine::AgentIdentity,
+    endpoint: &crate::machines::mob_machine::MemberPeerEndpoint,
+) -> Option<AgentIdentity> {
+    let current = state
+        .member_peer_endpoints
+        .iter()
+        .find(|(other, held)| *other != agent_identity && held.peer_id == endpoint.peer_id)
+        .map(|(other, _)| other);
+    let prior = || {
+        state
+            .member_prior_peer_endpoints
+            .iter()
+            .find(|(other, held)| {
+                *other != agent_identity && held.iter().any(|held| held.peer_id == endpoint.peer_id)
+            })
+            .map(|(other, _)| other)
+    };
+    current
+        .or_else(prior)
+        .map(|other| AgentIdentity::from(other.0.as_str()))
+}
+
+/// The refusal of a member whose comms endpoint carries the transport key
+/// another member of the mob holds, as its caller reads it. It names the
+/// refused member alone: the caller may not be allowed to see the key's
+/// holder, which is named in the log ([`warn_member_endpoint_key_held`]).
+pub(super) fn member_endpoint_key_held_refusal(
+    mob_id: &MobId,
+    agent_identity: &AgentIdentity,
+) -> String {
+    format!(
+        "member '{agent_identity}' cannot join mob '{mob_id}': another member of its mob already holds its comms key, and a mob admits a comms key for one member"
+    )
+}
+
+/// The restore failure of a member whose recorded or live endpoint carries
+/// the transport key another member of the mob holds: what it is and the way
+/// out, as a caller or a sender to the member reads it. It names the broken
+/// member alone, as [`member_endpoint_key_held_refusal`] does.
+pub(super) fn member_endpoint_key_held_reason(agent_identity: &AgentIdentity) -> String {
+    format!(
+        "member '{agent_identity}' cannot run: another member of its mob already holds its comms key, so it holds no endpoint; retire '{agent_identity}' to remove it"
+    )
+}
+
+/// Name the holder of a transport key in the log, where the refusal and the
+/// restore failure name only the member they refuse.
+pub(super) fn warn_member_endpoint_key_held(
+    mob_id: &MobId,
+    agent_identity: &AgentIdentity,
+    holder: &AgentIdentity,
+    peer_id: &str,
+    outcome: &'static str,
+) {
+    tracing::warn!(
+        mob_id = %mob_id,
+        agent_identity = %agent_identity,
+        holder = %holder,
+        peer_id,
+        outcome,
+        "a member's comms endpoint carries the transport key another member holds"
+    );
+}
+
+/// A member whose `MemberSpawned` row carries an endpoint MobMachine refused
+/// at the replay because another member holds its transport key: the replay
+/// recorded the member a restore failure instead of failing.
+pub(super) struct ReplayedEndpointKeyHeld {
+    pub(super) agent_identity: AgentIdentity,
+    pub(super) agent_runtime_id: AgentRuntimeId,
+    pub(super) holder: AgentIdentity,
+    pub(super) peer_id: String,
+    pub(super) reason: String,
 }
 
 /// Typed reason for a restored member whose comms endpoint cannot be
@@ -1502,17 +1636,61 @@ async fn record_first_seeded_member_endpoint(
     })
 }
 
+/// The restore failure of a member whose live endpoint MobMachine refused to
+/// register at a start. An endpoint whose transport key another member
+/// holds is answered with the reason of that case (retire the member; a
+/// respawn would load the same key) and the holder is named in the log;
+/// every other refusal is the endpoint-broken reason with `detail`.
+fn seeded_member_endpoint_refused_reason(
+    state: &crate::machines::mob_machine::MobMachineState,
+    mob_id: &MobId,
+    entry: &RosterEntry,
+    refused: &TrustedPeerDescriptor,
+    detail: &str,
+) -> String {
+    seeded_member_endpoint_key_held_reason(state, mob_id, &entry.agent_identity, refused)
+        .unwrap_or_else(|| member_endpoint_broken_reason(&entry.agent_identity, detail))
+}
+
+/// The restore failure of `agent_identity` when another member holds the
+/// transport key of `refused`, the endpoint MobMachine refused to register
+/// for it at a start, with that holder named in the log; `None` when no
+/// other member holds the key. A start breaks such a member alone; without
+/// a holder the refusal is not this case, and the caller keeps its own
+/// answer.
+fn seeded_member_endpoint_key_held_reason(
+    state: &crate::machines::mob_machine::MobMachineState,
+    mob_id: &MobId,
+    agent_identity: &AgentIdentity,
+    refused: &TrustedPeerDescriptor,
+) -> Option<String> {
+    let endpoint = crate::machines::mob_machine::MemberPeerEndpoint::from(refused);
+    let holder = member_endpoint_key_holder(
+        state,
+        &crate::machines::mob_machine::AgentIdentity::from_domain(agent_identity),
+        &endpoint,
+    )?;
+    warn_member_endpoint_key_held(
+        mob_id,
+        agent_identity,
+        &holder,
+        &endpoint.peer_id.0,
+        "its live endpoint is not registered; the member is listed broken until it is retired",
+    );
+    Some(member_endpoint_key_held_reason(agent_identity))
+}
+
 /// Cold-boot twin of explicit Resume's per-member endpoint isolation: record
 /// only this member Broken (typed MobMachine restore failure plus the handle
-/// diagnostic), clear its projection, and let the rest of the mob boot.
+/// diagnostic) with `reason`, clear its projection, and let the rest of the
+/// mob boot.
 async fn record_seeded_member_endpoint_broken(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     roster: &mut Roster,
     restore_diagnostics: &RwLock<HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>>,
     entry: &RosterEntry,
-    detail: &str,
+    reason: String,
 ) -> Result<(), MobError> {
-    let reason = member_endpoint_broken_reason(&entry.agent_identity, detail);
     apply_seeded_mob_signal(
         authority,
         crate::machines::mob_machine::MobMachineSignal::RecoverMemberRestoreFailure {
@@ -3418,6 +3596,10 @@ struct PlacedCarrierRecoveryEntry {
     /// (a placed member a spawn holding the entry's custody created): the
     /// replay records the entry again once the carrier seats the member.
     identity_entry: Option<crate::runtime::IdentityEntryOrigin>,
+    /// The fork lineage root the carrier's exact MemberSpawned row stores
+    /// for operator instructions (a placed helper fork): the replay records
+    /// it again once the carrier seats the member.
+    instruction_lineage_root: Option<AgentIdentity>,
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -3792,10 +3974,13 @@ fn classify_placed_spawn_recovery(
         };
         let identity_entry =
             exact_projection.and_then(|projection| projection.event.identity_entry());
+        let instruction_lineage_root = exact_projection
+            .and_then(|projection| projection.event.instruction_lineage_root().cloned());
         plan.entries.push(PlacedCarrierRecoveryEntry {
             record,
             disposition,
             identity_entry,
+            instruction_lineage_root,
         });
     }
 
@@ -4009,6 +4194,29 @@ async fn commit_placed_spawn_event_repairs(
             .await?;
     }
 
+    // A repaired row is written from the carrier, which holds no fork
+    // lineage root for operator instructions (the root lives on the row the
+    // stop cut off, and in MobMachine, which this start rebuilds from the
+    // rows). A repaired member that was seated as a helper fork is therefore
+    // seated outside its fork family: no record written for the family's
+    // first member and its forks reaches it. One warning names the members;
+    // it carries no record body.
+    let repaired_members: Vec<&str> = initial_plan
+        .entries
+        .iter()
+        .filter(|entry| repair_spawn_ids.contains(&entry.record.spawn_id))
+        .map(|entry| entry.record.agent_identity.as_str())
+        .collect();
+    tracing::warn!(
+        mob_id = %mob_id,
+        repaired = repaired_members.len(),
+        members = ?repaired_members,
+        "placed members were seated again from their spawn carriers after a stop in the middle \
+         of their seat; a carrier holds no operator instruction fork lineage, so a member among \
+         them that was seated as a fork is outside its fork family and is not selected by the \
+         records written for that family's first member and its forks"
+    );
+
     event_store.append_batch(repairs).await?;
     *mob_events = event_store
         .replay_all()
@@ -4182,6 +4390,30 @@ fn seed_mob_authority_sync_from_events(
     definition: &MobDefinition,
     defer_completed_phase: bool,
     committed_placed_recovery_keys: &BTreeSet<PlacedMemberRecoveryKey>,
+) -> Result<(), MobError> {
+    let mut endpoint_key_held = Vec::new();
+    seed_mob_authority_sync_from_events_reporting(
+        authority,
+        events,
+        definition,
+        defer_completed_phase,
+        committed_placed_recovery_keys,
+        &mut endpoint_key_held,
+    )
+}
+
+/// [`seed_mob_authority_sync_from_events`], reporting in `endpoint_key_held`
+/// each member whose row's endpoint the replay did not restore because
+/// another member holds its transport key. Such a member is recorded a
+/// restore failure in `authority`; a later row of the journal may still
+/// retire or replace it.
+fn seed_mob_authority_sync_from_events_reporting(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    events: &[crate::event::MobEvent],
+    definition: &MobDefinition,
+    defer_completed_phase: bool,
+    committed_placed_recovery_keys: &BTreeSet<PlacedMemberRecoveryKey>,
+    endpoint_key_held: &mut Vec<ReplayedEndpointKeyHeld>,
 ) -> Result<(), MobError> {
     use crate::machines::mob_machine as mob_dsl;
 
@@ -4399,6 +4631,24 @@ fn seed_mob_authority_sync_from_events(
                         "recover_member_dispatch_admission_lineage",
                     )?;
                 }
+                // A fork-derived member: its row stores its fork lineage
+                // root for operator instructions (the root its seat
+                // recorded, or the entry MobMachine held for the identity
+                // at a later seat of the same fork), and the replay records
+                // it again here, directly after the row seated the member
+                // and before the next journal row, so the records written
+                // for that root and its forks select the member after the
+                // restart as before it. A row without it (a member that is
+                // not fork-derived, or an earlier release's row) records
+                // nothing.
+                if let Some(root) = member_spawned.instruction_lineage_root() {
+                    recover_member_instruction_lineage(
+                        authority,
+                        &member_spawned.agent_identity,
+                        root,
+                        "recover_member_instruction_lineage",
+                    );
+                }
                 // The member of an identity entry: its row records the
                 // entry's origin, and the replay records the entry again
                 // before the boot plan is sealed.
@@ -4436,12 +4686,13 @@ fn seed_mob_authority_sync_from_events(
                     // have no live comms or surviving trust projection to
                     // rediscover it. Placed endpoints stay carrier-owned and
                     // are recovered only by the exact placed-spawn ladder.
-                    apply_seeded_mob_signal(
+                    let peer_endpoint = mob_dsl::MemberPeerEndpoint::from(member_peer_endpoint);
+                    let dsl_identity =
+                        mob_dsl::AgentIdentity::from_domain(&member_spawned.agent_identity);
+                    let restored = apply_seeded_mob_signal(
                         authority,
                         mob_dsl::MobMachineSignal::RecoverSpawnedMemberPeerEndpoint {
-                            agent_identity: mob_dsl::AgentIdentity::from_domain(
-                                &member_spawned.agent_identity,
-                            ),
+                            agent_identity: dsl_identity.clone(),
                             agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
                                 &member_spawned.agent_runtime_id,
                             ),
@@ -4449,10 +4700,53 @@ fn seed_mob_authority_sync_from_events(
                                 member_spawned.fence_token,
                             ),
                             generation: mob_dsl::Generation::from_domain(member_spawned.generation),
-                            peer_endpoint: mob_dsl::MemberPeerEndpoint::from(member_peer_endpoint),
+                            peer_endpoint: peer_endpoint.clone(),
                         },
                         "recover_member_spawned_peer_endpoint",
-                    )?;
+                    );
+                    if let Err(error) = restored {
+                        // One refusal does not fail the replay: the row's
+                        // endpoint carries the transport key another member
+                        // holds. A release that judged the endpoint after
+                        // writing the row left such a row behind, with no
+                        // terminal row. The member is replayed as the live
+                        // machine last held it, a member with no endpoint,
+                        // and recorded a restore failure, so it is listed
+                        // broken and is never woken; the key's holder keeps
+                        // its endpoint. Every other refusal fails the replay.
+                        // Which of two such members keeps the key is the
+                        // journal's order: on a journal written before the
+                        // endpoint was judged ahead of the row, the member
+                        // the replay keeps is the one whose row comes first.
+                        // The replay asks who holds the key, not why
+                        // MobMachine refused: a row refused for a second
+                        // reason too is recorded the same failure while a
+                        // holder exists.
+                        let Some(holder) = member_endpoint_key_holder(
+                            authority.state(),
+                            &dsl_identity,
+                            &peer_endpoint,
+                        ) else {
+                            return Err(error);
+                        };
+                        let reason =
+                            member_endpoint_key_held_reason(&member_spawned.agent_identity);
+                        apply_seeded_mob_signal(
+                            authority,
+                            mob_dsl::MobMachineSignal::RecoverMemberRestoreFailure {
+                                agent_identity: dsl_identity,
+                                reason: reason.clone(),
+                            },
+                            "recover_member_spawned_peer_endpoint_key_held",
+                        )?;
+                        endpoint_key_held.push(ReplayedEndpointKeyHeld {
+                            agent_identity: member_spawned.agent_identity.clone(),
+                            agent_runtime_id: member_spawned.agent_runtime_id.clone(),
+                            holder,
+                            peer_id: peer_endpoint.peer_id.0.clone(),
+                            reason,
+                        });
+                    }
                 }
                 if let Some(bridge_session_id) = member_spawned
                     .bridge_member_ref
@@ -5799,6 +6093,18 @@ fn recover_current_committed_placed_carrier_signals(
                 },
                 "recover_placed_identity_entry",
             )?;
+        }
+        // A placed fork-derived member: its row stores its fork lineage
+        // root for operator instructions, and the replay records it again
+        // now that the carrier seated the member (the journal replay skips
+        // the row itself).
+        if let Some(root) = entry.instruction_lineage_root.as_ref() {
+            recover_member_instruction_lineage(
+                authority,
+                &identity,
+                root,
+                "recover_placed_member_instruction_lineage",
+            );
         }
     }
     Ok(())
@@ -7869,6 +8175,19 @@ fn apply_recovered_flow_signal(
     Ok(())
 }
 
+/// Seed MobMachine with the restore failures a start recorded for its
+/// members.
+///
+/// A start whose mob was stopped or completed has finished its seeded
+/// authority's phase when this runs, and MobMachine takes a restore failure
+/// only while Running. Such a start owes one failure at most by then: the one
+/// its replay recorded, while the authority still replayed as Running, for a
+/// row whose endpoint carries another member's transport key. MobMachine
+/// already holds that failure, with that reason, so it is not stated again.
+/// Every other diagnostic is seeded as before, and refused by an authority
+/// that is not Running: the start fails rather than list a member broken
+/// that MobMachine does not hold broken. A Running start seeds every
+/// diagnostic, as before.
 fn seed_mob_authority_restore_failures(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     restore_diagnostics: &HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>,
@@ -7879,6 +8198,16 @@ fn seed_mob_authority_restore_failures(
             identity.as_str(),
         ));
         let reason = diagnostic.reason.clone();
+        if diagnostic.registration_refusal.is_none()
+            && authority.state().lifecycle_phase != mob_dsl::MobPhase::Running
+            && authority
+                .state()
+                .member_restore_failures
+                .get(&agent_identity)
+                == Some(&reason)
+        {
+            continue;
+        }
         // A host refusal of the member's registration keeps its typed code
         // (instead of the plain failure, whose transition clears the code).
         let signal = match diagnostic.registration_refusal {
@@ -8541,7 +8870,13 @@ impl MobBuilder {
     }
 
     /// The host's per-member build preparation, run before a member's
-    /// provision whenever it is materialized (at start or on a wake).
+    /// provision whenever it is materialized (at start or on a wake), and
+    /// before the spawn of a store-owned identity's member. It also composes
+    /// the seat of a store-owned identity's member at every build of it
+    /// ([`super::MemberBuildPreparer::prepare_store_owned_seat`]): such a
+    /// member is seated from its row with no host step, so this is where
+    /// its host gives it the build inputs it gives a member it spawns
+    /// itself.
     #[cfg(feature = "runtime-adapter")]
     pub fn with_member_build_preparer(
         mut self,
@@ -9522,12 +9857,14 @@ impl MobBuilder {
             // retired history. It skips only the exact current placed projection;
             // the canonical committed carrier installs that incarnation in one
             // recovery signal after historical generations establish high-water.
-            seed_mob_authority_sync_from_events(
+            let mut replayed_endpoint_key_held = Vec::new();
+            seed_mob_authority_sync_from_events_reporting(
                 &mut initial_dsl_authority,
                 &mob_events[post_bridge_epoch_start..],
                 &definition,
                 resumed_state == MobState::Completed,
                 &placed_recovery.current_committed_event_keys,
+                &mut replayed_endpoint_key_held,
             )?;
             recover_current_committed_placed_carrier_signals(
                 initial_dsl_authority.as_mut(),
@@ -9600,10 +9937,24 @@ impl MobBuilder {
             // Roster is a projection only. Build it after the authoritative
             // carrier/event reconciliation and machine recovery have succeeded.
             let mut roster = Roster::project(&mob_events);
-            // A store-owned identity's seat whose session no build created
-            // takes its descriptive inputs from the identity's row, its
-            // record: an update after the seat applies at the first build.
+            // A store-owned identity whose row records that its seat is
+            // owed a label restamp (an update committed while its member's
+            // seat row carried other labels, and no seat row has carried
+            // the row's labels since) reads the row's labels on its roster
+            // entry, as it did from that update's commit on: the rows are
+            // read already, and nothing is built, woken or written. Every
+            // other seat is left as the journal projected it, with every
+            // label it carries: a difference no update made is not the
+            // start's to settle. A seat whose session no build created
+            // also takes its descriptive inputs from the row: an update
+            // after the seat applies at the first build.
             for (identity, spec) in &recovered_created_rows.specs {
+                if recovered_created_rows
+                    .label_restamps_owed
+                    .contains(identity)
+                {
+                    roster.set_store_owned_seat_labels(identity, &spec.labels);
+                }
                 if super::boot_plan::domain_member_seat_session_unborn(
                     initial_dsl_authority.state(),
                     identity,
@@ -9640,7 +9991,52 @@ impl MobBuilder {
                     });
                 }
             }
-            let seeded_restore_diagnostics = HashMap::new();
+            // A member the replay recorded a restore failure because its row's
+            // endpoint carries the transport key another member holds, and
+            // whose incarnation no later row retired or replaced: it is
+            // listed broken with the reason, named once in the log, and its
+            // roster projection drops the endpoint its row carries (the
+            // holder's key), as a member whose endpoint is unusable does.
+            let mut seeded_restore_diagnostics = HashMap::new();
+            for held in replayed_endpoint_key_held {
+                let dsl_identity = crate::machines::mob_machine::AgentIdentity::from_domain(
+                    &held.agent_identity,
+                );
+                let state = initial_dsl_authority.state();
+                let current = state.identity_to_runtime.get(&dsl_identity)
+                    == Some(
+                        &crate::machines::mob_machine::AgentRuntimeId::from_domain(
+                            &held.agent_runtime_id,
+                        ),
+                    )
+                    && state.member_restore_failures.contains_key(&dsl_identity);
+                if !current {
+                    continue;
+                }
+                // One line per such member and start: the holder and the
+                // peer id are named here and nowhere a caller reads.
+                warn_member_endpoint_key_held(
+                    &definition.id,
+                    &held.agent_identity,
+                    &held.holder,
+                    &held.peer_id,
+                    "its recorded endpoint is not restored; the member is listed broken until it is retired",
+                );
+                let bridge_session_id = roster
+                    .get(&held.agent_identity)
+                    .and_then(|entry| entry.member_ref.bridge_session_id().cloned());
+                let _ = roster.set_comms_identity(&held.agent_identity, None, None);
+                seeded_restore_diagnostics.insert(
+                    held.agent_identity,
+                    super::handle::RestoreFailureDiagnostic {
+                        bridge_session_id,
+                        reason: held.reason,
+                        hold: None,
+                        cause_data: None,
+                        registration_refusal: None,
+                    },
+                );
+            }
             // Prepare shared runtime components early so resume reconciliation can
             // wire tool dispatchers for recreated sessions to the final actor channel.
             // Restored dispatchers may read identity and historical creation
@@ -9714,6 +10110,7 @@ impl MobBuilder {
                 machine_state_watch_rx,
                 operator_instruction_delivery:
                     super::operator_instruction_delivery::OperatorInstructionDeliveryShared::new(
+                        definition.id.clone(),
                         wiring.member_residency.instruction_delivery_concurrency,
                     ),
                 reachability_observations,
@@ -9744,6 +10141,7 @@ impl MobBuilder {
                     .unwrap_or_default(),
                 member_grant_mint: wiring.member_residency.member_grant_mint.clone(),
                 member_tool_audience: wiring.member_residency.member_tool_audience.clone(),
+                member_build_preparer: wiring.member_residency.build_preparer.clone(),
             };
             // An identity a replayed respawn abandonment ended loses its
             // scoped tool grants, and those of the sessions MobMachine held
@@ -10782,6 +11180,8 @@ impl MobBuilder {
             host_read_handle: &host_read_handle,
             unreadable_view_is_retryable: false,
             operator_instruction_bodies: &operator_instruction_bodies,
+            operator_instruction_journal: Some(epoch_events),
+            operator_instruction_member_rows: None,
         };
         restore_resumed_members(
             &restore_context,
@@ -10907,7 +11307,10 @@ impl MobBuilder {
                         roster,
                         &tool_handle.restore_diagnostics,
                         entry,
-                        "its live comms runtime exposes no peer id or public key",
+                        member_endpoint_broken_reason(
+                            &entry.agent_identity,
+                            "its live comms runtime exposes no peer id or public key",
+                        ),
                     )
                     .await?;
                     continue;
@@ -10947,7 +11350,10 @@ impl MobBuilder {
                             roster,
                             &tool_handle.restore_diagnostics,
                             entry,
-                            &member_endpoint_mismatch_detail(&candidate, &durable),
+                            member_endpoint_broken_reason(
+                                &entry.agent_identity,
+                                &member_endpoint_mismatch_detail(&candidate, &durable),
+                            ),
                         )
                         .await?;
                         continue;
@@ -10966,16 +11372,43 @@ impl MobBuilder {
                                 entry.agent_identity
                             ))
                         })?;
-                    let recovered_event = append_recovered_session_binding(
+                    // MobMachine may refuse the endpoint the member's session
+                    // came up with. While another member holds its transport
+                    // key, that breaks this member alone, as a refused
+                    // registration below does; every other refusal fails
+                    // the start, as before.
+                    let recovered_event = match append_recovered_session_binding(
                         dsl_authority,
                         &tool_handle.events,
                         &definition.id,
                         entry,
                         bridge_session_id,
-                        Some(spec),
+                        Some(spec.clone()),
                         "resume_upgrade_recovered_member_peer_endpoint",
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(event) => event,
+                        Err(error) => {
+                            let Some(reason) = seeded_member_endpoint_key_held_reason(
+                                dsl_authority.state(),
+                                &definition.id,
+                                &entry.agent_identity,
+                                &spec,
+                            ) else {
+                                return Err(error);
+                            };
+                            record_seeded_member_endpoint_broken(
+                                dsl_authority,
+                                roster,
+                                &tool_handle.restore_diagnostics,
+                                entry,
+                                reason,
+                            )
+                            .await?;
+                            continue;
+                        }
+                    };
                     roster.apply(&recovered_event);
                     tool_handle
                         .roster
@@ -10999,12 +11432,19 @@ impl MobBuilder {
                         &spec,
                         "resume_register_member_peer",
                     ) {
+                        let reason = seeded_member_endpoint_refused_reason(
+                            dsl_authority.state(),
+                            &definition.id,
+                            entry,
+                            &spec,
+                            &error.to_string(),
+                        );
                         record_seeded_member_endpoint_broken(
                             dsl_authority,
                             roster,
                             &tool_handle.restore_diagnostics,
                             entry,
-                            &error.to_string(),
+                            reason,
                         )
                         .await?;
                         continue;
@@ -11019,12 +11459,19 @@ impl MobBuilder {
                 )
                 .await
                 {
+                    let reason = seeded_member_endpoint_refused_reason(
+                        dsl_authority.state(),
+                        &definition.id,
+                        entry,
+                        &spec,
+                        &detail,
+                    );
                     record_seeded_member_endpoint_broken(
                         dsl_authority,
                         roster,
                         &tool_handle.restore_diagnostics,
                         entry,
-                        &detail,
+                        reason,
                     )
                     .await?;
                     continue;
@@ -11430,6 +11877,7 @@ impl MobBuilder {
             // member's release waits on the member's delivery lock).
             let operator_instruction_delivery =
                 super::operator_instruction_delivery::OperatorInstructionDeliveryShared::new(
+                    definition.id.clone(),
                     member_residency.instruction_delivery_concurrency,
                 );
             let handle = MobHandle {
@@ -11475,6 +11923,7 @@ impl MobBuilder {
                     .unwrap_or_default(),
                 member_grant_mint: member_residency.member_grant_mint.clone(),
                 member_tool_audience: member_residency.member_tool_audience.clone(),
+                member_build_preparer: member_residency.build_preparer.clone(),
             };
             if let Some(hook) = before_activation {
                 hook(handle.read_handle()).await?;
@@ -12365,9 +12814,25 @@ pub(super) struct ResumeMemberRestoreContext<'a> {
     /// with the read failure as its diagnostic (the boot rule).
     pub(super) unreadable_view_is_retryable: bool,
     /// The bodies of the mob's Active operator-instruction records: a member
-    /// whose restore mints its session carries its snapshot in it.
+    /// whose restore mints its session carries its snapshot in it. A wake
+    /// hands the shared records' bodies and where the woken member's own
+    /// are (`operator_instruction_member_rows`); a start hands what its
+    /// journal holds in memory and where each member's own body is in
+    /// `operator_instruction_journal`.
     pub(super) operator_instruction_bodies:
         &'a super::operator_instruction_delivery::OperatorInstructionBodies,
+    /// The mob's events of the epoch a start replays, in cursor order: a
+    /// member-targeted record's body is read from its row there. None for a
+    /// wake.
+    pub(super) operator_instruction_journal: Option<&'a [crate::event::MobEvent]>,
+    /// A wake's own member-targeted records: the mob's journal and the rows
+    /// that hold their bodies (slot key, digest, cursor). They are read only
+    /// when the restore mints the member's session, off the mob's actor, so
+    /// a wake that continues a session reads no journal row for them.
+    pub(super) operator_instruction_member_rows: Option<(
+        &'a dyn crate::store::MobEventStore,
+        &'a [(String, String, u64)],
+    )>,
 }
 
 /// Everything a member's restore writes, applied in the member's turn.
@@ -12403,6 +12868,17 @@ pub(super) struct SeatedMemberRestore {
     pub(super) restore_resume_from_role: Option<ProfileName>,
     /// The per-spawn overlay the member is restored with.
     pub(super) restore_overlay: Option<Arc<dyn AgentToolDispatcher>>,
+    /// The host's refusal to compose the seat of a store-owned identity's
+    /// member for this build
+    /// ([`super::MemberBuildPreparer::prepare_store_owned_seat`]): the
+    /// member's provision ends with it, as with a refused build
+    /// preparation, before anything is built.
+    pub(super) seat_refusal: Option<super::MemberBuildPreparationRefusal>,
+    /// Why the row of a store-owned identity could not be read for this
+    /// build: the member's provision ends retryable with it, as a store
+    /// that cannot serve the member now, before its host is asked and
+    /// before anything is built.
+    pub(super) row_unavailable: Option<String>,
 }
 
 /// What a member's restore writes once its request is settled, whatever
@@ -12506,7 +12982,9 @@ pub(super) enum RetryableRestoreCause {
     /// with its session unborn, and a later delivery wakes it again.
     SeatCreateUnavailable,
     /// The restore met work still in flight on the member's session, or a
-    /// store that could not serve it now ([`restore_error_is_retryable`]):
+    /// store that could not serve it now ([`restore_error_is_retryable`];
+    /// the identity store that could not serve a store-owned member's row
+    /// for this build, or holds a row of it this build cannot read):
     /// the member stays Dormant with its boot obligation owed, and its retry
     /// joins the work still in flight.
     RestoreUnavailable,
@@ -13321,18 +13799,107 @@ pub(super) async fn restore_resumed_member(
     } else {
         super::handle::ResumedMemberView::new(bridge_session_id.clone(), None)
     };
+    // A seat that built nothing named a session no build has created yet:
+    // its first materialization creates that session, as a spawn creates
+    // its own, under the id the seat named.
+    let seat_session_unborn =
+        super::boot_plan::domain_member_seat_session_unborn(base.state(), &entry.agent_identity);
+    // A seat's build inputs are set on the request before the customizer,
+    // as a spawn's caller sets a spawn's: the customizer runs over them.
+    let mut restore_request = super::fork_build::seat_resume_request(
+        entry,
+        &restore_view.session_id,
+        candidate.seat_build.as_deref(),
+    );
+    // A store-owned identity's member is seated from its row, with no host
+    // step: its host composes this build's request first, as it composes
+    // the spec of a member it spawns itself. Every build asks it; the first
+    // build of the member's session takes everything it composed, a later
+    // one only its profile and model overrides. A refusal ends this
+    // member's restore where a refused build preparation does, before its
+    // provision (`prepare_member_build_before_provision`), with the request
+    // left as it was. A live actor that is kept builds nothing and asks
+    // nothing.
+    let store_owned_seat = !keeps_live_actor
+        && entry.fork_source.is_none()
+        && super::created_identity::host_composes_seat(base.state(), &entry.agent_identity);
+    let mut seat_refusal = None;
+    // A build of a store-owned member must carry exactly its seat's labels.
+    // Which labels are the seat's is read here, in one point read of the
+    // identity's row at every such build. A row that records its seat is
+    // owed a label restamp (an update committed while the member's seat
+    // row carried other labels, and no seat row has carried the row's
+    // labels since) makes the row's labels the seat's: the host is asked
+    // with them, and the comparison below is made with them, so a host
+    // that answers the row is not refused and a label the row lacks is
+    // refused as ever. The record stays as it is: a build writes no seat
+    // row, so it settles nothing, and the next build after a restart reads
+    // the same. Any other row leaves the seat's labels the member's own,
+    // as its last seat row seated them: a label only the seat carries is
+    // kept or refused by the comparison, never dropped here. A row the
+    // store cannot serve now, or holds in a form this build cannot read,
+    // ends this build for a retry as a store that cannot serve the member
+    // (never as its host's refusal): the member is not built, or refused
+    // for good, on labels its row may not hold, and its host is not asked.
+    let mut row_unavailable = None;
+    let mut owed_row_labels = None;
+    if store_owned_seat && let Some(store) = ctx.tool_handle.identity_member.as_ref() {
+        use super::identity_change::StoreOwnedSeatRow;
+        match super::identity_change::store_owned_seat_row(
+            store.as_ref(),
+            &definition.id,
+            &entry.agent_identity,
+        )
+        .await
+        {
+            Ok(StoreOwnedSeatRow::Row {
+                labels,
+                label_restamp_owed: true,
+            }) => owed_row_labels = Some(labels),
+            Ok(StoreOwnedSeatRow::Row { .. } | StoreOwnedSeatRow::Absent) => {}
+            Ok(StoreOwnedSeatRow::Unreadable) => {
+                row_unavailable = Some(format!(
+                    "the identity store holds a row of store-owned '{}' that this build cannot \
+                     read, so the member's build waits until the row reads again",
+                    entry.agent_identity
+                ));
+            }
+            Err(error) => {
+                row_unavailable = Some(format!(
+                    "the identity store could not serve the row of store-owned '{}' now, so \
+                     the member's build waits for the store and is tried again: {error}",
+                    entry.agent_identity
+                ));
+            }
+        }
+    }
+    let seat_labels = owed_row_labels.as_ref().unwrap_or(&entry.labels);
+    if owed_row_labels.is_some() {
+        restore_request.labels = Some(seat_labels.clone());
+    }
+    if store_owned_seat
+        && row_unavailable.is_none()
+        && let Some(preparer) = ctx.member_build_preparer
+        && let Err(refusal) = Box::pin(super::member_build_preparer::compose_store_owned_seat(
+            preparer.as_ref(),
+            ctx.host_read_handle.clone(),
+            &mut restore_request,
+            seat_session_unborn,
+        ))
+        .await
+    {
+        seat_refusal = Some(refusal);
+    }
     // A customizer refusal (a host policy that is not configured, say) fails
     // this member's restore with the refusal as its diagnostic; the rest of
     // the mob still comes up, and the member is restored once the customizer
     // admits it.
-    // A seat's build inputs are set on the request before the customizer,
-    // as a spawn's caller sets a spawn's: the customizer runs over them.
-    let restore_spec = match super::fork_build::rebuild_seat_resume_spec(
+    let mut restore_spec = match super::fork_build::customize_seat_resume_request(
         &definition.id,
         spawn_member_customizer.as_ref(),
         entry,
         &restore_view,
-        candidate.seat_build.as_deref(),
+        restore_request,
     ) {
         Ok(spec) => spec,
         Err(error) => {
@@ -13347,6 +13914,24 @@ pub(super) async fn restore_resumed_member(
             "spawn customizer cannot change resume restore identity from '{}' to '{}'",
             entry.agent_identity, restore_spec.identity
         )));
+    }
+    // A store-owned member carries its seat's labels and no others: the
+    // labels this build carries are compared with them here, once the
+    // host's spawn customizer ran, so a label the customizer set, dropped
+    // or changed is refused as one its composition answered is, for good,
+    // whether or not a build preparer is configured.
+    if store_owned_seat && row_unavailable.is_none() && seat_refusal.is_none() {
+        seat_refusal = super::MemberBuildPreparationRefusal::seat_labels_differ(
+            &entry.agent_identity,
+            seat_labels,
+            restore_spec.labels.as_ref().unwrap_or(seat_labels),
+        );
+        // A customizer that named no labels left the seat's: the build
+        // carries the labels the comparison was made with, the row's for a
+        // seat owed its restamp, never the roster entry's by a fallback.
+        if owed_row_labels.is_some() && restore_spec.labels.is_none() {
+            restore_spec.labels = Some(seat_labels.clone());
+        }
     }
     if restore_spec.role_name != entry.role {
         return Err(MobError::Internal(format!(
@@ -13518,13 +14103,10 @@ pub(super) async fn restore_resumed_member(
         restore_spec,
         restore_resume_from_role,
         restore_overlay,
+        seat_refusal,
+        row_unavailable,
     };
 
-    // A seat that built nothing named a session no build has created yet:
-    // its first materialization creates that session, as a spawn creates
-    // its own, under the id the seat named.
-    let seat_session_unborn =
-        super::boot_plan::domain_member_seat_session_unborn(base.state(), &entry.agent_identity);
     let outcome = if matches!(entry.member_ref, MemberRef::Session { .. })
         && session_service.supports_persistent_sessions()
     {
@@ -13645,14 +14227,46 @@ async fn unstage_member_build_hold(ctx: &ResumeMemberRestoreContext<'_>, session
 /// Ask the host's build preparer, when one is configured, before a member's
 /// provision. `Ok(None)` proceeds (a requested hold is staged on the member's
 /// next registration first); `Ok(Some(outcome))` is the provision outcome a
-/// refusal ends the member's restore with.
+/// refusal ends the member's restore with. `seat_refusal`, the host's
+/// refusal to compose the seat of a store-owned identity's member for this
+/// build, ends the restore the same way, and the host is not asked to
+/// prepare a build it refused to compose. `row_unavailable`, a row of a
+/// store-owned identity that could not be read for this build, ends the
+/// restore retryable first, as a store that cannot serve the member now
+/// ([`RetryableRestoreCause::RestoreUnavailable`]): the host was asked
+/// nothing and is asked nothing.
 #[cfg(feature = "runtime-adapter")]
 async fn prepare_member_build_before_provision(
     ctx: &ResumeMemberRestoreContext<'_>,
     entry: &RosterEntry,
     bridge_session_id: &SessionId,
     authority: &crate::machines::mob_machine::MobMachineAuthority,
+    seated: &SeatedMemberRestore,
 ) -> Result<Option<MemberRestoreProvisionOutcome>, MobError> {
+    if let Some(reason) = &seated.row_unavailable {
+        return Ok(Some(MemberRestoreProvisionOutcome::Retryable {
+            reason: reason.clone(),
+            cause: RetryableRestoreCause::RestoreUnavailable,
+        }));
+    }
+    let seat_refusal = seated.seat_refusal.as_ref();
+    let refused = |refusal: super::MemberBuildPreparationRefusal| match refusal {
+        super::MemberBuildPreparationRefusal::Retryable { reason } => {
+            MemberRestoreProvisionOutcome::Retryable {
+                reason,
+                cause: RetryableRestoreCause::BuildPreparation,
+            }
+        }
+        super::MemberBuildPreparationRefusal::Final { reason } => {
+            MemberRestoreProvisionOutcome::Failed(member_restore_failure(
+                bridge_session_id,
+                format!("the host refused to prepare the member's build: {reason}"),
+            ))
+        }
+    };
+    if let Some(refusal) = seat_refusal {
+        return Ok(Some(refused(refusal.clone())));
+    }
     let Some(preparer) = ctx.member_build_preparer else {
         return Ok(None);
     };
@@ -13676,18 +14290,7 @@ async fn prepare_member_build_before_provision(
                 .await?;
             Ok(None)
         }
-        Err(super::MemberBuildPreparationRefusal::Retryable { reason }) => {
-            Ok(Some(MemberRestoreProvisionOutcome::Retryable {
-                reason,
-                cause: RetryableRestoreCause::BuildPreparation,
-            }))
-        }
-        Err(super::MemberBuildPreparationRefusal::Final { reason }) => Ok(Some(
-            MemberRestoreProvisionOutcome::Failed(member_restore_failure(
-                bridge_session_id,
-                format!("the host refused to prepare the member's build: {reason}"),
-            )),
-        )),
+        Err(refusal) => Ok(Some(refused(refusal))),
     }
 }
 
@@ -13893,7 +14496,8 @@ pub(super) async fn provision_durable_member_restore(
     };
     // The host prepares the member's build before its provision.
     if let Some(outcome) =
-        prepare_member_build_before_provision(ctx, entry, bridge_session_id, &authority).await?
+        prepare_member_build_before_provision(ctx, entry, bridge_session_id, &authority, seated)
+            .await?
     {
         return Ok(MemberRestoreProvision {
             profile,
@@ -14287,14 +14891,39 @@ async fn provision_fresh_member_session(
         super::actor::admit_bridge_session_for_spawn(&mut provision_request.create_session);
     // The session this restore mints is born with the member's operator
     // instruction snapshot (an unborn seat's first wake, a recreated
-    // session).
+    // session). A wake's own member-targeted bodies are read from their
+    // journal rows here, and only for a build that carries the snapshot.
+    let member_bodies = match ctx.operator_instruction_member_rows {
+        Some((events, rows))
+            if !rows.is_empty()
+                && super::operator_instruction_delivery::birth_carries_member_instructions(
+                    &provision_request.create_session,
+                    base.state(),
+                ) =>
+        {
+            let read =
+                super::operator_instruction_delivery::read_journaled_bodies(events, rows.to_vec())
+                    .await?;
+            Some(ctx.operator_instruction_bodies.for_member(read))
+        }
+        _ => None,
+    };
+    // The member is seated: its fork lineage root is MobMachine's own.
+    let lineage_root = super::operator_instruction_delivery::member_lineage_root(
+        base.state(),
+        &entry.agent_identity,
+    );
     super::operator_instruction_delivery::carry_member_instruction_birth(
         &mut provision_request.create_session,
         base.state(),
-        ctx.operator_instruction_bodies,
+        member_bodies
+            .as_ref()
+            .unwrap_or(ctx.operator_instruction_bodies),
+        ctx.operator_instruction_journal,
         &definition.id,
         &entry.agent_identity,
         entry.role.as_str(),
+        lineage_root.as_ref(),
     )?;
     provision_request.generated_self_owned_operation_owner =
         Some(authorize_seeded_session_provision_operation_owner(
@@ -14305,9 +14934,14 @@ async fn provision_fresh_member_session(
             "resume_fresh_member_session_provision_owner",
         )?);
     // The host prepares the member's build before its provision.
-    if let Some(outcome) =
-        prepare_member_build_before_provision(ctx, entry, &admitted_bridge_session_id, &authority)
-            .await?
+    if let Some(outcome) = prepare_member_build_before_provision(
+        ctx,
+        entry,
+        &admitted_bridge_session_id,
+        &authority,
+        seated,
+    )
+    .await?
     {
         return Ok(outcome);
     }
@@ -14541,16 +15175,43 @@ async fn restore_member_on_successor(
         None
     };
     let recovered_endpoint_missing = recovered_endpoint.is_none();
-    let recovered_event = append_recovered_session_binding(
+    // A live successor the member keeps brings its endpoint with it, and
+    // MobMachine may refuse that endpoint. While another member holds its
+    // transport key, that breaks this member alone and nothing is repointed;
+    // every other refusal fails the restore, as before.
+    let recovered_event = match append_recovered_session_binding(
         commit.authority,
         &commit.tool_handle.events,
         &definition.id,
         entry,
         &replacement_session_id,
-        recovered_endpoint,
+        recovered_endpoint.clone(),
         "resume_repoint_missing_member_session_binding",
     )
-    .await?;
+    .await
+    {
+        Ok(event) => event,
+        Err(error) => {
+            let key_held = recovered_endpoint.as_ref().and_then(|refused| {
+                seeded_member_endpoint_key_held_reason(
+                    commit.authority.state(),
+                    &definition.id,
+                    &entry.agent_identity,
+                    refused,
+                )
+            });
+            let Some(reason) = key_held else {
+                return Err(error);
+            };
+            record_member_restore_failure(
+                commit.tool_handle,
+                entry,
+                member_restore_failure(&replacement_session_id, reason),
+            )
+            .await;
+            return Ok(None);
+        }
+    };
     commit.roster.apply(&recovered_event);
     commit
         .tool_handle
@@ -16328,6 +16989,7 @@ mod tests {
                 record: record.clone(),
                 disposition: PlacedCarrierRecoveryDisposition::CommittedCurrent,
                 identity_entry: None,
+                instruction_lineage_root: None,
             }],
             current_committed_event_keys: BTreeSet::from([(
                 record.agent_identity.clone(),
@@ -18637,6 +19299,515 @@ mod tests {
         assert!(authority.state().member_kickoff_pending.contains(
             &crate::machines::mob_machine::AgentIdentity::from_domain(&identity,)
         ));
+    }
+
+    /// The endpoint of `identity` that carries the key `key` under the
+    /// member's own name and address.
+    fn member_endpoint_with_key(
+        definition: &MobDefinition,
+        identity: &AgentIdentity,
+        key: [u8; 32],
+    ) -> meerkat_core::comms::TrustedPeerDescriptor {
+        let comms_name = format!("{}/worker/{identity}", definition.id);
+        meerkat_core::comms::TrustedPeerDescriptor {
+            peer_id: meerkat_comms::PubKey::new(key).to_peer_id(),
+            name: meerkat_core::comms::PeerName::new(comms_name.clone()).expect("a peer name"),
+            address: meerkat_core::comms::PeerAddress::parse(format!("inproc://{comms_name}"))
+                .expect("an address"),
+            pubkey: key,
+        }
+    }
+
+    /// A `MemberSpawned` row of `identity` (generation 0) whose endpoint
+    /// carries the key `key` under the member's own name and address.
+    fn member_spawned_row_with_key(
+        definition: &MobDefinition,
+        cursor: u64,
+        identity: &AgentIdentity,
+        key: [u8; 32],
+    ) -> MobEvent {
+        let endpoint = member_endpoint_with_key(definition, identity, key);
+        MobEvent {
+            cursor,
+            timestamp: Utc::now(),
+            mob_id: definition.id.clone(),
+            kind: MobEventKind::MemberSpawned(
+                MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::INITIAL,
+                    FenceToken::new(cursor),
+                    AgentRuntimeId::initial(identity.clone()),
+                    ProfileName::from("worker"),
+                )
+                .with_member_peer_endpoint(Some(endpoint)),
+            ),
+        }
+    }
+
+    /// A journal whose second `MemberSpawned` row carries the endpoint key
+    /// of the first row's member (an earlier release wrote the row before
+    /// MobMachine refused the endpoint) replays: the first member keeps the
+    /// endpoint, and the second is recorded a restore failure, with no
+    /// endpoint.
+    #[test]
+    fn seeded_authority_replays_a_row_of_another_members_key_as_a_restore_failure() {
+        let definition = MobDefinition::explicit("test-shared-key-mob");
+        let (holder, second) = (AgentIdentity::from("alice"), AgentIdentity::from("carol"));
+        let key = [7u8; 32];
+        let events = vec![
+            member_spawned_row_with_key(&definition, 1, &holder, key),
+            member_spawned_row_with_key(&definition, 2, &second, key),
+        ];
+        let mut authority = seed_mob_authority();
+
+        seed_mob_authority_sync_from_events(
+            &mut authority,
+            &events,
+            &definition,
+            false,
+            &BTreeSet::new(),
+        )
+        .expect("a row that carries another member's key must not fail the replay");
+
+        let state = authority.state();
+        let (dsl_holder, dsl_second) = (
+            mob_dsl::AgentIdentity::from_domain(&holder),
+            mob_dsl::AgentIdentity::from_domain(&second),
+        );
+        assert!(
+            state.member_peer_endpoints.contains_key(&dsl_holder),
+            "the first member keeps its endpoint"
+        );
+        assert!(!state.member_restore_failures.contains_key(&dsl_holder));
+        assert!(
+            state.identity_to_runtime.contains_key(&dsl_second),
+            "the second member stays a member"
+        );
+        assert!(
+            !state.member_peer_endpoints.contains_key(&dsl_second)
+                && !state.member_peer_ids.contains_key(&dsl_second),
+            "the second member holds no endpoint"
+        );
+        let reason = state
+            .member_restore_failures
+            .get(&dsl_second)
+            .expect("the second member is recorded a restore failure");
+        let peer_id = meerkat_comms::PubKey::new(key).to_peer_id().to_string();
+        assert!(
+            reason.contains("carol") && !reason.contains("alice") && !reason.contains(&peer_id),
+            "the reason names the broken member alone, without the holder or the peer id: {reason}"
+        );
+    }
+
+    /// Every other refusal of a row's endpoint still fails the replay: a row
+    /// whose endpoint generation is not its incarnation's is refused by
+    /// MobMachine with no other member holding its key, and with one holding
+    /// a different key.
+    #[test]
+    fn seeded_authority_still_fails_on_an_endpoint_row_refused_for_another_reason() {
+        let definition = MobDefinition::explicit("test-endpoint-refusal-mob");
+        let (holder, second) = (AgentIdentity::from("alice"), AgentIdentity::from("carol"));
+        let mismatched = |cursor: u64, key: [u8; 32]| {
+            let mut row = member_spawned_row_with_key(&definition, cursor, &second, key);
+            let MobEventKind::MemberSpawned(spawned) = &mut row.kind else {
+                unreachable!("a MemberSpawned row");
+            };
+            // The endpoint signal carries the row's generation; the
+            // incarnation it names was recovered at generation 0.
+            spawned.generation = Generation::new(1);
+            row
+        };
+        for (label, events) in [
+            ("no other member", vec![mismatched(1, [9u8; 32])]),
+            (
+                "another member with its own key",
+                vec![
+                    member_spawned_row_with_key(&definition, 1, &holder, [7u8; 32]),
+                    mismatched(2, [9u8; 32]),
+                ],
+            ),
+        ] {
+            let mut authority = seed_mob_authority();
+            let error = seed_mob_authority_sync_from_events(
+                &mut authority,
+                &events,
+                &definition,
+                false,
+                &BTreeSet::new(),
+            )
+            .expect_err(label);
+            assert!(
+                error
+                    .to_string()
+                    .contains("recover_member_spawned_peer_endpoint"),
+                "{label}: the endpoint signal's own refusal fails the replay: {error}"
+            );
+        }
+    }
+
+    /// The rows of a member that was spawned on the key `spawned_on` and
+    /// whose recovered session binding then moved it to the key `moved_to`:
+    /// MobMachine keeps `spawned_on` as the member's prior endpoint.
+    fn rows_of_a_member_moved_to_another_key(
+        definition: &MobDefinition,
+        cursor: u64,
+        identity: &AgentIdentity,
+        spawned_on: [u8; 32],
+        moved_to: [u8; 32],
+    ) -> [MobEvent; 2] {
+        let session = meerkat_core::types::SessionId::new();
+        let mut spawned = member_spawned_row_with_key(definition, cursor, identity, spawned_on);
+        let MobEventKind::MemberSpawned(row) = &mut spawned.kind else {
+            unreachable!("a MemberSpawned row");
+        };
+        row.bridge_member_ref = Some(crate::event::MemberRef::from_bridge_session_id(
+            session.clone(),
+        ));
+        let moved = MobEvent {
+            cursor: cursor + 1,
+            timestamp: Utc::now(),
+            mob_id: definition.id.clone(),
+            kind: MobEventKind::MemberSessionBindingRecovered(
+                crate::event::MemberSessionBindingRecoveredEvent::new(
+                    identity.clone(),
+                    AgentRuntimeId::initial(identity.clone()),
+                    session,
+                )
+                .with_member_peer_endpoint(Some(member_endpoint_with_key(
+                    definition, identity, moved_to,
+                ))),
+            ),
+        };
+        [spawned, moved]
+    }
+
+    /// What the replay does today with a refused endpoint row while another
+    /// member holds the row's key, pinned: it asks who holds the key, not
+    /// why MobMachine refused, so the row's member is recorded a restore
+    /// failure with the key-held reason, holds no endpoint, and the replay
+    /// goes on. That covers a row MobMachine refuses for a second reason
+    /// too (an endpoint generation that is not its incarnation's) and a key
+    /// its holder carries as a prior endpoint. The row without any holder
+    /// still fails the replay
+    /// (`seeded_authority_still_fails_on_an_endpoint_row_refused_for_another_reason`).
+    #[test]
+    fn seeded_authority_replays_every_refused_endpoint_row_as_a_restore_failure_while_another_member_holds_its_key()
+     {
+        let definition = MobDefinition::explicit("test-key-holder-mob");
+        let (holder, second) = (AgentIdentity::from("alice"), AgentIdentity::from("carol"));
+        let (key, later_key) = ([7u8; 32], [8u8; 32]);
+        let mismatched = {
+            let mut row = member_spawned_row_with_key(&definition, 2, &second, key);
+            let MobEventKind::MemberSpawned(spawned) = &mut row.kind else {
+                unreachable!("a MemberSpawned row");
+            };
+            spawned.generation = Generation::new(1);
+            row
+        };
+        let [holder_spawned, holder_moved] =
+            rows_of_a_member_moved_to_another_key(&definition, 1, &holder, key, later_key);
+        for (label, events, holder_key) in [
+            (
+                "a second refusal reason and a holder of the same key",
+                vec![
+                    member_spawned_row_with_key(&definition, 1, &holder, key),
+                    mismatched,
+                ],
+                key,
+            ),
+            (
+                "a holder through a prior endpoint",
+                vec![
+                    holder_spawned,
+                    holder_moved,
+                    member_spawned_row_with_key(&definition, 3, &second, key),
+                ],
+                later_key,
+            ),
+        ] {
+            let mut authority = seed_mob_authority();
+            seed_mob_authority_sync_from_events(
+                &mut authority,
+                &events,
+                &definition,
+                false,
+                &BTreeSet::new(),
+            )
+            .unwrap_or_else(|error| panic!("{label}: the replay goes on: {error}"));
+
+            let state = authority.state();
+            let (dsl_holder, dsl_second) = (
+                mob_dsl::AgentIdentity::from_domain(&holder),
+                mob_dsl::AgentIdentity::from_domain(&second),
+            );
+            assert_eq!(
+                state.member_peer_endpoints.get(&dsl_holder),
+                Some(&mob_dsl::MemberPeerEndpoint::from(
+                    &member_endpoint_with_key(&definition, &holder, holder_key)
+                )),
+                "{label}: the holder keeps its endpoint"
+            );
+            assert!(
+                !state.member_restore_failures.contains_key(&dsl_holder),
+                "{label}: the holder is not broken"
+            );
+            assert!(
+                state.identity_to_runtime.contains_key(&dsl_second)
+                    && !state.member_peer_endpoints.contains_key(&dsl_second)
+                    && !state.member_peer_ids.contains_key(&dsl_second),
+                "{label}: the row's member stays a member and holds no endpoint"
+            );
+            assert_eq!(
+                state.member_restore_failures.get(&dsl_second),
+                Some(&member_endpoint_key_held_reason(&second)),
+                "{label}: the row's member is recorded the key-held restore failure"
+            );
+        }
+    }
+
+    /// A start states its restore failures to MobMachine. Once the mob is no
+    /// longer Running, the one failure MobMachine already holds with the same
+    /// reason (the replay recorded it) is not stated again; a failure it
+    /// holds with another reason, and one it does not hold, are stated and
+    /// refused, so the start fails closed. A Running start states them all.
+    #[test]
+    fn a_start_states_no_restore_failure_twice_to_a_mob_that_is_no_longer_running() {
+        let definition = MobDefinition::explicit("test-restore-failure-stopped-mob");
+        let (holder, second) = (AgentIdentity::from("alice"), AgentIdentity::from("carol"));
+        let key = [7u8; 32];
+        let events = vec![
+            member_spawned_row_with_key(&definition, 1, &holder, key),
+            member_spawned_row_with_key(&definition, 2, &second, key),
+        ];
+        let mut authority = seed_mob_authority();
+        seed_mob_authority_sync_from_events(
+            &mut authority,
+            &events,
+            &definition,
+            false,
+            &BTreeSet::new(),
+        )
+        .expect("the journal replays");
+        let reason = member_endpoint_key_held_reason(&second);
+        assert_eq!(
+            authority
+                .state()
+                .member_restore_failures
+                .get(&mob_dsl::AgentIdentity::from_domain(&second)),
+            Some(&reason),
+            "the replay recorded the row's member its restore failure"
+        );
+        let diagnostic = |member: &AgentIdentity, reason: &str| {
+            HashMap::from([(
+                member.clone(),
+                crate::runtime::handle::RestoreFailureDiagnostic {
+                    bridge_session_id: None,
+                    reason: reason.to_string(),
+                    hold: None,
+                    cause_data: None,
+                    registration_refusal: None,
+                },
+            )])
+        };
+
+        let epoch = authority.state().topology_epoch;
+        seed_mob_authority_restore_failures(&mut authority, &diagnostic(&second, &reason))
+            .expect("a Running start states the failure again");
+        assert_ne!(
+            authority.state().topology_epoch,
+            epoch,
+            "a Running start states the failure to MobMachine, which takes it"
+        );
+
+        finish_seeded_mob_authority_phase(&mut authority, MobState::Stopped)
+            .expect("the mob was stopped");
+        let epoch = authority.state().topology_epoch;
+        seed_mob_authority_restore_failures(&mut authority, &diagnostic(&second, &reason))
+            .expect("the failure MobMachine holds is not stated to a stopped mob again");
+        assert_eq!(
+            authority.state().topology_epoch,
+            epoch,
+            "nothing is stated to the stopped mob"
+        );
+        assert_eq!(
+            authority
+                .state()
+                .member_restore_failures
+                .get(&mob_dsl::AgentIdentity::from_domain(&second)),
+            Some(&reason),
+            "MobMachine holds the failure as the replay recorded it"
+        );
+        for (label, member, stated) in [
+            ("held with another reason", &second, "another reason"),
+            ("not held", &holder, reason.as_str()),
+        ] {
+            let error =
+                seed_mob_authority_restore_failures(&mut authority, &diagnostic(member, stated))
+                    .expect_err(label);
+            assert!(
+                error.to_string().contains("phase Stopped"),
+                "{label}: a stopped mob refuses the failure: {error}"
+            );
+        }
+    }
+
+    /// `member_endpoint_key_holder` is the shell's reading of the one rule
+    /// MobMachine refuses an endpoint by (`peer_id_available_for_identity`),
+    /// which the shell cannot call. For a member that holds no endpoint the
+    /// two must agree: MobMachine refuses the endpoint, at a replay and at a
+    /// spawn, exactly when the lookup names another member, whether that
+    /// member holds the key now or as a prior endpoint. A member's own
+    /// current endpoint is admitted and has no other holder. This row fails
+    /// when MobMachine's rule and the lookup drift apart.
+    #[test]
+    fn member_endpoint_key_holder_agrees_with_mobmachines_refusal_of_an_endpoint() {
+        let definition = MobDefinition::explicit("test-key-holder-agreement-mob");
+        let (moved, settled, unkeyed) = (
+            AgentIdentity::from("alice"),
+            AgentIdentity::from("dave"),
+            AgentIdentity::from("carol"),
+        );
+        let (prior_key, current_key, settled_key, free_key) =
+            ([7u8; 32], [8u8; 32], [9u8; 32], [10u8; 32]);
+        let [moved_spawned, moved_binding] =
+            rows_of_a_member_moved_to_another_key(&definition, 1, &moved, prior_key, current_key);
+        let events = vec![
+            moved_spawned,
+            moved_binding,
+            member_spawned_row_with_key(&definition, 3, &settled, settled_key),
+            MobEvent {
+                cursor: 4,
+                timestamp: Utc::now(),
+                mob_id: definition.id.clone(),
+                kind: MobEventKind::MemberSpawned(MemberSpawnedEvent::new(
+                    unkeyed.clone(),
+                    Generation::INITIAL,
+                    FenceToken::new(4),
+                    AgentRuntimeId::initial(unkeyed.clone()),
+                    ProfileName::from("worker"),
+                )),
+            },
+        ];
+        let mut authority = seed_mob_authority();
+        seed_mob_authority_sync_from_events(
+            &mut authority,
+            &events,
+            &definition,
+            false,
+            &BTreeSet::new(),
+        )
+        .expect("the journal replays");
+        assert!(
+            authority
+                .state()
+                .member_prior_peer_endpoints
+                .contains_key(&mob_dsl::AgentIdentity::from_domain(&moved)),
+            "the moved member carries its first key as a prior endpoint"
+        );
+
+        for (label, identity, fence, key, refused) in [
+            (
+                "another member's current key",
+                &unkeyed,
+                4,
+                current_key,
+                true,
+            ),
+            ("another member's prior key", &unkeyed, 4, prior_key, true),
+            ("a third member's key", &unkeyed, 4, settled_key, true),
+            ("a key no member holds", &unkeyed, 4, free_key, false),
+            (
+                "the member's own current key",
+                &settled,
+                3,
+                settled_key,
+                false,
+            ),
+        ] {
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+            let peer_endpoint = mob_dsl::MemberPeerEndpoint::from(&member_endpoint_with_key(
+                &definition,
+                identity,
+                key,
+            ));
+            let runtime_id =
+                mob_dsl::AgentRuntimeId::from_domain(&AgentRuntimeId::initial(identity.clone()));
+            let replay_refused = authority
+                .prepare_authority()
+                .apply_signal(
+                    mob_dsl::MobMachineSignal::RecoverSpawnedMemberPeerEndpoint {
+                        agent_identity: dsl_identity.clone(),
+                        agent_runtime_id: runtime_id.clone(),
+                        fence_token: mob_dsl::FenceToken::from_domain(FenceToken::new(fence)),
+                        generation: mob_dsl::Generation::from_domain(Generation::INITIAL),
+                        peer_endpoint: peer_endpoint.clone(),
+                    },
+                )
+                .is_err();
+            let spawn_refused = mob_dsl::MobMachineMutator::apply(
+                &mut authority.prepare_authority(),
+                mob_dsl::MobMachineInput::RegisterMemberPeer {
+                    agent_identity: dsl_identity.clone(),
+                    agent_runtime_id: runtime_id,
+                    generation: mob_dsl::Generation::from_domain(Generation::INITIAL),
+                    fence_token: mob_dsl::FenceToken::from_domain(FenceToken::new(fence)),
+                    peer_endpoint: peer_endpoint.clone(),
+                },
+            )
+            .is_err();
+            let holder =
+                member_endpoint_key_holder(authority.state(), &dsl_identity, &peer_endpoint);
+            assert_eq!(
+                (replay_refused, spawn_refused, holder.is_some()),
+                (refused, refused, refused),
+                "{label}: MobMachine's refusal (at a replay, at a spawn) and the lookup's holder ({holder:?}) agree"
+            );
+        }
+    }
+
+    /// The rule by which a start breaks one member instead of failing: a
+    /// live endpoint MobMachine refused is the key-held case only while
+    /// another member holds its transport key. Then the reason names the
+    /// refused member alone; with no holder, or for the member's own key,
+    /// there is no such reason and the start keeps its own answer.
+    #[test]
+    fn a_start_reads_a_refused_live_endpoint_as_key_held_only_while_another_member_holds_its_key() {
+        let definition = MobDefinition::explicit("test-live-endpoint-key-held-mob");
+        let (holder, second) = (AgentIdentity::from("alice"), AgentIdentity::from("carol"));
+        let (held_key, own_key, free_key) = ([7u8; 32], [8u8; 32], [9u8; 32]);
+        let events = vec![
+            member_spawned_row_with_key(&definition, 1, &holder, held_key),
+            member_spawned_row_with_key(&definition, 2, &second, own_key),
+        ];
+        let mut authority = seed_mob_authority();
+        seed_mob_authority_sync_from_events(
+            &mut authority,
+            &events,
+            &definition,
+            false,
+            &BTreeSet::new(),
+        )
+        .expect("the journal replays");
+        let key_held = |key: [u8; 32]| {
+            seeded_member_endpoint_key_held_reason(
+                authority.state(),
+                &definition.id,
+                &second,
+                &member_endpoint_with_key(&definition, &second, key),
+            )
+        };
+
+        let reason = key_held(held_key).expect("another member holds the key");
+        assert_eq!(reason, member_endpoint_key_held_reason(&second));
+        let peer_id = meerkat_comms::PubKey::new(held_key)
+            .to_peer_id()
+            .to_string();
+        assert!(
+            reason.contains("carol") && !reason.contains("alice") && !reason.contains(&peer_id),
+            "the reason names the refused member alone, without the holder or the peer id: {reason}"
+        );
+        assert_eq!(key_held(free_key), None, "no member holds the key");
+        assert_eq!(key_held(own_key), None, "the key is the member's own");
     }
 
     #[test]

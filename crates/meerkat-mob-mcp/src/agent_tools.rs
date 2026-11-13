@@ -673,15 +673,25 @@ impl AgentMobToolSurface {
                 "tool '{tool_name}' member admission failed: {error}"
             ))
         })?;
+        // A member the mob's host hides from the caller's member tools is
+        // answered as a name the mob does not hold, whatever the caller's
+        // scope and before its ownership of the target is looked at:
+        // nothing is read from the member or done to it.
+        let caller = self.caller_identity_in(&handle).await;
+        if !handle
+            .members_hidden_from(caller.as_ref(), std::slice::from_ref(target))
+            .await
+            .is_empty()
+        {
+            return Err(
+                meerkat_mob::MemberTargetAbsence::NotFound.to_tool_error(tool_name, mob_id, target)
+            );
+        }
         let can_manage_mob = self
             .authority_over(mob_id, &handle)
             .await
             .can_manage_mob(mob_id.as_str(), handle.incarnation());
-        let caller = if can_manage_mob {
-            None
-        } else {
-            self.caller_identity_in(&handle).await
-        };
+        let caller = if can_manage_mob { None } else { caller };
         match handle
             .resolve_owned_member_target_admission(can_manage_mob, caller.as_ref(), target)
             .await
@@ -1927,6 +1937,20 @@ impl AgentMobToolSurface {
                 .ensure_mob_scope_authority(call.name, &source_mob_id)
                 .await?;
             let source_identity = AgentIdentity::from(participant.member_id);
+            // A member the source mob's host hides from the convener's
+            // member tools answers as a name that mob does not hold, before
+            // anything is read from it: nothing is forked.
+            let convener = self.caller_identity_in(&source).await;
+            if !source
+                .members_hidden_from(convener.as_ref(), std::slice::from_ref(&source_identity))
+                .await
+                .is_empty()
+            {
+                return Err(Self::map_mob_error(
+                    call,
+                    MobError::MemberNotFound(source_identity),
+                ));
+            }
             let source_profile = source
                 .effective_member_profile(&source_identity)
                 .await
@@ -2304,12 +2328,15 @@ impl AgentMobToolSurface {
             .current_mob_admission(call.name, &mob_id, &handle)
             .await?;
         self.state.pause_agent_call().await;
+        // The calling member, when it is a member of the listed mob: the
+        // owner view and the host's member tool audience both read it.
+        let caller = self.caller_identity_in(&handle).await;
         let owner_view = if manage {
             None
         } else {
             // Without manage scope a member of this mob still sees the
             // members it spawned (e.g. its fork_off children), and only those.
-            match self.caller_identity_in(&handle).await {
+            match caller.clone() {
                 Some(caller) => Some(caller),
                 None => return Err(ToolError::access_denied(call.name)),
             }
@@ -2333,6 +2360,10 @@ impl AgentMobToolSurface {
             }
             members = owned;
         }
+        // A member the mob's host hides from the caller's member tools is
+        // not in the list at all, with manage scope too, and no listed
+        // member's wiring names it.
+        let members = handle.member_rows_shown_to(caller.as_ref(), members).await;
 
         Self::encode_result(call, json!({"members": members}))
     }
@@ -2388,6 +2419,30 @@ impl AgentMobToolSurface {
     // ─── Profile CRUD dispatch ────────────────────────────────────────
     // ─── Wire / Unwire ────────────────────────────────────────────────
 
+    /// A wire or unwire that names a member the mob's host hides from the
+    /// caller's member tools is answered as one that names a member the mob
+    /// does not hold, before the mob is asked: nothing is wired or unwired.
+    async fn ensure_wire_ends_shown(
+        &self,
+        call: ToolCallView<'_>,
+        handle: &MobHandle,
+        local: &AgentIdentity,
+        target: &meerkat_mob::PeerTarget,
+    ) -> Result<(), ToolError> {
+        let peer = match target {
+            meerkat_mob::PeerTarget::Local(peer) => Some(peer),
+            _ => None,
+        };
+        let caller = self.caller_identity_in(handle).await;
+        match handle
+            .wire_end_answered_absent(caller.as_ref(), local, peer)
+            .await
+        {
+            Some(absent) => Err(Self::map_mob_error(call, MobError::MemberNotFound(absent))),
+            None => Ok(()),
+        }
+    }
+
     async fn dispatch_mob_wire(
         &self,
         call: ToolCallView<'_>,
@@ -2401,6 +2456,8 @@ impl AgentMobToolSurface {
 
         let local = AgentIdentity::from(args.member_id.as_str());
         let target = wire_peer_target_from_args(args.peer);
+        self.ensure_wire_ends_shown(call, &audit_handle, &local, &target)
+            .await?;
         audit_handle
             .wire(local, target)
             .await
@@ -2423,6 +2480,8 @@ impl AgentMobToolSurface {
 
         let local = AgentIdentity::from(args.member_id.as_str());
         let target = unwire_peer_target_from_args(args.peer)?;
+        self.ensure_wire_ends_shown(call, &audit_handle, &local, &target)
+            .await?;
         audit_handle
             .unwire(local, target)
             .await
@@ -2930,12 +2989,18 @@ fn build_tool_defs_with_profile_support(
              Each helper gets its own session that exists only for the delegated task. Helpers \
              do not persist between your turns. Once a helper completes or is retired, its session \
              is archived. Use delegate for work you want done and reported back, not for \
-             long-lived collaborators (use mob_create + mob_spawn_member for those).\n\n\
+             an agent that should stay. A long-term agent (a durable, named member with its \
+             own conversation and memory) is made with identity_create, when your tool list \
+             has it; mob_create + mob_spawn_member make workers that you manage and retire \
+             yourself.\n\n\
              WHEN TO USE DELEGATE vs MOB_*:\n\
              - delegate: Quick one-off tasks with an exact bounded result returned by the call.\n\
-             - mob_create + mob_spawn_member: Multi-member teams, custom wiring/flows, reusable \
-               profiles, long-lived collaborators, or when you need fine-grained control over \
-               backend, runtime_mode, and topology.\n\n\
+             - mob_create + mob_spawn_member: Multi-member teams of workers, custom \
+               wiring/flows, reusable profiles, or when you need fine-grained control over \
+               backend, runtime_mode, and topology.\n\
+             - identity_create (when your tool list has it): a long-term agent that stays \
+               after your work: durable, named, with its own conversation and memory. The \
+               worker tools do not make one.\n\n\
              TOOLING OPTIONS:\n\
              By default, the helper inherits your current tool set (inherit_parent mode). \
              Override via the tooling parameter:\n\
@@ -2977,7 +3042,10 @@ fn build_tool_defs_with_profile_support(
              - Use delegate for quick one-off helpers that run a single task and are discarded.\n\
              - Use mob_create when you need: multiple coordinated members, custom communication \
                wiring, flow-based execution (repeat_until loops), named profiles for role-based \
-               spawning, or long-lived teams that persist across interactions.\n\n\
+               spawning, or a team of workers that persists across your interactions.\n\
+             - Use identity_create (when your tool list has it) for a long-term agent: a \
+               durable, named member with its own conversation and memory that stays after \
+               your work. A mob you create holds workers you manage and retire.\n\n\
              KEY DEFINITION FIELDS:\n\
              - id: Unique mob identifier (string).\n\
              - profiles: Named role templates (inline or realm profile references) that members \
@@ -3108,7 +3176,8 @@ fn build_tool_defs_with_profile_support(
              and session metadata. More efficient than calling mob_check_member on each member \
              individually when you need a status overview of the whole mob.\n\n\
              Without manage scope over the mob, you see only the members you own: the members \
-             you forked and, transitively, the members they forked.",
+             you forked and, transitively, the members they forked. A member the mob's host \
+             keeps from your member tools is not listed, with manage scope too.",
             typed_schema::<MobIdArgs>(),
         ),
         tool_def(
@@ -4441,6 +4510,40 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+
+    /// The worker tools make workers. No worker tool's text sends a model to
+    /// them for an agent that should stay: `delegate` and `mob_create` name
+    /// `identity_create` for a long-term agent, as a tool a host may offer.
+    #[test]
+    fn the_worker_tools_text_keeps_workers_for_workers() {
+        let tools = build_tool_defs();
+        for tool in tools.iter() {
+            let text = tool.description.to_lowercase();
+            for sent_here in ["long-lived collaborator", "long-lived team"] {
+                assert!(
+                    !text.contains(sent_here),
+                    "{} still says `{sent_here}`",
+                    tool.name
+                );
+            }
+        }
+        for name in [TOOL_DELEGATE, TOOL_MOB_CREATE] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} is a worker tool"));
+            assert!(
+                tool.description
+                    .contains("identity_create (when your tool list has it)"),
+                "{name} names identity_create for a long-term agent, as a tool that may be \
+                 absent"
+            );
+            assert!(
+                tool.description.contains("long-term agent"),
+                "{name} says what identity_create is for"
+            );
+        }
+    }
 
     /// The `mob_check_member` note is chosen from typed fields. Each preview
     /// marker says why the preview is missing and whether checking again
@@ -8358,6 +8461,1093 @@ mod tests {
                 entry.wired_to
             );
         }
+    }
+
+    /// A host's member tool audience that decides on the roster labels
+    /// alone: a member whose row carries the label `kept_for` is hidden from
+    /// every caller whose own row does not carry the same value.
+    struct HideKeptMembers;
+
+    impl meerkat_mob::MemberToolAudience for HideKeptMembers {
+        fn hides(
+            &self,
+            _mob_id: &MobId,
+            _caller: Option<&AgentIdentity>,
+            caller_labels: Option<&std::collections::BTreeMap<String, String>>,
+            _target: &AgentIdentity,
+            target_labels: Option<&std::collections::BTreeMap<String, String>>,
+        ) -> bool {
+            let kept_for = |labels: Option<&std::collections::BTreeMap<String, String>>| {
+                labels.and_then(|labels| labels.get("kept_for")).cloned()
+            };
+            match kept_for(target_labels) {
+                Some(keeper) => kept_for(caller_labels) != Some(keeper),
+                None => false,
+            }
+        }
+    }
+
+    /// A mob a host built with [`HideKeptMembers`] as its member tool
+    /// audience and registered with the mob tools' state, with `members`
+    /// seated: each with the keeper its row's `kept_for` label names, if any.
+    async fn host_mob_with_kept_members(
+        state: &Arc<MobMcpState>,
+        mob_id: &str,
+        members: &[(&str, Option<&str>)],
+    ) -> MobHandle {
+        let mut builder = meerkat_mob::MobBuilder::new(
+            sample_definition(mob_id),
+            meerkat_mob::MobStorage::in_memory(),
+        )
+        .with_session_service(state.session_service())
+        .allow_ephemeral_sessions(true)
+        .with_member_tool_audience(Arc::new(HideKeptMembers));
+        if let Some(adapter) = &state.runtime_adapter {
+            builder = builder.with_runtime_adapter(adapter.clone());
+        }
+        let handle = builder.create().await.expect("create the host's mob");
+        state
+            .mob_insert_handle(handle.mob_id().clone(), handle.clone())
+            .await;
+        // The host has registered every mob it hosts.
+        state.declare_mob_set_restored();
+        for (member, keeper) in members {
+            let mut spec =
+                SpawnMemberSpec::new(ProfileName::from("worker"), AgentIdentity::from(*member));
+            if let Some(keeper) = keeper {
+                spec = spec.with_labels(std::collections::BTreeMap::from([(
+                    "kept_for".to_string(),
+                    (*keeper).to_string(),
+                )]));
+            }
+            state
+                .mob_spawn_spec(handle.mob_id(), spec)
+                .await
+                .expect("spawn the member");
+        }
+        handle
+    }
+
+    /// The capability to create mobs with manage scope over the mob `handle`
+    /// serves: what a council over that mob's members needs.
+    fn create_and_manage_authority(handle: &MobHandle) -> MobToolAuthorityContext {
+        meerkat_runtime::mob_operator_authority::grant_manage_mob(
+            &create_only_authority(),
+            handle.mob_id().as_str(),
+            handle.live_incarnation(),
+        )
+        .expect("generated mob authority should grant managed mob scope")
+    }
+
+    /// The agent mob tools of member `member` of the mob `handle` serves,
+    /// holding `authority`.
+    async fn member_mob_tools(
+        state: &Arc<MobMcpState>,
+        handle: &MobHandle,
+        member: &str,
+        authority: MobToolAuthorityContext,
+    ) -> Arc<dyn AgentToolDispatcher> {
+        let session = handle
+            .resolve_bridge_session_id(&AgentIdentity::from(member))
+            .await
+            .expect("the member's session");
+        let surface: Arc<dyn AgentToolDispatcher> = Arc::new(AgentMobToolSurface::new(
+            Arc::clone(state),
+            None,
+            authority,
+            "claude-sonnet-4-5".to_string(),
+            session.clone(),
+            None,
+            None,
+            None,
+        ));
+        surface
+            .bind_ops_lifecycle(
+                Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                session,
+            )
+            .expect("bind ops lifecycle")
+            .into_dispatcher()
+    }
+
+    /// One agent mob tool call, answered within a minute, as text with the
+    /// member name `name` masked: the answers for two names compare equal
+    /// when they differ in nothing but the name.
+    async fn masked_mob_tool_answer(
+        tools: &Arc<dyn AgentToolDispatcher>,
+        tool: &'static str,
+        args: serde_json::Value,
+        name: &str,
+    ) -> String {
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+        let call = tools.dispatch(ToolCallView {
+            id: "audience-tool-call",
+            name: tool,
+            args: &raw,
+        });
+        match tokio::time::timeout(std::time::Duration::from_mins(1), call).await {
+            Ok(Ok(outcome)) => format!("ok: {}", outcome.result.text_content()),
+            Ok(Err(error)) => format!("error: {error:?}"),
+            Err(_) => "no answer within a minute".to_string(),
+        }
+        .replace(name, "<member>")
+    }
+
+    /// `council` asks the host's member tool audience about each participant
+    /// it names: a member the audience hides from the convener answers
+    /// exactly as a name the mob does not hold, with create authority and
+    /// manage scope.
+    #[tokio::test]
+    async fn council_answers_a_participant_hidden_from_the_convener_as_absent() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "council-audience",
+            &[
+                ("council-kept", Some("ann")),
+                ("council-keeper", Some("ann")),
+                ("council-convener", None),
+            ],
+        )
+        .await;
+        let tools = member_mob_tools(
+            &state,
+            &handle,
+            "council-convener",
+            create_and_manage_authority(&handle),
+        )
+        .await;
+        let council = |member: &str| {
+            json!({
+                "council_id": format!("audience-{member}"),
+                "topic": "What were you asked so far?",
+                "participants": [{
+                    "mob_id": "council-audience",
+                    "member_id": member,
+                    "role": "witness",
+                }],
+                "max_rounds": 1,
+            })
+        };
+
+        let absent =
+            masked_mob_tool_answer(&tools, "council", council("council-gone"), "council-gone")
+                .await;
+        assert!(
+            absent.starts_with("error:"),
+            "a participant the mob does not hold is refused: {absent}"
+        );
+        let hidden =
+            masked_mob_tool_answer(&tools, "council", council("council-kept"), "council-kept")
+                .await;
+        assert_eq!(
+            hidden, absent,
+            "a participant hidden from the convener answers as a name the mob does not hold"
+        );
+
+        // A convener the member is not hidden from convenes it: the audience
+        // is asked about the convener itself.
+        let keeper = member_mob_tools(
+            &state,
+            &handle,
+            "council-keeper",
+            create_and_manage_authority(&handle),
+        )
+        .await;
+        let convened =
+            masked_mob_tool_answer(&keeper, "council", council("council-kept"), "council-kept")
+                .await;
+        assert!(
+            !convened.contains("mob member not found"),
+            "a convener the participant is not hidden from is not answered that the mob does \
+             not hold it: {convened}"
+        );
+    }
+
+    /// `mob_wire` to an external binding asks the host's member tool audience
+    /// about the member it names: a member it hides from the caller answers
+    /// exactly as a name the mob does not hold, whatever the binding: a
+    /// well-formed one, one whose address, key or name the mob refuses, and
+    /// one named as the member itself. A member the caller is shown is wired
+    /// by the well-formed binding and answered the refusal of each other
+    /// one. `mob_unwire` of an external peer answers the same way.
+    #[tokio::test]
+    async fn mob_wire_to_an_external_binding_answers_a_member_hidden_from_the_caller_as_absent() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "external-wire-audience",
+            &[
+                ("external-kept", Some("ann")),
+                ("external-shown", None),
+                ("external-caller", None),
+            ],
+        )
+        .await;
+        let caller = member_mob_tools(
+            &state,
+            &handle,
+            "external-caller",
+            scope_only_authority("external-wire-audience", handle.live_incarnation()),
+        )
+        .await;
+        // Each binding with the refusal the mob answers a member the caller
+        // is shown, if it refuses the binding. A binding with no name of its
+        // own is named as the member the call names.
+        let mut told_apart = Vec::new();
+        for (binding, name, address, public_key, refusal) in [
+            (
+                "a well-formed binding",
+                Some("external-worker"),
+                "inproc://external-worker",
+                ED25519_PUBLIC_KEY_7,
+                None,
+            ),
+            (
+                "a binding whose address is no address",
+                Some("external-worker"),
+                "not an address",
+                ED25519_PUBLIC_KEY_7,
+                Some("invalid peer address"),
+            ),
+            (
+                "a binding whose key is no key",
+                Some("external-worker"),
+                "inproc://external-worker",
+                "not a key",
+                Some("public_key must start with"),
+            ),
+            (
+                "a binding whose name is no peer name",
+                Some(" "),
+                "inproc://external-worker",
+                ED25519_PUBLIC_KEY_7,
+                Some("invalid peer name"),
+            ),
+            (
+                "a binding named as the member",
+                None,
+                "inproc://external-worker",
+                ED25519_PUBLIC_KEY_7,
+                Some("wire requires distinct members"),
+            ),
+        ] {
+            let wire = |member: &str| {
+                json!({
+                    "mob_id": "external-wire-audience",
+                    "member_id": member,
+                    "peer": {
+                        "external_binding": {
+                            "name": name.unwrap_or(member),
+                            "address": address,
+                            "identity": {
+                                "kind": "ed25519_public_key",
+                                "public_key": public_key,
+                            },
+                        },
+                    },
+                })
+            };
+            let absent =
+                masked_mob_tool_answer(&caller, "mob_wire", wire("external-gone"), "external-gone")
+                    .await;
+            let hidden =
+                masked_mob_tool_answer(&caller, "mob_wire", wire("external-kept"), "external-kept")
+                    .await;
+            let shown = masked_mob_tool_answer(
+                &caller,
+                "mob_wire",
+                wire("external-shown"),
+                "external-shown",
+            )
+            .await;
+            // Every binding is asked before any is judged, so one run shows
+            // each binding that tells the two names apart.
+            if !(absent.starts_with("error:") && absent.contains("mob member not found")) {
+                told_apart.push(format!(
+                    "{binding}: a name the mob does not hold is not answered as one: {absent}"
+                ));
+            }
+            if hidden != absent {
+                told_apart.push(format!(
+                    "{binding}: a member hidden from the caller answers {hidden}, a name the \
+                     mob does not hold {absent}"
+                ));
+            }
+            if shown.contains("mob member not found") {
+                told_apart.push(format!(
+                    "{binding}: a member the caller is shown is answered as absent: {shown}"
+                ));
+            }
+            match refusal {
+                Some(refusal) if !(shown.starts_with("error:") && shown.contains(refusal)) => {
+                    told_apart.push(format!(
+                        "{binding}: a member the caller is shown is not answered the binding's \
+                         refusal: {shown}"
+                    ));
+                }
+                None if !shown.starts_with("ok:") => {
+                    told_apart.push(format!(
+                        "{binding}: a member the caller is shown is not wired to the peer: {shown}"
+                    ));
+                }
+                _ => {}
+            }
+        }
+        // An unwire of an external peer by its name: the same three members.
+        let unwire = |member: &str| {
+            json!({
+                "mob_id": "external-wire-audience",
+                "member_id": member,
+                "peer": { "external": { "name": "external-worker" } },
+            })
+        };
+        let absent = masked_mob_tool_answer(
+            &caller,
+            "mob_unwire",
+            unwire("external-gone"),
+            "external-gone",
+        )
+        .await;
+        let hidden = masked_mob_tool_answer(
+            &caller,
+            "mob_unwire",
+            unwire("external-kept"),
+            "external-kept",
+        )
+        .await;
+        let shown = masked_mob_tool_answer(
+            &caller,
+            "mob_unwire",
+            unwire("external-shown"),
+            "external-shown",
+        )
+        .await;
+        if !(absent.starts_with("error:") && absent.contains("mob member not found")) {
+            told_apart.push(format!(
+                "an unwire: a name the mob does not hold is not answered as one: {absent}"
+            ));
+        }
+        if hidden != absent {
+            told_apart.push(format!(
+                "an unwire: a member hidden from the caller answers {hidden}, a name the mob \
+                 does not hold {absent}"
+            ));
+        }
+        if !shown.starts_with("ok:") {
+            told_apart.push(format!(
+                "an unwire: a member the caller is shown is not unwired from the peer: {shown}"
+            ));
+        }
+        assert!(
+            told_apart.is_empty(),
+            "a member hidden from the caller answers as a name the mob does not hold, and a \
+             member the caller is shown as the mob answers its binding:\n{}",
+            told_apart.join("\n")
+        );
+    }
+
+    /// The report `mob_destroy` answers with names no member the host's
+    /// member tool audience hides from the caller: not in a member list of
+    /// the report, not in the text of an error, not in the refusal of an
+    /// incomplete destroy. A member the caller is shown is named as before.
+    #[tokio::test]
+    async fn mob_destroy_report_names_no_member_hidden_from_the_caller() {
+        let (state, archives) = MobMcpState::new_in_memory_with_archive_failure_control();
+        let home =
+            host_mob_with_kept_members(&state, "destroy-home", &[("destroy-caller", None)]).await;
+        // One mob per case: the teardown of its member fails, so the
+        // destroy's report has an entry for that member.
+        let mut answers = Vec::new();
+        for (mob_id, member, keeper) in [
+            ("destroy-audience-a", "destroy-kept", Some("ann")),
+            ("destroy-audience-b", "destroy-shown", None),
+        ] {
+            let handle = host_mob_with_kept_members(&state, mob_id, &[(member, keeper)]).await;
+            let session = handle
+                .resolve_bridge_session_id(&AgentIdentity::from(member))
+                .await
+                .expect("the member's session");
+            archives
+                .fail_archive(session, "the archive is refused")
+                .await;
+            let caller = member_mob_tools(
+                &state,
+                &home,
+                "destroy-caller",
+                scope_only_authority(mob_id, handle.live_incarnation()),
+            )
+            .await;
+            answers.push(
+                masked_mob_tool_answer(&caller, "mob_destroy", json!({ "mob_id": mob_id }), mob_id)
+                    .await,
+            );
+        }
+        let [hidden, shown] = answers.as_slice() else {
+            panic!("two destroys were asked");
+        };
+        assert!(
+            shown.contains("destroy-shown"),
+            "the report names a member the caller is shown whose teardown failed: {shown}"
+        );
+        assert!(
+            hidden.starts_with("error:") && !hidden.contains("destroy-kept"),
+            "the report names no member hidden from the caller, in the refusal's message or \
+             in its data: {hidden}"
+        );
+        assert!(
+            hidden.contains("mob destroy incomplete") && hidden.contains("mob_destroy_incomplete"),
+            "a destroy whose only failure is a hidden member's is still answered as \
+             incomplete: {hidden}"
+        );
+        assert!(
+            !hidden.contains("the archive is refused"),
+            "no text of the hidden member's failure is answered: {hidden}"
+        );
+    }
+
+    /// `mob_wire` and `mob_unwire` ask the host's member tool audience about
+    /// both members they name. A member it hides from the caller answers
+    /// exactly as a name the mob does not hold, as the member and as the
+    /// peer, with manage scope, and no edge is made, also beside an identity
+    /// entry of the host. A caller the member is not hidden from wires and
+    /// unwires it as before.
+    #[tokio::test]
+    async fn mob_wire_and_unwire_answer_a_member_hidden_from_the_caller_as_absent() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "wire-audience",
+            &[
+                ("wire-kept", Some("ann")),
+                ("wire-keeper", Some("ann")),
+                ("wire-plain", None),
+                ("wire-caller", None),
+            ],
+        )
+        .await;
+        let scope = || scope_only_authority("wire-audience", handle.live_incarnation());
+        let caller = member_mob_tools(&state, &handle, "wire-caller", scope()).await;
+        let keeper = member_mob_tools(&state, &handle, "wire-keeper", scope()).await;
+        let ends = |member: &str, peer: &str| json!({ "mob_id": "wire-audience", "member_id": member, "peer": { "local": peer } });
+        let kept = AgentIdentity::from("wire-kept");
+        // An identity entry of the host: an agent's wire or unwire that
+        // names it is refused for the entry, after the other name is found.
+        let mut entry = SpawnMemberSpec::new(
+            ProfileName::from("worker"),
+            AgentIdentity::from("wire-entry"),
+        )
+        .with_entry_custody(true);
+        entry.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+        handle
+            .spawn_spec(entry)
+            .await
+            .expect("the host seats its identity entry");
+
+        for tool in ["mob_wire", "mob_unwire"] {
+            // Each call naming the kept member, beside the same call naming
+            // a name the mob does not hold in its place.
+            for (kept_call, absent_call, position) in [
+                (
+                    ends("wire-plain", "wire-kept"),
+                    ends("wire-plain", "wire-gone"),
+                    "as the peer",
+                ),
+                (
+                    ends("wire-kept", "wire-plain"),
+                    ends("wire-gone", "wire-plain"),
+                    "as the member",
+                ),
+                (
+                    ends("wire-nobody", "wire-kept"),
+                    ends("wire-nobody", "wire-gone"),
+                    "as the peer of a name the mob does not hold",
+                ),
+                (
+                    ends("wire-entry", "wire-kept"),
+                    ends("wire-entry", "wire-gone"),
+                    "as the peer of an identity entry",
+                ),
+                (
+                    ends("wire-kept", "wire-entry"),
+                    ends("wire-gone", "wire-entry"),
+                    "as the member beside an identity entry",
+                ),
+            ] {
+                let hidden = masked_mob_tool_answer(&caller, tool, kept_call, "wire-kept").await;
+                let absent = masked_mob_tool_answer(&caller, tool, absent_call, "wire-gone").await;
+                assert!(
+                    absent.starts_with("error:"),
+                    "{tool}: a name the mob does not hold is refused: {absent}"
+                );
+                assert_eq!(
+                    hidden, absent,
+                    "{tool}: a member hidden from the caller, named {position}, answers as a \
+                     name the mob does not hold"
+                );
+            }
+            // Beside a member the caller is shown, the entry's refusal stays.
+            let shown = masked_mob_tool_answer(
+                &caller,
+                tool,
+                ends("wire-entry", "wire-plain"),
+                "wire-entry",
+            )
+            .await;
+            assert!(
+                shown.starts_with("error:")
+                    && shown.contains("member '<member>' is an identity entry"),
+                "{tool}: a call that names the entry beside a member the caller is shown still \
+                 answers the refusal of the entry: {shown}"
+            );
+        }
+        let wired_to_kept = || async {
+            handle
+                .get_member(&kept)
+                .await
+                .expect("roster read")
+                .expect("the kept member is seated")
+                .wired_to
+        };
+        assert!(
+            wired_to_kept().await.is_empty(),
+            "no edge reaches the hidden member"
+        );
+
+        let wired = masked_mob_tool_answer(
+            &keeper,
+            "mob_wire",
+            ends("wire-keeper", "wire-kept"),
+            "wire-kept",
+        )
+        .await;
+        assert!(
+            wired.starts_with("ok:"),
+            "a caller the member is not hidden from wires it: {wired}"
+        );
+        assert!(
+            wired_to_kept()
+                .await
+                .contains(&AgentIdentity::from("wire-keeper")),
+            "the keeper's wire is made"
+        );
+        let unwired = masked_mob_tool_answer(
+            &keeper,
+            "mob_unwire",
+            ends("wire-keeper", "wire-kept"),
+            "wire-kept",
+        )
+        .await;
+        assert!(
+            unwired.starts_with("ok:"),
+            "a caller the member is not hidden from unwires it: {unwired}"
+        );
+
+        // The entry's own external peer, unwired by its name as if it were
+        // a member: no member holds that name, and the entry's refusal
+        // still answers, behind the lookup of the entry.
+        let entry = AgentIdentity::from("wire-entry");
+        let outside = AgentIdentity::from("wire-outside");
+        handle
+            .wire(
+                entry.clone(),
+                meerkat_mob::PeerTarget::ExternalBinding(
+                    meerkat_mob::ExternalPeerBindingSpec::new(
+                        "wire-outside",
+                        "inproc://wire-outside",
+                        meerkat_contracts::WireTrustedPeerIdentity::Ed25519PublicKey {
+                            public_key: ED25519_PUBLIC_KEY_7.to_string(),
+                        },
+                    ),
+                ),
+            )
+            .await
+            .expect("the host wires its entry to an external peer");
+        let by_name = masked_mob_tool_answer(
+            &caller,
+            "mob_unwire",
+            ends("wire-entry", "wire-outside"),
+            "wire-entry",
+        )
+        .await;
+        assert!(
+            by_name.starts_with("error:")
+                && by_name.contains("member '<member>' is an identity entry"),
+            "an agent's unwire of the entry's external peer by its name is refused for the \
+             entry: {by_name}"
+        );
+        assert!(
+            handle
+                .get_member(&entry)
+                .await
+                .expect("roster read")
+                .expect("the entry is seated")
+                .wired_to
+                .contains(&outside),
+            "the entry keeps its external peer"
+        );
+    }
+
+    /// One name given as both ends of `mob_wire` or `mob_unwire`: an
+    /// identity entry the host's audience hides from the caller answers
+    /// exactly as a name the mob does not hold, member not found. A member
+    /// the caller is shown still answers that the call needs two different
+    /// members. (The mob's own row asks a hidden approval branch too.)
+    #[tokio::test]
+    async fn mob_wire_and_unwire_answer_a_hidden_name_given_twice_as_absent() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "twice-audience",
+            &[("twice-shown", None), ("twice-caller", None)],
+        )
+        .await;
+        let mut entry = SpawnMemberSpec::new(
+            ProfileName::from("worker"),
+            AgentIdentity::from("twice-entry"),
+        )
+        .with_entry_custody(true)
+        .with_labels(std::collections::BTreeMap::from([(
+            "kept_for".to_string(),
+            "ann".to_string(),
+        )]));
+        entry.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+        handle
+            .spawn_spec(entry)
+            .await
+            .expect("the host seats its identity entry");
+        let caller = member_mob_tools(
+            &state,
+            &handle,
+            "twice-caller",
+            scope_only_authority("twice-audience", handle.live_incarnation()),
+        )
+        .await;
+
+        // Every name is asked on both tools before any answer is judged, so
+        // one run shows each answer that tells a hidden name from an unheld
+        // one.
+        let mut told_apart = Vec::new();
+        for tool in ["mob_wire", "mob_unwire"] {
+            let mut answers = Vec::new();
+            for name in ["twice-gone", "twice-entry", "twice-shown"] {
+                answers.push(
+                    masked_mob_tool_answer(
+                        &caller,
+                        tool,
+                        json!({ "mob_id": "twice-audience", "member_id": name, "peer": { "local": name } }),
+                        name,
+                    )
+                    .await,
+                );
+            }
+            let [absent, hidden_entry, shown] = answers.as_slice() else {
+                panic!("three names were asked");
+            };
+            if !(absent.starts_with("error:") && absent.contains("mob member not found")) {
+                told_apart.push(format!(
+                    "{tool}: a name the mob does not hold, given twice, is not answered as \
+                     one: {absent}"
+                ));
+            }
+            if hidden_entry != absent {
+                told_apart.push(format!(
+                    "{tool}: an identity entry hidden from the caller, given twice, answers \
+                     {hidden_entry}"
+                ));
+            }
+            if !(shown.starts_with("error:")
+                && shown.contains("requires distinct")
+                && !shown.contains("mob member not found"))
+            {
+                told_apart.push(format!(
+                    "{tool}: a member the caller is shown, given twice, does not answer that \
+                     the call needs two different members: {shown}"
+                ));
+            }
+        }
+        assert!(
+            told_apart.is_empty(),
+            "a hidden name given twice answers as a name the mob does not hold, member not \
+             found:\n{}",
+            told_apart.join("\n")
+        );
+    }
+
+    /// In a stopped mob an agent's `mob_wire` or `mob_unwire` that names an
+    /// identity entry is still refused for the entry: beside a member the
+    /// caller is shown, and for a wire also beside a name the mob does not
+    /// hold (a stopped mob looks no member up for a wire). An unwire beside
+    /// such a name answers member not found, as in a running mob.
+    #[tokio::test]
+    async fn mob_wire_and_unwire_refuse_an_identity_entry_in_a_stopped_mob() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "stopped-audience",
+            &[("stopped-shown", None), ("stopped-caller", None)],
+        )
+        .await;
+        let mut entry = SpawnMemberSpec::new(
+            ProfileName::from("worker"),
+            AgentIdentity::from("stopped-entry"),
+        )
+        .with_entry_custody(true);
+        entry.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+        handle
+            .spawn_spec(entry)
+            .await
+            .expect("the host seats its identity entry");
+        let caller = member_mob_tools(
+            &state,
+            &handle,
+            "stopped-caller",
+            scope_only_authority("stopped-audience", handle.live_incarnation()),
+        )
+        .await;
+        handle.stop().await.expect("stop the mob");
+
+        for (tool, peer, refused_for_the_entry) in [
+            ("mob_wire", "stopped-shown", true),
+            ("mob_wire", "stopped-gone", true),
+            ("mob_unwire", "stopped-shown", true),
+            ("mob_unwire", "stopped-gone", false),
+        ] {
+            let answer = masked_mob_tool_answer(
+                &caller,
+                tool,
+                json!({ "mob_id": "stopped-audience", "member_id": "stopped-entry", "peer": { "local": peer } }),
+                "stopped-entry",
+            )
+            .await;
+            let expected = if refused_for_the_entry {
+                "member '<member>' is an identity entry"
+            } else {
+                "mob member not found: stopped-gone"
+            };
+            assert!(
+                answer.starts_with("error:") && answer.contains(expected),
+                "{tool} of the entry and '{peer}' in a stopped mob answers \"{expected}\": \
+                 {answer}"
+            );
+        }
+    }
+
+    /// The rows `mob_list_members` answers `tools` for the mob `mob_id`.
+    async fn listed_member_rows(
+        tools: &Arc<dyn AgentToolDispatcher>,
+        mob_id: &str,
+    ) -> Vec<serde_json::Value> {
+        let raw = serde_json::value::RawValue::from_string(json!({ "mob_id": mob_id }).to_string())
+            .unwrap();
+        let listed = tools
+            .dispatch(ToolCallView {
+                id: "audience-list",
+                name: "mob_list_members",
+                args: &raw,
+            })
+            .await
+            .expect("mob_list_members dispatches");
+        let payload: serde_json::Value =
+            serde_json::from_str(&listed.result.text_content()).expect("list payload");
+        payload["members"]
+            .as_array()
+            .expect("members array")
+            .clone()
+    }
+
+    /// The sorted strings of the array `field` of a listed row.
+    fn listed_names(row: &serde_json::Value, field: &str) -> Vec<String> {
+        let mut names: Vec<String> = row[field]
+            .as_array()
+            .expect("an array of names")
+            .iter()
+            .map(|name| name.as_str().expect("a name").to_owned())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// The `wired_to` of a row `mob_list_members` answers names no member the
+    /// host's member tool audience hides from the caller: a member wired to
+    /// a hidden member is listed with its other peers only. A caller the
+    /// member is not hidden from reads the whole wiring.
+    #[tokio::test]
+    async fn mob_list_members_names_no_hidden_member_in_wired_to() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "peers-audience",
+            &[
+                ("peers-kept", Some("ann")),
+                ("peers-keeper", Some("ann")),
+                ("peers-shown", None),
+                ("peers-caller", None),
+            ],
+        )
+        .await;
+        // The host wires a member every caller is shown to the kept member
+        // and to the caller.
+        for peer in ["peers-kept", "peers-caller"] {
+            handle
+                .wire(
+                    AgentIdentity::from("peers-shown"),
+                    AgentIdentity::from(peer),
+                )
+                .await
+                .expect("the host wires the members");
+        }
+        let scope = || scope_only_authority("peers-audience", handle.live_incarnation());
+        let wired_to_of_shown = |member: &'static str| {
+            let state = Arc::clone(&state);
+            let handle = handle.clone();
+            let authority = scope();
+            async move {
+                let tools = member_mob_tools(&state, &handle, member, authority).await;
+                let rows = listed_member_rows(&tools, "peers-audience").await;
+                let row = rows
+                    .iter()
+                    .find(|row| row["agent_identity"] == "peers-shown")
+                    .expect("the shown member is listed");
+                listed_names(row, "wired_to")
+            }
+        };
+
+        assert_eq!(
+            wired_to_of_shown("peers-caller").await,
+            vec!["peers-caller".to_owned()],
+            "a listed row names no peer the audience hides from the caller"
+        );
+        assert_eq!(
+            wired_to_of_shown("peers-keeper").await,
+            vec!["peers-caller".to_owned(), "peers-kept".to_owned()],
+            "a caller the member is not hidden from reads the whole wiring"
+        );
+    }
+
+    /// `mob_check_member` and `mob_retire_member` ask the host's member tool
+    /// audience themselves: a member it hides from the caller answers
+    /// exactly as a name the mob does not hold, with manage scope, and stays
+    /// seated. A caller the member is not hidden from checks it as before.
+    #[tokio::test]
+    async fn mob_check_and_retire_member_answer_a_member_hidden_from_the_caller_as_absent() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "check-audience",
+            &[
+                ("check-kept", Some("ann")),
+                ("check-keeper", Some("ann")),
+                ("check-caller", None),
+            ],
+        )
+        .await;
+        let scope = || scope_only_authority("check-audience", handle.live_incarnation());
+        let caller = member_mob_tools(&state, &handle, "check-caller", scope()).await;
+        let keeper = member_mob_tools(&state, &handle, "check-keeper", scope()).await;
+        // A caller without manage scope over the mob: the audience is asked
+        // before the caller's ownership of the target is.
+        let unscoped = member_mob_tools(
+            &state,
+            &handle,
+            "check-caller",
+            spawn_profile_authority("check-audience", handle.live_incarnation(), "worker"),
+        )
+        .await;
+        let member = |member: &str| json!({ "mob_id": "check-audience", "member_id": member });
+
+        for (tools, scope) in [(&caller, "with manage scope"), (&unscoped, "without it")] {
+            for tool in ["mob_check_member", "mob_retire_member"] {
+                let absent =
+                    masked_mob_tool_answer(tools, tool, member("check-gone"), "check-gone").await;
+                assert!(
+                    absent.contains("member_not_found"),
+                    "{tool} {scope}: a name the mob does not hold is typed not found: {absent}"
+                );
+                let hidden =
+                    masked_mob_tool_answer(tools, tool, member("check-kept"), "check-kept").await;
+                assert_eq!(
+                    hidden, absent,
+                    "{tool} {scope}: a member hidden from the caller answers as a name the mob \
+                     does not hold"
+                );
+            }
+        }
+        assert!(
+            handle
+                .get_member(&AgentIdentity::from("check-kept"))
+                .await
+                .expect("roster read")
+                .is_some(),
+            "the hidden member stays seated"
+        );
+        let own = masked_mob_tool_answer(
+            &keeper,
+            "mob_check_member",
+            member("check-kept"),
+            "check-kept",
+        )
+        .await;
+        assert!(
+            own.starts_with("ok:"),
+            "a caller the member is not hidden from checks it: {own}"
+        );
+    }
+
+    /// `mob_list_members` leaves out a member the host's member tool audience
+    /// hides from the caller, with manage scope over the mob: the row is
+    /// absent, and every other member is listed. A caller the member is not
+    /// hidden from is listed it.
+    #[tokio::test]
+    async fn mob_list_members_leaves_out_a_member_hidden_from_the_caller() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "list-audience",
+            &[
+                ("list-kept", Some("ann")),
+                ("list-keeper", Some("ann")),
+                ("list-other-keeper", Some("bob")),
+                ("list-plain", None),
+            ],
+        )
+        .await;
+        let listed = |member: &'static str| {
+            let state = Arc::clone(&state);
+            let handle = handle.clone();
+            async move {
+                let tools = member_mob_tools(
+                    &state,
+                    &handle,
+                    member,
+                    scope_only_authority("list-audience", handle.live_incarnation()),
+                )
+                .await;
+                let mut names: Vec<String> = listed_member_rows(&tools, "list-audience")
+                    .await
+                    .iter()
+                    .map(|row| row["agent_identity"].as_str().expect("a name").to_owned())
+                    .collect();
+                names.sort_unstable();
+                names
+            }
+        };
+
+        assert_eq!(
+            listed("list-plain").await,
+            vec!["list-plain".to_owned()],
+            "a caller whose row carries no such label is listed no kept member"
+        );
+        assert_eq!(
+            listed("list-other-keeper").await,
+            vec!["list-other-keeper".to_owned(), "list-plain".to_owned()],
+            "a caller whose row carries another value is listed its own kind only"
+        );
+        assert_eq!(
+            listed("list-keeper").await,
+            vec![
+                "list-keeper".to_owned(),
+                "list-kept".to_owned(),
+                "list-plain".to_owned(),
+            ],
+            "a caller whose row carries the same value is listed the kept members"
+        );
+    }
+
+    /// Manage scope over a mob an agent created with `mob_create` belongs to
+    /// the session that created it: another member's session, holding the
+    /// capability to create mobs and manage scope over its own mob, is
+    /// refused by every tool that needs scope over the created mob, and its
+    /// `mob_list` does not name it. The creating session manages it.
+    #[tokio::test]
+    async fn a_session_holds_no_manage_scope_over_a_mob_another_session_created() {
+        let state = MobMcpState::new_in_memory();
+        let home = host_mob_with_kept_members(
+            &state,
+            "scope-home",
+            &[("scope-creator", None), ("scope-other", None)],
+        )
+        .await;
+        let creator =
+            member_mob_tools(&state, &home, "scope-creator", create_only_authority()).await;
+        let other = member_mob_tools(
+            &state,
+            &home,
+            "scope-other",
+            create_and_manage_authority(&home),
+        )
+        .await;
+        let created = masked_mob_tool_answer(
+            &creator,
+            "mob_create",
+            json!({
+                "definition": {
+                    "id": "scope-created",
+                    "profiles": {
+                        "worker": {
+                            "model": "claude-sonnet-4-5",
+                            "tools": { "comms": true },
+                            "peer_description": "worker",
+                            "runtime_mode": "turn_driven"
+                        }
+                    }
+                }
+            }),
+            "scope-helper",
+        )
+        .await;
+        assert!(created.starts_with("ok:"), "the creator's mob: {created}");
+        let created_id = MobId::from("scope-created");
+        for member in ["scope-helper", "scope-second"] {
+            state
+                .mob_spawn_spec(
+                    &created_id,
+                    SpawnMemberSpec::new(ProfileName::from("worker"), AgentIdentity::from(member)),
+                )
+                .await
+                .expect("seat a member of the created mob");
+        }
+
+        let own = listed_member_rows(&creator, "scope-created").await;
+        assert_eq!(own.len(), 2, "the creating session lists its mob: {own:?}");
+        for (tool, args) in [
+            ("mob_list_members", json!({ "mob_id": "scope-created" })),
+            (
+                "mob_wire",
+                json!({
+                    "mob_id": "scope-created",
+                    "member_id": "scope-helper",
+                    "peer": { "local": "scope-second" },
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                json!({ "mob_id": "scope-created", "profile": "worker", "member_id": "scope-third" }),
+            ),
+            (
+                "council",
+                json!({
+                    "topic": "What were you asked so far?",
+                    "participants": [{
+                        "mob_id": "scope-created",
+                        "member_id": "scope-helper",
+                        "role": "witness",
+                    }],
+                    "max_rounds": 1,
+                }),
+            ),
+        ] {
+            let answer = masked_mob_tool_answer(&other, tool, args, "scope-helper").await;
+            assert!(
+                answer.starts_with("error: AccessDenied"),
+                "{tool}: another session holds no scope over the created mob: {answer}"
+            );
+        }
+        let mobs = masked_mob_tool_answer(&other, "mob_list", json!({}), "scope-helper").await;
+        assert!(
+            mobs.contains("scope-home") && !mobs.contains("scope-created"),
+            "another session's mob_list names its own mob only: {mobs}"
+        );
     }
 
     /// The classification behind `wired`: only a committed edge between the

@@ -126,13 +126,20 @@ fn recent(limit: usize) -> ConsoleTimelineWindowQuery {
     }
 }
 
+/// The view these rows read with: `subject`'s, or, for no subject, the one
+/// operator's of a console that identifies nobody (a console without
+/// sign-in, as its request authentication states it).
+fn reader(controller: &AccessController, subject: Option<&str>) -> crate::access::AccessView {
+    controller.view_for_subject(subject).on_console(false)
+}
+
 /// The identities of the frames `subject` reads from one window page.
 async fn window_identities(
     aggregator: &MetaConsoleAggregator,
     controller: &AccessController,
     subject: Option<&str>,
 ) -> Vec<String> {
-    let decider = TimelineFrameDecider::new(controller.view_for_subject(subject));
+    let decider = TimelineFrameDecider::new(reader(controller, subject));
     let filter: &TimelineFrameFilter<'_> = &|frame: &ConsoleFrame| decider.visible(frame);
     aggregator
         .query_timeline_windowed_for(recent(200), Some(filter))
@@ -151,7 +158,7 @@ async fn stream_identities(
     controller: &AccessController,
     subject: Option<&str>,
 ) -> Vec<String> {
-    let view = controller.view_for_subject(subject);
+    let view = reader(controller, subject);
     aggregator
         .query_timeline_windowed_stored_for(recent(200), None)
         .await

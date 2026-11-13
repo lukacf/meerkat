@@ -282,9 +282,15 @@ run.
 - `publish_critical_release_assets` runs the check again on the Linux x86_64
   archives it is about to publish, whichever run built them (a
   [prebuild](#pre-tag-prebuild)'s included).
-- `release-binaries-check.yml` runs the same checks on a candidate commit,
-  the arm64 targets on runners of their own. Only a hosted run proves those
-  two targets.
+- Before a tag, three runs exercise parts of this, none of them publishing:
+  `release-binaries-check.yml` runs the check in the two build lanes on a
+  candidate commit and runs the BuildBuddy lane's arm64 binaries on runners of
+  their own, with full checkouts and no Windows job;
+  `windows-cross-validate.yml` runs the check on the Windows binaries on
+  `windows-2025-vs2026`; and a prebuild dispatch (`make release-prebuild`) is
+  the only one that runs `release.yml`'s own verify jobs, with their sparse
+  checkouts of the release tree. Only a hosted run proves the Windows, macOS
+  and Linux aarch64 legs.
 
 The check has no version condition: an asset recovery that rebuilds a tag
 before 0.9.15 fails it on Linux x86_64, since those rebuilt archives are the

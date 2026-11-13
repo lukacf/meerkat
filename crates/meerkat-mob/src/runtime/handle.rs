@@ -14499,7 +14499,8 @@ impl MobHandle {
     /// else the new or refreshed one.
     ///
     /// The command needs the `SendCommand` scope, the scope of the admission
-    /// it follows; no member tool issues it.
+    /// it follows. The agent lane cannot issue it, and closed admission
+    /// refuses it because binding a terminal run can wake the observer.
     pub async fn bind_flow_run_observer(
         &self,
         flow_id: FlowId,

@@ -403,11 +403,9 @@ impl MobCommand {
         match self.required_control_scope() {
             Some(ControlScope::SendCommand) => !matches!(
                 self,
-                // Settles an existing objective, or binds an observer to an
-                // existing run; starts nothing.
-                Self::ConcludeObjective { .. }
-                    | Self::BindFlowRunObserver { .. }
-                    | Self::AdmitControlScope { .. }
+                // Settles an existing objective or checks a scope; starts nothing.
+                // Observer binding is not exempt: a terminal run can wake it.
+                Self::ConcludeObjective { .. } | Self::AdmitControlScope { .. }
             ),
             Some(ControlScope::Live) => match self {
                 // Committing buffered input starts a turn; interrupt,
@@ -522,6 +520,8 @@ impl MobCommand {
             // Operator instructions are the host's; no agent writes them.
             | Self::SetOperatorInstruction { .. }
             | Self::RevokeOperatorInstruction { .. }
+            // Only the admitting host attributes an observer to a keyed run.
+            | Self::BindFlowRunObserver { .. }
             // The build preparation the host asked to retry is the host's.
             | Self::ResolveMemberBuildPreparation { .. } => AgentLaneAdmission::HostOnly,
             // No agent grants a member tools.
@@ -534,7 +534,6 @@ impl MobCommand {
             | Self::SendPeerMessage { .. }
             | Self::PreviewRunFlowAdmission { .. }
             | Self::RunFlow { .. }
-            | Self::BindFlowRunObserver { .. }
             | Self::ConcludeObjective { .. }
             | Self::BindObjectiveOwner { .. }
             | Self::CreateForkedParticipant { .. }
@@ -1330,9 +1329,13 @@ mod tests {
             Some(ControlScope::SendCommand)
         );
         assert!(
-            !bind.refused_while_admission_closed(),
-            "binding an observer starts nothing, so a closing mob still admits it"
+            bind.refused_while_admission_closed(),
+            "a terminal binding can wake an observer, so closed admission refuses it"
         );
+        assert!(matches!(
+            bind.agent_lane_admission(),
+            super::AgentLaneAdmission::HostOnly
+        ));
     }
 
     #[tokio::test]

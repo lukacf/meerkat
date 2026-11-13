@@ -16824,7 +16824,8 @@ impl MobActor {
     /// Bind `observer` to the existing keyed explicit-target run `run_id`
     /// and return the binding that stands. The run is read, never written:
     /// its row, activation params and role targets stay as admitted, and
-    /// nothing starts.
+    /// no new flow starts. A terminal run can wake its observer, so the
+    /// command follows the host-only and open-admission binding gates.
     async fn handle_bind_flow_run_observer(
         &mut self,
         run_id: RunId,

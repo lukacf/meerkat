@@ -1068,12 +1068,12 @@ fn mob_host_adoption_arms_follow_every_earlier_variant() {
         host_adoption_arms.to_vec(),
         "the host adoption's arms are the TransitionId variants directly before the build preparation retry's"
     );
-    // The refusals of external work to an identity entry (0.9.11) are the
-    // last TransitionId variants.
+    // Keep the published refusal pair contiguous before appended groups.
+    let first_refusal = index(MOB_IDENTITY_MEMBER_REFUSAL_ARMS[0]);
     assert_eq!(
-        variants[variants.len() - MOB_IDENTITY_MEMBER_REFUSAL_ARMS.len()..].to_vec(),
+        variants[first_refusal..first_refusal + MOB_IDENTITY_MEMBER_REFUSAL_ARMS.len()].to_vec(),
         MOB_IDENTITY_MEMBER_REFUSAL_ARMS.to_vec(),
-        "the identity member refusals of external work are the last TransitionId variants"
+        "the identity member refusals of external work retain their published order"
     );
     assert!(
         index("AdoptLegacyIdentityEntryRetireUnadopted") > 1900,
@@ -1098,6 +1098,28 @@ const MOB_IDENTITY_MEMBER_REFUSAL_ARMS: [&str; 2] = [
     "ResolveSubmitWorkRejectionIdentityMember",
     "ResolveSubmitWorkRejectionIdentityMemberUnreadableName",
 ];
+
+#[test]
+fn mob_flow_observation_arms_follow_every_published_0_9_14_variant() {
+    let variants = transition_id_variants(&render_machine_kernel_module(&mob_machine()));
+    assert_eq!(
+        variants[2035], "ResolveSubmitWorkRejectionIdentityMemberUnreadableName",
+        "the final published 0.9.14 variant keeps its ordinal"
+    );
+    assert_eq!(
+        &variants[2036..],
+        &[
+            "ResolveFlowRunObservationAdmissionAllowedRunning",
+            "ResolveFlowRunObservationAdmissionAllowedStopped",
+            "ResolveFlowRunObservationAdmissionAllowedCompleted",
+            "ResolveFlowRunObservationAdmissionAllowedDestroyed",
+            "ResolveFlowRunObservationAdmissionDeniedRunning",
+            "ResolveFlowRunObservationAdmissionDeniedStopped",
+            "ResolveFlowRunObservationAdmissionDeniedCompleted",
+            "ResolveFlowRunObservationAdmissionDeniedDestroyed",
+        ]
+    );
+}
 
 /// The build preparation retry's arms are contiguous, after every variant
 /// 0.9.10 renders, and the seal's refusal (`SealDeclaredRosterRefused`,

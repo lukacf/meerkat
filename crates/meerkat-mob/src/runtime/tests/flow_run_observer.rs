@@ -1496,6 +1496,74 @@ async fn the_bind_route_needs_the_send_command_scope() {
     ));
 }
 
+/// A direct agent-lane call cannot bypass the host's binding authority.
+/// Once admission closes, even the host cannot bind a terminal run and
+/// thereby start a new observer turn.
+#[tokio::test]
+async fn observer_binding_refuses_agent_lane_and_closed_admission_without_waking() {
+    let (handle, _service) = observer_mob().await;
+    let wakes = Arc::new(LedgerWakes::default());
+    handle.install_flow_run_observer_wake(wakes.clone());
+    let delivery = key("review-bind-admission");
+    let run_id = handle
+        .run_flow_with_role_targets_and_external_identity(
+            flow_id("review"),
+            params("bind-admission"),
+            reviewers(),
+            &delivery,
+        )
+        .await
+        .expect("admit the unobserved run");
+    wait_for_run_terminal(&handle, &run_id, Duration::from_secs(10)).await;
+
+    let agent = handle
+        .clone()
+        .with_command_authority(CommandAuthority::agent_lane());
+    let refused = agent
+        .bind_flow_run_observer(flow_id("review"), &delivery, observer(COORDINATOR))
+        .await;
+    assert!(
+        matches!(refused, Err(MobError::ScopeDenied(_))),
+        "{refused:?}"
+    );
+    assert!(
+        handle
+            .run_store
+            .get_run_observer(&run_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        wakes.keys().is_empty(),
+        "the refused agent cannot wake the observer"
+    );
+
+    handle
+        .close_admission(crate::runtime::MobAdmissionCloseReason::StandDown)
+        .await
+        .expect("close admission after the run ends");
+    let refused = handle
+        .bind_flow_run_observer(flow_id("review"), &delivery, observer(COORDINATOR))
+        .await;
+    assert!(
+        matches!(refused, Err(MobError::AdmissionClosed { .. })),
+        "{refused:?}"
+    );
+    assert!(
+        handle
+            .run_store
+            .get_run_observer(&run_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        wakes.keys().is_empty(),
+        "closed admission starts no observer turn"
+    );
+}
+
 /// No member tool binds an observer: the operator surface lists none
 /// and never issues the bind.
 #[tokio::test]

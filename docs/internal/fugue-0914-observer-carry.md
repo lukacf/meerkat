@@ -20,6 +20,7 @@ old source's initializer and event-route index. Its reopen test checks that
 an existing observer row remains byte-identical across two opens.
 
 Published 0.9.14 supports mob schema 12 and refuses these schema 13 stores.
+It also cannot consume the carried `MobFlowRun` continuation producer.
 A rollback therefore needs a compatible runtime or the complete pre-upgrade
 backup. Do not drop the observer table, rewrite the ledger, or reset state.
 Before a later Core upgrade, check whether upstream migration 13 adopts this
@@ -32,6 +33,10 @@ remain in place. Machine inputs and transitions are appended after the
 0.9.14 definitions, and the generated artifacts are regenerated from that
 combined source.
 
-Source provenance and local tests do not establish King deployment
+Observer binding is a host operation requiring `SendCommand`. It refuses
+the agent lane and closed admission: binding an already-terminal run can
+wake the observer even though it does not start another flow run.
+
+Source provenance and local tests do not establish deployment
 acceptance. Fugue's release records must identify the exact carried revision,
 the actual bundle, and the results of its installation and recovery checks.

@@ -1156,6 +1156,72 @@ class GatingPendingEntry:
 
 
 @dataclass(frozen=True)
+class GatingQuestionChoice:
+    """One choice of a question an agent asked with ``ask_user``."""
+    id: str
+    label: str
+
+
+@dataclass(frozen=True)
+class GatingQuestion:
+    """One multiple-choice question of a question set."""
+    id: str
+    prompt: str
+    choices: list[GatingQuestionChoice]
+    allow_free_text: bool = False
+    recommended: str | None = None
+
+
+@dataclass(frozen=True)
+class GatingQuestionSet:
+    """An open question set (``meta/gating/questions``)."""
+    pending_id: str
+    questions: list[GatingQuestion]
+    subject_digest: str
+    origin: GatingOrigin | None = None
+    title: str | None = None
+    created_at_ms: int | None = None
+    deadline_at_ms: int | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> GatingQuestionSet:
+        return cls(pending_id="", questions=[], subject_digest="")
+
+
+@dataclass(frozen=True)
+class GatingQuestionAnswer:
+    """A person's answer to one question of a question set."""
+    question_id: str
+    kind: str
+    choice_id: str | None = None
+    text: str | None = None
+
+    @classmethod
+    def choice(cls, question_id: str, choice_id: str) -> GatingQuestionAnswer:
+        return cls(question_id=question_id, kind="choice", choice_id=choice_id)
+
+    @classmethod
+    def free_text(cls, question_id: str, text: str) -> GatingQuestionAnswer:
+        return cls(question_id=question_id, kind="free_text", text=text)
+
+    def to_wire(self) -> dict[str, Any]:
+        return {}
+
+
+@dataclass(frozen=True)
+class GatingQuestionSetResult:
+    """The recorded end of a question set a person answered or dismissed."""
+    pending_id: str
+    kind: str
+    outcome: str
+    decided_at_ms: int | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> GatingQuestionSetResult:
+        return cls(pending_id="", kind="", outcome="")
+
+
+@dataclass(frozen=True)
 class MemoryStoreInfo:
     """Information about a memory store."""
     store: str

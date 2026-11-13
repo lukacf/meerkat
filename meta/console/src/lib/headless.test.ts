@@ -412,7 +412,9 @@ test("headless command execution models lifecycle, routing, and gating commands 
     CONSOLE_RPC_METHODS.gatingPending,
     CONSOLE_RPC_METHODS.gatingAudit,
     CONSOLE_RPC_METHODS.gatingDecide,
+    CONSOLE_RPC_METHODS.gatingQuestions,
   ];
+  assert.equal(CONSOLE_RPC_METHODS.gatingQuestions, "meta/gating/questions");
   const transport = createFakeTransport({ capabilities: { methods, version: "cap-all" } });
   const controller = createMetaConsoleController({ transport });
 
@@ -446,7 +448,9 @@ test("headless command execution models lifecycle, routing, and gating commands 
     CONSOLE_COMMAND_NAMES.listGatingPending,
     CONSOLE_COMMAND_NAMES.listGatingAudit,
     CONSOLE_COMMAND_NAMES.decideGating,
+    CONSOLE_COMMAND_NAMES.listQuestionSets,
   ]) {
+    assert.equal(typeof command, "string", "the gating commands are modeled");
     assert.equal((await controller.commands.execute({
       command,
       target: controlTarget("gating"),

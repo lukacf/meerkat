@@ -167,6 +167,9 @@ from .types import (
     GatingDecisionResult,
     GatingEvaluateResult,
     GatingPendingEntry,
+    GatingQuestionAnswer,
+    GatingQuestionSet,
+    GatingQuestionSetResult,
     GatingWithdrawResult,
     MemberHealth,
     MemberReloadResult,
@@ -4894,6 +4897,31 @@ class MobHandle:
             params["reason"] = reason
         raw = await self._runtime._rpc("meta/gating/withdraw", params)
         return GatingWithdrawResult.from_dict(raw)
+
+    async def gating_questions(self) -> list[GatingQuestionSet]:
+        """List the open question sets agents asked with ``ask_user``."""
+        return []
+
+    async def gating_answer(
+        self,
+        pending_id: str,
+        *,
+        approver_id: str,
+        presented_digest: str,
+        answers: Sequence[GatingQuestionAnswer | Mapping[str, Any]],
+    ) -> GatingQuestionSetResult:
+        """Answer an open question set."""
+        return GatingQuestionSetResult.from_dict({})
+
+    async def gating_dismiss(
+        self,
+        pending_id: str,
+        *,
+        approver_id: str,
+        presented_digest: str,
+    ) -> GatingQuestionSetResult:
+        """Dismiss an open question set."""
+        return GatingQuestionSetResult.from_dict({})
 
     async def gating_audit(self, limit: int = 100) -> list[GatingAuditEntry]:
         """Query the gating audit log."""

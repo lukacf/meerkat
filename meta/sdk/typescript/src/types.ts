@@ -1060,6 +1060,74 @@ export function parseGatingPendingEntry(raw: unknown): GatingPendingEntry {
   };
 }
 
+// -- Question sets --------------------------------------------------------
+
+/** One choice of a question an agent asked with `ask_user`. */
+export interface GatingQuestionChoice {
+  readonly id: string;
+  readonly label: string;
+}
+
+/** One multiple-choice question of a question set. */
+export interface GatingQuestion {
+  readonly id: string;
+  readonly prompt: string;
+  readonly choices: readonly GatingQuestionChoice[];
+  readonly allowFreeText: boolean;
+  readonly recommended: string | null;
+}
+
+/** An open question set (`meta/gating/questions`). */
+export interface GatingQuestionSet {
+  readonly pendingId: string;
+  readonly origin: GatingOrigin | null;
+  readonly title: string | null;
+  readonly questions: readonly GatingQuestion[];
+  readonly createdAtMs: number | null;
+  readonly deadlineAtMs: number | null;
+  readonly subjectDigest: string;
+}
+
+/** A person's answer to one question of a question set. */
+export interface GatingQuestionAnswer {
+  readonly questionId: string;
+  readonly answer:
+    | { readonly kind: "choice"; readonly choiceId: string }
+    | { readonly kind: "free_text"; readonly text: string };
+}
+
+/** The recorded end of a question set a person answered or dismissed. */
+export interface GatingQuestionSetResult {
+  readonly pendingId: string;
+  readonly kind: string;
+  readonly outcome: string;
+  readonly decidedAtMs: number | null;
+}
+
+export function parseGatingQuestionSet(_raw: unknown): GatingQuestionSet {
+  return {
+    pendingId: "",
+    origin: null,
+    title: null,
+    questions: [],
+    createdAtMs: null,
+    deadlineAtMs: null,
+    subjectDigest: "",
+  };
+}
+
+export function gatingQuestionAnswerToWire(
+  _answer: GatingQuestionAnswer,
+): Record<string, unknown> {
+  return {};
+}
+
+export function parseGatingQuestionSetResult(
+  _raw: unknown,
+): GatingQuestionSetResult {
+  return { pendingId: "", kind: "", outcome: "", decidedAtMs: null };
+}
+
 // -- ReconcileEdgesReport -------------------------------------------------
 
 export interface ReconcileEdgesReport {

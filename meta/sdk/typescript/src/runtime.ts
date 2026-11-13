@@ -219,6 +219,9 @@ import {
   parseGatingWithdrawResult,
   parseGatingAuditEntry,
   parseGatingPendingEntry,
+  parseGatingQuestionSet,
+  parseGatingQuestionSetResult,
+  gatingQuestionAnswerToWire,
   parseRediscoverReport,
   parseReconcileEdgesReport,
   parsePersistedEvent,
@@ -320,6 +323,9 @@ import {
   type GatingWithdrawResult,
   type GatingAuditEntry,
   type GatingPendingEntry,
+  type GatingQuestionAnswer,
+  type GatingQuestionSet,
+  type GatingQuestionSetResult,
   type RediscoverReport,
   type ReconcileEdgesReport,
   type PersistedEvent,
@@ -4671,6 +4677,31 @@ export class MobHandle {
         ? (((raw as Record<string, unknown>).entries as unknown[]) ?? [])
         : [];
     return (entries as unknown[]).map(parseGatingAuditEntry);
+  }
+
+  /** List the open question sets agents asked with `ask_user`. */
+  async gatingQuestions(): Promise<GatingQuestionSet[]> {
+    return [];
+  }
+
+  /** Answer an open question set. */
+  async gatingAnswer(
+    _pendingId: string,
+    _options: {
+      approverId: string;
+      presentedDigest: string;
+      answers: readonly GatingQuestionAnswer[];
+    },
+  ): Promise<GatingQuestionSetResult> {
+    return parseGatingQuestionSetResult({});
+  }
+
+  /** Dismiss an open question set. */
+  async gatingDismiss(
+    _pendingId: string,
+    _options: { approverId: string; presentedDigest: string },
+  ): Promise<GatingQuestionSetResult> {
+    return parseGatingQuestionSetResult({});
   }
 
   // -- Durable decisions (the stdio host's `meta/decisions/*`) --------------

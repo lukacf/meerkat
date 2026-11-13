@@ -1078,7 +1078,9 @@ are exempt gets a provisioned flow member, as a role with none does.
 ## Send Work
 
 Use member send for direct content delivery. Use the work lane when the caller
-needs a tracked, cancellable work reference.
+needs a work reference for the unit it submitted: `mob/submit_work` returns a
+`work_ref`. One submitted unit cannot be cancelled by that reference; see
+[Cancel work](#cancel-work) below.
 
 `mob/member_send`, SDK `Member.send`, and `mob/submit_work` with
 `origin: "external"` require the target's profile to set
@@ -1121,10 +1123,9 @@ required for internal flow dispatch or ordinary peer messaging.
     {
       "jsonrpc": "2.0",
       "id": 7,
-      "method": "mob/cancel_work",
+      "method": "mob/cancel_all_work",
       "params": {
-        "mob_id": "release-triage",
-        "work_ref": "work_123"
+        "member_ref": "member_ref_from_spawn_or_members"
       }
     }
     ```
@@ -1135,6 +1136,25 @@ required for internal flow dispatch or ordinary peer messaging.
 helper spawn, fork, and respawn responses. Application code should pass it back
 to work-lane APIs as-is instead of constructing it from `mob_id` and
 `agent_identity`.
+
+### Cancel work
+
+Cancellation is per member, not per unit. `mob/cancel_all_work` takes the
+`member_ref` and cancels the work that member had admitted when the cancel
+was taken: its current run is cancelled at the run's next boundary, and the
+input it held queued is abandoned. Input admitted after the cancel is
+untouched. Cancelling an idle member is not an error. The result is
+`{"mob_id": "...", "ok": true}`.
+
+`mob/cancel_work` does not cancel anything. The host lists the method, and
+every call is refused with `-32602`:
+
+```text
+per-unit work cancellation is unsupported for <work_ref>: no work-tracking ledger is wired
+```
+
+The submitted unit runs on. A `work_ref` that is not a UUID is refused one
+step earlier, also with `-32602` (`work_ref must be a valid UUID: ...`).
 
 ## Flows
 
@@ -1433,7 +1453,7 @@ command. `rkat run --export-atif` writes a trajectory for a single-session run.
 | Watch events | `mob/events`, SDK event subscriptions |
 | Manage lifecycle | `mob/lifecycle`, `mob/retire`, `mob/respawn`, `mob/destroy` |
 | Manage flows | `mob/flows`, `mob/flow_run`, `mob/flow_status`, `mob/flow_cancel` |
-| Manage work | `mob/submit_work`, `mob/conclude_objective`, `mob/cancel_work`, `mob/cancel_all_work` |
+| Manage work | `mob/submit_work`, `mob/conclude_objective`, `mob/cancel_all_work` (`mob/cancel_work` is listed and always refused; see [Cancel work](#cancel-work)) |
 | Wait for startup | `mob/wait_kickoff`, `mob/wait_ready` |
 | Manage profiles | `mob/profile/create`, `mob/profile/get`, `mob/profile/list`, `mob/profile/update`, `mob/profile/delete` |
 

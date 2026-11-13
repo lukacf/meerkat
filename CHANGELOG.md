@@ -252,16 +252,6 @@ them.
   materialized when a rollback began and was woken during it could be left
   with such a trust entry in the same releases.)
 
-- Release binaries: a live channel over WebRTC failed at its first peer
-  connection in the Linux and macOS downloads of `rkat-rpc`
-  (`rkat-rpc --live-webrtc`, `live/webrtc/answer`). Those binaries are built
-  with Bazel, which linked the WebRTC stack against a second copy of tokio;
-  that copy never has a runtime, so creating the peer connection panicked
-  with "there is no reactor running". The stack now links the one tokio the
-  process runs on, and a check holds every Bazel-built release binary to a
-  single tokio. The Windows download and builds from source with Cargo were
-  not affected.
-
 ### Security
 
 - `meerkat-core`, `rkat`: the configuration documents the engine writes are

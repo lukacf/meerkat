@@ -34,9 +34,9 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `agent.retire` | Retire / force-cancel / delete the agent |
 | `agent.reset` | Reset durable agent state |
 | `agent.tool_grants.manage` | Grant and revoke the agent's [scoped tool grants](/api/rpc#scoped-tool-grants) (`meta/tool_grants/grant` and `revoke`); listing them and reading their audit needs `agent.view` |
-| `agent.identity.create` | Create long-term agents (`meta/identity/create`; see [Agent changes](/api/rpc#agent-changes)). It names no agent, so a rule grants it without a resource selector. Which profiles a caller may create agents of, and under which outcome, is the host's [identity policy](/reference/identity-policy) |
-| `agent.identity.manage` | Update, archive, unarchive and adopt the agent (`meta/identity/update`, `archive`, `unarchive`, `adopt`); reading agents (`meta/identity/list`, `get`, `directory`, `operation`, `plan`) needs `agent.view` |
-| `agent.identity.remove` | Remove the agent for good (`meta/identity/remove`): its name is never available again |
+| `agent.identity.create` | From 0.9.15. Create long-term agents (`meta/identity/create`; see [Agent changes](/api/rpc#agent-changes)). It names no agent, so a rule grants it without a resource selector. Which profiles a caller may create agents of, and under which outcome, is the host's [identity policy](/reference/identity-policy) |
+| `agent.identity.manage` | From 0.9.15. Update, archive, unarchive and adopt the agent (`meta/identity/update`, `archive`, `unarchive`, `adopt`); reading agents (`meta/identity/list`, `get`, `directory`, `operation`, `plan`) needs `agent.view` |
+| `agent.identity.remove` | From 0.9.15. Remove the agent for good (`meta/identity/remove`): its name is never available again |
 | `gating.view` / `gating.decide` | Read and decide approval gates |
 | `decisions.view` | Read the durable decisions the caller may see on the Console: `meta/decisions/list`, `get` and `rendering` (see [durable decision methods](/api/rpc#durable-decision-methods)) |
 | `decisions.decide` | Reserved for deciding durable decisions on the Console; the Console decides none yet |
@@ -44,7 +44,7 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `workgraph.view` | Read WorkGraph snapshots, items, attention, events, and facts; observe the wake stream |
 | `workgraph.manage` | Mutate WorkGraph items, goals, links, and attention bindings |
 | `mob.observe` | Subscribe to whole-mob raw event streams |
-| `runtime.admin` | Routing tables, labels, wiring, reconcile, mob announcements; for the mob's long-term agents, the hold of their changes (`meta/identity/changes_hold`), a read of another requester's operation (`meta/identity/operation`), and the list of an agent's schedules that its archive, unarchive and removal and their plan answer (see [agent changes](/api/rpc#agent-changes)) |
+| `runtime.admin` | Routing tables, labels, wiring, reconcile, mob announcements; from 0.9.15, for the mob's long-term agents, the hold of their changes (`meta/identity/changes_hold`), a read of another requester's operation (`meta/identity/operation`), and the list of an agent's schedules that its archive, unarchive and removal and their plan answer (see [agent changes](/api/rpc#agent-changes)) |
 | `topology.view` | Inspect topology state for an agent; also requires `agent.view` |
 | `topology.connect` / `topology.disconnect` / `topology.reconnect` | Plan or apply the corresponding edge action; required independently on both endpoints |
 | `topology.bulk` | Submit more than one explicit topology operation in a bounded transaction |
@@ -60,7 +60,7 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 Evaluation is **deny-by-default with deny-overrides**: a matching `deny` rule always wins, then a matching `allow` rule allows, otherwise the check denies. Subjects listed in `admins` bypass rules entirely. A disabled config allows everything.
 
 A pattern covers the actions a later release adds to its family: a rule
-with `agent.*` or `*` also covers `agent.tool_grants.manage` and the three
+with `agent.*` or `*` also covers `agent.tool_grants.manage` and, from 0.9.15, the three
 `agent.identity.*` actions, allow and deny alike. The identity actions only
 open the methods: the host's [identity policy](/reference/identity-policy)
 still judges every change, and with no policy every change is refused.

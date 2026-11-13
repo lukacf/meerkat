@@ -1222,6 +1222,8 @@ runtime copy of the old session stayed on disk, unbound.
 
 ## Agent changes
 
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
 A mob's long-term agents can be created, changed, archived, removed and
 released from configuration while the mob runs. One family of methods does
 it, `meta/identity/*`, on the stdio gateway and on `POST /console/rpc`.
@@ -2717,6 +2719,8 @@ Each event an ingress attests is recorded in the runtime's metadata store
 before the decision is decided, and the record survives a restart.
 
 ### Changes of agents that a person decides
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 A change of an agent whose outcome under the host's identity policy
 (`runtime_options.identity_creation`) is `require_approval` is not committed
@@ -4347,6 +4351,8 @@ instruction at their next run start. The result and the refusals are those of
 `meta/set_instruction`.
 
 ### Reserved namespaces
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 The namespaces that start with `meerkat.identity.` are the platform's. The
 gateway keeps each agent's own changed instructions there, one record per

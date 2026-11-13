@@ -122,6 +122,136 @@ impl OpenAiLiveClient {
             api_key: api_key.into(),
         }
     }
+
+    /// Remove from `diagnostic`, text the realtime endpoint sent, the API
+    /// key the connection was opened with, and credential shapes. The
+    /// endpoint, or a gateway in front of it, can repeat the connection's
+    /// headers in an error.
+    fn redact_diagnostic(&self, diagnostic: &mut String) {
+        meerkat_core::redact::redact_credentials(diagnostic, |visit| visit(&self.api_key));
+    }
+
+    /// `error` with every field that can carry provider text redacted as
+    /// [`Self::redact_error_message`] does; its class is kept.
+    fn redacted_error(&self, mut error: LlmError) -> LlmError {
+        error.redact_diagnostics(|message| self.redact_error_message(message));
+        error
+    }
+
+    /// Redact `message`, the message of a realtime error, as
+    /// [`Self::redact_diagnostic`] does, and keep what the session decides
+    /// from it. The session tells an acknowledgement from a failure by two
+    /// fixed phrases of such a message
+    /// ([`openai_response_already_active_message`],
+    /// [`openai_response_cancel_no_active_response_message`]). Those
+    /// decisions belong to the message as received: when the redaction
+    /// removes a phrase (a private-key marker takes its whole line), the
+    /// redacted message ends with that phrase, so the session decides as it
+    /// would on the original.
+    fn redact_error_message(&self, message: &mut String) {
+        let already_active = openai_response_already_active_message(message);
+        let cancel_not_active = openai_response_cancel_no_active_response_message(message);
+        self.redact_diagnostic(message);
+        if already_active && !openai_response_already_active_message(message) {
+            message.push_str(" (active response in progress)");
+        }
+        if cancel_not_active && !openai_response_cancel_no_active_response_message(message) {
+            message.push_str(" (cancellation failed: no active response found)");
+        }
+    }
+
+    /// Redact every text field of `error`, a realtime error or the error of
+    /// a failed response: its message ([`Self::redact_error_message`]) and
+    /// its `code` and `param`, which are provider text too. The fixed codes
+    /// the session decides on hold nothing the redaction replaces and pass
+    /// unchanged.
+    fn redact_server_error(&self, error: &mut OpenAiServerError) {
+        self.redact_error_message(&mut error.message);
+        for field in [&mut error.code, &mut error.param].into_iter().flatten() {
+            self.redact_diagnostic(field);
+        }
+    }
+
+    /// The line the opt-in frame trace (`RKAT_OPENAI_REALTIME_TRACE_JSON`)
+    /// prints for a frame, sent or received: `frame`, the frame as JSON,
+    /// redacted as [`Self::redact_diagnostic`] does, so a frame that holds
+    /// the connection's API key anywhere is traced without it.
+    fn traced_frame(&self, frame: Option<String>) -> Option<String> {
+        let mut line = frame?;
+        self.redact_diagnostic(&mut line);
+        Some(line)
+    }
+
+    /// `connection`, opened with this client's API key, as the client hands
+    /// it out: what it reports about a failure carries no API key.
+    fn session_over<S: OpenAiLiveSession>(&self, connection: S) -> KeyRedactingLiveSession<S> {
+        KeyRedactingLiveSession {
+            connection,
+            client: self.clone(),
+        }
+    }
+}
+
+/// A realtime connection whose provider error text has lost the API key the
+/// connection was opened with: the message, code and param of an `error`
+/// event, the reason and the error of a failed response, and every error
+/// the connection itself returns.
+/// Everything a session derives from those (its typed errors, a failed
+/// response's details) is built from the redacted text; events that carry
+/// no error pass through as they are.
+struct KeyRedactingLiveSession<S> {
+    connection: S,
+    /// Holds the API key the connection sent.
+    client: OpenAiLiveClient,
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl<S: OpenAiLiveSession> OpenAiLiveSession for KeyRedactingLiveSession<S> {
+    async fn send_raw(&mut self, event: ClientEvent) -> Result<(), LlmError> {
+        if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_JSON").is_some()
+            && let Some(line) = self.client.traced_frame(trace_client_event_json(&event))
+        {
+            // Trace output must stay mechanically safe. Dumping full base64
+            // audio payloads into the sideband host's stderr pipe can
+            // introduce backpressure and perturb realtime timing, which makes
+            // the trace itself untrustworthy during smoke debugging.
+            eprintln!("[openai-realtime-send] {line}");
+        }
+        self.connection
+            .send_raw(event)
+            .await
+            .map_err(|error| self.client.redacted_error(error))
+    }
+
+    async fn next_event(&mut self) -> Result<Option<ServerEvent>, LlmError> {
+        let mut event = self
+            .connection
+            .next_event()
+            .await
+            .map_err(|error| self.client.redacted_error(error))?;
+        match &mut event {
+            Some(ServerEvent::Error { error, .. }) => self.client.redact_server_error(error),
+            Some(ServerEvent::ResponseDone { response, .. }) => {
+                if let Some(details) = response.status_details.as_mut() {
+                    if let Some(reason) = details.reason.as_mut() {
+                        self.client.redact_diagnostic(reason);
+                    }
+                    if let Some(error) = details.error.as_mut() {
+                        self.client.redact_server_error(error);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_JSON").is_some()
+            && let Some(event) = event.as_ref()
+            && let Some(line) = self.client.traced_frame(trace_server_event_json(event))
+        {
+            eprintln!("[openai-realtime-recv] {line}");
+        }
+        Ok(event)
+    }
 }
 
 /// Split-half wrapper around `RealtimeClient`.
@@ -405,15 +535,8 @@ fn decode_and_validate_openai_realtime_image(
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl OpenAiLiveSession for RealtimeOpenAiLiveSession {
     async fn send_raw(&mut self, event: ClientEvent) -> Result<(), LlmError> {
-        if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_JSON").is_some()
-            && let Some(serialized) = trace_client_event_json(&event)
-        {
-            // Trace output must stay mechanically safe. Dumping full base64
-            // audio payloads into the sideband host's stderr pipe can
-            // introduce backpressure and perturb realtime timing, which makes
-            // the trace itself untrustworthy during smoke debugging.
-            eprintln!("[openai-realtime-send] {serialized}");
-        }
+        // A sent frame is traced by the session the client hands out
+        // (`KeyRedactingLiveSession`), through its redaction.
         self.sender.send(event).await.map_err(map_openai_live_error)
     }
 
@@ -428,12 +551,8 @@ impl OpenAiLiveSession for RealtimeOpenAiLiveSession {
             Some(Err(err)) => return Err(map_openai_live_error(err)),
             None => None,
         };
-        if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_JSON").is_some()
-            && let Some(event) = event.as_ref()
-            && let Some(serialized) = trace_server_event_json(event)
-        {
-            eprintln!("[openai-realtime-recv] {serialized}");
-        }
+        // A received frame is traced by the session the client hands out
+        // (`KeyRedactingLiveSession`), after its redaction.
         Ok(event)
     }
 }
@@ -451,8 +570,8 @@ impl OpenAiLiveSessionFactory for OpenAiLiveClient {
             None,
         )
         .await
-        .map_err(map_openai_live_error)?;
-        let mut session = RealtimeOpenAiLiveSession::from_client(client);
+        .map_err(|error| self.redacted_error(map_openai_live_error(error)))?;
+        let mut session = self.session_over(RealtimeOpenAiLiveSession::from_client(client));
         configure_openai_live_session(&mut session, open_config).await?;
         Ok(Box::new(session))
     }
@@ -463,8 +582,8 @@ impl OpenAiLiveSessionFactory for OpenAiLiveClient {
     ) -> Result<Box<dyn OpenAiLiveSession>, LlmError> {
         let client = RealtimeClient::connect(&self.api_key, None, Some(target.call_id.as_str()))
             .await
-            .map_err(map_openai_live_error)?;
-        let mut session = RealtimeOpenAiLiveSession::from_client(client);
+            .map_err(|error| self.redacted_error(map_openai_live_error(error)))?;
+        let mut session = self.session_over(RealtimeOpenAiLiveSession::from_client(client));
         wait_for_openai_session_created(&mut session).await?;
         Ok(Box::new(session))
     }
@@ -6998,6 +7117,382 @@ mod tests {
                 .await
                 .pop_front()
                 .unwrap_or(Ok(None))
+        }
+    }
+
+    /// The session `client` hands out over `connection`, a scripted stand-in
+    /// for the websocket it opened with its API key.
+    fn client_session_over(
+        client: &OpenAiLiveClient,
+        connection: FakeOpenAiLiveSession,
+    ) -> Box<dyn OpenAiLiveSession> {
+        Box::new(client.session_over(connection))
+    }
+
+    /// The line the opt-in frame trace prints for `frame` on a connection
+    /// of `client`.
+    fn traced_frame_line(client: &OpenAiLiveClient, frame: &ServerEvent) -> Option<String> {
+        client.traced_frame(trace_server_event_json(frame))
+    }
+
+    /// The opt-in frame trace prints a frame without the connection's API
+    /// key, wherever the frame repeats it (an error's message, its `param`),
+    /// and still as the frame the server sent.
+    #[test]
+    fn traced_frames_carry_no_api_key() {
+        let key = format!("realtime-{}", "madeupcredential".repeat(3));
+        let client = OpenAiLiveClient::new(key.clone());
+        let frame = ServerEvent::Error {
+            event_id: "evt_echo".to_string(),
+            error: ServerError {
+                error_type: ApiErrorType::InvalidRequestError,
+                code: None,
+                message: format!(
+                    "upstream echo: rejected request with header authorization: Bearer {key}"
+                ),
+                param: Some(format!("credential {key} was refused")),
+                event_id: None,
+            },
+        };
+        let line = traced_frame_line(&client, &frame).expect("an error frame is traced");
+        assert!(
+            !line.contains(&key),
+            "the traced frame leaked the API key: {line}"
+        );
+        assert!(
+            line.contains("evt_echo") && line.contains("upstream echo"),
+            "the frame is traced as the server sent it: {line}"
+        );
+    }
+
+    /// The line the opt-in frame trace prints for a `frame` this process
+    /// sends on a connection of `client`.
+    fn traced_sent_frame_line(client: &OpenAiLiveClient, frame: &ClientEvent) -> Option<String> {
+        client.traced_frame(trace_client_event_json(frame))
+    }
+
+    /// A sent frame is traced through the same redaction as a received
+    /// one: conversation content that holds the connection's API key (a
+    /// tool result that printed it) is traced without it.
+    #[test]
+    fn traced_sent_frames_carry_no_api_key() {
+        let key = format!("realtime-{}", "madeupcredential".repeat(3));
+        let client = OpenAiLiveClient::new(key.clone());
+        let frame = ClientEvent::ConversationItemCreate {
+            event_id: Some("evt_sent".to_string()),
+            previous_item_id: None,
+            item: Box::new(Item::Message {
+                id: None,
+                status: None,
+                phase: None,
+                role: Role::User,
+                content: vec![ContentPart::InputText {
+                    text: format!("the tool printed authorization: Bearer {key} and stopped"),
+                }],
+            }),
+        };
+        let line = traced_sent_frame_line(&client, &frame).expect("a sent frame is traced");
+        assert!(
+            !line.contains(&key),
+            "the traced frame leaked the API key: {line}"
+        );
+        assert!(
+            line.contains("evt_sent") && line.contains("the tool printed"),
+            "the frame is traced as it was sent: {line}"
+        );
+    }
+
+    /// The session reads two fixed phrases in a provider error's message to
+    /// tell an acknowledgement from a failure. Those decisions belong to
+    /// the message as received: a message that also repeats the API key and
+    /// holds the begin marker of a private-key block (which the redaction
+    /// replaces with its whole line) still reads as the same phrase, and
+    /// carries no key.
+    #[tokio::test]
+    async fn realtime_error_phrases_are_read_from_the_message_as_received() {
+        let key = format!("realtime-{}", "madeupcredential".repeat(3));
+        // (The marker is assembled here so no scanner reads the source as a
+        // secret.)
+        let marker = format!("-----BEGIN {}-----", "PRIVATE KEY");
+        let active = format!(
+            "Conversation already has an active response in progress: resp_1. Header \
+             authorization: Bearer {key} {marker}"
+        );
+        let cancel = format!(
+            "Cancellation failed: no active response found. Header authorization: Bearer \
+             {key} {marker}"
+        );
+        let error_event = |message: &str| {
+            Ok(Some(ServerEvent::Error {
+                event_id: "evt_phrase".to_string(),
+                error: ServerError {
+                    error_type: ApiErrorType::InvalidRequestError,
+                    code: None,
+                    message: message.to_string(),
+                    param: None,
+                    event_id: None,
+                },
+            }))
+        };
+        let next_events: FakeEventQueue = Arc::new(Mutex::new(VecDeque::from([
+            error_event(&active),
+            error_event(&cancel),
+            Err(LlmError::InvalidRequest {
+                message: active.clone(),
+            }),
+        ])));
+        let client = OpenAiLiveClient::new(key.clone());
+        let mut session = client_session_over(
+            &client,
+            FakeOpenAiLiveSession {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                next_events,
+            },
+        );
+        let mut messages = Vec::new();
+        for _ in 0..2 {
+            let event = session.next_event().await.expect("the error event arrives");
+            let Some(ServerEvent::Error { error, .. }) = event else {
+                panic!("the error event arrives: {event:?}");
+            };
+            messages.push(error.message);
+        }
+        let Err(LlmError::InvalidRequest { message }) = session.next_event().await else {
+            panic!("the refused request arrives as an invalid request");
+        };
+        messages.push(message);
+        for message in &messages {
+            assert!(
+                !message.contains(&key),
+                "the message leaked the key: {message}"
+            );
+        }
+        assert!(
+            openai_response_already_active_message(&messages[0]),
+            "an active-response acknowledgement stays one: {}",
+            messages[0]
+        );
+        assert!(
+            openai_response_cancel_no_active_response_message(&messages[1]),
+            "a cancel answered with no active response stays one: {}",
+            messages[1]
+        );
+        assert!(
+            openai_response_already_active_message(&messages[2]),
+            "an active-response acknowledgement that arrives as an error stays one: {}",
+            messages[2]
+        );
+    }
+
+    /// A realtime error's `code` and `param`, and a failed response's
+    /// `reason`, are provider text too: a key repeated there is replaced.
+    /// The codes and reasons the session decides on pass unchanged.
+    #[tokio::test]
+    async fn echoed_api_key_stays_out_of_realtime_error_codes_and_reasons() {
+        let key = format!("realtime-{}", "madeupcredential".repeat(3));
+        let echoing_error = || ServerError {
+            error_type: ApiErrorType::InvalidRequestError,
+            code: Some(format!("rejected_credential:{key}")),
+            message: "upstream echo: the request was refused".to_string(),
+            param: Some(format!("authorization: Bearer {key}")),
+            event_id: None,
+        };
+        let mut failed = fake_response("resp_echo", ResponseStatus::Failed);
+        failed.status_details = Some(oai_rt_rs::protocol::models::ResponseStatusDetails {
+            reason: Some(format!("credential {key} was refused")),
+            error: Some(echoing_error()),
+        });
+        let mut frames: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::from([
+            Ok(Some(ServerEvent::Error {
+                event_id: "evt_echo".to_string(),
+                error: echoing_error(),
+            })),
+            Ok(Some(ServerEvent::ResponseDone {
+                event_id: "evt_done".to_string(),
+                response: failed,
+            })),
+        ]);
+        // Every fixed value the session decides on. The quota codes are
+        // typed here, each one checked against the product's own list
+        // (private to meerkat-llm-core, where a row walks that list through
+        // the same redaction); then the two context codes and the two
+        // reasons this file matches on.
+        let quota_codes = [
+            "insufficient_quota",
+            "credit_balance_exhausted",
+            "organization_spend_limit_exceeded",
+            "project_spend_limit_exceeded",
+            "organization_usage_limit_exceeded",
+            "billing_hard_limit_reached",
+            "enforced_spend_limit_reached",
+            "quota_exceeded",
+            "usage_limit_reached",
+        ];
+        for code in quota_codes {
+            assert!(
+                LlmError::code_signals_quota_exhausted(code),
+                "not a quota code the session decides on: {code}"
+            );
+        }
+        let decided_on: Vec<&str> = quota_codes
+            .into_iter()
+            .chain([
+                "context_length_exceeded",
+                "context_window_exceeded",
+                "max_output_tokens",
+                "content_filter",
+            ])
+            .collect();
+        for fixed in &decided_on {
+            let mut incomplete = fake_response("resp_fixed", ResponseStatus::Incomplete);
+            incomplete.status_details = Some(oai_rt_rs::protocol::models::ResponseStatusDetails {
+                reason: Some((*fixed).to_string()),
+                error: Some(ServerError {
+                    error_type: ApiErrorType::InvalidRequestError,
+                    code: Some((*fixed).to_string()),
+                    message: "upstream echo".to_string(),
+                    param: None,
+                    event_id: None,
+                }),
+            });
+            frames.push_back(Ok(Some(ServerEvent::ResponseDone {
+                event_id: "evt_fixed".to_string(),
+                response: incomplete,
+            })));
+        }
+        let client = OpenAiLiveClient::new(key.clone());
+        let mut session = client_session_over(
+            &client,
+            FakeOpenAiLiveSession {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                next_events: Arc::new(Mutex::new(frames)),
+            },
+        );
+
+        let event = session.next_event().await.expect("the error event arrives");
+        let Some(ServerEvent::Error { error, .. }) = event else {
+            panic!("the error event arrives: {event:?}");
+        };
+        let rendered = format!("{error:?}");
+        assert!(
+            !rendered.contains(&key),
+            "the error event leaked the API key: {rendered}"
+        );
+        let done = session
+            .next_event()
+            .await
+            .expect("the failed response arrives");
+        let Some(ServerEvent::ResponseDone { response, .. }) = done else {
+            panic!("the failed response arrives: {done:?}");
+        };
+        let failure = openai_response_failure(&response, LiveResponseFailureStatus::Failed);
+        let rendered = format!("{failure:?} {:?}", response.status_details);
+        assert!(
+            !rendered.contains(&key),
+            "the failed response leaked the API key: {rendered}"
+        );
+        assert!(rendered.contains("upstream echo"), "{rendered}");
+        for fixed in decided_on {
+            let done = session.next_event().await.expect("the response arrives");
+            let Some(ServerEvent::ResponseDone { response, .. }) = done else {
+                panic!("the response arrives: {done:?}");
+            };
+            let details = response.status_details.expect("status details");
+            assert_eq!(details.reason.as_deref(), Some(fixed));
+            assert_eq!(
+                details.error.and_then(|error| error.code).as_deref(),
+                Some(fixed)
+            );
+        }
+    }
+
+    /// A realtime endpoint, or a gateway in front of one, that repeats the
+    /// connection's API key (in an `error` event, in the error of a failed
+    /// response, or in a transport error) never puts it in what the session
+    /// reports: the typed error of the event, the failed response's
+    /// details, the transport error. The server's answer still arrives, and
+    /// each error keeps its class.
+    #[tokio::test]
+    async fn echoed_api_key_stays_out_of_realtime_errors() {
+        let key = format!("realtime-{}", "madeupcredential".repeat(3));
+        let echo = format!(
+            "upstream echo: rejected request with header authorization: Bearer {key}; \
+             credential {key} was refused"
+        );
+        let server_error = |error_type| ServerError {
+            error_type,
+            code: None,
+            message: echo.clone(),
+            param: None,
+            event_id: None,
+        };
+        let mut failed = fake_response("resp_echo", ResponseStatus::Failed);
+        failed.status_details = Some(oai_rt_rs::protocol::models::ResponseStatusDetails {
+            reason: None,
+            error: Some(server_error(ApiErrorType::ServerError)),
+        });
+        let next_events: FakeEventQueue = Arc::new(Mutex::new(VecDeque::from([
+            Ok(Some(ServerEvent::Error {
+                event_id: "evt_echo".to_string(),
+                error: server_error(ApiErrorType::InvalidRequestError),
+            })),
+            Ok(Some(ServerEvent::ResponseDone {
+                event_id: "evt_done".to_string(),
+                response: failed,
+            })),
+            Err(LlmError::Unknown {
+                message: echo.clone(),
+            }),
+        ])));
+        let client = OpenAiLiveClient::new(key.clone());
+        let mut session = client_session_over(
+            &client,
+            FakeOpenAiLiveSession {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                next_events,
+            },
+        );
+
+        let event_error = next_openai_session_event(session.as_mut())
+            .await
+            .expect_err("an error event fails the wait");
+        assert!(
+            matches!(event_error, LlmError::InvalidRequest { .. }),
+            "the error event keeps its class: {event_error:?}"
+        );
+        let done = session
+            .next_event()
+            .await
+            .expect("the failed response arrives");
+        let Some(ServerEvent::ResponseDone { response, .. }) = done else {
+            panic!("the failed response arrives: {done:?}");
+        };
+        let failure = openai_response_failure(&response, LiveResponseFailureStatus::Failed);
+        let transport_error = session
+            .next_event()
+            .await
+            .expect_err("the transport error arrives");
+        assert!(
+            matches!(transport_error, LlmError::Unknown { .. }),
+            "the transport error keeps its class: {transport_error:?}"
+        );
+
+        for (surface, rendered) in [
+            ("error event", format!("{event_error} {event_error:?}")),
+            ("failed response", format!("{failure:?}")),
+            (
+                "transport error",
+                format!("{transport_error} {transport_error:?}"),
+            ),
+        ] {
+            assert!(
+                !rendered.contains(&key),
+                "the {surface} leaked the API key: {rendered}"
+            );
+            assert!(
+                rendered.contains("upstream echo"),
+                "the server's answer reached the {surface}: {rendered}"
+            );
         }
     }
 

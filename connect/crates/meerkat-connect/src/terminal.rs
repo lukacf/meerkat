@@ -264,7 +264,8 @@ impl TerminalInput {
             // Also discard an unfinished kernel canonical line, which a
             // nonblocking read cannot receive before Enter or Ctrl-D.
             match tcflush(&mode.fd, FlushArg::TCIFLUSH) {
-                Ok(()) | Err(nix::errno::Errno::ENOTTY) => Ok(()),
+                Ok(()) => Ok(()),
+                Err(error) if is_no_terminal_queue(error) => Ok(()),
                 Err(error) => Err(io::Error::from(error)),
             }
         });
@@ -615,6 +616,16 @@ async fn read_ordinary_bytes(
     }
 }
 
+/// Whether a `tcflush` refusal means the descriptor has no terminal input
+/// queue (a pipe or socket), so there is nothing to discard. Linux reports
+/// ENOTTY; Darwin reports EOPNOTSUPP for a socket.
+fn is_no_terminal_queue(error: nix::errno::Errno) -> bool {
+    matches!(
+        error,
+        nix::errno::Errno::ENOTTY | nix::errno::Errno::EOPNOTSUPP
+    )
+}
+
 fn discard_ready_input(fd: &OwnedFd, ended: &mut bool) -> io::Result<()> {
     // A pipe or socket has no terminal queue to flush. Drain only currently
     // available bytes, with the same finite input bound and no blocking read.
@@ -891,6 +902,17 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn tcflush_refusals_without_a_terminal_queue_are_not_input_errors() {
+        use nix::errno::Errno;
+        // Linux reports ENOTTY for a pipe or socket; Darwin reports
+        // EOPNOTSUPP for a socket. Neither has a queue to flush.
+        assert!(is_no_terminal_queue(Errno::ENOTTY));
+        assert!(is_no_terminal_queue(Errno::EOPNOTSUPP));
+        assert!(!is_no_terminal_queue(Errno::EIO));
+        assert!(!is_no_terminal_queue(Errno::EBADF));
+    }
 
     #[tokio::test]
     async fn service_secret_entry_is_hidden_and_cancel_restores_the_same_input() {

@@ -758,7 +758,7 @@ Paths support `{name}` interpolation (replaced with the agent's comms name). Rel
 | `--agent-label key=value` | Metadata label (repeatable). Shown to peers via `peers()` |
 | `--comms-listen-tcp <ADDR>` | TCP address to listen on for signed comms (e.g., `"0.0.0.0:4200"`) |
 | `--comms-advertise-tcp <ADDR>` | TCP address advertised to signed peers. Required when binding a wildcard address. |
-| `--comms-binding-out <PATH>` | Write this session's external runtime binding JSON for mob hosts or other supervisors. |
+| `--comms-binding-out <PATH>` | Write this session's external runtime binding JSON for mob hosts or other supervisors. The file carries a bootstrap token. It is a new file that replaces the one at the path. A symbolic link at the path is never followed: a link to a regular file or to nothing is replaced by the new file, and a link to a named pipe, a socket, a device or a directory is refused, as those things themselves are. A path in `/proc`, or in `/dev` other than under `/dev/shm`, is refused whatever it holds (`/dev/stdout`). The file is readable by its owner only on Unix (mode 0600), and a supervisor under another account cannot read it. |
 | `--comms-pairing-password <PASSWORD>` | Accept initial signed comms enrollment with a shared one-time password. |
 | `--comms-pairing-password-env <ENV>` | Read the pairing password from an environment variable. |
 | `--comms-pairing-password-file <PATH>` | Read the pairing password from a file. |
@@ -1007,6 +1007,15 @@ Kickoff status notices are different. A member's kickoff progress reaches its wi
 - `mob.kickoff_cancelled`
 
 They are visible because they tell the parent or wired peers how a helper's initial autonomous turn is going, including a failure before the helper could reliably report for itself. They are still one-way notices, not requests: the receiving agent sees a `lifecycle` comms notice naming the kind, no inbound request is recorded, and no `send_response` reply is expected.
+
+Kickoff notices are progress hints, not a guaranteed record. The member's kickoff phase in its status is the fact; a peer can miss a notice:
+
+- Order: the notices of one member reach one peer one at a time, in the order the kickoff went through its phases. A notice to a peer that is not live wakes it and is delivered once the peer is live. Notices to different peers, and of different members, are independent.
+- Bound: at most eight notices of one member are pending for one peer, the one being sent included. A notice owed beyond that takes the place of the oldest one still waiting (never of the one being sent), so the latest phase, a failure or a cancellation included, survives. The bound is per pair of members; there is none across peers or members.
+- No retry: a notice whose send fails, or whose send budget ends (the sending member's comms ack timeout, 30 seconds by default), is not sent again. The next notice of that member to that peer is attempted when that budget has ended.
+- Cancel: a stop, a complete, a reset, a shutdown or a destroy of the mob, an unwire of the edge, a retirement of either member and the rollback of a failed spawn cancel the notices that are pending when they start. A notice such a command emits itself (the cancellation of a kickoff that a stop closes) is still handed off and ends within its send budget; the stop does not wait for it, and nothing is delivered after a destroy.
+
+A notice the delivery lane cannot confirm is logged at WARN with the member (`from`), the peer (`to`), the kind (`intent`) and a `class`: `preparation_failed`, `send_failed`, `pending_bound` or `cancelled`. Not confirmed is not the same as not delivered: a notice whose send budget ended, or that was cancelled, after its recipient had admitted it can still arrive, once. Three cases have no such record: a sending member with no comms runtime (nothing is prepared), a placed sending member (logged without the peer and the class), and notices still pending when the mob's actor exits.
 
 Batched peer lifecycle updates are presentation-only: the underlying comms stream remains one event per peer change.
 

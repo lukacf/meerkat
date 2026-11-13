@@ -1046,10 +1046,11 @@ them.
   its built-in skills and, on `rkat-rpc`, a mob member's prompt before it is
   published (`scripts/check-release-binary-registrations`, see the
   [release guide](docs/guides/cd-and-distribution.md#binary-artifacts)).
-  Affects the Linux x86_64 release archives that lane built: by the release
-  runs' history every release from 0.8.23 through 0.9.14, except 0.8.50 (the
-  other build lane; not affected, by reading); for 0.8.30 the lane that
-  built the published archives is not established. By run: 0.8.52, 0.9.0,
+  Affects the Linux x86_64 release archives that lane built: every release
+  from 0.8.23 through 0.9.14, with two exceptions: 0.8.50 (the other build
+  lane; not affected, by reading) and 0.8.30 (not established: treat it as
+  affected until it is). This is read from the run history for each of the
+  44 releases; no archive was downloaded for this. By run: 0.8.52, 0.9.0,
   0.9.10, 0.9.13 and 0.9.14. The
   macOS arm64 archive of 0.9.14 is not affected, by run. The Linux aarch64,
   Intel macOS and Windows archives and builds from source with Cargo
@@ -1411,8 +1412,10 @@ them.
   list are back (see Fixed), which changes what an agent started from that
   download receives: the CLI, and the `rkat-rpc` the Python and TypeScript
   SDKs download and start. The skill inventory is in its prompt again, so
-  prompt content and input token counts change against the affected
-  archives (see Fixed; 0.9.14 among them) on that platform: with the
+  prompt content and input token counts change on that platform against
+  the affected archives: every release from 0.8.23 through 0.9.14, with two
+  exceptions: 0.8.50 (the other build lane; not affected, by reading) and
+  0.8.30 (not established: treat it as affected until it is). With the
   default configuration the first request
   of a plain `rkat run` names all 6 built-in skills `rkat` lists by default
   (none of them on 0.9.14) and is about 2.3 kB larger. `rkat run --skill

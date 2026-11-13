@@ -28,6 +28,12 @@ scripts/buildbuddy-bazel-poc builds; they must match the binaries
     features in its library (the rules_rust patch moves them into a select on
     //tools/bazel:release_build), and every listed crate has such a
     repository.
+(d) Every `release-build-linux-*` case links with GNU ld
+    (--linkopt=-fuse-ld=bfd), not the cc toolchain's default gold: the gold of
+    the lane's image writes the constructors of the link-time registrations
+    (the capabilities and the built-in skills) into a table that process
+    start never runs. scripts/check-release-binary-registrations asks the
+    built binaries; this is the same rule at the source.
 
 Usage: check-bazel-release-features.py [repo-root]
 Exit 0 = clean, 1 = violations, 2 = the inputs cannot be read.
@@ -55,6 +61,9 @@ SETTING_LABEL = "//tools/bazel:release_build"
 RELEASE_KEYS = {SETTING_LABEL, f"@{SETTING_LABEL}", f"@@{SETTING_LABEL}"}
 DEFINE_NAME = "meerkat_release_build"
 DEFINE_FLAG = f"--define={DEFINE_NAME}=1"
+LINUX_CASE_PREFIX = "release-build-linux-"
+LINUX_LINKER_FLAG = "--linkopt=-fuse-ld=bfd"
+LINUX_LINKER = re.compile(r"(?<![\w-])" + re.escape(LINUX_LINKER_FLAG) + r"(?![\w-])")
 RUST_RULES = ("rust_library", "rust_binary", "rust_proc_macro", "rust_shared_library", "rust_static_library")
 TEST_VARIANT_SUFFIXES = ("_test_support", "_with_runtime_test_support")
 # Paths whose text names the opt flags without running a build: this guard and
@@ -257,6 +266,13 @@ def check_launcher(root: pathlib.Path) -> tuple[list[str], set[str], set[str]]:
             errors.append(f"{LAUNCHER} {name} does not build with --compilation_mode=opt")
         if (builds_opt or name in release_cases) and DEFINE_FLAG not in body:
             errors.append(f"{LAUNCHER} {name} builds release binaries without {DEFINE_FLAG}")
+        if name.startswith(LINUX_CASE_PREFIX) and not LINUX_LINKER.search(
+            "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+        ):
+            errors.append(
+                f"{LAUNCHER} {name} links without {LINUX_LINKER_FLAG}: the cc toolchain's default gold "
+                "leaves link-time registrations out of the binary's init-array table"
+            )
         if name in release_cases:
             targets = re.search(r'default_target="([^"]*)"', body)
             labels = set(targets.group(1).split()) if targets else set()

@@ -42,7 +42,7 @@ case "${command}" in
   release-build-linux-x86)
     command="build"
     default_target="//app:app_bin //tool:tool"
-    extra_args+=(--compilation_mode=opt --define=meerkat_release_build=1 --remote_download_outputs=toplevel)
+    extra_args+=(--compilation_mode=opt --define=meerkat_release_build=1 --remote_download_outputs=toplevel --linkopt=-fuse-ld=bfd)
     ;;
   release-build-windows-x86)
     command="build"
@@ -480,6 +480,18 @@ class ReleaseFeatureGateTests(unittest.TestCase):
             "--compilation_mode=opt --remote",
         )
         self.assert_fails("release-build-linux-x86 builds release binaries without --define=meerkat_release_build=1")
+
+    def test_linux_release_build_without_gnu_ld_fails(self) -> None:
+        self.edit("scripts/buildbuddy-bazel-poc", " --linkopt=-fuse-ld=bfd)", ")")
+        self.assert_fails("release-build-linux-x86 links without --linkopt=-fuse-ld=bfd")
+
+    def test_linux_release_build_naming_gnu_ld_only_in_a_comment_fails(self) -> None:
+        self.edit(
+            "scripts/buildbuddy-bazel-poc",
+            " --linkopt=-fuse-ld=bfd)",
+            ")\n    # was: --linkopt=-fuse-ld=bfd",
+        )
+        self.assert_fails("release-build-linux-x86 links without --linkopt=-fuse-ld=bfd")
 
     def test_opt_build_outside_the_launcher_fails(self) -> None:
         self.edit("Makefile", "\tscripts/buildbuddy-bazel-poc\n", "\tbb build -c opt //app:app_bin\n")

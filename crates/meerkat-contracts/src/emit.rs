@@ -2527,6 +2527,44 @@ mod tests {
         fs::remove_dir_all(&output_dir).unwrap();
     }
 
+    /// A reasoning effort refusal's `route`, `supported` and `facts` are
+    /// always present on the wire and `null` when they have no value: the
+    /// schema requires each and lets each be null. The two `conflicting_*`
+    /// members are left out when absent, so the schema does not require
+    /// them.
+    #[test]
+    fn the_refusals_always_present_members_are_required_and_nullable() {
+        fn admits_null(schema: &serde_json::Value) -> bool {
+            let ty = &schema["type"];
+            ty.as_str() == Some("null")
+                || ty
+                    .as_array()
+                    .is_some_and(|types| types.iter().any(|ty| ty.as_str() == Some("null")))
+                || ["anyOf", "oneOf"].iter().any(|key| {
+                    schema[*key]
+                        .as_array()
+                        .is_some_and(|arms| arms.iter().any(admits_null))
+                })
+        }
+        let schema =
+            serde_json::to_value(schemars::schema_for!(meerkat_core::ReasoningEffortRefusal))
+                .expect("the refusal's schema is JSON");
+        let required = schema["required"]
+            .as_array()
+            .expect("the refusal's schema lists its required members");
+        let is_required = |member: &str| required.iter().any(|name| name.as_str() == Some(member));
+        for member in ["route", "supported", "facts"] {
+            assert!(is_required(member), "{member} is required: {schema}");
+            assert!(
+                admits_null(&schema["properties"][member]),
+                "{member} may be null: {schema}"
+            );
+        }
+        for member in ["conflicting_param", "conflicting_level"] {
+            assert!(!is_required(member), "{member} is left out when absent");
+        }
+    }
+
     #[test]
     fn emitted_rest_openapi_contains_wire_contracts_not_only_paths() {
         let output_dir = temp_output_dir("rest-openapi-contracts");

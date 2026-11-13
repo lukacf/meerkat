@@ -1568,6 +1568,22 @@ Security, Upgrade and Changed.
   the table names no holder at all (macOS, Windows, and on Linux btrfs
   subvolumes and overlayfs, the 0.9.4 known limitation), nothing changes.
 
+- Python SDK: `MobHandle.subscribe_agent` and `subscribe_mob` deliver each
+  event when it arrives, and so do the event routes of the SDK's ASGI app
+  (`runtime.asgi()`: `GET /agents/<id>/events` and `GET /mob/events`). The
+  SDK read the gateway's event stream in blocks of 4096 bytes and waited
+  for each block to fill: a short run showed no event, a longer run showed
+  its first events and not its last (usually `run_completed`) until later
+  activity on the stream, and the ASGI routes sent no response at all,
+  because their response starts with the first event. Affects every
+  `meerkat-meta` release, 0.9.0 through 0.9.14 (by reading the source at
+  each release tag; by a run on 0.9.14), and the package under its earlier
+  name, `meerkat-mobkit`, from 0.4.8. The gateway and the TypeScript SDK
+  were not affected. On an affected release, read a run's end from
+  `member_status(...).progress.run_state` (`run_open`, then `idle`) or, on
+  an identity-first runtime, with `send_and_wait` or `wait_for_turn`. See
+  the Python SDK's CHANGELOG.
+
 ### Known limitations
 
 - An update cannot hand an agent's runtime mode back to its profile: to

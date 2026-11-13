@@ -83,6 +83,24 @@ All notable changes to the Python SDK are documented here.
   `unwire_local` on both sides with current `peer_info`,
   `wire_cross_mob`); with member socket endpoints, one member per gateway
   today.
+- `MobHandle.subscribe_agent` and `subscribe_mob` deliver each event when
+  it arrives, and so do the event routes of the ASGI app (`runtime.asgi()`:
+  `GET /agents/<id>/events` and `GET /mob/events`). The SDK read the
+  gateway's event stream in blocks of 4096 bytes and waited for each block
+  to fill, so it handed nothing on until that many bytes had arrived. A
+  short run showed no event at all; a longer run showed its first events
+  and not its last, usually `run_completed`, until later activity on the
+  stream; and the ASGI routes sent no response, because their response
+  starts with the first event. The stream is now read as it arrives.
+  Affects every `meerkat-meta` release, 0.9.0 through 0.9.14, by reading
+  the source at each release tag and by a run on 0.9.14; the reader was the
+  same in the package under its earlier name, `meerkat-mobkit`, from 0.4.8.
+  The gateway and the TypeScript SDK were not affected. On an affected
+  release a run's end can be read without the event stream:
+  `member_status(...).progress.run_state` reads `run_open` and then `idle`
+  (the first read after a send can still be `idle`), and on an
+  identity-first runtime `send_and_wait` and `wait_for_turn` return when the
+  turn has finished.
 
 ## 0.9.14
 

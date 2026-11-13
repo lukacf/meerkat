@@ -4,23 +4,27 @@ description: "Use Node service operations, native application composition and a 
 icon: "js"
 ---
 
-`@rkat/toolkit` version `0.9.10` is an ESM package supporting Node 22.12.0 or newer. The service libraries run without Meerkat, Meta or a model. The browser UI has a separate entrypoint.
+`@rkat/toolkit` version `0.9.14` is an ESM package supporting Node 22.12.0 or newer. The service libraries run without Meerkat, Meta or a model. The browser UI has a separate entrypoint.
 
 ## Install
 
 ```sh
-npm install https://github.com/lukacf/meerkat/releases/download/connect-v0.9.10/rkat-toolkit-0.9.10.tgz
+npm install https://github.com/lukacf/meerkat/releases/download/connect-v0.9.14/rkat-toolkit-0.9.14.tgz
 ```
 
 ## Build from source
 
-From `connect/sdk/typescript/` in a checkout of this repository, install the locked tooling:
+In a checkout of this repository, first build the two SDKs the package links for
+development: `sdks/typescript` (`npm install --ignore-scripts`, then `npm run build`)
+and `meta/sdk/typescript` (`npm ci --ignore-scripts`, then `npm run build`). Then,
+from `connect/sdk/typescript/`, install the locked tooling:
 
 ```sh
 npm ci --ignore-scripts
 ```
 
-Current source locks published `@rkat/sdk` 0.9.10 and `@rkat/meta-sdk` 0.9.10.
+The source links `@rkat/sdk` and `@rkat/meta-sdk` from the same checkout, so the
+package builds against the SDKs of the same commit.
 Native development compositions also require a matching gateway and explicit
 SDK provenance; see [BUILDING.md](https://github.com/lukacf/meerkat/blob/main/connect/BUILDING.md#sdks).
 Then build and pack:

@@ -1,0 +1,319 @@
+{
+  "schema_version": 1,
+  "description": [
+    "Configuration of scripts/check_inrepo_version_pins.py, run by scripts/verify-version-parity.sh.",
+    "Every product of this repository consumes the others at the version this tree builds: in development and CI the build of the same commit, in a release the same release's artifacts. A pin of an in-repo package is a same-commit reference or names exactly the package's version in this tree.",
+    "former_names: earlier names of in-repo packages, read as the package they became. products: product words the check reads beside ci/products.json. release_tags: release tag prefixes beside the products' own. release_assets: release asset name prefixes and the package whose version they carry (wheel and npm tarball names are derived).",
+    "allow: pins that stay below the version in this tree, each with its reason: upgrade-test fixtures, recorded history, tests that feed recorded or synthetic versions to the code they test, and code that reads installations recorded by earlier releases. An entry without match or key covers whole files, which are not read; one with match covers the pins it matches. In a JSON file key scopes an entry to the pins of the values under the key paths it matches (object keys joined by /, array items by their index). removed_by names the change that removes a temporary entry's pins. An entry that covers nothing fails the check.",
+    "published_release_inputs: files that record a published release of an in-repo product (they pin its assets by digest, so they move only after a publication). They are judged together, per product: they all name one release, the one a version constant among them names or, without one, the newest they name; an input that names another release, a release newer than the version in this tree or no single release fails the check; a selected release older than the version in this tree is a warning and fails nothing. A path given with a match puts only the pins it matches in that class, the file's other pins follow the ordinary rule, and it fails the check when it applies to none. They are read even under a whole-file allow entry. A path that matches no tracked file fails the check.",
+    "version_constants: per file, the package a version constant pins when its name names no product (VERSION = \"X.Y.Z\"); a constant the file no longer holds fails the check."
+  ],
+  "former_names": {
+    "pypi:meerkat-mobkit": "pypi:meerkat-meta",
+    "npm:@rkat/mobkit-sdk": "npm:@rkat/meta-sdk"
+  },
+  "products": {
+    "forge": "pypi:meta-forge"
+  },
+  "release_tags": {
+    "meta-installer-v": "pypi:meta-forge",
+    "forge-v": "pypi:meta-forge",
+    "forge-native-v": "pypi:meta-forge"
+  },
+  "release_assets": {
+    "rkat": "product:core",
+    "rkat-mcp": "product:core",
+    "rkat-rest": "product:core",
+    "rkat-rpc": "product:core",
+    "meta-rpc-gateway": "product:meta",
+    "meta-gateway": "product:meta",
+    "meta-repair": "product:meta",
+    "mobkit-rpc-gateway": "product:meta",
+    "mobkit-gateway": "product:meta",
+    "meerkat-connect": "product:connect",
+    "meerkat-connect-gateway": "product:connect",
+    "meta-installer": "pypi:meta-forge",
+    "meta-forge": "pypi:meta-forge",
+    "forge-service-host": "pypi:meta-forge"
+  },
+  "published_release_inputs": {
+    "reason": "Forge's release inputs, the VERSION line of the Meta runtime that compiled agent teams install (beside its wheel's SHA-256), the model catalog of that runtime and the recorded release of it that the installer's tests read pin the assets of a published Meta or Connect release by digest, so they are filled in after that release is published and stay behind a version bump until they are refreshed; the list is emptied when Forge's release derives its in-repo inputs at release time.",
+    "paths": [
+      "meta/installer/release/**",
+      {
+        "path": "meta/installer/launchkit/public_meta_runtime.py",
+        "match": "^VERSION = "
+      },
+      "meta/installer/launchkit/meta_model_catalog_*.json",
+      "meta/installer/tests/fixtures/meta_release_*/**"
+    ]
+  },
+  "version_constants": {
+    "meta/installer/launchkit/public_meta_runtime.py": {
+      "VERSION": "pypi:meerkat-meta"
+    }
+  },
+  "allow": [
+    {
+      "path": "scripts/check_inrepo_version_pins.py",
+      "reason": "The check's own description quotes example pins of each shape it finds."
+    },
+    {
+      "path": "scripts/test_check_inrepo_version_pins.py",
+      "reason": "The check's tests feed synthetic pins of each shape to it."
+    },
+    {
+      "path": "specs/**",
+      "reason": "Generated TLA+ models and their configurations; the machine sources they come from are read."
+    },
+    {
+      "path": "**/dist/**",
+      "reason": "Built bundles; the sources they are built from are read."
+    },
+    {
+      "path": "meta/crates/meerkat-meta/console-dist/**",
+      "reason": "The console bundle the Meta crate embeds, built from meta/console, whose sources are read."
+    },
+    {
+      "path": "artifacts/schemas/**",
+      "reason": "Schemas emitted from meerkat-contracts; the contract version they carry is checked by the parity script's own section."
+    },
+    {
+      "path": "docs/meta/**",
+      "reason": "The docs site's snapshot of meta/docs at the main commit docs/meta/_source.json records, which the Publish Meta docs workflow renders after a push to main changes meta/docs, so it follows a Meta bump after that bump lands; meta/docs itself is read, and scripts/check-meta-docs-lag.py bounds the lag."
+    },
+    {
+      "path": "**/CHANGELOG.md",
+      "reason": "Released notes record the versions each release shipped with."
+    },
+    {
+      "path": "docs/internal/**",
+      "reason": "Unpublished audit and archive notes quote the versions they examined."
+    },
+    {
+      "path": "meta/docs/internal/**",
+      "reason": "Unpublished audit and archive notes quote the versions they examined."
+    },
+    {
+      "path": "examples/audit/**",
+      "reason": "Audit notes of the examples quote the versions they examined."
+    },
+    {
+      "path": "connect/docs/releases/**",
+      "reason": "Connect's release records describe each release's own assets and the sources it was built from."
+    },
+    {
+      "path": "connect/crates/toolkit-package/integrations/connectors/*/*/SUPPORT.md",
+      "reason": "Each connector version's support record names the wheels its verification ran with."
+    },
+    {
+      "path": "connect/BUILDING.md",
+      "match": "meerkat-connect release v0\\.9\\.0|^meerkat-connect-0\\.9\\.0$|meerkat_toolkit-0\\.9\\.0|rkat-toolkit-0\\.9\\.0",
+      "reason": "The build instructions for the v0.9.0 checkout name that release's own assets."
+    },
+    {
+      "path": "docs/guides/upgrading.mdx",
+      "match": "^meerkat-meta==0\\.9\\.10$",
+      "reason": "The upgrade notes of 0.9.10 describe the pins that release shipped with."
+    },
+    {
+      "path": "connect/sdk/services/README.md",
+      "match": "^meerkat_toolkit_services-0\\.1\\.19$",
+      "reason": "Names the services release that introduced an operation; bundles of that release or later carry it."
+    },
+    {
+      "path": "meta/CONTRIBUTING.md",
+      "match": "^meta-rpc-gateway-0\\.8\\.31$",
+      "reason": "A format example of Meta's release record, not a pin."
+    },
+    {
+      "path": "examples/030-web-dashboard-copilot-sh/examples.sh",
+      "match": "^meerkat = \">=0\\.6\\.0\"$",
+      "reason": "The example pack's own [requires] runtime floor, a statement of the pack format rather than a dependency of this repository; a literal current version in examples/ would also trip the release projection's version ratchet."
+    },
+    {
+      "path": "crates/meerkat-runtime/tests/fixtures/**",
+      "reason": "Upgrade-test corpora captured from published releases, with the provenance of the release that produced them."
+    },
+    {
+      "path": "crates/meerkat-runtime/tests/recovery_contract.rs",
+      "match": "release v0\\.8\\.10$|^rkat-0\\.8\\.10$",
+      "reason": "Checks that the recorded 0.8.10 corpus names the published release, and the archive, that produced it."
+    },
+    {
+      "path": "meta/crates/meerkat-meta/tests/fixtures/**",
+      "reason": "Upgrade-test states recorded by published Meta and Core releases, and the scripts and manifests that mint them."
+    },
+    {
+      "path": "meta/installer/tests/fixtures/**",
+      "reason": "Recorded Forge runtime history and a recorded Meta 0.9.6 release, read by Forge's upgrade and compatibility tests."
+    },
+    {
+      "path": "meta/installer/tests/test_*.py",
+      "reason": "Forge's tests feed recorded runtime versions (MobKit 0.8.x, published Meta 0.9.x) and synthetic versions to the selection, verification and upgrade code they test."
+    },
+    {
+      "path": "meta/scripts/test_*.py",
+      "reason": "Tests of Meta's and Forge's release scripts feed synthetic release versions, URLs and asset names to the code they test."
+    },
+    {
+      "path": "connect/scripts/test_*.py",
+      "reason": "Tests of Connect's packaging scripts feed synthetic library and product versions to the code they test."
+    },
+    {
+      "path": "connect/crates/meerkat-connect/src/stdio_tests.rs",
+      "reason": "Test data: synthetic services and agno wheel names with placeholder digests."
+    },
+    {
+      "path": "connect/crates/meerkat-connect/src/resources/installation_readback.rs",
+      "match": "^meerkat_toolkit_(services|agno)-0\\.1\\.0$",
+      "reason": "Test data in its test module: synthetic services and agno wheel names with placeholder digests."
+    },
+    {
+      "path": "connect/crates/meerkat-connect/src/terminal_connector/installed/returning_account.rs",
+      "match": "^meerkat_toolkit_services-0\\.1\\.0$",
+      "reason": "Test data: a synthetic services wheel name with placeholder digests."
+    },
+    {
+      "path": "crates/xtask/tests/release_workflow_asset_manifest.rs",
+      "reason": "Tests of the release asset manifest contract use a synthetic earlier release's archive names."
+    },
+    {
+      "path": "scripts/test-release-doctor-workflow-contract.sh",
+      "reason": "The release doctor's contract test uses a synthetic earlier release."
+    },
+    {
+      "path": "scripts/test-verify-release-asset-provenance.sh",
+      "reason": "The release asset provenance test uses synthetic release versions."
+    },
+    {
+      "path": "scripts/test-release-projection-only.sh",
+      "match": "1\\.2\\.3",
+      "reason": "The release projection classifier's test builds a synthetic repository at version 1.2.3."
+    },
+    {
+      "path": "sdks/python/tests/**",
+      "reason": "The SDK's binary resolution and integrity tests use synthetic release versions and archive names."
+    },
+    {
+      "path": "sdks/typescript/tests/**",
+      "reason": "The SDK's binary resolution and integrity tests use synthetic release versions and archive names."
+    },
+    {
+      "path": "meta/installer/launchkit/native_definition_continuity.py",
+      "match": "^CORE_VERSION = \"0\\.8\\.51\"$",
+      "reason": "Upgrade history: recognizes the MobKit 0.8.46 to 0.8.48 deployments on Core 0.8.51 that earlier Forge releases installed; generated packages carry this module byte for byte, so it is not edited."
+    },
+    {
+      "path": "meta/installer/launchkit/deployment_updates.py",
+      "match": "^NATIVE_STORAGE_META_VERSION = \"0\\.9\\.4\"$",
+      "reason": "Upgrade history: the storage threshold an application update must not cross, a threshold and not a pin."
+    },
+    {
+      "path": "meta/installer/launchkit/deployment_updates.py",
+      "match": "meerkat-mobkit release v\\{version\\}$",
+      "reason": "Upgrade history: validates the update receipts of MobKit-era installations against the release they recorded."
+    },
+    {
+      "path": "meta/installer/launchkit/runtime_dependencies.py",
+      "match": "meerkat-mobkit release v\\{expected_version\\}$",
+      "reason": "Upgrade history: checks the official runtime receipts that MobKit-era installations recorded."
+    },
+    {
+      "path": "meta/installer/launchkit/templates/install_gateway.py",
+      "match": "meerkat-(mobkit|meta) release v\\{VERSION\\}$",
+      "reason": "Upgrade history: a generated package installs the runtime its deployment.json records; packages generated for Meta 0.9.7 and earlier find it in the standalone repositories."
+    },
+    {
+      "path": "meta/installer/pyproject.toml",
+      "match": "^meerkat-mobkit==0\\.8\\.42$",
+      "reason": "Test fixture: the test extra installs the MobKit 0.8.42 SDK that the installer's tests import; CI installs it from PyPI with the extra."
+    },
+    {
+      "path": "meta/installer/DEVELOPMENT.md",
+      "match": "^meerkat-mobkit==0\\.8\\.42$",
+      "reason": "Test fixture text: documents the test extra that installs the MobKit 0.8.42 SDK for the installer's tests."
+    },
+    {
+      "path": "meta/installer/release/**",
+      "match": "0\\.9\\.10|forge-native-v0\\.3\\.1",
+      "key": "^(?:targets/[^/]+/)?(?:files/(?:product|ordinary|native)/|selection/|paths/)|^provider/|^archive$",
+      "reason": "Forge's product inputs (the Connect 0.9.10 product, the ordinary gateway meta-v0.9.10 and the collection host forge-service-host 0.3.1: the product, ordinary and native files of the release inputs and their stable copy, the product selection and its paths, the stable copy's provider and the committed assembly record's archive, never a Guide row): forge-service-host is built outside this repository against Connect 0.9.10's resources digest, so these rows move together when this repository builds forge-service-host from the same commit and the Forge release takes all product inputs from the paired release.",
+      "removed_by": "the in-repo forge-service-host build"
+    },
+    {
+      "path": "meta/scripts/installer-release.py",
+      "match": "meerkat-meta release v\\{version\\}$",
+      "reason": "Dead code, removal tracked: the standalone repository's route for an ordinary gateway of a Meta release made before the monorepo, which no release input names.",
+      "removed_by": "the in-repo forge-service-host build"
+    },
+    {
+      "path": "meta/installer/launchkit/generator.py",
+      "match": "^MOBKIT_VERSION = \"0\\.8\\.47\"$",
+      "reason": "Upgrade history: a compatibility key for reading packages built with the MobKit-era runtime; no new package compiles against it."
+    },
+    {
+      "path": "meta/installer/launchkit/bootstrap.py",
+      "match": "^CORE_VERSION = \"0\\.8\\.51\"$|meerkat-mobkit release v\\{VERSION\\}$",
+      "reason": "Dead code, removal tracked.",
+      "removed_by": "the change that removes Forge's dead MobKit-era code"
+    },
+    {
+      "path": "meta/installer/launchkit/distribution.py",
+      "match": "^meerkat_mobkit-0\\.8\\.4[267]$|meerkat-mobkit release v0\\.8\\.4[67]$",
+      "reason": "Dead code, removal tracked.",
+      "removed_by": "the change that removes Forge's dead MobKit-era code"
+    },
+    {
+      "path": "meta/installer/README.md",
+      "match": "^meerkat_mobkit-0\\.8\\.47$",
+      "reason": "Dead code, removal tracked: this section documents the legacy bundle path.",
+      "removed_by": "the change that removes Forge's dead MobKit-era code"
+    },
+    {
+      "path": "connect/release/connect-release-inputs*.json",
+      "reason": "The candidate input templates of Connect's standalone release protocol select Core and Meta 0.9.4; the monorepo's connect-release.yml is a draft and Connect's releases are built outside it.",
+      "removed_by": "the change that makes Connect's candidate protocol take Core and Meta from the same commit"
+    },
+    {
+      "path": "connect/.github/workflows/checks.yml",
+      "reason": "A copy of the standalone repository's workflow; GitHub runs only the root workflows, and ci.yml's connect-checks job runs these checks.",
+      "removed_by": "the change that removes the standalone repositories' workflow copies under connect/.github and meta/.github"
+    },
+    {
+      "path": "connect/README.md",
+      "match": "v0\\.9\\.10$",
+      "reason": "Connect's README describes and installs the Connect 0.9.10 release with Core 0.9.10.",
+      "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
+    },
+    {
+      "path": "connect/sdk/python/HOME_ASSISTANT.md",
+      "reason": "Installs the Connect 0.9.0 wheel from the standalone repository.",
+      "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
+    },
+    {
+      "path": "connect/sdk/typescript/README.md",
+      "match": "v0\\.9\\.0$|^rkat-toolkit-0\\.9\\.0$",
+      "reason": "Installs the Connect 0.9.0 npm package from the standalone repository.",
+      "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
+    },
+    {
+      "path": "meta/docs/forge/quickstart.mdx",
+      "match": "release forge-v0\\.3\\.0$|^meta-forge-0\\.3\\.0$",
+      "reason": "Forge's install page downloads Forge 0.3.0 from the standalone repository; Forge 0.3.1 is released here as meta-installer-v0.3.1.",
+      "removed_by": "the change that points Forge's install docs at its meta-installer releases in this repository"
+    },
+    {
+      "path": "meta/docs/forge/reference.mdx",
+      "match": "release forge-v0\\.3\\.0$|^meta-forge-0\\.3\\.0$",
+      "reason": "Forge's reference page downloads Forge 0.3.0 from the standalone repository; Forge 0.3.1 is released here as meta-installer-v0.3.1.",
+      "removed_by": "the change that points Forge's install docs at its meta-installer releases in this repository"
+    },
+    {
+      "path": "**/meerkat-platform/references/sessions_runtime_surfaces_api_changes.md",
+      "match": "\"=0\\.9\\.0\"$",
+      "reason": "The platform skill's guidance pins its example crates at 0.9.0; the docs stamper rewrites only the skill's SKILL.md.",
+      "removed_by": "the change that stamps the platform skill reference's pinning example with the workspace version"
+    }
+  ]
+}

@@ -3,7 +3,58 @@
 All notable changes to Meerkat Connect are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## Documentation erratum - 2026-11-12
+
+This clarifies documentation for released Connect 0.9.14; it is not a new
+runtime change. The peer-delivery entries in the 0.9.11 **Known limitations**
+section, carried forward in the changelog distributed with 0.9.14, describe
+reply and Recorder refusals too categorically. Those historical entries and
+the released tags are unchanged.
+
+In Connect 0.9.14's selected member composition, the receiver's standing
+selection permits messages and replies to the actual sender (not requests),
+and writes to its own Recorder. Requests and sends to other peers are outside
+that selection. A same-process governed delivery also narrows each operation
+by the sending work's current grants for its target: an operation without that
+target coverage is refused. Coverage is necessary, not a guarantee of success.
+This does not assert that any particular governed reply or Recorder write has
+been qualified at runtime.
+
+A delivery without a governed origin still uses the receiver's standing
+selection; it does not gain unrestricted authority. A network delivery carries
+no governed origin, and Connect must resolve its sender in the receiving
+member's local mob roster or refuse it. This describes Connect's selected
+composition, not a general rule for all Core hosts or a qualification of
+cross-network deployment.
+
+The current [host composition](https://docs.rkat.ai/connect/guides/host-composition)
+and [access-control](https://docs.rkat.ai/connect/reference/access-control)
+guides give the conditional wording for Connect 0.9.14.
+
 ## [Unreleased]
+
+## [0.9.14] - 2026-11-11
+
+Meerkat Connect 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14
+and Connect 0.9.14, released together): GitHub release `connect-v0.9.14`, a
+full release that is never the repository's latest.
+
+`@rkat/toolkit` accepts its optional peers `@rkat/sdk` and `@rkat/meta-sdk`
+from 0.9.14, and its source builds and tests run against the SDKs of the
+same commit. See Changed.
+
+### Changed
+
+- `@rkat/toolkit` accepts its optional peers `@rkat/sdk` and `@rkat/meta-sdk`
+  from 0.9.14 below 0.10.0 (`>=0.9.14 <0.10.0`; it accepted them from 0.9.10):
+  the package is built and tested with the SDKs of its own release, and each
+  release moves the floor to its version; a release that reaches the ceiling
+  also moves the ceiling, to the next minor release on the 0.x line (at
+  0.10.0 the peers become `>=0.10.0 <0.11.0`). Its development dependencies link
+  `@rkat/sdk` and `@rkat/meta-sdk` from the same checkout instead of
+  installing the published 0.9.10 packages, so source builds and tests run
+  against the SDKs of the same commit; build the repository's
+  `sdks/typescript` and `meta/sdk/typescript` first (see BUILDING.md).
 
 ## [0.9.13] - 2026-11-11
 

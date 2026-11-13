@@ -99,6 +99,8 @@ pub mod confinement_config;
 pub mod connection;
 pub mod context_budget;
 mod digest_observability;
+#[cfg(not(target_arch = "wasm32"))]
+mod document_file;
 pub mod error;
 pub mod event;
 pub mod event_injector;

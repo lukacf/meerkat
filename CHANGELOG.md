@@ -1386,6 +1386,14 @@ them.
   new revision, with `include_forks`; they then select the forks seated
   from then on.
 
+- Mob: an agent whose `mob_destroy` the mob refuses is now answered
+  `mob destroy refused. The destroy can be retried; the host's log has the
+  cause.`, with no data, for every refusal whose type does not show what it
+  names (an internal error's text, a pending lifecycle operation), also on
+  a host that installs no member tool audience. The host's log holds the
+  whole refusal at `warn`, with the mob's id; read the cause there. The
+  host's own destroy is answered as before.
+
 ### Known limitations
 
 - The owner-only rule of this release (see Security) covers the

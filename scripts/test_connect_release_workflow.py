@@ -1020,6 +1020,7 @@ STAGE_BUILD_STEPS = (
     "Free the Cargo output",
     "Pack the work root for the check job",
     "Upload the work root",
+    "Upload the failure evidence",
 )
 STAGE_CHECK_STEPS = (
     "Checkout the dispatched source",
@@ -1040,6 +1041,7 @@ STAGE_CHECK_STEPS = (
     "Retain the provenance bundle",
     "Upload the stage record",
     "Upload the stage provenance",
+    "Upload the failure evidence",
 )
 # The producer's one call per step: job, workflow step, the words after `connect-candidate.py macos`.
 PRODUCER_CALLS = (
@@ -1716,26 +1718,62 @@ class ConnectMacosProducerContractTests(unittest.TestCase):
         lane = re.search(r'(?m)^MACOS_LANE = "([^"]+)"$', self.SOURCE.read_text()).group(1)
         self.assertIn(f"          RUST_LANE_ID: {lane}\n", step_block("Free the Cargo output", "stage_macos_build") + "\n")
 
+    EVIDENCE = "Upload the failure evidence"
+
     def test_a_failed_step_fails_its_job(self):
-        # A failed check (the official Playwright install is one) must stop the job before the stage
-        # record is written: no step is conditional and none tolerates a failure. The producer's own
-        # tests hold that a failed official install fails its step and that a check that did not run is
-        # stated and never assembled (connect/scripts/test_connect_candidate_cli.py:
+        # No step may mask a failure: none continues on an error, and no step's shell tolerates a failed
+        # command (`|| true`, `|| :`, `set +e`). A failed check (the official Playwright install is one)
+        # therefore stops the job before the stage record is written. The producer's own tests hold that
+        # a failed official install fails its step and that a check that did not run is stated and never
+        # assembled (connect/scripts/test_connect_candidate_cli.py:
         # test_a_failed_official_install_fails_the_stage,
         # test_an_official_install_that_could_not_run_is_stated_and_never_assembles).
+        # The only conditional step is the named evidence upload: the last step of each stage job, run
+        # only after a failure, which it cannot undo.
         for job in self.JOBS:
             block = job_block(job)
             with self.subTest(job=job):
                 self.assertNotIn("continue-on-error", block)
-                self.assertEqual(re.findall(r"(?m)^        if:", block), [])
-                for step in re.findall(r"(?m)^      - name: (.+)$", block):
+                steps = re.findall(r"(?m)^      - name: (.+)$", block)
+                conditional = [step for step in steps if "\n        if:" in step_block(step, job)]
+                self.assertEqual(conditional, [self.EVIDENCE] if job in STAGE_JOBS else [])
+                for step in steps:
                     body = step_block(step, job)
                     if "        run: |\n" in body + "\n":
                         self.assertIn("          set -euo pipefail\n", body + "\n", step)
+                        shell = re.sub(r"(?m)^\s*#.*$", "", indented_body(step, job, "run", 10))
+                        self.assertIsNone(re.search(r"\|\|\s*(true|:)(\s|$)|\bset\s+\+e\b|\bset\s+\+o\s+(errexit|pipefail)\b",
+                                                    shell), step)
         producer_tests = (ROOT / "connect/scripts/test_connect_candidate_cli.py").read_text()
         for name in ("test_a_failed_official_install_fails_the_stage",
                      "test_an_official_install_that_could_not_run_is_stated_and_never_assembles"):
             self.assertIn(f"def {name}(", producer_tests)
+
+    def test_the_one_conditional_step_uploads_the_producers_bounded_failure_evidence(self):
+        # What the producer keeps when a stage one step refuses (its command records and logs, each cut to
+        # its end, under a total bound: connect-candidate.py, macos_failure_evidence) is the whole upload:
+        # one directory, no product archive, kept for a few days. Without it a failed job leaves only
+        # what its steps printed, because the work root goes with the runner.
+        source = self.SOURCE.read_text()
+        directory = re.search(r'(?m)^FAILURE_EVIDENCE = "([a-z-]+)"$', source).group(1)
+        names = {"stage_macos_build": "connect-macos-arm64-stage-build-failure",
+                 "stage_macos_check": "connect-macos-arm64-stage-check-failure"}
+        for job in STAGE_JOBS:
+            with self.subTest(job=job):
+                steps = re.findall(r"(?m)^      - name: (.+)$", job_block(job))
+                self.assertEqual(steps[-1], self.EVIDENCE)
+                step = step_block(self.EVIDENCE, job) + "\n"
+                self.assertIn("        if: failure()\n", step)
+                self.assertNotIn("always()", step)
+                self.assertNotIn("        run:", step)
+                self.assertIn("        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4\n", step)
+                rows = dict(line.strip().split(": ", 1) for line in step.split("        with:\n", 1)[1].splitlines()
+                            if line.startswith("          ") and ": " in line)
+                self.assertEqual(rows, {
+                    "name": names[job] + "-${{ github.run_id }}-${{ github.run_attempt }}",
+                    "path": f"{WORK_ROOT}/{directory}", "if-no-files-found": "ignore", "overwrite": "false",
+                    "retention-days": "7"})
+        self.assertNotIn(self.EVIDENCE, job_block("assemble_macos"))
 
 
 if __name__ == "__main__":

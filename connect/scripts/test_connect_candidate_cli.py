@@ -980,6 +980,80 @@ def test_a_failed_command_that_keeps_logs_of_its_own_also_shows_the_end_of_the_n
     assert not any("an earlier child" in line for line in lines)
 
 
+def test_a_refused_stage_one_step_keeps_bounded_failure_evidence_and_no_product_file(lane, capsys):
+    # A hosted runner discards the work root when the job fails. When a stage one step refuses, the
+    # producer keeps under <work>/failure-evidence what explains it and nothing else: the command records
+    # and logs, the logs two commands keep for their children, the check records. Each file is cut to its
+    # end, the whole is bounded, and no product file (executables, archives, the unpacked library) is in it.
+    lane.through("resources")
+    work = lane.work
+    (work / "records/long.log").write_bytes(b"first line\n" + b"x" * (p.FAILURE_EVIDENCE_FILE_BYTES + 4096) + b"\nlast line\n")
+    (work / "components/logs").mkdir(parents=True, exist_ok=True)
+    (work / "components/logs/build-1-activepieces-ci.stderr").write_text("npm error code E503\n")
+    (work / "components/logs/not-a-log.bin").write_bytes(b"\0" * 64)
+    (work / "cli-qualification").mkdir(exist_ok=True)
+    (work / "cli-qualification/official-playwright.refused.json").write_text('{"status": "refused"}\n')
+    original = lane.effect
+
+    def effect(name, argv, cwd, env):
+        if name == "native-build":
+            raise ValueError("command did not succeed: native-build")
+        return original(name, argv, cwd, env)
+
+    lane.effect = effect
+    assert p.macos_main(["build", "--work", str(work)]) == 1
+    said = capsys.readouterr().err
+    assert "connect-candidate macos build refused: ValueError: command did not succeed: native-build" in said
+    evidence = work / p.FAILURE_EVIDENCE
+    assert "failure evidence kept" in said and str(evidence) in said
+    record = p.read_json(evidence / "FAILURE.json")
+    assert record["schema"] == "connect-macos-failure-evidence/1" and record["step"] == "build"
+    assert record["refusal"] == "ValueError: command did not succeed: native-build"
+    rows = {row["path"]: row for row in record["files"]}
+    kept = {path.relative_to(evidence).as_posix() for path in evidence.rglob("*") if path.is_file()}
+    assert kept == set(rows) | {"FAILURE.json"}
+    assert {"records/long.log", "records/preflight.step.json", "records/library-kit.log",
+            "components/logs/build-1-activepieces-ci.stderr",
+            "cli-qualification/official-playwright.refused.json"} <= set(rows)
+    assert all(name.startswith(("records/", "components/logs/", "cli-qualification/")) for name in rows)
+    assert not any(name.endswith((".bin", ".tar.gz", ".tgz", ".whl")) for name in rows)
+    for name, row in rows.items():
+        original_size = (work / name).stat().st_size
+        assert row["bytes"] == original_size and row["kept_bytes"] == min(original_size, p.FAILURE_EVIDENCE_FILE_BYTES)
+        assert (evidence / name).stat().st_size == row["kept_bytes"]
+    long = (evidence / "records/long.log").read_bytes()
+    assert long.endswith(b"\nlast line\n") and b"first line" not in long, "the end of an oversized log"
+    assert (evidence / "components/logs/build-1-activepieces-ci.stderr").read_text() == "npm error code E503\n"
+    assert sum(row["kept_bytes"] for row in rows.values()) <= p.FAILURE_EVIDENCE_TOTAL_BYTES
+    assert not p.step_path(work, "build").exists()
+
+
+def test_failure_evidence_stops_at_its_total_bound_and_says_what_it_left_out(tmp_path, monkeypatch):
+    work = tmp_path / "cw"
+    (work / "records").mkdir(parents=True)
+    for index in range(5):
+        (work / "records" / f"command-{index}.log").write_bytes(b"y" * 1000)
+    monkeypatch.setattr(p, "FAILURE_EVIDENCE_FILE_BYTES", 600)
+    monkeypatch.setattr(p, "FAILURE_EVIDENCE_TOTAL_BYTES", 1500)
+    evidence = p.macos_failure_evidence(work, "library", "ValueError: inert")
+    record = p.read_json(evidence / "FAILURE.json")
+    assert [row["kept_bytes"] for row in record["files"]] == [600, 600, 0, 0, 0]
+    assert all(row["left_out"] == "the evidence is full" for row in record["files"][2:])
+    assert sorted(path.name for path in (evidence / "records").iterdir()) == ["command-0.log", "command-1.log"]
+    # One failure, one evidence directory: a second call keeps the first.
+    assert p.macos_failure_evidence(work, "library", "ValueError: again") is None
+    assert p.read_json(evidence / "FAILURE.json")["refusal"] == "ValueError: inert"
+
+
+def test_a_step_that_succeeds_or_a_command_outside_stage_one_keeps_no_failure_evidence(lane, capsys):
+    assert p.macos_main(["preflight", "--work", str(lane.work), "--source-sha", REVISION]) == 0
+    assert not (lane.work / p.FAILURE_EVIDENCE).exists()
+    # A refusal before the work root has records (another commit than the selected one) keeps nothing.
+    other = lane.root / "other"
+    assert p.macos_main(["preflight", "--work", str(other), "--source-sha", "c" * 40]) == 1
+    assert not (other / p.FAILURE_EVIDENCE).exists()
+
+
 def test_the_dependency_lines_are_the_package_lines_of_the_merged_log():
     # The recorder keeps stdout and stderr in one log. Cargo's own status lines are left out by shape.
     said = ("    Updating crates.io index\n  Downloaded serde v1.0.228\nserde v1.0.228\n"

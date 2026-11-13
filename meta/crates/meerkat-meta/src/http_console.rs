@@ -16078,16 +16078,14 @@ async fn handle_console_runtime_rpc_with_visibility(
             });
             let (decided, notices) =
                 owner.decide_gating_action_attested(request, &decider.evidence(), |entry| {
-                    if let Err(refusal) = console_decide_fenced(
+                    console_decide_fenced(
                         &decider,
                         fence.as_ref(),
                         entry
                             .and_then(|entry| entry.origin.as_ref())
                             .map(|origin| origin.identity.as_str()),
-                    ) {
-                        return Err(refusal);
-                    }
-                    Ok(crate::runtime::GatingDecider {
+                    )
+                    .map(|()| crate::runtime::GatingDecider {
                         principal: decider.principal.clone(),
                         held_approver_ids: fence
                             .as_ref()

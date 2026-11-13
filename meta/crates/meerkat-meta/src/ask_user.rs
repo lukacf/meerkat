@@ -740,14 +740,16 @@ pub(crate) fn open_question_sets(
         }
     }
     sets.sort_by(|left, right| {
-        (
-            left.row.descriptor.deadline_at_ms,
-            left.row.decision_id.as_str(),
-        )
-            .cmp(&(
-                right.row.descriptor.deadline_at_ms,
-                right.row.decision_id.as_str(),
-            ))
+        left.row
+            .descriptor
+            .deadline_at_ms
+            .cmp(&right.row.descriptor.deadline_at_ms)
+            .then_with(|| {
+                left.row
+                    .decision_id
+                    .as_str()
+                    .cmp(right.row.decision_id.as_str())
+            })
     });
     Ok(sets)
 }

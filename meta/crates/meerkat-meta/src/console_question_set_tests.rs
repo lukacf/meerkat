@@ -1211,7 +1211,7 @@ async fn an_invalid_answer_leaves_the_set_open() {
             "answers": answers,
         })
     };
-    let requests = vec![
+    let requests = [
         (
             "no answers",
             json!({ "pending_id": pending_id, "decision": "approve", "presented_digest": digest }),
@@ -1592,7 +1592,7 @@ async fn a_call_without_a_human_surface_holds_nothing() {
     let served = ConsoleScheduleDoorSlot::default();
     served.install(Arc::new(NoSends));
     let available = decisions_in(state_dir.path(), name, true);
-    let surfaces: Vec<(&str, Option<AskUserSurface>, &str, &str)> = vec![
+    let surfaces: [(&str, Option<AskUserSurface>, &str, &str); 6] = [
         ("unfilled", None, name, ASKER),
         (
             "no Console served",

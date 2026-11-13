@@ -10,7 +10,10 @@
 //!   ([`AskUserSlot::after_hook`]), which composes the tool over the build's
 //!   external tools ([`crate::tool_compose::ComposedExternalTools`]) with a
 //!   [`MemberAskUserHost`] for that member. A build whose tools already name
-//!   `ask_user` keeps its own. Nothing is opened, read or started for it.
+//!   `ask_user` (a host's own tool of that name) keeps its own, and Meta
+//!   mounts none: the questions that tool asks are that tool's, so no
+//!   decision is held for them, the read lists none of them and no notice
+//!   is sent for them. Nothing is opened, read or started for the mount.
 //! - **Surface.** The slot is late-bound: the runtime fills it
 //!   ([`AskUserSurface`]) once it keeps durable decisions and serves its
 //!   long-term agents. A call answers `no_human_surface` at once, holding
@@ -27,13 +30,11 @@
 //!   and on stdio. Its match on the decision's kind is closed: a decision of
 //!   any other kind is [`QuestionSetRefusal::NotAQuestionSet`], which each
 //!   route answers as it answers an unknown pending id.
-//! - **Notice.** The kind's executor is driven for the runtime
+//! - **Notice.** The kind's executor is driven for the runtime from its first
+//!   set on (an executor claim creates files, so none is made before)
 //!   ([`spawn_ask_user_driver`]); the end of a set reaches its asker as a
 //!   keyed send ([`MemberKeyedNotices`], key [`ask_user_notice_key`]) whose
 //!   body is the typed result ([`ask_user_result_input`]).
-
-// The skeleton of the rows: every type and signature, and no behaviour yet.
-#![allow(dead_code, unused_imports, unused_variables, unreachable_code)]
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -76,6 +77,12 @@ pub(crate) const CONSOLE_CHANNEL: &str = "console";
 /// The ingress and channel of an answer the stdio host carries.
 pub(crate) const HOST_CHANNEL: &str = "host";
 
+/// What a decide of a set that ended is told.
+pub(crate) const NO_LONGER_OPEN: &str = "the question set is no longer open";
+
+/// What a decide on another digest than the set's is told.
+const CHANGED_SINCE_SHOWN: &str = "the question set changed since it was shown";
+
 /// The key the notice of the decision `decision_id` is sent under: a notice
 /// asked for twice is delivered once.
 pub fn ask_user_notice_key(decision_id: &str) -> String {
@@ -103,6 +110,9 @@ pub(crate) struct AskUserSurface {
     console: ConsoleServed,
     mob_id: String,
     clock: Arc<dyn DecisionClock>,
+    /// Signalled by each set the runtime holds: what starts the executor's
+    /// driver at the first one ([`AskUserDriver`]).
+    held: Arc<tokio::sync::Notify>,
 }
 
 impl std::fmt::Debug for AskUserSurface {
@@ -129,7 +139,13 @@ impl AskUserSurface {
             console,
             mob_id: mob_id.into(),
             clock: Arc::new(SystemDecisionClock),
+            held: Arc::default(),
         }
+    }
+
+    /// The signal each set the runtime holds raises.
+    pub(crate) fn held_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.held)
     }
 
     /// This surface reading `clock` when it holds a set.
@@ -203,6 +219,13 @@ impl AskUserSlot {
             .clone()
     }
 
+    /// The signal each set held through the slot's surface raises, when the
+    /// slot is filled.
+    #[cfg(test)]
+    pub(crate) fn held_signal(&self) -> Option<Arc<tokio::sync::Notify>> {
+        self.surface().map(|surface| surface.held_signal())
+    }
+
     /// The durable decisions the question sets are held in, when the slot is
     /// filled.
     pub(crate) fn decisions(&self) -> Option<RuntimeDecisions> {
@@ -230,7 +253,6 @@ impl AskUserSlot {
     /// that is not a member build, and for a build whose tools already name
     /// `ask_user` (the host's own tool of that name stays reachable).
     pub(crate) fn mount(&self, req: &mut CreateSessionRequest) {
-        return;
         let Some(build) = req.build.as_mut() else {
             return;
         };
@@ -326,7 +348,6 @@ fn hold_refusal(error: AskUserError) -> AskUserRefusal {
 #[async_trait]
 impl AskUserHost for MemberAskUserHost {
     async fn ask(&self, request: AskUserRequest<'_>) -> Result<AskUserResult, AskUserRefusal> {
-        return Ok(AskUserResult::no_human_surface());
         let Some(surface) = self.slot.surface() else {
             return Ok(AskUserResult::no_human_surface());
         };
@@ -358,6 +379,7 @@ impl AskUserHost for MemberAskUserHost {
             },
         )
         .map_err(hold_refusal)?;
+        surface.held.notify_one();
         surface.decisions.notify_work();
         ask_user_result_of(&held).map_err(|error| AskUserRefusal::Failed(error.to_string()))
     }
@@ -385,7 +407,6 @@ impl MemberKeyedNotices {
 #[async_trait]
 impl AskUserNotices for MemberKeyedNotices {
     async fn deliver(&self, notice: &AskUserNotice) -> Option<ApprovalConsentDeliveryState> {
-        return None;
         let failed = |reason: &str| {
             Some(ApprovalConsentDeliveryState::Failed {
                 reason: reason.to_owned(),
@@ -440,17 +461,88 @@ impl AskUserNotices for MemberKeyedNotices {
     }
 }
 
-/// Drive the executor of `ask_user.questions` decisions for a runtime: a
-/// pass at start (which settles what an earlier process left), after each
-/// change of a decision, and per `tick` while a set waits for its deadline.
-/// `None`, starting nothing, for a runtime that keeps no durable decisions,
-/// for a candidate launch, and outside an async runtime.
+/// The driver of the executor of a runtime's `ask_user.questions`
+/// decisions, started when it has work: at once when the decision store
+/// already holds a set (an earlier process's, which its first pass
+/// settles), otherwise at the first set the runtime holds. Until then it
+/// claims nothing, creates no file and makes no pass. Dropping it stops the
+/// passes.
+pub(crate) struct AskUserDriver {
+    starter: tokio::task::JoinHandle<()>,
+    started: Arc<std::sync::Mutex<Option<DecisionExecutorDriver>>>,
+}
+
+impl std::fmt::Debug for AskUserDriver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AskUserDriver")
+            .field("passes", &self.passes())
+            .finish()
+    }
+}
+
+impl AskUserDriver {
+    /// How many passes the executor's driver has finished; `None` while it
+    /// has not started (no set was ever held).
+    pub(crate) fn passes(&self) -> Option<u64> {
+        self.started
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(DecisionExecutorDriver::passes)
+    }
+
+    /// Stop the passes and wait until the driver's task has ended.
+    #[cfg(test)]
+    pub(crate) async fn shutdown(self) {
+        self.starter.abort();
+        let driver = self
+            .started
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(driver) = driver {
+            driver.shutdown().await;
+        }
+    }
+}
+
+impl Drop for AskUserDriver {
+    fn drop(&mut self) {
+        self.starter.abort();
+        // The started driver stops its passes when it is dropped.
+        self.started
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}
+
+/// Whether `decisions` hold a decision of the kind, open or ended. A count
+/// the store cannot give counts as one that does.
+fn holds_a_set(decisions: &RuntimeDecisions) -> bool {
+    let Ok(kind) = ask_user_questions_kind() else {
+        return true;
+    };
+    decisions
+        .owner()
+        .count(&DecisionListFilter::default().with_kind(kind))
+        .map_or(true, |count| count > 0)
+}
+
+/// Drive the executor of `ask_user.questions` decisions for a runtime, from
+/// the moment it has work ([`AskUserDriver`]): `held` is signalled by each
+/// set the runtime holds. Once started: a pass at start (which settles
+/// what an earlier process left), after each change of a decision, and per
+/// `tick` while a set waits for its deadline. `None`, starting nothing,
+/// for a runtime that keeps no durable decisions, for a candidate launch,
+/// and outside an async runtime.
 pub(crate) fn spawn_ask_user_driver(
     decisions: &RuntimeDecisions,
     notices: Arc<dyn AskUserNotices>,
     tick: Duration,
-) -> Option<DecisionExecutorDriver> {
-    return None;
+    held: Arc<tokio::sync::Notify>,
+) -> Option<AskUserDriver> {
     if !decisions.is_available() {
         return None;
     }
@@ -471,21 +563,37 @@ pub(crate) fn spawn_ask_user_driver(
             return None;
         }
     };
-    match DecisionExecutorDriver::spawn(
-        decisions,
-        vec![executor],
-        Arc::new(AskUserApproverCurrent),
-        tick,
-    ) {
-        Ok(driver) => Some(driver),
-        Err(error) => {
-            tracing::warn!(
-                error = ?error,
-                "ended question sets are not delivered: their driver did not start"
-            );
-            None
+    let started = Arc::new(std::sync::Mutex::new(None));
+    let starter = tokio::spawn({
+        let started = Arc::clone(&started);
+        let decisions = decisions.clone();
+        async move {
+            // The executor's claim creates the store's lock files: it waits
+            // for the first set, unless an earlier process left one.
+            if !holds_a_set(&decisions) {
+                held.notified().await;
+            }
+            match DecisionExecutorDriver::spawn(
+                &decisions,
+                vec![executor],
+                Arc::new(AskUserApproverCurrent),
+                tick,
+            ) {
+                Ok(driver) => {
+                    *started
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(driver);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = ?error,
+                        "ended question sets are not delivered: their driver did not start"
+                    );
+                }
+            }
         }
-    }
+    });
+    Some(AskUserDriver { starter, started })
 }
 
 /// Whether `pending_id` has the shape of a decision id: `decision:` and 64
@@ -546,6 +654,31 @@ impl HeldQuestionSet {
         &self.row.decision_id
     }
 
+    /// Why the set, as this read found it, would not take `verdict` on the
+    /// digest `presented`: it is no longer open, it changed since it was
+    /// shown, or the answers are not valid for it. A route asks before it
+    /// records anything for a request; the hand-off decides again.
+    pub(crate) fn refuses(
+        &self,
+        verdict: &QuestionSetVerdict,
+        presented: &Sha256Digest,
+    ) -> Option<String> {
+        if self.row.state.phase != DecisionPhase::Open {
+            return Some(NO_LONGER_OPEN.to_owned());
+        }
+        if *presented != self.row.descriptor.subject_digest {
+            return Some(CHANGED_SINCE_SHOWN.to_owned());
+        }
+        match verdict {
+            QuestionSetVerdict::Answer(answers) => {
+                AskUserAnswers::for_set(&self.body.questions, answers.clone())
+                    .err()
+                    .map(|error| error.to_string())
+            }
+            QuestionSetVerdict::Dismiss => None,
+        }
+    }
+
     /// The set as `meta/gating/questions` lists it.
     pub(crate) fn wire(&self) -> Value {
         serde_json::to_value(WireQuestionSet {
@@ -580,7 +713,6 @@ pub(crate) fn question_sets_result<'a>(
 pub(crate) fn open_question_sets(
     decisions: &RuntimeDecisions,
 ) -> Result<Vec<HeldQuestionSet>, DecisionError> {
-    return Ok(Vec::new());
     if !decisions.is_available() {
         return Ok(Vec::new());
     }
@@ -628,7 +760,6 @@ pub(crate) fn held_question_set(
     decisions: &RuntimeDecisions,
     pending_id: &str,
 ) -> Option<HeldQuestionSet> {
-    return None;
     if !is_decision_id(pending_id) || !decisions.is_available() {
         return None;
     }
@@ -796,7 +927,6 @@ pub(crate) fn answer_question_set(
     decide: QuestionSetDecide,
     eligibility: &dyn ConsentEligibility,
 ) -> Result<QuestionSetDecided, QuestionSetRefusal> {
-    return Err(QuestionSetRefusal::NotAQuestionSet);
     let invalid = |error: &dyn std::fmt::Display| QuestionSetRefusal::Invalid(error.to_string());
     let owner = decisions.owner();
     let row = match owner.get(&decide.decision_id) {
@@ -866,11 +996,11 @@ pub(crate) fn answer_question_set(
         }
         Err(DecisionError::Refused { refusal, .. }) => Err(match refusal {
             DecisionRefusal::NotEligible => QuestionSetRefusal::NotEligible,
-            DecisionRefusal::SubjectChanged => QuestionSetRefusal::Invalid(
-                "the question set changed since it was shown".to_owned(),
-            ),
+            DecisionRefusal::SubjectChanged => {
+                QuestionSetRefusal::Invalid(CHANGED_SINCE_SHOWN.to_owned())
+            }
             DecisionRefusal::NotOpen | DecisionRefusal::Expired => {
-                QuestionSetRefusal::Invalid("the question set is no longer open".to_owned())
+                QuestionSetRefusal::Invalid(NO_LONGER_OPEN.to_owned())
             }
             _ => QuestionSetRefusal::Invalid("the question set did not take the answer".to_owned()),
         }),

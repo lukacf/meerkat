@@ -5,8 +5,8 @@
 //! `meta/gating/decide`, and the member's next turn receives the typed
 //! result as an `ask_user_result` input. Without a Console the call
 //! answers `no_human_surface` and writes nothing. A runtime that holds no
-//! set opens no decision store, and the driver of the kind's executor makes
-//! one pass and no other.
+//! set creates no file of the decision store, and the driver of the kind's
+//! executor makes no pass before the first set.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -45,7 +45,6 @@ const IDENTITY: &str = "agent-a";
 /// What the row sends the member to make it ask.
 const ASK_NOW: &str = "ASK-NOW-KILO-3: ask which day to release.";
 const CALL_ID: &str = "call-ask-1";
-const DECISIONS_FILE: &str = "approval_decisions.sqlite3";
 
 static NEXT_MOB: AtomicU64 = AtomicU64::new(0);
 
@@ -342,18 +341,27 @@ async fn send_ask(runtime: &UnifiedRuntime) {
         .expect("the keyed send commits");
 }
 
-/// Wait until the driver of the members' question sets made its first
-/// pass, then long enough for another to show if one were made.
-async fn first_pass(runtime: &UnifiedRuntime) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    while runtime.ask_user_driver_passes().unwrap_or(0) < 1 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the driver made no pass: {:?}",
-            runtime.ask_user_driver_passes()
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+/// The decision store's files under `state`: the store itself and the lock
+/// files of its executors.
+fn decision_store_files(state: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(state)
+        .expect("read the state directory")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with("approval_decisions"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Long enough for a pass of the driver of the members' question sets to
+/// show, if one were made.
+async fn settle() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 }
 
@@ -377,11 +385,11 @@ async fn a_member_asks_a_person_and_reads_the_answer_on_its_next_turn() {
     let app = runtime.build_console_json_router(decision_state());
 
     // Lazy: nothing is opened for a runtime that holds no set yet.
-    first_pass(&runtime).await;
+    settle().await;
     let passes_before = runtime.ask_user_driver_passes();
-    let file_before = state.path().join(DECISIONS_FILE).exists();
+    let files_before = decision_store_files(state.path());
     let listed_before = console_rpc(&app, "meta/gating/questions", json!({})).await;
-    let file_after_read = state.path().join(DECISIONS_FILE).exists();
+    let files_after_read = decision_store_files(state.path());
 
     // The member's turn calls the tool: the call answers `asked` at once.
     send_ask(&runtime).await;
@@ -473,14 +481,22 @@ async fn a_member_asks_a_person_and_reads_the_answer_on_its_next_turn() {
     let tools = model.tools.lock().unwrap().clone();
     runtime.shutdown().await;
 
-    assert_eq!(passes_before, Some(1), "one pass and no other");
-    assert!(!file_before, "no decision store before the first set");
+    assert_eq!(passes_before, None, "no pass before the first set");
+    assert_eq!(
+        files_before,
+        Vec::<String>::new(),
+        "no file of the decision store before the first set"
+    );
     assert_eq!(
         listed_before["result"],
         json!({ "question_sets": [] }),
         "{listed_before}"
     );
-    assert!(!file_after_read, "a read creates no decision store");
+    assert_eq!(
+        files_after_read,
+        Vec::<String>::new(),
+        "a read creates no file of the decision store"
+    );
     assert!(
         tools.iter().any(|tool| tool == "ask_user"),
         "the member's model is offered the tool: {tools:?}"
@@ -523,7 +539,7 @@ async fn a_member_asks_a_person_and_reads_the_answer_on_its_next_turn() {
         "an answered set is no longer listed"
     );
     assert!(
-        passes_after.is_some_and(|passes| passes > 1),
+        passes_after.is_some_and(|passes| passes >= 1),
         "{passes_after:?}"
     );
 }
@@ -539,8 +555,8 @@ async fn without_a_console_the_call_answers_that_no_person_can_be_asked() {
         .request_with(&[CALL_ID, r#"\"outcome\":\"no_human_surface\""#])
         .await;
     let stdio_listed = stdio_rpc(&runtime, "meta/gating/questions", json!({})).await;
-    let file = state.path().join(DECISIONS_FILE).exists();
-    first_pass(&runtime).await;
+    let files = decision_store_files(state.path());
+    settle().await;
     let passes = runtime.ask_user_driver_passes();
     runtime.shutdown().await;
 
@@ -550,6 +566,10 @@ async fn without_a_console_the_call_answers_that_no_person_can_be_asked() {
         json!({ "question_sets": [] }),
         "{stdio_listed}"
     );
-    assert!(!file, "nothing is held: no decision store");
-    assert_eq!(passes, Some(1), "no pass is made for the call");
+    assert_eq!(
+        files,
+        Vec::<String>::new(),
+        "nothing is held: no file of the decision store"
+    );
+    assert_eq!(passes, None, "no pass is made for the call");
 }

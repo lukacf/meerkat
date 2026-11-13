@@ -113,7 +113,7 @@ pub(crate) fn gating_decide_question_set(
     response_id: Value,
 ) -> JsonRpcResponse {
     let Some((decisions, set)) = named_question_set(runtime, params) else {
-        return invalid(response_id, "the question set is no longer open");
+        return invalid(response_id, crate::ask_user::NO_LONGER_OPEN);
     };
     // The request is read as every gating decide is: `approver_id` is
     // required, and the same refusals answer what it lacks.
@@ -188,7 +188,7 @@ pub(crate) fn gating_decide_question_set(
         Ok(decided) => answered(response_id, decided.wire()),
         Err(QuestionSetRefusal::Invalid(message)) => invalid(response_id, message),
         Err(QuestionSetRefusal::NotAQuestionSet | QuestionSetRefusal::NotEligible) => {
-            invalid(response_id, "the question set is no longer open")
+            invalid(response_id, crate::ask_user::NO_LONGER_OPEN)
         }
         Err(QuestionSetRefusal::Failed(error)) => refused(
             response_id,

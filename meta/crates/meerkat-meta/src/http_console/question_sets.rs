@@ -149,6 +149,11 @@ pub(super) async fn decide(
         Ok(request) => request,
         Err(message) => return invalid_params(response_id, message),
     };
+    // A request the set would not take is refused before anything is
+    // recorded for it.
+    if let Some(message) = set.refuses(&verdict, &presented_digest) {
+        return invalid_params(response_id, message);
+    }
     // The person, authenticated in the login the request was made in.
     let approver = decider
         .human
@@ -232,11 +237,11 @@ pub(super) async fn decide(
         Ok(decided) => response_value(response_id, Some(decided.wire()), None),
         Err(QuestionSetRefusal::NotEligible) => match refused {
             Some(refusal) => refusal.into_rpc_error(response_id),
-            None => invalid_params(response_id, "the question set is no longer open"),
+            None => invalid_params(response_id, crate::ask_user::NO_LONGER_OPEN),
         },
         Err(QuestionSetRefusal::Invalid(message)) => invalid_params(response_id, message),
         Err(QuestionSetRefusal::NotAQuestionSet) => {
-            invalid_params(response_id, "the question set is no longer open")
+            invalid_params(response_id, crate::ask_user::NO_LONGER_OPEN)
         }
         Err(QuestionSetRefusal::Failed(error)) => internal_error(
             response_id,

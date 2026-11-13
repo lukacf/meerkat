@@ -532,10 +532,10 @@ pub struct UnifiedRuntimeCore {
     /// console router build (`crate::console_schedules`).
     console_schedule_doors: crate::console_schedules::ConsoleScheduleDoorSlot,
     /// The driver of the executor of the question sets this runtime's
-    /// members ask (`crate::ask_user`): started once the runtime keeps
+    /// members ask (`crate::ask_user`): armed once the runtime keeps
     /// durable decisions and serves its long-term agents, stopped at
     /// shutdown.
-    ask_user_driver: std::sync::Mutex<Option<crate::durable_decisions::DecisionExecutorDriver>>,
+    ask_user_driver: std::sync::Mutex<Option<crate::ask_user::AskUserDriver>>,
 
     // Meta-side label sidecar for mob- and run-scoped metadata
     metadata_table: Arc<RuntimeMetadataTable>,
@@ -2348,24 +2348,23 @@ impl UnifiedRuntime {
     /// (`crate::ask_user`), from the durable decisions and the identity
     /// runtime installed now; a runtime without an identity runtime serves
     /// none, and its members' calls answer that no person can be asked. It
-    /// fills the surface the members' `ask_user` tool reads and starts the
-    /// driver of the kind's executor, which makes one pass and then waits
-    /// for a question set to be held: it opens no store and reads no
-    /// session. No driver starts for a runtime that keeps no durable
-    /// decisions or on a candidate launch. Called when either part is
-    /// installed, whatever the launch's identity policy; a later call
-    /// replaces what an earlier one started.
+    /// fills the surface the members' `ask_user` tool reads and arms the
+    /// driver of the kind's executor, which starts when it has work: at
+    /// once when the decision store already holds a set, otherwise at the
+    /// first set held. Until then nothing is opened, claimed or read, and
+    /// no pass is made. No driver is armed for a runtime that keeps no
+    /// durable decisions or on a candidate launch. Called when either part
+    /// is installed, whatever the launch's identity policy; a later call
+    /// replaces what an earlier one armed.
     pub(crate) fn serve_ask_user(&self) {
         if self.identity_first_context.is_none() {
             return;
         }
-        self.mob_runtime
-            .ask_user_slot()
-            .fill(crate::ask_user::AskUserSurface::new(
-                self.durable_decisions.clone(),
-                self.console_schedule_doors.served(),
-                self.mob_id(),
-            ));
+        let surface = crate::ask_user::AskUserSurface::new(
+            self.durable_decisions.clone(),
+            self.console_schedule_doors.served(),
+            self.mob_id(),
+        );
         let driver = crate::ask_user::spawn_ask_user_driver(
             &self.durable_decisions,
             // The composition's own handle of its mob: a back-edge, never
@@ -2374,7 +2373,9 @@ impl UnifiedRuntime {
                 self.mob_runtime.clone(),
             )),
             crate::durable_decisions::DecisionExecutorDriver::DEFAULT_TICK,
+            surface.held_signal(),
         );
+        self.mob_runtime.ask_user_slot().fill(surface);
         *self
             .ask_user_driver
             .lock()
@@ -2393,14 +2394,15 @@ impl UnifiedRuntime {
     }
 
     /// How many passes the driver of the members' question sets has
-    /// finished, when it runs: one at its start, then one for each change
-    /// of a decision and each tick it waited out. A diagnostic.
+    /// finished: `None` while it has not started (the runtime never held a
+    /// set), then one at its start and one for each change of a decision
+    /// and each tick it waited out. A diagnostic.
     pub fn ask_user_driver_passes(&self) -> Option<u64> {
         self.ask_user_driver
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .map(crate::durable_decisions::DecisionExecutorDriver::passes)
+            .and_then(crate::ask_user::AskUserDriver::passes)
     }
 
     /// Meta's answer to whether the party that decided a decision may still

@@ -29,13 +29,13 @@ use super::console_token_lapse_tests::{
 };
 use super::*;
 use crate::ask_user::{
-    AskUserSlot, AskUserSurface, MemberAskUserHost, ask_user_notice_key, ask_user_result_input,
-    spawn_ask_user_driver,
+    AskUserDriver, AskUserSlot, AskUserSurface, MemberAskUserHost, ask_user_notice_key,
+    ask_user_result_input, spawn_ask_user_driver,
 };
 use crate::console_schedules::{
     ConsoleScheduleDoor, ConsoleScheduleDoorSlot, ConsoleScheduledSend,
 };
-use crate::durable_decisions::{DecisionExecutorDriver, RuntimeDecisions};
+use crate::durable_decisions::RuntimeDecisions;
 
 const QUESTIONS: &str = "meta/gating/questions";
 const DECIDE: &str = "meta/gating/decide";
@@ -112,7 +112,12 @@ fn decisions_in(state_dir: &std::path::Path, name: &str, speaks: bool) -> Runtim
         state_dir,
         meerkat_core::RealmId::parse("team").expect("realm"),
         crate::durable_decisions::DecisionIngressDeclarations::default(),
-        Arc::new(crate::runtime::InMemoryMetadataStore::new()),
+        // The runtime's metadata store, in its state directory: the
+        // decide events of the Console are bound there.
+        Arc::new(
+            crate::runtime::SqliteMetadataStore::open(state_dir.join("metadata.sqlite3"))
+                .expect("metadata store"),
+        ),
         name,
         speaks,
     )
@@ -126,9 +131,16 @@ struct Setup {
 }
 
 impl Setup {
-    /// An enforced Console (verified tokens only) admitting BOB and CAROL,
-    /// with no access controller.
+    /// An enforced Console (verified tokens only) admitting BOB, CAROL and
+    /// DAVE, with an access controller that enforces nothing and knows the
+    /// rows' members (a Console that tells its people apart shows a member
+    /// it does not know to none of them).
     fn enforced() -> Self {
+        Self::bare().access(crate::access::AccessControlConfig::default())
+    }
+
+    /// [`Self::enforced`] with no access controller at all.
+    fn bare() -> Self {
         let mut decisions = state().decisions;
         decisions
             .auth
@@ -276,15 +288,20 @@ impl QuestionConsole {
         console_rpc_as(&self.app, token, DECIDE, params).await
     }
 
-    /// Drive the kind's executor over this Console's decisions, handing
-    /// the notices to `told`.
-    fn drive(&self, told: &Arc<Told>) -> DecisionExecutorDriver {
+    /// Arm the driver of the kind's executor over this Console's decisions,
+    /// handing the notices to `told`: it starts at once when the store
+    /// holds a set, otherwise at the first set held through the surface.
+    fn drive(&self, told: &Arc<Told>) -> AskUserDriver {
         spawn_ask_user_driver(
             &self.decisions,
             Arc::clone(told) as Arc<dyn AskUserNotices>,
             Duration::from_secs(3600),
+            self.runtime
+                .ask_user_slot()
+                .held_signal()
+                .expect("the surface is filled"),
         )
-        .expect("the driver starts")
+        .expect("the driver is armed")
     }
 
     async fn stop(self) {
@@ -405,8 +422,19 @@ async fn a_person_answers_a_set_and_its_asker_is_told_once() {
         decisions_in(state_dir.path(), "questions-answer", true),
     )
     .await;
-    let pending_id = console.asked(ASKER, "call-1").await;
-    let replayed = console.ask(ASKER, "call-1").await;
+    // The call and its replay (the same run and call id) hold one set.
+    let run_id = RunId::new();
+    let set = question_set();
+    let call = AskUserRequest {
+        questions: &set,
+        timeout: Duration::from_secs(3600),
+        run_id: &run_id,
+        call_id: "call-1",
+    };
+    let host = console.host(ASKER);
+    let asked = host.ask(call).await.expect("the host takes the call");
+    let replayed = host.ask(call).await.expect("the host takes the replay");
+    let pending_id = asked.request_id.clone().expect("an asked set");
     let listed = console.listed(Some(&bob())).await;
     let decided = console.answer(Some(&bob()), &pending_id).await;
     let told = Arc::new(Told::default());
@@ -424,7 +452,8 @@ async fn a_person_answers_a_set_and_its_asker_is_told_once() {
     driver.shutdown().await;
     console.stop().await;
 
-    assert_eq!(replayed.request_id.as_deref(), Some(pending_id.as_str()));
+    assert_eq!(asked.outcome, AskUserOutcome::Asked, "{asked:?}");
+    assert_eq!(replayed, asked, "a replayed call answers the set it held");
     assert_eq!(listed, vec![pending_id.clone()]);
     assert_eq!(
         decided["result"],
@@ -595,8 +624,11 @@ async fn a_dismissal_the_deadline_and_a_withdraw_reach_the_asker() {
     assert_eq!(outcome_of(&late), AskUserOutcome::TimedOut);
 }
 
-/// A set held by one runtime over a state directory is listed, answered
-/// and its notice delivered by a second runtime over the same directory.
+/// A restart. A runtime over a state directory whose store already holds a
+/// set starts the executor's driver at once, with no new set held, and its
+/// first passes settle what the earlier runtime left: an answer it took and
+/// never executed is executed and its asker told. A set the earlier runtime
+/// held is listed, answered and its notice delivered by the second.
 #[tokio::test]
 async fn a_set_survives_a_restart() {
     let state_dir = tempfile::tempdir().expect("state directory");
@@ -607,6 +639,10 @@ async fn a_set_survives_a_restart() {
     )
     .await;
     let pending_id = first.asked(ASKER, "call-1").await;
+    // Answered in the first runtime, which runs no driver: left approved.
+    let left_id = first.asked(OTHER, "call-2").await;
+    let left = first.answer(Some(&bob()), &left_id).await;
+    let left_phase = first.row(&left_id).state.phase;
     first.stop().await;
 
     let second = QuestionConsole::start(
@@ -617,18 +653,110 @@ async fn a_set_survives_a_restart() {
     .await;
     let told = Arc::new(Told::default());
     let driver = second.drive(&told);
+    until(
+        "the driver started at once and settled what was left",
+        || driver.passes().is_some() && !told.all().is_empty(),
+    )
+    .await;
+    let settled = told.all();
+    let settled_phase = second.row(&left_id).state.phase;
     let listed = second.listed(Some(&bob())).await;
     let decided = second.answer(Some(&bob()), &pending_id).await;
-    until("the asker is told", || !told.all().is_empty()).await;
+    until("the second asker is told", || told.all().len() == 2).await;
     let notices = told.all();
     driver.shutdown().await;
     second.stop().await;
 
+    assert_eq!(left["result"]["outcome"], json!("answered"), "{left}");
+    assert_eq!(left_phase, DecisionPhase::Approved);
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert_eq!(settled[0].decision_id.as_str(), left_id);
+    assert_eq!(settled[0].result.outcome, AskUserOutcome::Answered);
+    assert_eq!(settled_phase, DecisionPhase::Executed);
     assert_eq!(listed, vec![pending_id.clone()]);
     assert_eq!(decided["result"]["outcome"], json!("answered"), "{decided}");
-    assert_eq!(notices.len(), 1, "{notices:?}");
-    assert_eq!(notices[0].decision_id.as_str(), pending_id);
-    assert_eq!(notices[0].result.outcome, AskUserOutcome::Answered);
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    assert_eq!(notices[1].decision_id.as_str(), pending_id);
+    assert_eq!(notices[1].result.outcome, AskUserOutcome::Answered);
+}
+
+/// Several first sets arriving together start one driver: every call is
+/// answered `asked`, none waits for another, and each set's end reaches its
+/// asker exactly once.
+#[tokio::test]
+async fn first_sets_arriving_together_start_one_driver() {
+    const TOGETHER: usize = 8;
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let console = QuestionConsole::start(
+        "questions-together",
+        Setup::enforced(),
+        decisions_in(state_dir.path(), "questions-together", true),
+    )
+    .await;
+    let told = Arc::new(Told::default());
+    let driver = console.drive(&told);
+    let passes_before = driver.passes();
+    let hosts: Vec<MemberAskUserHost> = (0..TOGETHER)
+        .map(|n| console.host(&format!("agent-{n}")))
+        .collect();
+    let results = tokio::time::timeout(
+        Duration::from_secs(30),
+        futures::future::join_all(hosts.iter().map(|host| try_ask(host, "call-1", 3600))),
+    )
+    .await;
+    until("the driver started", || driver.passes().is_some()).await;
+    // While the one driver runs, its claim of the kind is held: no other
+    // executor of the kind can start beside it.
+    let second_claim = console
+        .decisions
+        .owner()
+        .claim_executor_kind(&DecisionKind::new(ASK_USER_QUESTIONS_KIND).expect("kind"));
+    let results = results.expect("no call waits for another");
+    let mut pending_ids = Vec::new();
+    for result in &results {
+        let result = result.as_ref().expect("the host takes the call");
+        pending_ids.push(result.request_id.clone().expect("an asked set"));
+    }
+    for pending_id in &pending_ids {
+        console
+            .decisions
+            .owner()
+            .withdraw(
+                &DecisionId::new(pending_id.clone()).expect("decision id"),
+                &meerkat_runtime::decision::DecisionWithdrawer::Host,
+            )
+            .expect("withdraw");
+    }
+    console.decisions.notify_work();
+    until("every asker is told", || told.all().len() >= TOGETHER).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let notices = told.all();
+    driver.shutdown().await;
+    console.stop().await;
+
+    assert_eq!(passes_before, None, "armed, not started");
+    assert!(
+        matches!(
+            second_claim,
+            Err(meerkat_runtime::decision::DecisionError::ExecutorHeld)
+        ),
+        "the kind's executor claim is held by the one driver"
+    );
+    pending_ids.sort();
+    pending_ids.dedup();
+    assert_eq!(pending_ids.len(), TOGETHER, "one set per call");
+    let mut told_ids: Vec<String> = notices
+        .iter()
+        .map(|notice| notice.decision_id.to_string())
+        .collect();
+    told_ids.sort();
+    assert_eq!(told_ids, pending_ids, "each asker is told exactly once");
+    assert!(
+        notices
+            .iter()
+            .all(|notice| notice.result.outcome == AskUserOutcome::Withdrawn),
+        "{notices:?}"
+    );
 }
 
 /// Who may answer. A person who may not view the asking member gets the
@@ -689,7 +817,7 @@ async fn only_a_person_who_may_view_the_asker_answers() {
     let service_dir = tempfile::tempdir().expect("state directory");
     let service_console = QuestionConsole::start(
         "questions-who-service",
-        Setup::enforced(),
+        Setup::bare(),
         decisions_in(service_dir.path(), "questions-who-service", true),
     )
     .await;
@@ -706,7 +834,7 @@ async fn only_a_person_who_may_view_the_asker_answers() {
     let service_phase = service_console.row(&service_pending).state.phase;
     service_console.stop().await;
     let open_dir = tempfile::tempdir().expect("state directory");
-    let mut open = Setup::enforced();
+    let mut open = Setup::bare();
     open.decisions.console.require_app_auth = false;
     let open_console = QuestionConsole::start(
         "questions-who-open",
@@ -1126,11 +1254,15 @@ async fn an_invalid_answer_leaves_the_set_open() {
             json!({ "pending_id": pending_id, "decision": "maybe", "presented_digest": digest }),
         ),
     ];
+    // A refused request records nothing: the decide event of a request the
+    // set would not take is never bound.
+    let recorded_before = other_files(state_dir.path());
     let mut answers = Vec::new();
     for (label, params) in requests {
         let answer = console.decide(Some(&bob()), params).await;
         answers.push((label, answer, console.row(&pending_id).state.phase));
     }
+    let recorded_after_refusals = other_files(state_dir.path());
     // A trimmed written answer of exactly the bound is taken.
     let trimmed = console
         .decide(
@@ -1138,6 +1270,7 @@ async fn an_invalid_answer_leaves_the_set_open() {
             approve(json!([text("q1", &format!("  {}  ", "x".repeat(280)))])),
         )
         .await;
+    let recorded_after_answer = other_files(state_dir.path());
     let row = console.row(&pending_id);
     console.stop().await;
 
@@ -1146,6 +1279,14 @@ async fn an_invalid_answer_leaves_the_set_open() {
         assert!(answer["error"]["data"].is_null(), "{label}: {answer}");
         assert_eq!(phase, DecisionPhase::Open, "{label}");
     }
+    assert!(
+        recorded_before == recorded_after_refusals,
+        "a refused request records nothing outside the decision store"
+    );
+    assert!(
+        recorded_after_refusals != recorded_after_answer,
+        "the decide event of the answer that is taken is recorded"
+    );
     assert_eq!(trimmed["result"]["outcome"], json!("answered"), "{trimmed}");
     let Some(DecisionEvidence::Human {
         answer: Some(DecisionAnswer::AskUser { answers }),
@@ -1288,16 +1429,34 @@ async fn the_host_answers_a_set_on_stdio() {
         &json!({
             "pending_id": dismissed_id,
             "approver_id": "person:dana",
-            "decision": "deny",
+            "decision": "reject",
             "presented_digest": console.digest(&dismissed_id),
         }),
         json!(4),
+    );
+    // The stdio decide reads its request as every gating decide does:
+    // the words it takes are the ones it took before.
+    let deny = crate::rpc::question_set_methods::gating_decide_question_set(
+        &console.runtime,
+        &json!({
+            "pending_id": pending_id,
+            "approver_id": "person:dana",
+            "decision": "deny",
+            "presented_digest": console.digest(&pending_id),
+        }),
+        json!(5),
     );
     let row = console.row(&pending_id);
     console.stop().await;
 
     let unnamed = unnamed.error.expect("an approver id is required");
     assert_eq!(unnamed.code, -32602);
+    assert_eq!(
+        deny.error.as_ref().map(|error| error.code),
+        Some(-32602),
+        "{:?}",
+        deny.error
+    );
     assert!(unnamed.message.contains("approver_id"), "{unnamed:?}");
     assert_eq!(phase_after_unnamed, DecisionPhase::Open);
     assert_eq!(
@@ -1353,7 +1512,7 @@ fn other_files(dir: &std::path::Path) -> BTreeMap<String, (u64, Vec<u8>)> {
                 .expect("under the state directory")
                 .display()
                 .to_string();
-            if name.starts_with(DECISIONS_FILE) {
+            if name.starts_with("approval_decisions.") {
                 continue;
             }
             let bytes = std::fs::read(&path).expect("read a state file");
@@ -1526,10 +1685,29 @@ async fn a_call_without_a_human_surface_holds_nothing() {
     assert_eq!(open.len(), 1, "only the whole surface held a set");
 }
 
-/// Nothing is opened for a runtime that never holds a set: its driver makes
-/// one pass and no other, the read lists nothing, and no decision store is
-/// created. No driver starts for a runtime that keeps no durable decisions
-/// or on a candidate launch.
+/// The names of the decision store's files under `dir`: the store itself
+/// and the lock files of its executors.
+fn decision_store_files(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("read the state directory")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with("approval_decisions"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Nothing is opened for a runtime that never holds a set: the executor's
+/// driver is armed and claims nothing, makes no pass and creates no file,
+/// and the read lists nothing and creates no decision store. The first set
+/// held starts the driver. No driver is armed for a runtime that keeps no
+/// durable decisions or on a candidate launch.
 #[tokio::test]
 async fn a_runtime_that_holds_no_set_opens_nothing() {
     let state_dir = tempfile::tempdir().expect("state directory");
@@ -1541,27 +1719,43 @@ async fn a_runtime_that_holds_no_set_opens_nothing() {
     .await;
     let told = Arc::new(Told::default());
     let driver = console.drive(&told);
-    until("the first pass was made", || driver.passes() >= 1).await;
     let listed = console.listed(Some(&bob())).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let passes = driver.passes();
-    let file = state_dir.path().join(DECISIONS_FILE).exists();
+    let passes_before = driver.passes();
+    let files_before = decision_store_files(state_dir.path());
     let none_unavailable = spawn_ask_user_driver(
         &RuntimeDecisions::unavailable(),
         Arc::clone(&told) as Arc<dyn AskUserNotices>,
         Duration::from_secs(3600),
+        Arc::default(),
     );
     let none_candidate = spawn_ask_user_driver(
         &decisions_in(state_dir.path(), "questions-lazy", false),
         Arc::clone(&told) as Arc<dyn AskUserNotices>,
         Duration::from_secs(3600),
+        Arc::default(),
     );
+    // The first set held starts the driver.
+    let _pending_id = console.asked(ASKER, "call-1").await;
+    until("the driver made its first pass", || {
+        driver.passes().is_some_and(|passes| passes >= 1)
+    })
+    .await;
+    let files_after = decision_store_files(state_dir.path());
     driver.shutdown().await;
     console.stop().await;
 
     assert_eq!(listed, Vec::<String>::new());
-    assert_eq!(passes, 1, "one pass and no other");
-    assert!(!file, "no decision store is created");
+    assert_eq!(passes_before, None, "no pass before the first set");
+    assert_eq!(
+        files_before,
+        Vec::<String>::new(),
+        "no file of the decision store before the first set"
+    );
+    assert!(
+        files_after.iter().any(|name| name == DECISIONS_FILE),
+        "{files_after:?}"
+    );
     assert!(none_unavailable.is_none());
     assert!(none_candidate.is_none());
     assert!(told.all().is_empty());

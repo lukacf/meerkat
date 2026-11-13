@@ -74,8 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
   Wiring a pair again is safe. The identical edge is accepted and changes
   nothing; a same-process route that is already there is re-pointed at
-  the member's inbox of now (a member built again over its state keeps
-  its name and key and gets a new inbox). A wire is never replaced:
+  the member's inbox of now. A wire is never replaced:
   `wire_local` on a member that is already wired to that peer name with
   another endpoint (another address, or another key after a respawn) is
   refused in plain words before anything is installed (`peer spec error:
@@ -102,7 +101,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   released to rest while its runtime keeps running is reached the same
   way: the other mob's route to its inbox goes when the member is
   released, and the other mob's next peer message builds the member again
-  and is delivered. A wake is
+  and is delivered. A member that is built when its mob is stopped through
+  its handle still accepts the other mob's peer message and is handed it
+  once, when the mob resumes; a peer send from inside the stopped mob's
+  own namespace is refused (`mob_not_running`), and so is any send that
+  would have to build a member of the stopped mob. A wake is
   forwarded only for an edge BOTH mobs hold in their state, each naming
   the other member by its key, and only for a send of the member that
   holds it. An edge only one mob holds, an edge one side unwired, another

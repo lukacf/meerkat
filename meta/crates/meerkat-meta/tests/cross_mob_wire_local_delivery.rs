@@ -2916,3 +2916,90 @@ async fn releasing_one_member_keeps_the_other_mobs_route_to_a_member_that_is_bui
     left.stop().await;
     right.stop().await;
 }
+
+/// A mob stopped through its handle while its member is BUILT. The member's
+/// inbox lives on, so the other mob's peer message is accepted; the member
+/// is handed nothing while its mob is stopped, and is handed the message
+/// once when the mob resumes. (A member that is not built when its mob is
+/// stopped is not woken, and that send is refused:
+/// `a_stopped_mob_refuses_the_wake_and_builds_nobody`.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_built_member_of_a_stopped_mob_accepts_a_peer_message_and_is_handed_it_once_at_the_resume()
+ {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "stop-built-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "stop-built-b", "bob", true).await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    assert_delivers(&mut left, &mut right, "stop-built before a-to-b").await;
+
+    right
+        .runtime
+        .mob_handle()
+        .stop()
+        .await
+        .expect("stop bob's mob");
+
+    // Accepted while the mob is stopped, and handed to nobody.
+    let held = "stop-built held a-to-b";
+    let result = left.send(&bob.peer_id, held).await;
+    assert!(
+        result.contains("peer_message_sent") && result.contains("\"is_error\":false"),
+        "a built member of a stopped mob accepts the message: {result}"
+    );
+    assert!(
+        !right.receives(held, NO_DELIVERY_WAIT).await,
+        "a member of a stopped mob was handed a peer message"
+    );
+
+    // Handed at the resume.
+    right
+        .runtime
+        .mob_handle()
+        .resume()
+        .await
+        .expect("resume bob's mob");
+    let handed = right
+        .observation(DELIVERY_WAIT, |observation| {
+            !observation.after_tool && observation.replay.contains(held)
+        })
+        .await
+        .expect("bob is handed the held message when his mob resumes");
+    assert!(
+        handed.last.contains(held),
+        "fixture: the turn that hands a peer message ends with it"
+    );
+    let once = handed.replay.matches(held).count();
+
+    // Handed once: bob's history at his next turn holds it as often as at
+    // the turn that handed it, and no other turn ended with it.
+    let next = "stop-built next a-to-b";
+    let result = left.send(&bob.peer_id, next).await;
+    assert!(!result.contains(NOT_ROUTABLE), "{result}");
+    let after = right
+        .observation(DELIVERY_WAIT, |observation| {
+            !observation.after_tool && observation.replay.contains(next)
+        })
+        .await
+        .expect("bob is handed alice's next message");
+    assert_eq!(
+        after.replay.matches(held).count(),
+        once,
+        "the held message was handed more than once"
+    );
+    assert!(
+        right
+            .observation(NO_DELIVERY_WAIT, |observation| {
+                !observation.after_tool && observation.last.contains(held)
+            })
+            .await
+            .is_none(),
+        "a second turn was started for the held message"
+    );
+    assert_delivers(&mut right, &mut left, "stop-built b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}

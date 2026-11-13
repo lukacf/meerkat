@@ -100,14 +100,16 @@ for the affected releases and what to do.
 </Warning>
 
 On an affected release, replace the watch loop with a wait on the run's
-state, then read the answer:
+state, then read the member's latest output:
 
 ```python
-        # Wait for the run by its state, then read the answer
+        # Wait for the run by its state, then read the member's latest output
         loop = asyncio.get_running_loop()
         # Time limit on the wait for run_open: a very short run can be over
         # between two polls
         open_by = loop.time() + 5
+        # Time limit on the whole wait
+        done_by = loop.time() + 120
         seen_open = False
         while True:
             status = await handle.member_status("agent-1")
@@ -116,12 +118,18 @@ state, then read the answer:
                 seen_open = True
             elif state == "idle" and (seen_open or loop.time() > open_by):
                 break
+            if loop.time() > done_by:
+                raise TimeoutError("the run did not end within 120 seconds")
             await asyncio.sleep(0.5)
+        if not seen_open:
+            print("no run was seen: it was over between two polls, or it has not started")
         print(status.output_preview)
 ```
 
-`status.status` and `status.is_final` describe the member, not the run, and
-do not change when a run ends.
+`status.status` and `status.is_final` describe the member, not the run.
+`output_preview` is the member's latest output, not the answer to this send:
+when no run was seen, or the run failed, it can be an earlier output or
+`None`.
 
 ## Durable detached tools
 
@@ -276,9 +284,7 @@ await rt.reconcile()                  # In-process roster reconciliation
 ```
 
 <Warning>
-Known issue, noted 2026-11-13: on Meta releases through 0.9.14, respawning an
-identity on a gateway or embedding host that keeps its state on disk can destroy the
-mobs it created and its delegates. See the
+Known issue, noted 2026-11-13: on Meta 0.9.9 through 0.9.14, respawning an identity on a gateway that keeps its state on disk, or on an embedding host that keeps its state on disk and uses identities, can destroy the mobs it created and its delegates. See the
 [known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
 for the affected releases, how it happens and what to do.
 </Warning>

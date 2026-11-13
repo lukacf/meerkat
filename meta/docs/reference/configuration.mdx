@@ -846,9 +846,7 @@ binding, rather than let it happen:
   before the spawn. A session whose binding cannot be read is refused too,
   with `retryable: true` in `data`: the same call can succeed once the read
   does. A session without a live actor is rebuilt with the launch's binding. Known issue,
-  noted 2026-11-13: on Meta releases through 0.9.14, attaching an existing
-  session to a mob can archive that session if the mob is stopped or the
-  gateway or host process shuts down while the attach is still in progress.
+  noted 2026-11-13: on Meta 0.9.0 through 0.9.14, attaching an existing session to a mob can archive that session if the mob is stopped, completed, reset or destroyed, or the gateway or host process shuts down, while the attach is still in progress, or if the attach itself is refused.
   Read from the source and not yet confirmed by a test: the mobs that session
   owns are then destroyed at the next start. See the
   [known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)

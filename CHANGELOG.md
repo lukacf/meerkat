@@ -1175,17 +1175,17 @@ them.
   a name the mob does not hold, and nothing is forked. Before, `council`
   was not held to the audience. Affects 0.9.11 through 0.9.14.
 
-- Mob: a `mob_destroy` that is refused before it starts tells an agent
-  nothing of a member the host's member tool audience
+- Mob: a `mob_destroy` refused by the mob tells an agent nothing of a
+  member the host's member tool audience
   (`MobBuilder::with_member_tool_audience`) hides from that agent. Before,
-  a destroy refused because a member's state could not be restored named
-  that member, its session and the cause to every caller, in the refusal's
-  message and in its data. An agent is now answered such a refusal whole
-  only when it names a member the agent is shown. A refusal whose fields
-  can name no member (a count of pending cleanup, a closed actor channel,
-  the mob's own state) is answered whole as well. Every other refusal of a
-  destroy that did not start is answered to an agent as a fixed text with
-  no data, on a host with no audience too, and is logged whole on the
+  a destroy the mob refused because a member's state could not be restored
+  named that member, its session and the cause to every caller, in the
+  refusal's message and in its data. An agent is now answered such a
+  refusal whole only when it names a member the agent is shown. A refusal
+  whose fields can name no member (a count of pending cleanup, a closed
+  actor channel, the mob's own state) is answered whole as well. Every
+  other refusal the mob answers is answered to an agent as one fixed text
+  with no data, on a host with no audience too, and is logged whole on the
   host. The host's own destroy is answered as before. The member lists of
   the report `mob_destroy` answers an agent hold only members the agent
   was shown when the destroy started. Affects 0.9.11 through 0.9.14.

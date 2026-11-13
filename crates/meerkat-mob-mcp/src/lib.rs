@@ -806,8 +806,8 @@ impl DestroyMemberView {
 /// Cut `report` for a caller with `view`: only members the caller is shown
 /// stay in its member lists, and an error text that names a member the
 /// roster held at the read and the caller is not shown is dropped. A caller
-/// shown no member is answered no error text at all. Nothing else changes;
-/// a caller shown every member gets the report untouched.
+/// shown no member is answered none of the destroy's error texts. Nothing
+/// else changes; a caller shown every member gets the report untouched.
 fn cut_destroy_report_for_caller(
     report: &mut meerkat_mob::MobDestroyReport,
     view: &DestroyMemberView,
@@ -838,13 +838,10 @@ fn cut_destroy_report_for_caller(
     }
 }
 
-/// What an agent caller is answered in place of a destroy's refusal that
-/// names a member it is not shown: no member, no session and no cause.
-const DESTROY_REFUSED_FOR_A_MEMBER: &str = "mob destroy refused: a member's state could not be \
-     restored. The destroy can be retried; the host's log has the cause.";
-
-/// What an agent caller is answered in place of any other refusal of a
-/// destroy that is not known to name only what the caller is shown.
+/// What an agent caller is answered in place of every refusal of a destroy
+/// that is not known to name only what the caller is shown: no member, no
+/// session and no cause. One text for all of them, so the answer does not
+/// say whether the refusal was about a member the caller is not shown.
 const DESTROY_REFUSED: &str =
     "mob destroy refused. The destroy can be retried; the host's log has the cause.";
 
@@ -1048,8 +1045,10 @@ fn destroy_refusal_subject(error: &MobError) -> DestroyRefusalSubject<'_> {
 /// custody restore when the member is one the caller is shown. Every other
 /// refusal (a deferred custody restore of any other member, a free text
 /// that may name a member, another mob, a variant this code does not
-/// classify) is logged whole and answered as a fixed text, so its message
-/// and its structured data name no member, no session and no cause.
+/// classify) is logged whole and answered as one fixed text, the same for
+/// all of them, so its message and its structured data name no member, no
+/// session and no cause, and do not say that a member the caller is not
+/// shown exists.
 fn destroy_refusal_for_caller(
     mob_id: &MobId,
     error: MobError,
@@ -1058,25 +1057,22 @@ fn destroy_refusal_for_caller(
     let DestroyMemberView::Only { shown, .. } = view else {
         return error;
     };
-    let answered = match destroy_refusal_subject(&error) {
-        DestroyRefusalSubject::Nothing => None,
-        DestroyRefusalSubject::Mob(named) if named == mob_id => None,
-        DestroyRefusalSubject::DeferredMember(member) if shown.contains(member) => None,
-        DestroyRefusalSubject::DeferredMember(_) => Some(DESTROY_REFUSED_FOR_A_MEMBER),
-        DestroyRefusalSubject::Mob(_) | DestroyRefusalSubject::Unclassified => {
-            Some(DESTROY_REFUSED)
-        }
+    let answered_whole = match destroy_refusal_subject(&error) {
+        DestroyRefusalSubject::Nothing => true,
+        DestroyRefusalSubject::Mob(named) => named == mob_id,
+        DestroyRefusalSubject::DeferredMember(member) => shown.contains(member),
+        DestroyRefusalSubject::Unclassified => false,
     };
-    let Some(answered) = answered else {
+    if answered_whole {
         return error;
-    };
+    }
     tracing::warn!(
         mob_id = %mob_id,
         error = %error,
         "a mob destroy was refused; its agent caller is answered a fixed text in place of \
          this refusal, which may name a member the caller is not shown"
     );
-    MobError::Internal(answered.to_string())
+    MobError::Internal(DESTROY_REFUSED.to_string())
 }
 
 impl AdmittedDestroy {

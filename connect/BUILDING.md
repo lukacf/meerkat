@@ -427,10 +427,15 @@ rows plus one row per crate) and its record `FETCHED.json` beside the files:
 ```sh
 scripts/repo-cargo tree --locked --manifest-path ../Cargo.toml -p toolkit-package \
   --features local-recipes,local-artifacts --target aarch64-apple-darwin \
-  -e normal,build --prefix none --format "{p}" > /absolute/tool-closure.txt
+  -e normal,build --prefix none --format "{p}" --color never > /absolute/tool-closure.txt
 python3 -I scripts/fetch-pinned-inputs.py --pins release/library-pins-macos-arm64.json \
   --closure /absolute/tool-closure.txt --lock ../Cargo.lock --destination /absolute/new/pins
 ```
+
+`--color never` belongs to the listing command: Cargo colours its listing
+whenever the environment asks for colour (`CARGO_TERM_COLOR=always`), even
+into a file, and the fetch step refuses a line it does not know instead of
+stripping it.
 
 The packagers and the exporter never download. Each takes the resolved pin
 file and that directory: for macOS arm64 the resource packager is called with

@@ -3,7 +3,7 @@
 
     connect/scripts/repo-cargo tree --locked --manifest-path Cargo.toml -p toolkit-package \\
         --features local-recipes,local-artifacts --target aarch64-apple-darwin -e normal,build \\
-        --prefix none --format "{p}" > /private/tmp/cw/tool-closure.txt
+        --prefix none --format "{p}" --color never > /private/tmp/cw/tool-closure.txt
     python3 -I connect/scripts/fetch-pinned-inputs.py \\
         --pins connect/release/library-pins-macos-arm64.json \\
         --closure /private/tmp/cw/tool-closure.txt --lock Cargo.lock \\
@@ -102,14 +102,19 @@ TRANSIENT_STATUSES = (408, 425, 429)
 USER_AGENT = "meerkat-connect-pinned-inputs/1"
 CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
 # The arguments after `repo-cargo tree --locked --manifest-path <root>/Cargo.toml`: the six native tools
-# are the bins of toolkit-package under these two features, built for macOS arm64.
+# are the bins of toolkit-package under these two features, built for macOS arm64. `--color never` is
+# part of the command: Cargo colours the repeat mark whenever its environment asks for colour
+# (CARGO_TERM_COLOR=always, which a hosted runner's Rust setup exports), even into a file, and the
+# listing must be the same text everywhere. With `--prefix none` no tree drawing is printed, so the
+# character set of the terminal or locale does not reach it.
 TOOL_CLOSURE_ARGUMENTS = (
     "-p", "toolkit-package", "--features", "local-recipes,local-artifacts",
     "--target", "aarch64-apple-darwin", "-e", "normal,build", "--prefix", "none", "--format", "{p}",
+    "--color", "never",
 )
 # `<name> v<version>`, then ` (proc-macro)`, then ` (<absolute path>)` for a workspace crate, then ` (*)`
 # for a repeated line. A git or other registry source prints something else in the brackets and is not
-# a line this accepts.
+# a line this accepts. Neither is a line with a terminal escape sequence: it is refused, never stripped.
 CLOSURE_LINE = re.compile(
     r"(?P<name>[A-Za-z0-9_-]+) v(?P<version>[0-9][0-9A-Za-z.+-]*)"
     r"(?: \(proc-macro\))?(?P<path> \(/[^()]*\))?(?: \(\*\))?")

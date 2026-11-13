@@ -2296,11 +2296,19 @@ def macos_library(work, pins, pinned_inputs):
             "scope": "one tool of the integration library built from this commit; not native or business execution"})
         outputs["tools"][name] = binding(build)
     # The crates the tools were built from, for the kit's archives and licence texts. It builds nothing.
+    # The command is the fetch step's closure command. `--color never` is in it, beside the environment
+    # every Cargo child gets: the listing is read line by line and must be plain text on every host.
     _, listing = record.run("tool-dependencies", [ROOT / "scripts/repo-cargo", "tree", "--locked",
         "--manifest-path", WORKSPACE / "Cargo.toml", "-p", "toolkit-package",
         "--features", "local-recipes,local-artifacts", "--target", MACOS_TRIPLE, "-e", "normal,build",
-        "--prefix", "none", "--format", "{p}"], cwd=WORKSPACE, env=macos_cargo_environment(), seconds=1800)
-    lines = [line for line in listing.read_text().splitlines() if PACKAGE_LINE.fullmatch(line)]
+        "--prefix", "none", "--format", "{p}", "--color", "never"],
+        cwd=WORKSPACE, env=macos_cargo_environment(), seconds=1800)
+    said = listing.read_text().splitlines()
+    # The log holds Cargo's status lines too, which are left out by their shape. Terminal control text is
+    # neither: a line with an escape sequence is refused, never skipped or stripped.
+    require(not any("\x1b" in line for line in said),
+            "the tool dependency listing has a terminal escape sequence")
+    lines = [line for line in said if PACKAGE_LINE.fullmatch(line)]
     require(lines, "the tool dependency listing is empty")
     (tools / "dependencies.txt").write_text("\n".join(lines) + "\n")
     _, sysroot = record.run("rust-sysroot", ["rustc", "--print", "sysroot"], cwd=WORKSPACE)

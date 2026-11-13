@@ -756,7 +756,10 @@ jobs:
       # rows, and the fetch writes the resolved pin file every later step is
       # given. Its record and the resolved file are kept under the work
       # root's records, so the stage record carries them. The test first
-      # checks that this tree's closure resolves against its lock.
+      # checks that this tree's closure resolves against its lock. The
+      # listing is read line by line, so the command says `--color never`:
+      # the Rust setup above exports CARGO_TERM_COLOR=always, and Cargo then
+      # colours its listing even into a file.
       - name: Fetch the pinned public inputs
         shell: bash
         env:
@@ -766,7 +769,7 @@ jobs:
           (cd connect && python3 -B -m unittest scripts.test_fetch_pinned_inputs)
           connect/scripts/repo-cargo tree --locked --manifest-path "${CONNECT_CHECKOUT}/Cargo.toml" \
             -p toolkit-package --features local-recipes,local-artifacts --target aarch64-apple-darwin \
-            -e normal,build --prefix none --format "{p}" > "${CONNECT_WORK}/tool-closure.txt"
+            -e normal,build --prefix none --format "{p}" --color never > "${CONNECT_WORK}/tool-closure.txt"
           python3 -I connect/scripts/fetch-pinned-inputs.py \
             --pins connect/release/library-pins-macos-arm64.json \
             --closure "${CONNECT_WORK}/tool-closure.txt" --lock Cargo.lock \

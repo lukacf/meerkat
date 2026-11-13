@@ -2780,6 +2780,10 @@ impl MobActor {
             return SpawnActivationStep::Continue;
         }
         let prepared = self.prepare_autonomous_kickoff_input(&pending.state);
+        #[cfg(test)]
+        let prepared =
+            super::kickoff_notice::autonomous_kickoff_start_fault_for_test(&agent_identity)
+                .and(prepared);
         match prepared {
             Ok((bridge_session_id, input)) => SpawnActivationStep::Dispatch(
                 SpawnActivationStage::AutonomousKickoff,

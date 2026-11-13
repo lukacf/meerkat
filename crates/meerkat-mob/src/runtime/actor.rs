@@ -25,6 +25,7 @@ mod host_preparation_hold;
 mod identity_change;
 mod identity_entry_admission;
 mod identity_preparation;
+pub(super) mod kickoff_notice;
 #[cfg(feature = "openai-live")]
 pub(super) mod live_durable_source_loads;
 pub(super) mod member_effect_lane;
@@ -5339,8 +5340,15 @@ const MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS: usize = 64;
 const MAX_LIFECYCLE_NOTIFICATION_TASKS: usize = 16;
 const MAX_PARALLEL_PEER_RETIRE_NOTIFICATIONS: usize = 64;
 const MAX_CONCURRENT_AUTONOMOUS_STOP_INTERRUPTS: usize = 8;
+/// How many peer messages may be pending on the peer delivery lane at once:
+/// each takes one permit, and a message beyond them is refused as saturated.
+/// Kickoff lifecycle notices run on the same lane and take no permit: their
+/// own bound is per member and peer
+/// ([`kickoff_notice::MAX_PENDING_KICKOFF_NOTICES_PER_PEER`]), so pending
+/// notices never refuse a peer message.
 #[cfg(not(test))]
 pub(super) const MAX_PENDING_PEER_DELIVERIES: usize = 1024;
+/// The test build's permit count (see the production constant).
 #[cfg(test)]
 pub(super) const MAX_PENDING_PEER_DELIVERIES: usize = 4;
 
@@ -6173,13 +6181,15 @@ pub(super) enum WiringEndpoint {
         host: mob_dsl::HostId,
         spec: TrustedPeerDescriptor,
     },
-    /// A seated local member that is not materialized in this process
-    /// (Dormant, or Waking before its comms runtime exists). Its peer
-    /// material is MobMachine's durable endpoint (`member_peer_endpoints`):
-    /// a live peer's trust toward it is installed from that endpoint. It has
-    /// no comms runtime, so nothing is installed or removed on its own side
-    /// and it sends no notice: its wake's topology step realizes its trust
-    /// from machine state. No wiring verb wakes it.
+    /// A seated local member that is not materialized for wiring in this
+    /// process (Dormant, or Waking before its wake has bound it, whether or
+    /// not that wake has built its comms runtime yet; see
+    /// `boot_plan::MemberEndpointSource`). Its peer material is
+    /// MobMachine's durable endpoint (`member_peer_endpoints`): a live
+    /// peer's trust toward it is installed from that endpoint. It has no
+    /// comms runtime the mob may wire through, so nothing is installed or
+    /// removed on its own side and it sends no notice: its wake's topology
+    /// step realizes its trust from machine state. No wiring verb wakes it.
     LocalDormant {
         entry: Box<RosterEntry>,
         spec: TrustedPeerDescriptor,
@@ -6383,6 +6393,11 @@ pub(super) struct PeerDeliveryInflight {
     to: AgentIdentity,
     cancel_token: tokio_util::sync::CancellationToken,
     settled: tokio::sync::watch::Receiver<bool>,
+    /// The delivery sends the kickoff lifecycle notices of `from` to `to`
+    /// (see [`kickoff_notice`]): the queue it sends from, which takes the
+    /// next notice of that pair while the delivery runs. `None` for a peer
+    /// message.
+    kickoff_notices: Option<Arc<kickoff_notice::KickoffNoticeQueue>>,
     /// Tokio task identity captured from the `AbortHandle` returned by
     /// `JoinSet::spawn`. A panicked task returns no `PeerDeliveryCompletion`,
     /// so this is the only exact bridge back to the logical delivery id.
@@ -17609,6 +17624,7 @@ impl MobActor {
                 to,
                 cancel_token,
                 settled,
+                kickoff_notices: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 task_id: abort_handle.id(),
             },
@@ -32277,6 +32293,36 @@ impl MobActor {
                     reply_tx,
                 } => {
                     let _ = reply_tx.send(Ok(self.owed_member_wake_retry_armed(&agent_identity)));
+                }
+                #[cfg(test)]
+                MobCommand::EmitKickoffNoticeForTest {
+                    agent_identity,
+                    intent,
+                    reply_tx,
+                } => {
+                    let emitted = self.notify_kickoff_event(&agent_identity, intent).await;
+                    let _ = reply_tx.send(emitted);
+                }
+                #[cfg(test)]
+                MobCommand::ResolveRetirementEndpointForTest {
+                    agent_identity,
+                    retiring,
+                    reply_tx,
+                } => {
+                    let entry = self.roster.read().await.get(&agent_identity).cloned();
+                    let resolved = match entry {
+                        Some(entry) => self
+                            .resolve_wiring_endpoint_for_retirement(&entry, &retiring)
+                            .await
+                            .map(|endpoint| match endpoint {
+                                WiringEndpoint::Local { .. } => "local",
+                                WiringEndpoint::LocalDormant { .. } => "local_dormant",
+                                WiringEndpoint::PeerOnly { .. } => "peer_only",
+                                WiringEndpoint::Placed { .. } => "placed",
+                            }),
+                        None => Err(MobError::MemberNotFound(agent_identity)),
+                    };
+                    let _ = reply_tx.send(resolved);
                 }
                 #[cfg(test)]
                 MobCommand::ParkActorForObservationTest {
@@ -51035,11 +51081,11 @@ impl MobActor {
 
         // Resolve endpoints. Failing here leaves the DSL + roster
         // untouched — matches the zero-side-effect expectations.
-        let (local_endpoint, peer_endpoint) = if retiring_identity.is_some() {
+        let (local_endpoint, peer_endpoint) = if let Some(retiring) = retiring_identity.as_ref() {
             (
-                self.resolve_wiring_endpoint_for_retirement(&local_entry)
+                self.resolve_wiring_endpoint_for_retirement(&local_entry, retiring)
                     .await?,
-                self.resolve_wiring_endpoint_for_retirement(&peer_entry)
+                self.resolve_wiring_endpoint_for_retirement(&peer_entry, retiring)
                     .await?,
             )
         } else {
@@ -66390,6 +66436,9 @@ impl MobActor {
             successful_wiring_targets,
             planned_wiring_targets,
         } = rollback_context;
+        // The member's pending deliveries are cancelled by the attempt
+        // itself (`start_spawn_rollback`), so a rollback a caller drives has
+        // the cancel too.
         let Some((custody, material, owner)) = self.claim_retained_spawn_rollback(agent_identity)
         else {
             return Err(MobError::LifecycleOperationPending {
@@ -67010,12 +67059,17 @@ impl MobActor {
             });
         }
 
-        // A Dormant member is wired from its durable endpoint: no comms
-        // runtime of it is looked up (there is none), and nothing wakes it.
-        if super::boot_plan::domain_member_is_dormant(
+        // MobMachine decides where the member's endpoint is read from. A
+        // Dormant member, and a Waking one whose wake has not bound it, are
+        // wired from the recorded endpoint: no comms runtime of it is looked
+        // up (a Dormant member has none; a wake builds one before it binds
+        // the member's operation record, and it is not the mob's to wire
+        // through until the wake's plan is applied), and nothing wakes it.
+        let endpoint_source = super::boot_plan::domain_member_endpoint_source(
             self.dsl_authority.state(),
             &entry.agent_identity,
-        ) {
+        );
+        if endpoint_source == super::boot_plan::MemberEndpointSource::Recorded {
             return self.local_dormant_wiring_endpoint(entry, context);
         }
 
@@ -67049,13 +67103,12 @@ impl MobActor {
                 let spec = Self::peer_only_spec_for_binding(&binding, context)?;
                 Ok(WiringEndpoint::PeerOnly { spec, binding })
             }
-            // A Waking member whose comms runtime does not exist yet: its
+            // A Waking member with no comms runtime to read (the same
+            // answer of MobMachine as above): its recorded endpoint, and its
             // wake's topology step realizes the edge from machine state.
             MemberRef::Session { .. }
-                if super::boot_plan::domain_member_is_unmaterialized(
-                    self.dsl_authority.state(),
-                    &entry.agent_identity,
-                ) =>
+                if endpoint_source
+                    == super::boot_plan::MemberEndpointSource::RuntimeThenRecorded =>
             {
                 self.local_dormant_wiring_endpoint(entry, context)
             }
@@ -67094,6 +67147,7 @@ impl MobActor {
     async fn resolve_wiring_endpoint_for_retirement(
         &self,
         entry: &RosterEntry,
+        retiring: &AgentIdentity,
     ) -> Result<WiringEndpoint, MobError> {
         // Retire has already removed the live MobMachine session binding before
         // trust cleanup runs. The roster's exact local session reference is
@@ -67101,7 +67155,24 @@ impl MobActor {
         // than trying to resurrect an ordinary behavior binding.
         if matches!(&entry.member_ref, MemberRef::Session { .. }) {
             let comms_name = self.comms_name_for(entry)?;
-            if let Some(comms) = self.provisioner_comms(&entry.member_ref).await {
+            // The surviving end of the edge follows MobMachine's one
+            // endpoint read, as ordinary resolution does: a member that is
+            // Dormant, or Waking and not Bound, is answered from its
+            // recorded endpoint below, and its comms runtime is not looked
+            // up (a wake builds one before it binds the member's operation
+            // record, and it is not the mob's to wire through until then).
+            // The retiring member keeps its direct read.
+            let recorded_first = entry.agent_identity != *retiring
+                && super::boot_plan::domain_member_endpoint_source(
+                    self.dsl_authority.state(),
+                    &entry.agent_identity,
+                ) == super::boot_plan::MemberEndpointSource::Recorded;
+            let comms = if recorded_first {
+                None
+            } else {
+                self.provisioner_comms(&entry.member_ref).await
+            };
+            if let Some(comms) = comms {
                 let public_key = comms.public_key().ok_or_else(|| {
                     MobError::WiringError(format!(
                         "unwire retirement requires public key for '{}'",
@@ -67427,84 +67498,103 @@ impl MobActor {
             let Some(recipient_entry) = recipient_entry else {
                 continue;
             };
-            // A kickoff status notice is content in MobMachine's verdict: it
-            // is delivered like a message, so a recipient that is not
-            // materialized is woken by its delivery, never skipped.
-            if !self.peer_notice_delivers(
-                &recipient_entry.agent_identity,
-                agent_identity,
-                mob_dsl::PeerInputClass::Content,
-            )? {
-                continue;
-            }
-            let (recipient_spec, recipient_unmaterialized) = match self
-                .resolve_wiring_endpoint(&recipient_entry, "notify_kickoff_event")
-                .await?
-            {
-                WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => {
-                    (spec, false)
-                }
-                WiringEndpoint::LocalDormant { spec, .. } => (spec, true),
-                WiringEndpoint::Placed { .. } => {
-                    return Err(MobError::WiringError(format!(
-                        "kickoff lifecycle notice to placed member '{}' has no remote-recipient realization",
-                        recipient_entry.agent_identity
-                    )));
-                }
-            };
-            if recipient_unmaterialized {
-                // The send waits for the recipient's wake, which this actor
-                // runs: it leaves the actor on the peer delivery lane, sent
-                // to the recipient's durable endpoint (its wake route).
-                let command = Self::peer_event_command(
-                    intent,
-                    &recipient_spec,
+            // The actor prepares the notice and never awaits its send (see
+            // `kickoff_notice`): a send to a recipient that is not live
+            // waits for the recipient's wake, which this actor runs, and a
+            // send to a live one waits on the recipient's drain.
+            //
+            // One rule for a notice that is not delivered, whether its
+            // preparation here or its send on the lane failed: it is
+            // recorded, and the member's remaining peers are still served.
+            match self
+                .prepare_kickoff_notice(
                     agent_identity,
                     &entry,
-                    &self.sender_notice_spec(&entry).await?,
-                )?;
-                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                self.spawn_peer_message_delivery(
-                    PeerMessageDeliveryPlan {
-                        from: agent_identity.clone(),
-                        to: recipient_entry.agent_identity.clone(),
-                        sender_comms: Arc::clone(&sender_comms),
-                        command,
-                    },
-                    reply_tx,
-                );
-                // The delivery settles off the actor: a notice that was not
-                // delivered is reported, as a failed send to a live recipient
-                // is.
-                let mob_id = self.definition.id.clone();
-                let from = agent_identity.clone();
-                let to = recipient_entry.agent_identity.clone();
-                tokio::spawn(async move {
-                    let failure = match reply_rx.await {
-                        Ok(Ok(_)) => return,
-                        Ok(Err(error)) => error.to_string(),
-                        Err(_) => "the delivery ended without an outcome".to_string(),
-                    };
-                    tracing::warn!(
-                        %mob_id,
-                        from = %from,
-                        to = %to,
-                        error = %failure,
-                        "a kickoff notice to a peer that was not materialized was not delivered"
-                    );
-                });
-                continue;
+                    &recipient_entry,
+                    intent,
+                    &sender_comms,
+                )
+                .await
+            {
+                Ok(Some(notice)) => self.spawn_kickoff_notice_delivery(notice),
+                Ok(None) => {}
+                Err(error) => kickoff_notice::record_unprepared_kickoff_notice(
+                    &self.definition.id,
+                    agent_identity,
+                    &recipient_entry.agent_identity,
+                    intent,
+                    &error,
+                ),
             }
-            self.notify_peer_event(
-                intent,
-                &recipient_spec,
-                agent_identity,
-                &entry,
-                &sender_comms,
-            )
-            .await?;
         }
         Ok(())
+    }
+
+    /// Prepare one kickoff notice of `agent_identity` (`entry`) for
+    /// `recipient_entry` on the actor's step: MobMachine's verdict on it, the
+    /// recipient's endpoint and the finished comms command. `None` when
+    /// MobMachine's verdict is that the recipient gets no notice.
+    async fn prepare_kickoff_notice(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        entry: &RosterEntry,
+        recipient_entry: &RosterEntry,
+        intent: &'static str,
+        sender_comms: &Arc<dyn CoreCommsRuntime>,
+    ) -> Result<Option<kickoff_notice::KickoffNoticeDelivery>, MobError> {
+        // A kickoff status notice is content in MobMachine's verdict: it
+        // is delivered like a message, so a recipient that is not
+        // materialized is woken by its delivery, never skipped.
+        if !self.peer_notice_delivers(
+            &recipient_entry.agent_identity,
+            agent_identity,
+            mob_dsl::PeerInputClass::Content,
+        )? {
+            return Ok(None);
+        }
+        #[cfg(test)]
+        kickoff_notice::kickoff_notice_preparation_fault_for_test(
+            &self.definition.id,
+            &recipient_entry.agent_identity,
+        )?;
+        let (recipient_spec, dormant_endpoint) = match self
+            .resolve_wiring_endpoint(recipient_entry, "notify_kickoff_event")
+            .await?
+        {
+            WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => {
+                (spec, false)
+            }
+            WiringEndpoint::LocalDormant { spec, .. } => (spec, true),
+            WiringEndpoint::Placed { .. } => {
+                return Err(MobError::WiringError(format!(
+                    "kickoff lifecycle notice to placed member '{}' has no remote-recipient realization",
+                    recipient_entry.agent_identity
+                )));
+            }
+        };
+        // The recipient is not live in MobMachine's residency: Dormant,
+        // or Waking, whether or not its wake has built its comms runtime
+        // yet. The send wakes it, or joins its wake.
+        let recipient_unmaterialized = dormant_endpoint
+            || super::boot_plan::domain_member_is_unmaterialized(
+                self.dsl_authority.state(),
+                &recipient_entry.agent_identity,
+            );
+        let command = Self::peer_event_command(
+            intent,
+            &recipient_spec,
+            agent_identity,
+            entry,
+            &self.sender_notice_spec(entry).await?,
+        )?;
+        Ok(Some(kickoff_notice::KickoffNoticeDelivery {
+            from: agent_identity.clone(),
+            to: recipient_entry.agent_identity.clone(),
+            intent,
+            recipient_unmaterialized,
+            sender_comms: Arc::clone(sender_comms),
+            command,
+        }))
     }
 
     /// The peer spec a notice from `entry` names its sender by, resolved as

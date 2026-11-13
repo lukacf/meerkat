@@ -7330,6 +7330,8 @@ struct FaultInjectedMobEventStore {
     event_tx: tokio::sync::broadcast::Sender<MobEvent>,
     external_deliveries: InMemoryMobEventStore,
     fail_on_kind: RwLock<HashSet<&'static str>>,
+    /// Kinds that fail once their allowance of further appends is used up.
+    fail_on_kind_after: RwLock<HashMap<&'static str, u64>>,
     fail_after_append_on_kind: RwLock<HashSet<&'static str>>,
     fail_next_external_delivery_claim: AtomicBool,
     fail_external_delivery_load_after_claim: AtomicBool,
@@ -7460,6 +7462,7 @@ impl FaultInjectedMobEventStore {
             event_tx,
             external_deliveries: InMemoryMobEventStore::new(),
             fail_on_kind: RwLock::new(HashSet::new()),
+            fail_on_kind_after: RwLock::new(HashMap::new()),
             fail_after_append_on_kind: RwLock::new(HashSet::new()),
             fail_next_external_delivery_claim: AtomicBool::new(false),
             fail_external_delivery_load_after_claim: AtomicBool::new(false),
@@ -7477,6 +7480,30 @@ impl FaultInjectedMobEventStore {
 
     async fn fail_appends_for(&self, kind: &'static str) {
         self.fail_on_kind.write().await.insert(kind);
+    }
+
+    /// Let `allowed` more appends of `kind` through, then fail every later
+    /// one, until [`Self::allow_appends_for`]: a fault that lands after
+    /// some of a step's appends were journaled.
+    async fn fail_appends_for_after(&self, kind: &'static str, allowed: u64) {
+        self.fail_on_kind_after.write().await.insert(kind, allowed);
+    }
+
+    /// Whether an append of `kind_label` is refused now: its kind is failed
+    /// outright, or its allowance of [`Self::fail_appends_for_after`] is
+    /// used up (an allowed append uses one).
+    async fn append_refused(&self, kind_label: &'static str) -> bool {
+        if self.fail_on_kind.read().await.contains(kind_label) {
+            return true;
+        }
+        match self.fail_on_kind_after.write().await.get_mut(kind_label) {
+            Some(0) => true,
+            Some(allowed) => {
+                *allowed -= 1;
+                false
+            }
+            None => false,
+        }
     }
 
     async fn fail_after_append_for(&self, kind: &'static str) {
@@ -7510,6 +7537,7 @@ impl FaultInjectedMobEventStore {
 
     async fn allow_appends_for(&self, kind: &'static str) {
         self.fail_on_kind.write().await.remove(kind);
+        self.fail_on_kind_after.write().await.remove(kind);
     }
 
     fn fail_next_external_delivery_claim(&self) {
@@ -7639,7 +7667,7 @@ impl private::MobEventStoreSealed for FaultInjectedMobEventStore {
         provenance: &crate::MobProvenance,
     ) -> Result<MobEvent, MobStoreError> {
         let kind_label = Self::kind_label(&event.kind);
-        if self.fail_on_kind.read().await.contains(kind_label) {
+        if self.append_refused(kind_label).await {
             return Err(MobStoreError::Internal(format!(
                 "fault-injected append failure for {kind_label}"
             )));
@@ -7775,7 +7803,7 @@ impl MobEventStore for FaultInjectedMobEventStore {
 
     async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
         let kind_label = Self::kind_label(&event.kind);
-        if self.fail_on_kind.read().await.contains(kind_label) {
+        if self.append_refused(kind_label).await {
             return Err(MobStoreError::Internal(format!(
                 "fault-injected append failure for {kind_label}"
             )));
@@ -7845,7 +7873,7 @@ impl MobEventStore for FaultInjectedMobEventStore {
         }
 
         let kind_label = Self::kind_label(&event.kind);
-        if self.fail_on_kind.read().await.contains(kind_label) {
+        if self.append_refused(kind_label).await {
             return Err(MobStoreError::Internal(format!(
                 "fault-injected append failure for {kind_label}"
             )));

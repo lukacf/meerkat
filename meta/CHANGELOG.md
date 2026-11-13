@@ -45,7 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   nested members are listed and served as before.
   Frames a console stored
   for participants before this release stay in its console store, unserved.
-  Affected: 0.8.27 through 0.9.14.
+  Affected: 0.8.27 through 0.9.14. The 0.9.13 notes said the next release
+  would no longer list a council's participants; 0.9.14 shipped without
+  this change and still lists them.
 
 ### Fixed
 
@@ -114,15 +116,6 @@ that person after a restart. See Security.
   `xattr`, calls it only to set attributes while unpacking, so Meta's own
   use is not known to be affected. `rustix` 1.1.6 has the fix; this release
   still builds with 1.1.5.
-
-- On a console whose visibility policy includes nested mob members (the policy
-  trait's default; the stock gateway policy does not), a temporary council's
-  participants are still listed as members in 0.9.14, and their stored
-  history holds a copy of the source member's earlier turns: a caller denied
-  the source can read them through a participant. The 0.9.13 notes said the
-  next release would no longer list them; 0.9.14 does not have that change.
-  Affects 0.8.27 through 0.9.14. Keep the stock policy, or deny the
-  participants by name (`council-p0`, ...).
 
 ## [0.9.13] - 2026-11-11
 

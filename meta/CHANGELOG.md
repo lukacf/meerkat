@@ -113,6 +113,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   methods was exercised, and no control run was made against a 0.9.14
   gateway.
 
+- Meta records an agent's changed instructions itself, as one operator
+  instruction record for the agent and its forks (`include_forks`), keyed
+  by the agent's name. So what "Operator instructions for a member and its
+  forks" and "Rolling back to 0.9.14" in `docs/guides/upgrading.mdx` say of
+  such records applies to every mob Meta serves from the first change of an
+  agent's instructions, with no operator write. A client that decodes
+  `mob/instruction_status` with an earlier `meerkat-contracts` refuses a
+  page that lists such a record: upgrade such clients together with the
+  gateway. After a rollback an earlier release reads each such record as
+  its agent's alone, and a host store loses the fork scope at the earlier
+  release's next checkpoint. A mob in which these records, with its other
+  records, are more than 64, or hold more than 1 MiB of Active bodies, is
+  past what an earlier release holds in one mob.
+
 ### Added
 
 - `meta/identity/list`, `get` and `directory` say `roster_listing_superseded:

@@ -21,11 +21,13 @@ ANTHROPIC_API_KEY=sk-... npx tsx main.ts
 ```
 
 This example follows the main branch. If it uses something newer than the SDK
-you installed, copy `main.ts` from that release's tag instead.
+you installed, copy `main.ts` from the release tag that matches your SDK's
+version instead.
 
 To run against this checkout, build the SDK and the runtime from the
 repository root. The SDK built from source pins no runtime digest and refuses
-to download one, so it needs `MEERKAT_BIN_PATH`:
+to download one, so point it at the runtime you build, here with
+`MEERKAT_BIN_PATH`:
 
 ```bash
 npm --prefix sdks/typescript install
@@ -43,7 +45,7 @@ export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_T
 
 ## Run
 
-From the checkout, after the build above:
+From the repository root of the checkout, after the build above:
 
 ```bash
 ANTHROPIC_API_KEY=sk-... npx tsx examples/003-hello-meerkat-ts/main.ts

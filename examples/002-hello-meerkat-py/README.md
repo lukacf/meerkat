@@ -18,11 +18,13 @@ python -m pip install meerkat-sdk
 ```
 
 This example follows the main branch. If it uses something newer than the SDK
-you installed, run the copy at that release's tag instead.
+you installed, run the copy of it at the release tag that matches your SDK's
+version instead.
 
 To run against this checkout, build the SDK and the runtime from the
 repository root. A source install of the SDK pins no runtime digest and
-refuses to download one, so it needs `MEERKAT_BIN_PATH`:
+refuses to download one, so point it at the runtime you build, here with
+`MEERKAT_BIN_PATH`:
 
 ```bash
 python3 -m venv .venv
@@ -40,6 +42,9 @@ export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_T
 - `Session` — `.id`, `.text`, `.usage`, `.turns`
 
 ## Run
+
+From the repository root:
+
 ```bash
 ANTHROPIC_API_KEY=sk-... python examples/002-hello-meerkat-py/main.py
 ```

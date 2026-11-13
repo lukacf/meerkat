@@ -102,6 +102,14 @@ them.
   enums needs the new arms, and code that builds either state names the
   field.
 
+- `meerkat-mob`: `MemberToolAudience::hides` takes two more arguments,
+  `caller_labels` and `target_labels`: the labels the calling member and
+  the target carry on their own roster rows at the call, `None` for one
+  the roster holds no row for. Meerkat hands them in from one roster read,
+  so a host's rule about a member's durable labels holds for a member the
+  host did not build in this process. An implementation adds the two
+  parameters; one that decides by identity alone ignores them.
+
 ### Upgrade notes
 
 - A definition update that drops a profile agents were created on. Before
@@ -245,6 +253,20 @@ them.
   stored by an earlier release loads as not paused for its target. No
   `schedule/*` RPC method, REST route, schedule tool or wire type changes,
   and no read of a schedule on those surfaces says whose pause it is yet.
+
+- Mob: `MobHandle::members_hidden_from` answers which of the members it is
+  given the host's member tool audience
+  (`MobBuilder::with_member_tool_audience`) hides from a calling member.
+  It is the one place the audience is asked, and the member tools that
+  name or list members ask through it: `member_status`, `retire_member`,
+  `force_cancel_member`, `wire_members`, `unwire_members`, `list_members`,
+  `spawn_member` and `spawn_many_members` (the source of a fork launch,
+  and the member a resumed session is bound to), and the mob tools'
+  `mob_check_member`, `mob_retire_member`, `mob_wire`, `mob_unwire`,
+  `mob_list_members`, `council` and `mob_destroy` (the members its report
+  names). A target the roster holds no row for is handed to the
+  audience without labels, and the host decides from its own record.
+  Empty when the host installed no audience.
 
 - `MobHandle::seat_owed_store_owned_identities` seats, while the mob runs,
   every store-owned identity that is owed its seat (the spawn of its
@@ -624,7 +646,58 @@ them.
   `last_failure` in `mob/instruction_status` is diagnostic: it is kept in
   the mob's process and not across a restart.
 
+- Mob: in a running mob a wire, and in every state an unwire, between two
+  members or of a member and an external peer answers a name the mob does
+  not hold as member not found before any refusal about the other member,
+  about the external peer's binding or about the edge; before, such a call
+  could answer that other refusal (an open approval branch, a Broken
+  member, an identity entry an agent may not wire, a binding the mob
+  refuses, an edge MobMachine does not admit) instead. The same holds for
+  a call that gives one name as both members: a name the mob does not hold
+  answers member not found, where it answered that the call needs two
+  different members.
+
 ### Fixed
+
+- Mob: the member lists a member's own tools answer (`list_members`, and
+  the mob tools' `mob_list_members`) leave out a member the host's member
+  tool audience hides from the caller, with manage scope too, as
+  `member_status`, `retire_member` and `force_cancel_member` already
+  answered such a member as one the mob does not hold. Through 0.9.14 a
+  list named it. The wiring a listed member's row shows (`wired_to`, and
+  its external peers) names no member or external peer the audience hides
+  from the caller either. Hosts with no audience see no change.
+
+- Mob: the wire tools keep to the host's member tool audience
+  (`MobBuilder::with_member_tool_audience`) too. In a running mob,
+  `wire_members`, `unwire_members`, `mob_wire` and `mob_unwire` answer a
+  call that names a member the audience hides from the caller, beside
+  another member or an external peer, exactly as the same call with a name
+  the mob does not hold in its place, and wire or unwire nothing. Through
+  0.9.14 a member with manage scope over the mob could learn that a member
+  hidden from it exists and reach it through these tools. Hosts with no
+  audience see no change.
+
+- Mob: the mob tools' `mob_check_member` and `mob_retire_member` ask the
+  host's member tool audience themselves, before the caller's scope or
+  ownership is looked at, and answer a member it hides from the caller
+  exactly as a name the mob does not hold. Through 0.9.14, with a host that
+  had not wrapped the two tools, a member could learn that a member hidden
+  from it exists, and one with manage scope over the mob could read its
+  status and retire it.
+
+- Mob: the report `mob_destroy` answers an agent with names no member the
+  host's member tool audience hides from that agent: not in its member
+  lists, not in an error text, not in the refusal of an incomplete destroy.
+  Through 0.9.14 it could name such a member.
+
+- Mob: a placed member's operator calls (`member_status`, `retire_member`,
+  `force_cancel_member`, `wire_members`, `unwire_members`, `list_members`)
+  reach the host's member tool audience as that member's.
+  Through 0.9.14 the audience was asked about them as about a call no
+  member made (`caller` `None`), so a placed member was shown what such a
+  call is shown, not what the member itself is shown. An absent caller is
+  now a call made by no member of the mob.
 
 - Mob: Core asks the host's member build preparer
   (`MobBuilder::with_member_build_preparer`) before the spawn of a
@@ -697,6 +770,26 @@ them.
   a lift with work already queued may start that run before the write is
   tried; the entry then reaches the first run that starts after the write.
 
+### Security
+
+- Mob: the fork and resume launches of `spawn_member` and
+  `spawn_many_members` keep to the host's member tool audience
+  (`MobBuilder::with_member_tool_audience`). A fork launch (a placed
+  member's included) answers a source the audience hides from the caller
+  as a source the mob does not hold, where a member with manage scope over
+  the mob could before start a member of its own from the conversation of
+  a member hidden from it. A resume launch that names a session bound to
+  such a member is refused exactly as a resume of a session nobody holds,
+  where the refusal before told a member with manage scope over the mob
+  which member the session is bound to. Affects 0.9.11 through 0.9.14.
+
+- Mob: `council` keeps to the host's member tool audience too: a
+  participant the audience hides from the convener is answered exactly as
+  a name the mob does not hold, and nothing is forked. Before, a member
+  that may create mobs and holds manage scope over the mob could convene a
+  member hidden from it and be answered from that member's conversation.
+  Affects 0.9.11 through 0.9.14.
+
 ### Known limitations
 
 - Mob: an explicit resume of a stopped mob (`MobHandle::resume`) rebuilds
@@ -719,6 +812,9 @@ them.
   be counted in the fork family and receive the records written for the
   family's first member and its forks: give the new member another name,
   or write those records again without `include_forks`.
+
+- Mob: the schedule tools are not checked against the member tool audience
+  on a host that mounts them itself.
 
 ## [0.9.13] - 2026-11-11
 

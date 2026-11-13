@@ -44,6 +44,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Core holds a member as an identity entry, and a session bridge has
   neither trait. No Meerkat code relied on them.
 
+### Security
+
+- The Console decides an agent for which no member is seated on the
+  agent's own record (its profile as its role, and its labels) wherever a
+  call or a stream names it: the reads of one agent by name
+  (`meta/console/inspect_identity`, `meta/identity/resolved_tools`,
+  `meta/identity/routing_status`) and every other check that names an
+  agent. Through 0.9.14, an agent its host configures that had no member
+  yet was not decided by an access rule scoped by role or by label, nor by
+  the rule about an agent private to a person (`console.private_to`), on
+  these calls. The same now holds for an agent of the identity store that
+  is owed its seat or archived. An agent whose record cannot be read is
+  shown to an access administrator only.
+- A deny by role also applies to the list entry of an agent that has no
+  live member (`GET /console/identities`, `meta/console/list_identities`
+  and, on a Console that serves other runtimes, the agent rows of
+  `GET /console/experience`). In 0.9.10 through 0.9.14 such an entry was
+  decided without the agent's role.
+- An open Console or event stream reads the roster and the agents' records
+  again before it decides its next item once its last read is 20 seconds
+  old, so a stream opened before an agent's record changed decides on the
+  record as it is.
+- `SameProcessTopologyCoordinator` reads both runtimes' agents before it
+  decides what a principal is shown under an enforcing access controller,
+  and shows an endpoint of a runtime that none of its agents holds to an
+  access administrator only.
+
 ### Upgrade
 
 - A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
@@ -707,6 +734,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   identity holds through its row answers
   `HeldBootstrapRefusal::ExistingContinuity`, as the add of a configured
   identity that has continuity does. It answered `IdentityStoreOwned`.
+- The list record of an agent with no live member
+  (`GET /console/identities`, `meta/console/list_identities`) carries the
+  label `role` with the agent's profile, unless the agent's declared
+  labels name a role, as the record of a live member carries its role.
 
 - Console: the line of a broken agent, in the roster and in its details,
   reads "Broken: it may need a respawn or a reset". It said that the agent
@@ -801,6 +832,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   after a restart) was checked and retired by another agent, and convened
   a council. The host's record still adds what a roster row cannot say (a
   member that left the roster).
+- Meerkat's member tools (`member_status`, `retire_member`,
+  `force_cancel_member`) naming a member private to a person the calling
+  agent does not act for read whom the member is private to from the
+  member's own roster row too, and the member lists an agent's tools answer
+  (`mob_list_members`, `list_members`) leave such a member out, with manage
+  scope over the mob too: Meerkat hands Meta's audience the labels the
+  caller and the target carry on their roster rows
+  (`MemberToolAudience::hides`, Breaking in the root changelog) and asks it
+  for every member a list would name. The caller's own person is its
+  roster row's; the host's record speaks for a caller only when it has no
+  row, and for a target whenever its row names nobody.
+- On the Console, the reads and changes of the mob's agents
+  (`meta/identity/get`, `list`, `directory`, `plan` and every change)
+  decide what the caller may view on the agent's own record: its profile
+  as its role, and its labels. A rule of the access configuration that
+  names a role or labels, and the rule about an agent private to a person,
+  hold for an agent no member is seated for (an archived agent, and one
+  whose seat is owed) as they hold for a seated one. The peers and the
+  asker a read names, and the peers a change names, are decided the same
+  way, and an agent whose record cannot be read is not shown.
+- An update of an agent's labels (`meta/identity/update`, `set.labels` and
+  `set.labels_remove`) lets a reserved label the agent carries stay when
+  the update does not name it. An agent that was adopted with a label its
+  configuration gave it (one of Meta's own, or one the identity policy
+  reserves) takes an update of its other labels; it was refused
+  `reserved_key`. An update that would change or remove a reserved label
+  is refused `reserved_key` at `set.labels`, and the removal of one of
+  Meta's own labels at `set.labels_remove`.
 
 - The first build of an identity created at run time carries the host
   customizer's tools: the member Core starts at the create to run the
@@ -892,6 +951,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   build, or adopted into the store from a plain member, gets them from its
   next seat: a reset, an unarchive, a seat a start owes, or a respawn
   (`meta/respawn`), which keeps its conversation.
+- `meta/access/preview` on a Console that serves other runtimes reads
+  those runtimes' agents before it decides, as the call it previews does.
 
 ### Known limitations
 
@@ -943,6 +1004,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `include_forks`. `meta/instruction_status` shows the scope of a record
   written elsewhere. A Rust host that embeds Meta sets the scope through
   the mob handle's `set_operator_instruction`.
+- A change of the row of an agent no member is seated for that a host
+  writes through the runtime's own mob handle, past `meta/identity/*`, is
+  decided on by the Console at the latest 20 seconds after it.
+- The SSE routers a host builds itself without a runtime
+  (`agent_events_sse_router`, `mob_events_sse_router` and their
+  `_with_access` forms) decide on the agent attributes the host records in
+  the access controller it passes: they read no roster and no agent
+  record.
 
 ## [0.9.13] - 2026-11-11
 

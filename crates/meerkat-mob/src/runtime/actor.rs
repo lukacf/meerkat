@@ -33323,7 +33323,7 @@ impl MobActor {
                     // wire leave the actor. `Dispatched` moves reply custody
                     // to the wiring lane; a dropped receiver is an observer
                     // loss only and never cancels the owned effects.
-                    match self.handle_wire_command(local, target).await {
+                    match self.handle_wire_command(authority, local, target).await {
                         Ok(wiring_io::WireHandled::Settled) => {
                             let _ = reply_tx.send(Ok(()));
                         }
@@ -33353,7 +33353,7 @@ impl MobActor {
                     target,
                     reply_tx,
                 } => {
-                    match self.handle_unwire_command(local, target).await {
+                    match self.handle_unwire_command(authority, local, target).await {
                         Ok(wiring_io::WireHandled::Settled) => {
                             let _ = reply_tx.send(Ok(()));
                         }
@@ -37003,6 +37003,17 @@ impl MobActor {
             } = &spec.launch_mode
         {
             let source = source_member_id.clone();
+            // A source the member tools marked (the host's member tool
+            // audience hides it from the calling member) is answered here
+            // as a source the roster does not hold: this is the place a fork
+            // source is first looked up, so both get the same answer after
+            // the same earlier refusals.
+            if spec.fork_source_answered_absent {
+                reject_spawn_before_custody!(
+                    "prompt_fork_dispatch_admission",
+                    MobError::MemberNotFound(source)
+                );
+            }
             match self.prompt_fork_dispatch_lineage(&source, &spec).await {
                 Ok(lineage) => spec.dispatch_admission_lineage = lineage,
                 Err(error) => {
@@ -37281,6 +37292,8 @@ impl MobActor {
             // Set only by a durable fork's seat: the fork lineage root its
             // birth snapshot was built with, which this seat records.
             instruction_lineage_root,
+            // Answered at the fork source's first lookup; nothing else reads it.
+            fork_source_answered_absent: _,
         } = spec;
         let dispatch_admission = super::fork_build::SpawnDispatchAdmissionFacts {
             lineage: dispatch_admission_lineage,
@@ -39839,6 +39852,8 @@ impl MobActor {
             dispatch_admission_lineage,
             // Set only by a durable fork's seat, which refuses placement.
             instruction_lineage_root: _,
+            // Answered at the fork source's first lookup; nothing else reads it.
+            fork_source_answered_absent: _,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -41604,6 +41619,7 @@ impl MobActor {
             dispatch_admission_lineage: _,
             // Nor is it a fork seat.
             instruction_lineage_root: _,
+            fork_source_answered_absent: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {
@@ -48597,9 +48613,13 @@ impl MobActor {
     /// to the detached wiring lane (#1105).
     async fn handle_wire_command(
         &mut self,
+        authority: &CommandAuthority,
         local: AgentIdentity,
         target: super::handle::PeerTarget,
     ) -> Result<wiring_io::WireHandled, MobError> {
+        self.refuse_edge_naming_unheld_member(&local, &target, false)
+            .await?;
+        self.refuse_agent_lane_edge_of_identity_entry(authority, &local, &target)?;
         self.refuse_approval_branch_control(Self::wiring_endpoints(&local, &target))
             .await?;
         match self
@@ -48612,6 +48632,79 @@ impl MobActor {
                 self.dispatch_prepared_wiring(*prepared, None),
             )),
         }
+    }
+
+    /// The agent lane's rule for a wire or unwire, behind the command's
+    /// member lookup: an agent wires and unwires no identity entry
+    /// ([`Self::agent_lane_member_refusal`]). Chokepoint (a) refuses such a
+    /// command itself unless it also names a member the mob does not hold,
+    /// which the lookup answers first; every command it left to the lookup
+    /// that the lookup let through is refused here, so no agent's wire or
+    /// unwire of an entry goes on (an entry's external peer unwired by its
+    /// name, a wire in a mob that is not running).
+    fn refuse_agent_lane_edge_of_identity_entry(
+        &self,
+        authority: &CommandAuthority,
+        local: &AgentIdentity,
+        target: &super::handle::PeerTarget,
+    ) -> Result<(), MobError> {
+        if !authority.acts_for_agent() {
+            return Ok(());
+        }
+        match self.agent_lane_member_refusal(Self::wiring_endpoints(local, target), false)? {
+            Some(refusal) => Err(refusal),
+            None => Ok(()),
+        }
+    }
+
+    /// A wire or unwire command answers a name the roster does not hold as
+    /// member not found before it refuses the call for anything else it
+    /// names: what the other member is (an open approval branch, a Broken
+    /// member) or, for an external peer, the peer's binding (its name,
+    /// address or key, a binding named as the member itself) and the edge.
+    /// So the answer for such a name never depends on the other end. The
+    /// member tools answer a member the host's member tool audience hides
+    /// from the caller by the same order
+    /// (`MobHandle::wire_end_answered_absent`): the local member first,
+    /// then the peer. Keep the two in step.
+    ///
+    /// Left to the command itself: a wire in a mob that is not running (its
+    /// lifecycle refusal comes first), and an unwire of an external peer by
+    /// its name. One name given as both ends is looked up like any other:
+    /// a name the roster does not hold answers member not found, and a
+    /// member it holds goes on to the command's own refusal of such a call.
+    async fn refuse_edge_naming_unheld_member(
+        &self,
+        local: &AgentIdentity,
+        target: &super::handle::PeerTarget,
+        unwire: bool,
+    ) -> Result<(), MobError> {
+        // An external peer is no member: only the local end is looked up.
+        let peer = match target {
+            super::handle::PeerTarget::Local(peer) => Some(peer),
+            _ => None,
+        };
+        if !unwire && self.state() != MobState::Running {
+            return Ok(());
+        }
+        let roster = self.roster.read().await;
+        if roster.get(local).is_none() {
+            return Err(MobError::MemberNotFound(local.clone()));
+        }
+        let Some(peer) = peer else {
+            return Ok(());
+        };
+        if roster.get(peer).is_some() {
+            return Ok(());
+        }
+        let external_peer = unwire
+            && meerkat_core::comms::PeerName::new(peer.as_str().to_string())
+                .ok()
+                .is_some_and(|name| self.external_peer_edge_for_name(local, &name).is_some());
+        if external_peer {
+            return Ok(());
+        }
+        Err(MobError::MemberNotFound(peer.clone()))
     }
 
     /// The members a wire or unwire command between `local` and `target`
@@ -50778,9 +50871,13 @@ impl MobActor {
     /// effects are dispatched onto the actor-owned wiring lane (#1105).
     async fn handle_unwire_command(
         &mut self,
+        authority: &CommandAuthority,
         local: AgentIdentity,
         target: super::handle::PeerTarget,
     ) -> Result<wiring_io::WireHandled, MobError> {
+        self.refuse_edge_naming_unheld_member(&local, &target, true)
+            .await?;
+        self.refuse_agent_lane_edge_of_identity_entry(authority, &local, &target)?;
         self.refuse_approval_branch_control(Self::wiring_endpoints(&local, &target))
             .await?;
         // An owned edge takes no plain unwire (0.9.11): MobMachine's
@@ -51761,6 +51858,12 @@ impl MobActor {
         }
         let edge = Self::external_peer_edge(&local_identity, &spec);
         let key = Self::external_peer_key_for_edge(&edge);
+        // In a running mob a wire command looked the member up before it got
+        // here (`refuse_edge_naming_unheld_member`) and every other caller
+        // names a member it seats, so there MobMachine's refusal of the edge
+        // is never the answer for a name the roster does not hold. A mob
+        // that is not running answers its lifecycle refusal here, before
+        // any lookup.
         self.probe_command_admission(
             mob_dsl::MobMachineInput::WireExternalPeer {
                 key: key.clone(),

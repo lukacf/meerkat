@@ -61,16 +61,18 @@ This section is for systems running 0.9.14 or 0.9.13. The full list of
 changes is in the CHANGELOG under `## [0.9.15]`.
 
 From 2026-11-13 until Connect 0.9.15 is published, the Connect release to
-use with Core 0.9.15 and Meta 0.9.15 is Connect 0.9.14. In that pairing:
+use with Core 0.9.15 and Meta 0.9.15 is Connect 0.9.14. A Python environment
+with the `native-host` extra of Connect 0.9.14's `meerkat-toolkit` cannot
+take `meerkat-meta` 0.9.15 until Connect 0.9.15 is published: the extra
+requires `meerkat-meta==0.9.14`. In that pairing:
 
 - Connect 0.9.14's archives are built with Core 0.9.14 and Meta 0.9.14. What
   0.9.15 changes in Core and Meta is not in the Connect CLI or the Connect
   gateway until Connect 0.9.15.
 - `@rkat/toolkit` 0.9.14 accepts `@rkat/sdk` 0.9.15 and `@rkat/meta-sdk`
   0.9.15 beside it: its optional peers accept 0.9.14 and later below 0.10.0.
-- The Python `meerkat-toolkit` 0.9.14 requires `meerkat-meta==0.9.14` for its
-  `native-host` extra. An environment that installs that extra keeps
-  `meerkat-meta` 0.9.14 until Connect 0.9.15.
+- Without that extra, the Python `meerkat-toolkit` 0.9.14 puts no
+  requirement on `meerkat-meta`.
 - The pairing rests on these published version requirements. It was not run
   as a whole before Core 0.9.15 and Meta 0.9.15 were published.
 

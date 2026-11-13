@@ -716,8 +716,16 @@ attaches its output to a release yet.
   outside a route's set refuses several on some routes: it prints one line
   per refused level (the manifest marks it `lines: per_level`), and an
   executed cell of it has one entry per level, `row/cell:level`, the lowest
-  level first. A failed live cell may carry the HTTP status and the
-  provider's error code as typed fields, never a message.
+  level first.
+- A row whose cells only its run knows (the models of a live account)
+  prints each cell it reached: the prefix
+  `reasoning-effort-receipt-observation ` and one JSON object that is exactly
+  an `observation` of the inputs schema (row, provider family, backend, API,
+  model, requested level, outcome, result). `record` reads those lines from
+  the run's output the same way and refuses an object with any other member;
+  `--observations FILE` adds a list from a file. A failed cell may carry the
+  HTTP status and an error code as typed fields, the code a word of the row's
+  own failure classes; never a provider's text or message.
 - `make reasoning-effort-receipt RESULTS=<directory> OUT=<directory>` (or
   the script's `generate`) reads the version, the manifest and the test
   sources from the commit and writes both files. An entry is `executed` only

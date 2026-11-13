@@ -33,12 +33,16 @@
 //     test a row names is defined in the file the row names.
 //   - It writes no free text from a run: a leg result holds counts, test
 //     names, typed cells and a digest of the runner's output, never the
-//     output. Of what a test prints it reads only the cell lines: a row says
-//     which model and level it picked for a cell on a line of its own, the
+//     output. Of what a test prints it reads only two kinds of line. A cell
+//     line: a row says which model and level it picked for a cell, the
 //     prefix `reasoning-effort-receipt-cell ` and one JSON object of exactly
-//     test, cell, model, level and route. A failed live cell may carry the
-//     HTTP status and the provider's error code as typed fields, never a
-//     message. Any string that looks like a credential, an e-mail address, a
+//     test, cell, model, level and route. An observation line: a row whose
+//     cells only its run knows (the models of a live account) says each cell
+//     it reached, the prefix `reasoning-effort-receipt-observation ` and one
+//     JSON object that is exactly an `observation` of the inputs schema; an
+//     object with any other member is refused. A failed cell may carry the
+//     HTTP status and an error code as typed fields (the code a word of the
+//     row's own failure classes), never a message. Any string that looks like a credential, an e-mail address, a
 //     URL, an absolute path, or this host's name or home directory is
 //     refused, in a leg result and again in the finished receipt.
 //   - The same inputs give the same bytes: no clock, no environment, fixed
@@ -57,8 +61,10 @@
 //     FILE is the run's output: `cargo nextest run --message-format
 //     libtest-json-plus` (stdout; every test is named), or the human log (the
 //     summary line's counts, and the tests whose status lines it shows). The
-//     rows' cell lines are in the JSON output of a run with `--no-capture`,
-//     and in the log of a run with `--success-output final`.
+//     rows' cell lines and observation lines are in the JSON output of a run
+//     with `--no-capture`, and in the log of a run with `--success-output
+//     final`. --observations FILE adds a JSON list of observations to those
+//     the output holds.
 //   reasoning-effort-receipt.mjs record --leg ID --not-run REASON --output FILE
 //   reasoning-effort-receipt.mjs generate --results DIR --output-dir DIR
 //       [--commit REV] [--manifest FILE] [--repo DIR] [--check]
@@ -85,6 +91,9 @@ export const MODES = ["in_process", "built_binary", "live"];
 // What a row prints before the JSON object that says which model and level
 // it picked for a cell (the `cell_line` of the inputs schema).
 export const CELL_LINE_PREFIX = "reasoning-effort-receipt-cell ";
+// What a row with observed cells prints before the JSON object of one cell
+// it saw (the `observation` of the inputs schema).
+export const OBSERVATION_LINE_PREFIX = "reasoning-effort-receipt-observation ";
 // The legs that need no credential and no network: they can always run, so
 // `--check` takes a gap there for a defect of the run.
 export const OFFLINE_MODES = ["in_process", "built_binary"];
@@ -353,10 +362,53 @@ function cellLines() {
 // How nextest opens the line of an event in its `libtest-json` output.
 const EVENT_OPENINGS = ['{"type":"suite",', '{"type":"test",'];
 
+/// An observation with its members in the schema's order and nothing else.
+/// Call it on an item that already matches the `observation` definition.
+function orderedObservation(item) {
+  return {
+    row: item.row,
+    provider_family: item.provider_family,
+    backend: item.backend,
+    api: item.api,
+    model: item.model,
+    requested_level: item.requested_level,
+    outcome: item.outcome.kind === "sent" ? { kind: "sent", level: item.outcome.level } : { kind: "refused", reason: item.outcome.reason },
+    result: item.result,
+    ...(item.http_status === undefined ? {} : { http_status: item.http_status }),
+    ...(item.error_code === undefined ? {} : { error_code: item.error_code }),
+  };
+}
+
+/// The observation lines of a run's output, each once. A line is the prefix
+/// and one JSON object that is exactly an `observation`: an object with any
+/// other member is refused, and so are two lines that say different things
+/// of one cell (a result, a status or a code that differs).
+function observationLines() {
+  const seen = new Map();
+  return {
+    /// Takes `text` when it is an observation line; says whether it was one.
+    take(text, place) {
+      const line = text.trim();
+      if (!line.startsWith(OBSERVATION_LINE_PREFIX)) return false;
+      const item = parseJson(line.slice(OBSERVATION_LINE_PREFIX.length), `the observation line at ${place}`);
+      assertValid(schemas().inputs, "observation", item, `the observation line at ${place}`);
+      const observed = orderedObservation(item);
+      const key = observationKey(observed);
+      const earlier = seen.get(key);
+      if (earlier !== undefined && JSON.stringify(earlier) !== JSON.stringify(observed)) {
+        throw new ReceiptError(`the observation line at ${place} says another thing of a cell of ${observed.row} than an earlier line`);
+      }
+      seen.set(key, observed);
+      return true;
+    },
+    list: () => [...seen.values()],
+  };
+}
+
 /// `cargo nextest run --message-format libtest-json-plus`: one JSON event a
 /// line. Reads the outcome event of every test and the suite events that
 /// say which target a test binary is. Of what the tests print it reads the
-/// cell lines and nothing else: as whole lines of the output (a run with
+/// cell lines and the observation lines and nothing else: as whole lines of the output (a run with
 /// `--no-capture`, where the tests' own output shares the stream with the
 /// events), and inside a failed test's captured output. An event is a line
 /// that opens as nextest writes one (`{"type":"suite",` or `{"type":"test",`);
@@ -367,10 +419,11 @@ export function parseNextestJson(text) {
   const targets = new Map();
   const finished = [];
   const cells = cellLines();
+  const observed = observationLines();
   text.split("\n").forEach((line, index) => {
     if (line.trim() === "") return;
     const place = `line ${index + 1} of the nextest JSON output`;
-    if (cells.take(line, place)) return;
+    if (cells.take(line, place) || observed.take(line, place)) return;
     if (!EVENT_OPENINGS.some((opening) => line.trimStart().startsWith(opening))) {
       if (EVENT_OPENINGS.some((opening) => line.includes(opening))) throw new ReceiptError(`${place} holds an event after other text`);
       return;
@@ -391,7 +444,9 @@ export function parseNextestJson(text) {
     const name = /^([^$#]+)\$([^$#]+?)(?:#([1-9][0-9]*))?$/u.exec(typeof event.name === "string" ? event.name : "");
     if (name === null) throw new ReceiptError(`${place} names its test in a form this reader does not know`);
     if (typeof event.stdout === "string") {
-      for (const printed of event.stdout.split("\n")) cells.take(printed, `${place} (the test's output)`);
+      for (const printed of event.stdout.split("\n")) {
+        if (!cells.take(printed, `${place} (the test's output)`)) observed.take(printed, `${place} (the test's output)`);
+      }
     }
     finished.push({ binary: name[1], name: name[2], outcome, tries: name[3] === undefined ? 1 : Number(name[3]), place });
   });
@@ -411,6 +466,7 @@ export function parseNextestJson(text) {
     tests_complete: true,
     tests: list,
     cell_lines: cells.list(),
+    observations: observed.list(),
   };
 }
 
@@ -429,10 +485,11 @@ export function parseNextestLog(text) {
   let summary = null;
   const tests = new Map();
   const cells = cellLines();
+  const observed = observationLines();
   text.split("\n").forEach((raw, index) => {
     const line = raw.replace(/\r$/u, "");
     const place = `line ${index + 1} of the nextest log`;
-    if (cells.take(line, place)) return;
+    if (cells.take(line, place) || observed.take(line, place)) return;
     if (/^\s*Summary \[/u.test(line)) {
       const match = LOG_SUMMARY.exec(line);
       if (match === null) throw new ReceiptError(`${place} is a summary this reader does not know`);
@@ -465,6 +522,7 @@ export function parseNextestLog(text) {
     tests_complete: list.length === summary.run,
     tests: list,
     cell_lines: cells.list(),
+    observations: observed.list(),
   };
 }
 
@@ -501,6 +559,13 @@ function observationKey(item) {
 export function buildLegResult({ leg, commit, command, exitStatus, format, output, observations = [], host }) {
   const text = Buffer.from(output).toString("utf8");
   const parsed = format === "nextest_libtest_json_plus" ? parseNextestJson(text) : parseNextestLog(text);
+  // The cells a row observed: the lines the run printed, and those handed
+  // over in a file. Each is held to the schema on its own, so a member the
+  // schema does not know is refused before anything is kept of the item.
+  const given = observations.map((item, index) => {
+    assertValid(schemas().inputs, "observation", item, `observation ${index + 1} of the observations given`);
+    return orderedObservation(item);
+  });
   const result = {
     schema_version: 1,
     kind: "reasoning_effort_leg_result",
@@ -514,7 +579,7 @@ export function buildLegResult({ leg, commit, command, exitStatus, format, outpu
     tests_complete: parsed.tests_complete,
     tests: parsed.tests,
     cell_lines: parsed.cell_lines,
-    observations: [...observations].sort((a, b) => compare(observationKey(a), observationKey(b))),
+    observations: [...given, ...parsed.observations].sort((a, b) => compare(observationKey(a), observationKey(b))),
   };
   const what = `the result of leg ${leg}`;
   assertValid(schemas().inputs, "leg_result", result, what);
@@ -1220,7 +1285,7 @@ function record(args) {
     });
   }
   writeFileSync(output, serialize(result));
-  console.log(`recorded leg ${leg}: ${result.status === "run" ? `${result.counts.run} run, ${result.counts.passed} passed, ${result.counts.failed} failed, ${result.counts.skipped} skipped, ${result.tests.length} named, ${result.cell_lines.length} cell lines` : `not run (${result.reason})`}`);
+  console.log(`recorded leg ${leg}: ${result.status === "run" ? `${result.counts.run} run, ${result.counts.passed} passed, ${result.counts.failed} failed, ${result.counts.skipped} skipped, ${result.tests.length} named, ${result.cell_lines.length} cell lines, ${result.observations.length} observations` : `not run (${result.reason})`}`);
   return 0;
 }
 

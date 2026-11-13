@@ -447,7 +447,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     change (`meta/identity/plan`, its `schedules`) and sends the change at
     the record it read. A plan that lists no schedule, is refused or cannot
     be read leaves the confirmation without a word of schedules; the change
-    is made all the same.
+    is made all the same. A viewer without `runtime.admin` is given what
+    becomes of the schedules and how many, without the list: the
+    confirmation and the result then say the count and no name.
   - The result of an archive, an unarchive and a removal says what became
     of the schedules that target the agent, where the answer states it
     (`schedules`): how many were paused, run again or were ended, and which

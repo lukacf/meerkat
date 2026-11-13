@@ -759,7 +759,12 @@ by how it came to exist.
   by name. A schedule without a name is counted; ids are among the
   technical details. Where the answer counts schedules it does not list,
   the result says the count, names the ones it lists and counts the rest
-  as more. If not every schedule could be read or changed, the
+  as more. Where the Console has access rules, the gateway gives the list
+  of the schedules to a viewer with `runtime.admin` only (see
+  [Access control](/concepts/access-control)): any other viewer is told
+  what becomes of them and how many, so the confirmation and the result say
+  the count and no name ("Its 2 schedules will be paused until it is
+  unarchived."). If not every schedule could be read or changed, the
   result says so and offers **Try again**, which sends the same request so
   the team follows the rest. Only the first answer of a change states its
   schedules: after a lost answer, or after **Try again**, the Console shows

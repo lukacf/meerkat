@@ -36349,6 +36349,143 @@ mod tests {
                 "and nothing is written in its place: {last:?}"
             );
         }
+
+        /// The reports of a turn's reasoning preference, one per attempt, in
+        /// order: whether the attempt is a provider turn's own, its fallback
+        /// attempt, the model and what the attempt sent.
+        fn leveled_preference_reports(
+            events: &[crate::AgentEvent],
+        ) -> Vec<(
+            bool,
+            Option<u32>,
+            Option<String>,
+            Option<crate::lifecycle::run_primitive::ReasoningLoweringOutcome>,
+        )> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    crate::AgentEvent::RequestReasoningLowered {
+                        turn_number,
+                        fallback_attempt,
+                        model,
+                        outcome,
+                        ..
+                    } => Some((
+                        turn_number.is_some(),
+                        *fallback_attempt,
+                        model.clone(),
+                        *outcome,
+                    )),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// This row pins TODAY'S outcome, which is not the rule the rest of a
+        /// turn follows. A turn's reasoning preference at a model-fallback
+        /// attempt is judged on the direct route of the target's provider and
+        /// the target model's catalog row, not on the route the target's
+        /// client observes. Here the target is on an account's route whose
+        /// list states the preferred level, and the target model has no
+        /// catalog row. The attempt therefore reports the preference as not
+        /// applied for want of a catalog fact and is sent at the session's
+        /// level, although the very next turn on the same target, judged on
+        /// the target's own route, applies the same preference. The origin's
+        /// request is judged on the origin's route, whose account does not
+        /// state the preferred level.
+        ///
+        /// Also today's outcome, pinned as it is: the attempt's report is
+        /// published on the agent's event tap (and its default event channel,
+        /// when one is set), not on the channel the run was started with,
+        /// which carries the origin's report only.
+        ///
+        /// A change that carries the target's route into the fallback switch,
+        /// so that the attempt is judged like every other request of the
+        /// turn, replaces this row with its own.
+        #[tokio::test]
+        async fn a_preference_at_a_fallback_attempt_is_judged_on_the_direct_route() {
+            use crate::lifecycle::run_primitive::{
+                ReasoningBatchDisposition, ReasoningEffort, ReasoningLoweringOutcome,
+                ReasoningNotAppliedReason,
+            };
+            use crate::model_profile::capabilities::EffortLevel;
+
+            let client = Arc::new(LeveledFallbackClient::new());
+            assert_eq!(
+                client.backup_route().account,
+                crate::AccountLevelStatement::Stated(vec![EffortLevel::Low, EffortLevel::High]),
+                "the target's own route states the preferred level"
+            );
+            let mut agent = leveled_fallback_agent(&client).await;
+            let (tap_tx, mut tap_rx) = mpsc::channel::<crate::AgentEvent>(1024);
+            *agent.event_tap().lock() = Some(crate::event_tap::EventTapState {
+                tx: tap_tx,
+                truncated: std::sync::atomic::AtomicBool::new(false),
+            });
+            let preference = ReasoningBatchDisposition::Apply(EffortLevel::Low);
+            let origin = (
+                true,
+                None,
+                Some("primary".to_string()),
+                Some(ReasoningLoweringOutcome::NotApplied(
+                    ReasoningNotAppliedReason::UnsupportedLevel,
+                )),
+            );
+            let attempt = (
+                false,
+                Some(1),
+                Some("backup".to_string()),
+                Some(ReasoningLoweringOutcome::NotApplied(
+                    ReasoningNotAppliedReason::NoCatalogFact,
+                )),
+            );
+
+            agent.set_active_turn_request_reasoning(Some(preference));
+            let (result, events) = run_leveled(&mut agent, "trigger fallback").await;
+            result.expect("the fallback attempt runs");
+            let tapped = std::iter::from_fn(|| tap_rx.try_recv().ok()).collect::<Vec<_>>();
+            assert_eq!(
+                leveled_preference_reports(&tapped),
+                vec![origin.clone(), attempt],
+                "the origin is judged on its own route, the fallback attempt on the direct route \
+                 of the target's provider"
+            );
+            assert_eq!(
+                leveled_preference_reports(&events),
+                vec![origin],
+                "the run's own channel carries the origin's report only"
+            );
+            let served = client.served();
+            assert_eq!(
+                served.iter().map(|(model, _)| *model).collect::<Vec<_>>(),
+                vec!["primary", "backup"]
+            );
+            assert_leveled_resolved(served[0].1.as_ref(), ReasoningEffort::High, "the origin");
+            assert_leveled_resolved(
+                served[1].1.as_ref(),
+                ReasoningEffort::High,
+                "the attempt is sent at the session's level",
+            );
+
+            // The same preference on the next turn, now on the target: judged
+            // on the target's own route, it is applied.
+            agent.set_active_turn_request_reasoning(Some(preference));
+            let (second, events) = run_leveled(&mut agent, "sticky fallback").await;
+            second.expect("a later turn on the fallback target");
+            assert_eq!(
+                leveled_preference_reports(&events),
+                vec![(
+                    true,
+                    None,
+                    Some("backup".to_string()),
+                    Some(ReasoningLoweringOutcome::Applied(EffortLevel::Low)),
+                )],
+                "the target's route takes the preferred level"
+            );
+            let served = client.served();
+            assert_eq!(served.len(), 3);
+            assert_leveled_resolved(served[2].1.as_ref(), ReasoningEffort::Low, "the later turn");
+        }
     }
 
     fn assert_sticky_fallback_was_skipped_cleanly(

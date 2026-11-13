@@ -17,6 +17,9 @@ function parseArgs(args) {
     if (args[i] === '--port' && args[i + 1]) {
       opts.port = parseInt(args[i + 1], 10);
       i++;
+    } else if (args[i] === '--host' && args[i + 1]) {
+      opts.host = args[i + 1];
+      i++;
     } else if (args[i] === '--cors-origin' && args[i + 1]) {
       opts.allowOrigin = args[i + 1];
       i++;
@@ -28,6 +31,8 @@ Usage:
 
 Options:
   --port <number>         Port to listen on (default: 3100, or PORT env var)
+  --host <address>        Address to listen on (default: 127.0.0.1, the loopback
+                          interface). The proxy does not check who calls it.
   --cors-origin <origin>  CORS allowed origin (default: *)
   -h, --help              Show this help
 
@@ -38,9 +43,9 @@ Environment variables:
   PORT                    Port to listen on (overridden by --port)
 
 The WASM client uses per-provider base URLs to point at this proxy:
-  anthropicBaseUrl: 'http://localhost:3100/anthropic'
-  openaiBaseUrl:    'http://localhost:3100/openai'
-  geminiBaseUrl:    'http://localhost:3100/gemini'
+  anthropicBaseUrl: 'http://127.0.0.1:3100/anthropic'
+  openaiBaseUrl:    'http://127.0.0.1:3100/openai'
+  geminiBaseUrl:    'http://127.0.0.1:3100/gemini'
 `);
       process.exit(0);
     }

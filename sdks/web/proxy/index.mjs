@@ -147,13 +147,24 @@ export function createProxyHandler(provider, opts = {}) {
 
 // ─── Node.js HTTP server adapter ────────────────────────────────
 
+const DEFAULT_HOST = '127.0.0.1';
+
+function isLoopbackAddress(address) {
+  return address === '::1' || /^(::ffff:)?127\./i.test(address);
+}
+
 /**
  * Start a standalone proxy server.
  *
- * @param {{ port?: number, allowOrigin?: string }} [opts]
+ * Listens on the loopback interface (127.0.0.1) unless `host` names another
+ * address. The proxy does not check who calls it.
+ *
+ * @param {{ port?: number, host?: string, allowOrigin?: string }} [opts]
  */
 export function startProxy(opts = {}) {
-  const port = opts.port || parseInt(process.env.PORT || '3100', 10);
+  // Port 0 asks the system for a free port.
+  const port = Number.isInteger(opts.port) ? opts.port : parseInt(process.env.PORT || '3100', 10);
+  const host = opts.host || DEFAULT_HOST;
   const allowOrigin = opts.allowOrigin || '*';
   const cors = corsHeaders(allowOrigin);
 
@@ -247,8 +258,13 @@ export function startProxy(opts = {}) {
     }
   });
 
-  server.listen(port, () => {
-    console.log(`@rkat/web proxy listening on http://localhost:${port}`);
+  server.listen(port, host, () => {
+    const bound = server.address();
+    const shown = bound.address.includes(':') ? `[${bound.address}]` : bound.address;
+    console.log(`@rkat/web proxy listening on http://${shown}:${bound.port}`);
+    if (!isLoopbackAddress(bound.address)) {
+      console.warn(`Warning: ${bound.address} is not a loopback address. The proxy does not check who calls it.`);
+    }
   });
 
   return server;

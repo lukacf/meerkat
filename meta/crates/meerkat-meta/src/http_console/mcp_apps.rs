@@ -158,6 +158,7 @@ impl ToolApplicationIngress for Ingress {
                 self.registration
                     .as_ref()
                     .map_or("", |registration| registration.namespace()),
+                first_read_reader(&self.state, self.registration.as_ref()),
             )
             .await
             .map_err(|()| meerkat_core::OperationAuthorizationError::Unavailable)?;
@@ -190,7 +191,7 @@ impl Ingress {
                 self.registration
                     .as_ref()
                     .map_or("", |registration| registration.namespace()),
-                PrivateOwnerRecordReader::OwnRuntime,
+                first_read_reader(&self.state, self.registration.as_ref()),
             )
             .await;
         }
@@ -201,6 +202,21 @@ impl Ingress {
     }
 }
 
+/// Which reading of a runtime the app route makes, for the first read of
+/// who the runtime's members are private to
+/// ([`AccessController::record_private_owner_record`]): of a runtime the
+/// console's aggregator serves, where the route took the runtime from that
+/// aggregator (`registration`), and of the console's own runtime otherwise.
+fn first_read_reader(
+    state: &ConsoleJsonState,
+    registration: Option<&crate::console_aggregator::ConsoleApplicationRuntime>,
+) -> PrivateOwnerRecordReader {
+    match (registration, state.console_aggregator.as_ref()) {
+        (Some(_), Some(aggregator)) => PrivateOwnerRecordReader::ServedRuntime(aggregator.id()),
+        _ => PrivateOwnerRecordReader::OwnRuntime,
+    }
+}
+
 /// Identity/session association is read from native current member/continuity
 /// ownership. A frame or client-supplied locator cannot manufacture it.
 async fn authorize_session(
@@ -208,7 +224,14 @@ async fn authorize_session(
     request: &Request,
     operation: Operation,
 ) -> Result<MobRuntime, ()> {
-    authorize_session_in_namespace(state, request, operation, "").await
+    authorize_session_in_namespace(
+        state,
+        request,
+        operation,
+        "",
+        first_read_reader(state, None),
+    )
+    .await
 }
 
 async fn authorize_session_in_namespace(
@@ -216,6 +239,7 @@ async fn authorize_session_in_namespace(
     request: &Request,
     operation: Operation,
     namespace: &str,
+    reader: PrivateOwnerRecordReader,
 ) -> Result<MobRuntime, ()> {
     let runtime = state.runtime.as_ref().ok_or(())?;
     let live_members = match state
@@ -224,13 +248,8 @@ async fn authorize_session_in_namespace(
         .filter(|controller| controller.enabled())
     {
         Some(controller) => {
-            prime_access_cache_from_runtime_in_namespace(
-                runtime,
-                controller,
-                namespace,
-                PrivateOwnerRecordReader::OwnRuntime,
-            )
-            .await
+            prime_access_cache_from_runtime_in_namespace(runtime, controller, namespace, reader)
+                .await
         }
         None => BTreeSet::new(),
     };
@@ -362,6 +381,7 @@ async fn route(
             &local_request,
             operation,
             candidate.namespace(),
+            first_read_reader(&local_state, Some(&candidate)),
         )
         .await
         .is_ok()
@@ -582,6 +602,7 @@ async fn handle_noting_dispatch(
                     .registration
                     .as_ref()
                     .map_or("", |registration| registration.namespace()),
+                first_read_reader(&state, ingress.registration.as_ref()),
             )
             .await
             .is_ok()

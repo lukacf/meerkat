@@ -3592,6 +3592,57 @@ async fn a_removal_of_an_agent_revokes_its_record_at_a_live_forks_next_run_once(
     rig.shutdown().await;
 }
 
+/// A reset of an agent must not take the agent's current instructions away
+/// from a fork that still runs on them. The agent's instructions were
+/// changed, its live fork got the entry, and the agent is reset: the agent's
+/// fresh conversation is built from the current text, and the fork, which
+/// keeps its conversation, still has the current text in effect at its next
+/// run. It is not told that the text was withdrawn, and it does not fall
+/// back to the earlier text of the first prompt it copied.
+///
+/// RED while the reset revokes the record for the agent AND its forks: the
+/// fork's next run gets a revoke entry and nothing of the record is in
+/// effect in it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_of_an_agent_leaves_its_current_instructions_in_effect_in_a_live_fork() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut rig, _entry) = edited_agent_with_a_live_fork(temp.path()).await;
+
+    rig.reset(CREATED).await;
+    rig.turn(CREATED, "AGENT-AFTER-ITS-RESET").await;
+    let fresh = rig.transcript(CREATED).await;
+    assert!(
+        fresh[0]["content"]
+            .as_str()
+            .is_some_and(|prompt| prompt.contains("Keep BETA records.")
+                && !prompt.contains("Keep ALPHA records.")),
+        "the agent's fresh conversation is built from the current text"
+    );
+    rig.member_recorded(CREATED, LIVE_FORK).await;
+
+    let after = entries(&fork_turn(&mut rig, LIVE_FORK, "FORK-AFTER-THE-RESET").await);
+    eprintln!(
+        "MEASURED the fork's next run after its agent's reset: {} entries, {} slots in effect, \
+         last entry: {}",
+        after.len(),
+        rig.slots_in_effect(LIVE_FORK).await,
+        after.last().map_or("none", String::as_str)
+    );
+    assert_eq!(
+        rig.slots_in_effect(LIVE_FORK).await,
+        1,
+        "after its agent's reset the fork still has the agent's current instructions in \
+         effect: {after:#?}"
+    );
+    assert!(
+        after
+            .last()
+            .is_some_and(|entry| carries(entry, &["Keep BETA records."])),
+        "the last word the fork was given is the agent's current text: {after:#?}"
+    );
+    rig.shutdown().await;
+}
+
 /// The bytes of one agent's set of operator instructions, measured. An
 /// agent's record is also its forks', and any member may be seated as a
 /// fork of an agent, so the 1 MiB of one agent's set holds the shared

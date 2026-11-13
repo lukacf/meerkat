@@ -11769,7 +11769,7 @@ impl MobRunStore for SqliteMobRunStore {
     ) -> Result<bool, MobStoreError> {
         let path = self.path.clone();
         let binding = binding.clone();
-        run_sqlite_task(move || {
+        run_sqlite_task(self.observer_owner(), move || {
             let mut conn = open_connection(&path)?;
             let tx = begin_immediate(&mut conn)?;
             let run_key = binding.run_id.to_string();
@@ -11809,7 +11809,7 @@ impl MobRunStore for SqliteMobRunStore {
     ) -> Result<Option<MobRunObserverBinding>, MobStoreError> {
         let path = self.path.clone();
         let run_key = run_id.to_string();
-        run_sqlite_task(move || {
+        run_sqlite_task(self.observer_owner(), move || {
             let conn = open_existing_read_connection(&path)?;
             let bytes: Option<Vec<u8>> = conn
                 .query_row(
@@ -11833,7 +11833,7 @@ impl MobRunStore for SqliteMobRunStore {
         let path = self.path.clone();
         let expected = expected.clone();
         let next = next.clone();
-        run_sqlite_task(move || {
+        run_sqlite_task(self.observer_owner(), move || {
             let mut conn = open_connection(&path)?;
             let tx = begin_immediate(&mut conn)?;
             let run_key = expected.run_id.to_string();
@@ -16114,6 +16114,43 @@ mod tests {
             Ok(closed_report(true, 1, 0, false))
         );
         drop(catch_up);
+    }
+
+    /// The carried flow-observer read must participate in 0.9.14's store
+    /// retirement custody, even after its awaiting task is aborted.
+    #[tokio::test]
+    async fn an_aborted_flow_observer_read_keeps_retirement_refused_until_it_closes() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        wait_for_watch_registrations(&path);
+        let catch_up = registered_catch_up(&path);
+        let runs = stores.run_store();
+        let mut parked = park_next_store_read_for_test(&path);
+        let read = tokio::spawn(async move { runs.get_run_observer(&RunId::new()).await });
+        assert!(
+            tokio::time::timeout(OBSERVER_HANG_GUARD, parked.opened())
+                .await
+                .expect("the observer read reaches the park within the hang guard")
+        );
+        read.abort();
+        assert!(read.await.unwrap_err().is_cancelled());
+        drop(stores);
+        assert_eq!(
+            drain_observers_within_hang_guard(&path),
+            Err(SqliteMobObserverDrainRefused::OtherOwners { owner_handles: 1 }),
+            "the cancelled observer read retains custody of its open connection"
+        );
+        assert!(!catch_up.is_closed());
+        parked.release();
+        let deadline = std::time::Instant::now() + OBSERVER_HANG_GUARD;
+        while catch_up.live_owner().is_some() {
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert_eq!(
+            drain_observers_within_hang_guard(&path),
+            Ok(closed_report(true, 1, 0, false))
+        );
     }
 
     #[test]

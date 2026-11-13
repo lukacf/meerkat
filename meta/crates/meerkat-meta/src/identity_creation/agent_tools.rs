@@ -232,7 +232,10 @@ fn description(name: &str) -> String {
              your change still applies. {UNKNOWN_NAME}\n\n\
              `set` names what changes; a member you leave out stays as it is. \
              `instructions` and `context` are replaced whole. `labels` sets each key you \
-             give and keeps the others; `labels_remove` removes keys. `profile` moves the \
+             give and keeps the others; `labels_remove` removes keys. A label the host \
+             reserves stays as it is: an update that would give it another value or remove \
+             it is refused `reserved_key` (at `set.labels` or `set.labels_remove`). \
+             `profile` moves the \
              agent to that profile's model, tools and skills on the same conversation. A \
              move into a profile whose agents the host prepares is refused `unsupported` at \
              `set.profile`: create the agent in that profile instead. \
@@ -487,12 +490,15 @@ fn input_schema(name: &str) -> Value {
                             "type": "object",
                             "additionalProperties": { "type": "string" },
                             "description": "Labels to set: each key takes its value, and \
-                                the agent's other labels stay.",
+                                the agent's other labels stay. A key the host reserves is \
+                                refused `reserved_key` unless you send the value the agent \
+                                has.",
                         },
                         "labels_remove": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Label keys to remove.",
+                            "description": "Label keys to remove. A key the host reserves \
+                                is not removed: the update is refused `reserved_key`.",
                         },
                         "profile": {
                             "type": "string",

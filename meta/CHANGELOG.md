@@ -498,6 +498,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     one) and that the first answer tells the effect and the count in
     `agents[0].schedules`. An agent is never given the list of the
     schedules: which they are is the host's to read.
+  - `identity_update` says what becomes of a label the host reserves: it
+    stays as it is, and an update that would give it another value or
+    remove it is refused `reserved_key` (at `set.labels` or
+    `set.labels_remove`).
   - The eight tools may wait behind the deferred tool catalog: in a session
     whose catalog is exact, their definitions are loaded on demand.
   - Rust API: `identity_creation::{IdentityAgentTools, IdentityToolCaller,

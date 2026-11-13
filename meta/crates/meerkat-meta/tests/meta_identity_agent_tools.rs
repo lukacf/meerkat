@@ -2046,6 +2046,10 @@ fn the_descriptions_say_what_a_model_must_know() {
         "`applies_at_next_session`",
         "`unchanged`",
         "You cannot change yourself",
+        // A label the host reserves, through an update
+        // (`an_agents_update_keeps_a_reserved_label_and_is_refused_a_change_of_it`).
+        "A label the host reserves stays as it is: an update that would give it another value \
+         or remove it is refused `reserved_key` (at `set.labels` or `set.labels_remove`).",
         "`stale_spec` with `current_digest`",
     ] {
         assert!(
@@ -3924,5 +3928,193 @@ async fn the_notice_of_a_carried_out_change_names_no_operation_id_to_the_agent_t
         rig.host_reads_operation(&operation, outcome).await;
     }
     route.lock().unwrap().take();
+    rig.shutdown().await;
+}
+
+/// A label the host reserves, through an agent's update, on the real family
+/// under a policy that reserves the key `tier`: an update that does not name
+/// it leaves it as it is; one that would give it another value, and one
+/// that would remove it, are refused `reserved_key` at `set.labels`; the
+/// removal of one of the product's own label keys is refused `reserved_key`
+/// at `set.labels_remove`; and an update that sends the value the agent
+/// already has is taken. The record an agent reads shows what stayed.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agents_update_keeps_a_reserved_label_and_is_refused_a_change_of_it() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot(state.path(), &fresh_mob_id()).await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "peers": {"default": "allow"},
+        "reserved_keys": {"labels": ["tier"]},
+        "approval": {"rules": [{
+            "change": ["descriptive"],
+            "requester": {"kind": "agent", "profile": [MAKER]},
+            "target": {"profile": [WORKER]},
+            "outcome": {"kind": "allow"},
+        }]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(
+        rig.runtime
+            .attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()),
+        "the launch attaches its identity policy"
+    );
+    // The host's own create gives the agent the reserved label: no request
+    // of an agent can.
+    let created = rig
+        .runtime
+        .mob_handle()
+        .create_store_owned_identities(
+            meerkat_mob::StoreOwnedIdentityCreate::new(
+                meerkat_mob::IdentityOperation::new(
+                    "create-scout",
+                    meerkat_core::approval::decision::Sha256Digest::of(b"scout").as_str(),
+                ),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                vec![meerkat_mob::CreatedIdentityRequest::new(
+                    meerkat_mob::CreatedIdentitySpec::new("scout", WORKER).with_labels(
+                        BTreeMap::from([
+                            ("tier".to_owned(), "gold".to_owned()),
+                            ("note".to_owned(), "first".to_owned()),
+                        ]),
+                    ),
+                )],
+            ),
+            meerkat_mob::IdentityChangeConsentInput::Policy(
+                meerkat_mob::IdentityPolicyOutcome::Allow,
+            ),
+        )
+        .await
+        .map(|created| created.change);
+    assert!(
+        matches!(
+            created,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "Core creates the agent with its labels: {created:?}"
+    );
+
+    /// The agent's record as the calling agent reads it.
+    async fn read(rig: &Rig, mark: &str) -> Value {
+        let record = rig
+            .tool(LEAD, mark, IDENTITY_GET, json!({"name": "scout"}))
+            .await;
+        assert!(!record.is_error, "{}", record.content);
+        record.content
+    }
+    /// One update of the agent, with `change` beside its name and digest.
+    async fn update(rig: &Rig, mark: &str, digest: &Value, change: Value) -> ToolAnswer {
+        let mut arguments = json!({"name": "scout", "expected_spec_digest": digest});
+        for (member, value) in change.as_object().expect("an object").clone() {
+            arguments[member] = value;
+        }
+        rig.tool(LEAD, mark, IDENTITY_UPDATE, arguments).await
+    }
+    let refused_at = |answer: &ToolAnswer, field: &str, what: &str| {
+        assert_eq!(
+            (
+                answer.content["outcome"].as_str(),
+                answer.content["kind"].as_str(),
+                answer.content["field"].as_str()
+            ),
+            (Some("refused"), Some("reserved_key"), Some(field)),
+            "{what}: {}",
+            answer.content
+        );
+        assert!(answer.is_error, "{what}");
+    };
+
+    let record = read(&rig, "labels-get-1").await;
+    assert_eq!(
+        record["labels"],
+        json!({"tier": "gold", "note": "first"}),
+        "{record}"
+    );
+
+    // An update that does not name the reserved label leaves it.
+    let changed = update(
+        &rig,
+        "labels-note",
+        &record["spec_digest"],
+        json!({"set": {"labels": {"note": "second"}}}),
+    )
+    .await;
+    assert_eq!(changed.content["outcome"], "done", "{}", changed.content);
+    let record = read(&rig, "labels-get-2").await;
+    assert_eq!(
+        record["labels"],
+        json!({"tier": "gold", "note": "second"}),
+        "an update that does not name a reserved label leaves it: {record}"
+    );
+
+    // Another value for it, and its removal, are refused; so is the removal
+    // of one of the product's own label keys.
+    refused_at(
+        &update(
+            &rig,
+            "labels-change",
+            &record["spec_digest"],
+            json!({"set": {"labels": {"tier": "silver"}}}),
+        )
+        .await,
+        "set.labels",
+        "another value for a reserved label",
+    );
+    refused_at(
+        &update(
+            &rig,
+            "labels-remove",
+            &record["spec_digest"],
+            json!({"set": {"labels_remove": ["tier"]}}),
+        )
+        .await,
+        "set.labels",
+        "the removal of a reserved label",
+    );
+    refused_at(
+        &update(
+            &rig,
+            "labels-remove-own",
+            &record["spec_digest"],
+            json!({"set": {"labels_remove": ["role"]}}),
+        )
+        .await,
+        "set.labels_remove",
+        "the removal of one of the product's own label keys",
+    );
+    let unchanged = read(&rig, "labels-get-3").await;
+    assert_eq!(
+        (&unchanged["labels"], &unchanged["spec_digest"]),
+        (&record["labels"], &record["spec_digest"]),
+        "a refused update changes nothing: {unchanged}"
+    );
+
+    // The value the agent already has is taken, beside a real change; and
+    // a label that is not reserved is removed.
+    let same = update(
+        &rig,
+        "labels-same",
+        &record["spec_digest"],
+        json!({"set": {"labels": {"tier": "gold", "note": "third"}}}),
+    )
+    .await;
+    assert_eq!(same.content["outcome"], "done", "{}", same.content);
+    let record = read(&rig, "labels-get-4").await;
+    assert_eq!(
+        record["labels"],
+        json!({"tier": "gold", "note": "third"}),
+        "{record}"
+    );
+    let removed = update(
+        &rig,
+        "labels-remove-note",
+        &record["spec_digest"],
+        json!({"set": {"labels_remove": ["note"]}}),
+    )
+    .await;
+    assert_eq!(removed.content["outcome"], "done", "{}", removed.content);
+    let record = read(&rig, "labels-get-5").await;
+    assert_eq!(record["labels"], json!({"tier": "gold"}), "{record}");
     rig.shutdown().await;
 }

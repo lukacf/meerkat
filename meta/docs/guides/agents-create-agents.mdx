@@ -155,6 +155,11 @@ deliberate.
   agent's first input comes through the host's own ingress.
 - **`instructions`** is a list of strings, one per section; most agents need
   one.
+- **`labels`.** The host reserves some label keys, and a create that gives one
+  is refused. An update keeps a reserved label the agent carries when it does
+  not name it; an update that would give it another value or remove it is
+  refused `reserved_key` at `set.labels` (the removal of one of the product's
+  own label keys at `set.labels_remove`).
 - **An agent never changes itself.** An update, archive, unarchive or removal
   that names the caller is refused `self_change_refused`.
 - **A configured agent is changed in configuration.** A run-time change of an

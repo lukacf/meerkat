@@ -49,11 +49,18 @@ written when a report
     file (beside this tool) as the report's tool_commit holds it in this tool's checkout. A
     report of a commit the checkout does not hold gives no receipt. The check does not repeat
     this: it holds a receipt, not the scans' files;
+  - is a credential report that names an identifier class proof (identifier_classes) and does not
+    state, as list_sha256, the sha256 of release/payload-credential-identifier-classes.json as the
+    report's tool_commit holds it in this tool's checkout: a finding is resolved by the commit's
+    class list and no other;
   - says PASS and shows otherwise: the private-text report's reasons, hits.refused and
     errors.refused must be empty, its exemptions.blocking and wrapper_failures 0, and its
     engine.exit_code the one that follows from the hits and errors it shows. The status word
     is not taken for it;
   - shows no blocking rule, a refused or pending finding, or an unread file that is not accepted;
+  - is a credential report that does not count, for each of its two builds, the files the build
+    was handed and left unread for lack of proof of read (read_proof, unread), or counts one: no
+    acceptance covers such a file for an upload;
   - does not show that every rule outside the path category is blocking: a review class of names
     refuses nothing, so the only review rule may be the path category's (the converter's
     `--paths review`), and the report must count none outside it (rules.review_outside_paths 0);
@@ -101,6 +108,9 @@ SCHEMA = "release-upload-receipt/3"
 CHECK_NAME = "release-upload-receipt-check.py"
 # The file of each scan, beside this tool: what a report's tool_sha256 is the digest of.
 SCAN_FILES = {"privacy report": "release-payload-privacy-scan.py", "credential report": "release-payload-credential-scan.py"}
+# The committed class list of the credential scan, in release/ of the checkout: a report that names an
+# identifier class proof states the list's digest.
+CLASSES_NAME = "payload-credential-identifier-classes.json"
 PRIVACY_SCHEMA = re.compile(r"release-payload-privacy-scan/report/[0-9]+\Z")
 CREDENTIAL_SCHEMA = re.compile(r"release-payload-credential-scan/report/[0-9]+\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -259,6 +269,21 @@ def scan_file_is_its_commits(label: str, report: dict, checkout, problems: list)
         problems.append(f"{label}: tool_sha256 is not {SCAN_FILES[label]} as the report's tool_commit holds it")
 
 
+def class_list_is_its_commits(label: str, report: dict, checkout, problems: list) -> None:
+    """The class list of a credential report: a report that names an identifier class proof states the
+    sha256 of the class list that was in force, and that must be release/CLASSES_NAME as the commit
+    the report names holds it in this checkout. A report without that part resolved nothing by class."""
+    if "identifier_classes" not in report:
+        return
+    classes, commit = report["identifier_classes"], report.get("tool_commit")
+    stated = classes.get("list_sha256") if isinstance(classes, dict) else None
+    if not digest(stated):
+        problems.append(f"{label}: identifier_classes.list_sha256 is not a sha256: release/{CLASSES_NAME} cannot be compared")
+    elif checkout is not None and isinstance(commit, str) and COMMIT.match(commit) \
+            and checkout.blob_sha256(commit, Path(__file__).resolve().parent.parent / "release" / CLASSES_NAME) != stated:
+        problems.append(f"{label}: identifier_classes.list_sha256 is not release/{CLASSES_NAME} as the report's tool_commit holds it")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
                                      allow_abbrev=False)
@@ -376,6 +401,7 @@ def main() -> int:
     if credential is not None:
         report, shared, credential_rows = credential
         scan_file_is_its_commits(label, report, checkout, problems)
+        class_list_is_its_commits(label, report, checkout, problems)
         builds, seen = report.get("detector_builds"), {}
         if isinstance(builds, list) and len(builds) == 2 and all(isinstance(row, dict) for row in builds):
             seen = {row.get("role"): row.get("sha256") for row in builds}
@@ -385,6 +411,15 @@ def main() -> int:
             value = report.get(group, {}).get(field) if isinstance(report.get(group), dict) else None
             if not count(value) or value != 0:
                 problems.append(f"{label}: {group}.{field} is not 0")
+        # Proof of read. The report counts, for each of its two builds, the files the build was handed
+        # and left unread for lack of proof of read. For an upload each count is 0, whatever an
+        # acceptance says: no entry covers such a file.
+        proofs, versions = report.get("read_proof"), {row.get("version") for row in builds} if seen else set()
+        if not isinstance(proofs, dict) or not versions or set(proofs) != versions or not all(
+                isinstance(proof, dict) and count(proof.get("unread")) for proof in proofs.values()):
+            problems.append(f"{label}: read_proof does not count, for each of the two builds, the files left unread for lack of proof of read")
+        elif any(proof["unread"] != 0 for proof in proofs.values()):
+            problems.append(f"{label}: read_proof counts a file that a build left unread for lack of proof of read (unread is not 0)")
         summary(report.get("accepted"), problems, label, "accepted", bound["credential-accepted"])
         summary(report.get("pending"), problems, label, "pending", bound["credential-pending"])
         if len(problems) == before:

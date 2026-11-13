@@ -263,7 +263,9 @@ class Fixture(unittest.TestCase):
                                     {"role": "current", "version": "0.0.2", "sha256": CURRENT, "default_rules_sha256": "4d" * 32}],
                 "accepted": {"count": 3, "sha256": "a7" * 32, "positions": 3}, "pending": {"count": 0, "sha256": None},
                 "findings": {"total": 3, "refused": 0, "pending_owner": 0, "by_rule": {"made-up-rule": {"accepted position": 3}}},
-                "unread": {"total": 4, "unaccepted": 0, "files": {"made-up reason": 4}}}
+                "unread": {"total": 4, "unaccepted": 0, "files": {"made-up reason": 4}},
+                "read_proof": {version: {"handed": 9, "read_as_it_is": 8, "read_behind_the_line": 1, "unread": 0, "readings": 2,
+                                         "proof_readings": 2} for version in ("0.0.1", "0.0.2")}}
 
     def receipt(self, files=None):
         """A passing receipt for the files, as the writer writes it for reports that ran with the class
@@ -1192,6 +1194,37 @@ class ReceiptWrite(Fixture):
         self.assertEqual((written["detector_pinned_sha256"], written["detector_current_sha256"]), (CURRENT, PINNED))
         self.refused(self.check(receipt), "credential", "detector")
 
+    def test_no_receipt_is_written_when_a_build_gives_no_proof_of_read_for_a_file(self):
+        # A file that one build was handed and left unread for lack of proof of read, and an
+        # acceptance that covers its bytes: the scan says PASS (one unread file, none without an
+        # acceptance). For an upload no entry covers such a file: no receipt.
+        reason = "no proof that a build read it (one build; the other build read it)"
+        proof = {"handed": 9, "read_as_it_is": 9, "read_behind_the_line": 0, "unread": 0, "readings": 2, "proof_readings": 2}
+        for left in ("0.0.1", "0.0.2"):
+            proofs = {version: dict(proof, read_as_it_is=8, unread=1) if version == left else dict(proof) for version in ("0.0.1", "0.0.2")}
+            covered = change(change(self.credential(), "unread", {"total": 1, "unaccepted": 0, "files": {reason: 1}}), "read_proof", proofs)
+            with self.subTest(left=left):
+                self.not_written(credential=covered, words=("credential", "read_proof"))
+        # A report that does not count such files for each of its two builds gives no receipt either:
+        # no counts at all (a scan from before the proof of read), the count of one build alone, a
+        # count under another build's name, a count that is no number.
+        credential = self.credential()
+        both = credential["read_proof"]
+        for note, value in (("no counts", DROP), ("no counts", None), ("no counts", {}), ("one build", {"0.0.1": both["0.0.1"]}),
+                            ("another build", {"0.0.1": both["0.0.1"], "0.0.3": both["0.0.2"]}),
+                            ("a third build", {**both, "0.0.3": both["0.0.2"]}),
+                            ("no number", {**both, "0.0.2": dict(both["0.0.2"], unread="0")}),
+                            ("no number", {**both, "0.0.2": dict(both["0.0.2"], unread=False)}),
+                            ("no number", {**both, "0.0.2": dict(both["0.0.2"], unread=-1)}),
+                            ("no count", {**both, "0.0.2": {key: value for key, value in both["0.0.2"].items() if key != "unread"}}),
+                            ("no count", {**both, "0.0.2": 0})):
+            with self.subTest(note=note, value=value):
+                self.not_written(credential=change(credential, "read_proof", value), words=("credential", "read_proof"))
+        # The other counts of the proof of read refuse nothing: files read behind the line are read.
+        done, _receipt = self.written(credential=change(credential, "read_proof", {
+            version: dict(proof, read_as_it_is=0, read_behind_the_line=9) for version in both}))
+        self.assertEqual(done.returncode, 0, done.stdout)
+
     def test_the_receipt_names_the_files_both_reports_name_with_the_same_bytes(self):
         extra = {"name": f"extra-{TARGET}.bin", "bytes": 3, "sha256": "9" * 64}
         # A file only one report names: no receipt at all, not a receipt without that row. Both scans
@@ -1513,6 +1546,43 @@ class ReceiptWrite(Fixture):
         self.assertEqual(git(repository, "cat-file", "blob", COMMIT + ":scripts/" + names["privacy"]), changed.decode().strip())
         self.not_written(privacy=change(self.privacy(), "tool_sha256", sha256(changed)), tool=other, words=("privacy", "tool_sha256"))
         self.assertEqual(self.written(tool=other)[0].returncode, 0)
+
+    def test_no_receipt_is_written_unless_the_class_list_of_a_credential_report_is_its_commits(self):
+        # A credential report that names an identifier class proof states the sha256 of the class list
+        # that was in force. The writer compares it with the list as the report's commit holds it in
+        # the writer's checkout, as it does for the scan's own file. A report without that part
+        # resolved nothing by class and is taken as before (every other row of this class).
+        name = "payload-credential-identifier-classes.json"
+        listed = b'{"made-up": "class list"}\n'
+        tool = self.checkout()
+        repository = tool.parent.parent
+        (repository / "release" / name).write_bytes(listed)
+        git(repository, "add", "-A")
+        git(repository, "commit", "-q", "-m", "a later commit holds a class list")
+        later = git(repository, "rev-parse", "HEAD")
+        proof = {"tool": "credential-identifier-class", "resolved": 1, "list_sha256": sha256(listed)}
+        report = change(change(self.credential(), "tool_commit", later), "identifier_classes", proof)
+        done, receipt = self.written(credential=report, tool=tool)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        # The receipt holds nothing of it: its fields are the ones it had.
+        self.assertEqual(set(json.loads(receipt.read_text())["credential"]), set(self.receipt()["credential"]))
+        # Another list, no digest, or a part that is no such statement: no receipt.
+        for value in ("9a" * 32, sha256(b'{"another": "class list"}\n'), sha256(listed).upper(), None, 7, "text", DROP):
+            self.not_written(credential=change(report, "identifier_classes.list_sha256", value), tool=tool,
+                             words=("credential", "identifier_classes", name))
+        for value in ("text", [], None, True, 3):
+            self.not_written(credential=change(report, "identifier_classes", value), tool=tool, words=("credential", "identifier_classes"))
+        # A commit that holds no class list vouches for none: the release commit of these rows holds none.
+        self.not_written(credential=change(report, "tool_commit", COMMIT), tool=tool, words=("credential", "identifier_classes", name))
+        # The commit decides, not the work tree, and not what git's index is told to overlook: a report
+        # of a scan that ran with an edited list states the edited list, and gets no receipt.
+        changed = b'{"made-up": "class list, edited in the work tree"}\n'
+        git(repository, "update-index", "--assume-unchanged", "--", "release/" + name)
+        (repository / "release" / name).write_bytes(changed)
+        self.assertEqual(git(repository, "status", "--porcelain"), "")
+        self.not_written(credential=change(report, "identifier_classes.list_sha256", sha256(changed)), tool=tool,
+                         words=("credential", "identifier_classes", name))
+        self.assertEqual(self.written(credential=report, tool=tool)[0].returncode, 0)
 
     def test_acceptance_inputs_can_be_bound_to_the_present_files(self):
         accepted = self.root / "credential-accepted.json"

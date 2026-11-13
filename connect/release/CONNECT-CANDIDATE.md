@@ -290,7 +290,10 @@ python3 scripts/connect-candidate.py credential-scan \
   `config/gitleaks.toml` of that version's source). The scan removes the global
   path allowlist lines that mention `vendor`, `dist-info` or `lock` from each,
   and stops unless a run with the build's embedded default gives the same
-  result as a run with the file.
+  result as a run with the file, over every directory a build reads of every
+  payload file (the scan root, the bytes outside archive members, the runs of
+  compiled files, the runs read alone): a rules file that lacks a rule gives
+  the default's result wherever that rule finds nothing.
 - The builds always run redacted and with allow comments ignored, from an
   empty working directory, with the payload one level below the scan root. No
   comment, ignore file or rules file inside a payload switches a finding off.
@@ -298,7 +301,111 @@ python3 scripts/connect-candidate.py credential-scan \
   every run of eight or more printable ASCII bytes. Each run a finding touches
   is read again as a unit of its own, and only those findings count, so no rule
   can join the end of one run to the start of the next. Such a finding is
-  reported at `PATH#strings`, and its line is the byte offset of the run.
+  reported at `PATH#strings`, and its line is the byte offset of the run. The
+  file of a compiled file's runs begins with its first run, and a run that is
+  read again is its own file from the first byte. Only where such a file would
+  start like a binary signature, which no build reads, something stands
+  before: a line of plain words before the runs, a line break before a run
+  that is read again.
+- No list of the scan decides whether a build read a file. Each build reads
+  every file it is handed twice (a member that is text, text among the bytes
+  outside members, the file of a compiled file's runs, a run that is read
+  again). The first reading is of the file as it is, and keeps what every rule
+  means, at the first byte and at the end of the text. In the second the file
+  ends with a line of the scan's own: a made-up name and value that the
+  build's rules report. The line stands on the scan's copies only and is cut
+  off again afterwards; no digest and no line number sees it. A finding of
+  both readings, the same by file, line and rule, counts once. A build has
+  read a file when it reports that line there exactly as it reports the line
+  alone, which the scan measures once per build: the same rules, as often, at
+  that line. The proof of the second reading speaks for the first: a build
+  takes or passes over a file for its path and its leading bytes, and those
+  are the same in both readings. The one exception is a size limit that the
+  added line alone crosses; then there is no proof, which is the safe side.
+  Where a build decides by more than its path and leading bytes, what the file
+  holds is still reported by the second reading; only a report that needs the
+  end of the text can then be missing. A
+  file without proof is read again behind a line of plain words, twice in the
+  same way, and its findings count at their own lines. Without the line there
+  too the file is unread by that build and refuses like every unread file (`no
+  proof that a build read it`). The line proves that the build reached the
+  file's last line, not that every rule ran on every line. A build that does
+  not report the line alone stops the scan. The receipt and the report count,
+  per build, the files handed, read as they are, read behind the line and
+  unread, and the readings of both kinds. For an upload, the number of handed
+  files that a build left unread for lack of proof of read (`read_proof`,
+  `unread`, counted per build in the report) must be 0 for both builds: the
+  upload receipt writer writes no receipt otherwise, whatever the acceptance
+  file says, and none from a report without those counts. The scan itself
+  passes when an acceptance of a file's exact bytes covers such a file, and
+  shows it (`unread` above `unread_unaccepted`); an acceptance of a position
+  never covers one. The other kinds of unread file keep their rule:
+  `unread_unaccepted` is 0.
+- An archive can hold more than its members, and its reader does not say so.
+  Every byte of an opened archive that is not the content of a member the scan
+  wrote out is scanned too, at every level, at paths below `ARCHIVE!!outside/`
+  (`!outside/` for the payload file itself). `before-start` is what stands
+  before the first record of a zip. `after-end` is what follows the end of a
+  zip (its end record and comment) or of a tar (the block where its reader
+  stops). Both are read as files, without their leading zero bytes, and an
+  archive that starts there is opened. `headers-and-gaps` holds, one on a
+  line, the runs of eight or more printable ASCII bytes and tabs of every
+  other such byte: headers, names, comments, extra fields, padding, gaps
+  between members, a member that was not written out, the header and trailer
+  of a gzip member, a zstd skippable frame. A tar inside a compressed file has
+  its own `tar-after-end` and `tar-headers-and-gaps`. Zero bytes alone make no
+  file. Both builds read these files whatever the path of their archive is:
+  not below that path, where a path allowlist could skip them, but under
+  numbered names in a directory of their own, and a file of them that starts
+  with a binary signature by its printable runs, like a compiled file
+  (`ARCHIVE!!outside/NAME#strings`). None of them is ever unread. The scan
+  stops with a usage error when a build's path allowlist matches one of the
+  numbered files it writes for the builds (these, the runs of a compiled file,
+  a run that is read alone). An
+  `archives` entry for the exact archive covers these paths; a `positions` or
+  `files` entry names them like any path.
+- What counts as a member's content is what was decoded, checked by the scan.
+  A zip is not opened (which refuses) when a stored member's data is longer
+  than its size, when a deflated member's stream does not end with its
+  compressed size or does not decode to its size, when a directory entry names
+  a place where no record stands or a record of another name, when its zip64
+  end records are not where they must be, or when its reader warns about it
+  (two entries for one record). The data of a zip entry with the mode of a
+  link (the link's target) or of a special file is read as text, as one of
+  the files of the bytes outside members (`ARCHIVE!!outside/link-00000`,
+  `special-00000`): no link is made, no name of the entry is used, and nothing
+  is followed. A directory entry that holds data is not written out
+  (`directory-with-data`). A tar member that is no file, no link and no
+  directory and has a size is read like a file when the reader gives its data
+  (a type it does not know); when it gives none (a pipe, a device) the member
+  is not written out (`special-with-data`). A compressed file (gzip, bzip2, xz,
+  zstd) is its streams and zero padding: any other byte after its last stream
+  makes it a file that is not opened.
+- A printed path names one file. A member whose name holds `!`, at any level,
+  and a member file whose name ends with `#strings` would print like another
+  path (a member of an archive, the runs of a compiled file). Such a member is
+  not written out and refuses as every member that is not written out does
+  (`separator-in-name`, `strings-mark-in-name`); only an `archives` entry for
+  the exact enclosing archive covers it.
+- A finding belongs to the member whose file a build names in its report, and
+  a report need not give a name back as the disk has it: a member's name that
+  is no UTF-8 (a tar member can carry any bytes) comes back with other
+  characters in the place of those bytes. Before a build reads the members the
+  scan notes each such member: it is known by its path without everything
+  that is not printable ASCII, and that form must be its own. When another
+  member has the same form, a report could mean either, and the scan stops
+  before a build runs. A finding at a path that is no member's stops the scan
+  too: no position is made at a path the scan did not hand to a build, and no
+  finding is dropped. The stop is wider than the names a report would
+  confuse: a UTF-8 name with a letter outside ASCII where the other name has
+  such a byte, or the plain name without the byte, stops the scan as well.
+  The scan takes it that a build gives back every printable ASCII character
+  of a path and adds none; a build that does otherwise never makes such a
+  member pass, but may show a refused position at a sibling. The receipt is a
+  text that a person reads: a path stands there in a form of its own and on
+  one line, with the escape sign written twice and a byte that is no UTF-8,
+  the column sign and every control character as `\xNN`. The listing and the
+  report hold the path itself.
 - `--accepted-findings` is optional and private; without it nothing is
   accepted. Its schema is `release-payload-credential-scan/accepted/1`. A
   `positions` entry accepts one position: `rule`, `path` (the path inside the
@@ -318,6 +425,45 @@ python3 scripts/connect-candidate.py credential-scan \
   `release-payload-credential-scan/pending/1`: `rule`, `path`, `line`,
   `sha256`). The list never accepts: a position on it refuses even when an
   acceptance entry matches, and the receipt counts it as `pending_owner`.
+- A record field that holds a random identifier is new in every build, so no
+  acceptance can be bound to its bytes. The committed
+  `release/payload-credential-identifier-classes.json` (schema
+  `release-payload-credential-scan/identifier-classes/1`) declares such
+  fields. Each entry of `classes` names the detector `rule`, the payload file
+  name (`asset`) and the path inside it (`member`), the JSON `key_path` (keys
+  joined by dots, a list step written `[]` after its key: `a.b[].c`), the
+  `value_form` (`uuid-v4`) and `accepted_by`. In `asset` and `member`,
+  `<version>` stands for three numbers joined by dots (no leading zero) and
+  `<target>` for a target name of two parts with one hyphen between them (as
+  `linux-x86_64`: a payload file's name holds its target's name); every other
+  character is itself, and a pattern needs a letter or a digit of its own
+  beside its places. A place cannot tell a version or a target from other
+  text of that form, so an entry can also name them literally. The scan
+  resolves a finding by an entry only when it proves all of this on the
+  member's bytes: the member is one JSON document without a repeated key; the
+  finding's line holds that one field and its text value and nothing else;
+  the value is the value at exactly the declared key path; the whole value is
+  a canonical lower-case version 4 UUID; every span the builds report for the
+  position lies on that line; rule, payload file name and member path are the
+  entry's; and every finding of the position lies in the one file that is
+  read. Anything else refuses as before, and each finding stands on its own
+  proof. A pending position refuses whatever a class proves, and an
+  acceptance bound to bytes counts before a class. A pending entry is bound
+  to the member's bytes, and such a member is new in every build: the entry
+  holds for the build it was written for, so the pending row of a field is
+  removed in the step that enables its class entry. A list that is not of its
+  schema, or holds a key twice, is a usage error. An absent list, or a list
+  without an entry, changes no output. With an entry in the list the
+  receipt's first line ends with `class_tool=<name> class_resolved=<n>`, its
+  rule table has one line for the findings a class resolved (it names no
+  rule), and the report holds the same number as `findings.class_resolved`
+  (so that `findings.total` is the sum of the accepted, the refused and that
+  number) and in `identifier_classes` (`tool`, `resolved`, `list_sha256`);
+  none of them names a rule, path or line of a resolved finding. The list is
+  read from the tool's own checkout. When the tool, its extractor or the list
+  is not, byte for byte, what that commit holds, `tool_commit` is null; and
+  the receipt writer gives no receipt unless `list_sha256` is the list of the
+  report's commit.
 - Unread content refuses too, and the rule is per build. A file may be unread
   by a detector build only when it is byte-equal to a pinned upstream member.
   A file that starts with a binary signature and is neither an opened archive
@@ -449,6 +595,16 @@ Where the pins come from:
   `detector_pinned_sha256` and `detector_current_sha256`. They are digests
   only. A name list, its rules and a list that names left-out members are
   private and enter no repository, workflow input, artifact or log.
+- When a detector pin or a build's default rules file changes, two counts are
+  measured again, per default rules file, before the new pin is accepted: the
+  rules that can report only at the first byte of a file (an alternative
+  anchored at the start of the text whose other alternatives take no line
+  break), and the rules with an end-of-text alternative after the value whose
+  other alternatives take no line break. The first says how far the stated
+  first-byte limit reaches. The second is why every file is read twice, as it
+  is and with the scan's line after it. The counting is done by hand: no
+  command of the tree measures the two counts, and the gate does not depend on
+  them, because each build reads every handed file twice whatever they are.
 - The name rule (`names`) says which file names are a target's own. A platform
   target (`linux-x86_64`, `macos-arm64`) has `holds-target`: the file name
   holds the target's name. Both product archives, their `.sha256` files and
@@ -622,6 +778,34 @@ Limits and consequences, as they stand:
   account, not as the public receives it. The cut's own anonymous read-back
   step stays the independent check; a public read-back inside the tool is not
   built.
+- The credential scan gives the builds the bytes of an archive that are no
+  member's content in two forms. What stands before a zip's first record or
+  after the end of a zip or a tar is read as a file. Every other such byte
+  (headers, names, comments, extra fields, padding, gaps between members, a
+  member that is not written out, the header and trailer of a gzip member, a
+  zstd skippable frame) reaches the builds only as its runs of eight or more
+  printable ASCII bytes and tabs, as a compiled file does. Text in another
+  encoding there, a value that another byte splits, and data there that is
+  itself compressed are not found. A value that stands across the end of a
+  header and the start of a member's data is in no run; a value longer than
+  the 4096-byte overlap of the 1 MiB pieces may be whole in no piece. A
+  record of a zip that no directory entry names is read as runs, also when a
+  whole archive stands there. An
+  archive in the file before or after a zip or a tar is opened only when it
+  starts that file; behind any other byte it is read as the bytes it is, as in
+  any member.
+- A rule that reports only at the first byte of a file (a pattern anchored at
+  the start of the file) reports a run only where the run stands there: the
+  first run of a compiled file, and a run that is read again on its own. It
+  does not report the first run when the file of the runs would start like a
+  binary signature, nor a run read again that starts like one: something
+  stands before those, because no build reads a file that starts so. The same
+  holds for bytes outside members that start like a binary signature, which
+  are read by their runs. It reports no run in `headers-and-gaps` or
+  `tar-headers-and-gaps`, whose first line is the scan's own. The scan's list
+  of signatures is a first guess only: a file of a kind that a build passes
+  over by a check of its own is found by the proof of read and read again
+  behind a line of plain words, and the same limit then holds for it.
 
 The check verifies that both reports are complete, current and bound to the
 exact files and the pinned inputs. It does not prove who produced a report.

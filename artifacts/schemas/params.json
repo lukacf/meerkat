@@ -2878,7 +2878,7 @@
             "type": "object"
           },
           {
-            "description": "One provider attempt of a turn that carries a reasoning-effort\npreference: what the batch requested, what the attempt's baseline\nrequest already said, and what the attempt actually sent. Emitted per\nprepared request (and again for a model-fallback attempt), so a turn\nwhose attempts differ reports each one; never a turn-level claim.",
+            "description": "One provider attempt of a turn that carries a reasoning-effort\npreference: what the batch requested, what the attempt's baseline\nrequest already said, and what the attempt actually sent. Emitted per\nprepared request (and again for a model-fallback attempt), so a turn\nwhose attempts differ reports each one; never a turn-level claim. For\na model-fallback attempt the preference is judged on the direct route\nof the target's provider and the target model's catalog row;\n`RequestReasoningEffortResolved` is the authoritative record of what\na request was sent with.",
             "properties": {
               "baseline": {
                 "$ref": "#/$defs/ReasoningLoweringBaseline",
@@ -12499,7 +12499,8 @@
               "tool_parity",
               "modality_parity",
               "request_unsupported",
-              "admission_unavailable"
+              "admission_unavailable",
+              "reasoning_effort_unsupported"
             ],
             "type": "string"
           },

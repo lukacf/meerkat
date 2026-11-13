@@ -169,7 +169,7 @@ export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "ser
 
 export type LlmProviderErrorRetryability = "retryable" | "non_retryable";
 
-export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable" | "tool_choice_unsupported";
+export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable" | "reasoning_effort_unsupported" | "tool_choice_unsupported";
 
 /**
  * Where Gemini blocked a response.

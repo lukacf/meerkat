@@ -215,7 +215,7 @@ LlmProviderErrorKind = Literal['invalid_request', 'content_filtered', 'server_er
 LlmProviderErrorRetryability = Literal['retryable', 'non_retryable']
 
 
-ModelFallbackSkipReason = Literal['provider_boundary', 'auth_unavailable', 'context_fit', 'context_unknown', 'output_budget', 'tool_parity', 'modality_parity', 'request_unsupported', 'admission_unavailable'] | Literal['tool_choice_unsupported']
+ModelFallbackSkipReason = Literal['provider_boundary', 'auth_unavailable', 'context_fit', 'context_unknown', 'output_budget', 'tool_parity', 'modality_parity', 'request_unsupported', 'admission_unavailable', 'reasoning_effort_unsupported'] | Literal['tool_choice_unsupported']
 
 
 # Where Gemini blocked a response.
@@ -2812,7 +2812,11 @@ class AgentEventRequestReasoningLowered(TypedDict, total=False):
     preference: what the batch requested, what the attempt's baseline
     request already said, and what the attempt actually sent. Emitted per
     prepared request (and again for a model-fallback attempt), so a turn
-    whose attempts differ reports each one; never a turn-level claim.
+    whose attempts differ reports each one; never a turn-level claim. For
+    a model-fallback attempt the preference is judged on the direct route
+    of the target's provider and the target model's catalog row;
+    `RequestReasoningEffortResolved` is the authoritative record of what
+    a request was sent with.
     """
     baseline: Required[ReasoningLoweringBaseline]
     fallback_attempt: NotRequired[Optional[int]]

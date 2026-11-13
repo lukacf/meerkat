@@ -531,6 +531,19 @@ mob or the member's role. The mob comms and WorkGraph operating skills are
 preloaded separately and survive any prompt override, so a role prompt does not
 have to repeat them.
 
+<Warning>
+Known issue, noted 2026-11-13: mob members run by the four binaries in the
+Linux x86_64 release archives (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`)
+are built without the built-in skills a mob preloads (`mob-communication`,
+and `workgraph-workflow` or `task-workflow` by profile): the spawn succeeds
+and the member still has its communication tools. A project copy of those
+skills does not restore them for members. Members of a mob run by the
+published Meta `rpc_gateway` are not affected. See the
+[known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
+for the releases and platforms that were checked and how each statement is
+known.
+</Warning>
+
 Identity-first hosts (Meta) have two more knobs that reach the prompt
 without editing the definition: `DurableAgentSpec.additional_instructions`,
 appended after the skills text and baked once at materialization, and an

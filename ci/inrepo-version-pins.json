@@ -287,30 +287,6 @@
       "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
     },
     {
-      "path": "connect/docs/site/*.mdx",
-      "match": "0\\.9\\.10",
-      "reason": "Connect's docs describe and install the Connect 0.9.10 release.",
-      "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
-    },
-    {
-      "path": "connect/docs/site/sdks/*.mdx",
-      "match": "0\\.9\\.10",
-      "reason": "Connect's SDK pages install the Connect 0.9.10 wheel and npm package.",
-      "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
-    },
-    {
-      "path": "docs/connect/*.mdx",
-      "match": "0\\.9\\.10",
-      "reason": "The rendered mirror of Connect's docs, which describe and install the Connect 0.9.10 release.",
-      "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
-    },
-    {
-      "path": "docs/connect/sdks/*.mdx",
-      "match": "0\\.9\\.10",
-      "reason": "The rendered mirror of Connect's SDK pages, which install the Connect 0.9.10 wheel and npm package.",
-      "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
-    },
-    {
       "path": "connect/sdk/python/HOME_ASSISTANT.md",
       "reason": "Installs the Connect 0.9.0 wheel from the standalone repository.",
       "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"

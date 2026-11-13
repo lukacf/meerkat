@@ -27,7 +27,7 @@ pub use capability::{
     CapabilitiesResponse, CapabilityEntry, CapabilityId, CapabilityRegistration, CapabilityScope,
     CapabilityStatus, available_capabilities, build_capabilities, resolve_capabilities,
 };
-pub use error::{CapabilityHint, ErrorCategory, ErrorCode, WireError};
+pub use error::{CapabilityHint, ErrorCategory, ErrorCode, WireError, WireRunFailure};
 pub use event_catalog::KNOWN_AGENT_EVENT_TYPES;
 pub use meerkat_core::{
     ExecutionPlacement, ExecutionPlacementIdentity, SessionForkResult,

@@ -15,18 +15,51 @@ pub fn redact_stream_diagnostics<'a>(
     let Some(authorizer) = authorizer else {
         return stream;
     };
-    Box::pin(stream.map(move |mut item| {
-        match &mut item {
-            Err(error)
-            | Ok(LlmEvent::Done {
-                outcome: LlmDoneOutcome::Error { error },
-            }) => {
-                error.redact_diagnostics(|message| authorizer.redact_response_diagnostic(message));
-            }
-            Ok(_) => {}
-        }
-        item
-    }))
+    redact_stream_errors(stream, move |message: &mut String| {
+        authorizer.redact_response_diagnostic(message);
+    })
+}
+
+/// `stream` with the error it ends with (an `Err` item, or a `Done` whose
+/// outcome is an error) run through `redact`
+/// ([`LlmError::redact_diagnostics`]): the error keeps its class and loses
+/// what `redact` removes. Successful content is left as it is. A provider
+/// client passes its own redaction here, which covers a client that signs
+/// requests with a key of its own and has no authorizer.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn redact_stream_errors<'a>(
+    stream: LlmStream<'a>,
+    redact: impl Fn(&mut String) + Send + 'a,
+) -> LlmStream<'a> {
+    Box::pin(stream.map(move |item| redact_stream_item(item, &redact)))
+}
+
+/// `stream` with the error it ends with (an `Err` item, or a `Done` whose
+/// outcome is an error) run through `redact`
+/// ([`LlmError::redact_diagnostics`]): the error keeps its class and loses
+/// what `redact` removes. Successful content is left as it is. A provider
+/// client passes its own redaction here, which covers a client that signs
+/// requests with a key of its own and has no authorizer.
+#[cfg(target_arch = "wasm32")]
+pub fn redact_stream_errors<'a>(
+    stream: LlmStream<'a>,
+    redact: impl Fn(&mut String) + 'a,
+) -> LlmStream<'a> {
+    Box::pin(stream.map(move |item| redact_stream_item(item, &redact)))
+}
+
+fn redact_stream_item(
+    mut item: Result<LlmEvent, LlmError>,
+    redact: &impl Fn(&mut String),
+) -> Result<LlmEvent, LlmError> {
+    match &mut item {
+        Err(error)
+        | Ok(LlmEvent::Done {
+            outcome: LlmDoneOutcome::Error { error },
+        }) => error.redact_diagnostics(redact),
+        Ok(_) => {}
+    }
+    item
 }
 
 pub fn ensure_terminal_done(mut stream: LlmStream<'_>) -> LlmStream<'_> {

@@ -169,7 +169,7 @@ export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "ser
 
 export type LlmProviderErrorRetryability = "retryable" | "non_retryable";
 
-export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable" | "reasoning_effort_unsupported" | "tool_choice_unsupported";
+export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable" | "tool_choice_unsupported" | "reasoning_effort_unsupported";
 
 /**
  * Where Gemini blocked a response.
@@ -257,17 +257,21 @@ export interface ReasoningRoute {
  * absent (`facts` is absent exactly when `supported` is). The two
  * `conflicting_*` fields are serialized only when present. The `Display`
  * text is for people and is not a contract; read the fields.
+ *
+ * Non-exhaustive: a later release can add a field, so code outside this
+ * crate reads the fields and does not build the value with a struct
+ * literal (a value is read from its wire form).
  */
 export type ReasoningEffortRefusal = {
   conflicting_level?: EffortLevel | null;
   conflicting_param?: string | null;
-  facts?: ReasoningFactsSource | null;
+  facts: ReasoningFactsSource | null;
   model: string;
   provider: Provider;
   reason: ReasoningEffortRefusalReason;
   requested: EffortLevel;
-  route?: ReasoningRoute | null;
-  supported?: EffortLevel[] | null;
+  route: ReasoningRoute | null;
+  supported: EffortLevel[] | null;
 };
 
 /**
@@ -1220,6 +1224,10 @@ export type ReasoningEffortDecidedBy = "request" | "preference";
 /**
  * A resolved `reasoning_effort` level: what one provider request is sent
  * with, for which model and route.
+ *
+ * Non-exhaustive: a later release can add a field, so code outside this
+ * crate reads the fields and does not build the value with a struct
+ * literal (a value is read from its wire form).
  */
 export interface ReasoningEffortResolution {
   decided_by: ReasoningEffortDecidedBy;

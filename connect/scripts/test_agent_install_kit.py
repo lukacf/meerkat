@@ -426,13 +426,16 @@ def write_tool_record(tools, tool, **changes):
 
 
 def write_pins(run, rows=None):
-    """Write the pin file from the crate files on disk plus any extra rows (connect-library-pins/1)."""
+    """Write the pin file from the crate files on disk plus any extra rows (connect-library-pins/1).
+
+    `use` is a sorted list of labels, as the committed pin file and the fetch step's resolved file have it.
+    """
     pins = []
     for (name, version) in sorted(run["crates"]):
         file = f"{name}-{version}.crate"
         pins.append({"kind": "crate", "name": name, "version": version, "file": file,
                      "url": f"https://static.crates.io/crates/{name}/{file}", "sha256": run["crates"][(name, version)],
-                     "sha512": None, "digest_source": "crates.io index cksum", "use": "tool build provenance"})
+                     "sha512": None, "digest_source": "crates.io index cksum", "use": ["tool build provenance"]})
     pins.extend(rows or run.get("extra_pins", []))
     pins.sort(key=lambda row: (row["kind"], row["name"], row["version"], row["file"]))
     put(run["pins"], (json.dumps({"schema": "connect-library-pins/1", "target": "macos-arm64", "pins": pins},
@@ -691,6 +694,20 @@ class RunBuiltKitTests(unittest.TestCase):
         duplicate = dict(document, pins=document["pins"] + [document["pins"][0]])
         self.run["pins"].write_text(json.dumps(duplicate))
         self.refused("invalid_pin_file", output="pins-duplicate")
+        # `use` is a non-empty list of labels (the pin schema); the crate rows carry the tool label.
+        crate = next(index for index, row in enumerate(document["pins"]) if row["kind"] == "crate")
+        for index, use in enumerate(("tool build provenance", [], [""], ["tool build provenance", 7], None)):
+            changed = json.loads(json.dumps(document))
+            changed["pins"][crate]["use"] = use
+            self.run["pins"].write_text(json.dumps(changed))
+            self.refused("invalid_pin_file", output="pins-use-" + str(index))
+        changed = json.loads(json.dumps(document))
+        changed["pins"][crate]["use"] = ["agno closure"]
+        self.run["pins"].write_text(json.dumps(changed))
+        self.refused("tool_crate_not_pinned", [changed["pins"][crate]["file"]], "pins-use-other")
+        changed["pins"][crate]["use"] = ["agno closure", "tool build provenance"]
+        self.run["pins"].write_text(json.dumps(changed))
+        self.assertEqual(package_run(self.run, self.base / "pins-use-two")["platform"], "macos-arm64")
         self.run["pins"].write_text(json.dumps(document))
         (self.run["checkout"] / "crates/toolkit-package/MCPB-INSTALL.md").unlink()
         self.refused("checkout_input_unavailable", ["crates/toolkit-package/MCPB-INSTALL.md"], "no-contract")

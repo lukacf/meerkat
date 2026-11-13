@@ -693,6 +693,35 @@ class CommittedPinFileTests(unittest.TestCase):
         self.assertEqual(library["pins"]["sha256"], self.pins.sha256)
         self.assertNotIn("PENDING", library["reason"])
 
+    def test_every_reader_of_the_resolved_pin_file_accepts_what_the_fetch_step_writes(self):
+        # The fetch step writes the resolved pin file; the kit packager, the library packager, the
+        # consumer exporter and the resource packager are each given it as `--pins`. Their own loaders
+        # must take the file as it is written (`use` is a sorted list of labels) and find their rows in
+        # it: the first hosted stage run that reached the kit was refused over exactly this file.
+        crates = FETCH.crate_rows(CLOSURE, LOCK)
+        document = FETCH.resolve(self.pins, crates)
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch).resolve() / RESOLVED_NAME
+            path.write_text(FETCH.render(document), encoding="utf-8")
+            kit = load("connect_install_kit_reads_pins", ROOT / "scripts/package-agent-install-kit.py")
+            _, rows = kit.load_pins(path)
+            self.assertEqual(len(rows), len(document["pins"]))
+            for crate in crates:
+                self.assertIn(kit.CRATE_USE, rows[("crate", crate["file"])]["use"])
+            library = load("connect_library_release_reads_pins", ROOT / "scripts/package-library-release.py")
+            _, rows = library.run_pins(path)
+            self.assertEqual(len(rows), len(document["pins"]))
+            self.assertEqual([row["file"] for row in library.run_official_pins(rows, "official github")],
+                             ["github-mcp-server_Darwin_arm64.tar.gz"])
+            self.assertEqual(sorted(row["name"] for row in library.run_official_pins(rows, "official playwright")),
+                             ["@playwright/mcp", "playwright", "playwright-core"])
+            exporter = load("connect_consumer_export_reads_pins", ROOT / "scripts/export-library-consumers.py")
+            _, index = exporter.load_pins(path)
+            self.assertEqual(sum(len(found) for found in index.values()), len(document["pins"]))
+            resources = load("connect_resource_packager_reads_pins", ROOT / "scripts/package-connect-resources.py")
+            self.assertEqual(resources.checked_pin_file("macos-arm64", path)["sha256"],
+                             hashlib.sha256(path.read_bytes()).hexdigest())
+
     def tool_closure(self, **environment):
         """What the closure command prints here, with these variables added to this process's environment."""
         result = subprocess.run(

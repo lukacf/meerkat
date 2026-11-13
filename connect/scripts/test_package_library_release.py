@@ -1377,7 +1377,7 @@ class ReleaseTests(unittest.TestCase):
         rows = [{"kind": "release-download", "name": "github-mcp-server", "version": "2.0.3",
                  "file": "github-mcp-server_Darwin_arm64.tar.gz",
                  "url": "https://github.com/github/github-mcp-server/releases/download/v2.0.3/github-mcp-server_Darwin_arm64.tar.gz",
-                 "sha256": sha(asset), "sha512": None, "digest_source": "publisher checksum file", "use": "official github"}]
+                 "sha256": sha(asset), "sha512": None, "digest_source": "publisher checksum file", "use": ["official github"]}]
         versions = {name: version for name, (version, _) in PLAYWRIGHT.items()}
         for name, (version, file) in PLAYWRIGHT.items():
             dependencies = {"@playwright/mcp": {"playwright": versions["playwright"], "playwright-core": versions["playwright-core"]},
@@ -1393,7 +1393,7 @@ class ReleaseTests(unittest.TestCase):
             rows.append({"kind": "npm-tarball", "name": name, "version": version, "file": file,
                          "url": "https://registry.npmjs.org/" + name + "/-/" + file, "sha256": None,
                          "sha512": hashlib.sha512(raw).hexdigest(), "digest_source": "dist.integrity",
-                         "use": "official playwright"})
+                         "use": ["official playwright"]})
         run["extra_pins"] = rows
         kit_fixture.write_pins(run)
         kit = kit_fixture.package_run(run, work / "kit")
@@ -1698,12 +1698,17 @@ class ReleaseTests(unittest.TestCase):
             change(pins["pins"])
             run["pins"].write_text(json.dumps(pins))
         cases = (
-            (lambda pins: [row.update(version="2.0.4") for row in pins if row["use"] == "official github"], "official_pin_mismatch"),
+            (lambda pins: [row.update(version="2.0.4") for row in pins if "official github" in row["use"]], "official_pin_mismatch"),
             (lambda pins: pins.remove(next(row for row in pins if row["name"] == "playwright-core")), "official_pin_mismatch"),
             (lambda pins: [row.update(version="0.0.84") for row in pins if row["name"] == "@playwright/mcp"], "official_pin_mismatch"),
-            (lambda pins: [row.update(sha256="0" * 64) for row in pins if row["use"] == "official github"], "pinned_input_digest_mismatch"),
+            (lambda pins: [row.update(sha256="0" * 64) for row in pins if "official github" in row["use"]], "pinned_input_digest_mismatch"),
             (lambda pins: [row.update(sha512="0" * 128) for row in pins if row["name"] == "playwright"], "pinned_input_digest_mismatch"),
             (lambda pins: [row.update(sha512=None) for row in pins if row["name"] == "playwright"], "invalid_pin_file"),
+            # `use` is a non-empty list of labels (the pin schema), never one string.
+            (lambda pins: [row.update(use="official github") for row in pins if "official github" in row["use"]], "invalid_pin_file"),
+            (lambda pins: [row.update(use=[]) for row in pins if row["name"] == "playwright"], "invalid_pin_file"),
+            (lambda pins: [row.update(use=["official playwright", 7]) for row in pins if row["name"] == "playwright"], "invalid_pin_file"),
+            (lambda pins: [row.update(use=["agno closure"]) for row in pins if row["name"] == "playwright"], "official_pin_mismatch"),
         )
         for index, (change, code) in enumerate(cases):
             with self.subTest(index=index):
@@ -1711,11 +1716,11 @@ class ReleaseTests(unittest.TestCase):
                 self.run_refused(run, code, "pins-" + str(index))
         run["pins"].write_text(json.dumps(document))
         # The release may be named by its tag: the same version with a leading "v".
-        repin(lambda pins: [row.update(version="v2.0.3") for row in pins if row["use"] == "official github"])
+        repin(lambda pins: [row.update(version="v2.0.3") for row in pins if "official github" in row["use"]])
         self.assertEqual(self.run_package(run, "tag-version")["inputs"]["official"]["github"]["sha256"], sha(run["asset"]))
         asset = gzip_tar({"LICENSE": (b"Upstream MIT licence\n", 0o644), "github-mcp-server": (b"\x7fELF not a Mach-O file", 0o755)})
         write(run["pinned"] / "release-download/github-mcp-server_Darwin_arm64.tar.gz", asset)
-        repin(lambda pins: [row.update(sha256=sha(asset)) for row in pins if row["use"] == "official github"])
+        repin(lambda pins: [row.update(sha256=sha(asset)) for row in pins if "official github" in row["use"]])
         self.run_refused(run, "official_executable_mismatch", "elf-asset")
 
     def test_macos_run_kit_must_be_the_run_built_scope_with_bound_records(self):

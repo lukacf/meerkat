@@ -911,6 +911,46 @@ def test_every_cargo_command_of_the_macos_steps_asks_for_plain_output_itself(lan
     assert [call[1] for call in lane.calls if call[0] == "rkat-build"] == [[str(item) for item in p.macos_rkat_argv()]]
 
 
+def test_a_failed_macos_command_leaves_the_bounded_end_of_its_log_on_stderr(tmp_path, capsys):
+    # The refusal names only the command. On a hosted runner the work root, and with it the command's
+    # log, is gone when the job fails, so the step itself must say what the command said: the end of
+    # its log, bounded, with control characters and workflow command markers shown as text.
+    recorder = p.StepRecorder(tmp_path, "library")
+    script = ("import sys\n"
+              "for index in range(4000): sys.stderr.write('early line %d\\n' % index)\n"
+              "sys.stderr.write('##[group]not a group\\n::error::not a command\\n')\n"
+              "sys.stderr.write('\\x1b[31mcoloured\\x1b[0m text\\npackaging refused: invalid_pin_file\\n')\n"
+              "sys.exit(2)\n")
+    with pytest.raises(ValueError, match="command did not succeed: library-kit"):
+        recorder.run("library-kit", [p.sys.executable, "-I", "-c", script], cwd=tmp_path)
+    said = capsys.readouterr().err
+    first = said.splitlines()[0]
+    assert "macos library" in first and "library-kit" in first and "exit 2" in first
+    assert "records/library-kit.log" in first
+    lines = said.splitlines()[1:]
+    assert lines and all(line.startswith("  | ") for line in lines)
+    assert lines[-1] == "  | packaging refused: invalid_pin_file"
+    assert "  | early line 3999" in lines and "  | early line 0" not in lines, "the end of the log, not all of it"
+    assert len(said.encode()) <= p.FAILED_LOG_TAIL_BYTES + 4096
+    assert "\x1b" not in said and "  | \\x1b[31mcoloured\\x1b[0m text" in lines
+    assert not any("##[" in line for line in lines) and "  | ::error::not a command" in lines
+    # The whole log stays in the records, and a command that succeeds says nothing.
+    assert (tmp_path / "records/library-kit.log").read_text().startswith("early line 0\n")
+    recorder.run("fine", [p.sys.executable, "-I", "-c", "print('ok')"], cwd=tmp_path)
+    assert capsys.readouterr().err == ""
+    assert recorder.commands == ["library-kit", "fine"]
+
+
+def test_a_macos_command_that_timed_out_says_so_and_shows_its_log(tmp_path, capsys):
+    recorder = p.StepRecorder(tmp_path, "stage")
+    script = "import sys, time\nsys.stderr.write('still working\\n')\nsys.stderr.flush()\ntime.sleep(60)\n"
+    with pytest.raises(ValueError, match="command did not succeed: slow"):
+        recorder.run("slow", [p.sys.executable, "-I", "-c", script], cwd=tmp_path, seconds=2)
+    said = capsys.readouterr().err
+    assert "macos stage" in said.splitlines()[0] and "timed out" in said.splitlines()[0]
+    assert said.splitlines()[-1] == "  | still working"
+
+
 def test_the_dependency_lines_are_the_package_lines_of_the_merged_log():
     # The recorder keeps stdout and stderr in one log. Cargo's own status lines are left out by shape.
     said = ("    Updating crates.io index\n  Downloaded serde v1.0.228\nserde v1.0.228\n"

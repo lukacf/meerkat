@@ -16081,6 +16081,159 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         );
     }
 
+    /// The server's ordinary stop with a request still queued ends nothing
+    /// the session owns. A turn is held at the model and a second tracked
+    /// `POST /sessions/{id}/messages` is admitted to the runtime and queued
+    /// behind it, as in the row above, and nothing is cancelled. The stop is
+    /// the server's own at its shutdown signal: schedule delivery stops and
+    /// every runtime registration is unregistered with the runtime's
+    /// graceful disposition, which requeues on this stored realm. The model
+    /// is never released before the stop. The queued request is answered as
+    /// kept for the session's next start (`409` `SESSION_NOT_RUNNING`, kind
+    /// `requeued_across_stop`), the stop leaves no runtime registration, no
+    /// further model request is made, and the session keeps the child mob it
+    /// owns and its implicit mob and stays stored and not archived.
+    ///
+    /// The running turn's request is answered by the stop too. Whether its
+    /// run is kept suspended for the next start or ended is the runtime
+    /// stop's decision per run, so its answer is reported in the messages
+    /// below and not asserted.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn an_ordinary_stop_with_a_queued_request_keeps_the_mobs_a_rest_session_owns() {
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
+
+        let session = RestSessionWithOwnedMobs::live().await;
+        let session_id = session.session_id.clone();
+
+        // The fixture's model never holds a turn: unload the session and
+        // continue it through a copy of the server state whose model waits
+        // on a gate the row holds, which attaches the session again.
+        session
+            .state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live session");
+        unregister_rest_runtime_session_until_terminal_for_test(&session.state, &session_id).await;
+        let model_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut state = session.state.clone();
+        state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&session.llm_calls),
+            release: Arc::clone(&model_gate),
+        }));
+        let requests_before = session.model_requests();
+        assert!(
+            state.runtime_adapter.has_runtime_persistence(),
+            "the runtime has a persistence store, so its graceful stop requeues"
+        );
+
+        // The turn ahead: held at the model.
+        let running = spawn_tracked_rest_continue(
+            &state,
+            &session_id,
+            "turn-running-at-the-ordinary-stop",
+            "the running turn",
+        );
+        wait_for_rest_llm_calls(
+            &session.llm_calls,
+            requests_before + 1,
+            "the running turn reaches the model",
+        )
+        .await;
+        let ahead = state
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("the running turn's inputs");
+        assert!(
+            !ahead.is_empty(),
+            "the running turn's input is an active input of the session"
+        );
+
+        // The queued request: admitted to the runtime, its input queued
+        // behind the running turn.
+        let queued = spawn_tracked_rest_continue(
+            &state,
+            &session_id,
+            "request-queued-at-the-ordinary-stop",
+            "the queued turn",
+        );
+        wait_for_rest_queued_input(&state, &session_id, &ahead).await;
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+                session.stored_and_not_archived().await,
+            ),
+            (true, true, true),
+            "(child mob, implicit mob, stored session) while the request is queued, before the \
+             stop"
+        );
+
+        // The server's stop at its shutdown signal, before its HTTP drain.
+        // The model gate is still held: the stop does not wait for the turn.
+        state.shutdown_schedule_host().await;
+        tokio::time::timeout(
+            FAILURE_BOUND,
+            crate::unregister_runtime_sessions_for_shutdown(&state),
+        )
+        .await
+        .expect("the stop does not wait for the turn held at the model");
+        let (queued_status, queued_body) = tokio::time::timeout(FAILURE_BOUND, queued)
+            .await
+            .expect("the queued request is answered by the stop")
+            .expect("queued request task");
+        let (running_status, running_body) = tokio::time::timeout(FAILURE_BOUND, running)
+            .await
+            .expect("the running turn's request is answered by the stop")
+            .expect("running turn task");
+        // After the drain the server unregisters once more, for a session
+        // registered meanwhile. It then cancels the requests still tracked:
+        // none is left here, and the row cancels nothing.
+        crate::unregister_runtime_sessions_for_shutdown(&state).await;
+
+        assert_eq!(
+            queued_status,
+            StatusCode::CONFLICT,
+            "the queued request is kept across the stop, not ended: {queued_body}; the running \
+             turn's request was answered {running_status} {running_body}"
+        );
+        assert_eq!(queued_body["code"], "SESSION_NOT_RUNNING", "{queued_body}");
+        assert_eq!(
+            queued_body["details"]["kind"], "requeued_across_stop",
+            "{queued_body}"
+        );
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "the stop unregistered the session's runtime"
+        );
+        assert_eq!(
+            session.model_requests(),
+            requests_before + 1,
+            "only the running turn reached the model: nothing ran after the stop"
+        );
+
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+            ),
+            (true, true),
+            "(child mob, implicit mob) after the ordinary stop, which is no archive of the \
+             session; the running turn's request was answered {running_status} {running_body}"
+        );
+        assert!(
+            session.stored_and_not_archived().await,
+            "the session is still stored, and not archived, after the ordinary stop"
+        );
+
+        // Released only now, so that nothing still waiting on the model
+        // outlives the row.
+        model_gate.add_permits(1);
+    }
+
     #[test]
     fn test_create_session_request_rejects_reserved_surface_metadata_keys() {
         let app_context = serde_json::json!({

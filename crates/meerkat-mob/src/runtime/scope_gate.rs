@@ -534,6 +534,7 @@ impl MobCommand {
             | Self::SendPeerMessage { .. }
             | Self::PreviewRunFlowAdmission { .. }
             | Self::RunFlow { .. }
+            | Self::BindFlowRunObserver { .. }
             | Self::ConcludeObjective { .. }
             | Self::BindObjectiveOwner { .. }
             | Self::CreateForkedParticipant { .. }

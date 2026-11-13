@@ -45,7 +45,10 @@
 //     cells only its run knows (the models of a live account) says each cell
 //     it reached, the prefix `reasoning-effort-receipt-observation ` and one
 //     JSON object that is exactly an `observation` of the inputs schema; an
-//     object with any other member is refused. A failed cell may carry the
+//     object with any other member is refused. Observations count only
+//     beside the row's own test: a leg result that does not name that test
+//     with a pass or a fail gives the row no executed entry, whatever
+//     observations it holds. A failed cell may carry the
 //     HTTP status and an error code as typed fields (the code a word of the
 //     row's own failure classes), never a message. Any string that looks like a credential, an e-mail address, a
 //     URL, an absolute path, or this host's name or home directory is
@@ -785,6 +788,18 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
           : !state.atCommit
             ? { status: "source_only", gap: "ran_at_another_commit" }
             : null;
+    // The row's own test in a leg result of this commit, and what the row
+    // comes to when that result does not name the test with a pass or a
+    // fail. Every kind of row is held to it: nothing is executed on a
+    // result that did not run the row's test.
+    const hit = unexecuted === null ? state.result.tests.find((item) => item.package === test.package && item.target === test.target && item.name === test.name) : undefined;
+    const untested =
+      unexecuted ??
+      (hit === undefined
+        ? { status: "source_only", gap: state.result.tests_complete ? "test_not_in_leg_result" : "no_per_test_result" }
+        : hit.outcome === "skip"
+          ? { status: "source_only", gap: "test_skipped" }
+          : null);
     const entry = (fields) => ({
       id: fields.id,
       row: row.id,
@@ -810,7 +825,11 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
     });
 
     if (row.cells === "observed") {
-      const seen = unexecuted === null ? state.result.observations.filter((item) => item.row === row.id) : [];
+      // An observation is read only from a leg result that names the row's
+      // test with a pass or a fail: lines of a run that skipped or did not
+      // run the test, and a list given in a file beside such a run, make no
+      // entry.
+      const seen = untested === null ? state.result.observations.filter((item) => item.row === row.id) : [];
       if (seen.length === 0) {
         entries.push(
           entry({
@@ -823,7 +842,7 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
             requested_level: null,
             outcome: null,
             outcome_basis: null,
-            ...(unexecuted ?? { status: "source_only", gap: "no_cells_observed" }),
+            ...(untested ?? { status: "source_only", gap: "no_cells_observed" }),
           }),
         );
       }
@@ -878,24 +897,14 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
             outcome: null,
             outcome_basis: null,
             values_basis: "manifest",
-            ...(unexecuted ?? { status: "source_only", gap: onRoute.some((item) => item.model === WITHHELD_MODEL_ID) ? "model_not_proven" : "model_not_observed" }),
+            ...(untested ?? { status: "source_only", gap: onRoute.some((item) => item.model === WITHHELD_MODEL_ID) ? "model_not_proven" : "model_not_observed" }),
           }),
         );
       }
       continue;
     }
 
-    let own = unexecuted;
-    if (own === null) {
-      const hit = state.result.tests.find((item) => item.package === test.package && item.target === test.target && item.name === test.name);
-      if (hit === undefined) {
-        own = { status: "source_only", gap: state.result.tests_complete ? "test_not_in_leg_result" : "no_per_test_result" };
-      } else if (hit.outcome === "skip") {
-        own = { status: "source_only", gap: "test_skipped" };
-      } else {
-        own = { status: "executed", result: hit.outcome, tries: hit.tries, gap: null };
-      }
-    }
+    const own = untested ?? { status: "executed", result: hit.outcome, tries: hit.tries, gap: null };
     for (const item of row.cells) {
       const cell = cells.get(item.cell);
       const route = `${cell.backend}/${cell.api}`;

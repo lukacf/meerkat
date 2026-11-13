@@ -730,7 +730,11 @@ attaches its output to a release yet.
   an `observation` of the inputs schema (row, provider family, backend, API,
   model, requested level, outcome, result). `record` reads those lines from
   the run's output the same way and refuses an object with any other member;
-  `--observations FILE` adds a list from a file. A failed cell may carry the
+  `--observations FILE` adds a list from a file. The receipt reads a row's
+  observations only from a leg result that names the row's own test with a
+  pass or a fail: beside a test the run skipped or did not run they make no
+  entry, and the row is listed as source only with that reason. A failed
+  cell may carry the
   HTTP status and an error code as typed fields, the code a word of the row's
   own failure classes; never a provider's text or message. The two live rows
   are `copilot_live_reasoning_effort_matrix` and

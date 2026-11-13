@@ -258,15 +258,18 @@ function observation(overrides = {}) {
   };
 }
 
-function liveResult(observations, commit = COMMIT) {
-  const output = [suite("started", "demo-facade", "effort_routes", "test"), testEvent("ok", "demo-facade::effort_routes$live_matrix")]
-    .map((event) => JSON.stringify(event))
+/// A result of the live leg that holds `observations`. `event` is what the
+/// run says of the live row's own test (`ok`, `failed`, `ignored`); `null`
+/// is a run that names another test only.
+function liveResult(observations, commit = COMMIT, event = "ok") {
+  const output = [suite("started", "demo-facade", "effort_routes", "test"), event === null ? testEvent("ok", "demo-facade::effort_routes$another_test") : testEvent(event, "demo-facade::effort_routes$live_matrix")]
+    .map((item) => JSON.stringify(item))
     .join("\n");
   return buildLegResult({
     leg: "live",
     commit,
     command: "make e2e-copilot-live",
-    exitStatus: 0,
+    exitStatus: event === "failed" ? 100 : 0,
     format: "nextest_libtest_json_plus",
     output: Buffer.from(output),
     observations,
@@ -930,6 +933,35 @@ row("observed cells come from the leg result and from nowhere else", () => {
   assert.deepEqual(
     elsewhere.entries.filter((entry) => entry.row === "live.matrix").map((entry) => [entry.id, entry.status, entry.gap, entry.model]),
     [["live.matrix/-", "source_only", "ran_at_another_commit", null]],
+  );
+
+  // Observations make entries only beside the row's own test, passed or
+  // failed, in the same leg result. A result that holds them (from the
+  // run's lines, or from a list given in a file) while the test was
+  // skipped, or was not run at all, proves no cell: the row is one entry,
+  // source only, and nothing of it is executed.
+  for (const [event, gap] of [
+    ["ignored", "test_skipped"],
+    [null, "test_not_in_leg_result"],
+  ]) {
+    const unproven = buildReceipt(withResult("live.json", liveResult(seen, COMMIT, event)));
+    assert.deepEqual(
+      unproven.entries.filter((entry) => entry.row === "live.matrix").map((entry) => [entry.id, entry.status, entry.gap, entry.model, entry.result, entry.result_file]),
+      [["live.matrix/-", "source_only", gap, null, null, null]],
+      `observations beside a test the run reports as ${event ?? "absent"}`,
+    );
+  }
+  // A failed test still ran: its cells are read, each with its own result.
+  assert.deepEqual(
+    buildReceipt(withResult("live.json", liveResult(seen, COMMIT, "failed")))
+      .entries.filter((entry) => entry.row === "live.matrix")
+      .map((entry) => [entry.id, entry.status, entry.result]),
+    [
+      ["live.matrix/#1", "executed", "fail"],
+      ["live.matrix/#2", "executed", "pass"],
+      ["live.matrix/#3", "executed", "pass"],
+      ["live.matrix/#4", "not_run", "skip"],
+    ],
   );
 
   // A result file written in another order lists the same cells in the same order.

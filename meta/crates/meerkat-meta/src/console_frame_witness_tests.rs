@@ -804,6 +804,84 @@ async fn a_send_to_a_member_with_no_session_carries_the_member_it_was_sent_to() 
     Ok(())
 }
 
+/// A send to a member that has no session yet is witnessed by the member the
+/// send was made to, never by another member that carries its name. A
+/// member's console identity is its `agent_identity` label when it carries
+/// one (an agent's spawn may set it), so a second roster row can carry the
+/// name of a member that is private to one person. The roster lists that row
+/// first; the send to the private member still carries the private member.
+/// Once the private member has left and the console knows the name as the
+/// other member's, the send is served to the person the member was private
+/// to and to an administrator, and to no other person.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_to_a_member_with_no_session_is_not_witnessed_by_another_member_of_its_name()
+-> TestResult {
+    let (_state, runtime, aggregator) = runtime_and_aggregator("witness-name").await?;
+    let mut own = SpawnMemberSpec::new("worker", AgentIdentity::from("resting-own"))
+        .with_labels(private_to_alice());
+    own.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+    // A shared member whose console identity is the private member's name.
+    // The roster lists members by member id: this one comes first.
+    let mut namesake =
+        SpawnMemberSpec::new("worker", AgentIdentity::from("aide")).with_labels(BTreeMap::from([
+            ("agent_identity".to_string(), "resting-own".to_string()),
+        ]));
+    namesake.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+    let seated = Box::pin(
+        runtime
+            .mob_runtime()
+            .handle()
+            .seat_dormant_members(vec![own, namesake]),
+    )
+    .await?;
+    assert!(
+        seated.len() == 2
+            && seated
+                .iter()
+                .all(|outcome| matches!(outcome, meerkat_mob::DormantSeatOutcome::Seated { .. })),
+        "both members are seated and not woken: {seated:?}"
+    );
+    let reserved = aggregator
+        .reserve_identity_first_interaction(send_request("resting-own", "send-to-own"), None)
+        .await;
+    assert!(
+        reserved.is_ok(),
+        "the send to the private member is reserved with no session"
+    );
+    let to_own = stored_frame(&aggregator, "resting-own", "send-to-own")
+        .await
+        .ok_or("the send to the private member is stored")?;
+    let witness = to_own
+        .source
+        .member_provenance
+        .as_ref()
+        .map(|witness| witness.member.agent_identity.clone());
+
+    // The private member leaves and the other member stays: a console that
+    // reads the roster now knows the name as the shared member's.
+    leaves(&runtime, "resting-own").await?;
+    let readers = readers();
+    prime_access_cache_from_runtime(runtime.mob_runtime(), &readers.bob.controller()).await;
+    assert_eq!(
+        (
+            witness.as_deref(),
+            timeline_frame_visible_to(&readers.bob, &to_own)
+        ),
+        (Some("resting-own"), false),
+        "the send carries the member it was sent to, and is not served to another person"
+    );
+    assert!(
+        timeline_frame_visible_to(&readers.alice, &to_own),
+        "the send is served to the person the member was private to"
+    );
+    assert!(
+        timeline_frame_visible_to(&readers.root, &to_own),
+        "the send is served to an administrator"
+    );
+    let _ = runtime.shutdown().await;
+    Ok(())
+}
+
 /// A member a spawn made shows its first message on its own page from its
 /// own session history, with its own witness, on a console log that holds
 /// nothing else of it: no kickoff record is needed for it. And every frame

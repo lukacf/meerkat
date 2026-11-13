@@ -812,12 +812,12 @@ async fn only_a_person_who_may_view_the_asker_answers() {
     let bob_answers = console.answer(Some(&bob()), &pending_id).await;
     console.stop().await;
 
-    // A Console with no access controller: a service token, and, once it
-    // is open, its anonymous caller.
+    // A Console whose access controller enforces nothing (it knows the
+    // asking member): a service token, and, once it is open, its anonymous caller.
     let service_dir = tempfile::tempdir().expect("state directory");
     let service_console = QuestionConsole::start(
         "questions-who-service",
-        Setup::bare(),
+        Setup::enforced(),
         decisions_in(service_dir.path(), "questions-who-service", true),
     )
     .await;
@@ -834,7 +834,7 @@ async fn only_a_person_who_may_view_the_asker_answers() {
     let service_phase = service_console.row(&service_pending).state.phase;
     service_console.stop().await;
     let open_dir = tempfile::tempdir().expect("state directory");
-    let mut open = Setup::bare();
+    let mut open = Setup::enforced();
     open.decisions.console.require_app_auth = false;
     let open_console = QuestionConsole::start(
         "questions-who-open",
@@ -1276,7 +1276,13 @@ async fn an_invalid_answer_leaves_the_set_open() {
 
     for (label, answer, phase) in answers {
         assert_eq!(answer["error"]["code"], json!(-32602), "{label}: {answer}");
-        assert!(answer["error"]["data"].is_null(), "{label}: {answer}");
+        // A request at fault is plain invalid params; the decision's own
+        // refusal (another digest than the set's) is typed.
+        let data = match label {
+            "wrong digest" => refused("subject_changed"),
+            _ => Value::Null,
+        };
+        assert_eq!(answer["error"]["data"], data, "{label}: {answer}");
         assert_eq!(phase, DecisionPhase::Open, "{label}");
     }
     assert!(
@@ -1472,7 +1478,7 @@ async fn the_host_answers_a_set_on_stdio() {
     );
     let again = again.error.expect("an answered set takes no second answer");
     assert_eq!(again.code, -32602);
-    assert!(again.message.contains("no longer open"), "{again:?}");
+    assert_eq!(again.data, Some(refused("not_open")), "{again:?}");
     assert_eq!(
         dismissed.result.as_ref().map(|result| &result["outcome"]),
         Some(&json!("dismissed")),
@@ -1931,5 +1937,289 @@ async fn the_read_is_a_gating_view_read() {
         decisions_decide["error"]["code"],
         json!(-32601),
         "{decisions_decide}"
+    );
+}
+
+/// The typed `data` of a decision's own refusal, as the decision methods
+/// give it: the kind `decision_refused` and the refusal, itself tagged by
+/// its kind.
+fn refused(refusal: &str) -> Value {
+    json!({ "kind": "decision_refused", "decision_refusal": { "kind": refusal } })
+}
+
+/// A decision's own refusal of an answer is typed, in the form the decision
+/// methods give it (`decision_refused` with the refusal), on the Console
+/// and on stdio alike: a set that ended and a set past its deadline (both
+/// `not_open`: the read that finds a set past its deadline records its
+/// expiry) and another digest than the set's (`subject_changed`).
+#[tokio::test]
+async fn a_refusal_of_the_decision_is_typed() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let now_ms = now_seconds() * 1000;
+    let clock = Arc::new(RowClock(AtomicU64::new(now_ms)));
+    let owner = DurableDecisionService::with_clock(
+        Arc::new(meerkat_store::SqliteDecisionStore::in_store_path(
+            state_dir.path(),
+        )),
+        clock.clone(),
+    );
+    let decisions =
+        decisions_in(state_dir.path(), "questions-typed", true).with_owner_for_test(owner);
+    let console =
+        QuestionConsole::start("questions-typed", Setup::enforced(), decisions.clone()).await;
+    console.runtime.ask_user_slot().fill(
+        AskUserSurface::new(decisions, console.doors.served(), "questions-typed")
+            .with_clock(clock.clone()),
+    );
+    let ended = console.asked(ASKER, "ended").await;
+    let open = console.asked(ASKER, "open").await;
+    let late = ask(&console.host(ASKER), "late", 60)
+        .await
+        .request_id
+        .expect("asked");
+    let dismissal = console
+        .decide(
+            Some(&bob()),
+            json!({
+                "pending_id": ended,
+                "decision": "reject",
+                "presented_digest": console.digest(&ended),
+            }),
+        )
+        .await;
+    clock.0.store(now_ms + 61_000, Ordering::SeqCst);
+    let another = Sha256Digest::of(b"another set").to_string();
+    let cases = [
+        (
+            "a set that ended",
+            ended.clone(),
+            console.digest(&ended),
+            "not_open",
+        ),
+        (
+            "a set past its deadline",
+            late.clone(),
+            console.digest(&late),
+            "not_open",
+        ),
+        ("another digest", open.clone(), another, "subject_changed"),
+    ];
+    let mut answers = Vec::new();
+    for (label, pending_id, digest, refusal) in cases {
+        let params = json!({
+            "pending_id": pending_id,
+            "decision": "approve",
+            "presented_digest": digest,
+            "answers": [choice("q1", "a")],
+        });
+        let on_console = console.decide(Some(&bob()), params.clone()).await;
+        let mut stdio_params = params;
+        stdio_params["approver_id"] = json!("person:dana");
+        let on_stdio = crate::rpc::question_set_methods::gating_decide_question_set(
+            &console.runtime,
+            &stdio_params,
+            json!(1),
+        );
+        answers.push((label, refusal, on_console, on_stdio.error));
+    }
+    let open_phase = console.row(&open).state.phase;
+    console.stop().await;
+
+    assert_eq!(
+        dismissal["result"]["outcome"],
+        json!("dismissed"),
+        "{dismissal}"
+    );
+    // Every case is judged, and each one that is not typed is named.
+    let mut untyped = Vec::new();
+    for (label, refusal, on_console, on_stdio) in answers {
+        if on_console["error"]["code"] != json!(-32602)
+            || on_console["error"]["data"] != refused(refusal)
+        {
+            untyped.push(format!("{label} on the Console: {on_console}"));
+        }
+        let stdio = on_stdio
+            .as_ref()
+            .map(|error| (error.code, error.data.clone()));
+        if stdio != Some((-32602, Some(refused(refusal)))) {
+            untyped.push(format!("{label} on stdio: {on_stdio:?}"));
+        }
+    }
+    assert!(
+        untyped.is_empty(),
+        "a decision's refusal is typed: {untyped:#?}"
+    );
+    assert_eq!(open_phase, DecisionPhase::Open);
+}
+
+/// A person who administers decisions and is no access admin reads nothing
+/// of the question set of a member private to someone else: it is not in
+/// their list, and its id reads as a decision that is not there. The set
+/// of a member they may see they read, and an access admin reads both.
+#[tokio::test]
+async fn a_decisions_administrator_reads_no_set_of_a_member_hidden_from_them() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let setup = Setup::enforced().access(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![DAVE.to_string()],
+        rules: vec![
+            rule(
+                "carol-administers-decisions",
+                CAROL,
+                &[
+                    crate::access::ACTION_DECISIONS_VIEW,
+                    crate::access::ACTION_DECISIONS_ADMIN,
+                    ACTION_AGENT_VIEW,
+                ],
+                &[],
+            ),
+            rule(
+                "bob-answers",
+                BOB,
+                &[ACTION_GATING_VIEW, ACTION_GATING_DECIDE, ACTION_AGENT_VIEW],
+                &[],
+            ),
+        ],
+        ..crate::access::AccessControlConfig::default()
+    });
+    setup
+        .access
+        .as_ref()
+        .expect("access controller")
+        .record_agent_attributes(crate::access::AgentResourceAttributes {
+            identity: "agent-p".to_string(),
+            agent_id: None,
+            role: Some("worker".to_string()),
+            labels: BTreeMap::from([(
+                crate::access::PRIVATE_TO_LABEL.to_string(),
+                person_private_owner_key(ISSUER, "oidc-sub-7"),
+            )]),
+        });
+    let console = QuestionConsole::start(
+        "questions-decisions-admin",
+        setup,
+        decisions_in(state_dir.path(), "questions-decisions-admin", true),
+    )
+    .await;
+    let private_set = console.asked("agent-p", "call-1").await;
+    let shared_set = console.asked(ASKER, "call-2").await;
+    let unknown = format!("decision:{}", "0".repeat(64));
+    let dave = token(
+        json!({ "sub": "oidc-sub-dave", "email": DAVE, "provider": "google_oauth" }),
+        Some(now_seconds() + 3600),
+    );
+    let read = |bearer: String, method: &'static str, decision_id: String| {
+        let app = console.app.clone();
+        async move {
+            let params = if method == "meta/decisions/list" {
+                json!({})
+            } else {
+                json!({ "decision_id": decision_id })
+            };
+            console_rpc_as(&app, Some(&bearer), method, params).await
+        }
+    };
+    let carol_list = read(carol(), "meta/decisions/list", String::new()).await;
+    let carol_get = read(carol(), "meta/decisions/get", private_set.clone()).await;
+    let carol_rendering = read(carol(), "meta/decisions/rendering", private_set.clone()).await;
+    let carol_unknown = read(carol(), "meta/decisions/get", unknown.clone()).await;
+    let carol_shared = read(carol(), "meta/decisions/get", shared_set.clone()).await;
+    let dave_list = read(dave.clone(), "meta/decisions/list", String::new()).await;
+    let dave_get = read(dave, "meta/decisions/get", private_set.clone()).await;
+    // The owner still reads and answers its member's set on the gating route.
+    let owner_listed = console.listed(Some(&bob())).await;
+    console.stop().await;
+
+    let carol_list = carol_list.to_string();
+    assert!(
+        carol_list.contains(&shared_set),
+        "a set of a member they may see is listed: {carol_list}"
+    );
+    // Every read is judged, and each one that shows the set is named.
+    let mut shown = Vec::new();
+    if carol_list.contains(&private_set) {
+        shown.push(format!(
+            "the set of a member private to someone else is not listed: {carol_list}"
+        ));
+    }
+    if refusal_shape(&carol_get, &private_set) != refusal_shape(&carol_unknown, &unknown) {
+        shown.push(format!(
+            "it reads as a decision that is not there: {carol_get}"
+        ));
+    }
+    if refusal_shape(&carol_rendering, &private_set) != refusal_shape(&carol_unknown, &unknown) {
+        shown.push(format!(
+            "its rendering reads as one that is not there: {carol_rendering}"
+        ));
+    }
+    assert!(shown.is_empty(), "nothing of the set is read: {shown:#?}");
+    assert!(carol_shared["error"].is_null(), "{carol_shared}");
+    assert!(carol_shared.to_string().contains(&shared_set));
+    let dave_list = dave_list.to_string();
+    assert!(dave_list.contains(&private_set), "{dave_list}");
+    assert!(dave_get["error"].is_null(), "{dave_get}");
+    assert!(dave_get.to_string().contains(&private_set));
+    assert!(owner_listed.contains(&private_set), "{owner_listed:?}");
+}
+
+/// A caller the read does not list a set to cannot decide it either: the
+/// decide checks the asking member by the read's own rule. Here the Console
+/// does not know the asking member (it may have been private to someone),
+/// so a person who is no access admin is neither listed the set nor may
+/// answer it by its id; an access admin is listed it and answers it.
+#[tokio::test]
+async fn a_caller_the_read_hides_a_set_from_cannot_decide_it() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let setup = Setup::enforced().access(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![DAVE.to_string()],
+        rules: vec![rule(
+            "bob-answers",
+            BOB,
+            &[ACTION_GATING_VIEW, ACTION_GATING_DECIDE, ACTION_AGENT_VIEW],
+            &[],
+        )],
+        ..crate::access::AccessControlConfig::default()
+    });
+    let console = QuestionConsole::start(
+        "questions-unknown-member",
+        setup,
+        decisions_in(state_dir.path(), "questions-unknown-member", true),
+    )
+    .await;
+    // A member the Console's access cache does not know.
+    let pending_id = console.asked("agent-u", "call-1").await;
+    let listed = console.listed(Some(&bob())).await;
+    let decided = console.answer(Some(&bob()), &pending_id).await;
+    let phase = console.row(&pending_id).state.phase;
+    let dave = token(
+        json!({ "sub": "oidc-sub-dave", "email": DAVE, "provider": "google_oauth" }),
+        Some(now_seconds() + 3600),
+    );
+    let admin_listed = console.listed(Some(&dave)).await;
+    let admin_decided = console.answer(Some(&dave), &pending_id).await;
+    console.stop().await;
+
+    assert_eq!(
+        listed,
+        Vec::<String>::new(),
+        "the read lists no set of a member the Console does not know"
+    );
+    assert_eq!(
+        refusal_kind(&decided),
+        &json!("access_denied"),
+        "a caller the read hides the set from cannot decide it: {decided}"
+    );
+    assert_eq!(
+        decided["error"]["message"],
+        json!("access denied to approval origin"),
+        "{decided}"
+    );
+    assert_eq!(phase, DecisionPhase::Open);
+    assert_eq!(admin_listed, vec![pending_id]);
+    assert_eq!(
+        admin_decided["result"]["outcome"],
+        json!("answered"),
+        "{admin_decided}"
     );
 }

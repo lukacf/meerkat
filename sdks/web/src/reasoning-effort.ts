@@ -19,17 +19,6 @@ export const REASONING_EFFORT_LEVELS = [
 export type ReasoningEffortLevel = (typeof REASONING_EFFORT_LEVELS)[number];
 
 /**
- * A turn's change to the session's level: a level (or the explicit
- * `{ action: 'set', value }` form) sets it for this turn and the turns
- * after it, `{ action: 'clear' }` removes it, and leaving the option out
- * keeps it.
- */
-export type ReasoningEffortTurnOverride =
-  | ReasoningEffortLevel
-  | { readonly action: 'set'; readonly value: ReasoningEffortLevel }
-  | { readonly action: 'clear' };
-
-/**
  * `error.data.kind` of the refusal a request for a level the model or
  * route does not accept gets (see `reasoningEffortRefusal`).
  */

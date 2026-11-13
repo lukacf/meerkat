@@ -346,6 +346,8 @@ store path and otherwise remain process-local. See
 
 ### Reasoning effort
 
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
 `create_session(..., reasoning_effort="high")` (and the streaming and deferred
 variants) sets the session's provider-neutral
 [reasoning effort](/concepts/providers#reasoning-effort) level: `"none"`,
@@ -359,8 +361,9 @@ server whose contract is 0.9.15 or later and raises
 `CapabilityUnavailableError` otherwise, before anything is written: an older
 server ignores it on `session/create` and refuses it on a turn.
 
-A level the model or its route does not accept fails the call with
-`INVALID_PARAMS`. `meerkat.reasoning_effort_refusal(error)` returns the typed
+A level the model or its route does not accept fails the call with a
+`MeerkatError` whose `code` is `"-32602"` (invalid params) and whose
+`details` hold the refusal data. `meerkat.reasoning_effort_refusal(error)` returns the typed
 `ReasoningEffortRefusal` (`requested`, `provider`, `model`, `route`,
 `reason`, `supported`, `facts`, `conflicting_param`, `conflicting_level`), or
 `None` for any other error:
@@ -386,7 +389,8 @@ except MeerkatError as error:
 request or the configuration changes. A refusal with a reason this SDK does
 not know is not parsed (`None`), and `error.details` keeps the data as sent.
 The route's names and `facts` are advisory: a value this SDK does not know is
-kept as a string.
+kept as a string. `route`, `supported` and `facts` are always present in the
+refusal data: `None` when they have no value, never left out.
 
 `parse_reasoning_effort_report(...)` reads the `reasoning_effort` block of a
 run result (`requested`, and one `sent` row per distinct resolution: `level`,

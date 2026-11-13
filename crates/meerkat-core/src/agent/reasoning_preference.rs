@@ -17,8 +17,8 @@ use crate::lifecycle::run_primitive::{
 };
 use crate::model_profile::capabilities::{EffortLevel, ModelCapabilities};
 use crate::reasoning_effort::{
-    ReasoningEffortDecidedBy, ReasoningEffortRefusalReason, ReasoningFactsSource,
-    ReasoningResolveInput, ReasoningResolveMode, ReasoningRouteObservation,
+    AccountLevelStatement, ModelApi, ReasoningEffortDecidedBy, ReasoningEffortRefusalReason,
+    ReasoningFactsSource, ReasoningResolveInput, ReasoningResolveMode, ReasoningRouteObservation,
     direct_route_observation, explicit_provider_effort, resolve_reasoning_effort,
 };
 
@@ -113,14 +113,29 @@ fn apply(
         None => direct_route_observation(provider),
     };
     let observation = route.map(|route| &route.observation).or(direct.as_ref());
-    // Where the catalog row states the route's levels, a model without a
-    // row of its own provider has no catalog fact, whatever else the
-    // baseline says. A route whose levels the account or the operator
-    // states needs no row.
-    let catalog_states_levels = observation.is_none_or(|observation| {
-        observation.backend.levels_source() == ReasoningFactsSource::Catalog
-    });
-    if catalog_states_levels && row.is_none() {
+    // Whether the route gives a preference nothing to be judged by: no
+    // catalog fact, whatever else the baseline says. The catalog row states
+    // the levels of a catalog route and, while the account states nothing
+    // for the model (its entry states no levels, or its list is not
+    // loaded), of an account's route: a model without a row of its own
+    // provider has none there. An operator's route has none where the
+    // operator declared no levels, as for every self-hosted model before a
+    // client could report its route. An account entry or an operator
+    // declaration that states levels needs no row.
+    let no_catalog_fact = match observation {
+        None => row.is_none(),
+        Some(observation) => match observation.backend.levels_source() {
+            ReasoningFactsSource::Catalog => row.is_none(),
+            ReasoningFactsSource::Account => match &observation.account {
+                AccountLevelStatement::NotStated | AccountLevelStatement::ListUnavailable => {
+                    row.is_none()
+                }
+                AccountLevelStatement::Stated(_) | AccountLevelStatement::NotApplicable => false,
+            },
+            ReasoningFactsSource::Operator => observation.operator_levels.is_none(),
+        },
+    };
+    if no_catalog_fact {
         return Err(ReasoningNotAppliedReason::NoCatalogFact);
     }
     let input = ReasoningResolveInput::new(
@@ -132,7 +147,28 @@ fn apply(
         ReasoningEffortDecidedBy::Preference,
     );
     match resolve_reasoning_effort(input, params, ReasoningResolveMode::Preference) {
-        Ok(_) => Ok(()),
+        Ok(resolution) => {
+            // The resolved marker tells the Responses client that a source
+            // other than the catalog stated the level, so the client sends
+            // it without judging it by the catalog row. A preference keeps
+            // it only there: for a level an account's entry or an
+            // operator's declaration stated, on the Responses API. Where
+            // the catalog row decided, the level goes out unmarked, as it
+            // always did. On a Chat Completions route it goes out unmarked
+            // too: a client built for a model without reasoning support
+            // refuses a marked level and drops an unmarked one, and a
+            // preference never fails a request.
+            let keeps_marker = resolution.facts != ReasoningFactsSource::Catalog
+                && resolution.route.api == ModelApi::Responses;
+            if !keeps_marker
+                && let Some(ProviderTag::OpenAi(tag)) = params
+                    .as_mut()
+                    .and_then(|params| params.provider_tag.as_mut())
+            {
+                tag.reasoning_effort_resolved = false;
+            }
+            Ok(())
+        }
         Err(refusal) => Err(not_applied_reason(
             refusal.reason,
             observation.is_some(),
@@ -662,10 +698,11 @@ mod tests {
     /// On a route whose levels an account states, the preferred level is
     /// judged by the account's statement, not by the catalog row of the
     /// provider's direct API: a level the row lists is not applied where
-    /// the model's entry does not state it, nor where the account states
-    /// nothing for the model or its list is not loaded. The same level on
-    /// the direct route (a client that reports no route) is applied from
-    /// the row, as before.
+    /// the model's entry does not state it. While the account states nothing
+    /// for the model (its entry states no levels, or its list is not
+    /// loaded) the row decides, as before the account's list was read. The
+    /// same level on the direct route (a client that reports no route) is
+    /// applied from the row, as before.
     #[test]
     fn an_account_route_is_judged_by_the_accounts_statement() {
         use crate::provider_matrix::OpenAiBackendKind;
@@ -711,8 +748,9 @@ mod tests {
         };
         assert_eq!(tag.reasoning_effort, Some(ReasoningEffort::Low));
 
-        // The account states nothing for the model, or its list is not
-        // loaded: the row is not used in its place.
+        // The account states nothing for the model (its entry states no
+        // levels, or its list is not loaded): the row decides. A level the
+        // row lists is applied, one it does not list is not.
         for account in [
             AccountLevelStatement::NotStated,
             AccountLevelStatement::ListUnavailable,
@@ -720,9 +758,22 @@ mod tests {
             let (outcome, params) = on_account(account.clone(), EffortLevel::Medium);
             assert_eq!(
                 outcome,
-                ReasoningLoweringOutcome::NotApplied(
-                    ReasoningNotAppliedReason::UnknownSupportedLevels
-                ),
+                ReasoningLoweringOutcome::Applied(EffortLevel::Medium),
+                "{account:?}"
+            );
+            let Some(ProviderTag::OpenAi(tag)) = params.and_then(|params| params.provider_tag)
+            else {
+                panic!("{account:?}: the level is written to the OpenAI tag")
+            };
+            assert_eq!(
+                tag.reasoning_effort,
+                Some(ReasoningEffort::Medium),
+                "{account:?}"
+            );
+            let (outcome, params) = on_account(account.clone(), EffortLevel::Xhigh);
+            assert_eq!(
+                outcome,
+                ReasoningLoweringOutcome::NotApplied(ReasoningNotAppliedReason::UnsupportedLevel),
                 "{account:?}"
             );
             assert_eq!(params, None, "{account:?}: the baseline is untouched");
@@ -743,6 +794,249 @@ mod tests {
             outcome,
             ReasoningLoweringOutcome::Applied(EffortLevel::Medium)
         );
+    }
+
+    /// While the account states nothing for the model, a model without a
+    /// catalog row has nothing to judge a preference by: no catalog fact,
+    /// and the baseline untouched, on every Copilot route. An entry that
+    /// states levels needs no row.
+    #[test]
+    fn an_account_route_without_a_statement_or_a_row_has_no_catalog_fact() {
+        use crate::provider_matrix::{AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind};
+        use crate::{AccountLevelStatement, ModelApi, ReasoningBackend};
+
+        let routes = [
+            (
+                Provider::OpenAI,
+                ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+                ModelApi::Responses,
+            ),
+            (
+                Provider::OpenAI,
+                ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+                ModelApi::ChatCompletions,
+            ),
+            (
+                Provider::Anthropic,
+                ReasoningBackend::Anthropic(AnthropicBackendKind::Copilot),
+                ModelApi::Messages,
+            ),
+            (
+                Provider::Gemini,
+                ReasoningBackend::Google(GoogleBackendKind::Copilot),
+                ModelApi::ChatCompletions,
+            ),
+        ];
+        for (provider, backend, api) in routes {
+            let lower = |account: AccountLevelStatement| {
+                let route = PreferenceRoute {
+                    observation: ReasoningRouteObservation {
+                        backend,
+                        api,
+                        account,
+                        operator_levels: None,
+                    },
+                    default_tag: None,
+                };
+                let mut params = None;
+                let (_, outcome) = lower_reasoning_preference_on_route(
+                    None,
+                    provider,
+                    Some("account-model"),
+                    Some(&route),
+                    EffortLevel::Low,
+                    &mut params,
+                );
+                (outcome, params)
+            };
+            for account in [
+                AccountLevelStatement::NotStated,
+                AccountLevelStatement::ListUnavailable,
+            ] {
+                let (outcome, params) = lower(account.clone());
+                assert_eq!(
+                    outcome,
+                    ReasoningLoweringOutcome::NotApplied(ReasoningNotAppliedReason::NoCatalogFact),
+                    "{backend:?} {api} {account:?}"
+                );
+                assert_eq!(params, None, "{backend:?} {api} {account:?}");
+            }
+            let (outcome, params) = lower(AccountLevelStatement::Stated(vec![EffortLevel::Low]));
+            assert_eq!(
+                outcome,
+                ReasoningLoweringOutcome::Applied(EffortLevel::Low),
+                "{backend:?} {api}"
+            );
+            assert!(params.is_some(), "{backend:?} {api}");
+        }
+    }
+
+    /// The resolved marker tells the Responses client that a source other
+    /// than the catalog stated the level. A preference keeps it only there:
+    /// for a level an account's entry or an operator's declaration stated,
+    /// on the Responses API. Where the catalog row decided (a catalog
+    /// route, a client that reports no route, an account that states
+    /// nothing for the model) the level is written without it, the typed
+    /// effort alone, as before the route was observed. On a Chat
+    /// Completions route it is written without it too: a client built for a
+    /// model without reasoning support refuses a marked level and drops an
+    /// unmarked one, and a preference never fails a request. A level the
+    /// request names keeps the marker wherever it resolves.
+    #[test]
+    fn a_preference_keeps_the_resolved_marker_only_for_a_level_the_catalog_did_not_state() {
+        use crate::provider_matrix::{OpenAiBackendKind, SelfHostedBackendKind};
+        use crate::{AccountLevelStatement, ModelApi, ReasoningBackend};
+
+        let caps = caps(Provider::OpenAI, true, OPENAI_LEVELS);
+        let levels = vec![EffortLevel::Low, EffortLevel::High];
+        let openai = |kind, api, account| ReasoningRouteObservation {
+            backend: ReasoningBackend::OpenAi(kind),
+            api,
+            account,
+            operator_levels: None,
+        };
+        let self_hosted = |api| ReasoningRouteObservation {
+            backend: ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
+            api,
+            account: AccountLevelStatement::NotApplicable,
+            operator_levels: Some(levels.clone()),
+        };
+        let stated = || AccountLevelStatement::Stated(levels.clone());
+        let openai_tag = |params: Option<ProviderParamsOverride>| {
+            let Some(ProviderTag::OpenAi(tag)) = params.and_then(|params| params.provider_tag)
+            else {
+                panic!("the level is written to the OpenAI tag")
+            };
+            tag
+        };
+        // The provider and its row, the route the client observes, whether
+        // the preference keeps the marker, and whether a level the request
+        // names resolves there.
+        let cases = [
+            // An account's entry or an operator's declaration states the
+            // level.
+            (
+                Provider::OpenAI,
+                Some(&caps),
+                Some(openai(
+                    OpenAiBackendKind::Copilot,
+                    ModelApi::Responses,
+                    stated(),
+                )),
+                true,
+                true,
+            ),
+            (
+                Provider::OpenAI,
+                Some(&caps),
+                Some(openai(
+                    OpenAiBackendKind::Copilot,
+                    ModelApi::ChatCompletions,
+                    stated(),
+                )),
+                false,
+                true,
+            ),
+            (
+                Provider::SelfHosted,
+                None,
+                Some(self_hosted(ModelApi::Responses)),
+                true,
+                true,
+            ),
+            (
+                Provider::SelfHosted,
+                None,
+                Some(self_hosted(ModelApi::ChatCompletions)),
+                false,
+                true,
+            ),
+            // The catalog row decides.
+            (
+                Provider::OpenAI,
+                Some(&caps),
+                Some(openai(
+                    OpenAiBackendKind::OpenAiApi,
+                    ModelApi::Responses,
+                    AccountLevelStatement::NotApplicable,
+                )),
+                false,
+                true,
+            ),
+            (
+                Provider::OpenAI,
+                Some(&caps),
+                Some(openai(
+                    OpenAiBackendKind::Copilot,
+                    ModelApi::Responses,
+                    AccountLevelStatement::NotStated,
+                )),
+                false,
+                false,
+            ),
+            (
+                Provider::OpenAI,
+                Some(&caps),
+                Some(openai(
+                    OpenAiBackendKind::Copilot,
+                    ModelApi::Responses,
+                    AccountLevelStatement::ListUnavailable,
+                )),
+                false,
+                false,
+            ),
+            (Provider::OpenAI, Some(&caps), None, false, false),
+        ];
+        for (provider, capabilities, observation, marked, strict_resolves) in cases {
+            let context = format!("{observation:?}");
+            let route = observation.clone().map(|observation| PreferenceRoute {
+                observation,
+                default_tag: None,
+            });
+            let mut params = None;
+            let (_, outcome) = lower_reasoning_preference_on_route(
+                capabilities,
+                provider,
+                Some("route-model"),
+                route.as_ref(),
+                EffortLevel::Low,
+                &mut params,
+            );
+            assert_eq!(
+                outcome,
+                ReasoningLoweringOutcome::Applied(EffortLevel::Low),
+                "{context}"
+            );
+            let tag = openai_tag(params);
+            assert_eq!(
+                tag.reasoning_effort,
+                Some(ReasoningEffort::Low),
+                "{context}"
+            );
+            assert_eq!(tag.reasoning_effort_resolved, marked, "{context}");
+
+            // The level a request names keeps the marker on either API.
+            let mut params = None;
+            let resolved = resolve_reasoning_effort(
+                ReasoningResolveInput::new(
+                    EffortLevel::Low,
+                    provider,
+                    "route-model",
+                    observation.as_ref(),
+                    capabilities,
+                    ReasoningEffortDecidedBy::Request,
+                ),
+                &mut params,
+                ReasoningResolveMode::Strict,
+            );
+            assert_eq!(resolved.is_ok(), strict_resolves, "{context}");
+            if strict_resolves {
+                assert!(
+                    openai_tag(params).reasoning_effort_resolved,
+                    "{context}: a strict level is marked"
+                );
+            }
+        }
     }
 
     /// A copy that carries the session's provider-neutral level is not

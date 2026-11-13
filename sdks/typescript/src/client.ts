@@ -668,6 +668,9 @@ const DECISION_NOTICE_NOTIFICATION = "decision/notice";
  * constant, and if the option's release moves, this constant moves with it.
  */
 const REASONING_EFFORT_MIN_CONTRACT: readonly number[] = [0, 9, 15];
+// Read by the SDK's own tests, which derive their server contracts from it.
+// The package's entry point does not export it.
+export { REASONING_EFFORT_MIN_CONTRACT };
 const MEERKAT_REPO = "lukacf/meerkat";
 const MEERKAT_RELEASE_BINARY = "rkat-rpc";
 const MEERKAT_BINARY_CACHE_ROOT = path.join(

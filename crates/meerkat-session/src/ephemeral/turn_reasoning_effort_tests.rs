@@ -32,10 +32,24 @@ fn a_turn_level_the_session_is_not_at_is_refused() {
         );
     }
 
+    // A level is quoted and the absent state reads `no level`, so the level
+    // `none` and a session without a level are told apart.
     let not_applied = [
-        (Set(High), None, "'high'", "'none'"),
-        (Set(High), Some(Low), "'high'", "'low'"),
-        (Clear, Some(High), "'none'", "'high'"),
+        (Set(High), None, "asks for 'high'", "is at no level"),
+        (Set(High), Some(Low), "asks for 'high'", "is at 'low'"),
+        (Clear, Some(High), "asks for no level", "is at 'high'"),
+        (
+            Set(EffortLevel::None),
+            None,
+            "asks for 'none'",
+            "is at no level",
+        ),
+        (
+            Clear,
+            Some(EffortLevel::None),
+            "asks for no level",
+            "is at 'none'",
+        ),
     ];
     for (turn, session, asked, at) in not_applied {
         let refusal = unapplied_turn_reasoning_effort(Some(&turn), session)

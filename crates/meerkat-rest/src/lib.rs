@@ -7568,11 +7568,16 @@ async fn continue_session_inner(
         {
             Ok(v) => v,
             Err(e) => {
+                // A level the rebuilt session's route refuses is the
+                // caller's request, answered as the create answers it.
+                let rebuild_error = reasoning_effort_refused_api_error(&e).unwrap_or_else(|| {
+                    ApiError::Internal(format!("Failed to rebuild session: {e}"))
+                });
                 let error = unregister_rest_runtime_after_api_error_locked(
                     state,
                     &session_id,
                     runtime_was_registered,
-                    ApiError::Internal(format!("Failed to rebuild session: {e}")),
+                    rebuild_error,
                 )
                 .await;
                 drop(caller_event_tx);
@@ -17730,6 +17735,97 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         assert!(
             state.runtime_adapter.contains_session(&session_id).await,
             "failed rebuild validation must preserve an existing runtime registration"
+        );
+    }
+
+    /// A continue that names a level the session's route refuses is the
+    /// caller's request, refused: the rebuild's typed refusal is answered as
+    /// the create answers it (400, `INVALID_PARAMS`, the typed details), not
+    /// as an internal error. The session is one this server does not hold
+    /// live (the rebuild of a session it holds live is answered busy before
+    /// any build, whichever field asked for it): the refused rebuild leaves
+    /// no live session and no runtime registration behind.
+    #[tokio::test]
+    async fn test_continue_session_rebuild_refused_level_answers_400_with_the_typed_details() {
+        use meerkat_contracts::wire::runtime::WireTurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_completed_rest_runtime_session(&state).await;
+        state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live session");
+        unregister_rest_runtime_session_until_terminal_for_test(&state, &session_id).await;
+
+        let outcome = Box::pin(continue_session_inner(
+            &state,
+            &session_id.to_string(),
+            ContinueSessionRequest {
+                injected_context: None,
+                transient_turn_context: None,
+                session_id: session_id.to_string(),
+                prompt: ContentInput::Text("Continue".to_string()),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                reasoning_effort: Some(WireTurnMetadataOverride::Set(EffortLevel::High)),
+                keep_alive: None,
+                comms_name: None,
+                peer_meta: None,
+                verbose: false,
+                model: None,
+                provider: None,
+                auth_binding: None,
+                max_tokens: None,
+                hooks_override: None,
+                enable_web_search: None,
+                skill_refs: None,
+                turn_tool_overlay: None,
+                additional_instructions: None,
+            },
+            None,
+        ))
+        .await;
+
+        match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(error)) => {
+                let (status, payload) = api_error_status_and_payload(error).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{payload}");
+                assert_eq!(payload["code"], "INVALID_PARAMS", "{payload}");
+                assert_eq!(
+                    payload["details"]["kind"], "reasoning_effort_refused",
+                    "{payload}"
+                );
+                assert_eq!(payload["details"]["retryable"], false, "{payload}");
+                assert_eq!(
+                    payload["details"]["reasoning_effort_refusal"]["reason"],
+                    "supported_levels_unknown",
+                    "{payload}"
+                );
+                assert_eq!(
+                    payload["details"]["reasoning_effort_refusal"]["requested"], "high",
+                    "{payload}"
+                );
+            }
+            other => panic!("expected the typed refusal, got {other:?}"),
+        }
+        assert_eq!(
+            (
+                state
+                    .session_service
+                    .has_live_session(&session_id)
+                    .await
+                    .expect("check the live session"),
+                state.runtime_adapter.contains_session(&session_id).await,
+            ),
+            (false, false),
+            "a refused rebuild leaves no live session and no runtime registration behind"
         );
     }
 

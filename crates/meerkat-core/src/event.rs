@@ -3194,8 +3194,9 @@ pub enum AgentEvent {
     },
     /// One provider attempt of a turn that carries a reasoning-effort
     /// preference: what the batch requested, what the attempt's baseline
-    /// request already said, and what the attempt actually sent. Emitted per
-    /// prepared request (and again for a model-fallback attempt), so a turn
+    /// request already said, and the level judged for the attempt. Emitted
+    /// per prepared request (and again for a model-fallback attempt, also
+    /// one that is then skipped before any request is sent), so a turn
     /// whose attempts differ reports each one; never a turn-level claim. For
     /// a model-fallback attempt the preference is judged on the direct route
     /// of the target's provider and the target model's catalog row;

@@ -861,7 +861,7 @@ During execution, `session/event` notifications are emitted (see
   model or its route does not accept fails the session's build with invalid
   params whose `data` is
   `{"kind": "reasoning_effort_refused", "retryable": false, "reasoning_effort_refusal": {...}}`,
-  before any provider request. Since 0.9.15; an older server ignores the
+  before any provider request. From 0.9.15; an older server ignores the
   field.
 </ParamField>
 
@@ -1783,7 +1783,7 @@ Only a mechanical failure is `-32603`.
   two different levels, or a clear beside a nested level, are refused as
   invalid params. A level the model or its route does not accept is refused
   with the `reasoning_effort_refused` data of `session/create`, and the
-  session keeps its identity. `mob/turn_start` takes the same field. Since
+  session keeps its identity. `mob/turn_start` takes the same field. From
   0.9.15; an older server refuses the field.
 </ParamField>
 
@@ -4303,7 +4303,7 @@ live transport's realtime observations. See
 
 | Event | Description |
 |-------|-------------|
-| `run_started` | Agent execution began. A repeated `run_started` for a run id that has no terminal yet means that run started over from its inputs (a durable run a store fence gap suspended before its first round commit, run again once the fence is back): drop what you received for that run id before. Since 0.9.15, for a session that sets the provider-neutral `reasoning_effort` level, `reasoning_effort` holds the level as it resolves for the session's route when the run starts (`run_resumed` carries it too); a level that route does not take fails the run before `run_started` |
+| `run_started` | Agent execution began. A repeated `run_started` for a run id that has no terminal yet means that run started over from its inputs (a durable run a store fence gap suspended before its first round commit, run again once the fence is back): drop what you received for that run id before. From 0.9.15, for a session that sets the provider-neutral `reasoning_effort` level, `reasoning_effort` holds the level as it resolves for the session's route when the run starts (`run_resumed` carries it too); a level that route does not take fails the run before `run_started` |
 | `run_resumed` | Since 0.9.5: a run continued from its last committed round, under its original run id, after a restart or, in the same process, once a store fence gap that suspended it ended; carries `run_id`, `round` and `resume_point` (`tools_pending` or `awaiting_model`). See [Durable runs](/guides/durable-runs#after-a-crash) |
 | `run_completed` | Agent run finished |
 | `extraction_succeeded` | Structured-output extraction succeeded after a completed run; `request_usage` has one usage row per extraction request |
@@ -4351,8 +4351,8 @@ live transport's realtime observations. See
 | `boundary_append_applied` | A durable steer's typed appends were written into the running turn at a model boundary; carries `run_id`, `input_id`, model-projected `content`, `append_count`, optional canonical `notices`, and optional application-time `transcript_start` offset |
 | `boundary_appends_discarded` | Exact discarded application facts (`session_id`, `run_id`, `input_ids`), published after any required requeue persistence succeeds |
 | `live_channel_closed` | One of the session's live channels closed; published after every committed close with `session_id`, `channel_id`, a typed `reason` (`LiveChannelCloseReason`) and `reopen_recommended` |
-| `request_reasoning_lowered` | One provider attempt of a turn that carries a reasoning-effort preference: the batch's `requested` disposition, the attempt's `baseline` effort, and the `outcome` it sent (`applied` with the level, or `not_applied` with a typed reason; absent when the batch applies no level). `turn_number` or `fallback_attempt` names the attempt |
-| `request_reasoning_effort_resolved` | Since 0.9.15: one provider request was sent with the session's provider-neutral `reasoning_effort` level. `resolution` holds the level the request named (`requested`), the `level` sent, the `provider`, `model` and `route` (`backend`, `api`), the provider `fields` it was written to, the source of the route's levels (`facts`) and who decided the level (`decided_by`: `request`, or `preference` when the turn's reasoning preference replaced the session's level). Published once for each request handed to the provider, after it settled: it states what was sent, and a request refused before it was sent reports nothing. `turn_number` is absent for a compaction summary request; `fallback_attempt` names a model-fallback attempt. The run result's `reasoning_effort` block (`requested`, `sent`) counts the same requests per distinct resolution; a run resumed from its durable run cursor after a restart counts the requests it sends from the resume on |
+| `request_reasoning_lowered` | One provider attempt of a turn that carries a reasoning-effort preference: the batch's `requested` disposition, the attempt's `baseline` effort, and the `outcome` judged for it (`applied` with the level, or `not_applied` with a typed reason; absent when the batch applies no level). `turn_number` or `fallback_attempt` names the attempt; a fallback attempt is reported also when it is then skipped and no request is sent for it |
+| `request_reasoning_effort_resolved` | From 0.9.15: one request was handed to the provider client with the session's provider-neutral `reasoning_effort` level. `resolution` holds the level the request named (`requested`), the `level` sent, the `provider`, `model` and `route` (`backend`, `api`), the provider `fields` it was written to, the source of the route's levels (`facts`) and who decided the level (`decided_by`: `request`, or `preference` when the turn's reasoning preference replaced the session's level). Published once for each request handed to the provider client, after the call settled: it states the level the request was handed over with. A call that failed after the hand-over is counted even when nothing reached the provider (a connection error, for example), and a request refused before the hand-over reports nothing. `turn_number` is absent for a compaction summary request; `fallback_attempt` names a model-fallback attempt. The run result's `reasoning_effort` block (`requested`, `sent`) counts the same requests per distinct resolution; a run resumed from its durable run cursor after a restart counts the requests it sends from the resume on |
 | `interaction_complete` | Interaction-scoped stream completed |
 | `interaction_callback_pending` | Interaction reached a callback boundary and is waiting for tool results |
 | `interaction_failed` | Interaction-scoped stream failed |
@@ -4618,6 +4618,8 @@ and `data`, never on the message text.
 
 ### Reasoning effort refusal data
 
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
 A `reasoning_effort` level that the model's route does not accept is refused
 with `-32602` (invalid params) and this `error.data`:
 
@@ -4640,10 +4642,12 @@ with `-32602` (invalid params) and this `error.data`:
 `reason` is one of `unsupported_level`, `supported_levels_unknown`,
 `supported_levels_unavailable`, `conflicting_provider_effort`,
 `conflicting_thinking_budget`, `conflicting_thinking_type`,
-`conflicting_reasoning_body` and `conflicting_reasoning_mode`. `route` is
-`null` when the client that serves the session reports no route. `supported`
-and `facts` are `null` when no source states the levels the route accepts, or
-the source cannot be read now. A conflict also names `conflicting_param`, and
+`conflicting_reasoning_body` and `conflicting_reasoning_mode`. `route`,
+`supported` and `facts` are always present, never left out: `route` is
+`null` when the client that serves the session reports no route, and
+`supported` and `facts` are `null` when no source states the levels the
+route accepts, or the source cannot be read now. A conflict also names
+`conflicting_param`, and
 `conflicting_level` when the conflicting setting is itself a level.
 `retryable` is `true` only for `supported_levels_unavailable` (the account's
 model list is not loaded): the same request can succeed later with no change.
@@ -4654,14 +4658,19 @@ checked when its agent is built: `session/create` answers the refusal (a
 deferred create reports it at its first `turn/start`), and so does the build
 of a resumed or recovered session, whose stored identity stays as it was. A
 `turn/start` whose overrides move a live session to a model or level its
-route does not accept is refused the same way, and the session keeps its
-model, its level and its stored params. Such a turn is attempted once; its
-stored input ends as abandoned with the reason `stopped`, not with the
-refusal, and the session's live registration is rebuilt from the stored
-session at the next turn. A run that fails for the refusal
+route does not accept is refused the same way, before its input is stored:
+the session keeps its model, its level, its stored params and its live
+registration, and nothing is queued for the turn. A turn that has to build
+its session first (a deferred create's first turn, or a stored session that
+is not live), and a turn whose route changes between that check and its
+start, is judged when it starts: it is attempted once, and its stored input
+ends as abandoned with the reason `stopped`, not with the refusal (see
+Known limitations in the changelog). A run that fails for the refusal
 reports it in `run_failed` as the `error_report` reason
 `{"reason_type": "reasoning_effort_refused", "refusal": {...}}` with class
-`config`. No provider request is made for a refused level.
+`config`. No provider request is made for a refused level. The MCP server
+answers a refused level on `meerkat_run` and `meerkat_resume` as a tool
+error with the same code and data.
 
 ### comms/send error data
 

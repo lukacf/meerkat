@@ -624,8 +624,9 @@ impl OpenAiCompatibleClient {
                 // A level that was resolved for this request's route is sent
                 // or refused, never dropped. This client was built for a
                 // model without reasoning support, so its body has no place
-                // for the level. A raw level (no marker) is still dropped
-                // here, as it always was.
+                // for the level. A level without the marker (a caller's raw
+                // param, or the level a reasoning preference lowered for
+                // this wire) is still dropped here, as it always was.
                 return Err(LlmError::InvalidRequest {
                     message: format!(
                         "reasoning effort '{}' was resolved for this request, but this client \

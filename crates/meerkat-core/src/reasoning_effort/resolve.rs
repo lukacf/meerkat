@@ -334,7 +334,8 @@ impl Translation {
                 }
                 // The pair is the only body the Copilot Messages route takes
                 // a level in: any other thinking type conflicts, at every
-                // level.
+                // level. (A preference beside `disabled` or `between_tools`
+                // is not judged on this row: it writes the effort alone.)
                 match (self, tag.thinking.as_ref()) {
                     (
                         Self::AnthropicMessagesWithAdaptiveThinking,
@@ -587,11 +588,82 @@ fn catalog_statement(
 /// row is never a source of levels, whatever it lists. The stated levels are
 /// intersected with the levels the route's API can express. With no
 /// observation the levels are unknown; a route that takes no level (the
-/// realtime API) states the empty set.
+/// realtime API) states the empty set. These are the facts a level the
+/// request names is judged by; [`resolve_reasoning_effort`] says what a
+/// preference reads beside them.
 pub fn supported_reasoning_levels(
     provider: Provider,
     observation: Option<&ReasoningRouteObservation>,
     catalog_row: Option<&ModelCapabilities>,
+) -> ReasoningLevelFacts {
+    level_facts(
+        provider,
+        observation,
+        catalog_row,
+        ReasoningResolveMode::Strict,
+    )
+}
+
+/// Whether the account behind `observation`'s route states nothing about
+/// the model's levels: its entry states none, or its list is not loaded. A
+/// preference is then judged by the catalog row, as it was before a client
+/// could report its route; a strict request is refused as unknown or
+/// unavailable.
+fn account_states_nothing(observation: &ReasoningRouteObservation) -> bool {
+    observation.backend.levels_source() == ReasoningFactsSource::Account
+        && match &observation.account {
+            AccountLevelStatement::NotStated | AccountLevelStatement::ListUnavailable => true,
+            AccountLevelStatement::Stated(_) | AccountLevelStatement::NotApplicable => false,
+        }
+}
+
+/// The typed value `level` is written as on `translation`. `row_decides` is
+/// whether a preference is judged by the catalog row in place of an account
+/// that states nothing ([`account_states_nothing`]): the level is then
+/// written as the lowering the preference replaces wrote it, which for a
+/// Gemini model on Chat Completions includes the row's `minimal` as the
+/// thinking level. Every other level and row is [`Translation::write_for`],
+/// which has no `minimal` on that row.
+fn level_write(
+    translation: Translation,
+    level: EffortLevel,
+    row_decides: bool,
+) -> Option<LevelWrite> {
+    match (translation, level) {
+        (Translation::GeminiChatCompletions, EffortLevel::Minimal) if row_decides => {
+            gemini_thinking_level(level).map(LevelWrite::Gemini)
+        }
+        _ => translation.write_for(level),
+    }
+}
+
+/// Whether the request copy carries an Anthropic thinking type a level can
+/// stand beside without being adaptive: `disabled` or `between_tools`.
+/// (`enabled` carries a budget, which conflicts with a level by itself.)
+fn carries_disabled_or_between_tools_thinking(params: Option<&ProviderParamsOverride>) -> bool {
+    match params.and_then(|params| params.provider_tag.as_ref()) {
+        Some(ProviderTag::Anthropic(tag)) => match tag.thinking {
+            Some(AnthropicThinkingConfig::Disabled | AnthropicThinkingConfig::BetweenTools) => true,
+            Some(AnthropicThinkingConfig::Adaptive | AnthropicThinkingConfig::Enabled { .. })
+            | None => false,
+        },
+        Some(ProviderTag::OpenAi(_) | ProviderTag::Gemini(_) | ProviderTag::Unknown { .. })
+        | None => false,
+    }
+}
+
+/// The facts as `mode` reads the sources. A strict request reads only the
+/// source the backend names ([`supported_reasoning_levels`]). A preference
+/// reads the same source, except while the account states nothing for the
+/// model (its entry states no levels, or its list is not loaded): that is
+/// no information, so the catalog row decides, as it did before the
+/// account's list was read, and the facts name the catalog as their source.
+/// An entry that states levels is read as for a strict request.
+fn level_facts(
+    provider: Provider,
+    observation: Option<&ReasoningRouteObservation>,
+    catalog_row: Option<&ModelCapabilities>,
+    mode: ReasoningResolveMode,
 ) -> ReasoningLevelFacts {
     let Some(observation) = observation else {
         return ReasoningLevelFacts::Unknown;
@@ -602,6 +674,13 @@ pub fn supported_reasoning_levels(
             levels: Vec::new(),
             source,
         };
+    };
+    let row_decides =
+        mode == ReasoningResolveMode::Preference && account_states_nothing(observation);
+    let source = if row_decides {
+        ReasoningFactsSource::Catalog
+    } else {
+        source
     };
     let statement = match source {
         ReasoningFactsSource::Catalog => {
@@ -623,7 +702,10 @@ pub fn supported_reasoning_levels(
         Statement::Levels(stated) => ReasoningLevelFacts::Stated {
             levels: LEVEL_LADDER
                 .into_iter()
-                .filter(|level| stated.contains(level) && translation.write_for(*level).is_some())
+                .filter(|level| {
+                    stated.contains(level)
+                        && level_write(translation, *level, row_decides).is_some()
+                })
                 .collect(),
             source,
         },
@@ -640,7 +722,17 @@ pub fn supported_reasoning_levels(
 /// set; the route's constraints; the write. A strict request reports a
 /// conflict before the facts; a preference keeps the order of the lowering
 /// it replaces (reasoning off, the facts, then the other conflicts) and
-/// replaces a provider-specific effort instead of refusing it.
+/// replaces a provider-specific effort instead of refusing it. While the
+/// account states nothing for the model (its entry states no levels, or
+/// its list is not loaded), a preference is judged by the catalog row, as
+/// that lowering judged it; a strict request is refused as unknown or
+/// unavailable there. On the Copilot Messages route a preference writes the
+/// effort alone, as that lowering wrote it, where the row decides or the
+/// request carries a `disabled` or `between_tools` thinking type, which it
+/// keeps; a level the account's entry states is sent with adaptive
+/// thinking. Where the row decides for a Gemini model on Chat Completions,
+/// a preference for the row's `minimal` is written as the thinking level,
+/// as that lowering wrote it.
 ///
 /// On success `params` carries the level in the route's typed field (and,
 /// on an OpenAI-family route, the request-local resolved marker), and the
@@ -651,7 +743,7 @@ pub fn resolve_reasoning_effort(
     params: &mut Option<ProviderParamsOverride>,
     mode: ReasoningResolveMode,
 ) -> Result<ReasoningEffortResolution, ReasoningEffortRefusal> {
-    let facts = supported_reasoning_levels(input.provider, input.observation, input.catalog_row);
+    let facts = level_facts(input.provider, input.observation, input.catalog_row, mode);
     let refuse = |cause: Cause| refusal(&input, &facts, cause);
 
     // The generic reasoning mode needs no route to judge.
@@ -675,13 +767,28 @@ pub fn resolve_reasoning_effort(
     }) else {
         return Err(refuse(Cause::Facts));
     };
+    // Whether the catalog row decides for a preference: the account states
+    // nothing for the model.
+    let row_decides =
+        mode == ReasoningResolveMode::Preference && account_states_nothing(observation);
+    // The Copilot Messages route sends a level as the pair adaptive
+    // thinking with effort. A preference writes the effort alone there, as
+    // the lowering it replaces did, in two cases: the catalog row decides,
+    // or the request carries a thinking type of its own, which it keeps.
+    let translation = if translation == Translation::AnthropicMessagesWithAdaptiveThinking
+        && (row_decides
+            || (mode == ReasoningResolveMode::Preference
+                && carries_disabled_or_between_tools_thinking(params.as_ref())))
+    {
+        Translation::AnthropicMessages
+    } else {
+        translation
+    };
 
     let conflict = translation.conflict(params.as_ref(), input.requested, mode);
     let accepted = match &facts {
         ReasoningLevelFacts::Stated { levels, source } if levels.contains(&input.requested) => {
-            translation
-                .write_for(input.requested)
-                .map(|write| (write, *source))
+            level_write(translation, input.requested, row_decides).map(|write| (write, *source))
         }
         ReasoningLevelFacts::Stated { .. }
         | ReasoningLevelFacts::Unknown

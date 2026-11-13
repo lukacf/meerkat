@@ -1283,9 +1283,11 @@ fn assert_names_no_route(refusal: &ReasoningEffortRefusal) {
 }
 
 /// On `copilot/messages` a level is sent as the pair `thinking: adaptive`
-/// plus the effort, never as the effort alone, and a baseline that sets
-/// another thinking type conflicts at every level. On a direct backend the
-/// same inputs write the effort alone and leave `thinking` untouched.
+/// plus the effort, and a baseline that sets another thinking type
+/// conflicts with a level the request names at every level; a preference
+/// keeps that thinking type and writes the effort alone. On a direct
+/// backend the same inputs write the effort alone and leave `thinking`
+/// untouched.
 #[test]
 fn copilot_messages_writes_the_adaptive_pair_or_refuses() {
     const STATED: &[EffortLevel] = &[Low, Medium, High, Xhigh, Max];
@@ -1368,8 +1370,8 @@ fn copilot_messages_writes_the_adaptive_pair_or_refuses() {
         }
     }
 
-    // Another thinking type: a conflict at every level, the lowest
-    // included. The preference reports the thinking-mode conflict.
+    // Another thinking type: for a level the request names a conflict at
+    // every level, the lowest included.
     for config in [
         AnthropicThinkingConfig::Disabled,
         AnthropicThinkingConfig::BetweenTools,
@@ -1396,11 +1398,16 @@ fn copilot_messages_writes_the_adaptive_pair_or_refuses() {
             );
             assert_eq!(params, baseline, "a refusal writes nothing");
 
+            // A preference keeps the request's thinking type and writes the
+            // effort alone, as the lowering it replaces did.
             let mut params = baseline.clone();
-            let refusal = preference(level, &copilot, None, &mut params)
-                .expect_err("the preference never sends the effort alone");
-            assert_eq!(refusal.reason, Reason::ConflictingThinkingType);
-            assert_eq!(params, baseline);
+            let resolution = preference(level, &copilot, None, &mut params)
+                .expect("the preference keeps the thinking type");
+            assert_eq!(resolution.fields, owned(&["output_config.effort"]));
+            assert_eq!(resolution.facts, ReasoningFactsSource::Account);
+            let tag = anthropic_tag_of(&params);
+            assert_eq!(tag.effort, Some(typed_anthropic(level)));
+            assert_eq!(tag.thinking, Some(config.clone()));
         }
 
         // On a direct backend the same baseline takes the effort at `low`
@@ -2446,7 +2453,9 @@ fn check_outcome(context: &str, case: &Case<'_>, seen: &mut std::collections::BT
         catalog_row,
         &mut params,
     );
-    let facts = supported_reasoning_levels(provider, observation, catalog_row);
+    // The facts as the mode reads them: a preference reads the catalog row
+    // where the account's entry states no levels.
+    let facts = level_facts(provider, observation, catalog_row, mode);
     match outcome {
         Ok(resolution) => {
             seen.insert("resolved".to_owned());
@@ -2467,11 +2476,16 @@ fn check_outcome(context: &str, case: &Case<'_>, seen: &mut std::collections::BT
                     .is_some_and(|levels| levels.contains(&requested)),
                 "{context}: resolved a level the facts do not state"
             );
-            assert_eq!(
-                resolution.facts,
-                observation.backend.levels_source(),
-                "{context}"
-            );
+            // A level the request names is judged by the source the
+            // backend names. A preference reads the catalog row where the
+            // account states nothing for the model.
+            if mode == ReasoningResolveMode::Strict {
+                assert_eq!(
+                    resolution.facts,
+                    observation.backend.levels_source(),
+                    "{context}"
+                );
+            }
             assert_eq!(
                 explicit_provider_effort(params.as_ref()),
                 Some(requested),
@@ -2908,22 +2922,10 @@ mod previous_lowering {
     }
 }
 
-/// The request copy without the resolved marker, which the previous
-/// lowering did not write.
-fn without_marker(mut params: Option<ProviderParamsOverride>) -> Option<ProviderParamsOverride> {
-    if let Some(ProviderTag::OpenAi(tag)) = params
-        .as_mut()
-        .and_then(|params| params.provider_tag.as_mut())
-    {
-        tag.reasoning_effort_resolved = false;
-    }
-    params
-}
-
 /// The preference wrapper gives the outcome, the reported baseline and the
 /// request copy of the lowering it replaces, for every provider, catalog
-/// row shape, level and baseline. The one difference is the resolved marker
-/// on an applied OpenAI level.
+/// row shape, level and baseline: the catalog row decides on the direct
+/// route, so the copy carries no resolved marker either.
 #[test]
 fn the_preference_wrapper_matches_the_previous_lowering() {
     use crate::agent::reasoning_preference::lower_reasoning_preference;
@@ -3007,13 +3009,7 @@ fn the_preference_wrapper_matches_the_previous_lowering() {
                     match actual.1 {
                         ReasoningLoweringOutcome::Applied(_) => {
                             applied += 1;
-                            if provider == Provider::OpenAI {
-                                assert!(
-                                    openai_tag_of(&params).reasoning_effort_resolved,
-                                    "{context}: an applied OpenAI level is marked"
-                                );
-                            }
-                            assert_eq!(without_marker(params), expected_params, "{context}");
+                            assert_eq!(params, expected_params, "{context}");
                         }
                         ReasoningLoweringOutcome::NotApplied(reason) => {
                             reasons.insert(format!("{reason:?}"));
@@ -3041,4 +3037,501 @@ fn the_preference_wrapper_matches_the_previous_lowering() {
             "UnsupportedLevel",
         ]
     );
+}
+
+/// A preference on a self-hosted route whose operator declared no levels
+/// gives what the previous lowering gave a self-hosted model, for every
+/// baseline and level: no catalog fact, and the request copy as it was.
+/// Declared levels are information the previous lowering did not have, and
+/// there the declaration decides.
+#[test]
+fn a_preference_on_an_undeclared_self_hosted_route_matches_the_previous_lowering() {
+    use crate::agent::reasoning_preference::{
+        PreferenceRoute, lower_reasoning_preference_on_route,
+    };
+
+    let baselines = baselines();
+    for kind in SelfHostedBackendKind::ALL {
+        let backend = ReasoningBackend::SelfHosted(*kind);
+        for api in [ModelApi::Responses, ModelApi::ChatCompletions] {
+            let undeclared = PreferenceRoute {
+                observation: observation(backend, api),
+                default_tag: None,
+            };
+            for baseline in &baselines {
+                for level in LADDER {
+                    let context = format!("{}/{api} {level:?} with {baseline:?}", backend.as_str());
+                    let mut expected_params = baseline.clone();
+                    let expected = previous_lowering::lower(
+                        None,
+                        Provider::SelfHosted,
+                        level,
+                        &mut expected_params,
+                    );
+                    let mut params = baseline.clone();
+                    let actual = lower_reasoning_preference_on_route(
+                        None,
+                        Provider::SelfHosted,
+                        Some(MODEL),
+                        Some(&undeclared),
+                        level,
+                        &mut params,
+                    );
+                    assert_eq!(actual, expected, "{context}");
+                    assert_eq!(
+                        actual.1,
+                        ReasoningLoweringOutcome::NotApplied(
+                            ReasoningNotAppliedReason::NoCatalogFact
+                        ),
+                        "{context}"
+                    );
+                    assert_eq!(params, expected_params, "{context}");
+                    assert_eq!(&params, baseline, "{context}");
+                }
+            }
+
+            let declared = PreferenceRoute {
+                observation: operator(backend, api, &[Low, High]),
+                default_tag: None,
+            };
+            let lower = |level| {
+                let mut params = None;
+                let (_, outcome) = lower_reasoning_preference_on_route(
+                    None,
+                    Provider::SelfHosted,
+                    Some(MODEL),
+                    Some(&declared),
+                    level,
+                    &mut params,
+                );
+                (outcome, params)
+            };
+            let (outcome, params) = lower(Low);
+            assert_eq!(outcome, ReasoningLoweringOutcome::Applied(Low));
+            assert_eq!(
+                openai_tag_of(&params).reasoning_effort,
+                Some(ReasoningEffort::Low)
+            );
+            let (outcome, params) = lower(Medium);
+            assert_eq!(
+                outcome,
+                ReasoningLoweringOutcome::NotApplied(ReasoningNotAppliedReason::UnsupportedLevel)
+            );
+            assert_eq!(params, None);
+        }
+    }
+}
+
+/// `observation`'s route with `account` as the account's statement.
+fn with_account(
+    backend: ReasoningBackend,
+    api: ModelApi,
+    account: AccountLevelStatement,
+) -> ReasoningRouteObservation {
+    ReasoningRouteObservation {
+        account,
+        ..observation(backend, api)
+    }
+}
+
+/// A preference lowered on the route a client observes, for the model
+/// `catalog_row` describes (a model of `provider` without a row for `None`):
+/// what the lowering reports and the request copy it leaves.
+fn lower_on_route(
+    observation: ReasoningRouteObservation,
+    provider: Provider,
+    catalog_row: Option<&ModelCapabilities>,
+    level: EffortLevel,
+    baseline: &Option<ProviderParamsOverride>,
+) -> (
+    (ReasoningLoweringBaseline, ReasoningLoweringOutcome),
+    Option<ProviderParamsOverride>,
+) {
+    use crate::agent::reasoning_preference::{
+        PreferenceRoute, lower_reasoning_preference_on_route,
+    };
+
+    let route = PreferenceRoute {
+        observation,
+        default_tag: None,
+    };
+    let mut params = baseline.clone();
+    let lowered = lower_reasoning_preference_on_route(
+        catalog_row,
+        provider,
+        Some(catalog_row.map_or(MODEL, |row| row.id)),
+        Some(&route),
+        level,
+        &mut params,
+    );
+    (lowered, params)
+}
+
+/// The Copilot routes of the three families, each with the catalog rows of
+/// its family the previous lowering told apart, and a model without a row.
+fn copilot_preference_grid() -> Vec<(ReasoningBackend, ModelApi, Vec<Option<ModelCapabilities>>)> {
+    let openai = row(Provider::OpenAI, &[EffortLevel::None, Low, Medium, High]);
+    let anthropic = row(Provider::Anthropic, &[Low, Medium, High, Xhigh, Max]);
+    let gemini = row(Provider::Gemini, &[Low, Medium, High]);
+    let openai_rows = vec![
+        None,
+        Some(openai),
+        Some(row(Provider::OpenAI, ALL_LEVELS)),
+        Some(row(Provider::OpenAI, &[])),
+        Some(ModelCapabilities {
+            supports_reasoning: false,
+            ..openai
+        }),
+    ];
+    let anthropic_rows = vec![
+        None,
+        Some(anthropic),
+        Some(row(Provider::Anthropic, &[Low, Medium, High])),
+        Some(row(Provider::Anthropic, &[])),
+        Some(ModelCapabilities {
+            anthropic_disabled_thinking: AnthropicDisabledThinking::AtOrBelowHighEffort,
+            ..anthropic
+        }),
+        Some(ModelCapabilities {
+            anthropic_disabled_thinking: AnthropicDisabledThinking::AnyEffort,
+            thinking: ThinkingSupport::AnthropicAdaptiveOrBetweenTools,
+            ..anthropic
+        }),
+    ];
+    let gemini_rows = vec![
+        None,
+        Some(gemini),
+        Some(row(Provider::Gemini, &[Minimal, Low, Medium, High])),
+        Some(row(Provider::Gemini, &[])),
+        Some(ModelCapabilities {
+            thinking: ThinkingSupport::None,
+            ..gemini
+        }),
+    ];
+    vec![
+        (OPENAI_COPILOT, ModelApi::Responses, openai_rows.clone()),
+        (OPENAI_COPILOT, ModelApi::ChatCompletions, openai_rows),
+        (ANTHROPIC_COPILOT, ModelApi::Messages, anthropic_rows),
+        (GOOGLE_COPILOT, ModelApi::ChatCompletions, gemini_rows),
+    ]
+}
+
+/// On every Copilot route whose account states `account`, a preference
+/// gives what the previous lowering gave from the catalog row alone: the
+/// same outcome, reported baseline and request copy for every row shape,
+/// baseline and level, with no resolved marker. Returns the number of
+/// levels the grid applied.
+fn assert_copilot_preference_matches_the_previous_lowering(account: &AccountLevelStatement) -> u32 {
+    let baselines = baselines();
+    let mut applied = 0_u32;
+    for (backend, api, rows) in copilot_preference_grid() {
+        let provider = family(backend);
+        for catalog_row in &rows {
+            for baseline in &baselines {
+                for level in LADDER {
+                    let context = format!(
+                        "{}/{api} {account:?} {level:?} row {:?} with {baseline:?}",
+                        backend.as_str(),
+                        catalog_row
+                            .as_ref()
+                            .map(|row| (row.effort_levels, row.supports_reasoning)),
+                    );
+                    let mut expected_params = baseline.clone();
+                    let expected = previous_lowering::lower(
+                        catalog_row.as_ref(),
+                        provider,
+                        level,
+                        &mut expected_params,
+                    );
+                    let (actual, params) = lower_on_route(
+                        with_account(backend, api, account.clone()),
+                        provider,
+                        catalog_row.as_ref(),
+                        level,
+                        baseline,
+                    );
+                    assert_eq!(actual, expected, "{context}");
+                    if matches!(actual.1, ReasoningLoweringOutcome::Applied(_)) {
+                        applied += 1;
+                    }
+                    assert_eq!(params, expected_params, "{context}");
+                }
+            }
+        }
+    }
+    applied
+}
+
+/// A Gemini model on the Copilot Chat Completions route, while the account
+/// states nothing for it: a preference for `minimal` is judged by the
+/// catalog row and written as the thinking level the previous lowering
+/// wrote, for every baseline. A level the request names keeps its answer
+/// there: unknown or unavailable while the account states nothing, and
+/// unsupported where the entry states `minimal`, which that wire's effort
+/// field cannot express.
+#[test]
+fn a_gemini_minimal_preference_on_copilot_chat_completions_matches_the_previous_lowering() {
+    let catalog_row = row(Provider::Gemini, &[Minimal, Low, Medium, High]);
+    let baselines = baselines();
+    for (statement, strict_reason) in [
+        (
+            AccountLevelStatement::NotStated,
+            Reason::SupportedLevelsUnknown,
+        ),
+        (
+            AccountLevelStatement::ListUnavailable,
+            Reason::SupportedLevelsUnavailable,
+        ),
+    ] {
+        let silent = with_account(GOOGLE_COPILOT, ModelApi::ChatCompletions, statement.clone());
+        let mut applied = 0_u32;
+        for baseline in &baselines {
+            let context = format!("{statement:?} with {baseline:?}");
+            let mut expected_params = baseline.clone();
+            let expected = previous_lowering::lower(
+                Some(&catalog_row),
+                Provider::Gemini,
+                Minimal,
+                &mut expected_params,
+            );
+            let (actual, params) = lower_on_route(
+                silent.clone(),
+                Provider::Gemini,
+                Some(&catalog_row),
+                Minimal,
+                baseline,
+            );
+            assert_eq!(actual, expected, "{context}");
+            assert_eq!(params, expected_params, "{context}");
+            if matches!(actual.1, ReasoningLoweringOutcome::Applied(_)) {
+                applied += 1;
+            }
+        }
+        assert!(applied > 0, "{statement:?}: the grid applies `minimal`");
+
+        let (lowered, params) = lower_on_route(
+            silent.clone(),
+            Provider::Gemini,
+            Some(&catalog_row),
+            Minimal,
+            &None,
+        );
+        assert_eq!(lowered.1, ReasoningLoweringOutcome::Applied(Minimal));
+        assert_eq!(
+            gemini_tag_of(&params).thinking_level,
+            Some(GeminiThinkingLevel::Minimal),
+            "{statement:?}"
+        );
+
+        let mut params = None;
+        let refusal = strict(Minimal, &silent, Some(&catalog_row), &mut params)
+            .expect_err("the account states no levels");
+        assert_eq!(refusal.reason, strict_reason, "{statement:?}");
+        assert_eq!((refusal.supported, refusal.facts), (None, None));
+        assert_eq!(params, None, "{statement:?}");
+    }
+
+    let stated = account(
+        GOOGLE_COPILOT,
+        ModelApi::ChatCompletions,
+        &[Minimal, Low, Medium, High],
+    );
+    let mut params = None;
+    let refusal = strict(Minimal, &stated, Some(&catalog_row), &mut params)
+        .expect_err("the wire's effort field has no `minimal`");
+    assert_eq!(refusal.reason, Reason::UnsupportedLevel);
+    assert_eq!(refusal.supported, Some(vec![Low, Medium, High]));
+    assert_eq!(refusal.facts, Some(ReasoningFactsSource::Account));
+    assert_eq!(params, None);
+}
+
+/// Beside the grid, on every Copilot route whose account states `account`:
+/// the resolver names the catalog as the source of a preferred level, a
+/// level the request names is still refused for `strict_reason`, and once
+/// the account's entry states levels the preference follows the entry,
+/// against the row.
+fn assert_the_account_decides_once_it_states_levels(
+    account: &AccountLevelStatement,
+    strict_reason: Reason,
+) {
+    for (backend, api, rows) in copilot_preference_grid() {
+        let context = format!("{}/{api} {account:?}", backend.as_str());
+        let provider = family(backend);
+        // The first row of each family lists `low` and `medium`.
+        let catalog_row = rows
+            .iter()
+            .flatten()
+            .next()
+            .copied()
+            .expect("the family's listed row");
+        let silent = with_account(backend, api, account.clone());
+
+        let mut params = None;
+        let resolution = preference(Medium, &silent, Some(&catalog_row), &mut params)
+            .expect("the row lists the level");
+        assert_eq!(resolution.facts, ReasoningFactsSource::Catalog, "{context}");
+        assert_eq!(resolution.route, ReasoningRoute::new(backend, api));
+
+        let mut params = None;
+        let refusal = strict(Medium, &silent, Some(&catalog_row), &mut params)
+            .expect_err("the account states no levels");
+        assert_eq!(refusal.reason, strict_reason, "{context}");
+        assert_eq!((refusal.supported, refusal.facts), (None, None));
+        assert_eq!(params, None, "{context}");
+
+        let stated = with_account(backend, api, AccountLevelStatement::Stated(vec![Low]));
+        let (lowered, params) =
+            lower_on_route(stated.clone(), provider, Some(&catalog_row), Medium, &None);
+        assert_eq!(
+            lowered.1,
+            ReasoningLoweringOutcome::NotApplied(ReasoningNotAppliedReason::UnsupportedLevel),
+            "{context}"
+        );
+        assert_eq!(params, None, "{context}");
+        let (lowered, params) = lower_on_route(stated, provider, Some(&catalog_row), Low, &None);
+        assert_eq!(
+            lowered.1,
+            ReasoningLoweringOutcome::Applied(Low),
+            "{context}"
+        );
+        assert_eq!(
+            explicit_provider_effort(params.as_ref()),
+            Some(Low),
+            "{context}"
+        );
+    }
+}
+
+/// A preference on a Copilot route whose account entry states no levels is
+/// judged by the catalog row, as the previous lowering judged it, on every
+/// Copilot route; a model without a row has no catalog fact. On the Messages
+/// route the row's level is written as the effort alone, as that lowering
+/// wrote it; a level the entry states is sent there with adaptive thinking.
+#[test]
+fn a_preference_on_an_unstated_copilot_entry_matches_the_previous_lowering() {
+    let applied =
+        assert_copilot_preference_matches_the_previous_lowering(&AccountLevelStatement::NotStated);
+    assert!(applied > 100, "the grid applies levels ({applied})");
+    assert_the_account_decides_once_it_states_levels(
+        &AccountLevelStatement::NotStated,
+        Reason::SupportedLevelsUnknown,
+    );
+
+    let catalog_row = row(Provider::Anthropic, &[Low, Medium, High]);
+    let messages = |account| with_account(ANTHROPIC_COPILOT, ModelApi::Messages, account);
+    let unstated = messages(AccountLevelStatement::NotStated);
+    let mut params = None;
+    let resolution = preference(Low, &unstated, Some(&catalog_row), &mut params)
+        .expect("the row lists the level");
+    assert_eq!(resolution.fields, owned(&["output_config.effort"]));
+    let tag = anthropic_tag_of(&params);
+    assert_eq!(tag.effort, Some(AnthropicEffort::Low));
+    assert_eq!(tag.thinking, None, "the effort alone");
+
+    let (lowered, params) = lower_on_route(
+        messages(AccountLevelStatement::Stated(vec![Low])),
+        Provider::Anthropic,
+        Some(&catalog_row),
+        Low,
+        &None,
+    );
+    assert_eq!(lowered.1, ReasoningLoweringOutcome::Applied(Low));
+    let tag = anthropic_tag_of(&params);
+    assert_eq!(tag.effort, Some(AnthropicEffort::Low));
+    assert_eq!(tag.thinking, Some(AnthropicThinkingConfig::Adaptive));
+}
+
+/// A preference on a Copilot route whose account list is not loaded is
+/// judged by the catalog row, as the previous lowering judged it: the
+/// account has said nothing yet. A level the request names is still refused
+/// as unavailable, and once the list states levels the preference follows
+/// the list.
+#[test]
+fn a_preference_before_the_copilot_list_is_loaded_matches_the_previous_lowering() {
+    let applied = assert_copilot_preference_matches_the_previous_lowering(
+        &AccountLevelStatement::ListUnavailable,
+    );
+    assert!(applied > 100, "the grid applies levels ({applied})");
+    assert_the_account_decides_once_it_states_levels(
+        &AccountLevelStatement::ListUnavailable,
+        Reason::SupportedLevelsUnavailable,
+    );
+}
+
+/// On the Copilot Messages route a preference beside a thinking type of
+/// `disabled` or `between_tools` keeps that type and writes the effort
+/// alone, up to the ceiling the row records for the type, as the previous
+/// lowering did. A level the request names conflicts there at every level.
+#[test]
+fn a_preference_on_copilot_messages_keeps_the_requests_thinking_type() {
+    const STATED: &[EffortLevel] = &[Low, Medium, High, Xhigh, Max];
+    let copilot = account(ANTHROPIC_COPILOT, ModelApi::Messages, STATED);
+    let base = row(Provider::Anthropic, STATED);
+    let rows = [
+        ModelCapabilities {
+            anthropic_disabled_thinking: AnthropicDisabledThinking::AnyEffort,
+            ..base
+        },
+        ModelCapabilities {
+            anthropic_disabled_thinking: AnthropicDisabledThinking::AtOrBelowHighEffort,
+            ..base
+        },
+    ];
+    let mut capped = 0_u32;
+    for catalog_row in &rows {
+        for config in [
+            AnthropicThinkingConfig::Disabled,
+            AnthropicThinkingConfig::BetweenTools,
+        ] {
+            let baseline = thinking(config.clone());
+            for level in STATED.iter().copied() {
+                let context = format!(
+                    "{config:?} at {level:?}, disabled thinking {:?}",
+                    catalog_row.anthropic_disabled_thinking
+                );
+                let mut expected_params = baseline.clone();
+                let expected = previous_lowering::lower(
+                    Some(catalog_row),
+                    Provider::Anthropic,
+                    level,
+                    &mut expected_params,
+                );
+                let (actual, params) = lower_on_route(
+                    copilot.clone(),
+                    Provider::Anthropic,
+                    Some(catalog_row),
+                    level,
+                    &baseline,
+                );
+                assert_eq!(actual, expected, "{context}");
+                assert_eq!(params, expected_params, "{context}");
+                match actual.1 {
+                    ReasoningLoweringOutcome::Applied(_) => {
+                        let tag = anthropic_tag_of(&params);
+                        assert_eq!(tag.effort, Some(typed_anthropic(level)), "{context}");
+                        assert_eq!(tag.thinking, Some(config.clone()), "{context}");
+                    }
+                    ReasoningLoweringOutcome::NotApplied(reason) => {
+                        capped += 1;
+                        assert_eq!(
+                            reason,
+                            ReasoningNotAppliedReason::ThinkingModeConflict,
+                            "{context}"
+                        );
+                        assert!(level > High, "{context}");
+                        assert_eq!(params, baseline, "{context}");
+                    }
+                }
+
+                let mut params = baseline.clone();
+                let refusal = strict(level, &copilot, Some(catalog_row), &mut params)
+                    .expect_err("the level is sent there only with adaptive");
+                assert_eq!(refusal.reason, Reason::ConflictingThinkingType, "{context}");
+                assert_eq!(params, baseline, "{context}");
+            }
+        }
+    }
+    // `between_tools` is capped on both rows, `disabled` on the row that
+    // records the ceiling: `xhigh` and `max` each.
+    assert_eq!(capped, 6);
 }

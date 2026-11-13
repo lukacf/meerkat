@@ -1086,16 +1086,18 @@ impl Fixture {
 
     /// What a request sent with `level` reports.
     fn resolution(&self, level: EffortLevel) -> ReasoningEffortResolution {
-        ReasoningEffortResolution {
-            requested: level,
-            level,
-            provider: self.provider,
-            model: self.model.clone(),
-            route: self.route.clone(),
-            fields: self.param.fields(),
-            facts: self.facts,
-            decided_by: ReasoningEffortDecidedBy::Request,
-        }
+        // Read from the wire form: the type is built only by the resolver.
+        serde_json::from_value(json!({
+            "requested": level,
+            "level": level,
+            "provider": self.provider,
+            "model": self.model,
+            "route": self.route,
+            "fields": self.param.fields(),
+            "facts": self.facts,
+            "decided_by": ReasoningEffortDecidedBy::Request,
+        }))
+        .expect("a resolution reads from its wire form")
     }
 
     /// Every recorded request went to the route's API, named the route's
@@ -1255,6 +1257,27 @@ fn event_types(events: &[AgentEvent]) -> Vec<String> {
 
 fn stored_identity(agent: &DynAgent) -> Value {
     serde_json::to_value(agent.session().session_metadata()).expect("metadata serializes")
+}
+
+/// The refusal `fixture`'s route gives for `level`, read from its wire form
+/// (the type is built only by the resolver). It names no conflict.
+fn expected_refusal(
+    fixture: &Fixture,
+    level: EffortLevel,
+    reason: ReasoningEffortRefusalReason,
+    supported: Option<Vec<EffortLevel>>,
+    facts: Option<ReasoningFactsSource>,
+) -> ReasoningEffortRefusal {
+    serde_json::from_value(json!({
+        "requested": level,
+        "provider": fixture.provider,
+        "model": fixture.model,
+        "route": fixture.route,
+        "reason": reason,
+        "supported": supported,
+        "facts": facts,
+    }))
+    .expect("a refusal reads from its wire form")
 }
 
 /// A run that must fail with the typed refusal: nothing is reported as
@@ -1482,17 +1505,13 @@ async fn unsupported_level_is_refused_before_any_provider_request() {
             let refusal = refused(&fixture, level_params(level)).await;
             assert_eq!(
                 refusal,
-                ReasoningEffortRefusal {
-                    requested: level,
-                    provider: fixture.provider,
-                    model: fixture.model.clone(),
-                    route: Some(fixture.route.clone()),
-                    reason: ReasoningEffortRefusalReason::UnsupportedLevel,
-                    supported: Some(fixture.supported.clone()),
-                    facts: Some(fixture.facts),
-                    conflicting_param: None,
-                    conflicting_level: None,
-                },
+                expected_refusal(
+                    &fixture,
+                    level,
+                    ReasoningEffortRefusalReason::UnsupportedLevel,
+                    Some(fixture.supported.clone()),
+                    Some(fixture.facts),
+                ),
                 "{param:?} at {level:?}"
             );
         }
@@ -1582,17 +1601,13 @@ async fn unknown_support_is_refused_before_any_provider_request() {
         let refusal = refused(&fixture, level_params(level)).await;
         assert_eq!(
             refusal,
-            ReasoningEffortRefusal {
-                requested: level,
-                provider: fixture.provider,
-                model: fixture.model.clone(),
-                route: Some(fixture.route.clone()),
-                reason: ReasoningEffortRefusalReason::SupportedLevelsUnknown,
-                supported: None,
-                facts: None,
-                conflicting_param: None,
-                conflicting_level: None,
-            },
+            expected_refusal(
+                &fixture,
+                level,
+                ReasoningEffortRefusalReason::SupportedLevelsUnknown,
+                None,
+                None,
+            ),
             "{param:?} ({stage:?})"
         );
         assert_eq!(
@@ -1827,11 +1842,9 @@ async fn copilot_route_change_re_resolves_before_sending() {
     );
     Param::CopilotChat.assert_golden(&recorded[0].body, level);
 
-    let moved = ReasoningEffortResolution {
-        route: Param::CopilotChat.route(),
-        fields: Param::CopilotChat.fields(),
-        ..fixture.resolution(level)
-    };
+    let mut moved = fixture.resolution(level);
+    moved.route = Param::CopilotChat.route();
+    moved.fields = Param::CopilotChat.fields();
     assert_eq!(moved.route.to_string(), "copilot/chat_completions");
     assert_eq!(request_reports(&events), std::slice::from_ref(&moved));
     let report = result
@@ -1884,17 +1897,13 @@ async fn a_refresh_that_changes_only_the_levels_re_resolves() {
     let refusal = refused_run(&mut agent, "levels changed").await;
     assert_eq!(
         refusal,
-        ReasoningEffortRefusal {
-            requested: level,
-            provider: fixture.provider,
-            model: fixture.model.clone(),
-            route: Some(fixture.route.clone()),
-            reason: ReasoningEffortRefusalReason::UnsupportedLevel,
-            supported: Some(remaining),
-            facts: Some(ReasoningFactsSource::Account),
-            conflicting_param: None,
-            conflicting_level: None,
-        }
+        expected_refusal(
+            &fixture,
+            level,
+            ReasoningEffortRefusalReason::UnsupportedLevel,
+            Some(remaining),
+            Some(ReasoningFactsSource::Account),
+        )
     );
     assert_eq!(
         client.answered_apis(),
@@ -1952,17 +1961,13 @@ async fn refusal_inside_a_turn_is_the_typed_refusal() {
         let refusal = refused_run(&mut agent, &format!("{param:?}")).await;
         assert_eq!(
             refusal,
-            ReasoningEffortRefusal {
-                requested: level,
-                provider: fixture.provider,
-                model: fixture.model.clone(),
-                route: Some(fixture.route.clone()),
-                reason: ReasoningEffortRefusalReason::UnsupportedLevel,
-                supported: Some(remaining),
-                facts: Some(ReasoningFactsSource::Account),
-                conflicting_param: None,
-                conflicting_level: None,
-            },
+            expected_refusal(
+                &fixture,
+                level,
+                ReasoningEffortRefusalReason::UnsupportedLevel,
+                Some(remaining),
+                Some(ReasoningFactsSource::Account),
+            ),
             "{param:?}"
         );
         assert_eq!(
@@ -2349,29 +2354,25 @@ async fn a_level_the_route_stops_taking_is_refused_by_the_run() {
             let refusal = refused_run(&mut agent, &context).await;
             let expected = match declared {
                 // No route is reported: nothing states the level's support.
-                None => ReasoningEffortRefusal {
-                    requested: level,
-                    provider: fixture.provider,
-                    model: fixture.model.clone(),
-                    route: None,
-                    reason: ReasoningEffortRefusalReason::SupportedLevelsUnknown,
-                    supported: None,
-                    facts: None,
-                    conflicting_param: None,
-                    conflicting_level: None,
-                },
+                None => {
+                    let mut expected = expected_refusal(
+                        &fixture,
+                        level,
+                        ReasoningEffortRefusalReason::SupportedLevelsUnknown,
+                        None,
+                        None,
+                    );
+                    expected.route = None;
+                    expected
+                }
                 // The operator now declares the other levels only.
-                Some(remaining) => ReasoningEffortRefusal {
-                    requested: level,
-                    provider: fixture.provider,
-                    model: fixture.model.clone(),
-                    route: Some(fixture.route.clone()),
-                    reason: ReasoningEffortRefusalReason::UnsupportedLevel,
-                    supported: Some(remaining),
-                    facts: Some(fixture.facts),
-                    conflicting_param: None,
-                    conflicting_level: None,
-                },
+                Some(remaining) => expected_refusal(
+                    &fixture,
+                    level,
+                    ReasoningEffortRefusalReason::UnsupportedLevel,
+                    Some(remaining),
+                    Some(fixture.facts),
+                ),
             };
             assert_eq!(refusal, expected, "{context}");
             assert_eq!(

@@ -1990,7 +1990,13 @@ where
             // for the summary client's own route: a refusal fails this
             // compaction with the typed error and reaches no client.
             let mut request_params = provider_params.clone();
-            let resolution =
+            // A summary request that carries no level asks the client
+            // nothing: its route and default tag are read only to resolve
+            // a level.
+            let carries_level = request_params
+                .as_ref()
+                .is_some_and(|params| params.reasoning_effort.is_some());
+            let resolution = if carries_level {
                 match crate::agent::request_reasoning_effort::resolve_request_reasoning_effort(
                     &crate::agent::request_reasoning_effort::RequestReasoningTarget::of(
                         client,
@@ -2003,7 +2009,10 @@ where
                     Err(refusal) => {
                         break Err(crate::error::AgentError::ReasoningEffortRefused(refusal));
                     }
-                };
+                }
+            } else {
+                None
+            };
             let result = client
                 .stream_response_authorized(
                     &compaction_messages,

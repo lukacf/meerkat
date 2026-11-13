@@ -313,8 +313,13 @@ pub enum ReasoningFactsSource {
 /// absent (`facts` is absent exactly when `supported` is). The two
 /// `conflicting_*` fields are serialized only when present. The `Display`
 /// text is for people and is not a contract; read the fields.
+///
+/// Non-exhaustive: a later release can add a field, so code outside this
+/// crate reads the fields and does not build the value with a struct
+/// literal (a value is read from its wire form).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
 pub struct ReasoningEffortRefusal {
     /// The level the request named.
     pub requested: EffortLevel,
@@ -325,13 +330,16 @@ pub struct ReasoningEffortRefusal {
     /// The route the request would be served on. `None` when the client
     /// that serves the request reports no route: a route nobody observed
     /// is never guessed.
+    #[cfg_attr(feature = "schema", schemars(required))]
     pub route: Option<ReasoningRoute>,
     /// Why the level is refused.
     pub reason: ReasoningEffortRefusalReason,
     /// The levels the route accepts for the model: `None` when unknown or
     /// unavailable, empty when the route or the model takes no effort.
+    #[cfg_attr(feature = "schema", schemars(required))]
     pub supported: Option<Vec<EffortLevel>>,
     /// The source of `supported`.
+    #[cfg_attr(feature = "schema", schemars(required))]
     pub facts: Option<ReasoningFactsSource>,
     /// For a conflict: the path of the conflicting setting, for example
     /// `provider_params.provider_tag.effort`.
@@ -445,8 +453,13 @@ pub enum ReasoningEffortDecidedBy {
 
 /// A resolved `reasoning_effort` level: what one provider request is sent
 /// with, for which model and route.
+///
+/// Non-exhaustive: a later release can add a field, so code outside this
+/// crate reads the fields and does not build the value with a struct
+/// literal (a value is read from its wire form).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
 pub struct ReasoningEffortResolution {
     /// The level the request named.
     pub requested: EffortLevel,
@@ -469,8 +482,13 @@ pub struct ReasoningEffortResolution {
 
 /// One distinct resolution a run sent, with the number of provider requests
 /// that carried it. It has no `requested` of its own: the report holds it.
+///
+/// Non-exhaustive: a later release can add a field, so code outside this
+/// crate reads the fields and does not build the value with a struct
+/// literal (a value is read from its wire form).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
 pub struct ReasoningEffortSent {
     /// The level sent.
     pub level: EffortLevel,
@@ -494,8 +512,13 @@ pub struct ReasoningEffortSent {
 /// resolutions the run sent, in first-use order. A run that continues a
 /// callback suspension keeps its report; a run resumed from its durable run
 /// cursor after a restart reports the requests it sends from the resume on.
+///
+/// Non-exhaustive: a later release can add a field, so code outside this
+/// crate reads the fields and does not build the value with a struct
+/// literal (a value is read from its wire form).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
 pub struct ReasoningEffortReport {
     /// The level the run's requests named.
     pub requested: EffortLevel,

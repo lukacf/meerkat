@@ -271,6 +271,15 @@ fn owner_code(cause: &(dyn std::error::Error + 'static)) -> Option<OwnerCode> {
     if let Some(refusal) = cause.downcast_ref::<meerkat::help::HelpSessionNotResumable>() {
         return Some(OwnerCode::Public(refusal.error_code()));
     }
+    // A command that names the reasoning effort level in two places that
+    // disagree is the caller's request, refused before anything is built:
+    // invalid params, as JSON-RPC and REST answer the same disagreement.
+    if let Some(meerkat_core::SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree {
+        ..
+    }) = cause.downcast_ref::<meerkat_core::SessionLlmIdentityOverrideError>()
+    {
+        return Some(OwnerCode::Public(ErrorCode::InvalidParams));
+    }
     if let Some(code) = config_write_admission_code(cause) {
         return Some(OwnerCode::Public(code));
     }

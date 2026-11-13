@@ -54,6 +54,9 @@ fn runtime_driver_error_to_session_error(err: meerkat_runtime::RuntimeDriverErro
     if let Some(in_progress) = err.teardown_in_progress_session_error() {
         return in_progress;
     }
+    if let Some(refused) = err.reasoning_effort_refused_session_error() {
+        return refused;
+    }
     SessionError::Agent(meerkat_core::error::AgentError::InternalError(
         err.to_string(),
     ))
@@ -2710,6 +2713,29 @@ fn format_agent_result(
     }
 }
 
+/// A refused `reasoning_effort` level as a tool error, in the form JSON-RPC
+/// answers it: the session transport's code (invalid params, -32602), the
+/// refusal's message, and the typed data `{"kind":
+/// "reasoning_effort_refused", "retryable": <bool>,
+/// "reasoning_effort_refusal": {...}}`. A host reads the refusal from the
+/// data and never from the text. `None` for any other error.
+fn reasoning_effort_refused_tool_error(error: &SessionError) -> Option<ToolCallError> {
+    let SessionError::Agent(agent_error) = error.primary_error() else {
+        return None;
+    };
+    if !matches!(
+        agent_error.primary_error(),
+        meerkat::AgentError::ReasoningEffortRefused(_)
+    ) {
+        return None;
+    }
+    Some(ToolCallError::new(
+        meerkat_contracts::error::session_transport_error_code(error).jsonrpc_code(),
+        error.to_string(),
+        meerkat_contracts::error::session_error_details(error),
+    ))
+}
+
 fn format_agent_result_tool(
     result: Result<meerkat_core::types::RunResult, SessionError>,
     session_id: &meerkat::SessionId,
@@ -2718,6 +2744,10 @@ fn format_agent_result_tool(
         Err(SessionError::Agent(meerkat::AgentError::Cancelled)) => {
             Err(request_cancelled_tool_error())
         }
+        Err(error) => match reasoning_effort_refused_tool_error(&error) {
+            Some(refused) => Err(refused),
+            None => format_agent_result(Err(error), session_id).map_err(ToolCallError::internal),
+        },
         result => format_agent_result(result, session_id).map_err(ToolCallError::internal),
     }
 }
@@ -2774,6 +2804,18 @@ fn post_commit_session_created_error(
                 "resumable": true,
             })),
         );
+    }
+
+    // A refused reasoning effort level keeps its typed form; the data also
+    // names the session this call created, as its other failures do.
+    if let Some(mut refused) = reasoning_effort_refused_tool_error(err) {
+        if let Some(Value::Object(data)) = refused.data.as_mut() {
+            data.insert("session_id".to_string(), json!(session_id.to_string()));
+            data.insert("session_ref".to_string(), json!(session_id.to_string()));
+            data.insert("session_created".to_string(), json!(true));
+            data.insert("resumable".to_string(), json!(true));
+        }
+        return refused;
     }
 
     ToolCallError::internal_with_data(
@@ -11943,6 +11985,63 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             data.get("session_id").and_then(Value::as_str),
             Some(session_id_string.as_str())
         );
+    }
+
+    /// A refused reasoning effort level is a typed tool error, as JSON-RPC
+    /// answers it: invalid params with the typed refusal as the error's
+    /// data, never an internal error whose text a host would have to read.
+    /// After the call created its session the data also names the session.
+    #[test]
+    fn test_a_refused_reasoning_effort_is_a_typed_tool_error() {
+        let session_id = meerkat::SessionId::new();
+        for (reason, retryable) in [
+            ("unsupported_level", false),
+            ("supported_levels_unavailable", true),
+        ] {
+            let document = json!({
+                "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                "route": {"backend": "anthropic_api", "api": "messages"},
+                "reason": reason, "supported": null, "facts": null,
+            });
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document.clone()).expect("a refusal document reads");
+            let refused = || {
+                SessionError::Agent(meerkat::AgentError::ReasoningEffortRefused(Box::new(
+                    refusal.clone(),
+                )))
+            };
+            let typed = json!({
+                "kind": "reasoning_effort_refused",
+                "retryable": retryable,
+                "reasoning_effort_refusal": document,
+            });
+
+            let err = format_agent_result_tool(Err(refused()), &session_id)
+                .expect_err("a refused level is a tool error");
+            assert_eq!(err.code, -32602, "{reason}");
+            assert_eq!(err.message, format!("agent error: {refusal}"), "{reason}");
+            assert_eq!(err.data, Some(typed.clone()), "{reason}");
+
+            let err = post_commit_session_created_error(&session_id, &refused());
+            assert_eq!(err.code, -32602, "{reason}");
+            let data = err.data.expect("the typed data");
+            for (key, value) in typed.as_object().expect("an object") {
+                assert_eq!(&data[key], value, "{reason}: {key}");
+            }
+            assert_eq!(data["session_id"], session_id.to_string(), "{reason}");
+            assert_eq!(data["session_created"], true, "{reason}");
+            assert_eq!(data["resumable"], true, "{reason}");
+
+            // A reconfiguration's refusal reaches the same answer.
+            let from_driver = runtime_driver_error_to_session_error(
+                meerkat_runtime::RuntimeDriverError::ReasoningEffortRefused(Box::new(
+                    refusal.clone(),
+                )),
+            );
+            let err = format_agent_result_tool(Err(from_driver), &session_id)
+                .expect_err("a refused level is a tool error");
+            assert_eq!((err.code, err.data), (-32602, Some(typed)), "{reason}");
+        }
     }
 
     #[test]

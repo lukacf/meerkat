@@ -5207,12 +5207,13 @@ async fn handle_run_command(
             let merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
             // `--reasoning-effort` is the params' own `reasoning_effort`
             // key: the level has one home, and a level named in both
-            // places must be the same one.
+            // places must be the same one. The disagreement stays typed in
+            // the error chain, so the command exits as an invalid request.
             let merged_provider_params = meerkat_core::resolve_build_provider_params(
                 merged_provider_params.as_ref(),
                 reasoning_effort,
             )
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+            .map_err(anyhow::Error::new)?;
             let mut limits = config.budget_limits();
             if let Some(max_duration) = dur {
                 limits.max_duration = Some(max_duration);

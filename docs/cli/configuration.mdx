@@ -510,7 +510,7 @@ check made by the CLI itself, exits 1.
 A mob error with a typed console detail (codes 45-48 and 56) also prints one
 `detail:` line with that detail as JSON. Do not classify a failure by its
 numeric code alone: code 2 is shared by usage errors and `INVALID_PARAMS`,
-and a failed turn exits 1 whatever its cause, except a turn refused for its
+and a failed turn exits 1 whatever its cause, except, from 0.9.15, a turn refused for its
 reasoning effort level, which exits 2 like the refused build (see
 [Reasoning effort refusal](#reasoning-effort-refusal)). `rkat run --output json` writes
 the typed error as a [failure document](#json-failure-document); other
@@ -592,6 +592,8 @@ a mob error's `detail:` line) as in text mode. Text and HTML output print no
 failure document, and neither does any command other than `rkat run`.
 
 ### Reasoning effort refusal
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 `rkat run --reasoning-effort <LEVEL>` (with or without `--resume`) exits 2
 when the level is refused for the selected model on the route that serves it

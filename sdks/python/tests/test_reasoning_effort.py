@@ -3,14 +3,18 @@
 ``session/create`` takes a level; ``turn/start`` and ``mob/turn_start`` take
 its tri-state (a level, ``{"action": "clear"}``, absent). An older server
 ignores the parameter on ``session/create`` and refuses it on a turn, so the
-SDK refuses to send it below contract 0.9.15. A level the model or route does
-not accept is refused with ``error.data.kind`` ``"reasoning_effort_refused"``
+SDK refuses to send it below the first contract that carries the option
+(``_REASONING_EFFORT_MIN_CONTRACT``). A level the model or route does not
+accept is refused with ``error.data.kind`` ``"reasoning_effort_refused"``
 (``SessionError`` in crates/meerkat-core/src/service/mod.rs), which
 ``reasoning_effort_refusal`` reads back.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+import re
 from typing import Any
 
 import pytest
@@ -34,6 +38,7 @@ from meerkat import (
     parse_reasoning_effort_resolution,
     reasoning_effort_refusal,
 )
+from meerkat.client import _REASONING_EFFORT_MIN_CONTRACT
 from meerkat.errors import CapabilityUnavailableError, MeerkatError
 
 SESSION_ID = "019a2b3c-0000-7000-8000-000000000001"
@@ -47,8 +52,26 @@ RUN_RESULT = {
 }
 
 
+def _contract(parts: tuple[int, ...]) -> str:
+    return ".".join(str(part) for part in parts)
+
+
+def _one_release_below(parts: tuple[int, ...]) -> tuple[int, ...]:
+    major, minor, patch = parts
+    if patch > 0:
+        return (major, minor, patch - 1)
+    return (major, minor - 1, 0) if minor > 0 else (major - 1, 0, 0)
+
+
+CARRIER_CONTRACT = _contract(_REASONING_EFFORT_MIN_CONTRACT)
+"""The first server contract that carries the option: the SDK's own gate."""
+
+OLDER_CONTRACT = _contract(_one_release_below(_REASONING_EFFORT_MIN_CONTRACT))
+"""The contract one release below the gate: a server without the option."""
+
+
 def fake_client(
-    contract_version: str = "0.9.15",
+    contract_version: str = CARRIER_CONTRACT,
 ) -> tuple[MeerkatClient, list[tuple[str, dict[str, Any]]]]:
     client = MeerkatClient()
     client._server_contract_version = contract_version
@@ -127,16 +150,18 @@ async def test_a_turn_that_names_no_level_sends_none() -> None:
     assert "reasoning_effort" not in calls[1][1]
 
 
-OLDER_SERVER_REFUSAL = (
-    r"reasoning_effort needs a server contract >= 0\.9\.15; this server reports 0\.9\.14"
+OLDER_SERVER_REFUSAL = re.escape(
+    f"reasoning_effort needs a server contract >= {CARRIER_CONTRACT}; "
+    f"this server reports {OLDER_CONTRACT}"
 )
 
 
 @pytest.mark.asyncio
 async def test_sdk_refuses_the_field_for_an_older_server_contract() -> None:
-    """Released 0.9.14 has no such parameter: its session/create ignores it
+    """A server one release below the gate has no such parameter: its
+    session/create ignores it
     and the session would run with no level; its turn/start refuses it."""
-    client, calls = fake_client("0.9.14")
+    client, calls = fake_client(OLDER_CONTRACT)
     live = session(client)
 
     with pytest.raises(CapabilityUnavailableError, match=OLDER_SERVER_REFUSAL) as refused:
@@ -166,24 +191,160 @@ async def test_sdk_refuses_the_field_for_an_older_server_contract() -> None:
 
 @pytest.mark.asyncio
 async def test_the_gate_is_the_first_contract_that_carries_the_option() -> None:
-    """A 0.9.14 server does not have the option and does not get the field;
-    a 0.9.15 server, the first contract that carries it, does."""
-    before, before_calls = fake_client("0.9.14")
-    refusal = r"reasoning_effort needs a server contract >= 0\.9\.15; this server reports 0\.9\.14"
+    """A server one release below the gate does not have the option and does
+    not get the field; a server at the gate, the first contract that carries
+    it, does."""
+    before, before_calls = fake_client(OLDER_CONTRACT)
+    refusal = OLDER_SERVER_REFUSAL
     with pytest.raises(CapabilityUnavailableError, match=refusal):
         await before.create_session("hello", reasoning_effort="high")
     with pytest.raises(CapabilityUnavailableError, match=refusal):
         await session(before).turn("next", reasoning_effort="high")
     with pytest.raises(CapabilityUnavailableError, match=refusal):
         await before.mob_turn_start("mob-1", "worker", "next", reasoning_effort="high")
-    assert before_calls == [], "nothing is written to a 0.9.14 server"
+    assert before_calls == [], "nothing is written to a server below the gate"
 
-    carrier, carrier_calls = fake_client("0.9.15")
+    carrier, carrier_calls = fake_client(CARRIER_CONTRACT)
     await carrier.create_session("hello", reasoning_effort="high")
     await session(carrier).turn("next", reasoning_effort="low")
     assert [method for method, _ in carrier_calls] == ["session/create", "turn/start"]
     assert carrier_calls[0][1]["reasoning_effort"] == "high"
     assert carrier_calls[1][1]["reasoning_effort"] == "low"
+
+
+def streaming_client(
+    contract_version: str = CARRIER_CONTRACT,
+) -> tuple[MeerkatClient, list[tuple[str, dict[str, Any]]], list[str]]:
+    """A connected client for the streaming calls: ``written`` holds the
+    requests that reached the server's stdin, ``staged`` the subscriptions and
+    response slots a call registered before it could write."""
+    client = MeerkatClient()
+    client._server_contract_version = contract_version
+    written: list[tuple[str, dict[str, Any]]] = []
+    staged: list[str] = []
+
+    class Stdin:
+        def write(self, data: bytes) -> None:
+            request = json.loads(data)
+            written.append((request["method"], request["params"]))
+
+        async def drain(self) -> None:
+            return None
+
+    class Process:
+        stdin = Stdin()
+
+    class Dispatcher:
+        def subscribe_events(self, session_id: str) -> asyncio.Queue[Any]:
+            staged.append("events")
+            return asyncio.Queue()
+
+        def subscribe_pending_stream(self, request_id: int) -> asyncio.Queue[Any]:
+            staged.append("pending_stream")
+            return asyncio.Queue()
+
+        def expect_response(self, request_id: int) -> asyncio.Future[Any]:
+            staged.append("response")
+            return asyncio.get_running_loop().create_future()
+
+        def unsubscribe_events(self, session_id: str) -> None:
+            return None
+
+        def unsubscribe_pending_stream(self, request_id: int) -> None:
+            return None
+
+    client._process = Process()  # type: ignore[assignment]
+    client._dispatcher = Dispatcher()  # type: ignore[assignment]
+    return client, written, staged
+
+
+@pytest.mark.asyncio
+async def test_a_streaming_create_sends_the_level_and_is_refused_for_an_older_server() -> None:
+    client, written, _ = streaming_client()
+
+    async with client.create_session_streaming("hello", reasoning_effort="high"):
+        pass
+    async with client.create_session_streaming("hello"):
+        pass
+
+    assert [method for method, _ in written] == ["session/create"] * 2
+    assert written[0][1]["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in written[1][1]
+
+    older, older_written, older_staged = streaming_client(OLDER_CONTRACT)
+    with pytest.raises(CapabilityUnavailableError, match=OLDER_SERVER_REFUSAL):
+        older.create_session_streaming("hello", reasoning_effort="high")
+    assert older_written == [], "nothing is written to a server that would drop the level"
+    assert older_staged == [], "nothing is staged for sending either"
+
+    # A streaming create that names no level is unaffected.
+    async with older.create_session_streaming("hello"):
+        pass
+    assert [method for method, _ in older_written] == ["session/create"]
+    assert "reasoning_effort" not in older_written[0][1]
+
+
+@pytest.mark.asyncio
+async def test_a_streaming_turn_sends_the_tri_state_and_is_refused_for_an_older_server() -> None:
+    client, written, _ = streaming_client()
+    live = session(client)
+
+    async with live.stream("next", reasoning_effort="low"):
+        pass
+    async with live.stream("next", reasoning_effort=REASONING_EFFORT_CLEAR):
+        pass
+    async with live.stream("next"):
+        pass
+
+    assert [method for method, _ in written] == ["turn/start"] * 3
+    assert written[0][1]["reasoning_effort"] == "low"
+    assert written[1][1]["reasoning_effort"] == {"action": "clear"}
+    assert "reasoning_effort" not in written[2][1]
+
+    older, older_written, older_staged = streaming_client(OLDER_CONTRACT)
+    older_live = session(older)
+    with pytest.raises(CapabilityUnavailableError, match=OLDER_SERVER_REFUSAL):
+        older_live.stream("next", reasoning_effort="low")
+    with pytest.raises(CapabilityUnavailableError, match=OLDER_SERVER_REFUSAL):
+        older_live.stream("next", reasoning_effort=REASONING_EFFORT_CLEAR)
+    assert older_written == [], "nothing is written to a server that would refuse the turn"
+    assert older_staged == [], "nothing is staged for sending either"
+
+    # A streaming turn that names no level is unaffected.
+    async with older_live.stream("next"):
+        pass
+    assert [method for method, _ in older_written] == ["turn/start"]
+    assert "reasoning_effort" not in older_written[0][1]
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_first_turn_sends_the_tri_state_and_is_refused_for_an_older_server() -> None:
+    client, calls = fake_client()
+    deferred = await client.create_deferred_session("hello")
+
+    await deferred.start_turn("begin", reasoning_effort="max")
+    await deferred.start_turn("begin", reasoning_effort=REASONING_EFFORT_CLEAR)
+    await deferred.start_turn("begin")
+
+    assert [method for method, _ in calls] == ["session/create"] + ["turn/start"] * 3
+    assert calls[1][1]["session_id"] == SESSION_ID
+    assert calls[1][1]["reasoning_effort"] == "max"
+    assert calls[2][1]["reasoning_effort"] == {"action": "clear"}
+    assert "reasoning_effort" not in calls[3][1]
+
+    older, older_calls = fake_client(OLDER_CONTRACT)
+    older_deferred = await older.create_deferred_session("hello")
+    del older_calls[:]
+    with pytest.raises(CapabilityUnavailableError, match=OLDER_SERVER_REFUSAL):
+        await older_deferred.start_turn("begin", reasoning_effort="max")
+    with pytest.raises(CapabilityUnavailableError, match=OLDER_SERVER_REFUSAL):
+        await older_deferred.start_turn("begin", reasoning_effort=REASONING_EFFORT_CLEAR)
+    assert older_calls == [], "nothing is written to a server that would refuse the turn"
+
+    # A first turn that names no level is unaffected.
+    await older_deferred.start_turn("begin")
+    assert [method for method, _ in older_calls] == ["turn/start"]
+    assert "reasoning_effort" not in older_calls[0][1]
 
 
 # The refusal's data for a level the model does not accept.
@@ -203,7 +364,7 @@ UNSUPPORTED = {
 
 
 def refused(data: Any) -> MeerkatError:
-    return MeerkatError("INVALID_PARAMS", "reasoning effort refused", details=data)
+    return MeerkatError("-32602", "reasoning effort refused", details=data)
 
 
 def with_refusal(**changes: Any) -> dict[str, Any]:

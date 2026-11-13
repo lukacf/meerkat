@@ -1424,6 +1424,39 @@ pub enum WireTurnMetadataOverride<T> {
     Clear,
 }
 
+/// The schema of a request's `reasoning_effort` turn member
+/// (`WireTurnMetadataOverride<EffortLevel>`), written out: a bare level,
+/// `{"action": "set", "value": <level>}`, or `{"action": "clear"}`. The
+/// generic type's derived schema has one name for every instance, so a
+/// document that merges components by name would describe this member with
+/// another instance's value type, and the derived schema has no bare form.
+#[cfg(feature = "schema")]
+pub(crate) fn reasoning_effort_turn_override_schema(
+    generator: &mut schemars::SchemaGenerator,
+) -> schemars::Schema {
+    let level = generator.subschema_for::<meerkat_core::model_profile::capabilities::EffortLevel>();
+    schemars::json_schema!({
+        "anyOf": [
+            level,
+            {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "const": "set" },
+                    "value": level
+                },
+                "required": ["action", "value"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "const": "clear" }
+                },
+                "required": ["action"]
+            }
+        ]
+    })
+}
+
 impl<'de, T> Deserialize<'de> for WireTurnMetadataOverride<T>
 where
     T: DeserializeOwned,

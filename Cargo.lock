@@ -3471,6 +3471,7 @@ dependencies = [
  "meerkat-copilot",
  "meerkat-core",
  "meerkat-live",
+ "meerkat-llm-core",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
  "meerkat-mob",

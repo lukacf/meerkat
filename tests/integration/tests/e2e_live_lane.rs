@@ -89,3 +89,163 @@ live_suite!(
     e2e_live_surface_build_fixtures,
     "surface-build-fixtures-live"
 );
+
+/// Live row of the provider-neutral `reasoning_effort` level on the direct
+/// provider APIs: one cell per provider whose key is set (OpenAI Responses,
+/// Anthropic Messages, Gemini `generateContent`). A cell takes the first
+/// catalog model whose row states effort levels, its provider's default
+/// model first, and sends ONE request for it: a streamed turn at one level
+/// of the row, with a tool offered, through a session the factory builds on
+/// the provider's own client. The run must report the level with the route
+/// and `facts: catalog`. Before that, and without any request, a level
+/// outside the row and a catalog model whose row states no levels must be
+/// refused.
+///
+/// The rules are those of `meerkat_integration_tests::live_reasoning_matrix`,
+/// pinned there by rows that need no provider: at most one request per cell,
+/// counted by a gate in front of the client; the run ends at the first 401,
+/// 403, 429, exhausted quota or policy stop and sends nothing after it; a
+/// line carries a failure's class and HTTP status, never the provider's
+/// text; every cell the run reaches is also printed on stdout as one
+/// `reasoning-effort-receipt-observation` line of typed fields for the
+/// reasoning effort execution receipt. A run sends at most one request per
+/// provider with a key, three at most, and asks for nothing else: a direct
+/// route has no account lookup, and a direct client sends nothing a second
+/// time on its own.
+///
+/// ```text
+/// repo-cargo test -p meerkat-integration-tests --test e2e_live_lane \
+///     direct_provider_live_reasoning_effort -- --ignored --exact --nocapture
+/// ```
+///
+/// Without a provider key the row prints a skip and passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "lane:e2e-live"]
+async fn direct_provider_live_reasoning_effort() {
+    use std::time::{Duration, Instant};
+
+    use meerkat::AgentFactory;
+    use meerkat_core::{Config, Provider, ReasoningLevelFacts, SessionLlmIdentity};
+    use meerkat_integration_tests::live_reasoning_matrix::{
+        self as matrix, CellModel, FailureClass, Lane, MatrixLine, MatrixRun, Redactor,
+        RequestBudget,
+    };
+
+    /// The variables a provider's key is read from, as the live lane names
+    /// them.
+    const PROVIDER_KEYS: [(Provider, &[&str]); 3] = [
+        (Provider::OpenAI, &["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]),
+        (
+            Provider::Anthropic,
+            &["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
+        ),
+        (
+            Provider::Gemini,
+            &["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        ),
+    ];
+
+    let providers: Vec<Provider> = PROVIDER_KEYS
+        .iter()
+        .filter(|(_, names)| {
+            names
+                .iter()
+                .any(|name| std::env::var(name).is_ok_and(|value| !value.is_empty()))
+        })
+        .map(|(provider, _)| *provider)
+        .collect();
+    if providers.is_empty() {
+        eprintln!("SKIP direct-live reasoning: no provider key is set");
+        return;
+    }
+
+    let mut config = Config::default();
+    config.model_fallback.enabled = Some(false);
+    let temp = tempfile::TempDir::new().unwrap_or_else(|error| panic!("a directory: {error}"));
+    let factory = AgentFactory::new(temp.path().join("factory-store"))
+        .runtime_root(temp.path().join("runtime"));
+    let redactor = Redactor::default();
+
+    // Per provider: the first catalog model whose row states levels on the
+    // direct route and the first whose row states none.
+    let mut candidates = Vec::new();
+    for provider in providers {
+        let observation = meerkat_core::direct_route_observation(provider);
+        let facts = |model: &str| {
+            meerkat_core::supported_reasoning_levels(
+                provider,
+                observation.as_ref(),
+                meerkat_models::capabilities_for(provider, model),
+            )
+        };
+        let models: Vec<&str> = meerkat_models::default_model(provider)
+            .into_iter()
+            .chain(meerkat_models::allowed_models(provider))
+            .collect();
+        let with_levels = models.iter().copied().find(|model| {
+            matches!(facts(model), ReasoningLevelFacts::Stated { levels, .. } if !levels.is_empty())
+        });
+        let without_levels = models
+            .iter()
+            .copied()
+            .find(|model| matches!(facts(model), ReasoningLevelFacts::Unknown));
+        for model in with_levels.into_iter().chain(without_levels) {
+            let identity = SessionLlmIdentity {
+                model: model.to_string(),
+                provider,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            };
+            let Ok(client) = factory
+                .build_llm_client_for_identity(&config, &identity)
+                .await
+            else {
+                let line = MatrixLine::Fail {
+                    route: format!("{}/-", provider.as_str()),
+                    model: model.to_string(),
+                    shape: None,
+                    level: None,
+                    class: FailureClass::BuildFailed,
+                    status: None,
+                    detail: Some("route_client"),
+                }
+                .render(Lane::Direct);
+                eprintln!("{}", redactor.redact(&line));
+                panic!("STOP: a provider client did not build; no request was sent");
+            };
+            candidates.push((
+                provider,
+                CellModel {
+                    model: model.to_string(),
+                    client,
+                    auth_binding: None,
+                    config: config.clone(),
+                },
+            ));
+        }
+    }
+    let cells = matrix::assemble_cells(candidates);
+
+    let run = MatrixRun {
+        lane: Lane::Direct,
+        state_root: temp.path().join("matrix"),
+        budget: RequestBudget::new(matrix::REQUESTS_PER_CELL),
+        redactor,
+        turn_timeout: Duration::from_secs(90),
+        deadline: Instant::now() + Duration::from_secs(240),
+        max_tokens: 512,
+        max_retries: 0,
+    };
+    let summary = matrix::run_matrix(&run, &cells, &matrix::print_line).await;
+
+    assert!(
+        summary.stopped.is_none(),
+        "STOP: a provider failure ended the run; see its STOP line"
+    );
+    assert_eq!(summary.fail, 0, "a cell failed; see its FAIL line");
+    assert!(
+        summary.pass > 0,
+        "no cell passed: no provider with a key has a catalog model that states levels, or every turn was cut"
+    );
+}

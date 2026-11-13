@@ -2330,7 +2330,10 @@ impl MobToolCaller {
 
     /// The person the calling member is private to, when it is private to
     /// one. A caller whose member cannot be read is refused: whom it acts
-    /// for is unknown.
+    /// for is unknown. The caller's own roster row says it; the record of
+    /// the members this process built is asked only for a caller that has
+    /// no row, so a caller whose row names nobody is never taken for a
+    /// person's member on the record's word.
     async fn owner(&self, tool: &str) -> Result<Option<String>, meerkat_core::ToolError> {
         let Some(state) = self.state.upgrade() else {
             return Err(meerkat_core::ToolError::execution_failed(format!(
@@ -2338,9 +2341,17 @@ impl MobToolCaller {
             )));
         };
         match state.member_for_bridge_session(&self.session_id).await {
-            Ok(Some((mob_id, member))) => Ok(self
-                .member_owner(&state, mob_id.as_str(), member.as_str())
-                .await),
+            Ok(Some((mob_id, member))) => Ok(
+                match self
+                    .row_owner(&state, mob_id.as_str(), member.as_str())
+                    .await
+                {
+                    Some(owner) => owner,
+                    None => self
+                        .private_owners
+                        .owner_of(mob_id.as_str(), member.as_str()),
+                },
+            ),
             Ok(None) => Ok(None),
             Err(error) => Err(meerkat_core::ToolError::execution_failed(format!(
                 "tool '{tool}' could not read its caller: {error}"
@@ -2348,22 +2359,42 @@ impl MobToolCaller {
         }
     }
 
-    /// The person member `member` of mob `mob_id` is private to. Its own
-    /// roster row says so first: the labels the member holds. The record
-    /// of the members this process built only adds to that, for a member
-    /// whose row names nobody or cannot be read (one that left the roster,
-    /// say): what the record does not know is not thereby private to no
-    /// one.
+    /// What the roster row of member `member` of mob `mob_id` says of its
+    /// person: `Some` of the row's answer when the row was read, `None`
+    /// when the mob holds no row for it or the row cannot be read.
+    async fn row_owner(
+        &self,
+        state: &meerkat_mob_mcp::MobMcpState,
+        mob_id: &str,
+        member: &str,
+    ) -> Option<Option<String>> {
+        let handle = state
+            .handle_for(&meerkat_mob::MobId::from(mob_id))
+            .await
+            .ok()?;
+        let entry = handle
+            .get_member(&meerkat_mob::AgentIdentity::from(member))
+            .await
+            .ok()??;
+        Some(crate::access::private_owner(&entry.labels).map(str::to_string))
+    }
+
+    /// The person member `member` of mob `mob_id` is private to, as a
+    /// target of the caller's tools. Its own roster row says so first: the
+    /// labels the member holds. The record of the members this process
+    /// built only adds to that, for a member whose row names nobody or
+    /// cannot be read (one that left the roster, say): what the record does
+    /// not know is not thereby private to no one.
     async fn member_owner(
         &self,
         state: &meerkat_mob_mcp::MobMcpState,
         mob_id: &str,
         member: &str,
     ) -> Option<String> {
-        match state.handle_for(&meerkat_mob::MobId::from(mob_id)).await {
-            Ok(handle) => self.owner_in(&handle, mob_id, member).await,
-            Err(_) => self.private_owners.owner_of(mob_id, member),
-        }
+        self.row_owner(state, mob_id, member)
+            .await
+            .flatten()
+            .or_else(|| self.private_owners.owner_of(mob_id, member))
     }
 
     /// [`Self::member_owner`] over `mob`, the handle of mob `mob_id`: the

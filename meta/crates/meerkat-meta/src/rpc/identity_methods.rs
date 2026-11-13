@@ -189,7 +189,10 @@ pub(crate) fn console_requester(person: Option<&str>) -> ChangeRequester {
 
 /// The agents a Console caller may view, as the family asks which agents a
 /// caller may see: a peer the caller may not view is answered as a name no
-/// agent holds.
+/// agent holds. An agent the family read is decided again as its own record
+/// reads it (its profile as its role, and its labels), so a rule about a
+/// role or a label, and the rule about an agent private to a person, hold
+/// for an agent no member is seated for.
 pub(crate) struct ViewedAgents(pub(crate) AccessView);
 
 impl crate::identity_creation::PeerVisibility for ViewedAgents {
@@ -199,6 +202,25 @@ impl crate::identity_creation::PeerVisibility for ViewedAgents {
 
     fn sees_every_agent(&self) -> bool {
         self.0.allows(crate::access::ACTION_RUNTIME_ADMIN)
+    }
+
+    fn sees_record(
+        &self,
+        name: &str,
+        profile: &str,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> bool {
+        self.0
+            .decide_agent_with_attributes(
+                crate::access::ACTION_AGENT_VIEW,
+                &crate::access::AgentResourceAttributes {
+                    identity: name.to_owned(),
+                    agent_id: None,
+                    role: Some(profile.to_owned()),
+                    labels: labels.clone(),
+                },
+            )
+            .is_allow()
     }
 }
 
@@ -659,6 +681,88 @@ mod tests {
         assert!(!person.sees("ledger"), "no rule lets the caller view it");
         let admin = ViewedAgents(enforced.view_for_subject(Some("root@example.test")));
         assert!(admin.sees("ledger"), "an admin views every agent");
+    }
+
+    /// A controller whose rules let everyone view every agent, and deny
+    /// `person@example.test` the agents of the role `reviewer` and the
+    /// agents that carry the label `tier = sealed`. Its access attributes
+    /// hold nothing: a record the family read is all there is to decide on.
+    #[allow(clippy::expect_used)]
+    fn scoped_denies() -> crate::access::AccessController {
+        use crate::access::{
+            ACTION_AGENT_VIEW, AccessControlConfig, AccessController, AccessEffect, AccessRule,
+        };
+
+        let deny = |id: &str| AccessRule {
+            id: id.to_string(),
+            effect: AccessEffect::Deny,
+            subjects: vec!["person@example.test".to_string()],
+            actions: vec![ACTION_AGENT_VIEW.to_string()],
+            ..AccessRule::default()
+        };
+        AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "people".to_string(),
+                    actions: vec![ACTION_AGENT_VIEW.to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    roles: vec!["reviewer".to_string()],
+                    ..deny("no-reviewer")
+                },
+                AccessRule {
+                    match_labels: std::collections::BTreeMap::from([(
+                        "tier".to_string(),
+                        "sealed".to_string(),
+                    )]),
+                    ..deny("nothing-sealed")
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller")
+    }
+
+    /// An agent the family read is decided on its own record: a deny that
+    /// names a role refuses a record of that profile, whatever the access
+    /// attributes hold of the agent's name.
+    #[test]
+    fn a_console_caller_sees_a_record_as_its_profile_decides() {
+        use crate::identity_creation::PeerVisibility;
+
+        let enforced = scoped_denies();
+        let plain = std::collections::BTreeMap::new();
+        let person = ViewedAgents(enforced.view_for_subject(Some("person@example.test")));
+        assert!(person.sees_record("scout", "worker", &plain));
+        assert!(
+            !person.sees_record("critic", "reviewer", &plain),
+            "the deny names the record's profile"
+        );
+        let other = ViewedAgents(enforced.view_for_subject(Some("other@example.test")));
+        assert!(other.sees_record("critic", "reviewer", &plain));
+    }
+
+    /// An agent the family read is decided on its own record: a deny that
+    /// names a label refuses a record that carries it, whatever the access
+    /// attributes hold of the agent's name.
+    #[test]
+    fn a_console_caller_sees_a_record_as_its_labels_decide() {
+        use crate::identity_creation::PeerVisibility;
+
+        let enforced = scoped_denies();
+        let plain = std::collections::BTreeMap::new();
+        let sealed = std::collections::BTreeMap::from([("tier".to_string(), "sealed".to_string())]);
+        let person = ViewedAgents(enforced.view_for_subject(Some("person@example.test")));
+        assert!(person.sees_record("scout", "worker", &plain));
+        assert!(
+            !person.sees_record("vault", "worker", &sealed),
+            "the deny names a label the record carries"
+        );
+        let other = ViewedAgents(enforced.view_for_subject(Some("other@example.test")));
+        assert!(other.sees_record("vault", "worker", &sealed));
     }
     use crate::identity_creation::{AgentChangeState, AgentOutcome, Requester, Sha256Digest};
 

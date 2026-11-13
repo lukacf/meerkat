@@ -7666,3 +7666,69 @@ fn a_profile_update_moves_an_agent_to_the_profile_on_the_same_conversation() {
         "nothing moved"
     );
 }
+
+/// A caller that sees every name, and no record of the profile it names.
+struct SeesNoRecordOf(&'static str);
+
+impl PeerVisibility for SeesNoRecordOf {
+    fn sees(&self, _name: &str) -> bool {
+        true
+    }
+
+    fn sees_record(&self, _name: &str, profile: &str, _labels: &BTreeMap<String, String>) -> bool {
+        profile != self.0
+    }
+}
+
+/// A caller is shown an agent as the agent's own record reads to it: an
+/// agent whose name the caller's view admits and whose record it refuses
+/// is in no list and no directory of the caller's, and a get of it answers
+/// as for a name no agent holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_caller_is_shown_no_agent_whose_record_its_view_refuses() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) = launch(temp.path(), false).await;
+    assert!(runtime.attach_identity_policy(in_process_policy(), IdentityFamilyOptions::new()));
+    let whole = runtime.identity_family().expect("the family");
+    let narrow = runtime
+        .identity_family_seen_by(Arc::new(SeesNoRecordOf("planner")))
+        .expect("the family as a caller that sees no record of one profile");
+    let mob = runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+
+    let everyone = listed_to(&whole, &mob, &host).await;
+    assert!(
+        everyone.iter().any(|name| name == PLANNER) && everyone.iter().any(|name| name == HOST_A),
+        "{everyone:?}"
+    );
+    let others: Vec<String> = everyone
+        .iter()
+        .filter(|name| name.as_str() != PLANNER)
+        .cloned()
+        .collect();
+    assert_eq!(listed_to(&narrow, &mob, &host).await, others);
+    let offered = offered_to(&narrow, &mob, &host).await;
+    assert!(
+        offered.iter().all(|name| name != PLANNER) && offered.iter().any(|name| name == HOST_A),
+        "{offered:?}"
+    );
+    let got = narrow
+        .read(&mob, &host, IdentityRead::Get(GetAgent::new(PLANNER)))
+        .await
+        .expect_err("a get of an agent whose record the view refuses");
+    let absent = narrow
+        .read(&mob, &host, IdentityRead::Get(GetAgent::new("nobody")))
+        .await
+        .expect_err("a name no agent holds");
+    assert_eq!(
+        (got.kind_token(), &got.field),
+        (absent.kind_token(), &absent.field),
+        "nothing tells the two apart"
+    );
+    // The twin: an agent whose record the view admits is read.
+    narrow
+        .read(&mob, &host, IdentityRead::Get(GetAgent::new(HOST_A)))
+        .await
+        .expect("a get of an agent the view shows");
+    let _ = runtime.shutdown().await;
+}

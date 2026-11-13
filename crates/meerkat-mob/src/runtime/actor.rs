@@ -7691,6 +7691,13 @@ enum RetirePendingSpawnVerdict {
 pub(super) struct PendingSpawnProgress {
     pub(super) bridge_session_id: Option<meerkat_core::types::SessionId>,
     pub(super) operation_id: Option<meerkat_core::ops::OperationId>,
+    /// Whether the finished provision created its session or attached one
+    /// that already existed, as its receipt reports it. Absent until the
+    /// provision returns.
+    pub(super) session_origin: Option<super::provisioner::ProvisionSessionOrigin>,
+    /// The exact attachment a provision that resumed or revived an existing
+    /// session may release, from the same receipt.
+    pub(super) rollback_authority: Option<super::provisioner::ResumedMemberRollbackAuthority>,
 }
 
 /// Honest spawn-exec observations (DEC-P3-10): a pure function over the
@@ -8115,6 +8122,49 @@ pub(super) struct PendingSpawnCleanupAnchor {
     /// pending-spawn cleanup. Generic lifecycle drains (stop/destroy) have no
     /// committed member incarnation and leave this absent.
     retire_incarnation: Option<RetirePendingSpawnCleanupIncarnation>,
+    /// Whether the provision created the session or attached one that
+    /// already existed (see [`Self::settle`]).
+    session_origin: super::provisioner::ProvisionSessionOrigin,
+    /// The exact attachment a provision that resumed or revived an existing
+    /// session may release.
+    rollback_authority: Option<super::provisioner::ResumedMemberRollbackAuthority>,
+}
+
+impl PendingSpawnCleanupAnchor {
+    /// Run this anchor's cleanup against the provisioner that owns the
+    /// provisioned session.
+    ///
+    /// A lifecycle step that cancels the spawn (stop, complete, reset,
+    /// shutdown, destroy) ends a session the spawn created. A session the
+    /// spawn resumed or revived existed before it and never became a
+    /// member's: it is released exactly as a failed spawn's rollback
+    /// releases it, and stays as it was. A retire of the pending member is
+    /// that member's disposal, so it ends the session whatever its origin,
+    /// as the retire of a seated member does.
+    pub(super) async fn settle(
+        &self,
+        provisioner: &Arc<dyn MobProvisioner>,
+    ) -> Result<(), MobError> {
+        let member_ref = MemberRef::from_bridge_session_id(self.session_id.clone());
+        let releases_existing_session = self.retire_incarnation.is_none()
+            && self.session_origin != super::provisioner::ProvisionSessionOrigin::Fresh;
+        if releases_existing_session {
+            return PendingProvision::new(
+                member_ref,
+                self.agent_identity.clone(),
+                Arc::clone(provisioner),
+                self.operation_id.clone(),
+                self.session_origin,
+                self.rollback_authority.clone(),
+                super::provisioner::RollbackOrigin::SpawnRollback,
+            )
+            .rollback()
+            .await;
+        }
+        provisioner
+            .abort_member_provision(&member_ref, &self.operation_id, &self.reason)
+            .await
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19499,6 +19549,40 @@ impl MobActor {
             "mob shutdown report complete"
         );
         self.lifecycle_observations.store_shutdown_report(report);
+    }
+
+    /// Dispose of a provisioned member whose spawn ended before the mob took
+    /// its completion (it was refused after provisioning, or the actor is
+    /// gone).
+    ///
+    /// A session the spawn created is retired, and the typed disposal is
+    /// returned. A session the spawn resumed or revived existed before it and
+    /// never became a member's: it is released exactly as a failed spawn's
+    /// rollback releases it and stays as it was (`None`).
+    async fn dispose_unsettled_provision(
+        provisioner: &Arc<dyn MobProvisioner>,
+        agent_identity: &AgentIdentity,
+        receipt: &super::handle::MemberSpawnReceipt,
+    ) -> Result<Option<crate::machines::mob_machine::MemberSessionDisposal>, MobError> {
+        match receipt.session_origin {
+            super::provisioner::ProvisionSessionOrigin::Fresh => provisioner
+                .retire_member(&receipt.member_ref)
+                .await
+                .map(Some),
+            super::provisioner::ProvisionSessionOrigin::ResumedDurable
+            | super::provisioner::ProvisionSessionOrigin::RevivedRetired => PendingProvision::new(
+                receipt.member_ref.clone(),
+                agent_identity.clone(),
+                Arc::clone(provisioner),
+                receipt.operation_id.clone(),
+                receipt.session_origin,
+                receipt.rollback_authority.clone(),
+                super::provisioner::RollbackOrigin::SpawnRollback,
+            )
+            .rollback()
+            .await
+            .map(|()| None),
+        }
     }
 
     async fn ensure_autonomous_dispatch_capability_for_provisioner(
@@ -34662,8 +34746,20 @@ impl MobActor {
                 .bridge_session_id
                 .clone()
                 .zip(progress.operation_id.clone())
+                .map(|(session_id, operation_id)| {
+                    (
+                        session_id,
+                        operation_id,
+                        // A provision reports its origin with its session; a
+                        // slot that names a session and no origin created it.
+                        progress
+                            .session_origin
+                            .unwrap_or(super::provisioner::ProvisionSessionOrigin::Fresh),
+                        progress.rollback_authority.clone(),
+                    )
+                })
         };
-        let Some((session_id, operation_id)) = snapshot else {
+        let Some((session_id, operation_id, session_origin, rollback_authority)) = snapshot else {
             return Ok(None);
         };
         if let Some(incarnation) = retire_incarnation
@@ -34681,6 +34777,8 @@ impl MobActor {
             operation_id,
             reason: reason.to_string(),
             retire_incarnation: retire_incarnation.cloned(),
+            session_origin,
+            rollback_authority,
         }))
     }
 
@@ -34688,13 +34786,7 @@ impl MobActor {
         &self,
         anchor: &PendingSpawnCleanupAnchor,
     ) -> Result<(), MobError> {
-        self.provisioner
-            .abort_member_provision(
-                &MemberRef::from_bridge_session_id(anchor.session_id.clone()),
-                &anchor.operation_id,
-                &anchor.reason,
-            )
-            .await
+        anchor.settle(&self.provisioner).await
     }
 
     fn pending_spawn_cleanup_error(context: &str, errors: Vec<String>) -> MobError {
@@ -36967,6 +37059,7 @@ impl MobActor {
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress {
                 bridge_session_id: Some(pending_spawn_session_id),
                 operation_id: Some(operation_id),
+                ..PendingSpawnProgress::default()
             })),
             pending_recipient_trust_peer_id: None,
             observations: SpawnExecObservations::default(),
@@ -39056,6 +39149,10 @@ impl MobActor {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             progress.bridge_session_id = Some(bridge_session_id);
                             progress.operation_id = Some(spawn_receipt.operation_id.clone());
+                            progress.session_origin = Some(spawn_receipt.session_origin);
+                            progress
+                                .rollback_authority
+                                .clone_from(&spawn_receipt.rollback_authority);
                         }
                         #[cfg(test)]
                         {
@@ -39074,11 +39171,15 @@ impl MobActor {
                                 )
                                 .await
                         {
-                            if let Err(retire_error) =
-                                provisioner.retire_member(&spawn_receipt.member_ref).await
+                            if let Err(cleanup_error) = Self::dispose_unsettled_provision(
+                                &provisioner,
+                                &spawn_member_identity,
+                                &spawn_receipt,
+                            )
+                            .await
                             {
                                 return Err(MobError::Internal(format!(
-                                    "autonomous capability check failed for '{spawn_member_identity}': {capability_error}; cleanup retire failed for member '{:?}': {retire_error}",
+                                    "autonomous capability check failed for '{spawn_member_identity}': {capability_error}; cleanup failed for member '{:?}': {cleanup_error}",
                                     spawn_receipt.member_ref
                                 )));
                             }
@@ -39140,18 +39241,24 @@ impl MobActor {
                     MobCommand::SpawnProvisioned {
                         result: Ok(spawn_receipt),
                         ..
-                    } => match provisioner.retire_member(&spawn_receipt.member_ref).await {
+                    } => match Self::dispose_unsettled_provision(
+                        &provisioner,
+                        &panic_member_identity,
+                        &spawn_receipt,
+                    )
+                    .await
+                    {
                         Ok(disposal) => tracing::warn!(
                             spawn_ticket,
                             member_ref = ?spawn_receipt.member_ref,
                             disposal = ?disposal,
-                            "spawn completion dropped because the actor is gone; provisioned member was retired"
+                            "spawn completion dropped because the actor is gone; a session the spawn created was retired, one it resumed was released"
                         ),
                         Err(cleanup_error) => tracing::warn!(
                             spawn_ticket,
                             member_ref = ?spawn_receipt.member_ref,
                             error = %cleanup_error,
-                            "spawn completion dropped; failed cleanup retire for provisioned member"
+                            "spawn completion dropped; failed cleanup for provisioned member"
                         ),
                     },
                     MobCommand::SpawnProvisioned {

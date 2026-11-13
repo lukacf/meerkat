@@ -4,7 +4,7 @@
 //! (topology reconciliation), REQ-20 (static wiring preserved), REQ-22 (topology
 //! not continuity truth), and REQ-33 (identity-keyed reconciliation).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use futures::{StreamExt, stream};
@@ -190,6 +190,14 @@ pub struct RestoreFlowResult {
     /// declared that it does not list: retired, removed, or failed to retire
     /// (the next pass retires it again). Empty for a partial restore.
     pub unlisted: BTreeMap<AgentIdentity, UnlistedIdentityAnswer>,
+    /// The identities the host's roster lists that are served from their
+    /// records in the mob's identity store: a record is its identity's one
+    /// owner, so the pass neither registered nor declared the roster's
+    /// entry for any of them, and an edit of that entry changes nothing.
+    /// Each one's status says the same (`roster_listing_superseded`). Set
+    /// by a roster pass; empty for a partial restore and for one member's
+    /// add.
+    pub roster_listings_superseded: BTreeSet<AgentIdentity>,
 }
 
 // ---------------------------------------------------------------------------
@@ -395,7 +403,7 @@ pub async fn restore_flow(
     topology_provider: Option<&dyn TopologyProvider>,
     customizer: Option<&dyn AgentCustomizer>,
 ) -> Result<RestoreFlowResult, IdentityRuntimeError> {
-    restore_roster(runtime, roster, topology_provider, customizer, false).await
+    restore_roster(runtime, roster, &[], topology_provider, customizer, false).await
 }
 
 /// Execute the full restore flow per REQ-12 sequencing.
@@ -421,9 +429,15 @@ pub async fn restore_flow(
 ///
 /// Without a session bridge the flow is validation-only: every outcome is
 /// `Dormant` and nothing is declared.
+///
+/// `also_served` are the identities the runtime serves that the roster does
+/// not list (their record is their row in the mob's identity store): the
+/// topology provider is asked about them with the roster's, and nothing of
+/// them is declared.
 pub(crate) async fn restore_roster(
     runtime: &IdentityRuntime,
     roster: &[DurableAgentSpec],
+    also_served: &[DurableAgentSpec],
     topology_provider: Option<&dyn TopologyProvider>,
     customizer: Option<&dyn AgentCustomizer>,
     complete: bool,
@@ -433,6 +447,7 @@ pub(crate) async fn restore_roster(
     let registered = register_roster_metadata(
         runtime,
         roster,
+        also_served,
         topology_provider,
         RosterPass::Default,
         customizer,
@@ -514,6 +529,7 @@ pub(crate) async fn restore_roster(
         outcomes,
         managed_edges,
         unlisted: registered.unlisted,
+        roster_listings_superseded: BTreeSet::new(),
     })
 }
 
@@ -526,7 +542,7 @@ pub async fn lazy_register_flow(
     roster: &[DurableAgentSpec],
     topology_provider: Option<&dyn TopologyProvider>,
 ) -> Result<RestoreFlowResult, IdentityRuntimeError> {
-    lazy_register_roster(runtime, roster, topology_provider, false).await
+    lazy_register_roster(runtime, roster, &[], topology_provider, false).await
 }
 
 /// Register the roster and topology metadata, and declare the roster in
@@ -540,15 +556,18 @@ pub async fn lazy_register_flow(
 /// modes always left it: its host creates it, so a create at the pass would
 /// read broken while that host is not bound yet. A lazy reconcile also
 /// reconciles the managed topology, since no restore pass follows it.
+/// `also_served` is [`restore_roster`]'s.
 pub(crate) async fn lazy_register_roster(
     runtime: &IdentityRuntime,
     roster: &[DurableAgentSpec],
+    also_served: &[DurableAgentSpec],
     topology_provider: Option<&dyn TopologyProvider>,
     complete: bool,
 ) -> Result<RestoreFlowResult, IdentityRuntimeError> {
     let registered = register_roster_metadata(
         runtime,
         roster,
+        also_served,
         topology_provider,
         RosterPass::Lazy,
         None,
@@ -576,6 +595,7 @@ pub(crate) async fn lazy_register_roster(
         outcomes,
         managed_edges: registered.managed_edges,
         unlisted: registered.unlisted,
+        roster_listings_superseded: BTreeSet::new(),
     })
 }
 
@@ -630,6 +650,7 @@ struct RegisteredRoster {
 async fn register_roster_metadata(
     runtime: &IdentityRuntime,
     roster: &[DurableAgentSpec],
+    also_served: &[DurableAgentSpec],
     topology_provider: Option<&dyn TopologyProvider>,
     pass: RosterPass,
     customizer: Option<&dyn AgentCustomizer>,
@@ -637,11 +658,16 @@ async fn register_roster_metadata(
 ) -> Result<RegisteredRoster, IdentityRuntimeError> {
     IdentityRuntime::validate_roster_uniqueness(roster)?;
 
-    let identities: Vec<AgentIdentity> = roster.iter().map(|s| s.identity.clone()).collect();
+    // The topology provider is asked about every identity the runtime
+    // serves: the roster's, and the ones whose record is their row.
+    let served = roster
+        .iter()
+        .chain(also_served.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    let identities: Vec<AgentIdentity> = served.iter().map(|s| s.identity.clone()).collect();
 
-    let topology_context = TopologyContext {
-        roster: roster.to_vec(),
-    };
+    let topology_context = TopologyContext { roster: served };
     let managed_edges = if let Some(tp) = topology_provider {
         tp.compute_edges(&identities, &topology_context)
             .await
@@ -744,5 +770,6 @@ pub(crate) async fn add_member_flow(
         outcomes: BTreeMap::from([(spec.identity.clone(), outcome)]),
         managed_edges: Vec::new(),
         unlisted: BTreeMap::new(),
+        roster_listings_superseded: BTreeSet::new(),
     })
 }

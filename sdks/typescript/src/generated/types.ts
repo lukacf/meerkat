@@ -1062,6 +1062,7 @@ export interface WireInstructionTargetProfile {
 
 export interface WireInstructionTargetMember {
   agent_identity: string;
+  include_forks?: boolean;
   kind: "member";
 }
 

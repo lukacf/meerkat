@@ -382,6 +382,10 @@ pub struct TimeoutsConfig {
     pub profile: u64,
     /// A remove.
     pub remove: u64,
+    /// An archive or an unarchive.
+    pub archive: u64,
+    /// An adoption.
+    pub adopt: u64,
     /// The largest timeout any rule may give, at most seven days.
     pub max: u64,
 }
@@ -397,6 +401,8 @@ impl Default for TimeoutsConfig {
             authority: HOURS_4,
             profile: HOURS_4,
             remove: HOURS_4,
+            archive: HOURS_4,
+            adopt: HOURS_4,
             max: MAX_DECISION_TIMEOUT_MS,
         }
     }
@@ -427,6 +433,11 @@ pub enum ChangeClass {
     Profile,
     /// The identity's removal.
     Remove,
+    /// The identity's archive, and its unarchive.
+    Archive,
+    /// The identity's adoption: its release from configuration, after which
+    /// it is changed at run time and configuration no longer declares it.
+    Adopt,
 }
 
 impl ChangeClass {
@@ -440,6 +451,8 @@ impl ChangeClass {
             Self::Authority => "authority",
             Self::Profile => "profile",
             Self::Remove => "remove",
+            Self::Archive => "archive",
+            Self::Adopt => "adopt",
         }
     }
 }

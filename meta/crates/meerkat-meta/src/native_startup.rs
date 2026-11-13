@@ -1219,6 +1219,199 @@ mod tests {
         ));
     }
 
+    /// A mob with a profile that is not durable (`lead`) and one that is
+    /// (`steady`), both turn-driven.
+    fn two_profile_definition(mob_id: &str) -> meerkat_mob::MobDefinition {
+        meerkat_mob::MobDefinition::from_toml(&format!(
+            "[mob]\nid = \"{mob_id}\"\n\n[profiles.lead]\nmodel = \"gpt-5.5\"\n\
+             runtime_mode = \"turn_driven\"\n\n[profiles.lead.tools]\ncomms = true\n\n\
+             [profiles.steady]\nmodel = \"gpt-5.5\"\ndurable = true\n\
+             runtime_mode = \"turn_driven\"\n\n[profiles.steady.tools]\ncomms = true\n"
+        ))
+        .expect("two profile definition")
+    }
+
+    /// How a row seats its one member.
+    #[derive(Debug, Clone, Copy)]
+    enum Seat {
+        /// An agent created while the mob runs, on this profile: its record
+        /// is its row in the mob's identity store.
+        Created(&'static str),
+        /// A plain worker a host spawns on this profile, with no mark.
+        Worker(&'static str),
+    }
+
+    /// The member every row below seats.
+    const SEATED: &str = "keeper";
+
+    /// Seat [`SEATED`] as `seat` says in a fresh mob over `state`, wake it so
+    /// its session exists, and stop the mob. Answers the mob store's path.
+    async fn one_woken_member(state: &Path, mob_id: &str, seat: Seat) -> PathBuf {
+        let mob_store = state.join(crate::storage_layout::EVENT_LOG_DB_FILE_NAME);
+        let (storage, provenance) =
+            crate::mob_composition_manifest::persistent_mob_storage(mob_store.clone())
+                .expect("persistent mob storage");
+        let mut spec = crate::MobBootstrapSpec::persistent(
+            two_profile_definition(mob_id),
+            storage,
+            provenance,
+            state.to_path_buf(),
+            4,
+        )
+        .await
+        .expect("persistent composition");
+        spec.options.default_llm_client =
+            Some(std::sync::Arc::new(meerkat_client::TestClient::default()));
+        let runtime = Box::pin(crate::MobRuntime::bootstrap(spec))
+            .await
+            .expect("bootstrap the mob runtime");
+        let member = meerkat_mob::AgentIdentity::from(SEATED);
+        match seat {
+            Seat::Created(profile) => {
+                let operation = "create-keeper";
+                let created = Box::pin(
+                    runtime.handle().create_store_owned_identities(
+                        meerkat_mob::StoreOwnedIdentityCreate::new(
+                            meerkat_mob::IdentityOperation::new(
+                                operation,
+                                meerkat_core::approval::decision::Sha256Digest::of(
+                                    operation.as_bytes(),
+                                )
+                                .as_str(),
+                            ),
+                            meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                            vec![meerkat_mob::CreatedIdentityRequest::new(
+                                meerkat_mob::CreatedIdentitySpec::new(SEATED, profile),
+                            )],
+                        ),
+                        meerkat_mob::IdentityChangeConsentInput::Policy(
+                            meerkat_mob::IdentityPolicyOutcome::Allow,
+                        ),
+                    ),
+                )
+                .await
+                .map(|created| created.change);
+                assert!(
+                    matches!(
+                        created,
+                        Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+                    ),
+                    "Core creates the agent: {created:?}"
+                );
+            }
+            Seat::Worker(profile) => {
+                Box::pin(
+                    runtime
+                        .handle()
+                        .ensure_member(meerkat_mob::SpawnMemberSpec::new(profile, member.clone())),
+                )
+                .await
+                .expect("spawn the plain worker");
+            }
+        }
+        Box::pin(runtime.handle().ensure_member_live(&member))
+            .await
+            .expect("the member's session exists");
+        shut_down_and_wait_for_the_actor(&runtime).await;
+        mob_store
+    }
+
+    /// Remove `runtime.sqlite` and its sidecars from `state`.
+    fn remove_runtime_store(state: &Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = state.join(RUNTIME_DB_FILE_NAME).into_os_string();
+            path.push(suffix);
+            match std::fs::remove_file(PathBuf::from(path)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("remove the runtime store: {error}"),
+            }
+        }
+    }
+
+    /// An agent created while the mob runs is bound to its session as any
+    /// long-term agent is: once its conversation exists, a start over a
+    /// state directory whose `runtime.sqlite` is gone refuses typed, counting
+    /// it, whatever its profile says of durability. Controls: the same agent
+    /// on a durable profile counts the same, and a plain worker on the
+    /// profile that is not durable does not count and starts.
+    ///
+    /// RED before the seat of such an agent was a durable identity's on any
+    /// profile: on the profile that is not durable its binding was not
+    /// counted, and the start went on over the emptied runtime store.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_created_agents_binding_without_its_runtime_store_refuses() {
+        for (row, seat, counted) in [
+            ("created", Seat::Created("lead"), 1),
+            ("created-durable-profile", Seat::Created("steady"), 1),
+            ("plain-worker", Seat::Worker("lead"), 0),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let state = dir.path();
+            let mob_store = one_woken_member(state, &format!("native-startup-{row}"), seat).await;
+            assert_eq!(
+                bound_identity_count(state, Some(&mob_store))
+                    .await
+                    .expect("count Core bindings"),
+                counted,
+                "{seat:?}"
+            );
+            refuse_unready_state_dir(state, Some(&mob_store))
+                .await
+                .expect("the runtime store holds the member's session");
+            remove_runtime_store(state);
+            let verdict = refuse_unready_state_dir(state, Some(&mob_store)).await;
+            if counted == 0 {
+                verdict.expect("a plain worker's binding holds no start back");
+            } else {
+                assert!(
+                    matches!(
+                        verdict,
+                        Err(StorageLayoutError::RuntimeStoreMissing {
+                            bound_identities: 1,
+                            ..
+                        })
+                    ),
+                    "{seat:?}: {verdict:?}"
+                );
+            }
+        }
+    }
+
+    /// The storage census of the members' comms identities names an agent
+    /// created while the mob runs whose key pair is missing, as it names
+    /// any long-term agent's, whatever its profile says of durability. A
+    /// plain worker on the same profile is not named.
+    ///
+    /// RED before the seat of such an agent was a durable identity's on any
+    /// profile: on the profile that is not durable the census did not look
+    /// at it, and read healthy.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_comms_identity_census_names_a_created_agent_without_its_key_pair() {
+        for (row, seat, named) in [
+            ("created", Seat::Created("lead"), true),
+            ("created-durable-profile", Seat::Created("steady"), true),
+            ("plain-worker", Seat::Worker("lead"), false),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let state = dir.path();
+            let mob_store = one_woken_member(state, &format!("native-census-{row}"), seat).await;
+            // A comms identity directory that holds no key pair at all.
+            let keys = tempfile::tempdir().expect("an empty comms identity volume");
+            let (storage, _provenance) =
+                crate::mob_composition_manifest::persistent_mob_storage(mob_store)
+                    .expect("reopen the stopped mob's storage");
+            let slot =
+                crate::host_store::comms_identity_census(Some(keys.path()), None, &storage).await;
+            let detail = slot.detail.clone().unwrap_or_default();
+            assert_eq!(
+                (slot.degraded, detail.contains(SEATED)),
+                (named, named),
+                "{seat:?}: {slot:?}"
+            );
+        }
+    }
+
     /// A member reset (a rotation) seats the identity's next life on a new
     /// session, unborn until its first wake, and archives the session of the
     /// life before it, which the runtime store still holds. Stopped before

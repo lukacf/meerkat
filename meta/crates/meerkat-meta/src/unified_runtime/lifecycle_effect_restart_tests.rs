@@ -2465,3 +2465,423 @@ async fn the_bridge_forwards_a_legacy_reset_and_a_retirement_start_s_cause() {
     );
     let _ = boot.runtime.shutdown().await;
 }
+
+/// The agent the rows below create while the mob runs: its record is its
+/// row in the mob's identity store, and the host's roster never lists it.
+const KEEPER: &str = "keeper-1";
+
+/// The operation a row's change of `name` runs under.
+fn change_of(what: &str, name: &str) -> meerkat_mob::IdentityOperation {
+    let id = format!("{what}-{name}");
+    let digest = meerkat_core::approval::decision::Sha256Digest::of(id.as_bytes());
+    meerkat_mob::IdentityOperation::new(id.as_str(), digest.as_str())
+}
+
+/// The consent every change of the rows below commits under.
+fn allowed() -> meerkat_mob::IdentityChangeConsentInput<'static> {
+    meerkat_mob::IdentityChangeConsentInput::Policy(meerkat_mob::IdentityPolicyOutcome::Allow)
+}
+
+/// Create the agent `name` through Core's change path, on the fixture's one
+/// profile: Core seats it, and its row holds its record.
+async fn create_agent(boot: &Boot, name: &str) {
+    let created = boot
+        .runtime
+        .mob_handle()
+        .create_store_owned_identities(
+            meerkat_mob::StoreOwnedIdentityCreate::new(
+                change_of("create", name),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                vec![meerkat_mob::CreatedIdentityRequest::new(
+                    meerkat_mob::CreatedIdentitySpec::new(name, "lead"),
+                )],
+            ),
+            allowed(),
+        )
+        .await
+        .map(|created| created.change);
+    assert!(
+        matches!(
+            created,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "Core creates {name}: {created:?}"
+    );
+}
+
+/// Archive the agent `name` through Core's change path: Core retires its
+/// member and keeps its name and record.
+async fn archive_agent(boot: &Boot, name: &str) {
+    let archived = boot
+        .runtime
+        .mob_handle()
+        .archive_identity(
+            meerkat_mob::IdentityArchiveChange::new(
+                change_of("archive", name),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                name,
+            ),
+            allowed(),
+        )
+        .await;
+    assert!(
+        matches!(
+            archived,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "Core archives {name}: {archived:?}"
+    );
+}
+
+/// Remove the agent `name` through Core's change path: Core retires the
+/// member it holds, if any, and the name is never an agent's again.
+async fn remove_agent(boot: &Boot, name: &str) {
+    let removed = boot
+        .runtime
+        .mob_handle()
+        .remove_identity(
+            meerkat_mob::IdentityRemoval::new(
+                change_of("remove", name),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                name,
+            ),
+            allowed(),
+        )
+        .await;
+    assert!(
+        matches!(
+            removed,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "Core removes {name}: {removed:?}"
+    );
+}
+
+/// Wake `identity`'s member, so its session exists, and answer that
+/// session: the one its conversation runs on, as Core's entry names it.
+async fn wake(boot: &Boot, identity: &AgentIdentity) -> SessionId {
+    let member = member_id(identity);
+    boot.runtime
+        .mob_handle()
+        .ensure_member_live(&member)
+        .await
+        .expect("the member wakes");
+    match boot.runtime.mob_handle().identity_entry(&member) {
+        Ok(meerkat_mob::IdentityEntryRead::Entry(meerkat_mob::IdentityEntryView {
+            standing: meerkat_mob::EntryStanding::Seated(seated),
+            ..
+        })) => seated
+            .session_id
+            .expect("a seated member names its session"),
+        other => panic!("{identity} is a seated agent: {other:?}"),
+    }
+}
+
+/// Whether Core holds `name` as a removed agent's: the name is its tombstone.
+fn tombstoned(boot: &Boot, name: &str) -> bool {
+    matches!(
+        boot.runtime
+            .mob_handle()
+            .identity_entry(&meerkat_mob::AgentIdentity::from(name)),
+        Ok(meerkat_mob::IdentityEntryRead::Removed)
+    )
+}
+
+/// What the end of an agent's place among the mob's agents ran for it.
+#[derive(Debug, PartialEq, Eq)]
+struct LeavingEffects {
+    /// What was read of its last session, in order: its compaction
+    /// `discards` (the memory harvest), then its `transcript` (the
+    /// distillation).
+    session_reads: Vec<String>,
+    /// The exit interviews queued for it, each with its cause.
+    exit_interviews: Vec<String>,
+    /// Each call of the host's retirement hook: its cause, and whether it
+    /// names the agent's last session.
+    hook: Vec<(String, bool)>,
+}
+
+impl LeavingEffects {
+    /// What an agent that leaves is owed: the harvest of its last session's
+    /// compactions, that session's distillation, one exit interview and one
+    /// call of the retirement hook, which names that session.
+    fn owed() -> Self {
+        Self {
+            session_reads: vec!["discards".to_string(), "transcript".to_string()],
+            exit_interviews: vec!["retire".to_string()],
+            hook: vec![("unlisted".to_string(), true)],
+        }
+    }
+
+    /// What ran for `identity`, whose last session was `session`.
+    async fn of(
+        seen: &Mutex<Vec<RetiredIdentityMember>>,
+        reads: &OrderedReads,
+        store: &SqliteAgentMemoryStore,
+        identity: &AgentIdentity,
+        session: &SessionId,
+    ) -> Self {
+        let suffix = format!(" {session}");
+        let hook = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|retired| retired.identity == *identity)
+            .map(|retired| {
+                (
+                    retired.cause.as_str().to_string(),
+                    retired.session_id.as_ref() == Some(session),
+                )
+            })
+            .collect();
+        Self {
+            session_reads: reads
+                .of(session)
+                .iter()
+                .map(|read| read.trim_end_matches(suffix.as_str()).to_string())
+                .collect(),
+            exit_interviews: pending_harvests_of(store, identity).await,
+            hook,
+        }
+    }
+}
+
+/// One boot of the rows below: the memory provider on (a distiller and a
+/// steward over the store in the state directory), with every read of a
+/// session recorded in order, and the host's retirement hook recording each
+/// call.
+struct LeavingBoot {
+    boot: Boot,
+    seen: Arc<Mutex<Vec<RetiredIdentityMember>>>,
+    reads: Arc<OrderedReads>,
+    store: Arc<SqliteAgentMemoryStore>,
+}
+
+impl LeavingBoot {
+    async fn over(state: &Path, mob_id: &str, roster: Vec<DurableAgentSpec>) -> Self {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let reads = Arc::new(OrderedReads::default());
+        let (memory, store) = memory_with_discards(
+            &state.join("memory"),
+            Arc::clone(&reads) as Arc<dyn TranscriptSource>,
+            Some(Arc::clone(&reads) as Arc<dyn CompactionDiscardSource>),
+        );
+        let boot = boot(
+            state,
+            mob_id,
+            roster,
+            Wiring {
+                observer: Some(recording_observer(&seen)),
+                memory: Some(memory),
+                ..Wiring::default()
+            },
+        )
+        .await;
+        Self {
+            boot,
+            seen,
+            reads,
+            store,
+        }
+    }
+
+    /// What ran for `identity` once the projection read every step Core
+    /// journaled so far.
+    async fn effects(&self, identity: &AgentIdentity, session: &SessionId) -> LeavingEffects {
+        self.boot.identities.settle_lifecycle_projection().await;
+        tokio::time::sleep(SETTLE).await;
+        LeavingEffects::of(&self.seen, &self.reads, &self.store, identity, session).await
+    }
+}
+
+/// An agent created while the mob runs is archived, with the memory
+/// provider on. Its archive owes it what a configured agent's leaving the
+/// roster owes that agent: the harvest of the compactions its last session
+/// holds, that session's distillation, an exit interview and the host's
+/// retirement hook. Beta, a configured agent on the same profile, leaves the
+/// roster in the same boot and is the measure.
+///
+/// RED before an archive's retirement owed anything: the configured agent
+/// got all four, the archived agent none.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archive_owes_a_created_agent_what_leaving_the_roster_owes_a_configured_one() {
+    const MOB: &str = "lifecycle-effect-archive-created";
+    let alpha = member(ALPHA);
+    let beta = member(BETA);
+    let keeper = AgentIdentity::parse(KEEPER).expect("identity");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let rig = LeavingBoot::over(temp.path(), MOB, vec![alpha.clone(), beta.clone()]).await;
+    create_agent(&rig.boot, KEEPER).await;
+    let configured_session = wake(&rig.boot, &beta.identity).await;
+    let created_session = wake(&rig.boot, &keeper).await;
+
+    assert!(rig.boot.roster.remove(&beta.identity));
+    let _ = rig.boot.context.refresh_desired_topology_tracked().await;
+    archive_agent(&rig.boot, KEEPER).await;
+
+    assert_eq!(
+        rig.effects(&beta.identity, &configured_session).await,
+        LeavingEffects::owed(),
+        "the configured agent that left the roster"
+    );
+    assert_eq!(
+        rig.effects(&keeper, &created_session).await,
+        LeavingEffects::owed(),
+        "the archived agent is owed what the configured agent got"
+    );
+    let _ = rig.boot.runtime.shutdown().await;
+}
+
+/// An agent created while the mob runs is removed, with the memory provider
+/// on. Its removal owes it what a configured agent's leaving the roster owes
+/// that agent, on its last session, and its name is a removed agent's.
+///
+/// RED before a removal's retirement owed anything: the removed agent's last
+/// conversation was never harvested or distilled, no exit interview was
+/// queued and the host's retirement hook never heard of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removal_owes_a_created_agent_what_leaving_the_roster_owes_a_configured_one() {
+    const MOB: &str = "lifecycle-effect-remove-created";
+    let alpha = member(ALPHA);
+    let beta = member(BETA);
+    let keeper = AgentIdentity::parse(KEEPER).expect("identity");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let rig = LeavingBoot::over(temp.path(), MOB, vec![alpha.clone(), beta.clone()]).await;
+    create_agent(&rig.boot, KEEPER).await;
+    let configured_session = wake(&rig.boot, &beta.identity).await;
+    let created_session = wake(&rig.boot, &keeper).await;
+
+    assert!(rig.boot.roster.remove(&beta.identity));
+    let _ = rig.boot.context.refresh_desired_topology_tracked().await;
+    remove_agent(&rig.boot, KEEPER).await;
+
+    assert!(
+        tombstoned(&rig.boot, KEEPER),
+        "the name is a removed agent's"
+    );
+    assert_eq!(
+        rig.effects(&beta.identity, &configured_session).await,
+        LeavingEffects::owed(),
+        "the configured agent that left the roster"
+    );
+    assert_eq!(
+        rig.effects(&keeper, &created_session).await,
+        LeavingEffects::owed(),
+        "the removed agent is owed what the configured agent got, on its last session"
+    );
+    let _ = rig.boot.runtime.shutdown().await;
+}
+
+/// An agent created while the mob runs is removed, and the process is
+/// killed inside the first side effect its removal owes (the harvest of its
+/// last session's compactions), after Core committed the removal. The next
+/// start over the same state runs what the removal owes, once: nothing a
+/// removal owes is lost with the process that committed it.
+///
+/// RED before a removal's retirement owed anything: the child found nothing
+/// owed, and the next start ran nothing for the removed agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kill_after_a_removal_runs_what_it_owes_the_created_agent_after_the_restart() {
+    const NAME: &str =
+        "a_kill_after_a_removal_runs_what_it_owes_the_created_agent_after_the_restart";
+    const MOB: &str = "lifecycle-effect-remove-created-kill";
+    let alpha = member(ALPHA);
+    let keeper = AgentIdentity::parse(KEEPER).expect("identity");
+    if let Some(state) = child_state() {
+        let boot = boot(
+            &state,
+            MOB,
+            vec![alpha.clone()],
+            Wiring {
+                memory: Some(
+                    memory_with_discards(
+                        &state.join("memory"),
+                        Arc::new(RecordingTranscripts::default()),
+                        Some(Arc::new(ExitOnDiscards)),
+                    )
+                    .0,
+                ),
+                ..Wiring::default()
+            },
+        )
+        .await;
+        create_agent(&boot, KEEPER).await;
+        let session = wake(&boot, &keeper).await;
+        std::fs::write(state.join("last-session"), session.to_string())
+            .expect("note the removed agent's last session");
+        remove_agent(&boot, KEEPER).await;
+        // The harvest of the removed agent's last session ends the process.
+        boot.identities.settle_lifecycle_projection().await;
+        // Nothing was owed: the process ends all the same, and the parent's
+        // start decides.
+        exit_now::<()>();
+    }
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    run_child(NAME, temp.path()).await;
+    let session = SessionId::parse(
+        &std::fs::read_to_string(temp.path().join("last-session"))
+            .expect("the child noted the removed agent's last session"),
+    )
+    .expect("a session id");
+    {
+        let store = SqliteAgentMemoryStore::open(temp.path().join("memory"))
+            .expect("open the memory store");
+        assert!(
+            pending_harvests_of(&store, &keeper).await.is_empty(),
+            "the kill came before the exit interview"
+        );
+    }
+
+    let rig = LeavingBoot::over(temp.path(), MOB, vec![alpha.clone()]).await;
+    assert!(
+        tombstoned(&rig.boot, KEEPER),
+        "the name is a removed agent's"
+    );
+    // A predecessor's backlog runs beside the start: wait for its last side
+    // effect, bounded.
+    let deadline = tokio::time::Instant::now() + EFFECT_DEADLINE;
+    while hook_calls_of(&rig.seen, &keeper).is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        rig.effects(&keeper, &session).await,
+        LeavingEffects::owed(),
+        "the start after the kill runs what the removal owes, once, on the agent's last session"
+    );
+    let _ = rig.boot.runtime.shutdown().await;
+}
+
+/// An agent created while the mob runs is archived, then removed. The
+/// archive ended its member and owed it everything a leaving agent is owed;
+/// the removal of the archived agent retires no member and owes nothing
+/// more: nothing runs twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removal_of_an_archived_created_agent_owes_nothing_more() {
+    const MOB: &str = "lifecycle-effect-remove-archived";
+    let alpha = member(ALPHA);
+    let keeper = AgentIdentity::parse(KEEPER).expect("identity");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let rig = LeavingBoot::over(temp.path(), MOB, vec![alpha.clone()]).await;
+    create_agent(&rig.boot, KEEPER).await;
+    let session = wake(&rig.boot, &keeper).await;
+
+    archive_agent(&rig.boot, KEEPER).await;
+    assert_eq!(
+        rig.effects(&keeper, &session).await,
+        LeavingEffects::owed(),
+        "the archive owes the agent what a leaving agent is owed"
+    );
+
+    remove_agent(&rig.boot, KEEPER).await;
+    assert!(
+        tombstoned(&rig.boot, KEEPER),
+        "the name is a removed agent's"
+    );
+    assert_eq!(
+        rig.effects(&keeper, &session).await,
+        LeavingEffects::owed(),
+        "the removal of the archived agent ran nothing more"
+    );
+    let _ = rig.boot.runtime.shutdown().await;
+}

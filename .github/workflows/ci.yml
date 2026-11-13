@@ -1714,9 +1714,12 @@ jobs:
     # minutes with meerkat-rpc still compiling (it started 22m44s in), and
     # gpt-live-replay took 28m52s there and 29m29s on main push 39213218053,
     # then 37m44s and 40m28s on main pushes 42497143053 and 42463179911.
-    # A push or dispatch gets 70 minutes; a pull request runs only the suites
+    # On the 0.9.14 release branch push the connect-console-composition row
+    # built cold for 69m03s and was cancelled at the 70 minutes a push had
+    # then; it passed only in a rerun.
+    # A push or dispatch gets 110 minutes; a pull request runs only the suites
     # outside the chain and keeps 30.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 70 }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 110 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.integration_matrix) }}

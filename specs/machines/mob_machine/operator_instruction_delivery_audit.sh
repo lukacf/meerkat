@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # TLC audit of the MobMachine operator-instruction region: the mob's desired
-# records, the owed computation and each member's delivery facts, checked on
+# records, the owed computation, each member's delivery facts and the fork
+# lineage a record written for a member and its forks follows, checked on
 # the generated model as the shell drives it.
 #
 # usage: operator_instruction_delivery_audit.sh [--mutants] [extra tlc args...]
@@ -12,20 +13,51 @@
 # life marker, identity_life_resets and identity_life_ends); each run
 # explores its whole reachable space under its generation bound. It first
 # checks that the generated model defines every arm the audit drives with the
-# parameters it passes, and still reads none of the counters anywhere else,
+# parameters it passes, the target predicate with the text two mutants
+# replace, the lineage record's Stopped arm as its Running arm in the other
+# phase, and still reads none of the counters anywhere else,
 # so a renamed arm or field fails the run instead of a vacuous pass. Then:
-# - the write run (AuditWriteSpec) and the seat run (AuditSeatSpec) each over
+# - the write run (AuditWriteSpec), the seat run (AuditSeatSpec) and the fork
+#   run (AuditForkSpec) each over
 #   their whole space with TLC coverage: each must finish without an error and
 #   fire every action of its covered list (each generated at least one
 #   successor state);
 # - one run per reachability witness, with that witness's negation as an
 #   extra invariant (a state goal) or action property (a step goal),
 #   requiring TLC to report exactly that violation;
-# - with --mutants, six defects seeded into a copy of the generated model:
-#   four refused by the property each targets, checked as the run's only
-#   property:
+# - with --mutants, nineteen defects seeded into a copy of the generated
+#   model: seventeen refused by the property each targets, checked as the
+#   run's only property:
 #     profile_check_dropped (the target predicate selects every member for a
 #       profile target) by AuditWriteOwesExactlyTheSelected;
+#     member_retarget_forgets_leaver (a member-targeted record that moves to
+#       another member owes only the member it moves to) by
+#       AuditWriteOwesExactlyTheSelected;
+#     fork_not_owed, fork_not_owed_by_higher_revision, fork_not_owed_by_revoke
+#       and fork_not_owed_by_replay (a new record, a higher revision, a
+#       revoke and a replay of a record for a member and its forks owe only
+#       the member it names: the walk of the lineage dropped) by
+#       AuditWriteOwesExactlyTheSelected;
+#     plain_member_record_leaks_to_forks (the target predicate's fork
+#       disjunct ignores the kind, so a record for a member alone also
+#       selects its forks) by AuditWriteOwesExactlyTheSelected;
+#     fork_owed_stays_blocked (a higher revision owes a blocked fork and
+#       leaves it blocked) by AuditOwedIsSeatedAndUnblocked;
+#     lineage_record_forgets_to_owe (a lineage record owes its member
+#       nothing) by AuditLineageRecordOwesTheGeneration;
+#     lineage_recorded_after_snapshot (the lineage record's guard on a
+#       recorded snapshot dropped) by AuditLineageOnlyBeforeASnapshot;
+#     lineage_names_itself (the lineage record's guard on the root being
+#       another name dropped) by the generated
+#       invariant member_instruction_lineage_names_another_member;
+#     lineage_root_looked_up_again (a lineage record whose root holds an
+#       entry itself writes that entry's root instead of the root it was
+#       given) by AuditLineageRecordWritesTheGivenRoot;
+#     seat_drops_lineage (a seat removes the name's lineage entry, so a
+#       second seat of a fork forgets its root) by
+#       AuditLineageKeptUnlessRecordedOrEnded;
+#     lineage_survives_identity_end (the end of an identity keeps its lineage
+#       entry) by AuditIdentityEndLeavesNoLineage;
 #     unborn_seat_delivered (the prepared delivery's born-session guard
 #       dropped) by AuditDeliversOnlyToBoundBornMembers;
 #     seat_forgets_to_owe (a replayed seat owes nothing) by
@@ -56,16 +88,21 @@ fi
 # The mob generation bound of each run. The write run's writes and revokes on
 # its one slot, at revisions 1 and 2, commit at most two generations (a write
 # then a retarget, a re-owing write or a revoke); its bound of 3 only leaves
-# room. The seat run commits at most two. A deeper bound may be run by hand
-# through the environment; the witnesses need at least these.
+# room. The seat run and the fork run commit at most two. A deeper bound may
+# be run by hand through the environment; the witnesses need at least these.
 max_write_generation="${OPERATOR_INSTRUCTION_DELIVERY_AUDIT_MAX_WRITE_GENERATION:-3}"
 max_seat_generation="${OPERATOR_INSTRUCTION_DELIVERY_AUDIT_MAX_SEAT_GENERATION:-2}"
+max_fork_generation="${OPERATOR_INSTRUCTION_DELIVERY_AUDIT_MAX_FORK_GENERATION:-2}"
 if ! [[ "${max_write_generation}" =~ ^[0-9]+$ ]] || (( max_write_generation < 3 )); then
   echo "error: the write run's generation bound must be an integer >= 3" >&2
   exit 2
 fi
 if ! [[ "${max_seat_generation}" =~ ^[0-9]+$ ]] || (( max_seat_generation < 2 )); then
   echo "error: the seat run's generation bound must be an integer >= 2" >&2
+  exit 2
+fi
+if ! [[ "${max_fork_generation}" =~ ^[0-9]+$ ]] || (( max_fork_generation < 2 )); then
+  echo "error: the fork run's generation bound must be an integer >= 2" >&2
   exit 2
 fi
 
@@ -81,6 +118,8 @@ write_covered_actions=(
   RevokeOperatorInstructionDuplicateRunning
   RevokeOperatorInstructionConflictRunning
   RevokeOperatorInstructionAdvanceRunning
+  RecoverOperatorInstructionAppliedRunning
+  RecordMemberInstructionLineageRunning
   PrepareMemberInstructionDeliveryNotOwedRunning
   PrepareMemberInstructionDeliveryDeliverRunning
   RecordMemberInstructionTargetNotOwedRunning
@@ -94,8 +133,8 @@ write_covered_actions=(
   RefuseMemberInstructionTargetBlockedRunning
 )
 
-# The seat run's deferrals, its releasing retire and the release verdict;
-# each must fire.
+# The seat run's deferrals, its releasing retire, the release verdict, the
+# lineage record and the end of an identity's life; each must fire.
 seat_covered_actions=(
   PrepareMemberInstructionDeliveryUnbornRunning
   PrepareMemberInstructionDeliveryUnboundRunning
@@ -103,7 +142,38 @@ seat_covered_actions=(
   RetireRunningReleasingArchiveOnly
   ResolveMemberInstructionReleaseAuthorizedRunning
   ResolveMemberInstructionReleaseNotNeededRunning
+  RecordMemberInstructionLineageRunning
+  EndIdentityLifeRunning
 )
+
+# The fork run's lineage record, its writes, revoke and replay, and the end
+# of an identity's life; each must fire.
+fork_covered_actions=(
+  RecordMemberInstructionLineageRunning
+  EndIdentityLifeRunning
+  SetOperatorInstructionNewRunning
+  SetOperatorInstructionAdvanceRunning
+  RevokeOperatorInstructionAdvanceRunning
+  RecoverOperatorInstructionAppliedRunning
+)
+
+# A covered arm a run fires only through a named audit wrapper whose
+# conjunct restricts it (the replay to the journal's order, the end of a
+# life to an unseated identity): TLC's coverage names such an action after
+# the wrapper (an action whose body is a conjunction is named after its
+# operator), so in that run the arm's coverage is read under the wrapper's
+# name. A closed table of <run>:<wrapper>:<arm>; never a match on a
+# coverage line's location.
+covered_aliases=(
+  "write:AuditReplay:RecoverOperatorInstructionAppliedRunning"
+  "fork:AuditReplay:RecoverOperatorInstructionAppliedRunning"
+  "seat:AuditEndLife:EndIdentityLifeRunning"
+  "fork:AuditEndLife:EndIdentityLifeRunning"
+)
+
+# The generated target predicate, as the regenerated model prints it: the
+# premise requires this exact line, and two mutants replace it.
+target_applies_line='operator_instruction_target_applies(kind, profile, member, member_profile, agent_identity, lineage_root) == (IF (kind = "Mob") THEN TRUE ELSE (IF ((kind = "Profile") /\ (member_profile = Some(profile))) THEN TRUE ELSE (IF ((IF (kind = "Member") THEN TRUE ELSE (kind = "MemberAndForks")) /\ (member = Some(agent_identity))) THEN TRUE ELSE ((kind = "MemberAndForks") /\ (lineage_root # None) /\ (lineage_root = member)))))'
 
 spec_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ci_cfg="${spec_dir}/ci.cfg"
@@ -112,9 +182,10 @@ work_dir="$(mktemp -d "${TMPDIR:-/tmp}/operator-instruction-delivery-audit.XXXXX
 trap 'if declare -F tlc_run_cap_reap >/dev/null; then tlc_run_cap_reap; fi; rm -rf "${work_dir}"' EXIT
 
 # The premise: the generated model defines each arm the audit drives with the
-# parameters, in the order, the audit passes them, and the target predicate
-# the profile mutant replaces.
-MODEL="${spec_dir}/model.tla" python3 - <<'PY'
+# parameters, in the order, the audit passes them, the target predicate
+# two mutants replace, and the lineage record's Stopped arm as its Running
+# arm in the other phase (the reason the arm coverage list gives for it).
+MODEL="${spec_dir}/model.tla" HELPER="${target_applies_line}" python3 - <<'PY'
 import os, re
 text = open(os.environ["MODEL"]).read()
 write = "slot, revision, digest, body_bytes, target_kind, target_profile, target_member"
@@ -130,6 +201,9 @@ arms = {
     "RecoverMemberSeatSessionBornRunning": "agent_identity, agent_runtime_id, unborn",
     "RecoverRosterMemberRetiredRunning": "agent_identity, agent_runtime_id, generation, preserve_machine_topology, preservation_started, session_archived, hosted_incarnation",
     "RetireRunningReleasingArchiveOnly": "mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id",
+    "RecordMemberInstructionLineageRunning": "agent_identity, root_identity",
+    "RecordMemberInstructionLineageStopped": "agent_identity, root_identity",
+    "EndIdentityLifeRunning": "agent_identity",
     "SetOperatorInstructionNewRunning": write,
     "SetOperatorInstructionAdvanceRunning": write,
     "SetOperatorInstructionDuplicateRunning": write,
@@ -140,6 +214,7 @@ arms = {
     "RevokeOperatorInstructionDuplicateRunning": revoke,
     "RevokeOperatorInstructionConflictRunning": revoke,
     "RevokeOperatorInstructionAdvanceRunning": revoke,
+    "RecoverOperatorInstructionAppliedRunning": "slot, revision, effect, digest, body_bytes, target_kind, target_profile, target_member, generation",
     "PrepareMemberInstructionDeliveryNotOwedRunning": prepare,
     "PrepareMemberInstructionDeliveryUnbornRunning": prepare,
     "PrepareMemberInstructionDeliveryUnboundRunning": prepare,
@@ -160,11 +235,19 @@ arms = {
 for arm, params in arms.items():
     heads = re.findall(r"(?m)^" + arm + r"\(([^)]*)\) ==$", text)
     assert heads == [params], f"expected {arm}({params}) in model.tla, found {heads}"
-helper = re.findall(
-    r"(?m)^operator_instruction_target_applies\(([^)]*)\) == ", text
+helper = [line for line in text.split("\n") if line.startswith("operator_instruction_target_applies(")]
+assert helper == [os.environ["HELPER"]], (
+    f"expected the operator_instruction_target_applies helper of the audit's runner in model.tla, found {helper}"
 )
-assert helper == ["kind, profile, member, member_profile, agent_identity"], (
-    f"expected the operator_instruction_target_applies helper in model.tla, found {helper}"
+
+def arm_body(arm):
+    start = text.index("\n" + arm + "(") + 1
+    return text[start:text.index("\n\n", start)].split("\n")[1:]
+
+running = arm_body("RecordMemberInstructionLineageRunning")
+stopped = arm_body("RecordMemberInstructionLineageStopped")
+assert [line.replace('"Running"', '"Stopped"') for line in running] == stopped, (
+    "RecordMemberInstructionLineageStopped is not RecordMemberInstructionLineageRunning in the other phase"
 )
 variables = [line for line in text.split("\n") if line.startswith("VARIABLES ")]
 assert len(variables) == 1, "expected one VARIABLES line in model.tla"
@@ -178,6 +261,7 @@ for name in (
     "member_instruction_owed",
     "member_instruction_recorded",
     "member_instruction_blocked",
+    "member_instruction_lineage",
     "runtime_retire_pending_sessions",
 ):
     assert re.search(r"\b" + name + r"\b", variables[0]), f"model.tla declares no variable {name}"
@@ -260,20 +344,27 @@ read -r step_index epoch_index life_resets_index life_ends_index <<<"${view_posi
 audit_properties="  AuditWriteOwesExactlyTheSelected
   AuditSeatOwesTheGeneration
   AuditUnseatLeavesNoFact
+  AuditLineageRecordWritesTheGivenRoot
+  AuditLineageRecordOwesTheGeneration
+  AuditIdentityEndLeavesNoLineage
+  AuditLineageKeptUnlessRecordedOrEnded
   AuditRegionWakesNothing"
 audit_invariants="  AuditRecordedWithinGeneration
   AuditOwedIsSeatedAndUnblocked
-  AuditDeliversOnlyToBoundBornMembers"
+  AuditDeliversOnlyToBoundBornMembers
+  AuditLineageOnlyBeforeASnapshot"
 
 # usage: write_cfg <run> <file> <extra invariant lines> <extra property lines>
-# where <run> is write (AuditWriteSpec under AuditWriteConstraint) or seat
-# (AuditSeatSpec under AuditSeatConstraint).
+# where <run> is write (AuditWriteSpec under AuditWriteConstraint), seat
+# (AuditSeatSpec under AuditSeatConstraint) or fork (AuditForkSpec under
+# AuditForkConstraint).
 write_cfg() {
   local run="$1" cfg="$2" invariants="$3" properties="$4"
   local spec constraint
   case "${run}" in
     write) spec="AuditWriteSpec"; constraint="AuditWriteConstraint" ;;
     seat) spec="AuditSeatSpec"; constraint="AuditSeatConstraint" ;;
+    fork) spec="AuditForkSpec"; constraint="AuditForkConstraint" ;;
     *)
       echo "error: unknown audit run '${run}'" >&2
       exit 1
@@ -287,7 +378,8 @@ write_cfg() {
   AuditLifeResetsIndex = ${life_resets_index}
   AuditLifeEndsIndex = ${life_ends_index}
   AuditMaxWriteGeneration = ${max_write_generation}
-  AuditMaxSeatGeneration = ${max_seat_generation}" "${cfg}"
+  AuditMaxSeatGeneration = ${max_seat_generation}
+  AuditMaxForkGeneration = ${max_fork_generation}" "${cfg}"
   replace_exact_line "INVARIANTS" "PROPERTIES
 ${audit_properties}${properties}
 INVARIANTS
@@ -385,27 +477,39 @@ check_space() {
   # `<Action line L, col C to line L, col C of module model>: D:T`, with D the
   # new distinct states it found and T the successor states it generated; an
   # arm that changes nothing the VIEW keeps (a verdict) finds no new state,
-  # so T counts.
+  # so T counts. An arm of covered_aliases is read under its wrapper's name.
   local coverage="${work_dir}/${run}-coverage.txt"
   awk '/^The coverage statistics at / { block = ""; next } { block = block $0 "\n" } END { printf "%s", block }' \
     "${log}" > "${coverage}"
-  local action generated
+  local action generated named alias
   for action in "$@"; do
-    generated="$(awk -v head="<${action} line " '
+    named="${action}"
+    for alias in "${covered_aliases[@]}"; do
+      if [[ "${alias%%:*}" == "${run}" && "${alias##*:}" == "${action}" ]]; then
+        named="${alias#*:}"
+        named="${named%%:*}"
+      fi
+    done
+    generated="$(awk -v head="<${named} line " '
       index($0, head) == 1 && $0 ~ / of module (model|operator_instruction_delivery_audit)( \([0-9 ]+\))?>: [0-9]+:[0-9]+$/ {
         split($NF, counts, ":"); total += counts[2]; found = 1
       }
       END { if (found) print total }' "${coverage}")"
     if [[ -z "${generated}" || "${generated}" == "0" ]]; then
-      echo "error: ${run} run: ${action} never fired (coverage '${generated:-absent}')" >&2
+      echo "error: ${run} run: ${action} never fired (coverage of ${named}: '${generated:-absent}')" >&2
       exit 1
     fi
-    echo "covered ${action}: ${generated} successor states"
+    if [[ "${named}" == "${action}" ]]; then
+      echo "covered ${action}: ${generated} successor states"
+    else
+      echo "covered ${action} through ${named}: ${generated} successor states"
+    fi
   done
 }
 
 check_space write "${write_covered_actions[@]}"
 check_space seat "${seat_covered_actions[@]}"
+check_space fork "${fork_covered_actions[@]}"
 
 # Each witness is <run>:<kind>:<name>: a state goal's negation joins the
 # invariants, a step goal's negation ([][~step]_vars) joins the properties.
@@ -414,15 +518,28 @@ check_space seat "${seat_covered_actions[@]}"
 for witness in \
   "write:Action property:ProfileWriteOwesOne" \
   "write:Action property:RetargetOwesLeaver" \
+  "write:Action property:MemberRetargetOwesBoth" \
   "write:Action property:RecordedReowed" \
   "write:Action property:BlockedThenUnblocked" \
   "write:Action property:RecordCloses" \
+  "write:Action property:ForkWriteOwesFork" \
+  "write:Action property:MemberWriteSkipsFork" \
+  "write:Action property:LineageRecordOwes" \
   "write:Invariant:DormantDeliverable" \
   "seat:Action property:SeatAfterWriteOwed" \
   "seat:Action property:UnseatDropsFacts" \
+  "seat:Action property:IdentityEndDropsLineage" \
+  "seat:Action property:ForkOwedWithoutSeatedRoot" \
   "seat:Invariant:UnbornOwedDeferred" \
   "seat:Invariant:UnboundOwedDeferred" \
-  "seat:Invariant:RetiringReleasable"; do
+  "seat:Invariant:RetiringReleasable" \
+  "fork:Invariant:RootHoldsAnEntry" \
+  "fork:Action property:ForkOfForkFollowsTheFirstMember" \
+  "fork:Action property:ForkRecordSkipsSiblingFork" \
+  "fork:Action property:ReseatKeepsLineage" \
+  "fork:Action property:ReseatedForkOwedByRootRecord" \
+  "fork:Action property:LineageRecordRepeated" \
+  "fork:Action property:ForkWriteSkipsBystander"; do
   run="${witness%%:*}"
   rest="${witness#*:}"
   kind="${rest%%:*}"
@@ -475,13 +592,11 @@ open(path, "w").write(text)
 PY
   }
 
-  # usage: mutate <run> <name> <kind> <target> <arm> <anchor> <new line>...
-  # Seeds the mutant, runs <run> with <target> as its only invariant or
-  # property, and requires TLC to report it violated.
-  mutate() {
+  # usage: refuse_mutant <run> <name> <kind> <target>
+  # Runs <run> over the seeded mutant <name> with <target> as its only
+  # invariant or property, and requires TLC to report it violated.
+  refuse_mutant() {
     local run="$1" name="$2" kind="$3" target="$4"
-    shift 4
-    seed_mutant "${name}" "$@"
     local cfg="${work_dir}/mutant-${name}.cfg"
     write_target_cfg "${run}" "${cfg}" "${kind}" "${target}"
     run_tlc "mutant-${name}" "${cfg}" "${work_dir}/mutant-${name}"
@@ -494,6 +609,16 @@ PY
     local depth
     depth="$(grep -cE '^State [0-9]+:' "${log}" || true)"
     echo "mutant ${name} refused by ${target} in ${depth} states"
+  }
+
+  # usage: mutate <run> <name> <kind> <target> <arm> <anchor> <new line>...
+  # Seeds the mutant, runs <run> with <target> as its only invariant or
+  # property, and requires TLC to report it violated.
+  mutate() {
+    local run="$1" name="$2" kind="$3" target="$4"
+    shift 4
+    seed_mutant "${name}" "$@"
+    refuse_mutant "${run}" "${name}" "${kind}" "${target}"
   }
 
   # usage: mutate_unreachable <run> <name> <witness> <arm> <anchor> <new line>...
@@ -521,7 +646,133 @@ PY
   # The target predicate selects every member for a profile target.
   mutate write profile_check_dropped "Action property" AuditWriteOwesExactlyTheSelected \
     operator_instruction_target_applies 'member_profile = Some(profile)' \
-    'operator_instruction_target_applies(kind, profile, member, member_profile, agent_identity) == ((kind = "Mob") \/ (kind = "Profile") \/ ((kind = "Member") /\ (member = Some(agent_identity))))'
+    'operator_instruction_target_applies(kind, profile, member, member_profile, agent_identity, lineage_root) == (IF (kind = "Mob") THEN TRUE ELSE (IF (kind = "Profile") THEN TRUE ELSE (IF ((IF (kind = "Member") THEN TRUE ELSE (kind = "MemberAndForks")) /\ (member = Some(agent_identity))) THEN TRUE ELSE ((kind = "MemberAndForks") /\ (lineage_root # None) /\ (lineage_root = member)))))'
+  # The target predicate's fork disjunct ignores the kind: a record for a
+  # member alone also selects the members forked from it. A member record
+  # retargeted to a profile searches the seats with the predicate, so a fork
+  # of the member under another profile would be owed the slot's revoke.
+  mutate write plain_member_record_leaks_to_forks "Action property" AuditWriteOwesExactlyTheSelected \
+    operator_instruction_target_applies 'lineage_root = member' \
+    'operator_instruction_target_applies(kind, profile, member, member_profile, agent_identity, lineage_root) == (IF (kind = "Mob") THEN TRUE ELSE (IF ((kind = "Profile") /\ (member_profile = Some(profile))) THEN TRUE ELSE (IF ((IF (kind = "Member") THEN TRUE ELSE (kind = "MemberAndForks")) /\ (member = Some(agent_identity))) THEN TRUE ELSE ((lineage_root # None) /\ (lineage_root = member)))))'
+  # A member-targeted record that moves to another member owes only the
+  # member it moves to: the lookup of the member it leaves is dropped, so
+  # that member's session would keep the record. The arm looks its two
+  # members up instead of searching the seats; the edit replaces the four
+  # places where it owes the record's earlier member (one per branch on
+  # whether the new member is seated, with and without the walk of the
+  # lineage for a target that includes forks).
+  seed_mutant_owed_lookup() {
+    local name="$1" arm="$2"
+    local dir="${work_dir}/mutant-${name}"
+    mkdir -p "${dir}"
+    cp "${spec_dir}/model.tla" "${spec_dir}/operator_instruction_delivery_audit.tla" "${dir}/"
+    MODEL="${dir}/model.tla" ARM="${arm}" python3 - <<'PY'
+import os, re
+path, arm = os.environ["MODEL"], os.environ["ARM"]
+text = open(path).read()
+start = text.index("\n" + arm + "(") + 1
+end = text.index("\n\n", start)
+body = text[start:end]
+earlier_member_owed = re.compile(
+    r'MapSet\(member_instruction_owed, \(IF "value" \\in DOMAIN \(IF \(slot \\in DOMAIN operator_instruction_target_member\)'
+    r'(?:(?!MapSet\().)*?\["value"\] ELSE None\), \(operator_instruction_generation \+ 1\)\)'
+)
+body, count = earlier_member_owed.subn("member_instruction_owed", body)
+assert count == 4, f"expected the earlier member owed in four places of {arm}, found {count}"
+open(path, "w").write(text[:start] + body + text[end:])
+PY
+  }
+  seed_mutant_owed_lookup member_retarget_forgets_leaver SetOperatorInstructionAdvanceRunning
+  refuse_mutant write member_retarget_forgets_leaver "Action property" AuditWriteOwesExactlyTheSelected
+  # A record for a member and its forks owes (or unblocks) only the member
+  # it names: the arm's walk of the lineage map, the generated loop helper
+  # of <arm> over the lineage's keys for <fact> (owed or blocked), returns
+  # what it was given.
+  seed_mutant_lineage_walk_dropped() {
+    local name="$1" arm="$2" fact="$3"
+    local dir="${work_dir}/mutant-${name}"
+    mkdir -p "${dir}"
+    cp "${spec_dir}/model.tla" "${spec_dir}/operator_instruction_delivery_audit.tla" "${dir}/"
+    MODEL="${dir}/model.tla" ARM="${arm}" FACT="${fact}" python3 - <<'PY'
+import os, re
+path, arm, fact = os.environ["MODEL"], os.environ["ARM"], os.environ["FACT"]
+text = open(path).read()
+walk = re.compile(
+    r"(?m)^(" + re.escape(arm) + r"_ForEach[0-9]+_member_instruction_" + re.escape(fact)
+    + r"\(acc, remaining[^)]*\)) == IF remaining = \{\} THEN acc ELSE LET item == CHOOSE x \\in remaining : TRUE IN LET child_id == item IN .*member_instruction_lineage\[child_id\].*$"
+)
+text, count = walk.subn(lambda found: found.group(1) + " == acc", text)
+assert count == 1, f"expected one walk of the lineage for {fact} in {arm}, found {count}"
+open(path, "w").write(text)
+PY
+  }
+  seed_mutant_lineage_walk_dropped fork_not_owed SetOperatorInstructionNewRunning owed
+  refuse_mutant write fork_not_owed "Action property" AuditWriteOwesExactlyTheSelected
+  seed_mutant_lineage_walk_dropped fork_not_owed_by_higher_revision SetOperatorInstructionAdvanceRunning owed
+  refuse_mutant write fork_not_owed_by_higher_revision "Action property" AuditWriteOwesExactlyTheSelected
+  seed_mutant_lineage_walk_dropped fork_not_owed_by_revoke RevokeOperatorInstructionAdvanceRunning owed
+  refuse_mutant write fork_not_owed_by_revoke "Action property" AuditWriteOwesExactlyTheSelected
+  seed_mutant_lineage_walk_dropped fork_not_owed_by_replay RecoverOperatorInstructionAppliedRunning owed
+  refuse_mutant write fork_not_owed_by_replay "Action property" AuditWriteOwesExactlyTheSelected
+  # A higher revision that owes a blocked fork leaves it blocked.
+  seed_mutant_lineage_walk_dropped fork_owed_stays_blocked SetOperatorInstructionAdvanceRunning blocked
+  refuse_mutant write fork_owed_stays_blocked Invariant AuditOwedIsSeatedAndUnblocked
+  # A lineage record owes its member nothing.
+  mutate write lineage_record_forgets_to_owe "Action property" AuditLineageRecordOwesTheGeneration \
+    RecordMemberInstructionLineageRunning "member_instruction_owed' =" \
+    "    /\\ member_instruction_owed' = member_instruction_owed"
+  # A lineage is recorded for a member whose session recorded a snapshot: the
+  # guard dropped.
+  mutate write lineage_recorded_after_snapshot Invariant AuditLineageOnlyBeforeASnapshot \
+    RecordMemberInstructionLineageRunning 'DOMAIN member_instruction_recorded' \
+    '    /\ TRUE'
+  # A lineage is recorded with the member itself as its root: the guard on
+  # the root being another name dropped.
+  mutate write lineage_names_itself Invariant member_instruction_lineage_names_another_member \
+    RecordMemberInstructionLineageRunning '(agent_identity # root_identity)' \
+    '    /\ TRUE'
+  # A lineage record whose root holds an entry itself looks that root up
+  # again and writes its root: the entry is no longer the root the record
+  # was given, so a replay could differ from the live record.
+  mutate fork lineage_root_looked_up_again "Action property" AuditLineageRecordWritesTheGivenRoot \
+    RecordMemberInstructionLineageRunning "member_instruction_lineage' =" \
+    "    /\\ member_instruction_lineage' = IF root_identity \\in DOMAIN member_instruction_lineage THEN MapSet(member_instruction_lineage, agent_identity, member_instruction_lineage[root_identity]) ELSE MapSet(member_instruction_lineage, agent_identity, root_identity)"
+  # A seat removes the name's lineage entry: a fork seated again after an
+  # unseat that kept its identity forgets its root. The seat arm leaves the
+  # lineage to its frame, so the edit takes the variable out of the arm's
+  # frame and adds the removal.
+  seed_mutant_frame_variable() {
+    local name="$1" arm="$2" variable="$3" line="$4"
+    local dir="${work_dir}/mutant-${name}"
+    mkdir -p "${dir}"
+    cp "${spec_dir}/model.tla" "${spec_dir}/operator_instruction_delivery_audit.tla" "${dir}/"
+    MODEL="${dir}/model.tla" ARM="${arm}" VARIABLE="${variable}" LINE="${line}" python3 - <<'PY'
+import os, re
+path, arm, variable, line = (os.environ[key] for key in ("MODEL", "ARM", "VARIABLE", "LINE"))
+text = open(path).read()
+start = text.index("\n" + arm + "(") + 1
+end = text.index("\n\n", start)
+lines = text[start:end].split("\n")
+frames = [i for i, current in enumerate(lines) if re.fullmatch(r"    /\\ UnchangedFrame_[0-9a-f]+", current)]
+assert len(frames) == 1, f"expected one frame line in {arm}, found {len(frames)}"
+assert not any(variable + "'" in current for current in lines), f"{arm} already updates {variable}"
+frame = lines[frames[0]][len("    /\\ "):]
+definitions = re.findall(r"(?m)^" + frame + r" == UNCHANGED << (.*) >>$", text)
+assert len(definitions) == 1, f"expected one definition of {frame}, found {len(definitions)}"
+names = [name.strip() for name in definitions[0].split(",")]
+assert names.count(variable) == 1, f"{frame} does not hold {variable} once"
+names.remove(variable)
+lines[frames[0]:frames[0] + 1] = [line, "    /\\ UNCHANGED << " + ", ".join(names) + " >>"]
+open(path, "w").write(text[:start] + "\n".join(lines) + text[end:])
+PY
+  }
+  seed_mutant_frame_variable seat_drops_lineage RecoverRosterMemberRunning member_instruction_lineage \
+    "    /\\ member_instruction_lineage' = MapRemove(member_instruction_lineage, agent_identity)"
+  refuse_mutant fork seat_drops_lineage "Action property" AuditLineageKeptUnlessRecordedOrEnded
+  # The end of an identity keeps its lineage entry.
+  mutate seat lineage_survives_identity_end "Action property" AuditIdentityEndLeavesNoLineage \
+    EndIdentityLifeRunning "member_instruction_lineage' =" \
+    "    /\\ member_instruction_lineage' = member_instruction_lineage"
   # A delivery is prepared for an unborn seat: the born-session guard dropped.
   mutate seat unborn_seat_delivered Invariant AuditDeliversOnlyToBoundBornMembers \
     PrepareMemberInstructionDeliveryDeliverRunning 'member_seat_session_unborn' \

@@ -179,6 +179,17 @@ export const CONSOLE_COMMAND_NAMES = {
   topologyOperationGet: "topologyOperationGet",
   topologyAuditQuery: "topologyAuditQuery",
   topologyMobEvents: "topologyMobEvents",
+  createAgent: "createAgent",
+  updateAgent: "updateAgent",
+  archiveAgent: "archiveAgent",
+  unarchiveAgent: "unarchiveAgent",
+  removeAgent: "removeAgent",
+  withdrawAgentChange: "withdrawAgentChange",
+  getAgentRecord: "getAgentRecord",
+  listAgentRecords: "listAgentRecords",
+  getAgentChange: "getAgentChange",
+  listAgentDirectory: "listAgentDirectory",
+  planAgentChange: "planAgentChange",
 } as const;
 
 export type ConsoleCommandName = typeof CONSOLE_COMMAND_NAMES[keyof typeof CONSOLE_COMMAND_NAMES];
@@ -189,6 +200,14 @@ type ConsoleCommandSpec = {
 };
 
 const LEGACY_INSPECT_IDENTITY_METHOD = "meta/inspect_identity";
+
+// The panes an agent's record is changed and read from: the roster and the
+// agent's own chat and details.
+const IDENTITY_CHANGE_TARGETS: ReadonlySet<MetaWorkbenchTarget["kind"]> = new Set<MetaWorkbenchTarget["kind"]>([
+  "meta/roster",
+  "meta/identity-chat",
+  "meta/identity-inspect",
+]);
 
 const CONSOLE_COMMAND_SPECS: Record<ConsoleCommandName, ConsoleCommandSpec> = {
   [CONSOLE_COMMAND_NAMES.inspectIdentity]: {
@@ -473,6 +492,21 @@ const CONSOLE_COMMAND_SPECS: Record<ConsoleCommandName, ConsoleCommandSpec> = {
     method: CONSOLE_RPC_METHODS.mobEventsQuery,
     targetKinds: new Set<MetaWorkbenchTarget["kind"]>(["meta/topology"]),
   },
+  // Changes and reads of the team's long-term agents. Params are the
+  // family's own request, written as every surface writes it: a change
+  // names its agent `name` and carries its `request_id`; nothing is filled
+  // in from the target.
+  [CONSOLE_COMMAND_NAMES.createAgent]: { method: CONSOLE_RPC_METHODS.identityCreate, targetKinds: IDENTITY_CHANGE_TARGETS },
+  [CONSOLE_COMMAND_NAMES.updateAgent]: { method: CONSOLE_RPC_METHODS.identityUpdate, targetKinds: IDENTITY_CHANGE_TARGETS },
+  [CONSOLE_COMMAND_NAMES.archiveAgent]: { method: CONSOLE_RPC_METHODS.identityArchive, targetKinds: IDENTITY_CHANGE_TARGETS },
+  [CONSOLE_COMMAND_NAMES.unarchiveAgent]: { method: CONSOLE_RPC_METHODS.identityUnarchive, targetKinds: IDENTITY_CHANGE_TARGETS },
+  [CONSOLE_COMMAND_NAMES.removeAgent]: { method: CONSOLE_RPC_METHODS.identityRemove, targetKinds: IDENTITY_CHANGE_TARGETS },
+  [CONSOLE_COMMAND_NAMES.withdrawAgentChange]: { method: CONSOLE_RPC_METHODS.identityWithdraw, targetKinds: IDENTITY_CHANGE_TARGETS },
+  [CONSOLE_COMMAND_NAMES.getAgentRecord]: { method: CONSOLE_RPC_METHODS.identityGet, targetKinds: IDENTITY_CHANGE_TARGETS },
+  [CONSOLE_COMMAND_NAMES.listAgentRecords]: { method: CONSOLE_RPC_METHODS.identityList, targetKinds: IDENTITY_CHANGE_TARGETS },
+  [CONSOLE_COMMAND_NAMES.getAgentChange]: { method: CONSOLE_RPC_METHODS.identityOperation, targetKinds: IDENTITY_CHANGE_TARGETS },
+  [CONSOLE_COMMAND_NAMES.listAgentDirectory]: { method: CONSOLE_RPC_METHODS.identityDirectory, targetKinds: IDENTITY_CHANGE_TARGETS },
+  [CONSOLE_COMMAND_NAMES.planAgentChange]: { method: CONSOLE_RPC_METHODS.identityPlan, targetKinds: IDENTITY_CHANGE_TARGETS },
 };
 
 /** Return the typed RPC method for a modeled console command. */

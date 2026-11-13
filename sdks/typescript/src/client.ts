@@ -2146,7 +2146,9 @@ export class MeerkatClient {
   /**
    * Write one operator instruction for the members `target` selects:
    * `{ kind: "mob" }`, `{ kind: "profile", profile }` or
-   * `{ kind: "member", agent_identity }`. Resolves once the record is in the
+   * `{ kind: "member", agent_identity }`, the last optionally with
+   * `include_forks: true` for the member and the forks of its fork family.
+   * Resolves once the record is in the
    * mob's journal; delivery to the members is asynchronous (see
    * {@link mobInstructionStatus}).
    */

@@ -4414,7 +4414,10 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             // target kind, why a member's delivery is blocked or deferred,
             // and why a write is refused.
             NamedTypeBinding::string_enum("InstructionEffect", &["Absent", "Active"]),
-            NamedTypeBinding::string_enum("InstructionTargetKind", &["Mob", "Profile", "Member"]),
+            NamedTypeBinding::string_enum(
+                "InstructionTargetKind",
+                &["Mob", "Profile", "Member", "MemberAndForks"],
+            ),
             NamedTypeBinding::string_enum(
                 "MemberInstructionBlock",
                 &[
@@ -5505,6 +5508,10 @@ runtime_internal_inputs!(
         // by the replay of a spawn row that carries it. Not a surface
         // command.
         RecordMemberDispatchAdmissionLineage,
+        // The record of a fork-derived member's lineage root for operator
+        // instructions, applied by the fork's seat and by the replay of a
+        // spawn row that carries the root. Not a surface command.
+        RecordMemberInstructionLineage,
     ]
 );
 

@@ -20,9 +20,7 @@ use meerkat_core::comms::TrustedPeerDescriptor;
 use meerkat_mob::ids::{AgentIdentity, AgentRuntimeId, FenceToken, MobId};
 use meerkat_mob::launch::MemberLaunchMode;
 use meerkat_mob::runtime::reconcile::MemberFilter;
-use meerkat_mob::{
-    MobBackendKind, MobHandle, MobRuntimeMode, PeerTarget, ProfileName, SpawnMemberSpec,
-};
+use meerkat_mob::{MobBackendKind, MobHandle, MobRuntimeMode, ProfileName, SpawnMemberSpec};
 
 use crate::mob_handle_runtime::{
     is_recoverable_lifecycle_cleanup_error, member_entry_to_json, member_model_registry,
@@ -44,7 +42,7 @@ use crate::access::{
     ACTION_MOB_MEMORY_READ, ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ,
     ACTION_OPERATOR_MEMORY_READ_ANY, ACTION_RUNTIME_ADMIN, ACTION_SCHEDULE_MANAGE,
     ACTION_WORKGRAPH_MANAGE, ACTION_WORKGRAPH_VIEW, AccessController, AccessResource, AccessView,
-    AgentResourceAttributes, LiveAccessView,
+    AgentResourceAttributes, LiveAccessView, PrivateOwnerRecordReader,
 };
 // The test modules build access rules and groups through `use super::*`.
 #[cfg(test)]
@@ -336,6 +334,10 @@ struct ConsoleSnapshotReadModelState {
 #[derive(Clone, Debug, Default)]
 struct IdentityBindingCut {
     bindings: BTreeMap<String, IdentityBinding>,
+    /// The display name of each identity whose registration carries one.
+    /// No part of a binding: a rename moves no session and no walked fact,
+    /// so it makes no row pending.
+    display_names: BTreeMap<String, String>,
     /// Positions of the read's start and completion on
     /// [`IDENTITY_BINDING_CUT_SEQUENCE`]. The empty cut of an unprimed read
     /// model holds 0 for both, before every read.
@@ -366,6 +368,7 @@ impl IdentityBindingCut {
     async fn read(identity_runtime: Option<&crate::identity_first::IdentityRuntime>) -> Self {
         let read_started = next_identity_binding_cut_position();
         let mut bindings = BTreeMap::new();
+        let mut display_names = BTreeMap::new();
         if let Some(identity_runtime) = identity_runtime {
             // A read that fails records no binding, so the walk's rows are
             // left as walked until a later cut answers.
@@ -377,6 +380,12 @@ impl IdentityBindingCut {
                 })
                 .unwrap_or_default();
             for status in statuses {
+                if let Some(display_name) = status.display_name.as_ref() {
+                    display_names.insert(
+                        status.identity.as_str().to_string(),
+                        display_name.as_str().to_string(),
+                    );
+                }
                 bindings.insert(
                     status.identity.as_str().to_string(),
                     IdentityBinding {
@@ -388,6 +397,7 @@ impl IdentityBindingCut {
         }
         Self {
             bindings,
+            display_names,
             read_started,
             read_completed: next_identity_binding_cut_position(),
         }
@@ -913,18 +923,61 @@ fn gating_audit_entry_origin(entry: &crate::runtime::GatingAuditEntry) -> Option
         .and_then(Value::as_str)
 }
 
+/// Whether a caller may see a gating entry recorded with the origin
+/// `identity`: only a caller that may view that agent, and, for a caller the
+/// console keeps apart from other people, only when the console knows the
+/// agent ([`AccessView::withholds_unknown_member`]): an origin it does not
+/// know may have been private to a person.
+fn gating_origin_visible(access_view: Option<&AccessView>, identity: &str) -> bool {
+    access_view.is_none_or(|view| {
+        view.can_view_agent(identity) && !view.withholds_unknown_member(identity)
+    })
+}
+
 /// Whether a caller may see an audit entry: entries recorded with an origin
-/// are visible only to callers that may view that origin's agent.
+/// are visible only to callers that may see that origin
+/// ([`gating_origin_visible`]).
 fn gating_audit_entry_visible(
     entry: &crate::runtime::GatingAuditEntry,
     access_view: Option<&AccessView>,
 ) -> bool {
+    gating_audit_entry_origin(entry)
+        .is_none_or(|identity| gating_origin_visible(access_view, identity))
+}
+
+/// An audit entry as the console serves it to a caller who may see it. The
+/// entry for an action blocked on a memory conflict carries the conflict,
+/// and the conflict's reason is text written from the records that
+/// conflict, which the caller may not be allowed to read: a console that can
+/// identify a person serves that text to an admin only
+/// ([`AccessView::kept_apart_from_other_people`]) and leaves the conflict's
+/// entity and topic to every caller who may see the entry. The entry of a
+/// failed conflict lookup carries the error of the failed read, which can
+/// quote the memory module's answer: that text is served to an admin only
+/// as well, and the entry still says that the lookup failed and for what.
+/// The stored entry is unchanged.
+fn gating_audit_entry_served(
+    mut entry: crate::runtime::GatingAuditEntry,
+    access_view: Option<&AccessView>,
+) -> crate::runtime::GatingAuditEntry {
+    if access_view.is_some_and(AccessView::kept_apart_from_other_people)
+        && let Some(conflict) = entry
+            .detail
+            .get_mut("conflict")
+            .and_then(Value::as_object_mut)
+    {
+        conflict.remove("reason");
+    }
+    // The entry of a failed conflict lookup carries the failed read's
+    // error text, which can quote what the memory module answered about
+    // the conflict.
+    if access_view.is_some_and(AccessView::kept_apart_from_other_people)
+        && entry.event_type == crate::runtime::MEMORY_CONFLICT_LOOKUP_FAILED_EVENT
+        && let Some(detail) = entry.detail.as_object_mut()
+    {
+        detail.remove("error");
+    }
     entry
-        .detail
-        .get("origin")
-        .and_then(|origin| origin.get("identity"))
-        .and_then(Value::as_str)
-        .is_none_or(|identity| access_view.is_none_or(|view| view.can_view_agent(identity)))
 }
 
 /// Live gating change notifications for the console. A connection starts with
@@ -979,8 +1032,6 @@ async fn console_gating_stream_handler(
         )
             .into_response();
     };
-    let subject = audience.subject().map(ToString::to_string);
-    let private_owner_key = audience.private_owner_key().map(ToString::to_string);
     // The caller's audience controller: an installed access controller, kept
     // even while it is disabled (enabling a policy later must reach this
     // stream), else the stream's own. Either is primed: the private-owner
@@ -992,6 +1043,9 @@ async fn console_gating_stream_handler(
     if let Some(runtime) = &runtime {
         prime_access_cache_from_runtime(runtime, &access).await;
     }
+    // Read again before a change is decided once this read is as old as a
+    // kept record's bound.
+    let mut prime_age = crate::http_sse::StreamPrimeAge::primed(Instant::now());
     let (mut receiver, mut cursor) = {
         let mut owner = owner.lock().await;
         let receiver = owner.subscribe_gating_changes();
@@ -1035,12 +1089,13 @@ async fn console_gating_stream_handler(
             }
             let page = owner.lock().await.gating_audit_after(cursor.as_deref());
             if let Some(runtime) = &runtime {
-                let probe = access.view_for_caller(subject.as_deref(), private_owner_key.as_deref());
-                if page
-                    .entries
-                    .iter()
-                    .filter_map(gating_audit_entry_origin)
-                    .any(|identity| !probe.knows_agent(identity))
+                let probe = audience.refreshed();
+                if (!page.entries.is_empty() && prime_age.due(Instant::now()))
+                    || page
+                        .entries
+                        .iter()
+                        .filter_map(gating_audit_entry_origin)
+                        .any(|identity| !probe.knows_agent(identity))
                 {
                     prime_access_cache_from_runtime(runtime, &access).await;
                 }
@@ -1049,8 +1104,9 @@ async fn console_gating_stream_handler(
                 break;
             }
             // The view is derived after the last await, from the live
-            // configuration and attribute cache.
-            let view = access.view_for_caller(subject.as_deref(), private_owner_key.as_deref());
+            // configuration and attribute cache: the same caller's view of
+            // the same console, under the configuration committed now.
+            let view = audience.refreshed();
             if view.enforced() && !view.allows(ACTION_GATING_VIEW) {
                 yield Ok(axum::response::sse::Event::default()
                     .event("gating.access_revoked")
@@ -1286,6 +1342,47 @@ pub async fn console_json_handler(
         attach_console_storage_scope(&mut response.body, auth.principal.as_deref());
     }
     if response.status == 200 && uri.path() == "/console/experience" {
+        // Whether this console serves changes of the mob's long-term agents
+        // to the caller (its launch has an enabled identity policy and the
+        // console is not read-only), and which of them the caller's grants
+        // admit.
+        let identity_changes_available = !state.decisions.console.read_only
+            && state
+                .runtime
+                .as_ref()
+                .and_then(MobRuntime::installed_identity_runtime)
+                .is_some_and(|identity_runtime| identity_runtime.identity_changes_enabled());
+        // The agents whose record is their row in the mob's identity
+        // store: the ones a run-time change can change. An agent its host
+        // configures is offered no control.
+        let mut changed_at_run_time = std::collections::BTreeSet::new();
+        if identity_changes_available
+            && let Some(identity_runtime) = state
+                .runtime
+                .as_ref()
+                .and_then(MobRuntime::installed_identity_runtime)
+        {
+            let listed: Vec<String> = response
+                .body
+                .pointer("/agent_sidebar/live_snapshot/agents")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|agent| agent.get("identity").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect();
+            for name in listed {
+                if identity_runtime.record_is_store_owned(&name).await {
+                    changed_at_run_time.insert(name);
+                }
+            }
+        }
+        crate::runtime::apply_identity_changes_to_experience(
+            &mut response.body,
+            caller.as_ref().map(|caller| &caller.audience),
+            identity_changes_available,
+            &|name| changed_at_run_time.contains(name),
+        );
         attach_console_send_dedupe(&mut response.body, state.console_aggregator.as_ref());
         if let Some(runtimes) = panel_runtimes {
             response.body["panel_runtimes"] = json!(
@@ -3330,7 +3427,10 @@ async fn console_send_gate(
 /// Record the access attributes of every runtime `aggregator` serves, each
 /// in its identity namespace, as every route that holds those runtimes
 /// records them ([`prime_access_cache_from_runtime_in_namespace`]): the
-/// priming of a Console route with no local runtime.
+/// priming of a Console route with no local runtime. Whether a runtime
+/// still owes the first read of who its members are private to is counted
+/// for that runtime (two runtimes under one namespace are two), and only
+/// while the Console serves it.
 async fn prime_access_cache_from_aggregator(
     aggregator: &MetaConsoleAggregator,
     access: &AccessController,
@@ -3346,9 +3446,26 @@ async fn prime_access_cache_from_aggregator(
         }
     };
     for runtime in runtimes {
-        prime_access_cache_from_runtime_in_namespace(&runtime.runtime, access, &runtime.namespace)
-            .await;
+        prime_access_cache_from_runtime_in_namespace(
+            &runtime.runtime,
+            access,
+            &runtime.namespace,
+            PrivateOwnerRecordReader::ServedRuntime(aggregator.id()),
+        )
+        .await;
     }
+    // No later reading of this aggregator's runtimes reaches a runtime it
+    // serves no longer, so none would find its first read done: this
+    // aggregator counts it no longer.
+    access.keep_served_private_owner_records(aggregator.id(), || {
+        let served = aggregator.panel_runtimes().ok()?;
+        Some(
+            served
+                .iter()
+                .map(|runtime| runtime.runtime.private_owners().record_id())
+                .collect(),
+        )
+    });
 }
 
 /// Whether the aggregator's identity record of `identity` (by identity or
@@ -3914,6 +4031,14 @@ mod console_private_side_chat_tests;
 #[cfg(test)]
 #[path = "console_private_audience_tests.rs"]
 mod console_private_audience_tests;
+
+#[cfg(test)]
+#[path = "console_frame_witness_tests.rs"]
+mod console_frame_witness_tests;
+
+#[cfg(test)]
+#[path = "console_kept_apart_tests.rs"]
+mod console_kept_apart_tests;
 
 #[cfg(test)]
 #[path = "console_schedule_tests.rs"]
@@ -4630,6 +4755,9 @@ async fn console_timeline_stream_handler(
     });
     let reprime_access = live_view.as_ref().map(|live| live.view().controller());
     reprime_stream_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref()).await;
+    // Read again before a frame is decided once this read is as old as a
+    // kept record's bound.
+    let mut prime_age = crate::http_sse::StreamPrimeAge::primed(Instant::now());
     let Some(aggregator) = &state.console_aggregator else {
         return console_json_error(
             StatusCode::NOT_FOUND,
@@ -4686,6 +4814,10 @@ async fn console_timeline_stream_handler(
                     .is_some_and(|view| !view.knows_agent(frame.identity.as_str()))
                     && priming.primes_for(&frame.identity)
                 {
+                    reprime_stream_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref())
+                        .await;
+                }
+                if prime_age.due(Instant::now()) {
                     reprime_stream_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref())
                         .await;
                 }
@@ -4777,7 +4909,8 @@ async fn console_timeline_stream_handler(
                 crate::http_sse::StreamWake::Item(Some(received)) => (false, Some(received)),
             };
             if let Some(live) = live_view.as_mut() {
-                let mut changed = policy_changed;
+                let mut changed = policy_changed
+                    || (received.is_some() && prime_age.due(Instant::now()));
                 while live.refresh() || changed {
                     changed = false;
                     reprime_stream_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref())
@@ -5170,6 +5303,9 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
         return true;
     }
     if crate::rpc::tool_grant_methods::is_tool_grant_mutating_method(method) {
+        return true;
+    }
+    if crate::rpc::identity_methods::is_identity_family_mutating_method(method) {
         return true;
     }
     if crate::rpc::topology_methods::is_topology_mutating_method(method) {
@@ -5807,6 +5943,8 @@ async fn retain_visible_member_rows(
     let registered = runtime.console_identity_labels().await;
     // Keyed by the side chat's public alias.
     let side_chats = listed_side_chat_lineages(runtime, entries).await;
+    let handle = runtime.handle();
+    let no_labels = std::collections::BTreeMap::new();
     rows.retain(|row| {
         let labels: Option<std::collections::BTreeMap<String, String>> = row
             .get("labels")
@@ -5816,9 +5954,14 @@ async fn retain_visible_member_rows(
             .or_else(|| row.get("member_id"))
             .or_else(|| row.get("agent_id"))
             .and_then(Value::as_str);
-        let identity = labels
-            .as_ref()
-            .and_then(crate::member_comms_id::durable_identity_label)
+        // A row names its member in either spelling.
+        let resolved = crate::member_comms_id::resolve_member_identity(
+            &handle,
+            &crate::member_comms_id::roster_member_id_for_supplied_id(agent_id.unwrap_or_default()),
+            labels.as_ref().unwrap_or(&no_labels),
+        );
+        let identity = resolved
+            .as_deref()
             .or_else(|| row.get("identity").and_then(Value::as_str))
             .or(agent_id);
         let role = row
@@ -5937,6 +6080,52 @@ fn console_rpc_access_requirements(
         }
         crate::rpc::tool_grant_methods::TOOL_GRANTS_LIST
         | crate::rpc::tool_grant_methods::TOOL_GRANTS_AUDIT => one(ACTION_AGENT_VIEW, identity),
+        // The changes of the mob's long-term agents. A create names no
+        // existing agent; a change of one agent is judged on that agent,
+        // and its removal, which is permanent, under an action of its own.
+        // Holding the mob's changes is the runtime's administration. A
+        // plan is judged as the change it plans, on the agent that change
+        // names. A withdrawal and an operation read name an operation, and
+        // their handler answers only the caller's own: they need what
+        // viewing needs.
+        crate::rpc::identity_methods::IDENTITY_CREATE => {
+            one(crate::access::ACTION_AGENT_IDENTITY_CREATE, None)
+        }
+        crate::rpc::identity_methods::IDENTITY_UPDATE
+        | crate::rpc::identity_methods::IDENTITY_ARCHIVE
+        | crate::rpc::identity_methods::IDENTITY_UNARCHIVE
+        | crate::rpc::identity_methods::IDENTITY_ADOPT => {
+            one(crate::access::ACTION_AGENT_IDENTITY_MANAGE, target)
+        }
+        crate::rpc::identity_methods::IDENTITY_REMOVE => {
+            one(crate::access::ACTION_AGENT_IDENTITY_REMOVE, target)
+        }
+        crate::rpc::identity_methods::IDENTITY_CHANGES_HOLD => one(ACTION_RUNTIME_ADMIN, None),
+        // The settle of an agent's preparation is the host's operator's,
+        // which no Console caller is: the family refuses it here whoever
+        // asks. It is gated like the runtime's administration all the same,
+        // so a caller without that reads a plain access refusal.
+        crate::rpc::identity_methods::IDENTITY_SETTLE_PREPARATION => {
+            one(ACTION_RUNTIME_ADMIN, None)
+        }
+        // The reads: one agent is judged on that agent; a list and the
+        // directory leave out the agents the caller may not view.
+        crate::rpc::identity_methods::IDENTITY_GET => one(ACTION_AGENT_VIEW, target),
+        crate::rpc::identity_methods::IDENTITY_PLAN => {
+            match params.get("change").and_then(Value::as_str) {
+                Some("create") => one(crate::access::ACTION_AGENT_IDENTITY_CREATE, None),
+                Some("remove") => one(crate::access::ACTION_AGENT_IDENTITY_REMOVE, target),
+                Some("update" | "archive" | "unarchive" | "adopt") => {
+                    one(crate::access::ACTION_AGENT_IDENTITY_MANAGE, target)
+                }
+                // A plan that names no change is refused by its handler.
+                _ => one(ACTION_AGENT_VIEW, None),
+            }
+        }
+        crate::rpc::identity_methods::IDENTITY_LIST
+        | crate::rpc::identity_methods::IDENTITY_DIRECTORY
+        | crate::rpc::identity_methods::IDENTITY_OPERATION
+        | crate::rpc::identity_methods::IDENTITY_WITHDRAW => one(ACTION_AGENT_VIEW, None),
         // Recovering a send answers only the caller's own sends to the
         // identity, so it needs exactly what sending there needs.
         "meta/console/send" | "meta/console/recover_send" => one(ACTION_AGENT_SEND, identity),
@@ -6246,6 +6435,12 @@ const NEW_MEMBER: &[ConsoleMemberField] = &[recorded(&["agent_identity"])];
 /// The identity a method records something for under its `identity`.
 const RECORDED_IDENTITY: &[ConsoleMemberField] = &[recorded(&["identity"])];
 
+/// The agent a change or a read of the identity family names.
+const NAMED_AGENT: &[ConsoleMemberField] = &[subject(&["name"])];
+
+/// The agents a create of the identity family names.
+const NEW_AGENTS: &[ConsoleMemberField] = &[recorded(&["agents", "*", "name"])];
+
 /// A fork's child, which it creates, and its source, which it reads.
 const FORK_MEMBERS: &[ConsoleMemberField] = &[
     recorded(&["agent_identity"]),
@@ -6357,6 +6552,24 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
         | "meta/tool_grants/list"
         | "meta/tool_grants/audit"
         | "meta/tool_grants/revoke" => SUBJECT_MEMBER,
+        // The identity family: a create names the agents it creates, a
+        // change or a read of one agent names it under `name`, and the
+        // others name none (their handlers leave out the agents the caller
+        // may not view).
+        crate::rpc::identity_methods::IDENTITY_CREATE => NEW_AGENTS,
+        crate::rpc::identity_methods::IDENTITY_UPDATE
+        | crate::rpc::identity_methods::IDENTITY_ARCHIVE
+        | crate::rpc::identity_methods::IDENTITY_UNARCHIVE
+        | crate::rpc::identity_methods::IDENTITY_REMOVE
+        | crate::rpc::identity_methods::IDENTITY_ADOPT
+        | crate::rpc::identity_methods::IDENTITY_GET
+        | crate::rpc::identity_methods::IDENTITY_PLAN
+        | crate::rpc::identity_methods::IDENTITY_SETTLE_PREPARATION => NAMED_AGENT,
+        crate::rpc::identity_methods::IDENTITY_LIST
+        | crate::rpc::identity_methods::IDENTITY_DIRECTORY
+        | crate::rpc::identity_methods::IDENTITY_OPERATION
+        | crate::rpc::identity_methods::IDENTITY_WITHDRAW
+        | crate::rpc::identity_methods::IDENTITY_CHANGES_HOLD => NO_MEMBER,
         // The voice and live channel methods name the member they speak
         // for.
         method
@@ -6910,12 +7123,26 @@ pub(crate) fn live_access_violation(
 /// private to another person) never reaches this check: the request's
 /// member resolution ([`console_rpc_resolve_members`]) answered it as a
 /// member that does not exist before.
+///
+/// A read, a plan or a change of one long-term agent that names an agent
+/// the caller may not view is not judged here either
+/// ([`crate::rpc::identity_methods::answers_an_unviewed_agent_itself`]):
+/// the family is handed the caller's view and answers such an agent
+/// exactly as a name no agent holds, at the same step of the same checks,
+/// where a denial here would tell the two apart.
 pub(crate) fn console_rpc_access_violation(
     view: Option<&AccessView>,
     method: &str,
     params: &Value,
 ) -> Option<JsonRpcError> {
     let view = view.filter(|view| view.enforced())?;
+    if crate::rpc::identity_methods::answers_an_unviewed_agent_itself(method)
+        && console_method_members(method, params)
+            .first()
+            .is_some_and(|agent| !view.can_view_agent(agent))
+    {
+        return None;
+    }
     let subjects = console_rpc_member_targets(params);
     let requirements = console_rpc_access_requirements(method, params)?;
     // Every member the request names is judged, not only the field the
@@ -7243,15 +7470,23 @@ impl<'a> MemoryPanelCaller<'a> {
 
     /// Whether the caller may not know of the agent `identity` names, as the
     /// console names it ([`AccessView::hides_agent`]): it is private to
-    /// another person. Holds with access enforced or not. On a console with
-    /// sign-in, a caller who is not an admin is also shown nothing of an
-    /// agent the console does not know
+    /// another person. Holds with access enforced or not. On a console that
+    /// can identify a person, a caller who is not an admin is also shown
+    /// nothing of an agent the console does not know
     /// ([`AccessView::withholds_unknown_member`]): it ended before this
     /// process read who its members belong to, and may have been private.
     fn hides_identity(self, identity: &str) -> bool {
+        self.hides_private_identity(identity)
+            || self.view.is_some_and(|view| {
+                view.withholds_unknown_member(&namespace_console_identity(identity, self.namespace))
+            })
+    }
+
+    /// The private-owner half of [`Self::hides_identity`]: the agent
+    /// `identity` names is private to another person.
+    fn hides_private_identity(self, identity: &str) -> bool {
         self.view.is_some_and(|view| {
-            let identity = namespace_console_identity(identity, self.namespace);
-            view.hides_agent(&identity) || view.withholds_unknown_member(&identity)
+            view.hides_agent(&namespace_console_identity(identity, self.namespace))
         })
     }
 }
@@ -7345,9 +7580,13 @@ fn memory_panel_scope_visible(
 /// deny of that kind applies to either action (fails closed). An agent
 /// private to another person is withheld, enforced access or not.
 fn memory_panel_identity_visible(caller: MemoryPanelCaller<'_>, identity: &str) -> bool {
-    if caller.hides_identity(identity) {
-        return false;
-    }
+    !caller.hides_identity(identity) && memory_panel_identity_allowed(caller, identity)
+}
+
+/// The access rules' half of [`memory_panel_identity_visible`]: whether the
+/// rules allow the caller the memory scope of `identity`, judged on its
+/// name.
+fn memory_panel_identity_allowed(caller: MemoryPanelCaller<'_>, identity: &str) -> bool {
     let Some(view) = caller.enforced() else {
         return true;
     };
@@ -7489,10 +7728,16 @@ async fn memory_panel_retain_readable_promotion_sources(
 /// store deletes none of those rows, so every scope a run read before named
 /// is then among the realm's scopes, and quarantine evidence stays. Without
 /// enforced access every scope is readable. The identity scope of an agent
-/// hidden from the caller ([`MemoryPanelCaller::hides_identity`]) is left out
-/// of the count: no dream covers a member private to a person, so its runs
-/// name nothing of it, and counting it would withhold every run from
-/// everyone else and tell them private memory exists.
+/// private to another person ([`MemoryPanelCaller::hides_private_identity`])
+/// is left out of the count: no dream covers a member private to a person,
+/// so its runs name nothing of it, and counting it would withhold every run
+/// from everyone else and tell them private memory exists. The scope of an
+/// agent the console withholds from the caller only because it does not
+/// know it ([`AccessView::withholds_unknown_member`]) stays in the count,
+/// judged by the access rules on its name
+/// ([`memory_panel_identity_allowed`]) as for a caller the console keeps
+/// apart from nobody: a dream can cover such an agent's harvest, so a deny
+/// that names it, or no rule that allows it, withholds the runs.
 async fn memory_panel_realm_fully_readable(
     store: &dyn crate::memory::capabilities::MemoryPanelStore,
     caller: MemoryPanelCaller<'_>,
@@ -7509,10 +7754,15 @@ async fn memory_panel_realm_fully_readable(
             !matches!(
                 scope,
                 crate::memory::records::MemoryScope::Identity { identity, .. }
-                    if caller.hides_identity(identity)
+                    if caller.hides_private_identity(identity)
             )
         })
-        .all(|scope| memory_panel_scope_visible(caller, scope));
+        .all(|scope| match scope {
+            crate::memory::records::MemoryScope::Identity { identity, .. } => {
+                memory_panel_identity_allowed(caller, identity)
+            }
+            scope => memory_panel_scope_visible(caller, scope),
+        });
     if !every_scope {
         return Ok(false);
     }
@@ -7881,8 +8131,8 @@ mod memory_panel_records_paging_tests {
         Ok(())
     }
 
-    /// An anonymous caller who may view router and read its memory, and
-    /// neither for delivery.
+    /// The anonymous caller of a console that identifies nobody, who may
+    /// view router and read its memory, and neither for delivery.
     fn router_reader() -> TestResult<AccessView> {
         let controller = AccessController::new(crate::access::AccessControlConfig {
             enabled: true,
@@ -7898,7 +8148,7 @@ mod memory_panel_records_paging_tests {
             }],
             ..crate::access::AccessControlConfig::default()
         })?;
-        Ok(controller.view_for_subject(None))
+        Ok(controller.view_for_subject(None).on_console(false))
     }
 
     /// One page of `meta/memory/panel/records`: its rows as
@@ -10015,7 +10265,11 @@ fn console_request_auth_context(
 
 /// The Console's request authentication, shared by the Console's own routes
 /// and [`ConsoleViewerResolver`]. A token is checked against the Console's
-/// session fence record `fences` as it is now.
+/// session fence record `fences` as it is now. Whether the console can
+/// identify a person is read from its own configuration, in one place
+/// ([`crate::runtime::console_identifies_people`]), and stated on the
+/// audience of the caller it did not identify: that is the only place a
+/// caller becomes the one operator of a console that identifies nobody.
 pub(crate) fn console_request_auth_context_for(
     decisions: &RuntimeDecisionState,
     fences: &crate::auth::session_fence::ConsoleSessionFences,
@@ -10025,13 +10279,22 @@ pub(crate) fn console_request_auth_context_for(
 ) -> Option<ConsoleHttpAuthContext> {
     if !decisions.console.require_app_auth {
         // Open console: identify callers that volunteered a valid token so
-        // per-user ABAC grants still apply; everyone else is anonymous.
-        let caller = access.and_then(|_| {
-            let token = console_request_token(headers, uri)?;
-            crate::runtime::resolve_authorized_console_caller_from_token(decisions, fences, &token)
-        });
+        // per-user ABAC grants still apply; everyone else is anonymous. A
+        // token is resolved only where the console can identify a person,
+        // and there the caller it did not identify is told apart from its
+        // people all the same: the audience states the console's fact, not
+        // the caller's.
+        let identifies_people = crate::runtime::console_identifies_people(decisions, access);
+        let caller = identifies_people
+            .then(|| {
+                let token = console_request_token(headers, uri)?;
+                crate::runtime::resolve_authorized_console_caller_from_token(
+                    decisions, fences, &token,
+                )
+            })
+            .flatten();
         let Some(caller) = caller else {
-            let audience = console_audience_view(access, None, None);
+            let audience = console_audience_view(access, None, None).on_console(identifies_people);
             return Some(ConsoleHttpAuthContext {
                 access_view: access.map(|_| audience.clone()),
                 audience,
@@ -11145,7 +11408,7 @@ async fn session_member_owners(
             .as_ref()
             == Some(session_id)
         {
-            owners.push(durable_identity_for_member(&member));
+            owners.push(durable_identity_for_member(handle, &member));
         }
     }
     Some(owners)
@@ -11172,10 +11435,18 @@ enum SessionAttachDecision {
 /// Whether or not access is enforced, a session the caller may not know of
 /// is answered as a session that does not exist: one a member hidden from
 /// the caller owns ([`AccessView::hides_agent`]), one whose stored member
-/// labels name a private owner other than the caller, and, on a console with
-/// sign-in, for a caller who is not an admin, one whose owner the console
-/// does not know ([`AccessView::withholds_unknown_member`]) or that has no
-/// owner at all.
+/// labels name a private owner other than the caller
+/// ([`session_stored_private_owner`], which also reads the session of a
+/// member that ended), and, on a console that can identify a person, for a
+/// caller who is not an admin
+/// ([`AccessView::kept_apart_from_other_people`]), one whose owner the
+/// console does not know ([`AccessView::withholds_unknown_member`]) or that
+/// has no owner at all. A session no member holds whose owner could not be
+/// read (Core's member history did not answer, or the session's stored
+/// document could not be read or says nothing the console can decide by)
+/// is answered so to every caller who is not an admin, the one operator of
+/// a console that identifies nobody included: nothing says whether it was
+/// private to a person.
 async fn attached_session_decision(
     view: Option<&AccessView>,
     runtime: &MobRuntime,
@@ -11185,16 +11456,23 @@ async fn attached_session_decision(
     let Some(view) = view else {
         return SessionAttachDecision::Allowed;
     };
-    let owners = session_member_owners(&runtime.handle(), identity_runtime, session_id)
-        .await
-        .unwrap_or_default();
+    // Whether Core's member history answered: a failed read establishes no
+    // owner, and says nothing of whether the session had one.
+    let (owners, owners_read) =
+        match session_member_owners(&runtime.handle(), identity_runtime, session_id).await {
+            Some(owners) => (owners, true),
+            None => (Vec::new(), false),
+        };
     let stored_owner = session_stored_private_owner(runtime, session_id).await;
     let hidden = owners
         .iter()
         .any(|owner| view.hides_agent(owner) || view.withholds_unknown_member(owner))
-        || stored_owner
-            .as_deref()
-            .is_some_and(|owner| !view.is_admin() && view.private_owner_key() != Some(owner));
+        || match &stored_owner {
+            StoredPrivateOwner::Owner(owner) => {
+                !view.is_admin() && view.private_owner_key() != Some(owner.as_str())
+            }
+            StoredPrivateOwner::NoOwner | StoredPrivateOwner::Unreadable => false,
+        };
     if hidden {
         return SessionAttachDecision::Absent;
     }
@@ -11213,7 +11491,14 @@ async fn attached_session_decision(
                 })),
             });
         }
-        return if view.subject().is_some() {
+        // A console that can identify a person keeps what it cannot
+        // attribute from every caller who is not an admin, signed in or not.
+        // A session whose owner could not be read is attributed by nothing,
+        // on any console.
+        return if view.kept_apart_from_other_people()
+            || !owners_read
+            || matches!(stored_owner, StoredPrivateOwner::Unreadable)
+        {
             SessionAttachDecision::Absent
         } else {
             SessionAttachDecision::Allowed
@@ -11238,19 +11523,83 @@ async fn attached_session_decision(
     SessionAttachDecision::Allowed
 }
 
-/// The private owner the stored labels of session `session_id` name
-/// ([`crate::access::PRIVATE_TO_LABEL`]), read from the runtime's session
-/// service: a private member's session keeps its owner after the member
-/// ended.
+/// What the labels a session was created with say of its private owner
+/// ([`crate::access::PRIVATE_TO_LABEL`]).
+enum StoredPrivateOwner {
+    /// The labels name this private owner.
+    Owner(String),
+    /// The labels were read and name no private owner, or the session
+    /// service holds no session of the id.
+    NoOwner,
+    /// The labels could not be read: nothing says whether the session was
+    /// private to a person.
+    Unreadable,
+}
+
+impl StoredPrivateOwner {
+    fn of_labels(labels: &std::collections::BTreeMap<String, String>) -> Self {
+        crate::access::private_owner(labels)
+            .map_or(Self::NoOwner, |owner| Self::Owner(owner.to_string()))
+    }
+
+    /// What the stored document of a session says. The build of a mob
+    /// member's session writes the member's labels into the session
+    /// metadata's peer labels ([`meerkat_core::SessionMetadata::peer_meta`]),
+    /// beside its member binding, and nothing removes them when the member
+    /// ends. A document that carries neither was built for no mob member
+    /// and has no private owner. One whose metadata is missing or does not
+    /// decode, or that names a member binding without peer labels, cannot
+    /// be decided.
+    fn of_stored_session(session: &meerkat_core::Session) -> Self {
+        let Ok(view) = meerkat_core::PersistedSessionMetadataView::try_from_session(session) else {
+            return Self::Unreadable;
+        };
+        match view.session_metadata {
+            Some(metadata) => match (&metadata.peer_meta, &metadata.mob_member_binding) {
+                (Some(peer), _) => Self::of_labels(&peer.labels),
+                (None, None) => Self::NoOwner,
+                (None, Some(_)) => Self::Unreadable,
+            },
+            None => Self::Unreadable,
+        }
+    }
+}
+
+/// The private owner the labels of session `session_id` name: a private
+/// member's session keeps its owner after the member ended. A session Core
+/// serves is read through the runtime's session service. Core answers the
+/// read of an archived session as a session it does not hold, and a member
+/// that ended leaves its session archived, so such a session is read
+/// through the same service's resume read
+/// ([`meerkat_mob::MobSessionService::load_session_for_resume`]): the read
+/// an attach loads the session through, so whatever an attach can load is
+/// decided by the labels it was created with, on every composition. The
+/// read builds, seats and wakes nothing. A session that read does not hold
+/// has no owner. A failed read, an archived session the read does not hand
+/// out, and a runtime with no session service (one taken from a bare
+/// handle) answer [`StoredPrivateOwner::Unreadable`].
 async fn session_stored_private_owner(
     runtime: &MobRuntime,
     session_id: &meerkat_core::types::SessionId,
-) -> Option<String> {
-    let service = runtime.session_service()?;
-    let view = meerkat_core::service::SessionService::read(service.as_ref(), session_id)
+) -> StoredPrivateOwner {
+    let Some(service) = runtime.session_service() else {
+        return StoredPrivateOwner::Unreadable;
+    };
+    match meerkat_core::service::SessionService::read(service.as_ref(), session_id).await {
+        Ok(view) => return StoredPrivateOwner::of_labels(&view.state.labels),
+        Err(meerkat_core::service::SessionError::NotFound { .. }) => {}
+        Err(_) => return StoredPrivateOwner::Unreadable,
+    }
+    match meerkat_mob::MobSessionService::load_session_for_resume(service.as_ref(), session_id)
         .await
-        .ok()?;
-    crate::access::private_owner(&view.state.labels).map(str::to_string)
+    {
+        Ok(
+            meerkat_mob::ResumeSessionLoad::Active(session)
+            | meerkat_mob::ResumeSessionLoad::Revivable(session),
+        ) => StoredPrivateOwner::of_stored_session(&session),
+        Ok(meerkat_mob::ResumeSessionLoad::Absent) => StoredPrivateOwner::NoOwner,
+        Ok(_) | Err(_) => StoredPrivateOwner::Unreadable,
+    }
 }
 
 /// The session a console attach goes on with, and, for a session the caller
@@ -11296,9 +11645,12 @@ fn restore_absent_session(answer: Value, absent: Option<&(String, String)>) -> V
     serde_json::from_str(&answer.to_string().replace(fresh.as_str(), named)).unwrap_or(answer)
 }
 
-fn durable_identity_for_member(member: &meerkat_mob::runtime::MobMemberListEntry) -> String {
-    crate::member_comms_id::durable_identity_label(&member.labels)
-        .map(str::to_owned)
+fn durable_identity_for_member(
+    handle: &MobHandle,
+    member: &meerkat_mob::runtime::MobMemberListEntry,
+) -> String {
+    crate::member_comms_id::resolve_member_identity(handle, &member.agent_identity, &member.labels)
+        .map(std::borrow::Cow::into_owned)
         // Fallback surfaces the public alias, not the comms-safe roster id.
         .unwrap_or_else(|| {
             crate::member_comms_id::runtime_alias_str(member.agent_identity.as_str()).into_owned()
@@ -11363,8 +11715,12 @@ async fn lookup_member_alias_candidates_with_session(
     let label_matches = entries
         .iter()
         .filter(|entry| {
-            crate::member_comms_id::durable_identity_label(&entry.labels)
-                .is_some_and(|identity| identity == requested_identity)
+            crate::member_comms_id::resolve_member_identity(
+                handle,
+                &entry.agent_identity,
+                &entry.labels,
+            )
+            .is_some_and(|identity| identity == requested_identity)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -11376,7 +11732,7 @@ async fn lookup_member_alias_candidates_with_session(
     for member in matches {
         let runtime_member_id =
             crate::member_comms_id::runtime_alias_str(member.agent_identity.as_str()).into_owned();
-        let identity = durable_identity_for_member(&member);
+        let identity = durable_identity_for_member(handle, &member);
         let session_id = handle
             .resolve_bridge_session_id_observation(&member.agent_identity)
             .await
@@ -12060,6 +12416,12 @@ fn console_identity_status_json_from_identity_status(
     if let Some(member_id) = status.member_id.as_ref() {
         value["member_id"] = json!(member_id);
     }
+    // Why no member holds the identity, and that the host's roster also
+    // lists its name: each only when true, written by the one function the
+    // stdio gateway's status answer writes them with.
+    if let Value::Object(fields) = &mut value {
+        crate::rpc::insert_identity_status_marks(fields, status);
+    }
     value
 }
 
@@ -12393,20 +12755,21 @@ async fn handle_console_aggregator_rpc(
     if is_console_mutating_rpc_method(request.method.as_str()) && !can_mutate {
         return console_read_only_rpc_error(response_id);
     }
-    if let Some(response) = handle_access_admin_rpc(access, access_view, &request) {
-        return response;
-    }
-    // Every agent check below, and the memory reads that judge each row's
-    // identity by the attributes recorded under the name this Console gives
-    // it, read the caller's audience: it is primed from the Console's
-    // runtimes first, as the send gate primes it, whether or not access is
-    // enforced (the private-owner rule reads it too).
+    // Every agent check below (the preview of the access rules among them),
+    // and the memory reads that judge each row's identity by the attributes
+    // recorded under the name this Console gives it, read the caller's
+    // audience: it is primed from the Console's runtimes first, as the send
+    // gate primes it, whether or not access is enforced (the private-owner
+    // rule reads it too).
     if let (Some(aggregator), Some(view)) = (&console_aggregator, access_view) {
         Box::pin(prime_access_cache_from_aggregator(
             aggregator,
             &view.controller(),
         ))
         .await;
+    }
+    if let Some(response) = handle_access_admin_rpc(access, access_view, &request) {
+        return response;
     }
     // Every member the request names is resolved through the caller's
     // audience before any rule or handler reads it: a member hidden from the
@@ -13059,6 +13422,52 @@ async fn handle_console_runtime_rpc_with_visibility(
         }
     }
 
+    // The family of changes and reads of the mob's long-term agents, served
+    // by the same handlers as the stdin surface, after the gates above. Its
+    // requester is the verified person, under the key a decision records
+    // that person by, or the host on its console surface when the caller is
+    // no verified person; never the host's operator.
+    if crate::rpc::identity_methods::is_identity_family_method(request.method.as_str())
+        && let Some(family) = identity_runtime.as_ref().and_then(|identity_runtime| {
+            // A caller under access rules names only the peers it may view.
+            match access_view {
+                Some(view) => identity_runtime.identity_family_seen_by(Arc::new(
+                    crate::rpc::identity_methods::ViewedAgents(view.clone()),
+                )),
+                None => identity_runtime.identity_family(),
+            }
+        })
+    {
+        let handle = runtime.handle();
+        let person = governance
+            .human
+            .as_ref()
+            .and_then(|human| human.principal().ok())
+            .and_then(|principal| {
+                meerkat_core::approval::decision::DecisionPrincipalKey::of(&principal).ok()
+            });
+        let surface = crate::rpc::identity_methods::IdentityFamilySurface {
+            mob: &handle,
+            family: family.as_ref(),
+            requester: crate::rpc::identity_methods::console_requester(
+                person
+                    .as_ref()
+                    .map(meerkat_core::approval::decision::DecisionPrincipalKey::as_str),
+            ),
+            access: access_view,
+        };
+        if let Some(response) = crate::rpc::identity_methods::handle_identity_family_rpc(
+            &surface,
+            request.method.as_str(),
+            response_id.clone(),
+            &request.params,
+        )
+        .await
+        {
+            return response_value(response_id, response.result, response.error);
+        }
+    }
+
     match request.method.as_str() {
         "meta/capabilities" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             // A decision (a gate, a quarantine review, a goal confirmation)
@@ -13114,6 +13523,31 @@ async fn handle_console_runtime_rpc_with_visibility(
                             )
                     }),
             );
+            // The identity family, derived from its registry and split by
+            // its own classifier: advertised by the runtime that serves it.
+            // A method that is the host's operator's alone is advertised to
+            // no Console caller: none of them is the operator.
+            if identity_runtime
+                .as_ref()
+                .is_some_and(|identity_runtime| identity_runtime.identity_family().is_some())
+            {
+                methods.extend(
+                    crate::rpc::identity_methods::IDENTITY_FAMILY_METHODS
+                        .iter()
+                        .copied()
+                        .filter(|method| {
+                            !crate::rpc::identity_methods::is_identity_family_operator_method(
+                                method,
+                            )
+                        })
+                        .filter(|method| {
+                            can_mutate
+                                || !crate::rpc::identity_methods::is_identity_family_mutating_method(
+                                    method,
+                                )
+                        }),
+                );
+            }
             if identity_runtime.is_some() {
                 methods.extend_from_slice(&[
                     "meta/status_identity",
@@ -15407,9 +15841,10 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .list_gating_pending()
                 .into_iter()
                 .filter(|entry| {
-                    entry.origin.as_ref().is_none_or(|origin| {
-                        access_view.is_none_or(|view| view.can_view_agent(&origin.identity))
-                    })
+                    entry
+                        .origin
+                        .as_ref()
+                        .is_none_or(|origin| gating_origin_visible(access_view, &origin.identity))
                 })
                 .collect::<Vec<_>>();
             response_value(response_id, Some(json!({ "pending": pending })), None)
@@ -15455,6 +15890,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .into_iter()
                 .filter(|entry| gating_audit_entry_visible(entry, access_view))
                 .take(limit)
+                .map(|entry| gating_audit_entry_served(entry, access_view))
                 .collect::<Vec<_>>();
             // Hidden entries never move the cursor, so a stretch of them is
             // re-read next time, and a gap may be reported if the last
@@ -17531,6 +17967,7 @@ async fn handle_console_runtime_rpc_with_visibility(
             handle_console_wire_local(
                 runtime,
                 identity_runtime.as_ref(),
+                access_view,
                 &request.params,
                 response_id,
                 true,
@@ -17542,6 +17979,7 @@ async fn handle_console_runtime_rpc_with_visibility(
             handle_console_wire_local(
                 runtime,
                 identity_runtime.as_ref(),
+                access_view,
                 &request.params,
                 response_id,
                 false,
@@ -17907,8 +18345,12 @@ async fn console_member_peer_info(
                 .await
                 .into_iter()
                 .filter(|entry| {
-                    crate::member_comms_id::durable_identity_label(&entry.labels)
-                        .is_some_and(|identity| identity == member_alias)
+                    crate::member_comms_id::resolve_member_identity(
+                        &handle,
+                        &entry.agent_identity,
+                        &entry.labels,
+                    )
+                    .is_some_and(|identity| identity == member_alias)
                 })
                 .map(|entry| {
                     crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())
@@ -17985,6 +18427,7 @@ async fn console_member_peer_info(
 async fn handle_console_wire_local(
     runtime: &MobRuntime,
     identity_runtime: Option<&Arc<crate::identity_first::IdentityRuntime>>,
+    access_view: Option<&AccessView>,
     params: &Value,
     response_id: Value,
     wire: bool,
@@ -18053,7 +18496,42 @@ async fn handle_console_wire_local(
     };
 
     let handle = runtime.handle();
+    // The body is `UnifiedRuntime::wire_local` / `unwire_local`'s
+    // (`wire_local_edge`, `unwire_local_edge`): the refusal of a wire that
+    // would replace an edge, the route half of a same-process peer, the
+    // trust. Only an operator's wire looks at the other mobs of this
+    // process: on a Console with an access controller, a caller who is no
+    // access admin gets, for a member of another mob, the answer of a name
+    // no mob has, and no route is installed (a member private to another
+    // person is hidden from such a caller with access enforced or not, and
+    // this Console cannot judge the members of another mob).
+    let peers = if access_view.is_none_or(AccessView::is_admin) {
+        crate::unified_runtime::cross_mob::SameProcessPeers::Resolve
+    } else {
+        crate::unified_runtime::cross_mob::SameProcessPeers::Unresolved
+    };
     let local_alias = crate::member_comms_id::runtime_alias_str(local_id).into_owned();
+    let edge = move |handle: meerkat_mob::runtime::MobHandle,
+                     member: meerkat_mob::AgentIdentity,
+                     member_alias: String| async move {
+        let result = if wire {
+            crate::unified_runtime::cross_mob::wire_local_edge(
+                &handle,
+                member,
+                &member_alias,
+                spec,
+                peers,
+            )
+            .await
+        } else {
+            crate::unified_runtime::cross_mob::unwire_local_edge(&handle, member, spec).await
+        };
+        // The mob's own refusal reads as it always did here.
+        result.map_err(|err| match err {
+            crate::unified_runtime::cross_mob::CrossMobError::Mob(err) => err.to_string(),
+            other => other.to_string(),
+        })
+    };
     let authority_target = if let Some(identity_runtime) = identity_runtime {
         identity_runtime
             .member_alias_lifecycle_target(&local_alias)
@@ -18072,26 +18550,12 @@ async fn handle_console_wire_local(
             crate::identity_first::IdentityRuntime::run_member_alias_targets_operation_tracked(
                 vec![target],
                 move || async move {
-                    let result = if wire {
-                        handle
-                            .wire(
-                                crate::member_comms_id::roster_member_id_for_supplied_id(
-                                    &operation_alias,
-                                ),
-                                PeerTarget::External(spec),
-                            )
-                            .await
-                    } else {
-                        handle
-                            .unwire(
-                                crate::member_comms_id::roster_member_id_for_supplied_id(
-                                    &operation_alias,
-                                ),
-                                PeerTarget::External(spec),
-                            )
-                            .await
-                    };
-                    result.map_err(|err| err.to_string())
+                    edge(
+                        handle,
+                        crate::member_comms_id::roster_member_id_for_supplied_id(&operation_alias),
+                        operation_alias,
+                    )
+                    .await
                 },
             )
             .await
@@ -18101,22 +18565,12 @@ async fn handle_console_wire_local(
             format!("generated member alias requires current identity authority: {local_alias}"),
         ),
         Ok(None) => {
-            let result = if wire {
-                handle
-                    .wire(
-                        crate::member_comms_id::mob_member_id(&local_alias),
-                        PeerTarget::External(spec),
-                    )
-                    .await
-            } else {
-                handle
-                    .unwire(
-                        crate::member_comms_id::mob_member_id(&local_alias),
-                        PeerTarget::External(spec),
-                    )
-                    .await
-            };
-            result.map_err(|err| err.to_string())
+            edge(
+                handle,
+                crate::member_comms_id::mob_member_id(&local_alias),
+                local_alias.clone(),
+            )
+            .await
         }
     };
 
@@ -18310,6 +18764,12 @@ async fn build_live_snapshot(
 /// time) until the walk lands. Its other facts stay as walked: visibility
 /// and access decide on them, and the experience renders every record of a
 /// pending row in its withheld shape.
+///
+/// An identity-first row is also labelled by its registration: its
+/// `display_name` label is the display name `cut` read for the identity,
+/// when the registration has one. The roster, the sidebar and the topology
+/// node all read that label, so they show one name, and a change of it shows
+/// at the next read with no new walk.
 async fn join_identity_bindings(
     members: &mut [ConsoleMember],
     walked_cut: &IdentityBindingCut,
@@ -18329,6 +18789,18 @@ async fn join_identity_bindings(
         };
         if !crate::member_comms_id::live_member_is_identity(&member.agent_identity, &identity) {
             continue;
+        }
+        // The label the roster, the sidebar and the topology node read
+        // (`labels.display_name`, else the row's id) is the display name of
+        // the identity's registration, when it has one. A seat carries only
+        // the labels it was seated with: an identity whose record is its row
+        // in the mob's identity store is seated with its row's labels, which
+        // hold no display name, and a change of the row's display name
+        // reaches the registration, never the seat.
+        if let Some(display_name) = cut.display_names.get(&identity) {
+            member
+                .labels
+                .insert("display_name".to_string(), display_name.clone());
         }
         let current = cut.bindings.get(&identity);
         let session_id = current.and_then(|binding| binding.session_id.clone());
@@ -18610,6 +19082,8 @@ async fn reset_all_live_console_agents(
     let mut visible_runtime_member_ids = BTreeSet::new();
     let mut duplicate_live_identities = BTreeSet::new();
     let mut delegate_members = BTreeSet::new();
+    // A member with no `source_mob_id` is the primary mob's.
+    let primary = runtime.handle();
     for member in snapshot.members {
         if member.state == MEMBER_STATE_RETIRING {
             continue;
@@ -18617,17 +19091,18 @@ async fn reset_all_live_console_agents(
         if let Some(source_mob_id) = member.labels.get("source_mob_id").cloned() {
             delegate_members.insert((source_mob_id, member.agent_identity));
         } else {
-            let identity = crate::member_comms_id::durable_identity_label(&member.labels)
-                .map(str::to_owned)
-                .or_else(|| {
-                    identity_by_runtime_member_id
-                        .get(
-                            crate::member_comms_id::runtime_alias_str(&member.agent_identity)
-                                .as_ref(),
-                        )
-                        .cloned()
-                })
-                .unwrap_or_else(|| member.agent_identity.clone());
+            let identity = crate::member_comms_id::resolve_member_identity(
+                &primary,
+                &crate::member_comms_id::mob_member_id(&member.agent_identity),
+                &member.labels,
+            )
+            .map(std::borrow::Cow::into_owned)
+            .or_else(|| {
+                identity_by_runtime_member_id
+                    .get(crate::member_comms_id::runtime_alias_str(&member.agent_identity).as_ref())
+                    .cloned()
+            })
+            .unwrap_or_else(|| member.agent_identity.clone());
             if let Some(existing) = runtime_member_id_by_identity.get(&identity)
                 && existing != &member.agent_identity
             {
@@ -18662,14 +19137,18 @@ async fn reset_all_live_console_agents(
         if member.state == MEMBER_STATE_RETIRING || member.labels.contains_key("source_mob_id") {
             continue;
         }
-        let identity = crate::member_comms_id::durable_identity_label(&member.labels)
-            .map(str::to_owned)
-            .or_else(|| {
-                identity_by_runtime_member_id
-                    .get(crate::member_comms_id::runtime_alias_str(&member.agent_identity).as_ref())
-                    .cloned()
-            })
-            .unwrap_or_else(|| member.agent_identity.clone());
+        let identity = crate::member_comms_id::resolve_member_identity(
+            &primary,
+            &crate::member_comms_id::mob_member_id(&member.agent_identity),
+            &member.labels,
+        )
+        .map(std::borrow::Cow::into_owned)
+        .or_else(|| {
+            identity_by_runtime_member_id
+                .get(crate::member_comms_id::runtime_alias_str(&member.agent_identity).as_ref())
+                .cloned()
+        })
+        .unwrap_or_else(|| member.agent_identity.clone());
         raw_runtime_member_ids_by_identity
             .entry(identity.clone())
             .or_default()
@@ -18707,11 +19186,11 @@ async fn reset_all_live_console_agents(
     let mut retired_delegate_details = Vec::new();
     let mut reset_details = Vec::new();
     let mut failures = Vec::new();
-    // The store-owned identities (created at runtime, or adopted into store
-    // custody): Core's MobMachine drives them, so Meta's reset refuses each
-    // before anything acts, and none fails the call. Each is reported with
-    // its kind; Core's own changes reset nothing of them.
-    let mut store_owned = Vec::new();
+    // Kept in the body for shape stability, always empty: through 0.9.13 it
+    // listed the identities whose record is their row in the mob's identity
+    // store, which the reset then refused. They are reset as any identity
+    // now, and appear under `reset` or `failed` like the others.
+    let store_owned: Vec<Value> = Vec::new();
     // Kept in the body for shape stability. Nothing on the reset path warns
     // today: a registered identity resets through Core's rotation, which
     // retires the current incarnation and seats the fresh one in one step,
@@ -19124,13 +19603,9 @@ async fn reset_all_live_console_agents(
                             .await;
                     }
                 }
-                Err(
-                    err @ crate::identity_first::IdentityRuntimeError::IdentityStoreOwned { .. },
-                ) => store_owned.push(json!({
-                    "identity": identity,
-                    "kind": "identity_store_owned",
-                    "error": err.to_string(),
-                })),
+                // An archived identity has no member and no life to reset:
+                // it is left archived, and it fails nothing.
+                Err(crate::identity_first::IdentityRuntimeError::IdentityArchived { .. }) => {}
                 Err(err) => failures.push(json!({
                     "identity": identity,
                     "error": err.to_string(),
@@ -19443,7 +19918,13 @@ pub(crate) async fn prime_access_cache_from_runtime(
     runtime: &MobRuntime,
     access: &AccessController,
 ) {
-    prime_access_cache_from_runtime_in_namespace(runtime, access, "").await;
+    prime_access_cache_from_runtime_in_namespace(
+        runtime,
+        access,
+        "",
+        PrivateOwnerRecordReader::OwnRuntime,
+    )
+    .await;
     if let Some(identity_runtime) = runtime.installed_identity_runtime() {
         prime_current_runtime_aliases(&identity_runtime, access).await;
     }
@@ -19490,6 +19971,9 @@ pub(crate) async fn prime_access_cache_from_handle(handle: &MobHandle, access: &
         None,
     )
     .await;
+    // No identity runtime here: each record is read now.
+    let unseated =
+        unseated_agent_access_attributes(handle, None, &roster_identities, &BTreeMap::new()).await;
     record_live_and_registered_attributes(
         access,
         members,
@@ -19498,6 +19982,148 @@ pub(crate) async fn prime_access_cache_from_handle(handle: &MobHandle, access: &
         &BTreeMap::new(),
         "",
     );
+    for attributes in unseated {
+        access.record_agent_attributes(attributes);
+    }
+}
+
+/// The access attributes of every agent of `handle`'s mob that no roster
+/// row in `roster_identities` names (the roster rows of that mob: a row
+/// wins), so the rules decide an agent no member is seated for (one owed
+/// its seat, an archived one, one its host has not placed yet) as they
+/// decide a seated one:
+///
+/// - an agent whose record is its row in the mob's identity store, from
+///   that row: its profile as its role, and the row's labels. The names
+///   are Core's identity entries (the machine state its actor published: no
+///   store read). With `identities`, a row is read once and kept
+///   (`IdentityRuntime::unseated_records`: one read for the names not kept,
+///   forgotten at a change of the agent and after a bound); without, each
+///   row is read now. A row that cannot be read is private to nobody known
+///   ([`crate::access::UNKNOWN_PRIVATE_OWNER`]): only an access
+///   administrator is shown the agent;
+/// - every other agent `identities` has registered (one its host
+///   configures), from that registration as it is now: the registered
+///   profile as its role, and the registered labels as the Console reads
+///   them. An entry Core holds for such an agent that the runtime has not
+///   registered is private to nobody known.
+///
+/// The private-owner record's owner of an agent (`known_members`) is added
+/// where the agent's own record names none: it never makes one less
+/// private.
+async fn unseated_agent_access_attributes(
+    handle: &MobHandle,
+    identities: Option<&crate::identity_first::IdentityRuntime>,
+    roster_identities: &BTreeSet<String>,
+    known_members: &BTreeMap<String, Option<String>>,
+) -> Vec<AgentResourceAttributes> {
+    use crate::identity_creation::identity_name_of_member;
+    let private_to_nobody_known = |identity: String| AgentResourceAttributes {
+        identity,
+        agent_id: None,
+        role: None,
+        labels: BTreeMap::from([(
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            crate::access::UNKNOWN_PRIVATE_OWNER.to_string(),
+        )]),
+    };
+    let decided_on = |identity: String, role: String, mut labels: BTreeMap<String, String>| {
+        if crate::access::private_owner(&labels).is_none()
+            && let Some(Some(owner)) = known_members.get(&identity)
+        {
+            labels.insert(crate::access::PRIVATE_TO_LABEL.to_string(), owner.clone());
+        }
+        AgentResourceAttributes {
+            identity,
+            agent_id: None,
+            role: Some(role),
+            labels,
+        }
+    };
+
+    // Core's entries no roster row names: the created ones with their
+    // member names, the others by name, and apart the ones this build
+    // cannot read.
+    let mut created = Vec::new();
+    let mut created_names = BTreeSet::new();
+    let mut others = BTreeSet::new();
+    let mut unreadable = BTreeSet::new();
+    let mut after: Option<meerkat_mob::AgentIdentity> = None;
+    loop {
+        let page =
+            match handle.identity_entries(after.as_ref(), meerkat_mob::IDENTITY_ENTRY_PAGE_MAX) {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "access priming: Core's identity entries could not be read; the agents no \
+                         member is seated for are recorded as far as they were read"
+                    );
+                    break;
+                }
+            };
+        for view in &page.entries {
+            let name = identity_name_of_member(&view.identity);
+            if roster_identities.contains(&name) {
+                continue;
+            }
+            if crate::identity_first::IdentityRuntime::entry_record_is_row(view) {
+                created_names.insert(name.clone());
+                created.push((name, view.identity.clone()));
+            } else {
+                others.insert(name);
+            }
+        }
+        unreadable.extend(
+            page.unreadable
+                .iter()
+                .map(identity_name_of_member)
+                .filter(|name| !roster_identities.contains(name)),
+        );
+        match page.next {
+            Some(next) if after.as_ref().is_none_or(|current| &next > current) => {
+                after = Some(next);
+            }
+            _ => break,
+        }
+    }
+
+    let mut attributes = Vec::new();
+    let records = match identities {
+        Some(identities) => identities.unseated_records(handle, &created).await,
+        None => {
+            crate::identity_first::IdentityRuntime::read_unseated_records(handle, &created).await
+        }
+    };
+    for (name, record) in records {
+        attributes.push(match record {
+            Some(record) => decided_on(name, record.profile, record.labels),
+            None => private_to_nobody_known(name),
+        });
+    }
+
+    // The agents the host configures, as the identity runtime registered
+    // them: a roster row and a created row win, and an entry this build
+    // cannot read is decided as a record that cannot be read.
+    let mut configured = match identities {
+        Some(identities) => identities.configured_records().await,
+        None => BTreeMap::new(),
+    };
+    configured.retain(|name, _| {
+        !roster_identities.contains(name)
+            && !created_names.contains(name)
+            && !unreadable.contains(name)
+    });
+    others.retain(|name| !configured.contains_key(name));
+    for name in unreadable.into_iter().chain(others) {
+        attributes.push(private_to_nobody_known(name));
+    }
+    for (name, record) in configured {
+        let mut labels = record.labels;
+        crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
+        attributes.push(decided_on(name, record.profile, labels));
+    }
+    attributes
 }
 
 fn namespace_console_identity(identity: &str, namespace: &str) -> String {
@@ -19529,12 +20155,21 @@ fn namespace_console_attributes(
 /// experience records them, one final value per console identity, and the
 /// spawn registry's attributes for each registered identity no live member
 /// names. The members of agent-created sub-mobs count as live members,
-/// found and labelled as the console's snapshot finds and labels them.
-/// Returns the recorded live identities, namespaced.
+/// found and labelled as the console's snapshot finds and labels them. Then
+/// the agents of the mob that no roster row of the mob itself names (one
+/// owed its seat, an archived one, one its host has not placed yet), each
+/// from its own record ([`unseated_agent_access_attributes`]), so a rule
+/// about a role or a label and the rule about an agent private to a person
+/// decide such an agent wherever it is named.
+/// `first_read_reader` says which reading of the runtime this is, for the
+/// first read of who its members are private to
+/// ([`AccessController::record_private_owner_record`]).
+/// Returns the recorded live identities and those agents, namespaced.
 async fn prime_access_cache_from_runtime_in_namespace(
     runtime: &MobRuntime,
     access: &AccessController,
     namespace: &str,
+    first_read_reader: PrivateOwnerRecordReader,
 ) -> BTreeSet<String> {
     let registered = runtime.console_identity_labels().await;
     let mut roster_identities = BTreeSet::new();
@@ -19547,6 +20182,9 @@ async fn prime_access_cache_from_runtime_in_namespace(
         Some(runtime.side_chat_lineages()),
     )
     .await;
+    // The mob's own roster rows: a member of a sub-mob that carries an
+    // agent's name does not stand for the agent.
+    let own_roster_identities = roster_identities.clone();
     for (mob_id, delegate_handle, host_identity) in delegate_mobs_with_hosts(runtime).await {
         members.extend(
             live_member_access_attributes(
@@ -19570,16 +20208,94 @@ async fn prime_access_cache_from_runtime_in_namespace(
         .filter_map(|member| member.agent_id.as_deref())
         .map(crate::member_comms_id::logical_memory_identity)
         .collect();
-    let mut known_members = runtime.private_owners().memory_members();
+    // A first read of that record that is still on its first attempt is
+    // waited for, a bounded time; whether a read is still owed is taken
+    // before the record itself, so a record read as complete is complete.
+    // While a read is owed the controller keeps every caller who is not
+    // an admin apart: an ended private member is not known as one yet. A
+    // read found done is recorded only at the end, once this priming has
+    // recorded who the members are private to. Until then the runtime
+    // counts as owing the read: as the last priming left it, and from the
+    // start of the first priming of a runtime the controller has not
+    // recorded yet. A priming of a runtime it has recorded with its read
+    // done records nothing here.
+    let owners = runtime.private_owners();
+    owners
+        .first_attempts_settled(crate::private_owners::FIRST_READ_WAIT)
+        .await;
+    let first_read_pending = owners.first_read_pending();
+    if first_read_pending || !access.has_private_owner_record(owners.record_id()) {
+        access.record_private_owner_record(owners.record_id(), first_read_reader, true);
+    }
+    let mut known_members = owners.memory_members();
     known_members.retain(|identity, _| !live_rows.contains(identity));
-    record_live_and_registered_attributes(
+    let unseated = unseated_agent_access_attributes(
+        &runtime.handle(),
+        runtime.installed_identity_runtime().as_deref(),
+        &own_roster_identities,
+        &known_members,
+    )
+    .await;
+    #[cfg(test)]
+    unseated_read_hold::wait(runtime.handle().mob_id().as_str()).await;
+    let mut recorded = record_live_and_registered_attributes(
         access,
         members,
         &registered,
         &roster_identities,
         &known_members,
         namespace,
-    )
+    );
+    // After the members and the ended ones: an agent's own record decides
+    // it, whatever the spawn registry or a sub-mob's member of its name
+    // says.
+    for attributes in unseated {
+        let attributes = namespace_console_attributes(attributes, namespace);
+        recorded.insert(attributes.identity.clone());
+        access.record_agent_attributes(attributes);
+    }
+    if !first_read_pending {
+        access.record_private_owner_record(owners.record_id(), first_read_reader, false);
+    }
+    recorded
+}
+
+/// Test hold: a priming of a mob named here stops right after its read of
+/// the agents no member is seated for, as it does while that read is under
+/// way, until the gate opens.
+#[cfg(test)]
+mod unseated_read_hold {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+
+    type Hold = (tokio::sync::watch::Receiver<bool>, Arc<AtomicBool>);
+
+    static HOLDS: LazyLock<Mutex<BTreeMap<String, Hold>>> =
+        LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+    /// Hold the primings of `mob_id` until `gate` opens. The answer turns
+    /// true once a priming waits at the hold.
+    pub(super) fn hold(mob_id: &str, gate: tokio::sync::watch::Receiver<bool>) -> Arc<AtomicBool> {
+        let reached = Arc::new(AtomicBool::new(false));
+        HOLDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(mob_id.to_string(), (gate, Arc::clone(&reached)));
+        reached
+    }
+
+    pub(super) async fn wait(mob_id: &str) {
+        let hold = HOLDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(mob_id)
+            .cloned();
+        if let Some((mut gate, reached)) = hold {
+            reached.store(true, Ordering::SeqCst);
+            let _ = gate.wait_for(|open| *open).await;
+        }
+    }
 }
 
 /// The access attributes of every structural roster row of `handle`,
@@ -19603,9 +20319,14 @@ async fn live_member_access_attributes(
     for entry in &entries {
         let alias = crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str());
         roster_identities.insert(
-            crate::member_comms_id::durable_identity_label(&entry.labels)
-                .unwrap_or(alias.as_ref())
-                .to_string(),
+            crate::member_comms_id::resolve_member_identity(
+                handle,
+                &entry.agent_identity,
+                &entry.labels,
+            )
+            .as_deref()
+            .unwrap_or(alias.as_ref())
+            .to_string(),
         );
     }
     // A side chat names its source as this roster records its fork; the
@@ -19613,6 +20334,7 @@ async fn live_member_access_attributes(
     let side_chats =
         if crate::side_chat::any_side_chat_marker(entries.iter().map(|entry| &entry.labels)) {
             crate::side_chat::side_chat_lineages(
+                handle,
                 &entries
                     .iter()
                     .map(|entry| crate::side_chat::SideChatRosterRow {
@@ -19658,6 +20380,7 @@ async fn live_member_access_attributes(
             let alias = crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())
                 .into_owned();
             let labels = projected_console_member_labels(
+                handle,
                 &entry.labels,
                 &alias,
                 host_identity,
@@ -19775,6 +20498,7 @@ async fn delegate_mobs_with_hosts(runtime: &MobRuntime) -> Vec<(String, MobHandl
 /// priming use this projection, so all of them record one value per
 /// identity.
 fn projected_console_member_labels(
+    handle: &MobHandle,
     roster_labels: &BTreeMap<String, String>,
     alias: &str,
     host_identity: Option<&str>,
@@ -19784,8 +20508,12 @@ fn projected_console_member_labels(
 ) -> BTreeMap<String, String> {
     let mut labels = roster_labels.clone();
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
-    let console_identity_key =
-        crate::member_comms_id::durable_identity_label(roster_labels).unwrap_or(alias);
+    let console_identity = crate::member_comms_id::resolve_member_identity(
+        handle,
+        &crate::member_comms_id::mob_member_id(alias),
+        roster_labels,
+    );
+    let console_identity_key = console_identity.as_deref().unwrap_or(alias);
     if let Some(spawn_labels) = registered_labels.get(console_identity_key) {
         crate::console_spawn::merge_registered_labels(&mut labels, spawn_labels);
     }
@@ -19852,6 +20580,7 @@ async fn project_console_members_from_handle(
         // chat, Meerkat's fork record) may assert (this projection feeds the
         // experience-path ABAC attribute rebuild).
         let labels = projected_console_member_labels(
+            handle,
             &entry.labels,
             &identity,
             host_identity,
@@ -27423,10 +28152,10 @@ message = "review"
     /// (`-32014`, `identity_name_unreadable`). A read of Core's entry that
     /// Core could not serve refuses the mutation retryable (`-32052`,
     /// `identity_history_unavailable`), never as an unknown identity. An
-    /// identity created at runtime (Core holds it as a created entry, whose
-    /// record the mob's identity store owns) is registered from its row and
-    /// goes through its door, which refuses the mutation: Core drives a
-    /// store-owned identity.
+    /// identity created at runtime (Core holds it as an identity entry whose
+    /// record is its row in the mob's identity store) is registered from its
+    /// row and goes through its door, which serves the mutation as any
+    /// identity's.
     ///
     /// RED before the door told them apart: `meta/retire_member` answered
     /// each of them with an untyped `-32000`.
@@ -27501,28 +28230,25 @@ message = "review"
             );
         }
         // The identity created at runtime goes through its door, which
-        // refuses the retire: Core drives a store-owned identity.
+        // registers it from its row and serves the retire as any identity's:
+        // Core releases its member and keeps it seated.
         let response = retire("console-created").await;
-        assert!(response["result"].is_null(), "{response:#?}");
-        assert_eq!(response["error"]["code"], json!(-32000), "{response:#?}");
-        let detail = response["error"]["data"]["detail"]
-            .as_str()
-            .unwrap_or_default();
         assert!(
-            detail.contains("retire_member (identity)") && detail.contains("store-owned"),
-            "the identity's door refused the retire: {response:#?}"
+            response.get("error").is_none_or(Value::is_null),
+            "the identity's door serves the retire: {response:#?}"
         );
         assert!(
             identity_runtime.contains(&created).await,
             "the door registered the identity created at runtime from its row"
         );
-        assert!(
-            core_bridge.releases().is_empty(),
-            "a refused mutation releases nothing"
+        assert_eq!(
+            core_bridge.releases(),
+            vec![created.clone()],
+            "the retire released the identity's member"
         );
         assert!(
             core_bridge.core.live_member(&created)?.is_some(),
-            "Core's member of the created identity is untouched"
+            "Core keeps the member of the created identity seated"
         );
 
         // Every read of Core's entry fails: the mutation of a plain name is
@@ -27545,16 +28271,18 @@ message = "review"
         Ok(())
     }
 
-    /// `meta/reset_all` does not fail on a store-owned identity (created at
-    /// runtime, or adopted into store custody): Meta's reset refuses it
-    /// before anything acts, as Core's MobMachine drives it, and the call
-    /// reports it in its own `store_owned` list with its kind
-    /// (`identity_store_owned`), not under `failed`. Nothing of it is reset.
+    /// `meta/reset_all` resets an identity whose record is its row in the
+    /// mob's identity store (created at runtime, or adopted into the store)
+    /// as any other: its reset reaches Core's rotation, and the call's
+    /// `store_owned` list, kept for shape stability, is empty. Over this
+    /// bridge, which implements no rotation, the reset's own failure is
+    /// reported under `failed`, as a configured identity's would be.
     ///
-    /// RED before the list: the call failed `-32000` "reset_all failed for
-    /// one or more identities", with the store-owned identity under `failed`.
+    /// RED before the reset served such an identity: it was refused before
+    /// Core was asked, and listed under `store_owned` with the kind
+    /// `identity_store_owned`.
     #[tokio::test]
-    async fn reset_all_reports_a_store_owned_identity_apart_and_does_not_fail()
+    async fn reset_all_resets_an_identity_whose_record_is_its_row_like_any_other()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (_temp_dir, runtime) =
             build_empty_console_test_runtime("console-reset-all-store-owned").await?;
@@ -27600,31 +28328,33 @@ message = "review"
             true,
         ))
         .await;
-        assert!(
-            response.get("error").is_none_or(Value::is_null),
-            "a store-owned identity does not fail the call: {response:#?}"
-        );
-        let result = &response["result"];
-        assert_eq!(result["failed"], json!([]), "{response:#?}");
-        assert_eq!(result["reset"], json!([]), "{response:#?}");
-        let store_owned = result["store_owned"]
-            .as_array()
-            .ok_or_else(|| format!("reset_all lists its store-owned identities: {response:#?}"))?;
+        let body = if response.get("error").is_none_or(Value::is_null) {
+            &response["result"]
+        } else {
+            &response["error"]["data"]
+        };
         assert_eq!(
-            store_owned
+            body["store_owned"],
+            json!([]),
+            "no identity is set apart by where its record lives: {response:#?}"
+        );
+        let failed = body["failed"]
+            .as_array()
+            .ok_or_else(|| format!("reset_all lists its failures: {response:#?}"))?;
+        assert_eq!(
+            failed
                 .iter()
-                .map(|row| (row["identity"].clone(), row["kind"].clone()))
+                .map(|row| row["identity"].clone())
                 .collect::<Vec<_>>(),
-            vec![(json!("console-store-owned"), json!("identity_store_owned"))],
-            "{response:#?}"
+            vec![json!("console-store-owned")],
+            "the reset was carried to Core, whose rotation this bridge does not implement: \
+             {response:#?}"
         );
         assert!(
-            core_bridge.releases().is_empty(),
-            "nothing of the store-owned identity is reset"
-        );
-        assert!(
-            core_bridge.core.live_member(&created)?.is_some(),
-            "Core's member of the store-owned identity is untouched"
+            failed[0]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("member rotation")),
+            "the failure is the rotation's, not a refusal of the identity: {response:#?}"
         );
         let _ = runtime.handle().stop().await;
         Ok(())
@@ -32811,11 +33541,11 @@ mod console_viewer_resolver_tests {
 
     // HS256 fixtures are accepted only for a development issuer.
     const ISSUER: &str = "https://trusted.meta.localhost";
-    const BOB: &str = "bob@example.test";
-    const CAROL: &str = "carol@example.test";
+    pub(super) const BOB: &str = "bob@example.test";
+    pub(super) const CAROL: &str = "carol@example.test";
     const ROBOT: &str = "svc:robot";
 
-    fn decisions(require_app_auth: bool) -> RuntimeDecisionState {
+    pub(super) fn decisions(require_app_auth: bool) -> RuntimeDecisionState {
         crate::build_runtime_decision_state(crate::RuntimeDecisionInputs {
             bigquery: crate::BigQueryNaming {
                 dataset: "viewer_dataset".to_string(),
@@ -32867,7 +33597,7 @@ mod console_viewer_resolver_tests {
         .expect("signed fixture JWT")
     }
 
-    fn bearer(subject: &str) -> HeaderMap {
+    pub(super) fn bearer(subject: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
@@ -33359,6 +34089,203 @@ mod console_viewer_resolver_tests {
                 issuer: ISSUER.to_string(),
             }
         );
+    }
+
+    /// The audience the console builds for a request that carries
+    /// `subject`'s token, or no token.
+    fn audience(
+        decisions: &RuntimeDecisionState,
+        access: Option<&AccessController>,
+        subject: Option<&str>,
+    ) -> AccessView {
+        console_request_auth_context_for(
+            decisions,
+            &crate::auth::session_fence::ConsoleSessionFences::detached(),
+            access,
+            &subject.map(bearer).unwrap_or_default(),
+            &Uri::from_static("/console/timeline"),
+        )
+        .expect("the console admits the request")
+        .audience
+    }
+
+    /// `decisions` with a trusted key set that holds no key: no token
+    /// verifies against it.
+    pub(super) fn with_no_key(mut decisions: RuntimeDecisionState) -> RuntimeDecisionState {
+        decisions.trusted_oidc.jwks_json = r#"{"keys":[]}"#.to_string();
+        decisions
+    }
+
+    /// Rules that are off, with Carol the one administrator: every caller
+    /// may reach every agent.
+    pub(super) fn rules_off() -> AccessControlConfig {
+        AccessControlConfig {
+            enabled: false,
+            admins: vec![CAROL.to_string()],
+            ..AccessControlConfig::default()
+        }
+    }
+
+    /// The access configurations that grant a caller who sends no token:
+    /// an allow rule that names no subject and no group, and rules that are
+    /// off. Carol is the one administrator of both.
+    fn configurations_that_grant_a_caller_with_no_token() -> [AccessControlConfig; 2] {
+        [
+            AccessControlConfig {
+                enabled: true,
+                admins: vec![CAROL.to_string()],
+                rules: vec![AccessRule {
+                    id: "every-caller-reads-every-agent".to_string(),
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                }],
+                ..AccessControlConfig::default()
+            },
+            rules_off(),
+        ]
+    }
+
+    /// Whether a read of `member`'s memory scope reaches that member for
+    /// `view`, or is answered as a read of a member that does not exist.
+    fn reads_memory_scope_of(view: &AccessView, member: &str) -> bool {
+        let mut params = json!({ "identity": member });
+        console_rpc_resolve_members(Some(view), "meta/agent_memory/manifest", &mut params)
+            .expect("a member a method reads is never refused");
+        params["identity"] == json!(member)
+    }
+
+    /// A console where sign-in is optional and a token is verified can
+    /// identify a person, so a member can be private to one there. A caller
+    /// who sends no token is then one more caller who is not an
+    /// administrator: refused a record with no captured member attributes,
+    /// under a name a shared member holds and under a name no member ever
+    /// held, and the memory scope of a member the console does not know. A
+    /// console that can identify nobody (no key to verify a token with, or
+    /// no access controller to resolve one for) serves its one operator as
+    /// before. A console that requires sign-in tells its people apart with
+    /// or without an access configuration.
+    #[test]
+    fn a_console_that_can_identify_a_person_exempts_no_caller_with_no_token() {
+        const SHARED: &str = "alpha";
+        const UNSEATED: &str = "ghost-x";
+        let open = decisions(false);
+        for config in configurations_that_grant_a_caller_with_no_token() {
+            let enabled = config.enabled;
+            let controller = AccessController::new(config).expect("controller");
+            controller.record_agent_attributes(crate::access::AgentResourceAttributes {
+                identity: SHARED.to_string(),
+                agent_id: None,
+                role: Some("worker".to_string()),
+                labels: Default::default(),
+            });
+            let nobody = audience(&open, Some(&controller), None);
+            let bob = audience(&open, Some(&controller), Some(BOB));
+            let admin = audience(&open, Some(&controller), Some(CAROL));
+            assert!(admin.is_admin() && !bob.is_admin() && nobody.subject().is_none());
+            for name in [SHARED, UNSEATED] {
+                assert!(
+                    !nobody.can_view_uncaptured_member(name),
+                    "rules on {enabled}: a caller with no token reads no record with no \
+                     captured attributes under {name}"
+                );
+                assert!(!bob.can_view_uncaptured_member(name), "{name}");
+                assert!(admin.can_view_uncaptured_member(name), "{name}");
+            }
+            assert!(
+                !reads_memory_scope_of(&nobody, UNSEATED),
+                "rules on {enabled}: a caller with no token is shown no memory scope of a \
+                 member the console does not know"
+            );
+            assert!(!reads_memory_scope_of(&bob, UNSEATED));
+            assert!(reads_memory_scope_of(&admin, UNSEATED));
+            assert!(
+                reads_memory_scope_of(&nobody, SHARED),
+                "a member the console knows is withheld from nobody"
+            );
+
+            // The same controller on a console with no key: nobody can be
+            // identified, so nobody can be an administrator either.
+            let operator = audience(&with_no_key(open.clone()), Some(&controller), None);
+            for name in [SHARED, UNSEATED] {
+                assert!(
+                    operator.can_view_uncaptured_member(name),
+                    "rules on {enabled}: the one operator of a console that verifies no \
+                     token reads the record under {name} as before"
+                );
+            }
+            assert!(reads_memory_scope_of(&operator, UNSEATED));
+        }
+
+        // No access controller: a token is never resolved, with a key or
+        // without one.
+        for console in [open.clone(), with_no_key(open)] {
+            let operator = audience(&console, None, None);
+            assert!(operator.can_view_uncaptured_member(UNSEATED));
+            assert!(reads_memory_scope_of(&operator, UNSEATED));
+        }
+
+        // Sign-in required and no access configuration: every caller is a
+        // person, and none is an administrator.
+        let person = audience(&decisions(true), None, Some(BOB));
+        assert!(!person.can_view_uncaptured_member(UNSEATED));
+        assert!(!reads_memory_scope_of(&person, UNSEATED));
+    }
+
+    /// A session that no member owns is answered as a session that does not
+    /// exist to every caller of a console that can identify a person, except
+    /// its administrator, whether the caller sent a token or not. A console
+    /// that can identify nobody attaches it for its one operator as before.
+    #[tokio::test]
+    async fn a_session_with_no_established_owner_is_absent_on_a_console_that_can_identify_a_person()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        async fn attach(view: &AccessView, runtime: &MobRuntime) -> &'static str {
+            let session_id = meerkat_core::types::SessionId::new();
+            match attached_session_decision(Some(view), runtime, None, &session_id).await {
+                SessionAttachDecision::Allowed => "allowed",
+                SessionAttachDecision::Absent => "absent",
+                SessionAttachDecision::Denied(_) => "denied",
+            }
+        }
+        // A runtime that keeps its sessions in a durable store, where the
+        // console reads that no session of this id was ever stored.
+        let state_dir = tempfile::tempdir()?;
+        let runtime = super::console_side_chat_tests::persistent_gateway_runtime_in(
+            state_dir.path(),
+            "attach-unowned-open-console",
+            "",
+            "",
+        )
+        .await?;
+        let controller = AccessController::new(rules_off())?;
+        let open = decisions(false);
+        let nobody = audience(&open, Some(&controller), None);
+        assert_eq!(
+            attach(&nobody, &runtime).await,
+            "absent",
+            "a caller with no token on a console that can identify a person"
+        );
+        assert_eq!(
+            attach(&audience(&open, Some(&controller), Some(BOB)), &runtime).await,
+            "absent"
+        );
+        assert_eq!(
+            attach(&audience(&open, Some(&controller), Some(CAROL)), &runtime).await,
+            "allowed",
+            "the administrator"
+        );
+        let no_key = with_no_key(open.clone());
+        assert_eq!(
+            attach(&audience(&no_key, Some(&controller), None), &runtime).await,
+            "allowed",
+            "the one operator of a console that verifies no token"
+        );
+        assert_eq!(
+            attach(&audience(&open, None, None), &runtime).await,
+            "allowed",
+            "the one operator of a console with no access controller"
+        );
+        Ok(())
     }
 }
 
@@ -34081,6 +35008,58 @@ mod console_identity_row_keys_tests {
             },
             None,
         ));
+    }
+
+    /// The marks of an identity's status that are written only when true:
+    /// why no member holds it (`archived`, `preparation_pending`), and that
+    /// the host's roster also lists the name of an agent served from its
+    /// record (`roster_listing_superseded`).
+    const STATUS_MARKS: [&str; 3] = [
+        "archived",
+        "preparation_pending",
+        "roster_listing_superseded",
+    ];
+
+    /// The console's `meta/status_identity` answers each mark of the status
+    /// as the stdio gateway's answer does: only when true, in the status
+    /// record's own form, so the answer of an identity that sets none names
+    /// none.
+    #[test]
+    fn status_identity_row_answers_the_marks_of_the_status_only_when_true() {
+        let plain: crate::identity_first::IdentityStatus = serde_json::from_value(json!({
+            "identity": "console:identity-row",
+            "state": "active",
+            "addressability": "addressable",
+        }))
+        .expect("identity status");
+        let unset = console_identity_status_json_from_identity_status(&plain, None);
+        let stdio_unset = crate::rpc::identity_status_wire(&plain);
+        for mark in STATUS_MARKS {
+            assert!(unset.get(mark).is_none(), "{mark}: {unset}");
+            assert!(stdio_unset.get(mark).is_none(), "{mark}: {stdio_unset}");
+        }
+        for mark in STATUS_MARKS {
+            let mut read = json!({
+                "identity": "console:identity-row",
+                "state": "dormant",
+                "addressability": "addressable",
+            });
+            read[mark] = json!(true);
+            let status: crate::identity_first::IdentityStatus =
+                serde_json::from_value(read).expect("identity status");
+            let set = console_identity_status_json_from_identity_status(&status, None);
+            let record = serde_json::to_value(&status).expect("the status record serializes");
+            let stdio = crate::rpc::identity_status_wire(&status);
+            assert_eq!(set.get(mark), Some(&json!(true)), "{mark}: {set}");
+            assert_eq!(set.get(mark), record.get(mark), "{mark}: {set}");
+            for other in STATUS_MARKS {
+                // The two gateways answer every mark alike, set or not.
+                assert_eq!(set.get(other), stdio.get(other), "{other}: {set}");
+                if other != mark {
+                    assert!(set.get(other).is_none(), "{other}: {set}");
+                }
+            }
+        }
     }
 }
 
@@ -36449,6 +37428,134 @@ mod tool_grant_console_access_tests {
 }
 
 #[cfg(test)]
+mod identity_family_console_access_tests {
+    use super::*;
+    use crate::rpc::identity_methods::{
+        IDENTITY_FAMILY_METHODS, is_identity_family_mutating_method,
+    };
+
+    /// On the console a create needs `agent.identity.create`, a change of
+    /// one agent `agent.identity.manage` on that agent, its removal
+    /// `agent.identity.remove` on it and the hold of the mob's changes
+    /// `runtime.admin`; the reads need `agent.view`, a get on the agent it
+    /// names. A read-only console refuses exactly the family's writers, and
+    /// every method names its members in the member field table, a create
+    /// the agents it creates.
+    #[test]
+    fn the_console_gates_identity_changes_on_their_actions_and_reads_on_view() {
+        let named = json!({
+            "request_id": "r-1",
+            "name": "scout",
+            "expected_spec_digest": "sha256:00",
+        });
+        let scout = Some("scout".to_string());
+        assert_eq!(
+            console_rpc_access_requirements(
+                "meta/identity/create",
+                &json!({ "agents": [{ "name": "scout", "profile": "worker" }] })
+            ),
+            Some(vec![("agent.identity.create", None)])
+        );
+        for method in [
+            "meta/identity/update",
+            "meta/identity/archive",
+            "meta/identity/unarchive",
+            "meta/identity/adopt",
+        ] {
+            assert_eq!(
+                console_rpc_access_requirements(method, &named),
+                Some(vec![("agent.identity.manage", scout.clone())]),
+                "{method}"
+            );
+        }
+        assert_eq!(
+            console_rpc_access_requirements("meta/identity/remove", &named),
+            Some(vec![("agent.identity.remove", scout.clone())])
+        );
+        assert_eq!(
+            console_rpc_access_requirements("meta/identity/changes_hold", &json!({ "held": true })),
+            Some(vec![(ACTION_RUNTIME_ADMIN, None)])
+        );
+        assert_eq!(
+            console_rpc_access_requirements(
+                "meta/identity/settle_preparation",
+                &json!({ "request_id": "r-1", "name": "scout" })
+            ),
+            Some(vec![(ACTION_RUNTIME_ADMIN, None)])
+        );
+        assert_eq!(
+            console_method_members(
+                "meta/identity/settle_preparation",
+                &json!({ "request_id": "r-1", "name": "scout" })
+            ),
+            ["scout"]
+        );
+        assert_eq!(
+            console_rpc_access_requirements("meta/identity/get", &json!({ "name": "scout" })),
+            Some(vec![(ACTION_AGENT_VIEW, scout)])
+        );
+        // A plan is judged as the change it plans, on the agent it names.
+        let planned = |change: &str| {
+            let mut params = named.clone();
+            params["change"] = json!(change);
+            console_rpc_access_requirements("meta/identity/plan", &params)
+        };
+        assert_eq!(
+            console_rpc_access_requirements(
+                "meta/identity/plan",
+                &json!({"change": "create", "agents": [{"name": "scout", "profile": "worker"}]})
+            ),
+            Some(vec![("agent.identity.create", None)])
+        );
+        for change in ["update", "archive", "unarchive", "adopt"] {
+            assert_eq!(
+                planned(change),
+                Some(vec![("agent.identity.manage", Some("scout".to_string()))]),
+                "{change}"
+            );
+        }
+        assert_eq!(
+            planned("remove"),
+            Some(vec![("agent.identity.remove", Some("scout".to_string()))])
+        );
+        for method in [
+            "meta/identity/list",
+            "meta/identity/directory",
+            "meta/identity/operation",
+            "meta/identity/withdraw",
+        ] {
+            assert_eq!(
+                console_rpc_access_requirements(method, &json!({})),
+                Some(vec![(ACTION_AGENT_VIEW, None)]),
+                "{method}"
+            );
+        }
+        for method in IDENTITY_FAMILY_METHODS {
+            assert_eq!(
+                is_console_mutating_rpc_method(method),
+                is_identity_family_mutating_method(method),
+                "{method}"
+            );
+            assert!(
+                console_method_member_fields(method).is_some(),
+                "{method} is in the member field table"
+            );
+        }
+        assert_eq!(
+            console_method_members(
+                "meta/identity/create",
+                &json!({ "agents": [{ "name": "scout" }, { "name": "ledger" }] })
+            ),
+            ["scout", "ledger"]
+        );
+        assert_eq!(
+            console_method_members("meta/identity/remove", &named),
+            ["scout"]
+        );
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::expect_used)]
 mod console_access_priming_tests {
     //! Every route records one final access value per console identity, so
@@ -36619,6 +37726,7 @@ mod console_access_priming_tests {
             ]),
             spawned_by: Some("lead".to_string()),
             spawned_by_session: None,
+            session_id: None,
             via_tool: "mob_spawn_member".to_string(),
         })
         .await;
@@ -36675,6 +37783,7 @@ mod console_access_priming_tests {
             ]),
             spawned_by: Some("lead".to_string()),
             spawned_by_session: None,
+            session_id: None,
             via_tool: "mob_spawn_member".to_string(),
         })
         .await;
@@ -36728,6 +37837,8 @@ mod console_access_priming_tests {
         }
         let (controller, publication) = joined_controller()?;
         prime_access_cache_from_handle(&runtime.handle(), &controller).await;
+        // The first priming from the runtime records the runtime itself.
+        prime_access_cache_from_runtime(&runtime, &controller).await;
         console_experience(&runtime, &controller).await;
         let quiet = publication
             .observe(|| ())
@@ -36950,6 +38061,7 @@ mod console_access_priming_tests {
             labels: BTreeMap::from([("role".to_string(), "worker".to_string())]),
             spawned_by: Some("lead".to_string()),
             spawned_by_session: None,
+            session_id: None,
             via_tool: "mob_spawn_member".to_string(),
         })
         .await;
@@ -37122,6 +38234,7 @@ comms = true
                 labels: BTreeMap::new(),
                 spawned_by: Some(spawner.to_string()),
                 spawned_by_session: None,
+                session_id: None,
                 via_tool: "mob_spawn_member".to_string(),
             })
             .await;

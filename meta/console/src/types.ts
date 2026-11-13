@@ -62,6 +62,12 @@ export interface ConsoleAgentAffordances {
   can_manage_schedules?: boolean;
   can_retire?: boolean;
   can_respawn?: boolean;
+  /** Whether the viewer may change this agent's record (edit, archive)
+   * where the console serves changes of agents. Absent on a gateway that
+   * serves none. */
+  can_change_identity?: boolean;
+  /** Whether the viewer may remove this agent for good. */
+  can_remove_identity?: boolean;
   runtime_mode?: string;
 }
 
@@ -387,6 +393,19 @@ export interface ConsoleExperience {
   voice?: { available?: boolean; readiness_method?: string };
   memory?: ConsoleMemorySection;
   workgraph?: ConsoleWorkGraphSection;
+  identity_changes?: ConsoleIdentityChangesSection;
+}
+
+/// Per-caller standing on changes of the team's long-term agents, projected
+/// by `/console/experience`. `available` says whether this console serves the
+/// changes to the caller at all; `can_create` gates New agent, `can_change`
+/// the edit, archive and unarchive of an agent and `can_remove` its removal.
+/// Advisory: the gateway judges every change again when it is sent.
+export interface ConsoleIdentityChangesSection {
+  available?: boolean;
+  can_create?: boolean;
+  can_change?: boolean;
+  can_remove?: boolean;
 }
 
 /// Per-caller WorkGraph standing, projected by `/console/experience` when a

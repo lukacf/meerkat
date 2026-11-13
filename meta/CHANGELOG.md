@@ -127,6 +127,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   records, are more than 64, or hold more than 1 MiB of Active bodies, is
   past what an earlier release holds in one mob.
 
+- Between two mobs of one process, an edge that `meta/cross_mob/wire`
+  recorded in an earlier release delivered nothing there (through 0.9.14
+  every send over it was refused). Such edges become live at the upgrade:
+  the first send over one is delivered, and builds the recipient when it
+  is not built. Before upgrading, unwire the ones you do not want
+  (`meta/cross_mob/unwire`).
+
 ### Added
 
 - `meta/identity/list`, `get` and `directory` say `roster_listing_superseded:
@@ -782,6 +789,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     identity_tool_defs, identity_tool_catalog, identity_tool_provenance,
     is_identity_tool, IDENTITY_TOOLS}` and the eight tool name constants.
 
+- `meta/cross_mob/peer_info` answers two more fields for a local member:
+  `pubkey_b64`, the member's own transport key (standard base64), and
+  `dialable_address`, the member's socket endpoint, only when it has one
+  (`runtime_options.member_comms_address`). `dialable_address` is left out,
+  never null, for a member with in-process comms only. Python
+  `MobHandle.peer_info` and TypeScript `MobHandle.peerInfo` return them as
+  they come.
+- Python `MetaBuilder.member_comms_tcp(address="127.0.0.1:0")` gives the
+  locally hosted mob members signed TCP comms endpoints
+  (`runtime_options.member_comms_address`), as TypeScript `memberCommsTcp`
+  does: what a member of another gateway needs to reach them.
+
 ### Changed
 
 - A host that labels its members in its customizer must put those labels
@@ -1215,6 +1234,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   after it was built. `docs/reference/configuration.mdx` ("Member socket
   option") has the rule and what brings each kind of member back.
 
+- The SDK helper `wire_cross_mob` (Python `MobHandle.wire_cross_mob`,
+  TypeScript `MobHandle.wireCrossMob`) wires two members of two mobs so
+  that each can send the other ordinary peer messages, between two gateways
+  (two processes: every SDK runtime starts its own) and between two mobs
+  one process hosts. Through 0.9.14 it wired nothing. Every Meta release
+  since 0.9.9 is affected; earlier releases were not checked. There were
+  two causes:
+  - The helper passed no key, and `meta/cross_mob/peer_info` reported none
+    and only an in-process address. The first `meta/cross_mob/wire_local`
+    was refused with `external peer descriptor is invalid:
+    TrustedPeerDescriptor.pubkey must be non-zero`. The helper now wires
+    each side by the other member's `dialable_address` and `pubkey_b64`
+    when both gateways report a dialable address (give the members of both
+    a socket endpoint: `member_comms_tcp()` / `memberCommsTcp()`).
+    Otherwise it wires by the in-process address with no key, and
+    `wire_local` takes the key of a live member of another mob in its own
+    process from that member's registration.
+  - Between two mobs of one process, a caller that did supply each member's
+    key got both wires accepted and every send refused with
+    `peer_not_found_or_not_trusted`: only the managed topology's wire
+    (`meta/topology/apply`) installed the route by which one mob's
+    namespace reaches a member of the other; `meta/cross_mob/wire_local`
+    and `meta/cross_mob/wire` installed none. `wire_local`
+    (`UnifiedRuntime::wire_local`, stdio and console
+    RPC) now installs that route with the trust, and `unwire_local` removes
+    both, the route once no member of the mob is still wired to that peer.
+    A failed wire takes back exactly the route it installed.
+
+  A mob that was not wired gets no route: sends between its members and
+  either wired mob are still refused. `wire_local` refuses, with nothing
+  changed, a peer id or key that the named live member of its process does
+  not have (`inproc alias error`), and refuses in plain words a keyless
+  in-process wire to a member that no mob of its process has (`peer spec
+  error: ... is not a live member of a mob in this process ...`), which is
+  what a helper call between two gateways without member socket endpoints
+  now answers. A keyed in-process wire to such a member is accepted as
+  before. The helper docstring and the SDK guides no longer tell a
+  cross-process caller to pass the gateway key of `peer_pubkey`: a
+  descriptor carries the member's key from `peer_info`.
+
+  Wiring a pair again is safe. The identical edge is accepted and changes
+  nothing; a same-process route that is already there is re-pointed at
+  the member's inbox of now. A wire is never replaced:
+  `wire_local` on a member that is already wired to that peer name with
+  another endpoint (another address, or another key after a respawn) is
+  refused in plain words before anything is installed (`peer spec error:
+  ... is already wired to ... with another endpoint ...: unwire both
+  sides first ...`). Through 0.9.14 that call answered `mob error:
+  invalid state transition: Running -> Running`. `unwire_local` removes
+  the same-process route with the trust also when the caller names the
+  peer id of another incarnation of the member, and also a route the
+  managed topology's wire installed, once no member of the mob is
+  still wired to that peer. A keyless in-process wire to a member of the
+  caller's own mob is refused in plain words, and a wire is refused when
+  the local mob already holds that key. The keyless refusal for a member
+  no mob of the process has live also says what to do when the process
+  hosts it and it is not running (pass its key from `peer_info`).
+
+  Between two mobs of one process, an edge both mobs hold keeps working
+  when a runtime is stopped and built again over its state, with no second
+  wire: a peer message to a member that is not built is handed to that
+  member's own mob, which builds it and delivers, or refuses with its own
+  typed answer (a mob stopped through its handle refuses, and builds
+  nobody; a mob its runtime stopped for teardown holds no edge any more,
+  and the send is answered `peer_not_found_or_not_trusted`). The route to
+  the member's inbox is installed once its mob answered ready. A member
+  released to rest while its runtime keeps running is reached the same
+  way: the other mob's route to its inbox goes when the member is
+  released, and the other mob's next peer message builds the member again
+  and is delivered. A member that is built when its mob is stopped through
+  its handle still accepts the other mob's peer message and is handed it
+  once, when the mob resumes; a peer send from inside the stopped mob's
+  own namespace is refused (`mob_not_running`), and so is any send that
+  would have to build a member of the stopped mob. A wake is
+  forwarded only for an edge BOTH mobs hold in their state, each naming
+  the other member by its key, and only for a send of the member that
+  holds it. An edge only one mob holds, an edge one side unwired, another
+  sender or another key wake nobody, and the sender gets
+  `peer_not_found_or_not_trusted`. Only ordinary peer messages and
+  requests wake a member this way: a silent lifecycle notice to a member
+  of another mob that is not built is answered as before (not found).
+
+  Sends over an in-process `meta/cross_mob/wire` edge
+  (`UnifiedRuntime::wire_cross_mob` between two mobs of one process) were
+  refused `peer_not_found_or_not_trusted` through 0.9.14: that wire
+  recorded the edge in both mobs' state and installed no route. Such an
+  edge now delivers from the wire on, and builds the recipient when it is
+  not built. This holds for an edge an earlier release recorded too: it
+  starts to deliver at the first send after the upgrade, with no new wire
+  (see Upgrade). An unwire of either kind takes the edge's routes with it:
+  after `meta/cross_mob/unwire` neither mob routes the other mob's member,
+  and a later one-sided wire reaches nobody. `meta/cross_mob/wire` and the
+  managed topology's wire refuse, with nothing changed, a member of the
+  other mob whose key a member of the wiring mob is seated under, as
+  `wire_local` does (`inproc alias error: ... already holds that key under
+  another name ...`, naming the mob that holds it).
+
+  The
+  in-process form with the member's key (`remote_pubkey_b64` from
+  `peer_info`) wires a member that is not built; that wire builds nobody.
+  A runtime that shuts down takes the routes of its edges to the other
+  mobs' members, and theirs to its members, with it; through
+  0.9.14 they stayed and led to inboxes that were gone (a send was
+  answered `peer_admission_dropped ... classification_rejected`). What a
+  runtime holds is read from its mob's state once when it starts (one
+  member listing, one row for each member wired to a member of another
+  mob; nobody is built).
+
+  On the Console, `meta/cross_mob/wire_local` resolves a member of
+  another mob of its process (the route, the member's key) only for an
+  access admin, a subject the access configuration's `admins` names (and
+  for every caller of a Console assembled with no access controller at
+  all). For any other caller (the action `runtime.admin` can be granted to
+  one) the wire reads nothing of another mob and installs no route: such
+  a member gets the answer of a name no mob has. An edge that caller
+  wires with the member's key is an edge of the mob's state like any
+  other: it delivers once the other mob holds it too, as above. On a
+  Console with an access controller and no admins configured, the
+  same-process route at wire time is available through the host RPC
+  only. The two new `peer_info` fields are answered on the stdio RPC;
+  the Console's `peer_info` is unchanged.
+
 ### Known limitations
 
 - An update cannot hand an agent's runtime mode back to its profile: to
@@ -1296,6 +1437,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and the restart completes the retirement. A gateway lifts its mob at every
   start, and the retire of such a member after a lift ends this way. Retire
   the member, then restart the gateway.
+
+- A wire between members of two gateways survives a gateway restart on
+  persistent state only when each wired member's `dialable_address` is the
+  same after the restart. With the default member address (port `0`, a
+  port the system picks at each start: `member_comms_tcp()`,
+  `memberCommsTcp()`) a restarted member binds another port, is restored
+  `broken`, and its wires are dead; give a mob with persistent state a
+  fixed member address. To wire such a member again: `respawn_member` it
+  (it comes back active with its new address, on a fresh session),
+  `unwire_local` on both gateways, each with the other member's current
+  `peer_info`, then `wire_cross_mob` again.
+- With member socket endpoints, run one member per gateway today.
+- Between two mobs of one process, with the managed topology: after a
+  member is released to rest and built again by its own mob, a managed
+  connection from another mob to it reads as not active (the Console shows
+  it degraded and offers Reconnect, and a plain Connect answers that a
+  reconnect is required) until the other mob next sends to it or the
+  connection is applied again. A send from the other mob in that window
+  is delivered; a send by the rebuilt member's own mob does not change
+  the reading. If a Connect or Reconnect on that connection fails while
+  it reads as not active, both of its halves are unwired, and the two
+  members cannot message each other until the next apply that succeeds
+  (the connection stays desired).
 
 ## [0.9.14] - 2026-11-11
 

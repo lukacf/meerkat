@@ -1610,6 +1610,8 @@ class MetaRuntime:
             runtime_options["access_config_path"] = self._config.access_config_path
         if self._config.meerkat_config_path:
             runtime_options["meerkat_config_path"] = self._config.meerkat_config_path
+        if self._config.member_comms_address:
+            runtime_options["member_comms_address"] = self._config.member_comms_address
         if self._config.provider_credentials_root:
             runtime_options["provider_credentials_root"] = self._config.provider_credentials_root
         if self._config.native_realm is not None:
@@ -6451,44 +6453,112 @@ class MobHandle:
         remote_member_id: str,
         remote_handle: "MobHandle",
     ) -> None:
-        """Wire a local member to a member on another mob handle.
+        """Wire a local member to a member on another mob handle, both ways.
 
-        Uses peer_info + wire_local on both sides.  Both mob handles must
-        live in the **same process** — ``peer_info()`` always returns an
-        ``inproc://`` address, which is only reachable within the same
-        process.  For cross-process peering, call ``wire_local()`` on each
-        handle directly, supplying the remote gateway's routable TCP or UDS
-        address in place of the inproc address from ``peer_info()``.
+        After it returns, the two members can send each other ordinary peer
+        messages with their comms ``send`` tool. It reads ``peer_info`` on
+        both sides and calls ``wire_local`` on each side:
+
+        - **Two gateways (two processes).** Every ``MetaRuntime`` starts its
+          own gateway process, so this is the usual case. Give the members
+          of BOTH gateways a socket endpoint (``member_comms_tcp()`` on each
+          builder). ``peer_info`` then reports each member's
+          ``dialable_address`` and ``pubkey_b64``, and each side is wired to
+          the other by that address and key.
+        - **One process.** When either answer has no ``dialable_address``,
+          each side is wired by the in-process address with no key. That
+          works when one process hosts both mobs (a host application that
+          composes both runtimes): the gateway takes the member's key from
+          its own registration and installs the route with the trust.
+          Otherwise the first ``wire_local`` is refused in plain words (the
+          member is not a live member of a mob in that process) and nothing
+          is wired.
+
+        When the second ``wire_local`` is refused, the first side is undone
+        with ``unwire_local`` and the refusal is raised. A side that was
+        already wired to that peer before the call is left as it was.
+
+        **Calling it again.** For a pair that is already wired with the same
+        endpoints the call succeeds and changes nothing. A wire is never
+        replaced: when a side is already wired to that peer name with
+        another endpoint (another address, or another key after a respawn),
+        its ``wire_local`` is refused in plain words and nothing changes.
+        Call ``unwire_local`` on both sides first, each with the other
+        member's current ``peer_info``, then wire again.
+
+        A member of a stopped mob still accepts a message through a wire;
+        it is handed the message when its mob resumes.
+
+        **What a wire survives.** Between two gateways, a wire survives a
+        gateway restart on persistent state only when each wired member's
+        ``dialable_address`` is the same after the restart. A member whose
+        address changed is restored ``broken``, and its wires are dead. To
+        recover:
+
+        1. ``respawn_member`` the broken member. It comes back active with
+           its new address, and on a fresh conversation: a respawn starts
+           the member on a new session.
+        2. ``unwire_local`` on the other gateway, with the respawned
+           member's current ``peer_info``.
+        3. ``unwire_local`` on the restarted gateway, with the other
+           member's current ``peer_info``.
+        4. ``wire_cross_mob`` again.
 
         Args:
             local_member_id: Member on this mob to wire.
             remote_member_id: Member on the remote mob to wire.
-            remote_handle: MobHandle for the remote mob (must be same-process).
+            remote_handle: MobHandle for the remote mob.
         """
         local_info = await self.peer_info(local_member_id)
         remote_info = await remote_handle.peer_info(remote_member_id)
+        by_socket = all(
+            info.get("dialable_address") and info.get("pubkey_b64")
+            for info in (local_info, remote_info)
+        )
+
+        def describe(info: dict[str, str]) -> tuple[str, str, str, str | None]:
+            if by_socket:
+                return (
+                    info["comms_name"],
+                    info["peer_id"],
+                    info["dialable_address"],
+                    info["pubkey_b64"],
+                )
+            return info["comms_name"], info["peer_id"], info["address"], None
+
+        remote_name, remote_peer_id, remote_address, remote_key = describe(remote_info)
+        local_name, local_peer_id, local_address, local_key = describe(local_info)
+        # A side that is wired to this peer already is not this call's to
+        # undo: a refused second side must leave it as it was.
+        wired_before = remote_name in (await self.get_member(local_member_id)).wired_to
         await self.wire_local(
             local_member_id,
-            remote_info["comms_name"],
-            remote_info["peer_id"],
-            remote_info["address"],
+            remote_name,
+            remote_peer_id,
+            remote_address,
+            remote_pubkey_b64=remote_key,
         )
         try:
             await remote_handle.wire_local(
                 remote_member_id,
-                local_info["comms_name"],
-                local_info["peer_id"],
-                local_info["address"],
+                local_name,
+                local_peer_id,
+                local_address,
+                remote_pubkey_b64=local_key,
             )
         except Exception:
-            # Best-effort rollback: undo the local wire using the same
-            # low-level API — no contact directory or peer handles needed.
+            if wired_before:
+                raise
+            # Best-effort rollback: undo the local wire with the parameters
+            # it was made with. The gateway removes the trust and the route
+            # it installed with it.
             try:
                 await self.unwire_local(
                     local_member_id,
-                    remote_info["comms_name"],
-                    remote_info["peer_id"],
-                    remote_info["address"],
+                    remote_name,
+                    remote_peer_id,
+                    remote_address,
+                    remote_pubkey_b64=remote_key,
                 )
             except Exception:
                 pass
@@ -6529,7 +6599,14 @@ class MobHandle:
     async def peer_info(self, member_id: str) -> dict[str, str]:
         """Get comms peer info for a local member.
 
-        Returns ``{"member_id", "mob_id", "comms_name", "peer_id", "address"}``.
+        Returns ``{"member_id", "mob_id", "comms_name", "peer_id", "address",
+        "pubkey_b64"}`` and, for a member with a socket endpoint
+        (``member_comms_tcp()`` on the builder), ``"dialable_address"``.
+        ``address`` is the in-process address, which reaches the member only
+        from the same process. ``pubkey_b64`` is the member's own transport
+        key (standard base64). ``dialable_address`` is left out, never null,
+        when the member has no socket endpoint. A gateway older than 0.9.15
+        answers neither ``pubkey_b64`` nor ``dialable_address``.
         Used to build peer specs for cross-mob wiring via ``wire_local``.
         """
         raw = await self._runtime._rpc(
@@ -6542,7 +6619,9 @@ class MobHandle:
         """Return the local gateway's Ed25519 signing pubkey, base64.
 
         Used to bootstrap trust before populating a peer meta's
-        contact directory with this gateway's pubkey. Raises
+        contact directory with this gateway's pubkey. It is the GATEWAY's
+        key, not a member's: a ``wire_local`` descriptor takes the member's
+        key from :meth:`peer_info`. Raises
         :class:`CapabilityUnavailableError` from the underlying
         transport if the local gateway is inproc-only and never
         configured a keypair.
@@ -6565,22 +6644,39 @@ class MobHandle:
     ) -> None:
         """Wire a local member to a remote peer (local side only).
 
-        For same-process (inproc) cross-mob wiring::
+        :meth:`wire_cross_mob` makes these calls for both sides; call this
+        directly only to wire one side yourself.
 
-            # Get peer info from each side
+        Two gateways (two processes), each member with a socket endpoint::
+
             a_info = await core.peer_info("research")
             b_info = await gw.peer_info("calendar")
 
-            # Wire each side to the other (inproc address from peer_info)
-            await core.wire_local("research", b_info["comms_name"], b_info["peer_id"], b_info["address"])
-            await gw.wire_local("calendar", a_info["comms_name"], a_info["peer_id"], a_info["address"])
+            # Each side names the other by its dialable address and its own key
+            await core.wire_local(
+                "research", b_info["comms_name"], b_info["peer_id"],
+                b_info["dialable_address"], remote_pubkey_b64=b_info["pubkey_b64"],
+            )
+            await gw.wire_local(
+                "calendar", a_info["comms_name"], a_info["peer_id"],
+                a_info["dialable_address"], remote_pubkey_b64=a_info["pubkey_b64"],
+            )
 
-        For cross-process (TCP/UDS), replace the address with the remote
-        gateway's transport endpoint — peer_info always returns inproc.
-        Pass ``remote_pubkey_b64`` (base64 of the peer gateway's Ed25519
-        verifying key, fetched via :meth:`peer_pubkey`) to stamp a real
-        signing pubkey on the descriptor; the gateway rejects non-inproc
-        wires without one.
+        ``remote_pubkey_b64`` is the MEMBER's transport key from
+        ``peer_info`` (the peer id is derived from it), never the gateway
+        key of :meth:`peer_pubkey`. The gateway refuses a socket address
+        without a key.
+
+        One process hosting both mobs: pass ``peer_info``'s ``address`` (the
+        in-process address) and no key. The gateway takes the key of a live
+        member of another mob in its own process from that member's
+        registration, and installs the route with the trust. A member that
+        process does not have is refused in plain words. When the member may
+        not be running (a mob built again over its state builds a member on
+        its first message), pass ``pubkey_b64`` from its ``peer_info`` as
+        well: the wire then needs no running member and starts none. Once
+        both mobs hold the edge, a peer message to a member that is not
+        running is handed to that member's own mob, which starts it.
         """
         params: dict[str, str] = {
             "local_member_id": local_member_id,

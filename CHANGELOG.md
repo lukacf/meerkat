@@ -411,6 +411,30 @@ them.
   `meerkat_store::doctor::operator_instruction_mob_totals` is the census
   behind it.
 
+- `meerkat-comms`: `InprocRegistry::wake_route_owner_in_namespace` reads the
+  owner of the wake route published for a key in a namespace, with the
+  owner's name for the member. It is a read for a host that runs two
+  namespaces in one process and declared a link between them: the host hands
+  a wake to the member's own owner, which still answers from its machine.
+  The read publishes and retracts nothing, wakes nobody and hands out no
+  inbox, and for a send scoped to a namespace the registry itself still
+  never wakes a member from another namespace. `publish_wake_route` and
+  `retract_wake_route` now document that second publisher: a host forwarder
+  never publishes over an owner's route and never retracts one.
+
+- `meerkat-comms`: `InprocRegistry::publish_forwarder_wake_route` publishes
+  a host forwarder's wake route, marked as such. A send scoped to the
+  route's namespace finds it like any wake route; a lookup in any namespace
+  (a sender with no namespace) skips it, so such a sender still finds the
+  member's own owner as its one route. No route published with
+  `publish_wake_route` is marked, so nothing changes for existing
+  publishers.
+
+- `meerkat-comms`: `RegistrationRejection::InboxGone`, the answer of a
+  registration whose inbox already left the registry through its own
+  runtime (see Changed). Nothing is registered. `RegistrationRejection` is
+  non-exhaustive, so code that matches it compiles unchanged.
+
 ### Changed
 
 - Provider error text (see Security): in the errors of the OpenAI
@@ -674,6 +698,34 @@ them.
   memory) is made with `identity_create` when the agent's tool list has it.
   Meerkat Meta mounts that tool where the host's identity policy enables it.
   No tool's behavior or schema changes.
+
+- `meerkat-comms`: for a sender with no namespace, two live registrations
+  of the SAME inbox under one key are one route (a member's own, and the
+  route a host that links two namespaces holds to that inbox in the linked
+  one): the envelope is handed to that inbox once. Before, any second
+  registration under the key made it ambiguous and the send was refused.
+  Registrations of different inboxes under one key are still ambiguous:
+  nothing is handed off. Sends scoped to a namespace are unchanged.
+
+- `meerkat-comms`: a route never outlives its inbox. When a runtime's
+  in-process inbox leaves the registry (`CommsRuntime::retire_inproc_route`,
+  the runtime's drop, or a successor's
+  `PreparedCommsRuntime::publish_replacing`), every registration of that
+  inbox in another namespace (a route a host that links two namespaces
+  installed to it) is removed in the same step. A send scoped to that
+  namespace then finds no live route: it takes the member's wake route,
+  which builds the member, or answers `PeerNotFound`. Before, such a
+  registration stayed and kept answering for an inbox that was gone: every
+  send to it was refused, and none reached the wake route, so a member
+  released to rest was never built by a peer message from the other
+  namespace. Registrations of other inboxes are not touched, and
+  `InprocRegistry::unregister_in_namespace` still removes exactly the one
+  registration it names. The rule holds at registration too: registering an
+  inbox that already left installs nothing and is refused
+  (`RegistrationRejection::InboxGone`), so a host that read a member's
+  inbox just before the member left cannot put a route to it back. An
+  inbox that is only closed for peer ingress has not left and still
+  registers.
 
 ### Fixed
 

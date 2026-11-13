@@ -6325,6 +6325,47 @@ export class MobHandle {
     await this._runtime._rpc("meta/cross_mob/unwire_local", params);
   }
 
+  /**
+   * Wire a local member to a member on another mob handle, both ways, so the
+   * two can send each other ordinary peer messages.
+   *
+   * Two gateways (two processes, the usual case: every runtime starts its own
+   * gateway): give the members of BOTH gateways a socket endpoint
+   * (`memberCommsTcp()` on each builder). `peerInfo` then reports each
+   * member's `dialable_address` and `pubkey_b64`, and each side is wired to
+   * the other by that address and key (the member's own key, never the
+   * gateway key of `peerPubkey`).
+   *
+   * When either answer has no `dialable_address`, each side is wired by the
+   * in-process address with no key. That works when one process hosts both
+   * mobs; otherwise the first `wireLocal` is refused in plain words and
+   * nothing is wired.
+   *
+   * When the second `wireLocal` is refused, the first side is undone with
+   * `unwireLocal` and the refusal is thrown. A side that was already wired to
+   * that peer before the call is left as it was.
+   *
+   * Calling it again: for a pair that is already wired with the same
+   * endpoints the call succeeds and changes nothing. A wire is never
+   * replaced: when a side is already wired to that peer name with another
+   * endpoint (another address, or another key after a respawn), its
+   * `wireLocal` is refused in plain words and nothing changes. Call
+   * `unwireLocal` on both sides first, each with the other member's current
+   * `peerInfo`, then wire again.
+   *
+   * A member of a stopped mob still accepts a message through a wire; it is
+   * handed the message when its mob resumes.
+   *
+   * What a wire survives: between two gateways, a wire survives a gateway
+   * restart on persistent state only when each wired member's
+   * `dialable_address` is the same after the restart. A member whose address
+   * changed is restored `broken`, and its wires are dead. To recover:
+   * `respawnMember` the broken member (it comes back active with its new
+   * address, and on a fresh conversation: a respawn starts the member on a
+   * new session); `unwireLocal` on the other gateway, with the respawned
+   * member's current `peerInfo`; `unwireLocal` on the restarted gateway,
+   * with the other member's current `peerInfo`; then `wireCrossMob` again.
+   */
   async wireCrossMob(
     localMemberId: string,
     remoteMemberId: string,
@@ -6332,27 +6373,36 @@ export class MobHandle {
   ): Promise<void> {
     const localInfo = await this.peerInfo(localMemberId);
     const remoteInfo = await remoteHandle.peerInfo(remoteMemberId);
-    await this.wireLocal(
-      localMemberId,
-      remoteInfo.comms_name,
-      remoteInfo.peer_id,
-      remoteInfo.address,
+    const bySocket = [localInfo, remoteInfo].every(
+      (info) => Boolean(info.dialable_address) && Boolean(info.pubkey_b64),
     );
+    const describe = (
+      info: Record<string, string>,
+    ): [string, string, string, { remotePubkeyB64?: string } | undefined] =>
+      bySocket
+        ? [
+            info.comms_name,
+            info.peer_id,
+            info.dialable_address,
+            { remotePubkeyB64: info.pubkey_b64 },
+          ]
+        : [info.comms_name, info.peer_id, info.address, undefined];
+    const remotePeer = describe(remoteInfo);
+    const localPeer = describe(localInfo);
+    // A side that is wired to this peer already is not this call's to undo:
+    // a refused second side must leave it as it was.
+    const wiredBefore = (await this.getMember(localMemberId)).wiredTo.includes(
+      remotePeer[0],
+    );
+    await this.wireLocal(localMemberId, ...remotePeer);
     try {
-      await remoteHandle.wireLocal(
-        remoteMemberId,
-        localInfo.comms_name,
-        localInfo.peer_id,
-        localInfo.address,
-      );
+      await remoteHandle.wireLocal(remoteMemberId, ...localPeer);
     } catch (err) {
+      if (wiredBefore) {
+        throw err;
+      }
       try {
-        await this.unwireLocal(
-          localMemberId,
-          remoteInfo.comms_name,
-          remoteInfo.peer_id,
-          remoteInfo.address,
-        );
+        await this.unwireLocal(localMemberId, ...remotePeer);
       } catch {
         // Best-effort rollback; preserve the original remote error.
       }

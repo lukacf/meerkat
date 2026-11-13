@@ -35,6 +35,8 @@ class MetaBuilderConfig:
     gating_config_path: str | None = None
     access_config_path: str | None = None
     meerkat_config_path: str | None = None
+    # ``runtime_options.member_comms_address``; ``None`` sends nothing.
+    member_comms_address: str | None = None
     provider_credentials_root: str | None = None
     # ``runtime_options.native_realm``; ``None`` sends nothing.
     native_realm: NativeRealm | None = None
@@ -300,6 +302,30 @@ class MetaBuilder:
         if not text.strip():
             raise ValueError("meerkat_config path must not be empty")
         self._config.meerkat_config_path = text
+        return self
+
+    def member_comms_tcp(self, address: str = "127.0.0.1:0") -> MetaBuilder:
+        """Give locally hosted mob members signed TCP comms endpoints.
+
+        A member of another gateway runs in another process and cannot reach
+        the default in-process endpoints. With this, each local member binds
+        a TCP port on ``address`` (port ``0``: one the system picks), and
+        ``MobHandle.peer_info`` reports it as ``dialable_address``, which is
+        what ``MobHandle.wire_cross_mob`` wires two gateways by. Pass a
+        concrete externally reachable interface address for peers on another
+        host. Emitted as ``runtime_options.member_comms_address``.
+
+        The default address (port ``0``) is for a mob that does not outlive
+        its process: on persistent state a restarted member binds another
+        port, is restored broken, and its wires to members of other
+        gateways are dead (``MobHandle.wire_cross_mob`` says how to wire
+        them again). Give a mob with persistent state a fixed address, a
+        port of your choice. With member socket endpoints, run one member
+        per gateway today.
+        """
+        if not address.strip():
+            raise ValueError("member_comms_tcp address must not be empty")
+        self._config.member_comms_address = address
         return self
 
     def provider_credentials_root(self, path: str | Path) -> MetaBuilder:

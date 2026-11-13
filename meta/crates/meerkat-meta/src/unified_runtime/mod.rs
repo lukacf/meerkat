@@ -49,6 +49,7 @@ pub type HeldIdentityCompletion = Box<
 
 pub(crate) mod console_events;
 pub mod cross_mob;
+mod cross_mob_routes;
 pub mod edge_reconcile;
 pub mod edge_types;
 pub mod event_log;
@@ -341,6 +342,10 @@ pub struct UnifiedRuntimeCore {
     module_runtime: Arc<tokio::sync::Mutex<MetaRuntimeHandle>>,
     managed_dynamic_edges: Arc<tokio::sync::RwLock<BTreeSet<(String, String)>>>,
     shutting_down: AtomicBool,
+    /// This runtime's part of the link table between mobs of this process
+    /// (`cross_mob_routes`), set by the start-time read, which runs once
+    /// per runtime. Only the runtime that created a part closes it.
+    cross_mob_routes: std::sync::OnceLock<Arc<cross_mob_routes::CrossMobWakeRoutes>>,
     /// The runtime's close begins under this gate, serialized against a
     /// running publication of its bootstrap completion.
     close_gate: Arc<bootstrap_completion::RuntimeCloseGate>,
@@ -912,6 +917,7 @@ impl UnifiedRuntime {
                 module_runtime: Arc::new(tokio::sync::Mutex::new(module_runtime)),
                 managed_dynamic_edges: Arc::new(tokio::sync::RwLock::new(BTreeSet::new())),
                 shutting_down: AtomicBool::new(false),
+                cross_mob_routes: std::sync::OnceLock::new(),
                 close_gate: bootstrap_completion::RuntimeCloseGate::new(),
                 bootstrap_completion: std::sync::Mutex::new(
                     bootstrap_completion::CompletionSlot::Pending,
@@ -1213,6 +1219,9 @@ impl UnifiedRuntime {
                         runtime.reconcile_bootstrap_edges_if_configured()
                     })
                     .await;
+                    // The mob runs: its links to members of other mobs of
+                    // this process are read from its rows, once.
+                    crate::boxed_future::boxed(|| runtime.restore_cross_mob_wake_routes()).await;
                 }
                 Ok(runtime)
             }
@@ -1320,6 +1329,7 @@ impl UnifiedRuntime {
                 );
             }
         }
+        self.restore_cross_mob_wake_routes().await;
         self.mint_bootstrap_completion();
         Ok(())
     }
@@ -1801,6 +1811,7 @@ impl UnifiedRuntime {
                 // As on the unheld path: the bootstrap's lifecycle side
                 // effects run before it answers.
                 context.runtime.settle_lifecycle_projection().await;
+                self.restore_cross_mob_wake_routes().await;
                 self.mint_bootstrap_completion();
                 Ok(HeldBootstrapStart::Activated(result))
             }
@@ -1885,6 +1896,7 @@ impl UnifiedRuntime {
                 // and those a stopped process still owed, run before the
                 // bootstrap answers.
                 context.runtime.settle_lifecycle_projection().await;
+                self.restore_cross_mob_wake_routes().await;
                 self.mint_bootstrap_completion();
                 Ok(result)
             }

@@ -49,6 +49,40 @@ All notable changes to the Python SDK are documented here.
 - `IdentityStatus.archived` and `IdentityStatus.preparation_pending`:
   `True` while the agent is archived, and while it waits for its host's
   preparation. The gateway writes each only when it is so.
+- `MobHandle.wire_cross_mob` wires two members of two mobs so that each
+  can send the other ordinary peer messages. When both `peer_info` answers
+  carry `dialable_address` (two gateways whose members have socket
+  endpoints), each side is wired by the other member's dialable address and
+  its own key (`pubkey_b64`); otherwise by the in-process address with no
+  key, which a gateway from 0.9.15 resolves for a member of its own process
+  and refuses in plain words for any other. Through 0.9.14 the helper
+  passed no key and the first `wire_local` was refused. `peer_info` returns
+  the gateway's new `pubkey_b64` and `dialable_address` as they come.
+- `MetaBuilder.member_comms_tcp(address="127.0.0.1:0")` gives the locally
+  hosted mob members signed TCP comms endpoints
+  (`runtime_options.member_comms_address`), the TypeScript
+  `memberCommsTcp` twin: every `MetaRuntime` starts its own gateway
+  process, so `wire_cross_mob` between two runtimes needs it on both.
+- The `wire_local` and `wire_cross_mob` docstrings no longer tell a
+  cross-process caller to pass the gateway key of `peer_pubkey`: a
+  descriptor carries the member's key from `peer_info`.
+- `MobHandle.wire_cross_mob` called again for a pair that is already
+  wired with the same endpoints changes nothing. It reads the local
+  member once before it wires (`get_member`), and a refused second side
+  no longer undoes a first side that was wired before the call. A side
+  that is wired to that peer with another endpoint is refused by the
+  gateway in plain words (a wire is never replaced): call `unwire_local`
+  on both sides, each with the other member's current `peer_info`, then
+  wire again.
+
+- Limits, now in the `wire_cross_mob` and `member_comms_tcp` docstrings: a
+  wire between two gateways survives a gateway restart on persistent state
+  only when each wired member's `dialable_address` is the same after the
+  restart (the default port `0` is for a mob that does not outlive its
+  process); the way to wire such a member again (`respawn_member`,
+  `unwire_local` on both sides with current `peer_info`,
+  `wire_cross_mob`); with member socket endpoints, one member per gateway
+  today.
 
 ## 0.9.14
 

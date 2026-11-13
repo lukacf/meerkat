@@ -16,7 +16,7 @@ use std::time::Duration;
 use futures::stream;
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat_client::{LlmClient, LlmError, LlmEvent, LlmRequest, TestClient};
-use meerkat_comms::{InprocRegistry, PeerMeta};
+use meerkat_comms::InprocRegistry;
 use meerkat_core::types::HandlingMode;
 use meerkat_core::{Message, Provider, StopReason};
 use meerkat_meta::{
@@ -1259,9 +1259,6 @@ async fn downstream_alias_failure_removes_attempt_state_and_allows_clean_retry()
         .into_iter()
         .find(|peer| peer.name == alice_name)
         .expect("alice canonical registration");
-    let alice_sender = registry
-        .get_by_pubkey_in_namespace(&left_namespace, &alice_registration.pubkey)
-        .expect("alice canonical sender");
     let bob_registration = registry
         .peers_in_namespace(&right_namespace)
         .into_iter()
@@ -1284,19 +1281,14 @@ async fn downstream_alias_failure_removes_attempt_state_and_allows_clean_retry()
         )
         .await
         .expect("pre-wire Bob to Alice");
-    let alias = registry.register_with_meta_in_namespace(
-        &right_namespace,
-        alice_name.clone(),
-        alice_registration.pubkey,
-        alice_sender,
-        PeerMeta::default(),
-    );
+    // `wire_local` owns the route of the half it wires: Bob's namespace
+    // reaches Alice without a registration by hand.
     assert!(
-        !alias.is_rejected()
-            && !matches!(
-                alias,
-                meerkat_comms::RegistrationOutcome::ReplacedPubkey { .. }
-            )
+        registry
+            .peers_in_namespace(&right_namespace)
+            .into_iter()
+            .any(|peer| peer.name == alice_name && peer.pubkey == alice_registration.pubkey),
+        "wire_local must install Bob's route to Alice with the trust"
     );
 
     // Remove Bob's canonical route only long enough to force alias

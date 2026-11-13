@@ -45,6 +45,32 @@
 - `IdentityStatus.archived` and `IdentityStatus.preparationPending`: `true`
   while the agent is archived, and while it waits for its host's
   preparation. The gateway writes each only when it is so.
+- `MobHandle.wireCrossMob` wires two members of two mobs so that each can
+  send the other ordinary peer messages. When both `peerInfo` answers
+  carry `dialable_address` (two gateways whose members have socket
+  endpoints: `memberCommsTcp()` on both builders), each side is wired by
+  the other member's dialable address and its own key (`pubkey_b64`);
+  otherwise by the in-process address with no key, which a gateway from
+  0.9.15 resolves for a member of its own process and refuses in plain
+  words for any other. Through 0.9.14 the helper passed no key and the
+  first `wireLocal` was refused. `peerInfo` returns the gateway's new
+  `pubkey_b64` and `dialable_address` as they come.
+- `MobHandle.wireCrossMob` called again for a pair that is already wired
+  with the same endpoints changes nothing. It reads the local member
+  once before it wires (`getMember`), and a refused second side no
+  longer undoes a first side that was wired before the call. A side that
+  is wired to that peer with another endpoint is refused by the gateway
+  in plain words (a wire is never replaced): call `unwireLocal` on both
+  sides, each with the other member's current `peerInfo`, then wire
+  again.
+
+- Limits, now in the `wireCrossMob` and `memberCommsTcp` doc comments: a
+  wire between two gateways survives a gateway restart on persistent state
+  only when each wired member's `dialable_address` is the same after the
+  restart (the default port `0` is for a mob that does not outlive its
+  process); the way to wire such a member again (`respawnMember`,
+  `unwireLocal` on both sides with current `peerInfo`, `wireCrossMob`);
+  with member socket endpoints, one member per gateway today.
 
 ## 0.9.14
 

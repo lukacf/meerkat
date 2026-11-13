@@ -2906,92 +2906,8 @@ export const Sidebar = React.memo(function Sidebar({
         {orderAnnouncement}
       </div>
       {approvals || hostAttentionCount || attentionReplyCount ? <ApprovalAttention snapshot={approvals} hostItems={hostAttentionCount} replies={attentionReplyCount} onOpen={onOpenApproval || (() => onOpenControl("gating"))} /> : null}
-      {/* The roster's mast and search: the view menu's trigger shows while
-          either is hovered or focused, and always while the view is not
-          the default (A5). */}
-      <div className="sidebar__head cc-reveal-host">
-        <div className="sidebar__mast">
-          <div className="sidebar__mast-text">
-            <div className="sidebar__mast-title">Roster</div>
-            <div
-              className="sidebar__mast-sub"
-              title={viewIsDefault ? undefined : [mastCount, ...viewSummary].join(" · ")}
-            >
-              <span className="sidebar__mast-count" data-testid="sidebar-agent-count">{mastCount}</span>
-              {viewIsDefault ? null : (
-                <>
-                  <button
-                    type="button"
-                    className="sidebar__view-summary"
-                    aria-haspopup="dialog"
-                    aria-expanded={viewMenuOpen}
-                    aria-controls={viewMenuOpen ? viewMenuId : undefined}
-                    aria-label={`Roster view: ${viewSummary.join(", ")}. Change the view`}
-                    data-testid="sidebar-view-summary"
-                    onClick={() => setViewMenuOpen(true)}
-                  >
-                    {viewSummary.map((part) => ` · ${part}`).join("")}
-                  </button>
-                  <IconButton
-                    label="Reset roster view"
-                    glyph="close"
-                    size="sm"
-                    quiet
-                    className="sidebar__view-reset"
-                    data-testid="sidebar-view-reset"
-                    onClick={() => {
-                      resetView();
-                      viewTriggerRef.current?.focus();
-                    }}
-                  />
-                </>
-              )}
-            </div>
-          </div>
-          <IconButton
-            ref={viewTriggerRef}
-            label="Roster view options"
-            glyph="ellipsis"
-            size="sm"
-            quiet
-            reveal={viewIsDefault}
-            badge={!viewIsDefault}
-            aria-haspopup="dialog"
-            aria-expanded={viewMenuOpen}
-            aria-controls={viewMenuOpen ? viewMenuId : undefined}
-            className="sidebar__view-trigger"
-            data-testid="sidebar-view-menu"
-            data-customized={viewIsDefault ? undefined : "true"}
-            onClick={() => setViewMenuOpen((open) => !open)}
-          />
-          <ViewOptions
-            open={viewMenuOpen}
-            anchorRef={viewTriggerRef}
-            onClose={() => setViewMenuOpen(false)}
-            ariaLabel="Roster view"
-            controls={viewControls}
-            onReset={resetView}
-            resetDisabled={viewIsDefault}
-            resetTestId="sidebar-view-options-reset"
-            id={viewMenuId}
-            testId="sidebar-view-options"
-            className="sidebar__view-options"
-          />
-        </div>
-        <div className="sidebar__search">
-          <SearchField
-            ref={searchRef}
-            label="Search agents"
-            placeholder="Search agents"
-            value={q}
-            onChange={(value) => setQ(value)}
-            shortcut="/"
-            aria-keyshortcuts="/"
-            testId="sidebar-search"
-          />
-        </div>
-      </div>
-
+      {/* The Workbench comes before the roster's mast, so the mast's search
+          and view controls sit directly above the roster list. */}
       {(navKinds.length > 0 || customSidebarButtons.length > 0 || customPanels.length > 0) && (
         <nav
           className="sidebar__section sidebar__section--nav"
@@ -3131,6 +3047,92 @@ export const Sidebar = React.memo(function Sidebar({
           )}
         </nav>
       )}
+
+      {/* The roster's mast and search: the view menu's trigger shows while
+          either is hovered or focused, and always while the view is not
+          the default (A5). */}
+      <div className="sidebar__head cc-reveal-host">
+        <div className="sidebar__mast">
+          <div className="sidebar__mast-text">
+            <div className="sidebar__mast-title">Roster</div>
+            <div
+              className="sidebar__mast-sub"
+              title={viewIsDefault ? undefined : [mastCount, ...viewSummary].join(" · ")}
+            >
+              <span className="sidebar__mast-count" data-testid="sidebar-agent-count">{mastCount}</span>
+              {viewIsDefault ? null : (
+                <>
+                  <button
+                    type="button"
+                    className="sidebar__view-summary"
+                    aria-haspopup="dialog"
+                    aria-expanded={viewMenuOpen}
+                    aria-controls={viewMenuOpen ? viewMenuId : undefined}
+                    aria-label={`Roster view: ${viewSummary.join(", ")}. Change the view`}
+                    data-testid="sidebar-view-summary"
+                    onClick={() => setViewMenuOpen(true)}
+                  >
+                    {viewSummary.map((part) => ` · ${part}`).join("")}
+                  </button>
+                  <IconButton
+                    label="Reset roster view"
+                    glyph="close"
+                    size="sm"
+                    quiet
+                    className="sidebar__view-reset"
+                    data-testid="sidebar-view-reset"
+                    onClick={() => {
+                      resetView();
+                      viewTriggerRef.current?.focus();
+                    }}
+                  />
+                </>
+              )}
+            </div>
+          </div>
+          <IconButton
+            ref={viewTriggerRef}
+            label="Roster view options"
+            glyph="ellipsis"
+            size="sm"
+            quiet
+            reveal={viewIsDefault}
+            badge={!viewIsDefault}
+            aria-haspopup="dialog"
+            aria-expanded={viewMenuOpen}
+            aria-controls={viewMenuOpen ? viewMenuId : undefined}
+            className="sidebar__view-trigger"
+            data-testid="sidebar-view-menu"
+            data-customized={viewIsDefault ? undefined : "true"}
+            onClick={() => setViewMenuOpen((open) => !open)}
+          />
+          <ViewOptions
+            open={viewMenuOpen}
+            anchorRef={viewTriggerRef}
+            onClose={() => setViewMenuOpen(false)}
+            ariaLabel="Roster view"
+            controls={viewControls}
+            onReset={resetView}
+            resetDisabled={viewIsDefault}
+            resetTestId="sidebar-view-options-reset"
+            id={viewMenuId}
+            testId="sidebar-view-options"
+            className="sidebar__view-options"
+          />
+        </div>
+        <div className="sidebar__search">
+          <SearchField
+            ref={searchRef}
+            label="Search agents"
+            placeholder="Search agents"
+            value={q}
+            onChange={(value) => setQ(value)}
+            shortcut="/"
+            aria-keyshortcuts="/"
+            testId="sidebar-search"
+          />
+        </div>
+      </div>
 
       <div
         className="sidebar__virtual-list"

@@ -44,13 +44,15 @@ resolve_rkat() {
 RKAT="$(resolve_rkat)"
 
 # `rkat mob web build` no longer compiles wasm itself; it requires a prebuilt
-# meerkat-web-runtime artifact passed via --wasm. Use the committed one under
-# sdks/web/wasm (override with MEERKAT_WASM=/path/to/*.wasm).
+# meerkat-web-runtime artifact passed via --wasm, with its wasm-bindgen glue
+# beside it. Default: the build output under sdks/web/wasm, which is not in a
+# checkout (override with MEERKAT_WASM=/path/to/*.wasm; see the README).
 WASM_RUNTIME="${MEERKAT_WASM:-$WORKSPACE_ROOT/sdks/web/wasm/meerkat_web_runtime_bg.wasm}"
 if [[ ! -s "$WASM_RUNTIME" ]]; then
   echo "error: meerkat-web-runtime wasm not found at $WASM_RUNTIME" >&2
   echo "Build it: npm --prefix \"$WORKSPACE_ROOT/sdks/web\" run build:wasm" >&2
   echo "or set MEERKAT_WASM=/path/to/meerkat_web_runtime_bg.wasm" >&2
+  echo "(the released @rkat/web package carries one under wasm/; see the README)" >&2
   exit 1
 fi
 

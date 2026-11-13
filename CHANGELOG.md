@@ -1364,7 +1364,7 @@ them.
   mob and every flow run (an internal error that says the state could not
   be recovered). With more than 64 records it also refuses every member's
   operator instruction delivery in the member's session
-  (`slot_limit_exceeded`, retried without end; the status read shows the
+  (`slot_limit_exceeded`; the status read shows the
   member `owed` with that failure) and fails to build a member that needs a
   new session. Before a rollback run `rkat storage doctor`, which lists
   each such mob (`operator-instruction-mob-totals`, with both totals), and
@@ -1397,9 +1397,8 @@ them.
   select the forks. Nothing is refused. What the return to this release
   restores depends on the mob's store. On the SQLite store no stored row is
   rewritten: the lineage of every fork seated on this release is restored
-  from its spawn row and the records select those forks again; write each
-  such record at a new revision after the return, which delivers it to
-  every fork it selects. On a host store (a realm kept in the host's own
+  from its spawn row and the records select those forks again. On a host
+  store (a realm kept in the host's own
   database through the host store SPI) the earlier release writes the
   mob's journal again at its next checkpoint, from what it read: without
   the fork scope of the records and without the lineage roots. They do not
@@ -1499,6 +1498,11 @@ them.
   confirmed by a run on a build with the Linux x86_64 release archive fix of
   this release (see Fixed): that fix restores the built-in skills, it does
   not make an unknown name an error. A fix is planned for a later release.
+
+- Until Connect 0.9.15 is published, Connect 0.9.14 is the Connect release
+  for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in
+  either direction: it rests on the version requirements Connect 0.9.14
+  published.
 
 ## [0.9.14] - 2026-11-11
 

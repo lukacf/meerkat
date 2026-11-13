@@ -1188,20 +1188,19 @@ them.
   that uses `xattr`, calls it only to set attributes while unpacking, so
   Meerkat's own use is not known to be affected.
 
-- Examples 031 (Mini Diplomacy Arena) and 033 (The Office): a build no
-  longer writes provider keys into its output. Both pages pre-fill their
-  key fields from `VITE_`-prefixed variables (`VITE_ANTHROPIC_API_KEY`,
-  `VITE_OPENAI_API_KEY`, `VITE_GEMINI_API_KEY`; 033 also the
-  `VITE_RKAT_*_API_KEY` forms), and Vite wrote every variable with that
-  prefix that was set at build time, in plain text, into
-  `web/dist/assets/`: 031 since 0.4.1 and 033 since 0.4.4, through 0.9.14
-  (read from the released sources; confirmed by a build of 0.9.14). The
-  READMEs did not mention these variables, so only a build made with them
-  set on purpose is affected. The prefix is now exposed only to the local
-  dev server; `vite build` exposes none of them, and each example has a
-  test that builds with marker values and fails if one reaches the output.
-  If you hosted or shared a `dist/` built with those variables set, rotate
-  those keys.
+- Examples: a build of `examples/031-wasm-mini-diplomacy-sh` or
+  `examples/033-the-office-demo-sh` no longer contains provider keys. Both
+  pages pre-fill their key fields from `VITE_`-prefixed variables
+  (`VITE_ANTHROPIC_API_KEY`, `VITE_OPENAI_API_KEY`, `VITE_GEMINI_API_KEY`;
+  033 also the `VITE_RKAT_*_API_KEY` forms), and Vite wrote every variable
+  with that prefix that was set when `npm run build` ran, in plain text,
+  into `web/dist/assets/`. The READMEs did not mention these variables, so
+  only a build made with them set on purpose is affected. The prefix is now
+  exposed only to the local dev server. Affects every release that ships
+  the examples: 031 from 0.4.1 and 033 from 0.4.4, through 0.9.14 (read
+  from the released sources; confirmed by a build of 0.9.14). For what to do
+  if you hosted or shared such a build, see the known issue on the 0.9.14
+  release page: https://github.com/lukacf/meerkat/releases/tag/v0.9.14
 
 ### Upgrade notes
 

@@ -2223,3 +2223,94 @@ async fn a_caller_the_read_hides_a_set_from_cannot_decide_it() {
         "{admin_decided}"
     );
 }
+
+/// A person who administers decisions and is no access admin cannot
+/// withdraw the question set of a member private to someone else: its id is
+/// answered as an id that names no decision, and the set stays open. They
+/// withdraw the set of a member they may see; the member's owner and an
+/// access admin, who administer decisions too, withdraw the member's sets.
+#[tokio::test]
+async fn a_decisions_administrator_cannot_withdraw_a_set_of_a_member_hidden_from_them() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let administers = [
+        crate::access::ACTION_DECISIONS_VIEW,
+        crate::access::ACTION_DECISIONS_ADMIN,
+        ACTION_AGENT_VIEW,
+    ];
+    let setup = Setup::enforced().access(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![DAVE.to_string()],
+        rules: vec![
+            rule("carol-administers-decisions", CAROL, &administers, &[]),
+            rule("bob-administers-decisions", BOB, &administers, &[]),
+        ],
+        ..crate::access::AccessControlConfig::default()
+    });
+    setup
+        .access
+        .as_ref()
+        .expect("access controller")
+        .record_agent_attributes(crate::access::AgentResourceAttributes {
+            identity: "agent-p".to_string(),
+            agent_id: None,
+            role: Some("worker".to_string()),
+            labels: BTreeMap::from([(
+                crate::access::PRIVATE_TO_LABEL.to_string(),
+                person_private_owner_key(ISSUER, "oidc-sub-7"),
+            )]),
+        });
+    let console = QuestionConsole::start(
+        "questions-decisions-withdraw",
+        setup,
+        decisions_in(state_dir.path(), "questions-decisions-withdraw", true),
+    )
+    .await;
+    let private_set = console.asked("agent-p", "call-1").await;
+    let second_private_set = console.asked("agent-p", "call-2").await;
+    let shared_set = console.asked(ASKER, "call-3").await;
+    let unknown = format!("decision:{}", "0".repeat(64));
+    let dave = token(
+        json!({ "sub": "oidc-sub-dave", "email": DAVE, "provider": "google_oauth" }),
+        Some(now_seconds() + 3600),
+    );
+    let withdraw = |bearer: String, decision_id: String| {
+        let app = console.app.clone();
+        async move {
+            console_rpc_as(
+                &app,
+                Some(&bearer),
+                "meta/decisions/withdraw",
+                json!({ "decision_id": decision_id }),
+            )
+            .await
+        }
+    };
+    let carol_hidden = withdraw(carol(), private_set.clone()).await;
+    let carol_unknown = withdraw(carol(), unknown.clone()).await;
+    let phase_after_carol = console.row(&private_set).state.phase;
+    let carol_shared = withdraw(carol(), shared_set.clone()).await;
+    let owner_withdraws = withdraw(bob(), private_set.clone()).await;
+    let admin_withdraws = withdraw(dave, second_private_set.clone()).await;
+    let phases = [
+        console.row(&shared_set).state.phase,
+        console.row(&private_set).state.phase,
+        console.row(&second_private_set).state.phase,
+    ];
+    console.stop().await;
+
+    assert_eq!(
+        refusal_shape(&carol_hidden, &private_set),
+        refusal_shape(&carol_unknown, &unknown),
+        "a hidden set is not there to withdraw: {carol_hidden}"
+    );
+    assert!(!carol_unknown["error"].is_null(), "{carol_unknown}");
+    assert_eq!(
+        phase_after_carol,
+        DecisionPhase::Open,
+        "the hidden set stays open"
+    );
+    assert!(carol_shared["error"].is_null(), "{carol_shared}");
+    assert!(owner_withdraws["error"].is_null(), "{owner_withdraws}");
+    assert!(admin_withdraws["error"].is_null(), "{admin_withdraws}");
+    assert_eq!(phases, [DecisionPhase::Withdrawn; 3]);
+}

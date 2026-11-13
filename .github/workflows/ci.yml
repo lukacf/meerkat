@@ -3290,6 +3290,15 @@ jobs:
       - name: Bazel analysis
         run: bazel build --nobuild //... --repository_cache="${HOME}/.cache/bazel-repo" --disk_cache="${HOME}/.cache/bazel-disk"
 
+      # Every release binary and the meerkat-live test link one tokio: the
+      # WebRTC stack's crate repository must not bring a second runtime
+      # (its first peer connection panicked on one). The rows prove the
+      # check still refuses a second tokio; the check then reads this graph.
+      - name: One tokio in every release binary
+        run: |
+          python3 scripts/test_check_bazel_one_tokio.py
+          scripts/check-bazel-one-tokio.sh --repository_cache="${HOME}/.cache/bazel-repo"
+
   published-floor:
     name: Published floor (${{ matrix.product }})
     needs: [changes, stagger]

@@ -42299,8 +42299,7 @@ mod tests {
                 Some(&overrides),
             )
             .await
-            .err()
-            .expect("the recovery is refused after it registered the runtime");
+            .expect_err("the recovery is refused after it registered the runtime");
         assert!(refused.message.contains("provider"), "{refused:?}");
 
         assert_eq!(

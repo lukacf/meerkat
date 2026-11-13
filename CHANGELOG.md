@@ -1496,14 +1496,17 @@ them.
   stopped mob when it starts (the Meta gateways do) always meets this: retire
   the member, then restart the host.
 
-- A preloaded skill that cannot be resolved (a mistyped name, or a skill the
-  build does not have) is dropped without an error when a session is first
-  built: the session starts without it. This applies to `rkat run --skill`,
-  JSON-RPC `session/create` (and the Python and TypeScript SDK create
-  calls), REST `POST /sessions`, the MCP server's `meerkat_run`, a
-  schedule's first occurrence and mob member spawns; the only signs are a
-  `skill_resolution_failed` event where the surface delivers events and one
-  warning in the server's log (read from the source).
+- Read from the source: a preloaded skill that cannot be resolved (a mistyped
+  name, a skill the build does not have, or a skill whose required
+  capability is off) is dropped without an error when a session is first
+  built, and the session starts without it. This applies to
+  `rkat run --skill`, JSON-RPC `session/create` (and the Python and
+  TypeScript SDK create calls), REST `POST /sessions`, the MCP server's
+  `meerkat_run`, a schedule's first occurrence and mob member spawns. The
+  signs are a `skill_resolution_failed` event where the surface delivers
+  events and one warning in the server's log; `rkat run` itself prints
+  neither by default and, with `--verbose` or `RUST_LOG=warn`, only the
+  warning (by a run); when skills are disabled altogether there is neither.
 
 - Until Connect 0.9.15 is published, Connect 0.9.14 is the Connect release
   for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in

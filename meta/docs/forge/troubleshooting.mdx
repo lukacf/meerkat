@@ -350,37 +350,60 @@ The application did not finish native startup verification in time. Rebuild a pa
 ```
 
 Forge waits 240 seconds for an application it starts to report that its
-agent team has started, and fails the start when no report arrives. The
-installed package reports the same limit in its own words:
+agent team has started. When the limit ends a start, Forge stops the
+application; it does not keep starting in the background. The installed
+package reports the same limit in its own words:
 
 ```text
 Native startup did not report readiness before exit or the time limit.
 ```
 
-The application gives its own gateway the same 240 seconds to finish
-starting. When that limit ends the start, the application's output has the
-reason after `Deployment needs attention:`, with the last startup phase the
-gateway reported (`restore` in this example):
+The package's own `start` command waits 250 seconds for a background
+service and then prints:
 
 ```text
-meta/init outcome unknown (init_id=..., last phase: restore): the init deadline of 240.0s ran out before init settled; native state may have changed
+The service has not reported verified native readiness. Its owned unit remains available for status or stop.
 ```
 
-After the first report, while agents are still being admitted, Forge shows
+Forge can also give the application's gateway its own 240 seconds, counted
+from the moment the gateway accepts the start. When that limit ends the
+start, the application's log ends with a Python error that carries the
+reason and the last startup phase the gateway reported (`restore` in this
+example):
+
+```text
+meta/init outcome unknown (init_id=..., last phase: restore): the init deadline of 240s ran out before init settled; native state may have changed
+```
+
+When an application sends a first report while its agents are still being
+admitted, Forge shows
 `Waiting for agent admission to finish. Your application is not ready yet.`
 and waits up to 30 seconds for each further report. It then waits up to 30
 seconds for the application's Console.
 
-None of these limits is a setting. What to do:
+None of these limits is a setting, and Forge has no supported way today to
+start an application whose agent team needs more than 240 seconds. The
+installed files and the application's state stay as they are, and a new
+start begins the startup again; a background installation retries on its
+own after 30 seconds, each time with the same limit. What to do:
 
 - Choose **Stop and verify cleanup** when offered, wait until Forge confirms
   that the installation is stopped, and start the same installation again.
+- Read the last startup phase in the application's log: it says where the
+  start was waiting. A start that needs longer is often waiting on something
+  for each agent it builds, for example an MCP server that does not answer,
+  which a start waits for up to its connect timeout (see
+  [Unified runtime](/guides/unified-runtime)).
 - If the package was built by an earlier Forge, rebuild it with the current
   one, as the first message says: a package without readiness reporting
   cannot send the report.
-- Which agents a start builds before it reports ready is described under
-  `member_restore` in
+- An application built by Forge starts under the default `member_restore`,
+  which Forge does not let you change. Which agents that default builds
+  before a start reports ready is described under `member_restore` in
   [Configuration](/reference/configuration#sdk-and-gateway-runtime-options).
+- An agent team package run in the foreground with `bash start.sh`, and a
+  host written with the SDK, have no start limit. Neither makes Forge's own
+  start wait longer.
 
 ### The Console password is forgotten
 

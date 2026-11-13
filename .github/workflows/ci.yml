@@ -3379,7 +3379,21 @@ jobs:
     # a meerkat-meta release on PyPI.
     if: ${{ needs.changes.outputs.connect_checks == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Sized from measurement (2026-11-13). The release gate tests, the step
+    # after the package checks, are most of the job. The credential scan
+    # tests run the scan tool about 900 times and each run starts a stand-in
+    # detector build about 25 times, so the step is process starts from end
+    # to end: 450 s on four local CPUs in each of two runs. A hosted runner
+    # took 1.8 times as long for the same tests (the 80 tests that
+    # pull-request run 43491988354 printed before the old limit of 10
+    # minutes cancelled it: 497 s there, 277 s locally), which gives about
+    # 810 s for the step. The other steps took about 170 s in hosted runs.
+    # Expected job: about 980 s, 16 to 17 minutes; 35 minutes is a little
+    # over twice that. On a pull request the lane execution budget
+    # (CI_MAX_EXEC_SECONDS) is the tighter bound, and this lane now sits
+    # close below it: a slower gate step fails the budget step, which names
+    # the lane, long before this limit, which only stops a hang.
+    timeout-minutes: 35
     defaults:
       run:
         working-directory: connect
@@ -3412,8 +3426,22 @@ jobs:
           python3 -B -m unittest discover -s scripts -p 'test_package_connect_resource*.py' -v
           python3 -B -m unittest -v scripts.test_assemble_connect_product
           python3 -B -m unittest -v scripts.test_package_library_release.ReleaseTests scripts.test_package_library_release.SourceSnapshotReferenceTests scripts.test_package_github_enterprise
-          python3 -B -m unittest -v scripts.test_release_payload_privacy_scan scripts.test_privacy_rules_from_names scripts.test_release_payload_credential_scan scripts.test_release_upload_receipt_check scripts.test_release_upload_attach scripts.test_release_code_identifier_entry
           python3 -B -m unittest -v scripts.test_project_library_consumers
+
+      # The release gate's own tests: the two payload scans, the receipt
+      # check and the upload attach, with stand-in detector builds and
+      # made-up markers that the tests write themselves (no release bytes,
+      # no detector). The job's long step (see the limit above); the 20
+      # slowest tests are printed after the run.
+      - name: Check the release payload scans, upload receipts and upload attach with stand-in builds
+        run: >-
+          python3 -B -m unittest -v --durations 20
+          scripts.test_release_payload_privacy_scan
+          scripts.test_privacy_rules_from_names
+          scripts.test_release_payload_credential_scan
+          scripts.test_release_upload_receipt_check
+          scripts.test_release_upload_attach
+          scripts.test_release_code_identifier_entry
 
       - name: Install candidate and preparation test dependencies
         run: python3 -m pip install --disable-pip-version-check pytest==9.0.2 mcp==2.2.0

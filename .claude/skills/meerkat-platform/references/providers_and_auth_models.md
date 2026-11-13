@@ -252,7 +252,7 @@ refused when the agent is built and before each request.
 Rust `AgentBuildConfig.provider_params`. A realm-level
 `[agent] provider_params` table is a configuration error.
 
-### Reasoning effort (provider-neutral, 0.9.16)
+### Reasoning effort (provider-neutral, 0.9.15)
 
 `reasoning_effort` is one setting for every provider: `none`, `minimal`,
 `low`, `medium`, `high`, `xhigh` or `max` (one spelling each; `x_high` is not

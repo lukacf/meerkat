@@ -4,7 +4,7 @@
  * `session/create` takes a level; `turn/start` and `mob/turn_start` take its
  * tri-state (a level, `{ action: "clear" }`, absent). An older server ignores
  * the parameter on `session/create` and refuses it on a turn, so the SDK
- * refuses to send it below contract 0.9.16. A level the model or route does
+ * refuses to send it below contract 0.9.15. A level the model or route does
  * not accept is refused with `error.data.kind` `"reasoning_effort_refused"`
  * (`SessionError` in crates/meerkat-core/src/service/mod.rs), which
  * `reasoningEffortRefusal` reads back.
@@ -41,7 +41,7 @@ const RUN_RESULT = {
 };
 
 /** A client whose requests and written streaming requests are recorded. */
-function recordingClient(contractVersion = "0.9.16") {
+function recordingClient(contractVersion = "0.9.15") {
   const client = new MeerkatClient();
   client._serverContractVersion = contractVersion;
   const sent = [];
@@ -137,7 +137,7 @@ describe("reasoningEffort on requests", () => {
   const refusedByOlderServer = (error) =>
     error instanceof CapabilityUnavailableError
     && error.code === "CAPABILITY_UNAVAILABLE"
-    && /reasoningEffort needs a server contract >= 0\.9\.16; this server reports 0\.9\.14/
+    && /reasoningEffort needs a server contract >= 0\.9\.15; this server reports 0\.9\.14/
       .test(error.message);
 
   it("the SDK refuses the field for an older server contract", async () => {
@@ -180,11 +180,11 @@ describe("reasoningEffort on requests", () => {
   });
 
   it("the gate is the first contract that carries the option", async () => {
-    // A 0.9.15 server does not have the option and does not get the field.
-    const before = recordingClient("0.9.15");
+    // A 0.9.14 server does not have the option and does not get the field.
+    const before = recordingClient("0.9.14");
     const refused = (error) =>
       error instanceof CapabilityUnavailableError
-      && /reasoningEffort needs a server contract >= 0\.9\.16; this server reports 0\.9\.15/
+      && /reasoningEffort needs a server contract >= 0\.9\.15; this server reports 0\.9\.14/
         .test(error.message);
     const level = { reasoningEffort: "high" };
     await assert.rejects(before.client.createSession("hello", level), refused);
@@ -193,10 +193,10 @@ describe("reasoningEffort on requests", () => {
       before.client.mobTurnStart("mob-1", "worker", "next", level),
       refused,
     );
-    assert.deepEqual(before.sent, [], "nothing is written to a 0.9.15 server");
+    assert.deepEqual(before.sent, [], "nothing is written to a 0.9.14 server");
 
-    // A 0.9.16 server, the first contract that carries it, does.
-    const carrier = recordingClient("0.9.16");
+    // A 0.9.15 server, the first contract that carries it, does.
+    const carrier = recordingClient("0.9.15");
     await carrier.client.createSession("hello", level);
     await session(carrier.client).turn("next", { reasoningEffort: "low" });
     assert.deepEqual(

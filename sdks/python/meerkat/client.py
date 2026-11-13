@@ -529,7 +529,7 @@ _GRANT_GATED_TOOLS_MIN_CONTRACT = (0, 9, 9)
 # to such a server. This is the one place the SDK names that release: the
 # gate and every doc string refer to this constant, and if the option's
 # release moves, this constant moves with it.
-_REASONING_EFFORT_MIN_CONTRACT = (0, 9, 16)
+_REASONING_EFFORT_MIN_CONTRACT = (0, 9, 15)
 
 
 @contextmanager

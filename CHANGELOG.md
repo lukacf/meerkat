@@ -1013,7 +1013,7 @@ them.
   `supported` and `facts`.
 
   The Python and TypeScript SDKs send the field only to a server whose
-  contract is 0.9.16 or later and raise `CapabilityUnavailableError`
+  contract is 0.9.15 or later and raise `CapabilityUnavailableError`
   otherwise: an older server ignores it on `session/create` and refuses it
   on a turn. `reasoning_effort_refusal(error)` / `reasoningEffortRefusal(error)`
   (Python, TypeScript and Web) return the typed refusal with its eight
@@ -2000,7 +2000,7 @@ them.
   new revision, with `include_forks`; they then select the forks seated
   from then on.
 
-- Before rolling back to 0.9.15 or earlier, clear the reasoning effort level
+- Before rolling back to 0.9.14 or earlier, clear the reasoning effort level
   from every session that set it (`rkat run --resume <SESSION>
   --no-reasoning-effort`, or a turn with `reasoning_effort`
   `{"action":"clear"}`), and let accepted turns that carry it

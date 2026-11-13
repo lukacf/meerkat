@@ -55,54 +55,6 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
-## Upgrading to 0.9.16
-
-This section is for systems running 0.9.15. The full list of changes is in
-the CHANGELOG under `## [0.9.16]`.
-
-### Reasoning effort: one setting for every provider
-
-0.9.16 adds the provider-neutral `reasoning_effort` option (see
-[Reasoning effort](/concepts/providers#reasoning-effort)). Nothing changes
-for a session that does not set it: the same requests, the same defaults,
-and provider-specific parameters (`provider_params.provider_tag`) work as
-before, on every route.
-
-- **Moving from a provider-specific effort.** Replace the raw effort
-  (`provider_tag.reasoning_effort` for OpenAI, `provider_tag.effort` for
-  Claude, `provider_tag.thinking_level` for Gemini) with `reasoning_effort`,
-  or keep the raw parameter. Setting both is accepted when they name the
-  same level and refused as a typed conflict when they differ.
-- **Strictness.** A raw effort the model does not accept can be dropped or
-  refused by the provider. The neutral level is checked first: a level the
-  model or its route does not accept is refused before any provider request
-  with `INVALID_PARAMS` and `reasoning_effort_refused` data, and Meerkat
-  never lowers it, changes the model or moves to another route. On a GitHub
-  Copilot route the levels are the ones the account's model list states for
-  the model, which can be fewer than the provider's own API accepts.
-- **Spelling.** The neutral level is `xhigh` only. The Claude-specific
-  effort keeps accepting `xhigh` and `x_high`.
-- **Older servers.** `turn/start` and `mob/turn_start` on a server before
-  0.9.16 refuse the field; `session/create`, REST bodies and JSON mob
-  profiles on such a server ignore it. The Python and TypeScript SDKs
-  therefore refuse to send it to a server whose contract is below 0.9.16
-  (`CapabilityUnavailableError`).
-- **CLI scripts.** `rkat run --reasoning-effort <LEVEL>` exits 2 when the
-  level is refused; with `--output json` stdout then ends with a failure
-  document (`{"error": {...}}`) instead of a run result, so a script that
-  reads stdout as a result checks the exit status or the `error` key first.
-
-### Rolling back to 0.9.15
-
-Before rolling back, remove the reasoning effort level from every session
-that set it (`rkat run --resume <SESSION> --no-reasoning-effort`, or a turn
-with `reasoning_effort` `{"action":"clear"}`), and let accepted turns that
-carry it finish. A session whose stored provider params hold the level, and
-an accepted input whose turn carries the field, are refused by 0.9.15 and
-earlier with ``unknown field `reasoning_effort` ``. Replacing or clearing
-`provider_params` does not remove the level. Sessions that never carried it
-are written exactly as before and read on either release.
-
 ## Upgrading to 0.9.15
 
 This section is for systems running 0.9.14 or 0.9.13. The full list of
@@ -390,6 +342,47 @@ store:
   records are their members' alone and the forks seated before have no
   lineage. Write the records again, at a new revision, with
   `include_forks`; they then select the forks seated from then on.
+
+### Reasoning effort: one setting for every provider
+
+0.9.15 adds the provider-neutral `reasoning_effort` option (see
+[Reasoning effort](/concepts/providers#reasoning-effort)). Nothing changes
+for a session that does not set it: the same requests, the same defaults,
+and provider-specific parameters (`provider_params.provider_tag`) work as
+before, on every route.
+
+- **Moving from a provider-specific effort.** Replace the raw effort
+  (`provider_tag.reasoning_effort` for OpenAI, `provider_tag.effort` for
+  Claude, `provider_tag.thinking_level` for Gemini) with `reasoning_effort`,
+  or keep the raw parameter. Setting both is accepted when they name the
+  same level and refused as a typed conflict when they differ.
+- **Strictness.** A raw effort the model does not accept can be dropped or
+  refused by the provider. The neutral level is checked first: a level the
+  model or its route does not accept is refused before any provider request
+  with `INVALID_PARAMS` and `reasoning_effort_refused` data, and Meerkat
+  never lowers it, changes the model or moves to another route. On a GitHub
+  Copilot route the levels are the ones the account's model list states for
+  the model, which can be fewer than the provider's own API accepts.
+- **Spelling.** The neutral level is `xhigh` only. The Claude-specific
+  effort keeps accepting `xhigh` and `x_high`.
+- **Older servers.** `turn/start` and `mob/turn_start` on a server before
+  0.9.15 refuse the field; `session/create`, REST bodies and JSON mob
+  profiles on such a server ignore it. The Python and TypeScript SDKs
+  therefore refuse to send it to a server whose contract is below 0.9.15
+  (`CapabilityUnavailableError`).
+- **CLI scripts.** `rkat run --reasoning-effort <LEVEL>` exits 2 when the
+  level is refused; with `--output json` stdout then ends with a failure
+  document (`{"error": {...}}`) instead of a run result, so a script that
+  reads stdout as a result checks the exit status or the `error` key first.
+- **Rolling back.** Before rolling back to 0.9.14, remove the reasoning
+  effort level from every session that set it (`rkat run --resume <SESSION>
+  --no-reasoning-effort`, or a turn with `reasoning_effort`
+  `{"action":"clear"}`), and let accepted turns that carry it finish. A
+  session whose stored provider params hold the level, and an accepted
+  input whose turn carries the field, are refused by 0.9.14 and earlier
+  with ``unknown field `reasoning_effort` ``. Replacing or clearing
+  `provider_params` does not remove the level. Sessions that never carried
+  it are written exactly as before and read on either release.
 
 ### Meta 0.9.15
 

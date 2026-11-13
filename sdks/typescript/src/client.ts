@@ -667,7 +667,7 @@ const DECISION_NOTICE_NOTIFICATION = "decision/notice";
  * (`requireReasoningEffortSupport`) and every doc comment refer to this
  * constant, and if the option's release moves, this constant moves with it.
  */
-const REASONING_EFFORT_MIN_CONTRACT: readonly number[] = [0, 9, 16];
+const REASONING_EFFORT_MIN_CONTRACT: readonly number[] = [0, 9, 15];
 const MEERKAT_REPO = "lukacf/meerkat";
 const MEERKAT_RELEASE_BINARY = "rkat-rpc";
 const MEERKAT_BINARY_CACHE_ROOT = path.join(

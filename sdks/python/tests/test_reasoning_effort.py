@@ -3,7 +3,7 @@
 ``session/create`` takes a level; ``turn/start`` and ``mob/turn_start`` take
 its tri-state (a level, ``{"action": "clear"}``, absent). An older server
 ignores the parameter on ``session/create`` and refuses it on a turn, so the
-SDK refuses to send it below contract 0.9.16. A level the model or route does
+SDK refuses to send it below contract 0.9.15. A level the model or route does
 not accept is refused with ``error.data.kind`` ``"reasoning_effort_refused"``
 (``SessionError`` in crates/meerkat-core/src/service/mod.rs), which
 ``reasoning_effort_refusal`` reads back.
@@ -48,7 +48,7 @@ RUN_RESULT = {
 
 
 def fake_client(
-    contract_version: str = "0.9.16",
+    contract_version: str = "0.9.15",
 ) -> tuple[MeerkatClient, list[tuple[str, dict[str, Any]]]]:
     client = MeerkatClient()
     client._server_contract_version = contract_version
@@ -128,7 +128,7 @@ async def test_a_turn_that_names_no_level_sends_none() -> None:
 
 
 OLDER_SERVER_REFUSAL = (
-    r"reasoning_effort needs a server contract >= 0\.9\.16; this server reports 0\.9\.14"
+    r"reasoning_effort needs a server contract >= 0\.9\.15; this server reports 0\.9\.14"
 )
 
 
@@ -166,19 +166,19 @@ async def test_sdk_refuses_the_field_for_an_older_server_contract() -> None:
 
 @pytest.mark.asyncio
 async def test_the_gate_is_the_first_contract_that_carries_the_option() -> None:
-    """A 0.9.15 server does not have the option and does not get the field;
-    a 0.9.16 server, the first contract that carries it, does."""
-    before, before_calls = fake_client("0.9.15")
-    refusal = r"reasoning_effort needs a server contract >= 0\.9\.16; this server reports 0\.9\.15"
+    """A 0.9.14 server does not have the option and does not get the field;
+    a 0.9.15 server, the first contract that carries it, does."""
+    before, before_calls = fake_client("0.9.14")
+    refusal = r"reasoning_effort needs a server contract >= 0\.9\.15; this server reports 0\.9\.14"
     with pytest.raises(CapabilityUnavailableError, match=refusal):
         await before.create_session("hello", reasoning_effort="high")
     with pytest.raises(CapabilityUnavailableError, match=refusal):
         await session(before).turn("next", reasoning_effort="high")
     with pytest.raises(CapabilityUnavailableError, match=refusal):
         await before.mob_turn_start("mob-1", "worker", "next", reasoning_effort="high")
-    assert before_calls == [], "nothing is written to a 0.9.15 server"
+    assert before_calls == [], "nothing is written to a 0.9.14 server"
 
-    carrier, carrier_calls = fake_client("0.9.16")
+    carrier, carrier_calls = fake_client("0.9.15")
     await carrier.create_session("hello", reasoning_effort="high")
     await session(carrier).turn("next", reasoning_effort="low")
     assert [method for method, _ in carrier_calls] == ["session/create", "turn/start"]

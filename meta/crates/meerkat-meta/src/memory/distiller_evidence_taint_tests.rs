@@ -1814,7 +1814,7 @@ pub(crate) async fn cross_check_status(
         matches!(outcome, DistillOutcome::Completed { .. }),
         "{outcome:?}"
     );
-    Ok(rig.status_of("Appointment Friday at eight").await?)
+    rig.status_of("Appointment Friday at eight").await
 }
 
 #[tokio::test]

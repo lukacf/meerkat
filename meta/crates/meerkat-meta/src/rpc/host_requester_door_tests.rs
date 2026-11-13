@@ -225,9 +225,8 @@ fn only_the_host_route_names_a_host_attested_requester() {
     .map(|relative| root.join(relative).canonicalize().expect("allowed path"));
     let mut read = 0;
     for workspace in ["crates", "meta/crates", "connect/crates"] {
-        let Ok(crates) = std::fs::read_dir(root.join(workspace)) else {
-            panic!("{workspace}: the workspace directory reads");
-        };
+        let crates =
+            std::fs::read_dir(root.join(workspace)).expect("the workspace directory reads");
         for krate in crates.flatten() {
             let src = krate.path().join("src");
             if !src.is_dir() {

@@ -39,10 +39,16 @@ id = "python-quickstart"
 [profiles.worker]
 model = "gpt-5.5"
 runtime_mode = "turn_driven"
+external_addressable = true
 
 [profiles.worker.tools]
 comms = true
 ```
+
+`external_addressable = true` lets a caller outside the mob, such as the
+script below, send to members of the profile. It is `false` by default, and
+`handle.send` is then refused with
+`mob member is not externally addressable: agent-1`.
 
 Set `OPENAI_API_KEY` in your environment for the model above, or choose a
 supported model and its matching provider credentials. Run the following

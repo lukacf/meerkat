@@ -21,6 +21,25 @@ name: Connect release
 #      SHA-256;
 #   4. publish (dispatch): `publish-accepted` adds exactly the accepted three
 #      assets to that release, never replacing one.
+# Upload receipt check: no file reaches a release unless the exact bytes have
+# a passing upload receipt (connect/scripts/release-upload-receipt-check.py).
+# The release owner runs the private-text scan and the credential scan on the
+# attested candidate's files, where the private inputs are, writes the receipt
+# there from the two scan reports
+# (connect/scripts/release-upload-receipt-write.py) and gives the receipt to
+# accept: accept refuses without a passing receipt and keeps it in the
+# acceptance record; publish checks it again, for the bytes it is about to
+# write, before its first API call. The full scan reports never enter this
+# workflow, as an input or in an artifact: they hold category names and
+# counts, and the receipt holds only what the check reads. No job here runs a
+# scan or writes a receipt: the scans need private inputs, and a party that
+# cannot hold them never makes a receipt.
+# What a receipt is held to is not an input of this workflow. The check
+# reads the pins of the target (the name list, its rules, the list of left-out
+# members and the two detector builds, as digests) and the coverage exceptions
+# file from the commit of the checkout it runs in:
+# connect/release/upload-receipt-pins.json. A run cannot supply a pin, and a
+# pin that no commit has set refuses.
 # Prerequisites (connect-candidate-monorepo patch): connect-candidate.py names
 # lukacf/meerkat and this workflow; after the workspace wire-up it must build
 # meerkat-connect from the root workspace instead of native-candidate/.
@@ -68,6 +87,11 @@ name: Connect release
         type: string
       acceptance_sha256:
         description: Publish only - the owner-selected SHA-256 of acceptance.json
+        required: false
+        default: ""
+        type: string
+      upload_receipt:
+        description: Accept only - the upload receipt JSON for the candidate's exact files
         required: false
         default: ""
         type: string
@@ -316,9 +340,15 @@ jobs:
             echo "${TAG}: release exists; nothing to create"
             exit 0
           fi
-          # A full release that is not latest: Core's release stays latest. The
-          # assets arrive later: publish-accepted adds a hosted candidate's, and
-          # the release owner uploads a direct (retained-host) production's.
+          # A full release that is not latest: Core's release stays latest. This
+          # job uploads no asset. The assets arrive later, and only behind the
+          # upload receipt check: publish-accepted adds a hosted candidate's
+          # after the check passed for its exact bytes; a direct (retained-host)
+          # production's are added only by
+          # connect/scripts/release-upload-attach.py, which runs the check for
+          # exactly the staged files and uploads its own copies of them. An
+          # upload, recovery or republish script that attaches a file in any
+          # other way is not to be run.
           gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag \
             --latest=false --title "Meerkat Connect ${TAG#connect-v}" \
             --notes "Meerkat Connect ${TAG#connect-v}. RELEASE-MANIFEST.json and SHA256SUMS name each asset and how it was produced."
@@ -376,6 +406,11 @@ jobs:
           CARGO_INCREMENTAL: '0'
           CARGO_TERM_COLOR: never
         run: python3 scripts/connect-candidate.py build
+      # Not bound to a scan report, and it cannot be: this artifact is what the
+      # two release scans read. They need these bytes, which this step is the
+      # first to retain, and private inputs (the name list, the acceptance
+      # files) that no hosted runner holds. It is a workflow artifact of this
+      # run, not a release asset.
       - name: Upload exact candidate closure
         id: upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -425,6 +460,9 @@ jobs:
         env:
           BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
         run: cp -- "$BUNDLE_PATH" "dist/connect-${CONNECT_TARGET}-provenance.jsonl"
+      # Not bound to a scan report, for the same reason as the build job's
+      # artifact: the scans run on this attested candidate. Nothing reaches a
+      # release from here except through accept and publish below.
       - name: Upload attested candidate without publication
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -452,6 +490,43 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      # The pins of the upload receipt check are read from this checkout's
+      # commit. They count only when that commit is a reviewed one: a commit of
+      # the default branch. This step refuses, it never skips: an unknown
+      # branch, a failed fetch and a history that cannot be completed all stop
+      # the job here, before anything else runs. Candidates are built on any
+      # branch; only acceptance and publication are held to this.
+      - name: Require a commit of the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # A grafts file of the checkout states no ancestry for this step, and
+          # neither does a commit-graph file: the ancestry question below reads
+          # every commit's parents from the commit itself.
+          export GIT_GRAFT_FILE=/dev/null
+          if [[ ! "${DEFAULT_BRANCH}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+            echo "::error::the default branch is not known; refusing" >&2
+            exit 1
+          fi
+          remote_ref="refs/remotes/origin/${DEFAULT_BRANCH}"
+          if ! git fetch --quiet --no-tags origin "+refs/heads/${DEFAULT_BRANCH}:${remote_ref}"; then
+            echo "::error::the default branch ${DEFAULT_BRANCH} could not be fetched; refusing" >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse --is-shallow-repository)" != "false" ]]; then
+            if ! git fetch --quiet --no-tags --unshallow origin "+refs/heads/${DEFAULT_BRANCH}:${remote_ref}"; then
+              echo "::error::the history of this checkout could not be completed; refusing" >&2
+              exit 1
+            fi
+          fi
+          head="$(git rev-parse --verify 'HEAD^{commit}')"
+          tip="$(git rev-parse --verify "${remote_ref}^{commit}")"
+          if ! git -c core.commitGraph=false merge-base --is-ancestor "${head}" "${tip}"; then
+            echo "::error::commit ${head} is not on the default branch ${DEFAULT_BRANCH}; acceptance and publication run only from a commit of that branch; refusing" >&2
+            exit 1
+          fi
+          echo "commit ${head} is on the default branch ${DEFAULT_BRANCH} (tip ${tip})"
       - name: Select Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -472,14 +547,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUEST: ${{ inputs.publication_request }}
+          UPLOAD_RECEIPT: ${{ inputs.upload_receipt }}
         working-directory: connect
         run: |
           set -euo pipefail
           printf '%s' "${REQUEST}" > "${RUNNER_TEMP}/request.json"
+          printf '%s' "${UPLOAD_RECEIPT}" > "${RUNNER_TEMP}/upload-receipt.json"
+          # Refuses unless the upload receipt passes for the candidate's exact
+          # files (the upload receipt check, with the pins this checkout's
+          # commit holds); the record then carries the receipt.
           python3 scripts/connect-candidate.py accept-publication \
             --request "${RUNNER_TEMP}/request.json" --candidate "${RUNNER_TEMP}/candidate" \
-            --meta-source "${GITHUB_WORKSPACE}/meta" --output "${RUNNER_TEMP}/acceptance"
+            --meta-source "${GITHUB_WORKSPACE}/meta" \
+            --upload-receipt "${RUNNER_TEMP}/upload-receipt.json" \
+            --output "${RUNNER_TEMP}/acceptance"
           echo "acceptance.json sha256: $(sha256sum "${RUNNER_TEMP}/acceptance/acceptance.json" | cut -d' ' -f1)"
+      # Bound: accept-publication wrote this record only after the upload receipt
+      # check passed for the asset copies it holds. Of the scans it carries the
+      # receipt alone.
       - name: Upload the acceptance record
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -503,6 +588,39 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      # The same gate as in accept: the commit whose pins judge the receipt is a
+      # commit of the default branch, or nothing of this job runs.
+      - name: Require a commit of the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # A grafts file of the checkout states no ancestry for this step, and
+          # neither does a commit-graph file: the ancestry question below reads
+          # every commit's parents from the commit itself.
+          export GIT_GRAFT_FILE=/dev/null
+          if [[ ! "${DEFAULT_BRANCH}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+            echo "::error::the default branch is not known; refusing" >&2
+            exit 1
+          fi
+          remote_ref="refs/remotes/origin/${DEFAULT_BRANCH}"
+          if ! git fetch --quiet --no-tags origin "+refs/heads/${DEFAULT_BRANCH}:${remote_ref}"; then
+            echo "::error::the default branch ${DEFAULT_BRANCH} could not be fetched; refusing" >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse --is-shallow-repository)" != "false" ]]; then
+            if ! git fetch --quiet --no-tags --unshallow origin "+refs/heads/${DEFAULT_BRANCH}:${remote_ref}"; then
+              echo "::error::the history of this checkout could not be completed; refusing" >&2
+              exit 1
+            fi
+          fi
+          head="$(git rev-parse --verify 'HEAD^{commit}')"
+          tip="$(git rev-parse --verify "${remote_ref}^{commit}")"
+          if ! git -c core.commitGraph=false merge-base --is-ancestor "${head}" "${tip}"; then
+            echo "::error::commit ${head} is not on the default branch ${DEFAULT_BRANCH}; acceptance and publication run only from a commit of that branch; refusing" >&2
+            exit 1
+          fi
+          echo "commit ${head} is on the default branch ${DEFAULT_BRANCH} (tip ${tip})"
       - name: Select Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -526,6 +644,9 @@ jobs:
         working-directory: connect
         run: |
           set -euo pipefail
+          # Before its first API call publish-accepted runs the upload receipt
+          # check on the bytes it is about to write, with the pins this
+          # checkout's commit holds.
           python3 scripts/connect-candidate.py publish-accepted \
             --accepted "${ACCEPTED_DIR}" --acceptance-sha256 "${ACCEPTANCE_SHA256}" \
             --output "${RUNNER_TEMP}/publication"

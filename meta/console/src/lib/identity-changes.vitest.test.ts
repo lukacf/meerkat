@@ -1028,3 +1028,33 @@ describe("what a host's preparation of its agents refuses", () => {
     }
   });
 });
+
+describe("a reserved label refused by an edit", () => {
+  const reserved = (field: string) => ({
+    kind: "reserved_key",
+    field,
+    retryable: false,
+    detail: "The label key is reserved.",
+    data: {},
+  });
+
+  it("says of a reserved label an edit would set or change that another key is to be used", () => {
+    // The refusal names the labels the edit sets: the person picks another key.
+    expect(refusalSentence(reserved("set.labels"))).toBe("This label key is reserved by the host. Use another key.");
+    expect(refusalFormField("update", "set.labels")).toBe("labels");
+    // So does a create, and a refusal that names no field.
+    expect(refusalSentence(reserved("agents[0].labels"))).toBe("This label key is reserved by the host. Use another key.");
+    expect(refusalSentence({ ...reserved("set.labels"), field: undefined })).toBe("This label key is reserved by the host. Use another key.");
+  });
+
+  it("says of a reserved label an edit would remove that it cannot be removed here", () => {
+    // The refusal names the labels the edit removes: no other key helps, so
+    // the sentence does not offer one. It shows at the same field.
+    expect(refusalSentence(reserved("set.labels_remove"))).toBe("This label is reserved by the host and cannot be removed here.");
+    expect(refusalSentence(reserved("set.labels_remove"))).not.toContain("Use another key");
+    expect(refusalFormField("update", "set.labels_remove")).toBe("labels");
+    // Another kind at that position reads as it does anywhere.
+    expect(refusalSentence({ ...reserved("set.labels_remove"), kind: "invalid_request" }))
+      .toBe(refusalSentence({ ...reserved("set.labels"), kind: "invalid_request" }));
+  });
+});

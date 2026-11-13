@@ -83,6 +83,12 @@ All notable changes to the Python SDK are documented here.
   `unwire_local` on both sides with current `peer_info`,
   `wire_cross_mob`); with member socket endpoints, one member per gateway
   today.
+- A 0.9.15 client against a 0.9.14 gateway was exercised for one keyless row
+  only (the Meta Python SDK's own rows that start a real gateway without a
+  provider key, against a gateway built at the 0.9.14 commit); no other
+  client and no 0.9.14 runtime was exercised. The methods for agents created
+  at run time (meta/identity) need a 0.9.15 gateway: upgrade the gateway
+  before the SDKs that call them.
 
 ## 0.9.14
 

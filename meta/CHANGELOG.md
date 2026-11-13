@@ -1682,6 +1682,11 @@ Security, Upgrade and Changed.
 - Gating: an audit entry or pending request is decided by the agent that
   holds the name of its origin now. Only a host supplies an entry's origin.
 
+- Until Connect 0.9.15 is published, Connect 0.9.14 is the Connect release
+  for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in
+  either direction: it rests on the version requirements Connect 0.9.14
+  published.
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

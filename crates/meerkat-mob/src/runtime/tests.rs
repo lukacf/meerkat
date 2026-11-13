@@ -62308,6 +62308,8 @@ async fn test_stop_fails_pending_spawns_and_cleans_up_provisioned_session() {
 #[derive(Clone, Copy, Debug)]
 enum ProvisionedSpawnDrain {
     Stop,
+    Complete,
+    Reset,
     Shutdown,
     Destroy,
 }
@@ -62372,6 +62374,12 @@ async fn a_cancelled_resumed_spawn_keeps_its_session(drain: ProvisionedSpawnDrai
         ProvisionedSpawnDrain::Stop => {
             handle.stop().await.expect("stop the mob");
         }
+        ProvisionedSpawnDrain::Complete => {
+            handle.complete().await.expect("complete the mob");
+        }
+        ProvisionedSpawnDrain::Reset => {
+            handle.reset().await.expect("reset the mob");
+        }
         ProvisionedSpawnDrain::Shutdown => {
             handle.shutdown().await.expect("shut the mob runtime down");
         }
@@ -62405,13 +62413,27 @@ async fn a_cancelled_resumed_spawn_keeps_its_session(drain: ProvisionedSpawnDrai
     );
 
     // A later spawn resumes the session: in the same mob after a stop, in a
-    // new mob over a restarted service after a shutdown or a destroy.
+    // new mob over a restarted service after any other step.
     let (later_mob, later_service) = match drain {
         ProvisionedSpawnDrain::Stop => {
             handle.resume().await.expect("resume the stopped mob");
             (handle, service)
         }
-        ProvisionedSpawnDrain::Shutdown | ProvisionedSpawnDrain::Destroy => {
+        ProvisionedSpawnDrain::Complete
+        | ProvisionedSpawnDrain::Reset
+        | ProvisionedSpawnDrain::Shutdown
+        | ProvisionedSpawnDrain::Destroy => {
+            // A completed or reset mob still runs: it ends before the
+            // restart, as the process it lives in would.
+            if matches!(
+                drain,
+                ProvisionedSpawnDrain::Complete | ProvisionedSpawnDrain::Reset
+            ) {
+                handle
+                    .shutdown()
+                    .await
+                    .expect("shut the mob runtime down before the restart");
+            }
             let restarted = Arc::new(service.cold_restart_preserving_durable_state().await);
             let _ = restarted.enable_runtime_adapter();
             assert!(
@@ -62578,6 +62600,18 @@ async fn a_refused_provisioned_resumed_spawn_keeps_the_resumed_session() {
 #[tokio::test]
 async fn stop_after_a_resumed_spawn_provisioned_keeps_the_resumed_session() {
     a_cancelled_resumed_spawn_keeps_its_session(ProvisionedSpawnDrain::Stop).await;
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn complete_after_a_resumed_spawn_provisioned_keeps_the_resumed_session() {
+    a_cancelled_resumed_spawn_keeps_its_session(ProvisionedSpawnDrain::Complete).await;
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn reset_after_a_resumed_spawn_provisioned_keeps_the_resumed_session() {
+    a_cancelled_resumed_spawn_keeps_its_session(ProvisionedSpawnDrain::Reset).await;
 }
 
 #[cfg(feature = "runtime-adapter")]

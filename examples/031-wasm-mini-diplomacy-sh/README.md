@@ -77,15 +77,23 @@ npm --version
 The script reads the browser runtime from
 `sdks/web/wasm/meerkat_web_runtime_bg.wasm`, with its `meerkat_web_runtime.js`
 beside it. That directory is a build output and is not in a checkout, so
-provide the pair first. The quickest way is the released `@rkat/web` package
-of the same version as your `rkat` (if `rkat` is not on `PATH`, name the
-binary you run the example with):
+provide the pair first. The quickest way is the released `@rkat/web` package,
+which carries both. From the repository root, this fetches the version this
+checkout names into a scratch directory, so nothing is left in the checkout:
 
 ```bash
-npm pack "@rkat/web@$(rkat --version | awk '{print $2}')"
-tar -xzf rkat-web-*.tgz package/wasm
-export MEERKAT_WASM="$PWD/package/wasm/meerkat_web_runtime_bg.wasm"
+WEB_VERSION="$(node -p "require('./sdks/web/package.json').version")"
+SCRATCH="$(mktemp -d)"
+PACKED="$(cd "$SCRATCH" && npm pack --silent "@rkat/web@$WEB_VERSION")"
+tar -xzf "$SCRATCH/$PACKED" -C "$SCRATCH" package/wasm
+export MEERKAT_WASM="$SCRATCH/package/wasm/meerkat_web_runtime_bg.wasm"
 ```
+
+That is the runtime of a release. It matches a released `rkat` of the same
+version; a `rkat` built from a checkout that has changed since that release
+can differ from it, and then the runtime should be built from the checkout
+too. So should it when `npm pack` finds no such version, because the checkout
+names a release that is not published yet.
 
 To build it from this checkout instead (also after Rust changes), install
 `wasm-pack`, then run:

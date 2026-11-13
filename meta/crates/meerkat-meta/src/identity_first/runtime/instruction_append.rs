@@ -67,11 +67,15 @@
 //! member is seated again.
 //!
 //! The removal of an agent revokes its record
-//! ([`IdentityRuntime::after_removal`]). An archive keeps it. A fresh life
-//! (a reset, a delete) revokes it before the fresh session is seated: that
-//! session's first prompt is built from the current text, and nothing is
-//! appended to it
-//! ([`IdentityRuntime::revoke_instruction_record_for_fresh_life`]). A removal
+//! ([`IdentityRuntime::after_removal`]): the agent has no instructions any
+//! more, and a fork that holds the entry is told so by the same revoke. An
+//! archive keeps the record. A fresh life (a reset, a delete) keeps it too,
+//! brought up to the current text when it holds another one: the agent
+//! goes on with the same instructions, and a revoke would take them from
+//! every fork that still runs on them. The fresh session's first prompt is
+//! built from the current text, and the kept record reaches it as one
+//! standing entry with that same text
+//! ([`IdentityRuntime::keep_instruction_record_for_fresh_life`]). A removal
 //! whose step never ran is completed by the next process: its one read of
 //! the mob's records revokes the record of every agent the mob holds as
 //! removed.
@@ -147,6 +151,12 @@ pub(crate) enum InstructionCheck<'a> {
     /// conversation was built with. `locked` says whether the caller holds
     /// the identity's lifecycle lock.
     Reconcile { current: &'a [String], locked: bool },
+    /// The agent's fresh life (a reset, a delete) is about to be seated on
+    /// `current`. No change was observed and none is looked for: a record
+    /// the mob holds is kept, and brought up to `current` when it holds
+    /// another text; an agent with no record gets none. The caller holds
+    /// the identity's lifecycle lock.
+    FreshLife { current: &'a [String] },
 }
 
 impl InstructionCheck<'_> {
@@ -154,7 +164,8 @@ impl InstructionCheck<'_> {
         match self {
             Self::Changed { current, .. }
             | Self::Registered { current, .. }
-            | Self::Reconcile { current, .. } => current,
+            | Self::Reconcile { current, .. }
+            | Self::FreshLife { current } => current,
         }
     }
 
@@ -162,7 +173,7 @@ impl InstructionCheck<'_> {
     fn caller_holds_the_lock(&self) -> bool {
         matches!(
             self,
-            Self::Registered { .. } | Self::Reconcile { locked: true, .. }
+            Self::Registered { .. } | Self::Reconcile { locked: true, .. } | Self::FreshLife { .. }
         )
     }
 
@@ -172,7 +183,7 @@ impl InstructionCheck<'_> {
             Self::Changed { previous, current } | Self::Registered { previous, current } => {
                 sections(previous) != sections(current)
             }
-            Self::Reconcile { .. } => false,
+            Self::Reconcile { .. } | Self::FreshLife { .. } => false,
         }
     }
 }
@@ -387,6 +398,9 @@ impl IdentityRuntime {
                         }
                         None => false,
                     },
+                    // A fresh life writes no first record: its first
+                    // prompt is built from the current text.
+                    InstructionCheck::FreshLife { .. } => false,
                 };
                 if !changed {
                     return InstructionOutcome::Unchanged;
@@ -557,15 +571,32 @@ impl IdentityRuntime {
             .await;
     }
 
-    /// `identity`'s fresh life (a reset, a delete) is about to be seated,
-    /// under the identity's lifecycle lock: its record is revoked, as a
-    /// removal revokes it. The fresh conversation's first prompt is built
-    /// from the current, complete text, so nothing is to be appended to it;
-    /// a record left active would be appended to it as a second copy. A
-    /// later change is the record's next revision.
-    pub(super) fn revoke_instruction_record_for_fresh_life<'a>(
+    /// `identity`'s fresh life (a reset, a delete) is about to be seated on
+    /// `current`, its instructions now, under the identity's lifecycle
+    /// lock. The agent goes on with the same instructions, so its record is
+    /// KEPT: the record is the agent's and its forks', and a fork that
+    /// keeps its conversation must go on running on the agent's current
+    /// text (a revoke would reach every fork and leave it with the earlier
+    /// text of the first prompt it copied). A record that holds another
+    /// text than `current` (a change nothing recorded before the fresh
+    /// life) is first written at its next revision with the current text,
+    /// so a kept record never states a superseded text. An agent with no
+    /// record, or whose record is revoked, gets none: its first prompt is
+    /// built from the current text.
+    ///
+    /// The fresh conversation is selected by the kept record like any
+    /// conversation of the agent: beside its first prompt, which is built
+    /// from the current text, it holds that text once more, as the one
+    /// standing entry of the record. A later change is the record's next
+    /// revision.
+    ///
+    /// A record that could not be brought up to the current text is
+    /// revoked, as a removal revokes it: nothing may present a superseded
+    /// text to the fresh conversation as the current one.
+    pub(super) fn keep_instruction_record_for_fresh_life<'a>(
         &'a self,
         identity: &'a AgentIdentity,
+        current: &'a [String],
     ) -> BoxedStep<'a, ()> {
         Box::pin(async move {
             if self.is_candidate_launch() {
@@ -574,8 +605,38 @@ impl IdentityRuntime {
             let Some(mob) = self.runtime_services.mob_handle() else {
                 return;
             };
-            self.revoke_record_locked(&mob, identity, "an agent starting a fresh conversation")
+            let kept = self
+                .append_changed_instructions(
+                    &mob,
+                    identity,
+                    InstructionCheck::FreshLife { current },
+                )
                 .await;
+            if !matches!(kept, InstructionOutcome::AppliesAtNextSession { .. }) {
+                return;
+            }
+            // The write was refused, or the record could not be written:
+            // whether the record still holds another text is read again.
+            let stale = match instruction_slot(identity.as_str()) {
+                Some(slot) => instruction_record(&mob, &slot)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|record| record.effect == InstructionEffect::Active)
+                    .is_some_and(|record| {
+                        record.content_sha256
+                            != Some(InstructionContentDigest::for_body(&record_body(current)))
+                    }),
+                None => false,
+            };
+            if stale {
+                self.revoke_record_locked(
+                    &mob,
+                    identity,
+                    "an agent starting a fresh conversation whose record holds an earlier text",
+                )
+                .await;
+            }
         })
     }
 

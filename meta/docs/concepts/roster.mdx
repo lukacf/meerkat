@@ -382,14 +382,20 @@ What to know:
 
 - **A run in flight is not touched.** The entry is appended at a run start,
   never inside a run.
-- **A fresh conversation needs nothing.** A new agent, and an agent after
-  `meta/reset` or `meta/delete_identity`, build their first prompt from the
-  current, complete text. A reset or a delete revokes the agent's record, so
-  nothing is appended to the fresh conversation; a later change is recorded
-  again and reaches it as one entry. The record is revoked before the fresh
-  conversation is seated: a reset that is then refused leaves the agent on
-  its earlier conversation, which keeps its entries, and the gateway's next
-  start records the current text for it once more, as one more entry.
+- **A fresh conversation starts from the current text.** A new agent, and
+  an agent after `meta/reset` or `meta/delete_identity`, build their first
+  prompt from the current, complete text. A reset or a delete keeps the
+  agent's record: the agent goes on with the same instructions, and its
+  forks, which keep their conversations, go on running on them. So after an
+  edit, a fresh conversation of that agent carries the instruction text in
+  its first prompt and once more as the one standing entry of the record; a
+  later change reaches it as one more entry. A record that holds another
+  text than the current one when the fresh life starts is brought up to the
+  current text first. One that cannot hold the current text (a change too
+  large to record, for one) is revoked instead, so that nothing presents an
+  earlier text to the fresh conversation as the current one. An agent whose
+  instructions never changed has no record, and nothing is appended to its
+  fresh conversation.
 - **Removing an agent** revokes its record. A removal the gateway stopped
   right after, before the record was revoked, is completed after the next
   start, when the gateway first compares an agent (at the start when its
@@ -524,9 +530,13 @@ update's result:
     fork is a fresh member on its own profile's prompt with the agent's
     conversation as context, and is born with the record: it holds its own
     entry with the text, and not the agent's first prompt.
-  - A seated fork then follows the record as the agent does: a later change,
-    and the revoke of the record (a reset, a delete or a removal of the
-    agent revokes it), reach the fork as entries appended at its next run.
+  - A seated fork then follows the record as the agent does: a later change
+    reaches the fork as one more entry at its next run. A reset or a delete
+    of the agent keeps the record, so the fork goes on running on the
+    agent's current text. A removal of the agent revokes the record (the
+    agent has no instructions any more): a fork that holds the entry is
+    told so by one revoke entry at its next run, and what its conversation
+    held up to then stays as it was.
   - A fork's first prompt stays the copy it was taken with: a change reaches
     a fork as an entry, never as a rewritten prompt.
   - Not reached: the participants of a temporary council (they are seated in

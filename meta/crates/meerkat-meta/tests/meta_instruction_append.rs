@@ -1572,12 +1572,15 @@ async fn a_start_revokes_the_record_of_an_agent_removed_without_its_step() {
 }
 
 /// A reset right after an edit of the configuration that no roster pass
-/// read: the fresh conversation is built from the edited text, and nothing
-/// presents the text the record held before the edit as the current one.
+/// read: the fresh conversation is built from the edited text, the record
+/// the reset keeps holds the edited text before the fresh life is seated,
+/// and the one entry the fresh conversation holds carries the edited text.
+/// Nothing presents the text the record held before the edit as the
+/// current one.
 ///
-/// RED while a reset kept the record: the fresh conversation was born with
-/// the record's earlier text appended as "the current, complete text",
-/// after a first prompt built from the edited text.
+/// RED while a reset kept the record as it was: the fresh conversation was
+/// born with the record's earlier text appended as "the current, complete
+/// text", after a first prompt built from the edited text.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reset_after_an_unread_edit_never_presents_the_earlier_text_as_current() {
     let temp = tempfile::tempdir().unwrap();
@@ -1596,6 +1599,14 @@ async fn a_reset_after_an_unread_edit_never_presents_the_earlier_text_as_current
     rig.roster
         .upsert(configured_spec(&["Answer in GAMMA style."]));
     rig.reset(CONFIGURED).await;
+    let record = rig.record(CONFIGURED).await.expect("the kept record");
+    assert_eq!(
+        (record["revision"].clone(), record["effect"].clone()),
+        (json!(2), json!("active")),
+        "the record the reset keeps was brought up to the edited text: {record:#?}"
+    );
+    // The fresh life has no session until its first run: the mob carries
+    // the kept record into it when that run builds it.
     rig.turn(CONFIGURED, "AFTER-RESET").await;
     let prompt = rig.transcript(CONFIGURED).await[0]["content"]
         .as_str()
@@ -1611,6 +1622,16 @@ async fn a_reset_after_an_unread_edit_never_presents_the_earlier_text_as_current
             .iter()
             .all(|entry| !carries(entry, &["Answer in BETA style."])),
         "nothing presents the earlier text as the current one: {request:#?}"
+    );
+    assert_eq!(
+        request.len(),
+        1,
+        "the fresh conversation holds the kept record as one entry: {request:#?}"
+    );
+    assert!(
+        carries(&request[0], &["Answer in GAMMA style."]),
+        "the entry carries the edited text: {}",
+        request[0]
     );
     rig.shutdown().await;
 }
@@ -1656,16 +1677,15 @@ async fn a_spec_update_through_the_runtime_records_the_changed_instructions() {
     rig.shutdown().await;
 }
 
-/// A reset of an agent whose instructions changed revokes its record: the
-/// fresh conversation's first prompt is the current, complete text, and
-/// nothing is appended to it. A later change is the record's next revision
-/// and reaches the fresh conversation as one entry. The same for a
-/// configured agent and for one created at run time.
-///
-/// RED while a reset kept the record: the fresh conversation held the text
-/// twice, in its first prompt and as an appended entry.
+/// A reset of an agent whose instructions changed keeps its record: the
+/// agent goes on with the same instructions, and the record is also its
+/// forks'. The fresh conversation's first prompt is the current, complete
+/// text, and the kept record reaches it as ONE standing entry with the same
+/// text: never an earlier text, never a second entry. A later change is the
+/// record's next revision and reaches the fresh conversation as one more
+/// entry. The same for a configured agent and for one created at run time.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_reset_of_an_edited_agent_revokes_its_record_and_appends_nothing() {
+async fn a_reset_of_an_edited_agent_keeps_its_record_and_the_fresh_conversation_holds_it_once() {
     let temp = tempfile::tempdir().unwrap();
     let mut rig = boot(
         temp.path(),
@@ -1695,13 +1715,17 @@ async fn a_reset_of_an_edited_agent_revokes_its_record_and_appends_nothing() {
         );
 
         rig.reset(name).await;
-        let record = rig.record(name).await.expect("the revoked record");
+        let record = rig.record(name).await.expect("the kept record");
         assert_eq!(
             (record["revision"].clone(), record["effect"].clone()),
-            (json!(2), json!("absent")),
-            "{name}'s reset revoked its record: {record:#?}"
+            (json!(1), json!("active")),
+            "{name}'s reset kept its record as it was: {record:#?}"
         );
-        rig.turn(name, &format!("{name}-AFTER-RESET")).await;
+        // The fresh life has no session until its first run: the mob
+        // carries the kept record into it when that run builds it, and
+        // that first run's request holds the entry.
+        let marker = format!("{name}-AFTER-RESET");
+        rig.turn(name, &marker).await;
         let transcript = rig.transcript(name).await;
         assert!(
             transcript[0]["content"]
@@ -1710,9 +1734,23 @@ async fn a_reset_of_an_edited_agent_revokes_its_record_and_appends_nothing() {
                     && !prompt.contains("Answer in ALPHA style.")),
             "{name}'s fresh conversation is built from the current text"
         );
+        let standing = entries(&rig.request_messages(&marker));
+        assert_eq!(
+            standing.len(),
+            1,
+            "{name}'s fresh conversation holds the kept record as one entry from its first \
+             run on: {transcript:#?}"
+        );
         assert!(
-            entries(&transcript).is_empty(),
-            "nothing is appended to {name}'s fresh conversation: {transcript:#?}"
+            carries(&standing[0], &["Answer in BETA style."]),
+            "{name}'s entry carries the current text: {}",
+            standing[0]
+        );
+        rig.turn(name, &format!("{name}-ONCE-MORE")).await;
+        assert_eq!(
+            entries(&rig.transcript(name).await),
+            standing,
+            "{name}'s fresh conversation never holds a second entry"
         );
     }
 
@@ -1720,14 +1758,86 @@ async fn a_reset_of_an_edited_agent_revokes_its_record_and_appends_nothing() {
     let record = rig.record(CONFIGURED).await.expect("the record");
     assert_eq!(
         (record["revision"].clone(), record["effect"].clone()),
-        (json!(3), json!("active")),
+        (json!(2), json!("active")),
         "a later change is the record's next revision: {record:#?}"
     );
     rig.recorded(CONFIGURED).await;
     rig.turn(CONFIGURED, "CONFIGURED-THIRD").await;
     let request = entries(&rig.request_messages("CONFIGURED-THIRD"));
-    assert_eq!(request.len(), 1, "{request:#?}");
-    assert!(carries(&request[0], &["Answer in GAMMA style."]));
+    assert_eq!(request.len(), 2, "{request:#?}");
+    assert!(
+        carries(&request[0], &["Answer in BETA style."])
+            && carries(&request[1], &["Answer in GAMMA style."]),
+        "the later change is one more entry behind the kept one: {request:#?}"
+    );
+    rig.shutdown().await;
+}
+
+/// A change too large to record leaves the agent's record on the earlier
+/// text: the update answers `body_too_large`, and the change applies from
+/// the agent's next fresh conversation. A fresh life cannot keep such a
+/// record, which would present the earlier text to the fresh conversation
+/// as the current one: the record is revoked, and the fresh conversation is
+/// built from the current text and holds no entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_life_revokes_a_record_that_cannot_hold_the_current_text() {
+    let large = format!("Keep GAMMA records. {}", "x".repeat(300_000));
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id(), vec![configured_spec(&[])]).await;
+    rig.create(&["Keep ALPHA records."]).await;
+    rig.turn(CREATED, "FIRST-TURN").await;
+    rig.update(
+        "update-one",
+        &["Keep ALPHA records."],
+        &["Keep BETA records."],
+    )
+    .await;
+    assert_eq!(
+        rig.after_update(&["Keep ALPHA records."], &["Keep BETA records."])
+            .await,
+        InstructionOutcome::AppliesAtNextRun
+    );
+    rig.recorded(CREATED).await;
+    rig.turn(CREATED, "SECOND-TURN").await;
+
+    rig.update("update-two", &["Keep BETA records."], &[large.as_str()])
+        .await;
+    assert_eq!(
+        rig.after_update(&["Keep BETA records."], &[large.as_str()])
+            .await,
+        InstructionOutcome::AppliesAtNextSession {
+            reason: InstructionNextSessionReason::BodyTooLarge
+        },
+        "the larger text is not recorded"
+    );
+    let record = rig.record(CREATED).await.expect("the record");
+    assert_eq!(
+        (record["revision"].clone(), record["effect"].clone()),
+        (json!(1), json!("active")),
+        "the record still holds the earlier text: {record:#?}"
+    );
+
+    rig.reset(CREATED).await;
+    let record = rig.record(CREATED).await.expect("the revoked record");
+    assert_eq!(
+        (record["revision"].clone(), record["effect"].clone()),
+        (json!(2), json!("absent")),
+        "the fresh life revoked the record that holds an earlier text: {record:#?}"
+    );
+    rig.turn(CREATED, "AFTER-RESET").await;
+    let transcript = rig.transcript(CREATED).await;
+    assert!(
+        transcript[0]["content"]
+            .as_str()
+            .is_some_and(|prompt| prompt.contains("Keep GAMMA records.")
+                && !prompt.contains("Keep BETA records.")),
+        "the fresh conversation is built from the current text"
+    );
+    assert!(
+        entries(&transcript).is_empty(),
+        "nothing presents the earlier text to the fresh conversation: {} entries",
+        entries(&transcript).len()
+    );
     rig.shutdown().await;
 }
 
@@ -4191,7 +4301,7 @@ fn one_function_owns_the_instruction_records() {
             &[("mob_handle_runtime.rs", 2)],
         ),
         (
-            ".revoke_instruction_record_for_fresh_life(",
+            ".keep_instruction_record_for_fresh_life(",
             &[("identity_first/runtime.rs", 1)],
         ),
         // A launch's executor takes the identity runtime's own step in one

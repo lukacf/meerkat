@@ -460,9 +460,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   never rewritten. An agent that is not loaded is not woken, a restart
   neither loses nor repeats the change, and the removal of an agent revokes
   its record (after the next start when the gateway stopped right after the
-  removal). A reset or a delete of the agent revokes the record too: the
-  fresh conversation's first prompt is the current text, and nothing is
-  appended to it. A model that takes a system instruction only ahead of the
+  removal). A reset or a delete of the agent keeps the record, brought up
+  to the current text when it holds another one: the agent goes on with the
+  same instructions, and its forks go on running on them. The fresh
+  conversation's first prompt is the current text, and it carries that text
+  once more as the one standing entry of the record. A removal still
+  revokes the record, and a fork that holds the entry is told so at its
+  next run. A model that takes a system instruction only ahead of the
   conversation applies the change after a compaction or with a fresh
   conversation. A fork of the agent follows the record by Meerkat's rule for
   a member and its forks: a fork that is live when the change is recorded

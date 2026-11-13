@@ -240,7 +240,7 @@ of this full catalog.
 | `mob/claim_callback_route` | Mob | `MobClaimCallbackRouteParams` | `MobClaimCallbackRouteResult` | Bind a mob's member callback route to this connection with the mob's claim token (mob feature) |
 | `mob/submit_work` | Mob | `MobSubmitWorkParams` | `MobSubmitWorkResult` | Submit a unit of work to a mob member through the work lane (mob feature) |
 | `mob/conclude_objective` | Mob | `MobConcludeObjectiveParams` | `MobConcludeObjectiveResult` | Explicitly conclude a durable kickoff objective (mob feature) |
-| `mob/cancel_work` | Mob | `MobCancelWorkParams` | `MobCancelWorkResult` | Cancel a previously submitted unit of work (mob feature) |
+| `mob/cancel_work` | Mob | `MobCancelWorkParams` | `MobCancelWorkResult` | Always refused: per-unit cancellation is unsupported and nothing is cancelled; see [Cancel work](/guides/mobs#cancel-work) (mob feature) |
 | `mob/cancel_all_work` | Mob | `MobCancelAllWorkParams` | `MobCancelAllWorkResult` | Cancel all in-flight work for a mob member (mob feature) |
 | `mob/wait_kickoff` | Mob | `MobWaitParams` | `MobWaitMembersResult` | Wait for kickoff completion for a member (mob feature) |
 | `mob/wait_ready` | Mob | `MobWaitParams` | `MobWaitMembersResult` | Wait for mob startup readiness (members bound but kickoff not required, mob feature) |
@@ -419,6 +419,14 @@ Standard JSON-RPC 2.0 with `"jsonrpc": "2.0"` on every message. Three message ty
 </Accordion>
 
 ## Request cancellation
+
+<Warning>
+Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, cancelling
+a request that is still waiting behind another turn can permanently destroy
+the mobs of the session it was queued for. See
+the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
+for the affected releases, the cases and what to do.
+</Warning>
 
 Cancel an in-flight request by its exact JSON-RPC request ID, preserving its
 number/string type. For example, while `session/create` request `2` is still
@@ -1740,7 +1748,7 @@ Only a mechanical failure is `-32603`.
 </ParamField>
 
 <ParamField body="model" type="string | null" default="from session">
-  Model override for this turn. On pending (deferred) sessions this sets the model before materialization. On materialized sessions this hot-swaps the LLM client for the remainder of the session.
+  Model override for this turn. On pending (deferred) sessions this sets the model before materialization. On materialized sessions this hot-swaps the LLM client for the remainder of the session. Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, a turn that cannot be started can permanently destroy the mobs its session owns. See the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14) for the affected releases, the cases and what to do.
 </ParamField>
 
 <ParamField body="provider" type="string | null" default="from session">
@@ -3094,6 +3102,16 @@ the comms name it was created under, names another mob or member) is refused
 with `-32602` and `data.kind` `resume_session_bound_to_another_member`
 (`session_id`, `member_id`, `bound_mob_id`, `bound_member_id`), and nothing is
 seated.
+
+<Warning>
+Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, a
+`mob/spawn` that resumes an existing session can archive that session if the
+mob is stopped or the host shuts down while the spawn is still in progress.
+Read from the source and not yet confirmed by a test: the mobs that session
+owns are then destroyed at the next start. See the
+[known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
+for the affected releases, the cases and what to do.
+</Warning>
 
 ### workgraph/get
 

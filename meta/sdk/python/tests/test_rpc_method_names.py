@@ -1390,6 +1390,217 @@ async def test_wire_local_forwards_optional_pubkey():
     assert params["remote_address"] == "tcp://10.0.0.2:9001"
 
 
+def _cross_mob_peer(mob, member, peer_id, dialable_address=None):
+    """A gateway's peer_info answer: ``dialable_address`` only for a member
+    with a socket endpoint."""
+    comms_name = f"{mob}/worker/{member}"
+    info = {
+        "member_id": member,
+        "mob_id": mob,
+        "comms_name": comms_name,
+        "peer_id": peer_id,
+        "address": f"inproc://{comms_name}",
+        "pubkey_b64": f"{member}-key",
+    }
+    if dialable_address is not None:
+        info["dialable_address"] = dialable_address
+    return info
+
+
+def _wire_local_params(local_member, remote):
+    return {
+        "local_member_id": local_member,
+        "remote_comms_name": remote["comms_name"],
+        "remote_peer_id": remote["peer_id"],
+        "remote_address": remote["address"],
+    }
+
+
+def _socket_wire_params(local_member, remote):
+    return {
+        "local_member_id": local_member,
+        "remote_comms_name": remote["comms_name"],
+        "remote_peer_id": remote["peer_id"],
+        "remote_address": remote["dialable_address"],
+        "remote_pubkey_b64": remote["pubkey_b64"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_wire_cross_mob_wires_two_gateways_by_socket_endpoint_and_member_key():
+    """Both peer_info answers report a dialable address (two gateways whose
+    members have socket endpoints): each side is wired to the other by that
+    address and the member's own key."""
+    alice = _cross_mob_peer(
+        "mob-a", "alice", "00000000-0000-4000-8000-00000000000a", "tcp://127.0.0.1:4101"
+    )
+    bob = _cross_mob_peer(
+        "mob-b", "bob", "00000000-0000-4000-8000-00000000000b", "tcp://127.0.0.1:4102"
+    )
+    local, local_calls = make_mock_mob_handle({"meta/cross_mob/peer_info": alice})
+    remote, remote_calls = make_mock_mob_handle({"meta/cross_mob/peer_info": bob})
+
+    await local.wire_cross_mob("alice", "bob", remote)
+
+    assert local_calls == [
+        ("meta/cross_mob/peer_info", {"member_id": "alice"}),
+        ("meta/get_member", {"member_id": "alice"}),
+        ("meta/cross_mob/wire_local", _socket_wire_params("alice", bob)),
+    ]
+    assert remote_calls == [
+        ("meta/cross_mob/peer_info", {"member_id": "bob"}),
+        ("meta/cross_mob/wire_local", _socket_wire_params("bob", alice)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wire_cross_mob_never_mixes_a_socket_side_with_an_in_process_side():
+    """One side alone has a socket endpoint: both sides are wired by the
+    in-process address with no key, which the gateway resolves for a member
+    of its own process and refuses in plain words for any other."""
+    alice = _cross_mob_peer(
+        "mob-a", "alice", "00000000-0000-4000-8000-00000000000a", "tcp://127.0.0.1:4101"
+    )
+    bob = _cross_mob_peer("mob-b", "bob", "00000000-0000-4000-8000-00000000000b")
+    local, local_calls = make_mock_mob_handle({"meta/cross_mob/peer_info": alice})
+    remote, remote_calls = make_mock_mob_handle({"meta/cross_mob/peer_info": bob})
+
+    await local.wire_cross_mob("alice", "bob", remote)
+
+    assert local_calls[2] == ("meta/cross_mob/wire_local", _wire_local_params("alice", bob))
+    assert remote_calls[1] == ("meta/cross_mob/wire_local", _wire_local_params("bob", alice))
+
+
+@pytest.mark.asyncio
+async def test_wire_cross_mob_raises_a_refused_first_wire_and_sends_nothing_else():
+    """The gateway refuses the first wire_local (a member its process does
+    not have, named by an in-process address): the refusal reaches the
+    caller as it is, and no other wire or unwire is sent."""
+    alice = _cross_mob_peer("mob-a", "alice", "00000000-0000-4000-8000-00000000000a")
+    bob = _cross_mob_peer("mob-b", "bob", "00000000-0000-4000-8000-00000000000b")
+    local, local_calls = make_mock_mob_handle({"meta/cross_mob/peer_info": alice})
+    remote, remote_calls = make_mock_mob_handle({"meta/cross_mob/peer_info": bob})
+    answer = local._runtime._rpc
+    refusal = (
+        "cross_mob/wire_local failed: peer spec error: \"mob-b/worker/bob\" is not a live "
+        "member of a mob in this process"
+    )
+
+    async def refuse_wire_local(method, params=None, **kwargs):
+        if method == "meta/cross_mob/wire_local":
+            local_calls.append((method, params))
+            raise RpcError(-32000, refusal)
+        return await answer(method, params, **kwargs)
+
+    local._runtime._rpc = refuse_wire_local
+
+    with pytest.raises(RpcError, match="not a live member of a mob in this process"):
+        await local.wire_cross_mob("alice", "bob", remote)
+
+    assert [method for method, _ in local_calls] == [
+        "meta/cross_mob/peer_info",
+        "meta/get_member",
+        "meta/cross_mob/wire_local",
+    ]
+    assert remote_calls == [("meta/cross_mob/peer_info", {"member_id": "bob"})]
+
+
+@pytest.mark.asyncio
+async def test_wire_cross_mob_wires_each_side_to_the_others_peer_info():
+    """wire_cross_mob is peer_info on both sides, one read of the local
+    member (is it wired to that peer already), then wire_local on each
+    side with the other side's answer. The gateway's wire_local installs the
+    route with the trust, so the helper makes no further call."""
+    alice = _cross_mob_peer("mob-a", "alice", "00000000-0000-4000-8000-00000000000a")
+    bob = _cross_mob_peer("mob-b", "bob", "00000000-0000-4000-8000-00000000000b")
+    local, local_calls = make_mock_mob_handle({"meta/cross_mob/peer_info": alice})
+    remote, remote_calls = make_mock_mob_handle({"meta/cross_mob/peer_info": bob})
+
+    await local.wire_cross_mob("alice", "bob", remote)
+
+    assert local_calls == [
+        ("meta/cross_mob/peer_info", {"member_id": "alice"}),
+        ("meta/get_member", {"member_id": "alice"}),
+        ("meta/cross_mob/wire_local", _wire_local_params("alice", bob)),
+    ]
+    assert remote_calls == [
+        ("meta/cross_mob/peer_info", {"member_id": "bob"}),
+        ("meta/cross_mob/wire_local", _wire_local_params("bob", alice)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wire_cross_mob_undoes_the_first_side_when_the_second_refuses():
+    """A refused second wire_local is raised to the caller after the first
+    side is undone with the same parameters it was wired with."""
+    alice = _cross_mob_peer("mob-a", "alice", "00000000-0000-4000-8000-00000000000a")
+    bob = _cross_mob_peer("mob-b", "bob", "00000000-0000-4000-8000-00000000000b")
+    local, local_calls = make_mock_mob_handle({"meta/cross_mob/peer_info": alice})
+    remote, remote_calls = make_mock_mob_handle({"meta/cross_mob/peer_info": bob})
+    answer = remote._runtime._rpc
+
+    async def refuse_wire_local(method, params=None, **kwargs):
+        if method == "meta/cross_mob/wire_local":
+            remote_calls.append((method, params))
+            raise RpcError(-32000, "cross_mob/wire_local failed: refused")
+        return await answer(method, params, **kwargs)
+
+    remote._runtime._rpc = refuse_wire_local
+
+    with pytest.raises(RpcError, match="refused"):
+        await local.wire_cross_mob("alice", "bob", remote)
+
+    assert local_calls == [
+        ("meta/cross_mob/peer_info", {"member_id": "alice"}),
+        ("meta/get_member", {"member_id": "alice"}),
+        ("meta/cross_mob/wire_local", _wire_local_params("alice", bob)),
+        ("meta/cross_mob/unwire_local", _wire_local_params("alice", bob)),
+    ]
+    assert remote_calls == [
+        ("meta/cross_mob/peer_info", {"member_id": "bob"}),
+        ("meta/cross_mob/wire_local", _wire_local_params("bob", alice)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wire_cross_mob_keeps_a_first_side_that_was_wired_before_the_call():
+    """The local member is wired to that peer already when the helper runs:
+    a refused second wire_local is raised, and the first side is NOT undone
+    (the helper undoes only a wire it made)."""
+    alice = _cross_mob_peer("mob-a", "alice", "00000000-0000-4000-8000-00000000000a")
+    bob = _cross_mob_peer("mob-b", "bob", "00000000-0000-4000-8000-00000000000b")
+    local, local_calls = make_mock_mob_handle(
+        {
+            "meta/cross_mob/peer_info": alice,
+            "meta/get_member": {
+                "agent_identity": "alice",
+                "role": "worker",
+                "state": "active",
+                "wired_to": [bob["comms_name"]],
+            },
+        }
+    )
+    remote, remote_calls = make_mock_mob_handle({"meta/cross_mob/peer_info": bob})
+    answer = remote._runtime._rpc
+
+    async def refuse_wire_local(method, params=None, **kwargs):
+        if method == "meta/cross_mob/wire_local":
+            remote_calls.append((method, params))
+            raise RpcError(-32000, "cross_mob/wire_local failed: refused")
+        return await answer(method, params, **kwargs)
+
+    remote._runtime._rpc = refuse_wire_local
+
+    with pytest.raises(RpcError, match="refused"):
+        await local.wire_cross_mob("alice", "bob", remote)
+
+    assert local_calls == [
+        ("meta/cross_mob/peer_info", {"member_id": "alice"}),
+        ("meta/get_member", {"member_id": "alice"}),
+        ("meta/cross_mob/wire_local", _wire_local_params("alice", bob)),
+    ]
+
+
 def _wg_item(**overrides):
     payload = {
         "id": "item-1",

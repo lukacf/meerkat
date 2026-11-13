@@ -49,6 +49,7 @@ pub type HeldIdentityCompletion = Box<
 
 pub(crate) mod console_events;
 pub mod cross_mob;
+mod cross_mob_routes;
 pub mod edge_reconcile;
 pub mod edge_types;
 pub mod event_log;
@@ -341,6 +342,10 @@ pub struct UnifiedRuntimeCore {
     module_runtime: Arc<tokio::sync::Mutex<MetaRuntimeHandle>>,
     managed_dynamic_edges: Arc<tokio::sync::RwLock<BTreeSet<(String, String)>>>,
     shutting_down: AtomicBool,
+    /// This runtime's part of the link table between mobs of this process
+    /// (`cross_mob_routes`), set by the start-time read, which runs once
+    /// per runtime. Only the runtime that created a part closes it.
+    cross_mob_routes: std::sync::OnceLock<Arc<cross_mob_routes::CrossMobWakeRoutes>>,
     /// The runtime's close begins under this gate, serialized against a
     /// running publication of its bootstrap completion.
     close_gate: Arc<bootstrap_completion::RuntimeCloseGate>,
@@ -912,6 +917,7 @@ impl UnifiedRuntime {
                 module_runtime: Arc::new(tokio::sync::Mutex::new(module_runtime)),
                 managed_dynamic_edges: Arc::new(tokio::sync::RwLock::new(BTreeSet::new())),
                 shutting_down: AtomicBool::new(false),
+                cross_mob_routes: std::sync::OnceLock::new(),
                 close_gate: bootstrap_completion::RuntimeCloseGate::new(),
                 bootstrap_completion: std::sync::Mutex::new(
                     bootstrap_completion::CompletionSlot::Pending,
@@ -1141,10 +1147,19 @@ impl UnifiedRuntime {
         // preparer gets the bootstrap's wiring. With a declared agent
         // customizer it is armed now, before the mob restores anything, so a
         // member the start builds is held until the roster pass publishes its
-        // tools. Without one it is deferred: inert until the identity
-        // bootstrap finds a customizer, and from then on it publishes each
-        // identity member's tools right before Core builds the member, as
-        // the builder's and the gateways' wiring do. The declaration comes
+        // tools. Without one it is deferred: undecided until the host
+        // completes the bootstrap. An identity bootstrap that finds a
+        // customizer decides for it, and from then on the wiring publishes
+        // each identity member's tools right before Core builds the member,
+        // as the builder's and the gateways' wiring do; an identity
+        // bootstrap that finds none, and the activation without an identity
+        // context, decide that there is none. While it is undecided, every
+        // build of an agent created at run time is refused for now, so no
+        // such agent is built from its row before the host's build step, if
+        // it has one, was asked: a wake leaves it dormant, and a fresh seat
+        // (one the start owes it, or its create's kickoff spawn) stays
+        // owed until the call that decides has Core seat it. The
+        // declaration comes
         // off the spec here: `MobRuntime::prepare` refuses a spec that still
         // carries one, which nothing would wire.
         let declared_customizer = mob_spec.agent_customizer.take();
@@ -1204,6 +1219,9 @@ impl UnifiedRuntime {
                         runtime.reconcile_bootstrap_edges_if_configured()
                     })
                     .await;
+                    // The mob runs: its links to members of other mobs of
+                    // this process are read from its rows, once.
+                    crate::boxed_future::boxed(|| runtime.restore_cross_mob_wake_routes()).await;
                 }
                 Ok(runtime)
             }
@@ -1243,6 +1261,14 @@ impl UnifiedRuntime {
     /// (`InvalidConfig`): it holds every identity member it builds until an
     /// identity bootstrap publishes the member's tools, so without one they
     /// would stay held for good.
+    ///
+    /// On a runtime from [`Self::bootstrap`] or the `bootstrap_with_*`
+    /// family whose spec declares no agent customizer, the first `Ok` call
+    /// also settles that the composition has none: an agent created at run
+    /// time whose fresh seat was refused until the bootstrap completed (one
+    /// the mob's start owed its seat, or one created with a first message
+    /// since) is seated from its record now, once. A later call asks for
+    /// nothing again.
     pub async fn activate_without_identity_context(&mut self) -> Result<(), MobRuntimeError> {
         if self.identity_first_context.is_some() {
             return Err(MobRuntimeError::InvalidConfig(
@@ -1263,6 +1289,15 @@ impl UnifiedRuntime {
                     .to_string(),
             ));
         }
+        // The host declares that no identity context will be installed, so
+        // a wiring that waited to learn of an agent customizer composes
+        // none. Decided before the lift: a seat the lift's own start owes
+        // an agent created at run time is built from its record, as it is
+        // on a composition that never had a customizer.
+        let decided_without_customizer = self
+            .bootstrap_member_build_wiring
+            .as_ref()
+            .is_some_and(crate::gateway_wiring::MemberBuildWiring::decide_without_customizer);
         let pending = self.pending_mob_activation.lock().await.take();
         if let Some(pending) = pending {
             self.report_bootstrap_phase(UnifiedRuntimeBootstrapPhase::Activate);
@@ -1273,6 +1308,28 @@ impl UnifiedRuntime {
             }
             self.reconcile_bootstrap_edges_if_configured().await;
         }
+        if decided_without_customizer {
+            // The fresh seats the wiring refused while it was undecided are
+            // owed: the call that made the decision asks Core once to seat
+            // them (a mob that was already running when the runtime was
+            // bootstrapped ran its start's pass before the decision). It
+            // never fails the activation: an agent Core could not seat
+            // stays owed its seat, and Core's next start, or the next
+            // change of the mob's identities, seats it.
+            let still_owed = self
+                .mob_runtime
+                .handle()
+                .seat_owed_store_owned_identities()
+                .await;
+            if !still_owed.is_empty() {
+                tracing::warn!(
+                    identities = ?still_owed,
+                    "agents created at run time stay owed their seat after the activation \
+                     without an identity context asked Core to seat them"
+                );
+            }
+        }
+        self.restore_cross_mob_wake_routes().await;
         self.mint_bootstrap_completion();
         Ok(())
     }
@@ -1639,7 +1696,11 @@ impl UnifiedRuntime {
     /// carry the declared customizer or none; another one is refused here:
     /// the context is installed by then, but the customizer, its tool
     /// registry and the build preparer are not, and the runtime shuts down.
-    /// Without a customizer nothing changes. The held variants do the same.
+    /// Without a customizer the member builds stay as Core makes them, and
+    /// the bootstrap settles that the composition has none: an agent
+    /// created at run time whose fresh seat was refused until the bootstrap
+    /// completed is seated from its record, once. The held variants do the
+    /// same.
     pub async fn bootstrap_installed_identity_first_context(
         &mut self,
         roster: &[crate::identity_first::DurableAgentSpec],
@@ -1750,6 +1811,7 @@ impl UnifiedRuntime {
                 // As on the unheld path: the bootstrap's lifecycle side
                 // effects run before it answers.
                 context.runtime.settle_lifecycle_projection().await;
+                self.restore_cross_mob_wake_routes().await;
                 self.mint_bootstrap_completion();
                 Ok(HeldBootstrapStart::Activated(result))
             }
@@ -1834,6 +1896,7 @@ impl UnifiedRuntime {
                 // and those a stopped process still owed, run before the
                 // bootstrap answers.
                 context.runtime.settle_lifecycle_projection().await;
+                self.restore_cross_mob_wake_routes().await;
                 self.mint_bootstrap_completion();
                 Ok(result)
             }
@@ -1850,7 +1913,9 @@ impl UnifiedRuntime {
     /// binds it before it lifts the mob, so with an agent customizer every
     /// build from the lift on is prepared, and the builds a declared wiring
     /// held before are published by the roster pass; without one a deferred
-    /// wiring stays inert. A customizer or registry that conflicts with the
+    /// wiring is decided for none, stays inert, and has Core seat the agents
+    /// created at run time whose fresh seat it refused while undecided. A
+    /// customizer or registry that conflicts with the
     /// spec's declaration is refused before the customizer, its registry or
     /// the preparer is installed.
     async fn bind_bootstrap_member_build_wiring(
@@ -1913,6 +1978,11 @@ impl UnifiedRuntime {
         context
             .runtime
             .install_member_binding_observer(self.identity_binding_wake.clone());
+        // The family of changes and reads of the mob's long-term agents is
+        // attached with the identity authority: its reads are served from
+        // here on, and its changes once the launch attaches its identity
+        // policy. It builds one value and starts nothing.
+        self.attach_identity_reads(&context.runtime);
         self.identity_first_context = Some(context);
         if let Some(projection) = self.console_projection.get() {
             projection.update_identity_authority("default", self.identity_runtime_ref().cloned());
@@ -3302,10 +3372,6 @@ fn mob_is_stopping_or_stopped(handle: &MobHandle) -> bool {
         )
 }
 
-fn durable_identity_label(labels: &BTreeMap<String, String>) -> Option<String> {
-    labels.get("agent_identity").cloned()
-}
-
 async fn identity_member_registered(
     primary_mob_id: &str,
     mob_id: &str,
@@ -3815,7 +3881,12 @@ async fn reconcile_agent_event_streams(
             let Some((runtime_id, fence_token)) = entry.binding_atoms() else {
                 continue;
             };
-            let durable_identity = durable_identity_label(&entry.labels);
+            let durable_identity = crate::member_comms_id::resolve_member_identity(
+                handle,
+                &entry.agent_identity,
+                &entry.labels,
+            )
+            .map(std::borrow::Cow::into_owned);
             let identity_registered = identity_member_registered(
                 &primary_mob_id,
                 &mob_id,
@@ -3870,7 +3941,12 @@ async fn reconcile_agent_event_streams(
             let Some((runtime_id, fence_token)) = entry.binding_atoms() else {
                 continue;
             };
-            let durable_identity = durable_identity_label(&entry.labels);
+            let durable_identity = crate::member_comms_id::resolve_member_identity(
+                handle,
+                &entry.agent_identity,
+                &entry.labels,
+            )
+            .map(std::borrow::Cow::into_owned);
             let identity_registered = identity_member_registered(
                 &primary_mob_id,
                 &mob_id,
@@ -4760,7 +4836,19 @@ impl crate::memory::events::MemoryEventSink for ConsoleMemoryEventSink {
         let store = self.store.clone();
         let identity = event.identity().map(str::to_string);
         let event_type = event.event_type().to_string();
-        let data = event.data();
+        let mut data = event.data();
+        // A member's memory event that names its session (`session_key`)
+        // names it to the console too (`session_id`), so the console
+        // witnesses the frame by that session's member.
+        if identity.is_some()
+            && let Some(object) = data.as_object_mut()
+            && let Some(session) = object
+                .get("session_key")
+                .filter(|session| session.is_string())
+                .cloned()
+        {
+            object.entry("session_id").or_insert(session);
+        }
         self.handle.spawn(async move {
             match identity {
                 // A member's memory event: the store refuses it under a
@@ -4783,6 +4871,12 @@ mod tests {
 
     use super::*;
     use meerkat_mob::ids::Generation;
+
+    /// The identity a test member's stream is keyed by, read from its
+    /// label: the members these tests seat all carry it.
+    fn durable_identity_label(labels: &BTreeMap<String, String>) -> Option<String> {
+        crate::member_comms_id::durable_identity_label(labels).map(str::to_owned)
+    }
 
     /// The memory sink keeps `_system` for identity-less memory events and
     /// never writes a member's memory event under a runtime-plane identity.

@@ -68,17 +68,27 @@ InstructionResidency = WireInstructionResidency | InstructionAdvisoryUnknown
 InstructionLowering = WireInstructionLowering | InstructionAdvisoryUnknown
 
 # Which members of a mob an operator instruction targets: every member, the
-# members of one profile, or one member. A target is a predicate over the
-# roster: a profile or member that does not exist yet selects nobody until it
-# does.
+# members of one profile, or one member (alone, or with the forks of its fork
+# family: ``include_forks``, false when absent). A target is a predicate over
+# the roster: a profile or member that does not exist yet selects nobody
+# until it does.
 InstructionTargetMob = TypedDict("InstructionTargetMob", {"kind": Literal["mob"]})
 InstructionTargetProfile = TypedDict(
     "InstructionTargetProfile", {"kind": Literal["profile"], "profile": str}
 )
-InstructionTargetMember = TypedDict(
-    "InstructionTargetMember",
-    {"kind": Literal["member"], "agent_identity": str},
-)
+
+
+class InstructionTargetMember(TypedDict):
+    """One member. With ``include_forks`` the record follows the member's
+    fork family from its root: written for a member that is not itself a
+    fork it also selects every fork below it, written for a fork it selects
+    that member only. A status read carries the key only when it is true."""
+
+    kind: Literal["member"]
+    agent_identity: str
+    include_forks: NotRequired[bool]
+
+
 InstructionTarget = (
     InstructionTargetMob | InstructionTargetProfile | InstructionTargetMember
 )
@@ -399,10 +409,17 @@ def _target(value: Any, context: str) -> InstructionTarget:
     if kind == "profile":
         return {"kind": "profile", "profile": _string(data, "profile", context)}
     if kind == "member":
-        return {
+        member: InstructionTargetMember = {
             "kind": "member",
             "agent_identity": _string(data, "agent_identity", context),
         }
+        # The fork scope is a boolean, left out when false.
+        include_forks = data.get("include_forks", False)
+        if not isinstance(include_forks, bool):
+            raise _invalid(context, "include_forks must be a boolean")
+        if include_forks:
+            member["include_forks"] = True
+        return member
     raise _invalid(context, f"unsupported target kind {kind!r}")
 
 

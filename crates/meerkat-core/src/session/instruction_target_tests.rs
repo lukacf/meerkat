@@ -1047,6 +1047,73 @@ fn a_release_revokes_the_mob_instructions_at_the_next_fresh_run_start() {
     ));
 }
 
+/// A mob snapshot that no longer names a slot revokes it: the slot leaves
+/// the recorded target at once, and the next fresh run start revokes what
+/// was in effect, at the revision in effect. A slot the session never had
+/// in effect leaves no trace.
+#[test]
+fn a_snapshot_that_no_longer_names_a_slot_revokes_it_at_the_next_fresh_run_start() {
+    let mut session = conversed_session();
+    session
+        .record_instruction_target(record(
+            1,
+            vec![
+                ("tone", 1, Some("Be brief.")),
+                ("style", 1, Some("Use short sentences.")),
+            ],
+        ))
+        .unwrap();
+    assert!(matches!(
+        fresh_run(&mut session),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    // The next snapshot names only one of the two, and a third that never
+    // applied here is named and dropped again before any run.
+    session
+        .record_instruction_target(record(
+            2,
+            vec![
+                ("tone", 1, Some("Be brief.")),
+                ("extra", 1, Some("Never applied.")),
+            ],
+        ))
+        .unwrap();
+    session
+        .record_instruction_target(record(3, vec![("tone", 1, Some("Be brief."))]))
+        .unwrap();
+    let target = session.instruction_target_state().unwrap().unwrap();
+    assert_eq!(
+        target
+            .slots()
+            .iter()
+            .map(|slot| slot.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tone"],
+        "the target names only what the snapshot names"
+    );
+    assert_eq!(
+        fresh_run(&mut session),
+        RunStartInstructionOutcome::Applied {
+            entry_sequence: 2,
+            target_generation: 3,
+        }
+    );
+    let revocation = entries(&session).pop().expect("the revocation entry");
+    assert_eq!(revocation.changes().len(), 1);
+    assert!(matches!(
+        &revocation.changes()[0],
+        InstructionChange::Revoke { key, revision: at, revokes, .. }
+            if key.as_str() == "style" && at.get() == 1 && revokes.get() == 1
+    ));
+    assert_eq!(revocation.active().len(), 1);
+    let effective = effective_operator_instructions(session.id(), session.messages()).unwrap();
+    assert_eq!(effective.active_count(), 1);
+    assert_eq!(
+        fresh_run(&mut session),
+        RunStartInstructionOutcome::NotNeeded
+    );
+}
+
 #[test]
 fn a_release_before_any_run_start_still_revokes_what_was_in_effect() {
     // A write that a later owner makes before the next run start does not

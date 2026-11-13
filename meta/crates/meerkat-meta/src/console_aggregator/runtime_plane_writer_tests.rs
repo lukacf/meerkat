@@ -145,8 +145,8 @@ fn is_member_spawn_call(frame: &ConsoleFrame) -> bool {
         && frame.payload["tool_call_id"] == "call-spawn"
 }
 
-/// One spawn call in the member's transcript and the identity the history
-/// projection derives its initial-message frame under.
+/// One spawn call in the member's transcript and the identity the call
+/// names for the member to spawn.
 struct SpawnCallRow {
     label: &'static str,
     tool: &'static str,
@@ -186,16 +186,13 @@ async fn check_spawn_call_row(
             frame.kind, frame.identity
         ));
     }
-    if !crate::console_contracts::is_runtime_plane_identity(row.target)
-        && !frames.iter().any(|frame| {
-            frame.identity == row.target
-                && frame.kind == "user_input"
-                && frame.payload["tool_call_id"] == "call-spawn"
-        })
-    {
+    // A member's history writes frames under that member only: the initial
+    // message of a spawn call it made is not written under the name the
+    // call gave, an ordinary member's name included.
+    if let Some(frame) = frames.iter().find(|frame| frame.identity == row.target) {
         return Err(format!(
-            "the initial message for {} is not stored",
-            row.target
+            "a {} frame is stored under {}, the name the spawn call gave",
+            frame.kind, frame.identity
         ));
     }
     if !frames.iter().any(is_member_spawn_call) {

@@ -5961,6 +5961,21 @@ pub(crate) trait MobIdentityMemberStore: Send + Sync {
         Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable)
     }
 
+    /// [`Self::observe_created_identity`] for every identity of
+    /// `identities` in ONE store read: each named identity's row as the
+    /// created identity scan reads it. An identity with no row of schema
+    /// version 2 or later is absent from the answer. The caller bounds
+    /// `identities` (one page of names). Never writes.
+    async fn observe_created_identities(
+        &self,
+        mob_id: &MobId,
+        identities: &[AgentIdentity],
+    ) -> Result<BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation>, MobStoreError>
+    {
+        let _ = (mob_id, identities);
+        Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable)
+    }
+
     /// Purge the receipt's mob's rows of schema version 2 and later in one
     /// store transaction (the downgrade cycle, 0.9.11): every such row (a
     /// store-owned identity's, an archived one's, a removed name's

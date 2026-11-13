@@ -98,11 +98,13 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
 };
 // Operator instructions: a record's slot effect and target kind, why a
 // member's delivery is blocked or deferred, why a write is refused, and the
-// target predicate the machine's helper states. The schema's own types, one
-// definition for both instantiations of the machine.
+// target predicate the machine's helper states (for a member that is not
+// fork-derived, and with the member's fork lineage root). The schema's own
+// types, one definition for both instantiations of the machine.
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     InstructionEffect, InstructionTargetKind, MemberInstructionBlock, MemberInstructionDeferReason,
     OperatorInstructionRefusal, operator_instruction_target_applies,
+    operator_instruction_target_applies_to_lineage,
 };
 // A member build's tool dispatch admission: what the shell observed of the
 // build's lineage, what the host's customizer derived, and the verdict. The

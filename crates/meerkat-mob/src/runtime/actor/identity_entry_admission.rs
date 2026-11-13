@@ -19,6 +19,12 @@ impl MobActor {
     /// with [`MobError::IdentityMember`]. A host-only verb is refused
     /// [`MobError::ScopeDenied`] for `required`: an agent presents no host
     /// scope. `Ok(None)` admits the command; its own arms decide the rest.
+    ///
+    /// A wire or unwire that also names a member the mob does not hold is
+    /// admitted here: its handler answers that name as member not found
+    /// first and asks this rule again behind its own member lookup
+    /// ([`Self::refuse_agent_lane_edge_of_identity_entry`]), so the answer
+    /// for such a name never depends on what the other member is.
     pub(super) fn agent_lane_refusal(
         &self,
         cmd: &MobCommand,
@@ -34,7 +40,23 @@ impl MobActor {
             }
             AgentLaneAdmission::Members(members) => members,
         };
+        let unheld_first = matches!(cmd, MobCommand::Wire { .. } | MobCommand::Unwire { .. });
+        self.agent_lane_member_refusal(members, unheld_first)
+    }
+
+    /// The agent lane's rule for the members a command addresses: MobMachine
+    /// answers for each (`ResolveAgentLaneMemberAdmission`), and the first
+    /// identity entry among them is the refusal
+    /// ([`MobError::IdentityMember`]). With `unheld_first`, there is no
+    /// refusal when one of them is a name MobMachine admits and seats no
+    /// member for: the caller's own member lookup answers that name first.
+    pub(super) fn agent_lane_member_refusal<'a>(
+        &self,
+        members: impl IntoIterator<Item = &'a AgentIdentity>,
+        unheld_first: bool,
+    ) -> Result<Option<MobError>, MobError> {
         let mut probe = self.dsl_authority.fork();
+        let mut refusal = None;
         for agent_identity in members {
             let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
             let transition = mob_dsl::MobMachineMutator::apply(
@@ -64,15 +86,31 @@ impl MobActor {
                     ))
                 })?;
             match admission {
-                mob_dsl::AgentLaneMemberAdmissionKind::Admitted => {}
+                mob_dsl::AgentLaneMemberAdmissionKind::Admitted => {
+                    if unheld_first
+                        && !self
+                            .dsl_authority
+                            .state()
+                            .identity_to_runtime
+                            .contains_key(&dsl_identity)
+                    {
+                        return Ok(None);
+                    }
+                }
                 mob_dsl::AgentLaneMemberAdmissionKind::IdentityMember => {
-                    return Ok(Some(MobError::IdentityMember {
+                    let entry = MobError::IdentityMember {
                         member_id: agent_identity.clone(),
-                    }));
+                    };
+                    if !unheld_first {
+                        return Ok(Some(entry));
+                    }
+                    if refusal.is_none() {
+                        refusal = Some(entry);
+                    }
                 }
             }
         }
-        Ok(None)
+        Ok(refusal)
     }
 
     /// A door that acts on `agent_identity`'s member session as its host (a

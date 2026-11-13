@@ -922,6 +922,19 @@ macro_rules! mob_catalog_machine_dsl {
             // of an earlier incarnation never matches; the destroy and the
             // reset clear it.
             member_dispatch_admission_lineage: Map<AgentIdentity, AgentRuntimeId>,
+            // The member each fork-derived member was forked from, for
+            // operator instructions (0.9.15): the root of its lineage, so a
+            // fork of a fork names the first member, never the fork between.
+            // A record written for a member and its forks
+            // (InstructionTargetKind::MemberAndForks) selects every seated
+            // member whose root is the record's member. A fork seat records
+            // its root with RecordMemberInstructionLineage in the same actor
+            // command as its seat commit, and the replay of a spawn row that
+            // carries the root records it again. The entry lives as long as
+            // the forked identity: every arm that ends an identity removes
+            // it (the arms that move identity_life_ends), a respawn of the
+            // fork keeps it, and the destroy and the reset clear it.
+            member_instruction_lineage: Map<AgentIdentity, AgentIdentity>,
         }
 
         init(Running) {
@@ -1262,6 +1275,7 @@ macro_rules! mob_catalog_machine_dsl {
             member_instruction_recorded = EmptyMap,
             member_instruction_blocked = EmptyMap,
             member_dispatch_admission_lineage = EmptyMap,
+            member_instruction_lineage = EmptyMap,
         }
 
         terminal [Destroyed]
@@ -2438,6 +2452,11 @@ macro_rules! mob_catalog_machine_dsl {
             // records it in the same actor command as its seat commit, and
             // the replay of a spawn row that carries it records it again.
             RecordMemberDispatchAdmissionLineage { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
+            // The seated member agent_identity was forked from a member
+            // whose lineage root is root_identity: its fork seat records it
+            // in the same actor command as its seat commit, and the replay
+            // of a spawn row that carries it records it again.
+            RecordMemberInstructionLineage { agent_identity: AgentIdentity, root_identity: AgentIdentity },
         }
 
         surface_only [
@@ -4776,25 +4795,34 @@ macro_rules! mob_catalog_machine_dsl {
 
         // Operator instructions: whether a record's target selects a
         // member. A selector is a predicate, not a reference: a profile or a
-        // member that does not exist (yet) selects nobody. The catalog's
-        // `operator_instruction_target_applies` is the same predicate in
-        // Rust, for the shell's member snapshots and status reads.
+        // member that does not exist (yet) selects nobody. A record written
+        // for a member and its forks (MemberAndForks) also selects a member
+        // whose fork lineage root (`lineage_root`,
+        // member_instruction_lineage) is the record's member. The catalog's
+        // `operator_instruction_target_applies_to_lineage` is the same
+        // predicate in Rust, for the shell's member snapshots and status
+        // reads.
         helper operator_instruction_target_applies(
             kind: Enum<InstructionTargetKind>,
             profile: String,
             member: Option<AgentIdentity>,
             member_profile: Option<String>,
-            agent_identity: AgentIdentity
+            agent_identity: AgentIdentity,
+            lineage_root: Option<AgentIdentity>
         ) -> bool {
             kind == InstructionTargetKind::Mob
                 || (kind == InstructionTargetKind::Profile && member_profile == Some(profile))
-                || (kind == InstructionTargetKind::Member && member == Some(agent_identity))
+                || ((kind == InstructionTargetKind::Member || kind == InstructionTargetKind::MemberAndForks)
+                    && member == Some(agent_identity))
+                || (kind == InstructionTargetKind::MemberAndForks
+                    && lineage_root != None
+                    && lineage_root == member)
         }
 
         // A write the shell built from a typed request: a revision of at
         // least 1, a body digest, and a target whose shape matches its kind
         // (a profile name only for a Profile target, a member only for a
-        // Member target).
+        // Member or a MemberAndForks target).
         helper operator_instruction_write_well_formed(
             revision: u64,
             digest: String,
@@ -4806,8 +4834,20 @@ macro_rules! mob_catalog_machine_dsl {
                 && digest != ""
                 && ((kind == InstructionTargetKind::Mob && profile == "" && member == None)
                     || (kind == InstructionTargetKind::Profile && profile != "" && member == None)
-                    || (kind == InstructionTargetKind::Member && profile == "" && member != None))
+                    || ((kind == InstructionTargetKind::Member || kind == InstructionTargetKind::MemberAndForks)
+                        && profile == "" && member != None))
         }
+
+        // The slot limit and the active budget of a write bound one member's
+        // snapshot: the shared records (every member's, or a profile's) plus
+        // the member-targeted records that name the member. Every snapshot
+        // is within both limits before a write (the two invariants), and a
+        // write grows only the snapshots that hold the written slot after
+        // it: one member's for a member-targeted write, every member's for
+        // a shared write. The write arms ask the write-snapshot natives for
+        // the widest of those with the write applied (the written member's
+        // snapshot, or the widest of all), so a member-targeted write is
+        // judged without counting any other member's records.
 
         disposition DefinitionEpochAdvanced => local seam SurfaceResultAlignment,
         disposition RequestRuntimeBinding => routed [MeerkatMachine] seam NoOwnerRealization,
@@ -6371,7 +6411,8 @@ macro_rules! mob_catalog_machine_dsl {
             && for_all(slot in self.operator_instruction_target_profile.keys(),
                 self.operator_instruction_revision.contains_key(slot))
             && for_all(slot in self.operator_instruction_target_member.keys(),
-                self.operator_instruction_target_kind.get_cloned(slot) == Some(InstructionTargetKind::Member))
+                self.operator_instruction_target_kind.get_cloned(slot) == Some(InstructionTargetKind::Member)
+                || self.operator_instruction_target_kind.get_cloned(slot) == Some(InstructionTargetKind::MemberAndForks))
         }
 
         // Every record is well formed: a revision of at least 1, a body
@@ -6393,21 +6434,28 @@ macro_rules! mob_catalog_machine_dsl {
                     || (self.operator_instruction_target_kind.get_cloned(slot) == Some(InstructionTargetKind::Profile)
                         && self.operator_instruction_target_profile.get_cloned(slot) != Some("")
                         && self.operator_instruction_target_member.contains_key(slot) == false)
-                    || (self.operator_instruction_target_kind.get_cloned(slot) == Some(InstructionTargetKind::Member)
+                    || ((self.operator_instruction_target_kind.get_cloned(slot) == Some(InstructionTargetKind::Member)
+                            || self.operator_instruction_target_kind.get_cloned(slot) == Some(InstructionTargetKind::MemberAndForks))
                         && self.operator_instruction_target_profile.get_cloned(slot) == Some("")
                         && self.operator_instruction_target_member.contains_key(slot) == true)))
         }
 
-        // At most 64 records.
+        // At most 64 records in any member's snapshot: the shared records
+        // plus the member-targeted records that name one member. The mob
+        // holds any number of member-targeted records over all its members.
         invariant operator_instruction_slot_count_bounded {
-            self.operator_instruction_revision.len() <= 64
+            mob_machine_instruction_widest_snapshot_slots(
+                self.operator_instruction_target_kind,
+                self.operator_instruction_target_member) <= 64
         }
 
-        // The Active bodies of the records sum to at most 1 MiB.
+        // The Active bodies of any member's snapshot sum to at most 1 MiB.
         invariant operator_instruction_active_bytes_bounded {
-            session_document_instruction_active_bytes(
+            mob_machine_instruction_widest_snapshot_active_bytes(
                 self.operator_instruction_effect,
-                self.operator_instruction_body_bytes) <= 1048576
+                self.operator_instruction_body_bytes,
+                self.operator_instruction_target_kind,
+                self.operator_instruction_target_member) <= 1048576
         }
 
         // Delivery facts name seated members only, and an owed member is
@@ -6449,7 +6497,14 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.operator_instruction_target_member == EmptyMap
                 && self.member_instruction_owed == EmptyMap
                 && self.member_instruction_recorded == EmptyMap
-                && self.member_instruction_blocked == EmptyMap)
+                && self.member_instruction_blocked == EmptyMap
+                && self.member_instruction_lineage == EmptyMap)
+        }
+
+        // A member is never its own fork root.
+        invariant member_instruction_lineage_names_another_member {
+            for_all(child in self.member_instruction_lineage.keys(),
+                self.member_instruction_lineage.get_cloned(child) != Some(child))
         }
 
         // =====================================================================
@@ -11724,6 +11779,8 @@ macro_rules! mob_catalog_machine_dsl {
                 } else {
                     self.identity_life_ends.insert(agent_identity, 1);
                 }
+                // The identity's fork lineage ends with it.
+                self.member_instruction_lineage.remove(agent_identity);
             }
             to Running
             emit WiringGraphChanged { epoch: self.topology_epoch }
@@ -11771,6 +11828,8 @@ macro_rules! mob_catalog_machine_dsl {
                 } else {
                     self.identity_life_ends.insert(agent_identity, 1);
                 }
+                // The identity's fork lineage ends with it.
+                self.member_instruction_lineage.remove(agent_identity);
             }
             to Running
             // The abandoned incarnation is the identity's last and nothing
@@ -17740,6 +17799,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_rowless = EmptySet;
                 self.member_definition_wiring_exempt = EmptySet;
                 self.member_dispatch_admission_lineage = EmptyMap;
+                self.member_instruction_lineage = EmptyMap;
                 self.identity_runtime_generations = EmptyMap;
                 self.identity_generation_highwater = EmptyMap;
                 self.identity_runtime_fence_tokens = EmptyMap;
@@ -18242,6 +18302,7 @@ macro_rules! mob_catalog_machine_dsl {
                 // No member is seated after the reset, and a record names an
                 // incarnation of a member before it.
                 self.member_dispatch_admission_lineage = EmptyMap;
+                self.member_instruction_lineage = EmptyMap;
                 if self.operator_instruction_generation > 0 {
                     self.operator_instruction_generation += 1;
                 }
@@ -25286,6 +25347,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_unreadable = EmptySet;
                 self.member_definition_wiring_exempt = EmptySet;
                 self.member_dispatch_admission_lineage = EmptyMap;
+                self.member_instruction_lineage = EmptyMap;
                 self.identity_runtime_generations = EmptyMap;
                 self.identity_generation_highwater = EmptyMap;
                 self.identity_runtime_fence_tokens = EmptyMap;
@@ -33478,6 +33540,8 @@ macro_rules! mob_catalog_machine_dsl {
                 } else {
                     self.identity_life_ends.insert(agent_identity, 1);
                 }
+                // The identity's fork lineage ends with it.
+                self.member_instruction_lineage.remove(agent_identity);
             }
             to Running
             emit IdentityEntryUnlisted { agent_identity: agent_identity, verdict: UnlistEntryVerdict::Removed }
@@ -34455,6 +34519,8 @@ macro_rules! mob_catalog_machine_dsl {
                 } else {
                     self.identity_life_ends.insert(agent_identity, 1);
                 }
+                // The identity's fork lineage ends with it.
+                self.member_instruction_lineage.remove(agent_identity);
             }
             to Running
             emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::Removed }
@@ -35626,7 +35692,11 @@ macro_rules! mob_catalog_machine_dsl {
         //
         // A write commits a record (a new slot, or a higher revision) within
         // the slot limit, the per-slot body limit and the active budget, and
-        // advances the generation. Every seated member whose snapshot it
+        // advances the generation. The slot limit and the active budget
+        // bound one member's snapshot (the shared records plus the
+        // member-targeted records that name the member), so a mob holds a
+        // member-targeted record for each of any number of members. Every
+        // seated member whose snapshot it
         // changes (the record's old or new target selects the member) is
         // owed the new generation and unblocked. A repeat of the current
         // revision with the same content is a duplicate, the same revision
@@ -35656,7 +35726,14 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "body_within_limit" { body_bytes <= 262144 }
             guard "slot_new" { self.operator_instruction_revision.contains_key(slot) == false }
-            guard "slot_limit_reached" { self.operator_instruction_revision.len() >= 64 }
+            guard "slot_limit_reached" {
+                mob_machine_instruction_write_snapshot_slots(
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    target_kind,
+                    target_member) > 64
+            }
             update {}
             to Running
             emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::SlotLimitExceeded, current_revision: None }
@@ -35670,11 +35747,24 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "body_within_limit" { body_bytes <= 262144 }
             guard "slot_new" { self.operator_instruction_revision.contains_key(slot) == false }
-            guard "slot_room" { 64 > self.operator_instruction_revision.len() }
+            guard "slot_room" {
+                64 >= mob_machine_instruction_write_snapshot_slots(
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    target_kind,
+                    target_member)
+            }
             guard "over_budget" {
-                session_document_instruction_active_bytes(
-                    session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
-                    session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes))
+                mob_machine_instruction_write_snapshot_active_bytes(
+                    self.operator_instruction_effect,
+                    self.operator_instruction_body_bytes,
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    body_bytes,
+                    target_kind,
+                    target_member)
                     > 1048576
             }
             update {}
@@ -35690,25 +35780,61 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "body_within_limit" { body_bytes <= 262144 }
             guard "slot_new" { self.operator_instruction_revision.contains_key(slot) == false }
-            guard "slot_room" { 64 > self.operator_instruction_revision.len() }
+            guard "slot_room" {
+                64 >= mob_machine_instruction_write_snapshot_slots(
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    target_kind,
+                    target_member)
+            }
             guard "within_budget" {
                 1048576
-                    >= session_document_instruction_active_bytes(
-                        session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
-                        session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes))
+                    >= mob_machine_instruction_write_snapshot_active_bytes(
+                        self.operator_instruction_effect,
+                        self.operator_instruction_body_bytes,
+                        self.operator_instruction_target_kind,
+                        self.operator_instruction_target_member,
+                        slot,
+                        body_bytes,
+                        target_kind,
+                        target_member)
             }
             update {
-                // Every seated member the new record selects is owed it.
-                for member_id in self.identity_to_runtime.keys() {
-                    if operator_instruction_target_applies(
-                            target_kind,
-                            target_profile,
-                            target_member,
-                            self.member_profile_names.get_cloned(member_id),
-                            member_id)
-                    {
-                        self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
-                        self.member_instruction_blocked.remove(member_id);
+                // Every seated member the new record selects is owed it. A
+                // member-targeted record selects its one member, so that
+                // member is looked up, not searched for among the seats; a
+                // record for the member and its forks also selects the
+                // seated members whose fork lineage names it, found in the
+                // lineage map.
+                if target_kind == InstructionTargetKind::Member || target_kind == InstructionTargetKind::MemberAndForks {
+                    if self.identity_to_runtime.contains_key(target_member.get("value")) == true {
+                        self.member_instruction_owed.insert(target_member.get("value"), self.operator_instruction_generation + 1);
+                        self.member_instruction_blocked.remove(target_member.get("value"));
+                    }
+                    if target_kind == InstructionTargetKind::MemberAndForks {
+                        for child_id in self.member_instruction_lineage.keys() {
+                            if self.member_instruction_lineage.get_cloned(child_id) == target_member
+                                && self.identity_to_runtime.contains_key(child_id) == true
+                            {
+                                self.member_instruction_owed.insert(child_id, self.operator_instruction_generation + 1);
+                                self.member_instruction_blocked.remove(child_id);
+                            }
+                        }
+                    }
+                } else {
+                    for member_id in self.identity_to_runtime.keys() {
+                        if operator_instruction_target_applies(
+                                target_kind,
+                                target_profile,
+                                target_member,
+                                self.member_profile_names.get_cloned(member_id),
+                                member_id,
+                                self.member_instruction_lineage.get_cloned(member_id))
+                        {
+                            self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
+                            self.member_instruction_blocked.remove(member_id);
+                        }
                     }
                 }
                 self.operator_instruction_revision.insert(slot, revision);
@@ -35793,6 +35919,35 @@ macro_rules! mob_catalog_machine_dsl {
             emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::RevisionConflict, current_revision: self.operator_instruction_revision.get_copied(slot) }
         }
 
+        // A higher revision may move a record into another snapshot (another
+        // member's, or every member's): one that would be a snapshot's 65th
+        // record is refused, as a new slot is.
+        transition SetOperatorInstructionAdvanceSlotLimitExceeded {
+            per_phase [Running, Stopped]
+            on signal SetOperatorInstruction { slot, revision, digest, body_bytes, target_kind, target_profile, target_member }
+            guard "write_well_formed" {
+                operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) == true
+            }
+            guard "body_within_limit" { body_bytes <= 262144 }
+            guard "revision_not_below_current" {
+                self.operator_instruction_revision.get_cloned(slot).get("value") <= revision
+            }
+            guard "revision_advances" {
+                revision != self.operator_instruction_revision.get_cloned(slot).get("value")
+            }
+            guard "slot_limit_reached" {
+                mob_machine_instruction_write_snapshot_slots(
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    target_kind,
+                    target_member) > 64
+            }
+            update {}
+            to Running
+            emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::SlotLimitExceeded, current_revision: self.operator_instruction_revision.get_copied(slot) }
+        }
+
         transition SetOperatorInstructionAdvanceOverBudget {
             per_phase [Running, Stopped]
             on signal SetOperatorInstruction { slot, revision, digest, body_bytes, target_kind, target_profile, target_member }
@@ -35806,10 +35961,24 @@ macro_rules! mob_catalog_machine_dsl {
             guard "revision_advances" {
                 revision != self.operator_instruction_revision.get_cloned(slot).get("value")
             }
+            guard "slot_room" {
+                64 >= mob_machine_instruction_write_snapshot_slots(
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    target_kind,
+                    target_member)
+            }
             guard "over_budget" {
-                session_document_instruction_active_bytes(
-                    session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
-                    session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes))
+                mob_machine_instruction_write_snapshot_active_bytes(
+                    self.operator_instruction_effect,
+                    self.operator_instruction_body_bytes,
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    body_bytes,
+                    target_kind,
+                    target_member)
                     > 1048576
             }
             update {}
@@ -35830,32 +35999,81 @@ macro_rules! mob_catalog_machine_dsl {
             guard "revision_advances" {
                 revision != self.operator_instruction_revision.get_cloned(slot).get("value")
             }
+            guard "slot_room" {
+                64 >= mob_machine_instruction_write_snapshot_slots(
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    target_kind,
+                    target_member)
+            }
             guard "within_budget" {
                 1048576
-                    >= session_document_instruction_active_bytes(
-                        session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
-                        session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes))
+                    >= mob_machine_instruction_write_snapshot_active_bytes(
+                        self.operator_instruction_effect,
+                        self.operator_instruction_body_bytes,
+                        self.operator_instruction_target_kind,
+                        self.operator_instruction_target_member,
+                        slot,
+                        body_bytes,
+                        target_kind,
+                        target_member)
             }
             update {
                 // Every seated member the old or the new target selects is
                 // owed the new record (a member that left the selector is
-                // owed the slot's revoke).
-                for member_id in self.identity_to_runtime.keys() {
-                    if operator_instruction_target_applies(
-                            self.operator_instruction_target_kind.get_cloned(slot).get("value"),
-                            self.operator_instruction_target_profile.get_cloned(slot).get("value"),
-                            self.operator_instruction_target_member.get_cloned(slot),
-                            self.member_profile_names.get_cloned(member_id),
-                            member_id)
-                        || operator_instruction_target_applies(
-                            target_kind,
-                            target_profile,
-                            target_member,
-                            self.member_profile_names.get_cloned(member_id),
-                            member_id)
+                // owed the slot's revoke). A record that was and stays
+                // member-targeted selects its old member and its new one:
+                // they are looked up, not searched for among the seats, and
+                // the forks of either, when its target includes forks, are
+                // found in the lineage map.
+                if (self.operator_instruction_target_kind.get_cloned(slot).get("value") == InstructionTargetKind::Member
+                        || self.operator_instruction_target_kind.get_cloned(slot).get("value") == InstructionTargetKind::MemberAndForks)
+                    && (target_kind == InstructionTargetKind::Member || target_kind == InstructionTargetKind::MemberAndForks)
+                {
+                    if self.identity_to_runtime.contains_key(self.operator_instruction_target_member.get_cloned(slot).get("value")) == true {
+                        self.member_instruction_owed.insert(self.operator_instruction_target_member.get_cloned(slot).get("value"), self.operator_instruction_generation + 1);
+                        self.member_instruction_blocked.remove(self.operator_instruction_target_member.get_cloned(slot).get("value"));
+                    }
+                    if self.identity_to_runtime.contains_key(target_member.get("value")) == true {
+                        self.member_instruction_owed.insert(target_member.get("value"), self.operator_instruction_generation + 1);
+                        self.member_instruction_blocked.remove(target_member.get("value"));
+                    }
+                    if self.operator_instruction_target_kind.get_cloned(slot).get("value") == InstructionTargetKind::MemberAndForks
+                        || target_kind == InstructionTargetKind::MemberAndForks
                     {
-                        self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
-                        self.member_instruction_blocked.remove(member_id);
+                        for child_id in self.member_instruction_lineage.keys() {
+                            if self.identity_to_runtime.contains_key(child_id) == true
+                                && ((self.operator_instruction_target_kind.get_cloned(slot).get("value") == InstructionTargetKind::MemberAndForks
+                                        && self.member_instruction_lineage.get_cloned(child_id) == self.operator_instruction_target_member.get_cloned(slot))
+                                    || (target_kind == InstructionTargetKind::MemberAndForks
+                                        && self.member_instruction_lineage.get_cloned(child_id) == target_member))
+                            {
+                                self.member_instruction_owed.insert(child_id, self.operator_instruction_generation + 1);
+                                self.member_instruction_blocked.remove(child_id);
+                            }
+                        }
+                    }
+                } else {
+                    for member_id in self.identity_to_runtime.keys() {
+                        if operator_instruction_target_applies(
+                                self.operator_instruction_target_kind.get_cloned(slot).get("value"),
+                                self.operator_instruction_target_profile.get_cloned(slot).get("value"),
+                                self.operator_instruction_target_member.get_cloned(slot),
+                                self.member_profile_names.get_cloned(member_id),
+                                member_id,
+                                self.member_instruction_lineage.get_cloned(member_id))
+                            || operator_instruction_target_applies(
+                                target_kind,
+                                target_profile,
+                                target_member,
+                                self.member_profile_names.get_cloned(member_id),
+                                member_id,
+                                self.member_instruction_lineage.get_cloned(member_id))
+                        {
+                            self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
+                            self.member_instruction_blocked.remove(member_id);
+                        }
                     }
                 }
                 self.operator_instruction_revision.insert(slot, revision);
@@ -35954,16 +36172,40 @@ macro_rules! mob_catalog_machine_dsl {
                 revision != self.operator_instruction_revision.get_cloned(slot).get("value")
             }
             update {
-                for member_id in self.identity_to_runtime.keys() {
-                    if operator_instruction_target_applies(
-                            self.operator_instruction_target_kind.get_cloned(slot).get("value"),
-                            self.operator_instruction_target_profile.get_cloned(slot).get("value"),
-                            self.operator_instruction_target_member.get_cloned(slot),
-                            self.member_profile_names.get_cloned(member_id),
-                            member_id)
-                    {
-                        self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
-                        self.member_instruction_blocked.remove(member_id);
+                // The members the record selects are owed the revoke; a
+                // member-targeted record's one member is looked up, and its
+                // forks, when its target includes them, are found in the
+                // lineage map.
+                if self.operator_instruction_target_kind.get_cloned(slot).get("value") == InstructionTargetKind::Member
+                    || self.operator_instruction_target_kind.get_cloned(slot).get("value") == InstructionTargetKind::MemberAndForks
+                {
+                    if self.identity_to_runtime.contains_key(self.operator_instruction_target_member.get_cloned(slot).get("value")) == true {
+                        self.member_instruction_owed.insert(self.operator_instruction_target_member.get_cloned(slot).get("value"), self.operator_instruction_generation + 1);
+                        self.member_instruction_blocked.remove(self.operator_instruction_target_member.get_cloned(slot).get("value"));
+                    }
+                    if self.operator_instruction_target_kind.get_cloned(slot).get("value") == InstructionTargetKind::MemberAndForks {
+                        for child_id in self.member_instruction_lineage.keys() {
+                            if self.identity_to_runtime.contains_key(child_id) == true
+                                && self.member_instruction_lineage.get_cloned(child_id) == self.operator_instruction_target_member.get_cloned(slot)
+                            {
+                                self.member_instruction_owed.insert(child_id, self.operator_instruction_generation + 1);
+                                self.member_instruction_blocked.remove(child_id);
+                            }
+                        }
+                    }
+                } else {
+                    for member_id in self.identity_to_runtime.keys() {
+                        if operator_instruction_target_applies(
+                                self.operator_instruction_target_kind.get_cloned(slot).get("value"),
+                                self.operator_instruction_target_profile.get_cloned(slot).get("value"),
+                                self.operator_instruction_target_member.get_cloned(slot),
+                                self.member_profile_names.get_cloned(member_id),
+                                member_id,
+                                self.member_instruction_lineage.get_cloned(member_id))
+                        {
+                            self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
+                            self.member_instruction_blocked.remove(member_id);
+                        }
                     }
                 }
                 self.operator_instruction_revision.insert(slot, revision);
@@ -35992,23 +36234,60 @@ macro_rules! mob_catalog_machine_dsl {
             on signal RecoverOperatorInstruction { slot, revision, effect, digest, body_bytes, target_kind, target_profile, target_member, generation }
             guard "generation_advances" { self.operator_instruction_generation < generation }
             update {
-                for member_id in self.identity_to_runtime.keys() {
-                    if (self.operator_instruction_revision.contains_key(slot) == true
-                            && operator_instruction_target_applies(
-                                self.operator_instruction_target_kind.get_cloned(slot).get("value"),
-                                self.operator_instruction_target_profile.get_cloned(slot).get("value"),
-                                self.operator_instruction_target_member.get_cloned(slot),
+                // A replayed record that is member-targeted, over no record
+                // or over a member-targeted one, selects at most its old
+                // member and its new one: they are looked up, so the replay
+                // of a journal with a record per member does not search the
+                // seats once per record. The forks of either, when its target
+                // includes them, are found in the lineage map.
+                if (self.operator_instruction_revision.contains_key(slot) == false
+                        || self.operator_instruction_target_kind.get_cloned(slot).get("value") == InstructionTargetKind::Member
+                        || self.operator_instruction_target_kind.get_cloned(slot).get("value") == InstructionTargetKind::MemberAndForks)
+                    && (target_kind == InstructionTargetKind::Member || target_kind == InstructionTargetKind::MemberAndForks)
+                {
+                    if self.operator_instruction_revision.contains_key(slot) == true {
+                        if self.identity_to_runtime.contains_key(self.operator_instruction_target_member.get_cloned(slot).get("value")) == true {
+                            self.member_instruction_owed.insert(self.operator_instruction_target_member.get_cloned(slot).get("value"), generation);
+                            self.member_instruction_blocked.remove(self.operator_instruction_target_member.get_cloned(slot).get("value"));
+                        }
+                    }
+                    if self.identity_to_runtime.contains_key(target_member.get("value")) == true {
+                        self.member_instruction_owed.insert(target_member.get("value"), generation);
+                        self.member_instruction_blocked.remove(target_member.get("value"));
+                    }
+                    for child_id in self.member_instruction_lineage.keys() {
+                        if self.identity_to_runtime.contains_key(child_id) == true
+                            && ((self.operator_instruction_revision.contains_key(slot) == true
+                                    && self.operator_instruction_target_kind.get_cloned(slot) == Some(InstructionTargetKind::MemberAndForks)
+                                    && self.member_instruction_lineage.get_cloned(child_id) == self.operator_instruction_target_member.get_cloned(slot))
+                                || (target_kind == InstructionTargetKind::MemberAndForks
+                                    && self.member_instruction_lineage.get_cloned(child_id) == target_member))
+                        {
+                            self.member_instruction_owed.insert(child_id, generation);
+                            self.member_instruction_blocked.remove(child_id);
+                        }
+                    }
+                } else {
+                    for member_id in self.identity_to_runtime.keys() {
+                        if (self.operator_instruction_revision.contains_key(slot) == true
+                                && operator_instruction_target_applies(
+                                    self.operator_instruction_target_kind.get_cloned(slot).get("value"),
+                                    self.operator_instruction_target_profile.get_cloned(slot).get("value"),
+                                    self.operator_instruction_target_member.get_cloned(slot),
+                                    self.member_profile_names.get_cloned(member_id),
+                                    member_id,
+                                    self.member_instruction_lineage.get_cloned(member_id)))
+                            || operator_instruction_target_applies(
+                                target_kind,
+                                target_profile,
+                                target_member,
                                 self.member_profile_names.get_cloned(member_id),
-                                member_id))
-                        || operator_instruction_target_applies(
-                            target_kind,
-                            target_profile,
-                            target_member,
-                            self.member_profile_names.get_cloned(member_id),
-                            member_id)
-                    {
-                        self.member_instruction_owed.insert(member_id, generation);
-                        self.member_instruction_blocked.remove(member_id);
+                                member_id,
+                                self.member_instruction_lineage.get_cloned(member_id))
+                        {
+                            self.member_instruction_owed.insert(member_id, generation);
+                            self.member_instruction_blocked.remove(member_id);
+                        }
                     }
                 }
                 self.operator_instruction_revision.insert(slot, revision);
@@ -38444,6 +38723,40 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
+        // The record of a fork-derived member's lineage root for operator
+        // instructions (member_instruction_lineage). A fork seat applies it
+        // in the same synchronous actor step as its seat commit, before any
+        // delivery can be prepared for that seat, and the replay of a spawn
+        // row that carries the root applies it directly after the row
+        // seated the member. The entry is the root as given: the shell reads
+        // it from this state at the fork's admission (its source's entry,
+        // or the source itself when it holds none), so a fork of a fork
+        // names the first member, the same input writes the same entry at
+        // any time, and a row's replay is idempotent. A root is a name, as
+        // a member target is: an entry outlives its root's identity. From
+        // then on the records written for the root and its forks select the
+        // member, so it is owed the mob's snapshot when the mob has recorded
+        // a generation. A member whose session already recorded a snapshot
+        // under this seat is refused: that snapshot was built without the
+        // lineage, and a generation is recorded once. The machine does not
+        // see a delivery that is prepared and not yet recorded, which is
+        // why the record belongs to the seat's own step.
+        transition RecordMemberInstructionLineage {
+            per_phase [Running, Stopped]
+            on input RecordMemberInstructionLineage { agent_identity, root_identity }
+            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "root_is_another_member" { agent_identity != root_identity }
+            guard "no_snapshot_recorded" { self.member_instruction_recorded.contains_key(agent_identity) == false }
+            update {
+                self.member_instruction_lineage.insert(agent_identity, root_identity);
+                if self.operator_instruction_generation != 0 {
+                    self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
+                    self.member_instruction_blocked.remove(agent_identity);
+                }
+            }
+            to Running
+        }
+
         // The end of a retirement that ends its identity (the shell reads it
         // from the state before the terminal step and applies this on that
         // step), or the replay of a terminal row that recorded it: the
@@ -38457,6 +38770,8 @@ macro_rules! mob_catalog_machine_dsl {
                 } else {
                     self.identity_life_ends.insert(agent_identity, 1);
                 }
+                // The identity's fork lineage ends with it.
+                self.member_instruction_lineage.remove(agent_identity);
             }
             to Running
         }
@@ -38476,30 +38791,185 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         impl MobMachineAuthority {
-        // Operator instructions reuse the session document's slot-set
-        // natives: one slot map with one slot set, and the body bytes of a
-        // slot set's Active slots. A slot the bytes map does not name counts
-        // nothing. The TLA model renders them for this machine too.
-        fn session_document_instruction_slot_after_set<V: Clone>(
-            current: &std::collections::BTreeMap<String, V>,
-            slot: &str,
-            value: &V,
-        ) -> std::collections::BTreeMap<String, V> {
-            let mut updated = current.clone();
-            updated.insert(slot.to_owned(), value.clone());
-            updated
+        // Operator instructions: a member's snapshot holds the shared
+        // records (every record that is not member-targeted), the
+        // member-targeted records that name the member and, for a
+        // fork-derived member, the records written for its lineage root and
+        // its forks. Any name may be seated as a fork of another name, so
+        // the widest snapshot the records allow is the shared records plus
+        // the most one name holds of its own together with the most another
+        // name's records pass to its forks (which is at least the most any
+        // one name holds of its own). `tallies` holds, per name a
+        // member-targeted record names, what the name holds of its own and
+        // how much of that its forks take; the four natives below count
+        // records or Active body bytes into it.
+        fn mob_machine_instruction_widest_of(
+            shared: u64,
+            tallies: &std::collections::BTreeMap<&AgentIdentity, (u64, u64)>,
+        ) -> u64 {
+            let mut top_fork: Option<(&AgentIdentity, u64)> = None;
+            let mut second_fork = 0_u64;
+            for (name, (_, fork)) in tallies {
+                match top_fork {
+                    Some((_, top)) if *fork <= top => second_fork = second_fork.max(*fork),
+                    Some((_, top)) => {
+                        second_fork = top;
+                        top_fork = Some((*name, *fork));
+                    }
+                    None => top_fork = Some((*name, *fork)),
+                }
+            }
+            let mut widest = 0_u64;
+            for (name, (own, _)) in tallies {
+                let from_another = match top_fork {
+                    Some((top_name, top)) if top_name != *name => top,
+                    Some(_) => second_fork,
+                    None => 0,
+                };
+                widest = widest.max(own.saturating_add(from_another));
+            }
+            shared.saturating_add(widest)
         }
 
-        fn session_document_instruction_active_bytes(
+        // The records of the widest member snapshot once a write is applied
+        // (`slot` written with `kind` and `member`). Every snapshot is
+        // within the limit before a write, so this is what the limit has to
+        // hold after it. It reads the record maps as they are and counts
+        // the written slot as written, without building the maps the write
+        // leaves. A member-targeted record is a slot whose kind is Member or
+        // MemberAndForks and that the member map names; any other slot
+        // counts as shared.
+        fn mob_machine_instruction_write_snapshot_slots(
+            target_kind: &std::collections::BTreeMap<String, InstructionTargetKind>,
+            target_member: &std::collections::BTreeMap<String, AgentIdentity>,
+            slot: &str,
+            kind: &InstructionTargetKind,
+            member: &Option<AgentIdentity>,
+        ) -> u64 {
+            let mut shared = 0_u64;
+            let mut tallies = std::collections::BTreeMap::<&AgentIdentity, (u64, u64)>::new();
+            let written = std::iter::once((member.as_ref(), kind));
+            let others = target_kind
+                .iter()
+                .filter(|(other, _)| other.as_str() != slot)
+                .map(|(other, other_kind)| (target_member.get(other), other_kind));
+            for (record_member, record_kind) in written.chain(others) {
+                match (record_member, record_kind) {
+                    (Some(name), InstructionTargetKind::Member) => {
+                        let tally = tallies.entry(name).or_insert((0, 0));
+                        tally.0 = tally.0.saturating_add(1);
+                    }
+                    (Some(name), InstructionTargetKind::MemberAndForks) => {
+                        let tally = tallies.entry(name).or_insert((0, 0));
+                        tally.0 = tally.0.saturating_add(1);
+                        tally.1 = tally.1.saturating_add(1);
+                    }
+                    _ => shared = shared.saturating_add(1),
+                }
+            }
+            Self::mob_machine_instruction_widest_of(shared, &tallies)
+        }
+
+        // The Active body bytes of the widest member snapshot once the same
+        // write is applied, with the written slot Active at `body_bytes`. A
+        // slot the bytes map does not name counts nothing.
+        #[allow(clippy::too_many_arguments)]
+        fn mob_machine_instruction_write_snapshot_active_bytes(
             effect: &std::collections::BTreeMap<String, InstructionEffect>,
             bytes: &std::collections::BTreeMap<String, u64>,
+            target_kind: &std::collections::BTreeMap<String, InstructionTargetKind>,
+            target_member: &std::collections::BTreeMap<String, AgentIdentity>,
+            slot: &str,
+            body_bytes: &u64,
+            kind: &InstructionTargetKind,
+            member: &Option<AgentIdentity>,
         ) -> u64 {
-            effect
+            let mut shared = 0_u64;
+            let mut tallies = std::collections::BTreeMap::<&AgentIdentity, (u64, u64)>::new();
+            let written = std::iter::once((member.as_ref(), Some(kind), *body_bytes));
+            let others = effect
                 .iter()
-                .filter(|(_, slot_effect)| **slot_effect == InstructionEffect::Active)
-                .fold(0_u64, |total, (slot, _)| {
-                    total.saturating_add(bytes.get(slot).copied().unwrap_or(0))
+                .filter(|(other, other_effect)| {
+                    other.as_str() != slot && **other_effect == InstructionEffect::Active
                 })
+                .map(|(other, _)| {
+                    (
+                        target_member.get(other),
+                        target_kind.get(other),
+                        bytes.get(other).copied().unwrap_or(0),
+                    )
+                });
+            for (record_member, record_kind, record_bytes) in written.chain(others) {
+                match (record_member, record_kind) {
+                    (Some(name), Some(InstructionTargetKind::Member)) => {
+                        let tally = tallies.entry(name).or_insert((0, 0));
+                        tally.0 = tally.0.saturating_add(record_bytes);
+                    }
+                    (Some(name), Some(InstructionTargetKind::MemberAndForks)) => {
+                        let tally = tallies.entry(name).or_insert((0, 0));
+                        tally.0 = tally.0.saturating_add(record_bytes);
+                        tally.1 = tally.1.saturating_add(record_bytes);
+                    }
+                    _ => shared = shared.saturating_add(record_bytes),
+                }
+            }
+            Self::mob_machine_instruction_widest_of(shared, &tallies)
+        }
+
+        // The records of the widest member snapshot of a state: the
+        // invariant's count, over the record maps as they are.
+        fn mob_machine_instruction_widest_snapshot_slots(
+            target_kind: &std::collections::BTreeMap<String, InstructionTargetKind>,
+            target_member: &std::collections::BTreeMap<String, AgentIdentity>,
+        ) -> u64 {
+            let mut shared = 0_u64;
+            let mut tallies = std::collections::BTreeMap::<&AgentIdentity, (u64, u64)>::new();
+            for (slot, kind) in target_kind {
+                match (target_member.get(slot), kind) {
+                    (Some(name), InstructionTargetKind::Member) => {
+                        let tally = tallies.entry(name).or_insert((0, 0));
+                        tally.0 = tally.0.saturating_add(1);
+                    }
+                    (Some(name), InstructionTargetKind::MemberAndForks) => {
+                        let tally = tallies.entry(name).or_insert((0, 0));
+                        tally.0 = tally.0.saturating_add(1);
+                        tally.1 = tally.1.saturating_add(1);
+                    }
+                    _ => shared = shared.saturating_add(1),
+                }
+            }
+            Self::mob_machine_instruction_widest_of(shared, &tallies)
+        }
+
+        // The Active body bytes of the widest member snapshot of a state. A
+        // slot the bytes map does not name counts nothing.
+        fn mob_machine_instruction_widest_snapshot_active_bytes(
+            effect: &std::collections::BTreeMap<String, InstructionEffect>,
+            bytes: &std::collections::BTreeMap<String, u64>,
+            target_kind: &std::collections::BTreeMap<String, InstructionTargetKind>,
+            target_member: &std::collections::BTreeMap<String, AgentIdentity>,
+        ) -> u64 {
+            let mut shared = 0_u64;
+            let mut tallies = std::collections::BTreeMap::<&AgentIdentity, (u64, u64)>::new();
+            for (slot, slot_effect) in effect {
+                if *slot_effect != InstructionEffect::Active {
+                    continue;
+                }
+                let slot_bytes = bytes.get(slot).copied().unwrap_or(0);
+                match (target_member.get(slot), target_kind.get(slot)) {
+                    (Some(name), Some(InstructionTargetKind::Member)) => {
+                        let tally = tallies.entry(name).or_insert((0, 0));
+                        tally.0 = tally.0.saturating_add(slot_bytes);
+                    }
+                    (Some(name), Some(InstructionTargetKind::MemberAndForks)) => {
+                        let tally = tallies.entry(name).or_insert((0, 0));
+                        tally.0 = tally.0.saturating_add(slot_bytes);
+                        tally.1 = tally.1.saturating_add(slot_bytes);
+                    }
+                    _ => shared = shared.saturating_add(slot_bytes),
+                }
+            }
+            Self::mob_machine_instruction_widest_of(shared, &tallies)
         }
 
         fn mob_machine_remote_turn_custody_admits(
@@ -42913,13 +43383,16 @@ pub enum MemberSessionDisposal {
 
 /// What an operator-instruction record targets
 /// (`operator_instruction_target_kind`): every member of the mob, the
-/// members of one profile, or one member.
+/// members of one profile, one member, or one member and its forks (the
+/// seated members whose fork lineage root it is,
+/// `member_instruction_lineage`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum InstructionTargetKind {
     #[default]
     Mob,
     Profile,
     Member,
+    MemberAndForks,
 }
 
 /// Why a member's operator-instruction delivery is blocked
@@ -42968,12 +43441,12 @@ pub enum MemberInstructionDeferReason {
     SpawnInFlight,
 }
 
-/// Whether an operator-instruction record's target selects a member: the
-/// machine's `operator_instruction_target_applies` helper, for the shell's
-/// member snapshots and status reads. `member_profile` is the member's
-/// profile name as the machine holds it (`member_profile_names`). A
-/// selector is a predicate, not a reference: a profile or a member that
-/// does not exist selects nobody.
+/// Whether an operator-instruction record's target selects a member that
+/// is not fork-derived: [`operator_instruction_target_applies_to_lineage`]
+/// with no lineage root. `member_profile` is the member's profile name as
+/// the machine holds it (`member_profile_names`). A selector is a predicate,
+/// not a reference: a profile or a member that does not exist selects
+/// nobody.
 #[must_use]
 pub fn operator_instruction_target_applies(
     kind: InstructionTargetKind,
@@ -42982,10 +43455,39 @@ pub fn operator_instruction_target_applies(
     member_profile: Option<&str>,
     agent_identity: &str,
 ) -> bool {
+    operator_instruction_target_applies_to_lineage(
+        kind,
+        profile,
+        member,
+        member_profile,
+        agent_identity,
+        None,
+    )
+}
+
+/// Whether an operator-instruction record's target selects a member: the
+/// machine's `operator_instruction_target_applies` helper, for the shell's
+/// member snapshots and status reads. `lineage_root` is the member's fork
+/// lineage root as the machine holds it (`member_instruction_lineage`),
+/// `None` for a member that is not fork-derived: a record written for a
+/// member and its forks selects the member it names and every member whose
+/// root that member is.
+#[must_use]
+pub fn operator_instruction_target_applies_to_lineage(
+    kind: InstructionTargetKind,
+    profile: &str,
+    member: Option<&str>,
+    member_profile: Option<&str>,
+    agent_identity: &str,
+    lineage_root: Option<&str>,
+) -> bool {
     match kind {
         InstructionTargetKind::Mob => true,
         InstructionTargetKind::Profile => member_profile == Some(profile),
         InstructionTargetKind::Member => member == Some(agent_identity),
+        InstructionTargetKind::MemberAndForks => {
+            member == Some(agent_identity) || (lineage_root.is_some() && lineage_root == member)
+        }
     }
 }
 

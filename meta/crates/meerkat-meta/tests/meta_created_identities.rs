@@ -3,18 +3,19 @@
 //! Identities created at runtime, served by a Meta gateway's identity
 //! runtime.
 //!
-//! An identity created at runtime is a created entry of Core's mob: its
-//! record is its row in the mob's identity store (store-owned), not the
-//! host's roster. The roster pass registers each one from that row, and a
-//! door that names one this runtime has not registered yet registers it from
-//! its row first, so a send by name, a dispatch and a schedule fire go
-//! through the identity's door, as for any registered identity. A delivery
-//! door reads the row again, so a change Core made to it is served at once,
-//! and a delivery to one Core holds no member of is answered from Core's
-//! entry. Core's MobMachine drives a store-owned identity's lifecycle, so the
-//! identity's door refuses Meta's lifecycle verbs on it, typed and final, and
-//! changes nothing. A name Core holds for no identity, a removed identity's
-//! name included, stays unknown.
+//! An identity created at runtime is an identity entry of Core's mob whose
+//! record is its row in the mob's identity store, not the host's roster. The
+//! runtime serves it as any identity. A roster pass registers each one it
+//! has not registered yet from that row, and a door that names one this
+//! runtime has not registered yet registers it from its row first, so a send
+//! by name, a dispatch and a schedule fire go through the identity's door. A
+//! delivery door reads the row again, so a change Core made to it is served
+//! at once, and a delivery to one Core holds no member of is answered from
+//! Core's entry. The lifecycle verbs, the scoped tool grants, the topology
+//! provider, the warm and the bootstrap status treat it as a configured
+//! identity, and its first build carries the host customizer's tools. A
+//! name Core holds for no identity, a removed identity's name included,
+//! stays unknown.
 //!
 //! Each row boots the gateway's runtime composition on a temporary state
 //! directory (persistent stores, the state directory's identity substrate, a
@@ -35,12 +36,13 @@ use meerkat_core::Message;
 use meerkat_core::types::{StopReason, ToolCallView, ToolDef};
 use meerkat_core::{AgentToolDispatcher, ToolDispatchOutcome, ToolError};
 use meerkat_meta::UnifiedRuntimeBuilder;
-use meerkat_meta::identity_first::contracts::{AgentCustomizer, RosterProvider};
+use meerkat_meta::identity_first::contracts::{AgentCustomizer, RosterProvider, TopologyProvider};
 use meerkat_meta::identity_first::{
     AgentAddressability, AgentBuildContext, AgentBuildDraft, AgentIdentity, BoundGovernedInput,
     CustomizerError, DurableAgentSpec, GovernedBindContext, GovernedBindError, GovernedBindRefusal,
     GovernedInputBinder, GovernedInputError, GovernedSettlement, IdentityRuntimeError,
-    LocalExternalToolOverlay, MutableRosterProvider, RosterContext, RosterError,
+    LocalExternalToolOverlay, ManagedPeerEdge, MutableRosterProvider, RosterContext, RosterError,
+    TopologyContext, TopologyError,
 };
 use meerkat_mob::{EntryStanding, IdentityEntryRead, MobDefinition, ProfileName};
 use serde_json::{Value, json};
@@ -75,6 +77,15 @@ runtime_mode = "turn_driven"
 
 [profiles.worker.tools]
 comms = true
+
+[profiles.analyst]
+model = "gpt-5.4"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.analyst.tools]
+comms = true
+builtins = true
 "#
     ))
     .expect("parse the definition")
@@ -107,12 +118,12 @@ fn declared_spec() -> DurableAgentSpec {
 
 /// The host's roster: the declared identity alone. It never lists an
 /// identity created at runtime.
-struct DeclaredRoster;
+struct DeclaredRoster(DurableAgentSpec);
 
 #[async_trait]
 impl RosterProvider for DeclaredRoster {
     async fn roster(&self, _context: &RosterContext) -> Result<Vec<DurableAgentSpec>, RosterError> {
-        Ok(vec![declared_spec()])
+        Ok(vec![self.0.clone()])
     }
 }
 
@@ -139,16 +150,19 @@ fn controller() -> meerkat_core::ControllerModelSelection {
 
 /// The members' model: each request's last message (past Core's system
 /// notices) is sent on the row's channel, each whole request is kept, and
-/// every request answers.
+/// every request answers. A `pinned` client reports [`controller`] as its
+/// selection; one that is not reports none, so each request names the model
+/// its member was built with.
 #[derive(Clone)]
 struct RecordingClient {
     asked: mpsc::UnboundedSender<String>,
     requests: Arc<Mutex<Vec<String>>>,
+    pinned: bool,
 }
 
 impl meerkat_client::LlmClient for RecordingClient {
     fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
-        Some(controller())
+        self.pinned.then(controller)
     }
 
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
@@ -269,6 +283,8 @@ struct Rig {
     runtime: meerkat_meta::UnifiedRuntime,
     asked: mpsc::UnboundedReceiver<String>,
     requests: Arc<Mutex<Vec<String>>>,
+    /// The identity the host's roster declares.
+    declared: DurableAgentSpec,
 }
 
 /// Boot the gateway's runtime composition on `state` for the mob `mob_id`.
@@ -282,22 +298,59 @@ async fn boot_with(
     mob_id: &str,
     customizer: Option<Arc<dyn AgentCustomizer>>,
 ) -> Rig {
+    boot_composed(state, mob_id, customizer, None).await
+}
+
+/// [`boot_with`] with the host's `topology` provider, when it composes one.
+async fn boot_composed(
+    state: &Path,
+    mob_id: &str,
+    customizer: Option<Arc<dyn AgentCustomizer>>,
+    topology: Option<Arc<dyn TopologyProvider>>,
+) -> Rig {
+    boot_host(
+        state,
+        definition(mob_id),
+        declared_spec(),
+        customizer,
+        topology,
+        true,
+    )
+    .await
+}
+
+/// Boot the gateway's runtime composition on `state` for `definition`, with
+/// a roster that declares `declared` alone, the host's `customizer` and
+/// `topology` provider when it composes them, and a members' model that is
+/// `pinned` to [`controller`] or not.
+async fn boot_host(
+    state: &Path,
+    definition: MobDefinition,
+    declared: DurableAgentSpec,
+    customizer: Option<Arc<dyn AgentCustomizer>>,
+    topology: Option<Arc<dyn TopologyProvider>>,
+    pinned: bool,
+) -> Rig {
     let (asked_tx, asked) = mpsc::unbounded_channel();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let mut builder = UnifiedRuntimeBuilder::default()
-        .definition(definition(mob_id))
+        .definition(definition)
         .persistent_state(state)
         .continuity_from_state_dir(state)
         .await
         .expect("open the state-dir identity substrate")
-        .roster_provider(Arc::new(DeclaredRoster))
+        .roster_provider(Arc::new(DeclaredRoster(declared.clone())))
         .identity_runtime_instance_id("meta-created-identities")
         .default_llm_client(Arc::new(RecordingClient {
             asked: asked_tx,
             requests: Arc::clone(&requests),
+            pinned,
         }));
     if let Some(customizer) = customizer {
         builder = builder.agent_customizer(customizer);
+    }
+    if let Some(topology) = topology {
+        builder = builder.topology_provider(topology);
     }
     let runtime = Box::pin(builder.build())
         .await
@@ -306,6 +359,7 @@ async fn boot_with(
         runtime,
         asked,
         requests,
+        declared,
     }
 }
 
@@ -351,7 +405,7 @@ impl Rig {
                 .runtime
                 .identity_runtime()
                 .expect("identity runtime installed"),
-            roster_provider: Arc::new(MutableRosterProvider::new(vec![declared_spec()])),
+            roster_provider: Arc::new(MutableRosterProvider::new(vec![self.declared.clone()])),
             topology_provider: None,
             customizer: None,
             agent_memory_provider: None,
@@ -537,6 +591,29 @@ impl Rig {
         .unwrap_or(false)
     }
 
+    /// The whole model requests so far.
+    fn requests(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    /// `name`'s row in the mob's identity store, rendered: its revision,
+    /// presence, spec and owned edges.
+    async fn row(&self, name: &str) -> String {
+        match self
+            .runtime
+            .mob_handle()
+            .identity_record(&meerkat_mob::AgentIdentity::from(name))
+            .await
+            .expect("the row reads")
+        {
+            Some(meerkat_mob::CreatedIdentityObservation::Created(record)) => format!(
+                "{} {:?} {:?} {:?}",
+                record.revision, record.presence, record.spec, record.owned_edges
+            ),
+            other => panic!("{name} has a row: {other:?}"),
+        }
+    }
+
     /// The first whole model request that carried `marker`.
     fn request_with(&self, marker: &str) -> Option<String> {
         self.requests
@@ -706,61 +783,46 @@ async fn a_dispatch_to_an_identity_created_at_runtime_is_delivered_through_its_d
     rig.shutdown().await;
 }
 
-/// A member mutation of an identity created at runtime is answered by the
-/// identity's door: Core's MobMachine drives a store-owned identity's
-/// lifecycle, so Meta's lifecycle verbs refuse it, typed and final
-/// (`identity_store_owned`), and nothing changes. Core still holds its member
+/// A member mutation of an identity created at runtime, named before any
+/// roster pass registered it, is answered by the identity's door, which
+/// registers it from its row and serves the mutation as a configured
+/// identity's: `meta/reload_member` answers its outcome and
+/// `meta/retire_member` releases the member. Core still holds its member
 /// seated, and a send still reaches it.
 ///
 /// RED before Meta served created identities: `meta/reload_member` and
 /// `meta/retire_member` were refused `-32001` (unknown identity) before any
-/// door.
+/// door; and before the verbs served them, `identity_store_owned`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_mutation_of_an_identity_created_at_runtime_is_answered_by_its_door() {
     let temp = tempfile::tempdir().unwrap();
     let mut rig = boot(temp.path(), &fresh_mob_id()).await;
     rig.create(CREATED).await;
 
-    let reload = rig
-        .rpc("meta/reload_member", json!({"member_id": CREATED}))
-        .await;
-    assert!(reload["result"].is_null(), "{reload:#?}");
-    assert_eq!(
-        (
-            reload["error"]["code"].clone(),
-            reload["error"]["data"].clone()
-        ),
-        (
-            json!(-32603),
-            json!({"kind": "identity_store_owned", "identity": CREATED, "retryable": false})
-        ),
-        "the identity's door refuses the reload, typed and final: {reload:#?}"
-    );
-
     let retire = rig
         .rpc("meta/retire_member", json!({"member_id": CREATED}))
         .await;
-    assert!(retire["result"].is_null(), "{retire:#?}");
-    assert_eq!(
-        retire["error"]["code"],
-        json!(-32000),
-        "meta/retire_member answers the identity door's refusal: {retire:#?}"
-    );
-    let message = retire["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        message.contains("retire_member (identity) failed") && message.contains("store-owned"),
-        "the identity's door refused the retire: {retire:#?}"
+        retire["error"].is_null(),
+        "the identity's door serves the retire: {retire:#?}"
     );
-
+    assert!(
+        rig.registered(CREATED).await,
+        "the door registered the identity from its row"
+    );
     assert!(
         rig.seated(CREATED),
-        "nothing retired the created identity's member"
+        "the retire released the member and kept it seated"
     );
-    let sent = rig.send(CREATED, "CREATED-AFTER-MUTATION").await;
-    assert!(sent["error"].is_null(), "{sent:#?}");
     assert!(
-        rig.asked("CREATED-AFTER-MUTATION").await,
+        rig.turn(CREATED, "CREATED-AFTER-MUTATION").await,
         "the created identity still serves its sends"
+    );
+
+    let reload = rig.verb("meta/reload_member", CREATED).await;
+    assert!(
+        reload["error"].is_null() && !reload["result"].is_null(),
+        "the identity's door serves the reload: {reload:#?}"
     );
     rig.shutdown().await;
 }
@@ -1232,22 +1294,25 @@ async fn a_member_core_wakes_registers_its_identity_created_at_runtime_from_its_
     rig.shutdown().await;
 }
 
-/// The offline identity reset (`meta_gateway identity-reset`) refuses an
-/// identity created at runtime as store-owned (`identity_store_owned`), as
-/// every Meta lifecycle verb refuses it, and writes no first-boot row: Core's
-/// MobMachine drives it.
+/// The offline identity reset (`meta_gateway identity-reset`) resets a
+/// store-owned identity as any identity: it leaves its row in the first-boot
+/// manifest, and the next start's roster pass carries it out. After that
+/// start the agent is on a fresh session at the next generation with
+/// nothing built, its name and its row are unchanged, the manifest row is
+/// settled, and its next delivery runs on the fresh session without the old
+/// conversation.
 ///
-/// RED before the reset named store ownership: it refused the identity as
-/// one whose management kind this build does not know.
+/// RED before the pass carried such a row out: the reset refused the
+/// identity (`identity_store_owned`) and wrote nothing.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_offline_identity_reset_refuses_an_identity_created_at_runtime_as_store_owned() {
+async fn an_offline_identity_reset_gives_a_store_owned_identity_a_fresh_life_at_the_next_start() {
     let temp = tempfile::tempdir().unwrap();
     let mob_id = fresh_mob_id();
     let mut rig = boot(temp.path(), &mob_id).await;
     rig.create(CREATED).await;
-    let sent = rig.send(CREATED, "BEFORE-RESET").await;
-    assert!(sent["error"].is_null(), "{sent:#?}");
-    assert!(rig.asked("BEFORE-RESET").await);
+    assert!(rig.turn(CREATED, "BEFORE-OFFLINE-RESET").await);
+    let before = rig.life(CREATED).await;
+    let row_before = rig.row(CREATED).await;
     rig.shutdown_for_reopen().await;
 
     let report = meerkat_meta::storage_migrate_native::reset_identity(
@@ -1255,17 +1320,53 @@ async fn the_offline_identity_reset_refuses_an_identity_created_at_runtime_as_st
             .with_apply(),
     )
     .await;
-    let refusal = serde_json::to_value(report.refusal.as_ref().expect("the reset refuses"))
-        .expect("the refusal renders");
-    assert_eq!(
-        refusal["kind"],
-        json!("identity_store_owned"),
-        "the reset refuses the store-owned identity: {report:?}"
+    assert!(
+        report.refusal.is_none() && report.written,
+        "the offline reset takes the store-owned identity and writes its row: {report:?}"
+    );
+    let manifest = temp.path().join("storage-migrate-native.first-boot.json");
+    assert!(manifest.exists(), "the first-boot manifest holds the row");
+
+    let mut rig = boot(temp.path(), &mob_id).await;
+    let after = rig.life(CREATED).await;
+    assert_ne!(after.session, before.session, "a fresh session");
+    assert!(
+        after.generation > before.generation,
+        "at a later generation: {:?} after {:?}",
+        after.generation,
+        before.generation
     );
     assert!(
-        !report.written,
-        "a refused reset writes nothing: {report:?}"
+        rig.requests().is_empty(),
+        "the start carried the reset out without building a member"
     );
+    assert_eq!(
+        rig.row(CREATED).await,
+        row_before,
+        "the name and the row are unchanged"
+    );
+    assert!(
+        !manifest.exists(),
+        "the start settled the manifest row and removed the empty manifest"
+    );
+    assert!(
+        rig.turn(CREATED, "AFTER-OFFLINE-RESET").await,
+        "the agent takes its next delivery"
+    );
+    let delivered = rig.life(CREATED).await;
+    assert_eq!(
+        (delivered.session, delivered.generation),
+        (after.session, after.generation),
+        "on the fresh session"
+    );
+    let request = rig
+        .request_with("AFTER-OFFLINE-RESET")
+        .expect("the delivery's turn");
+    assert!(
+        !request.contains("BEFORE-OFFLINE-RESET"),
+        "the fresh conversation holds nothing of the old one"
+    );
+    rig.shutdown().await;
 }
 
 /// A created entry whose name the member-id encoding maps to another member
@@ -1322,5 +1423,3188 @@ async fn a_created_name_the_member_id_encoding_maps_to_another_member_is_not_reg
             "{name}: Core holds no entry under its member id {member}"
         );
     }
+    rig.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// One agent model: a store-owned identity is served as any identity
+// ---------------------------------------------------------------------------
+
+/// The verbs of the table, by the method a caller names: each takes the
+/// identity's name, and `retire_at_scope` is the Rust door (a scope captured
+/// from the identity, then the scoped retire).
+const VERBS: &[&str] = &[
+    "meta/retire",
+    "meta/retire_member",
+    "retire_at_scope",
+    "meta/reload_member",
+    "meta/identity/warm",
+    "meta/respawn",
+    "meta/respawn_member",
+    "meta/reset",
+    "meta/delete_identity",
+];
+
+/// What a caller observes of an identity between two reads of its status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Life {
+    session: Option<String>,
+    generation: Option<u64>,
+    state: String,
+}
+
+/// What a caller observes of one verb on one identity.
+#[derive(Debug, PartialEq, Eq)]
+struct VerbEffect {
+    /// The verb answered a result, not an error.
+    accepted: bool,
+    /// The identity's member is on the session it was on before the verb.
+    session_kept: bool,
+    /// How many generations the verb advanced the identity's member.
+    generations: u64,
+    /// The identity's state right after the verb.
+    state: String,
+    /// The identity took a delivery after the verb, in this process.
+    delivers: bool,
+}
+
+/// What Core's roster holds of a member.
+struct Seat {
+    role: ProfileName,
+    labels: BTreeMap<String, String>,
+    wired_to: std::collections::BTreeSet<meerkat_mob::AgentIdentity>,
+}
+
+impl Rig {
+    /// The identity's status as a caller reads it.
+    async fn life(&self, name: &str) -> Life {
+        let status = self
+            .runtime
+            .identity_runtime()
+            .expect("identity runtime installed")
+            .status(&id(name))
+            .await
+            .unwrap_or_else(|error| panic!("{name}: the status reads: {error}"));
+        Life {
+            session: status.session_id.map(|session| session.to_string()),
+            generation: status.generation.map(meerkat_mob::Generation::get),
+            state: format!("{:?}", status.state),
+        }
+    }
+
+    /// Core's roster entry of `name`'s member: its role, its labels and the
+    /// members it is wired to.
+    async fn member(&self, name: &str) -> Seat {
+        let entry = self
+            .runtime
+            .mob_handle()
+            .get_member(&meerkat_meta::member_comms_id::mob_member_id(name))
+            .await
+            .expect("Core's roster reads")
+            .unwrap_or_else(|| panic!("Core holds a member of {name}"));
+        Seat {
+            role: entry.role,
+            labels: entry.labels,
+            wired_to: entry.wired_to,
+        }
+    }
+
+    /// Ask `verb` of `name` and answer the JSON-RPC response (the Rust door's
+    /// answer is rendered as one). A verb Core refuses for a cause that
+    /// clears on its own (the member's last turn is still settling) is asked
+    /// again, bounded.
+    async fn verb(&self, verb: &str, name: &str) -> Value {
+        let mut response = self.verb_once(verb, name).await;
+        for _ in 0..40 {
+            let settling = response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("work in flight"));
+            if !settling {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            response = self.verb_once(verb, name).await;
+        }
+        response
+    }
+
+    async fn verb_once(&self, verb: &str, name: &str) -> Value {
+        match verb {
+            "retire_at_scope" => {
+                let identities = self
+                    .runtime
+                    .identity_runtime()
+                    .expect("identity runtime installed");
+                let scope = match identities.capture_delivery_scope(&id(name)).await {
+                    Ok(scope) => scope,
+                    Err(error) => return json!({"error": {"message": format!("{error:?}")}}),
+                };
+                match identities.retire_at_scope_tracked(&id(name), &scope).await {
+                    Ok(_) => json!({"result": {"identity": name}}),
+                    Err(error) => json!({"error": {"message": format!("{error:?}")}}),
+                }
+            }
+            "meta/retire_member" | "meta/reload_member" | "meta/respawn_member" => {
+                self.rpc(verb, json!({"member_id": name})).await
+            }
+            _ => self.rpc(verb, json!({"identity": name})).await,
+        }
+    }
+
+    /// Run one turn of `name` with `marker`: `false` when the send was
+    /// refused or the member's model was never asked. The model answers at
+    /// once, and the turn is given a moment to settle; a verb that still
+    /// finds it settling is asked again ([`Self::verb`]).
+    async fn turn(&mut self, name: &str, marker: &str) -> bool {
+        let sent = self.send(name, marker).await;
+        if !sent["error"].is_null() || !self.asked(marker).await {
+            eprintln!("{name}: the turn {marker:?} was not asked: {sent}");
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        true
+    }
+
+    /// Run `verb` on `name`, a member that ran a turn before, and answer what
+    /// a caller observes of it, with the verb's response.
+    async fn observe_verb(&mut self, verb: &str, name: &str) -> (VerbEffect, Value) {
+        assert!(
+            self.turn(name, &format!("BEFORE {verb} {name}")).await,
+            "{verb} {name}: the member runs a turn before the verb"
+        );
+        let before = self.life(name).await;
+        let response = self.verb(verb, name).await;
+        let after = self.life(name).await;
+        let delivers = self.turn(name, &format!("AFTER {verb} {name}")).await;
+        (
+            VerbEffect {
+                accepted: response["error"].is_null(),
+                session_kept: before.session == after.session,
+                generations: after
+                    .generation
+                    .unwrap_or_default()
+                    .saturating_sub(before.generation.unwrap_or_default()),
+                state: after.state,
+                delivers,
+            },
+            response,
+        )
+    }
+}
+
+/// Every lifecycle verb acts on a store-owned identity as on a configured
+/// one: for each verb the configured identity and a store-owned one, each a
+/// member that ran a turn, answer the same (accepted, the session kept or
+/// not, the generations advanced, the state right after), and each takes its
+/// next delivery in this process, with no restart.
+///
+/// RED before the verbs served both: every verb refused the store-owned
+/// identity (`identity_store_owned`), and changed nothing of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn meta_verbs_act_on_a_store_owned_identity_as_on_a_configured_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id()).await;
+    let mut differing = Vec::new();
+    for verb in VERBS {
+        let created = format!(
+            "keeper-{}",
+            verb.rsplit('/').next().unwrap().replace('_', "-")
+        );
+        rig.create(&created).await;
+        let (configured, configured_response) = rig.observe_verb(verb, DECLARED).await;
+        let (store_owned, store_owned_response) = rig.observe_verb(verb, &created).await;
+        assert!(
+            configured.accepted && configured.delivers,
+            "{verb}: the configured identity takes the verb and its next delivery: \
+             {configured:?} {configured_response:#?}"
+        );
+        if configured != store_owned {
+            differing.push(format!(
+                "{verb}: configured {configured:?}, store-owned {store_owned:?} \
+                 ({store_owned_response})"
+            ));
+        }
+        assert!(
+            rig.seated(&created),
+            "{verb}: Core holds the store-owned identity's member seated after the verb"
+        );
+    }
+    assert!(
+        differing.is_empty(),
+        "each verb has one effect, whichever record holds the identity's spec:\n{}",
+        differing.join("\n")
+    );
+    rig.shutdown().await;
+}
+
+/// The kinds of the events `events` holds now, in order.
+fn event_kinds<Event: Clone + std::fmt::Debug>(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+) -> Vec<String> {
+    let mut kinds = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        let rendered = format!("{event:?}");
+        kinds.push(
+            rendered
+                .split(|c: char| !c.is_alphanumeric())
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+        );
+    }
+    kinds
+}
+
+/// A respawn gives a store-owned identity what it gives a configured one,
+/// fact by fact as a caller observes them: the same session, the next
+/// generation, the state right after and after the next delivery, the
+/// events its subscribers get, and a next turn that is offered the host
+/// customizer's tool.
+///
+/// RED before the respawn served both: the store-owned identity's respawn
+/// was refused (`identity_store_owned`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_respawn_gives_a_store_owned_identity_what_it_gives_a_configured_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot_with(
+        temp.path(),
+        &fresh_mob_id(),
+        Some(Arc::new(ToolCustomizer) as Arc<dyn AgentCustomizer>),
+    )
+    .await;
+    rig.create(CREATED).await;
+    let mut observed = Vec::new();
+    for name in [DECLARED, CREATED] {
+        let before_marker = format!("BEFORE-RESPAWN {name}");
+        assert!(
+            rig.turn(name, &before_marker).await,
+            "{name}: a turn before"
+        );
+        let mut events = rig
+            .runtime
+            .identity_runtime()
+            .expect("identity runtime installed")
+            .subscribe(&id(name))
+            .await
+            .expect("the identity's events");
+        let before = rig.life(name).await;
+        let respawned = rig.verb("meta/respawn", name).await;
+        assert!(
+            respawned["error"].is_null(),
+            "{name}: the respawn is served: {respawned:#?}"
+        );
+        let after = rig.life(name).await;
+        let after_marker = format!("AFTER-RESPAWN {name}");
+        assert!(
+            rig.turn(name, &after_marker).await,
+            "{name}: the respawned member takes its next delivery"
+        );
+        let delivered = rig.life(name).await;
+        let offered = rig
+            .request_with(&after_marker)
+            .is_some_and(|request| offers_tool(&request));
+        observed.push((
+            name,
+            (
+                before.session == after.session,
+                after
+                    .generation
+                    .unwrap_or_default()
+                    .saturating_sub(before.generation.unwrap_or_default()),
+                respawned["result"]["session_id"] == json!(after.session),
+                respawned["result"]["generation"] == json!(after.generation),
+                after.state,
+                delivered.state,
+                event_kinds(&mut events),
+                offered,
+            ),
+        ));
+    }
+    assert_eq!(
+        observed[0].1, observed[1].1,
+        "a respawn's facts are the same for {} and {}",
+        observed[0].0, observed[1].0
+    );
+    assert!(
+        observed[1].1.0 && observed[1].1.1 == 1 && observed[1].1.7,
+        "the store-owned identity keeps its session, advances one generation and is offered \
+         the customizer's tool: {:?}",
+        observed[1].1
+    );
+    rig.shutdown().await;
+}
+
+/// A respawn seats a store-owned identity's successor with its row's
+/// current spec: after Core's update moved the row's profile and labels, the
+/// respawned member runs the row's profile with the row's labels, on its own
+/// session, and the identity runtime serves the row's spec.
+///
+/// RED before the respawn served store-owned identities: the respawn was
+/// refused (`identity_store_owned`), and the seat kept the labels it was
+/// seated with.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_respawn_seats_a_store_owned_identity_with_its_rows_current_spec() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id()).await;
+    rig.create(CREATED).await;
+    assert!(rig.turn(CREATED, "BEFORE-ROW-CHANGE").await);
+    let before = rig.life(CREATED).await;
+
+    let mut labels = created_labels();
+    labels.insert("tier".to_string(), "gold".to_string());
+    rig.update(
+        CREATED,
+        meerkat_mob::CreatedIdentitySpec::new(CREATED, "analyst")
+            .with_display_name(format!("Created {CREATED}"))
+            .with_labels(labels.clone()),
+    )
+    .await;
+
+    let respawned = rig.verb("meta/respawn", CREATED).await;
+    assert!(
+        respawned["error"].is_null(),
+        "the respawn is served: {respawned:#?}"
+    );
+    let member = rig.member(CREATED).await;
+    assert_eq!(
+        (member.role.as_str(), &member.labels),
+        ("analyst", &labels),
+        "the successor is seated with the row's current profile and labels"
+    );
+    let after = rig.life(CREATED).await;
+    assert_eq!(after.session, before.session, "on its own session");
+    let status = rig
+        .runtime
+        .identity_runtime()
+        .expect("identity runtime installed")
+        .status(&id(CREATED))
+        .await
+        .expect("the status reads");
+    assert_eq!(
+        (
+            status.profile.as_ref().map(ProfileName::as_str),
+            &status.labels
+        ),
+        (Some("analyst"), &labels),
+        "the identity runtime serves the row's current spec"
+    );
+    assert!(
+        rig.turn(CREATED, "AFTER-ROW-RESPAWN").await,
+        "the successor takes its next delivery"
+    );
+    let request = rig
+        .request_with("AFTER-ROW-RESPAWN")
+        .expect("the successor's turn");
+    let before_request = rig
+        .request_with("BEFORE-ROW-CHANGE")
+        .expect("the turn before the row changed");
+    assert_ne!(
+        tool_names(&request),
+        tool_names(&before_request),
+        "the successor is built with the row's profile's tools, which the profile it was \
+         created under does not offer"
+    );
+    rig.shutdown().await;
+}
+
+/// The names of the tools `request` offers, sorted.
+fn tool_names(request: &str) -> Vec<String> {
+    let request: Value = serde_json::from_str(request).unwrap_or_default();
+    let mut names: Vec<String> = request["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+        .collect();
+    names.sort();
+    names
+}
+
+/// A delivery's completion is observed for a store-owned identity as for a
+/// configured one: `meta/wait_for_completion` on the cursor a send answered
+/// ends `completed` for both.
+///
+/// RED before the identity's event stream was tracked for a member that
+/// carries no `agent_identity` label: the store-owned identity's cursor
+/// never moved, and the wait ended `timed_out`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deliverys_completion_is_observed_for_a_store_owned_identity_as_for_a_configured_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id()).await;
+    rig.create(CREATED).await;
+    let mut outcomes = Vec::new();
+    for name in [DECLARED, CREATED] {
+        // The first turn materializes the member; the wait is on the next.
+        assert!(rig.turn(name, &format!("WARM {name}")).await);
+        let cursor = rig
+            .rpc(
+                "meta/wait_for_completion",
+                json!({"identity": name, "timeout_ms": 10_000}),
+            )
+            .await;
+        let sent = rig.send(name, &format!("OBSERVED {name}")).await;
+        assert!(sent["error"].is_null(), "{name}: {sent:#?}");
+        let waited = rig
+            .rpc(
+                "meta/wait_for_completion",
+                json!({
+                    "identity": name,
+                    "after": cursor["result"]["completion_cursor"],
+                    "timeout_ms": 10_000,
+                }),
+            )
+            .await;
+        outcomes.push((
+            name,
+            cursor["result"]["outcome"].clone(),
+            waited["result"]["outcome"].clone(),
+        ));
+    }
+    assert_eq!(
+        outcomes,
+        vec![
+            (DECLARED, json!("completed"), json!("completed")),
+            (CREATED, json!("completed"), json!("completed")),
+        ],
+        "each identity's first turn and its next delivery are observed completed"
+    );
+    rig.shutdown().await;
+}
+
+/// A store-owned identity whose name the member-id encoding changes (the
+/// usual identity shape, with a `:`) is served under its own name: Core
+/// holds it under the comms-safe member id the name encodes to, and its
+/// deliveries, its respawn and its status go through that mapping.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_owned_identity_with_an_encoded_name_is_served_under_its_name() {
+    const NAMED: &str = "team:keeper";
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id()).await;
+    let member = meerkat_meta::member_comms_id::mob_member_id(NAMED);
+    assert_ne!(member.as_str(), NAMED, "the encoding changes the name");
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(created_spec(member.as_str())),
+        member.as_str(),
+    )
+    .await;
+    assert!(
+        rig.turn(NAMED, "ENCODED-BEFORE").await,
+        "a delivery to its name runs"
+    );
+    let before = rig.life(NAMED).await;
+    let respawned = rig.verb("meta/respawn", NAMED).await;
+    assert!(
+        respawned["error"].is_null(),
+        "the respawn is served: {respawned:#?}"
+    );
+    let after = rig.life(NAMED).await;
+    assert_eq!(after.session, before.session, "on its own session");
+    assert!(
+        after.generation > before.generation,
+        "at the next generation"
+    );
+    assert!(
+        rig.turn(NAMED, "ENCODED-AFTER").await,
+        "it takes its next delivery"
+    );
+    rig.shutdown().await;
+}
+
+/// The peer rule the rows' owned edges are admitted under.
+fn peer_rule() -> meerkat_mob::OwnedEdgeAdmission {
+    meerkat_mob::OwnedEdgeAdmission::rule("row-peers").expect("a peer rule id")
+}
+
+/// Whether Core holds `a` and `b` wired.
+async fn wired(rig: &Rig, a: &str, b: &str) -> bool {
+    rig.member(a)
+        .await
+        .wired_to
+        .contains(&meerkat_meta::member_comms_id::mob_member_id(b))
+}
+
+/// A reset gives a store-owned identity a fresh session and keeps its name
+/// and its edges: Core holds the same identity entry, seated at the next
+/// generation on a new session, its row is unchanged, the edge its row owns
+/// is wired again, and it takes its next delivery on the new session. The
+/// fresh life is seated with its row's current spec.
+///
+/// RED before the reset served store-owned identities: the reset was refused
+/// (`identity_store_owned`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_gives_a_store_owned_identity_a_fresh_session_and_keeps_its_name_and_edges() {
+    const PEER: &str = "keeper-peer";
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id()).await;
+    rig.create(PEER).await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(created_spec(CREATED))
+            .with_peers(vec![meerkat_mob::OwnedIdentityEdge::new(PEER, peer_rule())]),
+        CREATED,
+    )
+    .await;
+    assert!(wired(&rig, CREATED, PEER).await, "the row's edge is wired");
+    assert!(rig.turn(CREATED, "BEFORE-RESET").await);
+    let mut labels = created_labels();
+    labels.insert("tier".to_string(), "gold".to_string());
+    rig.update(CREATED, created_spec(CREATED).with_labels(labels.clone()))
+        .await;
+    let before = rig.life(CREATED).await;
+
+    let reset = rig.verb("meta/reset", CREATED).await;
+    assert!(reset["error"].is_null(), "the reset is served: {reset:#?}");
+    let after = rig.life(CREATED).await;
+    assert!(
+        after.session.is_some() && after.session != before.session,
+        "a fresh session: {before:?} -> {after:?}"
+    );
+    assert_eq!(
+        after.generation,
+        before.generation.map(|generation| generation + 1),
+        "the next generation"
+    );
+    assert_eq!(
+        reset["result"]["session_id"],
+        json!(after.session),
+        "the reset answers the fresh session: {reset:#?}"
+    );
+    match rig
+        .runtime
+        .mob_handle()
+        .identity_entry(&meerkat_mob::AgentIdentity::from(CREATED))
+    {
+        Ok(IdentityEntryRead::Entry(entry)) => assert!(
+            entry.origin == meerkat_mob::IdentityEntryOrigin::Created
+                && matches!(entry.standing, EntryStanding::Seated(_)),
+            "the same store-owned entry, seated: {entry:?}"
+        ),
+        other => panic!("{CREATED} stays an identity entry: {other:?}"),
+    }
+    let row = rig
+        .runtime
+        .mob_handle()
+        .identity_record(&meerkat_mob::AgentIdentity::from(CREATED))
+        .await
+        .expect("the row reads");
+    assert!(
+        matches!(
+            &row,
+            Some(meerkat_mob::CreatedIdentityObservation::Created(record))
+                if record.presence == meerkat_mob::CreatedIdentityPresence::Present
+        ),
+        "the row stays present: {row:?}"
+    );
+    assert_eq!(
+        rig.member(CREATED).await.labels,
+        labels,
+        "the fresh life is seated with the row's current labels"
+    );
+    assert!(
+        wired(&rig, CREATED, PEER).await,
+        "the row's owned edge is wired again after the reset"
+    );
+    assert!(rig.registered(CREATED).await, "the name stays served");
+    assert!(
+        rig.turn(CREATED, "AFTER-RESET").await,
+        "the fresh life takes its next delivery"
+    );
+    let request = rig.request_with("AFTER-RESET").expect("the fresh turn");
+    assert!(
+        !request.contains("BEFORE-RESET"),
+        "the fresh session holds none of the old conversation: {request}"
+    );
+    rig.shutdown().await;
+}
+
+/// `meta/delete_identity` gives an agent a fresh life and keeps it, whichever
+/// record holds its spec: after it the configured identity and the
+/// store-owned one are each still served and listed under the same name, on
+/// a new session at the next generation, and take their next delivery. The
+/// store-owned identity's row stays present: nothing is removed or archived.
+///
+/// RED before the verb served store-owned identities: the delete was refused
+/// (`identity_store_owned`).
+#[tokio::test(flavor = "multi_thread")]
+async fn after_delete_identity_an_agent_is_still_listed_under_its_name_on_a_new_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id()).await;
+    rig.create(CREATED).await;
+    let mut observed = Vec::new();
+    for name in [DECLARED, CREATED] {
+        let marker = format!("BEFORE-DELETE {name}");
+        assert!(rig.turn(name, &marker).await, "{name}: a turn before");
+        let before = rig.life(name).await;
+        let deleted = rig.verb("meta/delete_identity", name).await;
+        assert!(
+            deleted["error"].is_null(),
+            "{name}: the delete is served: {deleted:#?}"
+        );
+        let after = rig.life(name).await;
+        let listed = rig
+            .runtime
+            .identity_runtime()
+            .expect("identity runtime installed")
+            .statuses()
+            .await
+            .expect("the statuses read")
+            .iter()
+            .any(|status| status.identity.as_str() == name);
+        let marker = format!("AFTER-DELETE {name}");
+        let delivers = rig.turn(name, &marker).await;
+        observed.push((
+            name,
+            (
+                listed,
+                rig.registered(name).await,
+                after.session.is_some() && after.session != before.session,
+                after
+                    .generation
+                    .unwrap_or_default()
+                    .saturating_sub(before.generation.unwrap_or_default()),
+                delivers,
+            ),
+        ));
+    }
+    assert_eq!(
+        observed[0].1,
+        (true, true, true, 1, true),
+        "{}: still listed, a new session, the next generation, the next delivery",
+        observed[0].0
+    );
+    assert_eq!(
+        observed[1].1, observed[0].1,
+        "{} gets what {} gets",
+        observed[1].0, observed[0].0
+    );
+    let row = rig
+        .runtime
+        .mob_handle()
+        .identity_record(&meerkat_mob::AgentIdentity::from(CREATED))
+        .await
+        .expect("the row reads");
+    assert!(
+        matches!(
+            &row,
+            Some(meerkat_mob::CreatedIdentityObservation::Created(record))
+                if record.presence == meerkat_mob::CreatedIdentityPresence::Present
+        ),
+        "the store-owned identity's row stays present: {row:?}"
+    );
+    rig.shutdown().await;
+}
+
+/// The host's topology provider: it records the identities each call names
+/// and the specs its context lists, and answers the edges the row set.
+#[derive(Default)]
+struct RecordingTopology {
+    targets: Mutex<Vec<Vec<String>>>,
+    listed: Mutex<Vec<Vec<String>>>,
+    edges: Mutex<Vec<ManagedPeerEdge>>,
+}
+
+#[async_trait]
+impl TopologyProvider for RecordingTopology {
+    async fn compute_edges(
+        &self,
+        target_identities: &[AgentIdentity],
+        context: &TopologyContext,
+    ) -> Result<Vec<ManagedPeerEdge>, TopologyError> {
+        self.targets.lock().unwrap().push(
+            target_identities
+                .iter()
+                .map(|identity| identity.as_str().to_string())
+                .collect(),
+        );
+        self.listed.lock().unwrap().push(
+            context
+                .roster
+                .iter()
+                .map(|spec| spec.identity.as_str().to_string())
+                .collect(),
+        );
+        Ok(self.edges.lock().unwrap().clone())
+    }
+}
+
+/// A topology provider sees every identity the runtime serves: after a
+/// store-owned identity is created, the next pass names it among the
+/// provider's target identities and lists its spec in the provider's
+/// context, beside the configured identity, and an edge the provider answers
+/// between the two is wired.
+///
+/// RED before the provider saw store-owned identities: its input was the
+/// host's roster alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_topology_provider_sees_every_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let topology = Arc::new(RecordingTopology::default());
+    let rig = boot_composed(
+        temp.path(),
+        &fresh_mob_id(),
+        None,
+        Some(Arc::clone(&topology) as Arc<dyn TopologyProvider>),
+    )
+    .await;
+    rig.create(CREATED).await;
+    *topology.edges.lock().unwrap() =
+        vec![ManagedPeerEdge::new(id(DECLARED), id(CREATED)).expect("an edge")];
+
+    rig.roster_pass().await;
+    let targets = topology.targets.lock().unwrap().last().cloned();
+    let listed = topology.listed.lock().unwrap().last().cloned();
+    for (what, names) in [("target identities", targets), ("context", listed)] {
+        let names = names.expect("the pass asked the provider");
+        assert!(
+            names.iter().any(|name| name == DECLARED) && names.iter().any(|name| name == CREATED),
+            "the provider's {what} name the configured and the store-owned identity: {names:?}"
+        );
+    }
+    assert!(
+        wired(&rig, DECLARED, CREATED).await,
+        "the edge the provider answered between the two is wired"
+    );
+    rig.shutdown().await;
+}
+
+/// The managed topology leaves a peer edge a store-owned identity's row
+/// declares, and prunes one no owner declares: under a topology provider
+/// that answers no edge, the row's owned edge stays wired after a pass, and
+/// a plain edge wired between the store-owned identity and the configured
+/// one, which neither the provider, the definition nor a row declares, is
+/// unwired, as one between two configured identities is.
+///
+/// RED before the topology treated every identity alike: no edge of a
+/// store-owned identity was ever pruned.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_managed_topology_keeps_a_rows_owned_edge_and_prunes_an_undeclared_one() {
+    const PEER: &str = "keeper-peer";
+    let temp = tempfile::tempdir().unwrap();
+    let topology = Arc::new(RecordingTopology::default());
+    let rig = boot_composed(
+        temp.path(),
+        &fresh_mob_id(),
+        None,
+        Some(Arc::clone(&topology) as Arc<dyn TopologyProvider>),
+    )
+    .await;
+    rig.create(PEER).await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(created_spec(CREATED))
+            .with_peers(vec![meerkat_mob::OwnedIdentityEdge::new(PEER, peer_rule())]),
+        CREATED,
+    )
+    .await;
+    rig.runtime
+        .mob_handle()
+        .wire(
+            meerkat_meta::member_comms_id::mob_member_id(CREATED),
+            meerkat_meta::member_comms_id::mob_member_id(DECLARED),
+        )
+        .await
+        .expect("a plain edge between the store-owned and the configured identity");
+    assert!(wired(&rig, CREATED, PEER).await && wired(&rig, CREATED, DECLARED).await);
+
+    rig.roster_pass().await;
+    assert!(
+        wired(&rig, CREATED, PEER).await,
+        "the edge the row declares stays wired"
+    );
+    assert!(
+        !wired(&rig, CREATED, DECLARED).await,
+        "the edge no owner declares is pruned"
+    );
+    rig.shutdown().await;
+}
+
+/// The first build of a new store-owned identity carries the host
+/// customizer's tools: an identity created with a first message is built by
+/// Core for its kickoff, before any roster pass or door named it, and that
+/// kickoff turn is offered the tool.
+///
+/// RED before Core asked the host's build preparer about that spawn: the
+/// kickoff turn offered no customizer tool (only the member's next build
+/// carried it).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_build_of_a_new_identity_carries_customizer_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot_with(
+        temp.path(),
+        &fresh_mob_id(),
+        Some(Arc::new(ToolCustomizer) as Arc<dyn AgentCustomizer>),
+    )
+    .await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(created_spec(CREATED).with_initial_message(
+            meerkat_core::ContentInput::Text("FIRST-MESSAGE".to_string()),
+        )),
+        CREATED,
+    )
+    .await;
+    assert!(
+        rig.asked("FIRST-MESSAGE").await,
+        "the kickoff turn of the new identity runs"
+    );
+    let request = rig
+        .request_with("FIRST-MESSAGE")
+        .expect("the kickoff turn's request");
+    assert!(
+        offers_tool(&request),
+        "the first build's turn is offered the host customizer's tool: {request}"
+    );
+    rig.shutdown().await;
+}
+
+/// The build of a store-owned identity that Core wakes before any roster
+/// pass or door named it carries the host customizer's tools too: the turn
+/// that build runs next is offered the tool.
+///
+/// RED before that build attached the identity's tool dispatcher: it offered
+/// no customizer tool (only the member's next build carried it).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_wake_of_a_new_identity_carries_customizer_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot_with(
+        temp.path(),
+        &fresh_mob_id(),
+        Some(Arc::new(ToolCustomizer) as Arc<dyn AgentCustomizer>),
+    )
+    .await;
+    rig.create(CREATED).await;
+    assert!(
+        !rig.registered(CREATED).await,
+        "no roster pass or door named the new identity yet"
+    );
+    rig.runtime
+        .mob_handle()
+        .ensure_member_live(&meerkat_mob::AgentIdentity::from(CREATED))
+        .await
+        .expect("Core wakes the new identity's member: its first build");
+    let generation = rig.life(CREATED).await.generation;
+
+    assert!(
+        rig.turn(CREATED, "FIRST-BUILD-TURN").await,
+        "the first build runs a turn"
+    );
+    assert_eq!(
+        rig.life(CREATED).await.generation,
+        generation,
+        "the turn ran on the first build's incarnation"
+    );
+    let request = rig
+        .request_with("FIRST-BUILD-TURN")
+        .expect("the first build's turn");
+    assert!(
+        offers_tool(&request),
+        "the first build's turn is offered the host customizer's tool: {request}"
+    );
+    rig.shutdown().await;
+}
+
+/// A complete roster's pass never retires a store-owned identity: the host's
+/// roster does not list it, and after two passes Core still holds its member
+/// seated on the same session at the same generation, the runtime serves it,
+/// and it takes a delivery.
+#[tokio::test(flavor = "multi_thread")]
+async fn meta_roster_pass_never_retires_a_store_owned_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id()).await;
+    rig.create(CREATED).await;
+    assert!(rig.turn(CREATED, "BEFORE-PASSES").await);
+    let before = rig.life(CREATED).await;
+    rig.roster_pass().await;
+    rig.roster_pass().await;
+    assert!(rig.seated(CREATED), "Core holds the member seated");
+    assert!(rig.registered(CREATED).await, "the runtime serves it");
+    let after = rig.life(CREATED).await;
+    assert_eq!(
+        (after.session, after.generation),
+        (before.session, before.generation),
+        "the passes moved nothing of it"
+    );
+    assert!(rig.turn(CREATED, "AFTER-PASSES").await);
+    rig.shutdown().await;
+}
+
+/// The host's customizer of the start row: it counts the builds it composes.
+#[derive(Default)]
+struct CountingCustomizer {
+    builds: AtomicU64,
+}
+
+#[async_trait]
+impl AgentCustomizer for CountingCustomizer {
+    async fn customize_build(
+        &self,
+        _context: &AgentBuildContext,
+        spec: &DurableAgentSpec,
+        _draft: &mut AgentBuildDraft,
+    ) -> Result<(), CustomizerError> {
+        if spec.identity.as_str() != DECLARED {
+            self.builds.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+/// A start serves the store-owned identities without building one: after a
+/// restart over a state directory that holds three of them, each is served
+/// and tracked by the bootstrap status, no build of one was composed, no
+/// model was asked, and Core holds each member unmaterialized, through the
+/// start's pass and a second one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_builds_no_member_of_a_store_owned_identity() {
+    const NAMES: [&str; 3] = ["keeper-one", "keeper-two", "keeper-three"];
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let rig = boot(temp.path(), &mob_id).await;
+    for name in NAMES {
+        rig.create(name).await;
+    }
+    rig.shutdown_for_reopen().await;
+
+    let customizer = Arc::new(CountingCustomizer::default());
+    let rig = boot_with(
+        temp.path(),
+        &mob_id,
+        Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>),
+    )
+    .await;
+    rig.roster_pass().await;
+    let bootstrap = rig
+        .runtime
+        .identity_runtime()
+        .expect("identity runtime installed")
+        .identity_bootstrap_status();
+    for name in NAMES {
+        assert!(rig.registered(name).await, "{name} is served");
+        assert!(
+            bootstrap.identities.contains_key(&id(name)),
+            "{name} is tracked by the bootstrap status: {bootstrap:?}"
+        );
+        assert!(
+            rig.runtime
+                .mob_handle()
+                .member_unmaterialized(&meerkat_mob::AgentIdentity::from(name)),
+            "{name}: Core holds the member unmaterialized"
+        );
+    }
+    assert_eq!(
+        customizer.builds.load(Ordering::SeqCst),
+        0,
+        "no build of a store-owned identity was composed"
+    );
+    assert!(
+        rig.requests.lock().unwrap().is_empty(),
+        "no model was asked"
+    );
+    rig.shutdown().await;
+}
+
+/// An instruction activation reaches a store-owned member as it reaches a
+/// configured one: `meta/member_activate_instruction` appends the activation
+/// (`applied`) and `meta/member_instruction_activations` reads it back, for
+/// both, and neither wakes or rebuilds anything else.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_instruction_activation_reaches_a_store_owned_member_as_a_configured_one() {
+    const BODY: &str = "Answer in one sentence.";
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id()).await;
+    rig.create(CREATED).await;
+    let mut observed = Vec::new();
+    for name in [DECLARED, CREATED] {
+        let marker = format!("BEFORE-ACTIVATION {name}");
+        assert!(rig.turn(name, &marker).await, "{name}: a turn before");
+        let activated = rig
+            .rpc(
+                "meta/member_activate_instruction",
+                json!({
+                    "identity": name,
+                    "activation": {
+                        "revision": {
+                            "namespace": "host",
+                            "key": "persona",
+                            "revision_id": "r1",
+                            "content_sha256":
+                                meerkat_core::InstructionContentDigest::for_body(BODY).as_str(),
+                        },
+                        "activation_id": "a1",
+                        "expectation": {"kind": "absent"},
+                        "body": BODY,
+                    },
+                }),
+            )
+            .await;
+        let page = rig
+            .rpc(
+                "meta/member_instruction_activations",
+                json!({"identity": name, "namespace": "host", "key": "persona"}),
+            )
+            .await;
+        observed.push((
+            name,
+            (
+                activated["error"].clone(),
+                activated["result"]["receipt"]["disposition"].clone(),
+                page["error"].clone(),
+                page["result"]["page"]["records"]
+                    .as_array()
+                    .map(|records| {
+                        records
+                            .iter()
+                            .map(|record| record["identity"]["activation_id"].clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+            ),
+        ));
+    }
+    assert_eq!(
+        observed[0].1,
+        (
+            Value::Null,
+            json!("applied"),
+            Value::Null,
+            vec![json!("a1")]
+        ),
+        "{}: the activation is applied and read back",
+        observed[0].0
+    );
+    assert_eq!(
+        observed[1].1, observed[0].1,
+        "{} gets what {} gets",
+        observed[1].0, observed[0].0
+    );
+    rig.shutdown().await;
+}
+
+/// A status never says that the host's verbs refuse a store-owned identity:
+/// its `intent_managed` reads false, as a configured identity's does, in the
+/// Rust status and in `meta/status_identity`.
+///
+/// RED before the verbs served store-owned identities: it read true.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_owned_identitys_status_reads_no_host_verb_refusal() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    rig.create(CREATED).await;
+    for name in [DECLARED, CREATED] {
+        let status = rig
+            .runtime
+            .identity_runtime()
+            .expect("identity runtime installed")
+            .status(&id(name))
+            .await
+            .expect("the status reads");
+        assert!(!status.intent_managed, "{name}: {status:?}");
+        let wire = rig
+            .rpc("meta/status_identity", json!({"identity": name}))
+            .await;
+        assert_eq!(
+            wire["result"]["intent_managed"],
+            json!(false),
+            "{name}: {wire:#?}"
+        );
+    }
+    rig.shutdown().await;
+}
+
+/// A held add of a name a store-owned identity holds adds nothing: it is
+/// refused `ExistingContinuity`, as the add of a configured identity that
+/// has continuity is, for a seated store-owned identity and for one that was
+/// never seated (its host prepares it first).
+///
+/// RED before the add served both: it answered `identity_store_owned`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_add_of_a_name_a_store_owned_identity_holds_is_refused_existing_continuity() {
+    const PENDING: &str = "keeper-pending";
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    rig.create(CREATED).await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(created_spec(PENDING))
+            .with_preparation(meerkat_mob::IdentityPreparationMode::Required),
+        PENDING,
+    )
+    .await;
+    let context = rig
+        .runtime
+        .identity_first_context()
+        .expect("identity-first context installed");
+    for name in [CREATED, PENDING] {
+        let refused = context
+            .add_member_held(
+                DurableAgentSpec {
+                    identity: id(name),
+                    ..declared_spec()
+                },
+                tokio::time::Instant::now() + Duration::from_mins(1),
+                |_members, _completion| async { Ok(()) },
+            )
+            .await;
+        assert!(
+            matches!(
+                &refused,
+                Err(IdentityRuntimeError::HeldBootstrapRefused(
+                    meerkat_meta::identity_first::HeldBootstrapRefusal::ExistingContinuity {
+                        identity
+                    }
+                )) if identity.as_str() == name
+            ),
+            "{name}: the name is taken: {:?}",
+            refused
+                .as_ref()
+                .map(|_| "started")
+                .map_err(ToString::to_string)
+        );
+    }
+    rig.shutdown().await;
+}
+
+/// A held add of a name a removed identity held adds nothing either: Core
+/// keeps a removed identity's name (its tombstone), and the add is refused
+/// with Core's own answer for such a name.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_add_of_a_removed_identitys_name_is_refused_with_cores_answer() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    rig.create(CREATED).await;
+    rig.remove(CREATED).await;
+    let context = rig
+        .runtime
+        .identity_first_context()
+        .expect("identity-first context installed");
+    let refused = context
+        .add_member_held(
+            DurableAgentSpec {
+                identity: id(CREATED),
+                ..declared_spec()
+            },
+            tokio::time::Instant::now() + Duration::from_mins(1),
+            |_members, _completion| async { Ok(()) },
+        )
+        .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(IdentityRuntimeError::HeldBootstrapRefused(
+                meerkat_meta::identity_first::HeldBootstrapRefusal::ExistingContinuity { identity }
+            )) if identity.as_str() == CREATED
+        ),
+        "the removed name is still held: the add answers ExistingContinuity: {:?}",
+        refused
+            .as_ref()
+            .map(|_| "started")
+            .map_err(ToString::to_string)
+    );
+    assert!(!rig.seated(CREATED), "nothing is seated under the name");
+    rig.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// One host build step: a store-owned agent is built from the host's inputs
+// as a configured one
+// ---------------------------------------------------------------------------
+
+/// The model the host's customizer of the build rows gives every build.
+const HOST_MODEL: &str = "gpt-5.4";
+/// The system prompt it gives every build.
+const HOST_PROMPT: &str = "HOST-SYSTEM-PROMPT: keep the desk's record.";
+/// The instruction section it appends to every build.
+const HOST_INSTRUCTION: &str = "HOST-INSTRUCTION: cite the workspace record.";
+/// The profile of the build rows whose resume mask names the model.
+const MASKED: &str = "masked";
+/// The label the host's customizer of the build rows sets on every build:
+/// its key and its value.
+const HOST_LABEL: (&str, &str) = ("host_tier", "gold");
+
+/// The labels of a created agent's row that carries the host's label.
+fn host_labelled_row() -> BTreeMap<String, String> {
+    let mut labels = created_labels();
+    labels.insert(HOST_LABEL.0.to_string(), HOST_LABEL.1.to_string());
+    labels
+}
+
+/// The spec of an agent created on `profile` whose row carries the host's
+/// label: what a host that labels its members in its customizer creates.
+fn host_labelled_spec(name: &str, profile: &str) -> meerkat_mob::CreatedIdentitySpec {
+    meerkat_mob::CreatedIdentitySpec::new(name, profile)
+        .with_display_name(format!("Created {name}"))
+        .with_labels(host_labelled_row())
+}
+
+/// The application context the host's customizer gives every build.
+fn host_context() -> Value {
+    json!({"desk": "north", "host": true})
+}
+
+/// The provider parameters the host's customizer gives every build. The
+/// routing key is the host's own, so no identity's default is derived.
+fn host_provider_params() -> meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+    use meerkat_core::lifecycle::run_primitive::{
+        OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+    };
+    ProviderParamsOverride {
+        temperature: Some(0.25),
+        provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+            prompt_cache_key: Some("host-build-rows".to_string()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
+/// The host's customizer of the build rows: it sets every field of the
+/// draft, the same for every identity, and records each build it composes
+/// by the identity's name.
+#[derive(Default)]
+struct ComposingCustomizer {
+    builds: Mutex<Vec<String>>,
+}
+
+impl ComposingCustomizer {
+    /// How many builds of `name` the customizer composed.
+    fn builds_of(&self, name: &str) -> usize {
+        self.builds
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|built| built.as_str() == name)
+            .count()
+    }
+}
+
+#[async_trait]
+impl AgentCustomizer for ComposingCustomizer {
+    async fn customize_build(
+        &self,
+        _context: &AgentBuildContext,
+        spec: &DurableAgentSpec,
+        draft: &mut AgentBuildDraft,
+    ) -> Result<(), CustomizerError> {
+        self.builds
+            .lock()
+            .unwrap()
+            .push(spec.identity.as_str().to_string());
+        draft.model = Some(HOST_MODEL.to_string());
+        draft.system_prompt = Some(HOST_PROMPT.to_string());
+        draft
+            .additional_instructions
+            .push(HOST_INSTRUCTION.to_string());
+        draft
+            .labels
+            .insert(HOST_LABEL.0.to_string(), HOST_LABEL.1.to_string());
+        draft.app_context = Some(host_context());
+        draft.provider_params = Some(host_provider_params());
+        draft.local_external_tools = LocalExternalToolOverlay::new(Arc::new(HostTools));
+        Ok(())
+    }
+}
+
+/// The build rows' definition: the worker profile, and a profile whose
+/// resume mask names the model, so a rebuild on a durable session takes the
+/// profile's model over the session's own.
+fn build_rows_definition(mob_id: &str) -> MobDefinition {
+    MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "{mob_id}"
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
+
+[profiles.masked]
+model = "gpt-5.5"
+resume_overrides = ["model", "provider"]
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.masked.tools]
+comms = true
+"#
+    ))
+    .expect("parse the definition")
+}
+
+/// Boot the build rows' host on `state`: the configured identity on
+/// `profile`, the customizer that sets every draft field, and a members'
+/// model that reports no selection of its own, so each request names the
+/// model its member was built with.
+async fn boot_build_rows(
+    state: &Path,
+    mob_id: &str,
+    profile: &str,
+) -> (Rig, Arc<ComposingCustomizer>) {
+    let customizer = Arc::new(ComposingCustomizer::default());
+    let rig = boot_host(
+        state,
+        build_rows_definition(mob_id),
+        DurableAgentSpec {
+            profile: ProfileName::from(profile),
+            ..declared_spec()
+        },
+        Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>),
+        None,
+        false,
+    )
+    .await;
+    (rig, customizer)
+}
+
+/// What one build of an identity's member took from the host's build step,
+/// read from the facts that carry it: the turn's model request, Core's
+/// roster entry and the session's durable build state.
+#[derive(Debug, Clone, PartialEq)]
+struct BuildInputs {
+    /// The model the build's turn asked.
+    model: Value,
+    /// The model override Core's roster entry holds for the member.
+    model_override: Option<String>,
+    /// The model and the provider parameters of the profile override Core's
+    /// roster entry holds for the member.
+    profile_override: Option<(String, Value)>,
+    /// Whether the turn's request carries the host's system prompt.
+    system_prompt: bool,
+    /// Whether it carries the host's instruction section.
+    instruction: bool,
+    /// The sampling temperature and the provider parameters it carries.
+    temperature: Value,
+    provider_params: Value,
+    /// The application context the session's durable build state holds.
+    context: Option<Value>,
+    /// Whether the turn was offered the host's tool.
+    tool: bool,
+}
+
+impl Rig {
+    /// The inputs the build that ran the turn `marker` of `name` took.
+    async fn build_inputs(&self, name: &str, marker: &str) -> BuildInputs {
+        let rendered = self
+            .request_with(marker)
+            .unwrap_or_else(|| panic!("{name}: the turn {marker:?} was asked"));
+        let request: Value = serde_json::from_str(&rendered).expect("a rendered model request");
+        let entry = self
+            .runtime
+            .mob_handle()
+            .get_member(&meerkat_meta::member_comms_id::mob_member_id(name))
+            .await
+            .expect("Core's roster reads")
+            .unwrap_or_else(|| panic!("Core holds a member of {name}"));
+        let session = self
+            .life(name)
+            .await
+            .session
+            .unwrap_or_else(|| panic!("{name} is bound to a session"));
+        let session_id =
+            meerkat_core::types::SessionId::parse(&session).expect("the member's session id");
+        let stored = meerkat_mob::MobSessionService::load_persisted_session(
+            &**self
+                .runtime
+                .mob_runtime()
+                .session_service()
+                .expect("the runtime's session service"),
+            &session_id,
+        )
+        .await
+        .expect("the member's session reads")
+        .unwrap_or_else(|| panic!("{name}: the session {session} is stored"));
+        BuildInputs {
+            model: request["model"].clone(),
+            model_override: entry.effective_model_override.clone(),
+            profile_override: entry.effective_profile_override.as_ref().map(|profile| {
+                (
+                    profile.model.clone(),
+                    serde_json::to_value(&profile.provider_params)
+                        .expect("the profile's provider parameters render"),
+                )
+            }),
+            system_prompt: rendered.contains(HOST_PROMPT),
+            instruction: rendered.contains(HOST_INSTRUCTION),
+            temperature: request["temperature"].clone(),
+            provider_params: request["provider_params"].clone(),
+            context: stored
+                .try_build_state()
+                .expect("the session's build state reads")
+                .and_then(|state| state.app_context),
+            tool: offers_tool(&rendered),
+        }
+    }
+}
+
+/// Fail unless `inputs`, a build of `name`, took every input the host's
+/// customizer sets.
+fn assert_host_inputs(name: &str, inputs: &BuildInputs) {
+    assert_eq!(
+        inputs.model,
+        json!(HOST_MODEL),
+        "{name}: the build runs the host's model: {inputs:#?}"
+    );
+    assert!(
+        inputs.system_prompt && inputs.instruction,
+        "{name}: the build carries the host's system prompt and instruction: {inputs:#?}"
+    );
+    assert_eq!(
+        inputs.context,
+        Some(host_context()),
+        "{name}: the build carries the host's context: {inputs:#?}"
+    );
+    assert_eq!(
+        inputs
+            .profile_override
+            .as_ref()
+            .map(|(_, params)| params["temperature"].clone()),
+        Some(json!(0.25)),
+        "{name}: the build carries the host's provider parameters: {inputs:#?}"
+    );
+    assert!(
+        inputs.tool,
+        "{name}: the build is offered the host's tool: {inputs:#?}"
+    );
+}
+
+/// A store-owned agent is built from the host's build step as a configured
+/// agent on the same profile is: the model, the system prompt and its
+/// instruction section, the provider parameters, the context and the tools
+/// the host's customizer sets reach the first build of an agent created
+/// with a first message (its kickoff spawn) and of one created Dormant and
+/// then sent to, and each equals the configured agent's field by field. The
+/// host's customizer composes each of those first builds once.
+///
+/// Each created agent's row carries the label the host's customizer sets,
+/// as it must for the agent to be seated.
+///
+/// RED before Core asked the host to compose a store-owned seat: both
+/// created agents were built on the profile's own model with no host system
+/// prompt, instruction, provider parameters or context (only the host's tool
+/// reached them).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_owned_agent_is_built_from_the_hosts_inputs_as_a_configured_one() {
+    const KICKED: &str = "keeper-kicked";
+    const SEATED: &str = "keeper-seated";
+    let temp = tempfile::tempdir().unwrap();
+    let (mut rig, customizer) = boot_build_rows(temp.path(), &fresh_mob_id(), "worker").await;
+
+    assert!(
+        rig.turn(DECLARED, "BUILD-CONFIGURED").await,
+        "the configured agent runs a turn"
+    );
+    let configured = rig.build_inputs(DECLARED, "BUILD-CONFIGURED").await;
+    assert_host_inputs(DECLARED, &configured);
+
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(
+            host_labelled_spec(KICKED, "worker").with_initial_message(
+                meerkat_core::ContentInput::Text("BUILD-KICKOFF".to_string()),
+            ),
+        ),
+        KICKED,
+    )
+    .await;
+    assert!(
+        rig.asked("BUILD-KICKOFF").await,
+        "the kickoff turn of the agent created with a first message runs"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let kicked = rig.build_inputs(KICKED, "BUILD-KICKOFF").await;
+
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(host_labelled_spec(SEATED, "worker")),
+        SEATED,
+    )
+    .await;
+    assert!(
+        rig.turn(SEATED, "BUILD-SEATED").await,
+        "the agent created Dormant runs its first turn"
+    );
+    let seated = rig.build_inputs(SEATED, "BUILD-SEATED").await;
+
+    assert_eq!(
+        kicked, configured,
+        "an agent created with a first message is built from the host's inputs as the \
+         configured agent is"
+    );
+    assert_eq!(
+        seated, configured,
+        "an agent created Dormant and then sent to is built from the host's inputs as the \
+         configured agent is"
+    );
+    assert_eq!(
+        (customizer.builds_of(KICKED), customizer.builds_of(SEATED)),
+        (1, 1),
+        "the host's customizer composes each first build once"
+    );
+    rig.shutdown().await;
+}
+
+/// A reset leaves a store-owned agent's build inputs as they were: the
+/// first build of its fresh life takes from the host's build step what the
+/// first build of its first life took, field by field, on a new session.
+///
+/// The agent's row carries the label the host's customizer sets, as it
+/// must for the agent to be seated.
+///
+/// RED before Core asked the host to compose a store-owned seat: neither
+/// life took the host's model, system prompt, instruction, provider
+/// parameters or context.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_store_owned_agent_is_built_from_the_host_inputs_of_its_first_life() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut rig, _customizer) = boot_build_rows(temp.path(), &fresh_mob_id(), "worker").await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(host_labelled_spec(CREATED, "worker")),
+        CREATED,
+    )
+    .await;
+    assert!(
+        rig.turn(CREATED, "FIRST-LIFE").await,
+        "the first life runs a turn"
+    );
+    let first = rig.build_inputs(CREATED, "FIRST-LIFE").await;
+    assert_host_inputs(CREATED, &first);
+    let before = rig.life(CREATED).await;
+
+    let reset = rig.verb("meta/reset", CREATED).await;
+    assert!(reset["error"].is_null(), "the reset is served: {reset:#?}");
+    let after = rig.life(CREATED).await;
+    assert!(
+        after.session.is_some() && after.session != before.session,
+        "the reset seats a fresh session: {before:?} -> {after:?}"
+    );
+    assert!(
+        rig.turn(CREATED, "SECOND-LIFE").await,
+        "the fresh life runs a turn"
+    );
+    let second = rig.build_inputs(CREATED, "SECOND-LIFE").await;
+    assert_eq!(
+        second, first,
+        "the fresh life is built from the host's inputs as the first life was"
+    );
+    rig.shutdown().await;
+}
+
+/// Under a profile whose resume mask names the model, a store-owned agent
+/// and a configured agent on that profile build with the same model, the
+/// host's, in the process that first built them and again after a restart
+/// of the runtime on the same state directory, where each is rebuilt on its
+/// durable session and the mask takes the profile's model over the
+/// session's own.
+///
+/// RED before Core asked the host to compose a store-owned seat at every
+/// build: the created agent was built on the profile's own model.
+#[tokio::test(flavor = "multi_thread")]
+async fn under_a_resume_model_mask_a_store_owned_agent_builds_with_the_configured_agents_model() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let (mut rig, _customizer) = boot_build_rows(temp.path(), &mob_id, MASKED).await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(host_labelled_spec(CREATED, MASKED)),
+        CREATED,
+    )
+    .await;
+    assert!(rig.turn(DECLARED, "MASK-CONFIGURED-FIRST").await);
+    assert!(rig.turn(CREATED, "MASK-CREATED-FIRST").await);
+    let configured = rig.build_inputs(DECLARED, "MASK-CONFIGURED-FIRST").await;
+    let created = rig.build_inputs(CREATED, "MASK-CREATED-FIRST").await;
+    assert_eq!(
+        configured.model,
+        json!(HOST_MODEL),
+        "the configured agent's first build runs the host's model: {configured:#?}"
+    );
+    assert_eq!(
+        (
+            &created.model,
+            &created.model_override,
+            &created.profile_override
+        ),
+        (
+            &configured.model,
+            &configured.model_override,
+            &configured.profile_override
+        ),
+        "the created agent's first build runs the configured agent's model"
+    );
+    rig.shutdown_for_reopen().await;
+
+    let (mut rig, customizer) = boot_build_rows(temp.path(), &mob_id, MASKED).await;
+    assert!(rig.turn(DECLARED, "MASK-CONFIGURED-AGAIN").await);
+    assert!(rig.turn(CREATED, "MASK-CREATED-AGAIN").await);
+    let configured = rig.build_inputs(DECLARED, "MASK-CONFIGURED-AGAIN").await;
+    let created = rig.build_inputs(CREATED, "MASK-CREATED-AGAIN").await;
+    assert_eq!(
+        configured.model,
+        json!(HOST_MODEL),
+        "the configured agent's rebuild runs the host's model: {configured:#?}"
+    );
+    assert_eq!(
+        (
+            &created.model,
+            &created.model_override,
+            &created.profile_override
+        ),
+        (
+            &configured.model,
+            &configured.model_override,
+            &configured.profile_override
+        ),
+        "the created agent's rebuild after the restart runs the configured agent's model"
+    );
+    assert!(
+        customizer.builds_of(CREATED) >= 1,
+        "the host is asked again at the rebuild of the created agent"
+    );
+    rig.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// A label the host's customizer sets: a created agent's row must carry it
+// ---------------------------------------------------------------------------
+
+/// The subject the label rows' access rules are decided for.
+const LABEL_SUBJECT: &str = "alice@example.test";
+
+/// The access configuration of the label rows. Everyone may send to any
+/// agent, except to one that carries the host's label: the deny rule keyed
+/// on that label. Only an agent that carries it may be viewed: the allow
+/// rule keyed on it.
+fn label_access() -> meerkat_meta::AccessControlConfig {
+    let host_labelled = BTreeMap::from([(HOST_LABEL.0.to_string(), HOST_LABEL.1.to_string())]);
+    meerkat_meta::AccessControlConfig {
+        approvers: Default::default(),
+        enabled: true,
+        admins: Vec::new(),
+        groups: BTreeMap::new(),
+        rules: vec![
+            meerkat_meta::AccessRule {
+                id: "send-any".to_string(),
+                actions: vec!["agent.send".to_string()],
+                ..meerkat_meta::AccessRule::default()
+            },
+            meerkat_meta::AccessRule {
+                id: "no-send-to-host-labelled".to_string(),
+                effect: meerkat_meta::AccessEffect::Deny,
+                actions: vec!["agent.send".to_string()],
+                match_labels: host_labelled.clone(),
+                ..meerkat_meta::AccessRule::default()
+            },
+            meerkat_meta::AccessRule {
+                id: "view-host-labelled".to_string(),
+                actions: vec!["agent.view".to_string()],
+                match_labels: host_labelled,
+                ..meerkat_meta::AccessRule::default()
+            },
+        ],
+    }
+}
+
+/// What [`label_access`] decides about the member `seat` of `name`, read
+/// from Core's roster entry as the console reads a member's attributes:
+/// whether a send to it is allowed, and whether it may be viewed.
+fn label_decisions(name: &str, seat: &Seat) -> (bool, bool) {
+    let principal = meerkat_meta::AccessPrincipal {
+        subject: Some(LABEL_SUBJECT.to_string()),
+        groups: Default::default(),
+    };
+    let resource = meerkat_meta::AccessResource {
+        identity: Some(name),
+        agent_id: None,
+        role: Some(seat.role.as_str()),
+        labels: Some(&seat.labels),
+    };
+    let config = label_access();
+    let allowed = |action: &str| {
+        meerkat_meta::evaluate_access(&config, &principal, action, &resource).is_allow()
+    };
+    (allowed("agent.send"), allowed("agent.view"))
+}
+
+/// The decisions for a member that carries the host's label: the deny holds
+/// (no send), and the allow rule matches (view).
+const HOST_LABELLED: (bool, bool) = (false, true);
+
+/// What the identity's status shows of its seat: its state, and the reason
+/// its build is refused for, when one stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeatStatus {
+    state: String,
+    refused: Option<String>,
+}
+
+impl SeatStatus {
+    /// Whether the status shows the label refusal: it names the host's
+    /// label key and the remedy (the row), and no label value.
+    fn shows_the_label_refusal(&self) -> bool {
+        self.refused.as_deref().is_some_and(names_the_label_key)
+    }
+}
+
+/// Whether `reason` names the host's label key and the remedy (the label
+/// belongs in the agent's row), and not the label's value.
+fn names_the_label_key(reason: &str) -> bool {
+    reason.contains(&format!("added [{}]", HOST_LABEL.0))
+        && reason.contains("row")
+        && !reason.contains(HOST_LABEL.1)
+}
+
+impl Rig {
+    async fn seat_status(&self, name: &str) -> SeatStatus {
+        let status = self
+            .runtime
+            .identity_runtime()
+            .expect("identity runtime installed")
+            .status(&id(name))
+            .await
+            .unwrap_or_else(|error| panic!("{name}: the status reads: {error}"));
+        SeatStatus {
+            state: status.state.wire_str().to_string(),
+            refused: status
+                .customizer_tools_pending
+                .map(|pending| pending.reason),
+        }
+    }
+
+    /// Change `name`'s row through Core's store-owned update, from `from`
+    /// to `to`, as the operation `operation_id`.
+    async fn update_from(
+        &self,
+        operation_id: &str,
+        from: &meerkat_mob::CreatedIdentitySpec,
+        to: meerkat_mob::CreatedIdentitySpec,
+    ) {
+        let name = to.identity.to_string();
+        let updated = self
+            .runtime
+            .mob_handle()
+            .update_store_owned_identity(
+                meerkat_mob::StoreOwnedIdentityUpdate::new(
+                    operation(operation_id),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    to,
+                    from.spec_digest().expect("the row's digest"),
+                ),
+                allow(),
+            )
+            .await
+            .map(|updated| updated.change);
+        assert!(
+            matches!(
+                updated,
+                Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+            ),
+            "Core updates {name}: {updated:?}"
+        );
+    }
+
+    /// Whether a build created the session Core binds `name`'s member to:
+    /// the session is stored.
+    async fn session_built(&self, name: &str) -> bool {
+        let Some(session) = self.life(name).await.session else {
+            return false;
+        };
+        let session_id =
+            meerkat_core::types::SessionId::parse(&session).expect("the member's session id");
+        meerkat_mob::MobSessionService::load_persisted_session(
+            &**self
+                .runtime
+                .mob_runtime()
+                .session_service()
+                .expect("the runtime's session service"),
+            &session_id,
+        )
+        .await
+        .expect("the member's session reads")
+        .is_some()
+    }
+}
+
+/// A label the host's customizer sets on every build reaches a configured
+/// agent's seat, where the access rules keyed on it decide: the deny holds
+/// and the allow rule matches. A created agent whose row lacks that label is
+/// refused its seat instead of being seated without it: created Dormant and
+/// then sent to, the send is refused with a reason that names the label key
+/// and the remedy and no value, nothing is built and no turn runs; created
+/// with a first message, its kickoff does not run and Core holds no member
+/// of it. The host's customizer was asked about each.
+///
+/// RED before the rule: both created agents were built and ran, on seats
+/// that did not carry the host's label, so the deny rule missed them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_created_agent_whose_row_lacks_a_host_label_is_refused_its_seat_and_not_built() {
+    const KICKED: &str = "keeper-kicked";
+    const SEATED: &str = "keeper-seated";
+    let temp = tempfile::tempdir().unwrap();
+    let (mut rig, customizer) = boot_build_rows(temp.path(), &fresh_mob_id(), "worker").await;
+
+    assert!(
+        rig.turn(DECLARED, "LABEL-CONFIGURED").await,
+        "the configured agent runs a turn"
+    );
+    let configured = rig.member(DECLARED).await;
+    assert_eq!(
+        configured.labels.get(HOST_LABEL.0).map(String::as_str),
+        Some(HOST_LABEL.1),
+        "the configured agent's seat carries the host's label: {:?}",
+        configured.labels
+    );
+    assert_eq!(
+        label_decisions(DECLARED, &configured),
+        HOST_LABELLED,
+        "the deny holds for the configured agent, and the allow rule matches it"
+    );
+
+    rig.create(SEATED).await;
+    let sent = rig.send(SEATED, "LABEL-SEATED").await;
+    assert!(
+        !sent["error"].is_null() && names_the_label_key(&sent["error"].to_string()),
+        "the send to an agent whose row lacks the host's label is refused, naming the label \
+         key and the remedy: {sent}"
+    );
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(created_spec(KICKED).with_initial_message(
+            meerkat_core::ContentInput::Text("LABEL-KICKOFF".to_string()),
+        )),
+        KICKED,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        rig.request_with("LABEL-SEATED").is_none() && rig.request_with("LABEL-KICKOFF").is_none(),
+        "no turn of a refused agent runs"
+    );
+    assert!(
+        !rig.session_built(SEATED).await,
+        "nothing is built for the agent created Dormant: no build created its session"
+    );
+    assert!(
+        !rig.seated(KICKED),
+        "Core holds no member of the agent created with a first message"
+    );
+    assert!(
+        customizer.builds_of(SEATED) >= 1 && customizer.builds_of(KICKED) >= 1,
+        "the host's customizer was asked about each refused agent"
+    );
+    rig.shutdown().await;
+}
+
+/// A created agent whose row carries the label the host's customizer sets
+/// is built, its seat carries the label, and the access rules keyed on it
+/// decide as for a configured agent: the deny holds and the allow rule
+/// matches.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_created_agent_whose_row_carries_the_host_label_is_built_and_the_deny_holds() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut rig, _customizer) = boot_build_rows(temp.path(), &fresh_mob_id(), "worker").await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(host_labelled_spec(CREATED, "worker")),
+        CREATED,
+    )
+    .await;
+    assert!(
+        rig.turn(CREATED, "LABEL-IN-THE-ROW").await,
+        "the agent whose row carries the host's label is built and runs"
+    );
+    let created = rig.member(CREATED).await;
+    assert_eq!(
+        created.labels,
+        host_labelled_row(),
+        "its seat carries its row's labels, the host's among them"
+    );
+    assert_eq!(
+        label_decisions(CREATED, &created),
+        HOST_LABELLED,
+        "the deny holds for the created agent, and the allow rule matches it"
+    );
+    assert_eq!(rig.seat_status(CREATED).await.refused, None);
+    rig.shutdown().await;
+}
+
+/// A created agent refused its seat for a label its row lacks is visible as
+/// such, and its row and a seat of its member are all that has to change
+/// for it to be built: no restart and no store edit. Its status shows the
+/// reason, naming the label key and the remedy, with the state `broken`
+/// for one refused at its first wake and `dormant` for one owed its seat.
+/// An update of its row that adds the label seats the row's labels on its
+/// member at once, so the next send is served and the status shows no
+/// refusal; a respawn after it is served too, and a turn runs: its seat
+/// carries the label and the deny holds. An agent created
+/// with a first message, which Core holds no member of, is seated by the
+/// update itself and runs its kickoff. An archive and a removal of a
+/// refused agent are served.
+///
+/// RED before the rule: the agents were built without the label.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_created_agent_shows_the_reason_and_is_seated_once_its_row_carries_the_label() {
+    const KICKED: &str = "keeper-kicked";
+    const SEATED: &str = "keeper-seated";
+    const ARCHIVED: &str = "keeper-archived";
+    const REMOVED: &str = "keeper-removed";
+    const RESET: &str = "keeper-reset";
+    let temp = tempfile::tempdir().unwrap();
+    let (mut rig, _customizer) = boot_build_rows(temp.path(), &fresh_mob_id(), "worker").await;
+
+    // Created Dormant: refused at its first wake.
+    rig.create(SEATED).await;
+    let sent = rig.send(SEATED, "REFUSED-WAKE").await;
+    assert!(!sent["error"].is_null(), "the send is refused: {sent}");
+    let refused = rig.seat_status(SEATED).await;
+    assert!(
+        refused.shows_the_label_refusal(),
+        "the status shows the refusal's reason: {refused:?}"
+    );
+    assert_eq!(refused.state, "broken", "Core holds the member Broken");
+
+    rig.update(SEATED, host_labelled_spec(SEATED, "worker"))
+        .await;
+    let again = rig.send(SEATED, "AFTER-UPDATE").await;
+    assert!(
+        again["error"].is_null(),
+        "the update seats the row's labels on the member at once, so the send is served: \
+         {again}"
+    );
+    assert_eq!(
+        rig.member(SEATED).await.labels,
+        host_labelled_row(),
+        "the seat carries the row's labels"
+    );
+    let served = rig.seat_status(SEATED).await;
+    assert_eq!(
+        (served.state.as_str(), &served.refused),
+        ("active", &None),
+        "the status shows no refusal after the update"
+    );
+    let respawned = rig.verb("meta/respawn", SEATED).await;
+    assert!(
+        respawned["error"].is_null(),
+        "the respawn that seats the member with its row's labels is served: {respawned:#?}"
+    );
+    assert!(
+        rig.turn(SEATED, "AFTER-RESPAWN").await,
+        "the agent is built once its seat carries the label"
+    );
+    let seat = rig.member(SEATED).await;
+    assert_eq!(seat.labels, host_labelled_row());
+    assert_eq!(label_decisions(SEATED, &seat), HOST_LABELLED);
+    let cleared = rig.seat_status(SEATED).await;
+    assert_eq!(
+        (cleared.state.as_str(), &cleared.refused),
+        ("active", &None),
+        "the refusal is gone from the status"
+    );
+
+    // Created with a first message: owed its seat, seated by the update.
+    let kicked = created_spec(KICKED).with_initial_message(meerkat_core::ContentInput::Text(
+        "KICKOFF-ONCE-LABELLED".to_string(),
+    ));
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(kicked.clone()),
+        KICKED,
+    )
+    .await;
+    assert!(!rig.seated(KICKED), "the agent is owed its seat");
+    let owed = rig.seat_status(KICKED).await;
+    assert!(
+        owed.shows_the_label_refusal(),
+        "the status shows the refusal's reason: {owed:?}"
+    );
+    assert_eq!(owed.state, "dormant", "Core holds no member of it");
+    rig.update_from(
+        "update-kicked",
+        &kicked,
+        kicked.clone().with_labels(host_labelled_row()),
+    )
+    .await;
+    assert!(
+        rig.asked("KICKOFF-ONCE-LABELLED").await,
+        "the update seats the agent, and its kickoff runs"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let seat = rig.member(KICKED).await;
+    assert_eq!(seat.labels, host_labelled_row());
+    assert_eq!(label_decisions(KICKED, &seat), HOST_LABELLED);
+    assert_eq!(rig.seat_status(KICKED).await.refused, None);
+
+    // A refused agent is archived, and another removed.
+    for name in [ARCHIVED, REMOVED, RESET] {
+        rig.create(name).await;
+        let sent = rig.send(name, &format!("REFUSED {name}")).await;
+        assert!(
+            !sent["error"].is_null(),
+            "{name}: the send is refused: {sent}"
+        );
+    }
+    rig.archive(ARCHIVED).await;
+    rig.remove(REMOVED).await;
+    assert!(
+        !rig.seated(ARCHIVED) && !rig.seated(REMOVED),
+        "neither refused agent keeps a member"
+    );
+
+    // A reset seats a refused agent's member with its row's labels, as a
+    // respawn does.
+    rig.update(RESET, host_labelled_spec(RESET, "worker")).await;
+    let reset = rig.verb("meta/reset", RESET).await;
+    assert!(reset["error"].is_null(), "the reset is served: {reset:#?}");
+    assert!(
+        rig.turn(RESET, "AFTER-RESET-LABELLED").await,
+        "the agent is built once a reset seated it with the label"
+    );
+    let seat = rig.member(RESET).await;
+    assert_eq!(seat.labels, host_labelled_row());
+    assert_eq!(label_decisions(RESET, &seat), HOST_LABELLED);
+    rig.shutdown().await;
+}
+
+/// A host's roster that lists the identities it is given.
+struct ListedRoster(Vec<DurableAgentSpec>);
+
+#[async_trait]
+impl RosterProvider for ListedRoster {
+    async fn roster(&self, _context: &RosterContext) -> Result<Vec<DurableAgentSpec>, RosterError> {
+        Ok(self.0.clone())
+    }
+}
+
+/// [`boot`] with a host's roster that lists `roster` (its first identity is
+/// the rig's declared one) and the identity bootstrap `mode`.
+async fn boot_roster(
+    state: &Path,
+    mob_id: &str,
+    roster: Vec<DurableAgentSpec>,
+    mode: meerkat_meta::identity_first::IdentityBootstrapMode,
+) -> Rig {
+    let (asked_tx, asked) = mpsc::unbounded_channel();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let declared = roster
+        .first()
+        .cloned()
+        .expect("the roster lists an identity");
+    let builder = UnifiedRuntimeBuilder::default()
+        .definition(definition(mob_id))
+        .persistent_state(state)
+        .continuity_from_state_dir(state)
+        .await
+        .expect("open the state-dir identity substrate")
+        .roster_provider(Arc::new(ListedRoster(roster)))
+        .identity_runtime_instance_id("meta-created-identities")
+        .identity_bootstrap_mode(mode)
+        .default_llm_client(Arc::new(RecordingClient {
+            asked: asked_tx,
+            requests: Arc::clone(&requests),
+            pinned: true,
+        }));
+    let runtime = Box::pin(builder.build())
+        .await
+        .expect("build the gateway-shaped UnifiedRuntime");
+    Rig {
+        runtime,
+        asked,
+        requests,
+        declared,
+    }
+}
+
+/// What a status read says of an agent that never woke, with Core's facts
+/// of its seat beside it.
+#[derive(Debug, PartialEq, Eq)]
+struct NeverWoke {
+    /// `state` of `meta/status_identity`.
+    state: Value,
+    /// The agent's entry in the bootstrap status.
+    bootstrap: String,
+    /// Core holds the member seated and not materialized.
+    unmaterialized: bool,
+    /// No build created the session the member is seated on.
+    session_unborn: bool,
+}
+
+/// An agent that never woke reads one lifecycle state, whichever record
+/// holds its spec: a configured agent the roster pass seated and an agent
+/// created at run time are both members of the mob that nothing has built
+/// (Core holds each unmaterialized, on a session no build created), and
+/// `meta/status_identity` and the bootstrap status say the same of both,
+/// under the default bootstrap mode and under the lazy one. Nothing is built
+/// by any read.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_status_of_an_agent_that_never_woke_reads_the_same_for_both_kinds() {
+    use meerkat_meta::identity_first::IdentityBootstrapMode;
+    for mode in [
+        IdentityBootstrapMode::EagerMaterialize,
+        IdentityBootstrapMode::LazyMaterialize,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let rig = boot_roster(
+            temp.path(),
+            &fresh_mob_id(),
+            vec![declared_spec()],
+            mode.clone(),
+        )
+        .await;
+        rig.create(CREATED).await;
+        rig.roster_pass().await;
+        let mut read = Vec::new();
+        for name in [DECLARED, CREATED] {
+            let wire = rig
+                .rpc("meta/status_identity", json!({"identity": name}))
+                .await;
+            let session = wire["result"]["session_id"]
+                .as_str()
+                .and_then(|session| meerkat_core::types::SessionId::parse(session).ok());
+            let bootstrap = rig
+                .runtime
+                .identity_runtime()
+                .expect("identity runtime installed")
+                .identity_bootstrap_status()
+                .identities
+                .get(&id(name))
+                .map(|entry| format!("{:?}", entry.state))
+                .unwrap_or_else(|| "untracked".to_string());
+            read.push(NeverWoke {
+                state: wire["result"]["state"].clone(),
+                bootstrap,
+                unmaterialized: rig
+                    .runtime
+                    .mob_handle()
+                    .member_unmaterialized(&meerkat_mob::AgentIdentity::from(name)),
+                session_unborn: session
+                    .is_some_and(|session| rig.runtime.mob_handle().session_unborn(&session)),
+            });
+        }
+        assert!(
+            read[1].unmaterialized && read[1].session_unborn,
+            "{mode:?}: the created agent never woke: {:?}",
+            read[1]
+        );
+        assert_eq!(
+            read[0], read[1],
+            "{mode:?}: the configured agent (left) and the created one (right) never woke, and \
+             read the same"
+        );
+        assert!(
+            rig.requests.lock().unwrap().is_empty(),
+            "{mode:?}: no model was asked"
+        );
+        rig.shutdown().await;
+    }
+}
+
+/// The spec a host's roster lists `name` with: text of its own, which is not
+/// the text of the row a create wrote ([`created_spec`]).
+fn listed_spec(name: &str) -> DurableAgentSpec {
+    DurableAgentSpec {
+        identity: id(name),
+        display_name: Some(
+            meerkat_meta::identity_first::DisplayName::parse(&format!("Listed {name}")).unwrap(),
+        ),
+        labels: BTreeMap::from([("custody".to_string(), "roster".to_string())]),
+        ..declared_spec()
+    }
+}
+
+/// A name an agent holds through its record that its host's roster lists
+/// too is served from the record, and its status says so: the roster's text
+/// for the name is not applied (the status reads the row's display name and
+/// labels), and `meta/status_identity` carries
+/// `roster_listing_superseded: true`. A configured agent, and an agent the
+/// roster does not list, carry no such member. Once the roster no longer
+/// lists the name, the next roster pass drops the member again.
+///
+/// RED before the status said it: the member was absent for every agent, and
+/// nothing told a host that its roster's entry was not applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_roster_listing_of_an_agent_served_from_its_record_is_said_on_its_status() {
+    const UNLISTED: &str = "keeper-unlisted";
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let rig = boot(temp.path(), &mob_id).await;
+    rig.create(CREATED).await;
+    rig.create(UNLISTED).await;
+    rig.shutdown_for_reopen().await;
+
+    // The host's roster now lists the created agent's name with its own text.
+    let rig = boot_roster(
+        temp.path(),
+        &mob_id,
+        vec![declared_spec(), listed_spec(CREATED)],
+        meerkat_meta::identity_first::IdentityBootstrapMode::default(),
+    )
+    .await;
+    let pass = rig
+        .runtime
+        .identity_first_context()
+        .expect("identity-first context installed")
+        .refresh_desired_topology()
+        .await
+        .expect("the roster pass runs");
+    assert_eq!(
+        pass.roster_listings_superseded,
+        std::collections::BTreeSet::from([id(CREATED)]),
+        "the pass's result names the listing its record supersedes"
+    );
+    let status = rig
+        .rpc("meta/status_identity", json!({"identity": CREATED}))
+        .await;
+    assert_eq!(
+        status["result"]["display_name"],
+        json!(format!("Created {CREATED}")),
+        "the row serves, not the roster's text: {status:#?}"
+    );
+    assert_eq!(
+        status["result"]["labels"],
+        json!(created_labels()),
+        "the row serves, not the roster's text: {status:#?}"
+    );
+    assert_eq!(
+        status["result"]["roster_listing_superseded"],
+        json!(true),
+        "the status says the roster lists the name and the record serves: {status:#?}"
+    );
+    for name in [DECLARED, UNLISTED] {
+        let status = rig
+            .rpc("meta/status_identity", json!({"identity": name}))
+            .await;
+        assert!(
+            status["result"].is_object()
+                && status["result"].get("roster_listing_superseded").is_none(),
+            "{name} carries no such member: {status:#?}"
+        );
+    }
+    rig.shutdown_for_reopen().await;
+
+    // The roster no longer lists the name: the member is gone again.
+    let rig = boot(temp.path(), &mob_id).await;
+    rig.roster_pass().await;
+    let status = rig
+        .rpc("meta/status_identity", json!({"identity": CREATED}))
+        .await;
+    assert!(
+        status["result"].is_object() && status["result"].get("roster_listing_superseded").is_none(),
+        "a roster that no longer lists the name: {status:#?}"
+    );
+    rig.shutdown().await;
+}
+
+/// Peers see the identity marks of an agent created at run time as they see
+/// a configured agent's: the peer metadata each member's build registers
+/// for discovery carries the `agent_identity` and `profile_name` labels,
+/// naming the member and its role, whichever record holds the agent's spec.
+/// Core stamps them on every member's build from the member's own binding,
+/// over any application label of the same key, so they never depend on the
+/// labels a seat stores.
+#[tokio::test(flavor = "multi_thread")]
+async fn peers_see_the_identity_marks_of_a_store_owned_agent_as_of_a_configured_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let mut rig = boot(temp.path(), &mob_id).await;
+    rig.create(CREATED).await;
+    for (name, marker) in [(DECLARED, "MARKS-DECLARED"), (CREATED, "MARKS-CREATED")] {
+        let sent = rig.send(name, marker).await;
+        assert!(
+            sent.get("error").is_none(),
+            "{name} takes a send: {sent:#?}"
+        );
+        assert!(rig.asked(marker).await, "{name} is built and runs its turn");
+    }
+    let namespace = meerkat_core::mob_realm_id(&mob_id)
+        .expect("the mob's realm")
+        .as_str()
+        .to_string();
+    let peers = meerkat_comms::InprocRegistry::global().peers_in_namespace(&namespace);
+    let marks = |name: &str| {
+        let member = meerkat_meta::member_comms_id::mob_member_id(name).to_string();
+        let labels = peers
+            .iter()
+            .map(|peer| &peer.meta.labels)
+            .find(|labels| labels.get("meerkat_id") == Some(&member))
+            .unwrap_or_else(|| panic!("{name} registered its peer metadata: {peers:#?}"));
+        (
+            member,
+            labels.get("agent_identity").cloned(),
+            labels.get("profile_name").cloned(),
+        )
+    };
+    for name in [DECLARED, CREATED] {
+        let (member, agent_identity, profile_name) = marks(name);
+        assert_eq!(
+            (agent_identity, profile_name),
+            (Some(member), Some("worker".to_string())),
+            "{name}: peers see both marks"
+        );
+    }
+    rig.shutdown().await;
+}
+
+/// The host's customizer of the first process of the owed-seat row: it
+/// refuses every build of one identity, and composes every other build as
+/// [`ComposingCustomizer`] does (it sets the host's label too).
+struct RefusingBuildsOf {
+    name: &'static str,
+    composing: ComposingCustomizer,
+}
+
+#[async_trait]
+impl AgentCustomizer for RefusingBuildsOf {
+    async fn customize_build(
+        &self,
+        context: &AgentBuildContext,
+        spec: &DurableAgentSpec,
+        draft: &mut AgentBuildDraft,
+    ) -> Result<(), CustomizerError> {
+        if spec.identity.as_str() == self.name {
+            return Err(CustomizerError::BuildFailed(
+                "the row's host refuses this build".to_string(),
+            ));
+        }
+        self.composing.customize_build(context, spec, draft).await
+    }
+}
+
+/// An agent owed its seat is not built by the mob's start before the host's
+/// identity runtime is composed. Two agents are created with a first
+/// message and their first spawn fails, so each is owed its seat: one whose
+/// row lacks the label the host's customizer sets (refused by the label
+/// rule), and a twin whose row carries it (its host refuses that one build
+/// for another reason). After a restart the mob's start embodies both owed
+/// seats before the runtime is composed, when no host build step can run:
+/// neither is built then. Once the runtime is composed the seats are asked
+/// again and the host's build step decides each: the agent whose row lacks
+/// the label stays refused (no member, no session, no kickoff, and its
+/// status shows the label rule's reason), and the twin is built from the
+/// host's inputs as the configured agent is, on a seat that carries the
+/// label, and runs its first message once.
+///
+/// RED before the seat's build waited for the composition: the start built
+/// both from their rows alone, before the host's build step was asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_builds_no_owed_seat_before_the_runtime_is_composed_and_the_label_rule_decides_after()
+ {
+    const REFUSED: &str = "keeper-refused";
+    const TWIN: &str = "keeper-twin";
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let owed_seat = |rig: &Rig, name: &str| {
+        matches!(
+            rig.runtime
+                .mob_handle()
+                .identity_entry(&meerkat_mob::AgentIdentity::from(name)),
+            Ok(IdentityEntryRead::Entry(entry))
+                if entry.standing
+                    == EntryStanding::Unseated(meerkat_mob::UnseatedEntryCause::SeatOwed)
+        )
+    };
+
+    // The first process. The label rule refuses the first spawn of the
+    // agent whose row lacks the host's label, and the host refuses the
+    // twin's build: both creates commit, and both agents are owed their
+    // seat.
+    let rig = boot_host(
+        temp.path(),
+        build_rows_definition(&mob_id),
+        declared_spec(),
+        Some(Arc::new(RefusingBuildsOf {
+            name: TWIN,
+            composing: ComposingCustomizer::default(),
+        }) as Arc<dyn AgentCustomizer>),
+        None,
+        false,
+    )
+    .await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(created_spec(REFUSED).with_initial_message(
+            meerkat_core::ContentInput::Text("REFUSED-KICKOFF".to_string()),
+        )),
+        REFUSED,
+    )
+    .await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(
+            host_labelled_spec(TWIN, "worker")
+                .with_initial_message(meerkat_core::ContentInput::Text("TWIN-KICKOFF".to_string())),
+        ),
+        TWIN,
+    )
+    .await;
+    assert!(
+        owed_seat(&rig, REFUSED) && owed_seat(&rig, TWIN),
+        "both agents are owed their seat"
+    );
+    assert!(
+        rig.request_with("REFUSED-KICKOFF").is_none() && rig.request_with("TWIN-KICKOFF").is_none(),
+        "nothing was built"
+    );
+    rig.shutdown_for_reopen().await;
+
+    // The second process: the host composes every build, and sets its
+    // label on each.
+    let (mut rig, customizer) = boot_build_rows(temp.path(), &mob_id, "worker").await;
+    assert!(
+        rig.asked("TWIN-KICKOFF").await,
+        "the twin's first message runs once the runtime is composed"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // The agent the label rule refuses: never built, never run.
+    assert!(
+        rig.request_with("REFUSED-KICKOFF").is_none(),
+        "the refused agent's first message never runs"
+    );
+    assert!(
+        owed_seat(&rig, REFUSED) && !rig.session_built(REFUSED).await,
+        "Core holds no member of the refused agent, and nothing was built for it"
+    );
+    assert!(
+        customizer.builds_of(REFUSED) >= 1,
+        "the host's build step was asked about the refused agent once the runtime was composed"
+    );
+    let refused = rig.seat_status(REFUSED).await;
+    assert!(
+        refused.shows_the_label_refusal() && refused.state == "dormant",
+        "the label rule decided: the status shows its reason: {refused:?}"
+    );
+
+    // The twin: built from the host's inputs, on a seat that carries the
+    // label, as the configured agent is.
+    let twin = rig.build_inputs(TWIN, "TWIN-KICKOFF").await;
+    assert_host_inputs(TWIN, &twin);
+    let twin_seat = rig.member(TWIN).await;
+    assert_eq!(
+        twin_seat.labels,
+        host_labelled_row(),
+        "the twin's seat carries its row's labels, the host's among them"
+    );
+    assert_eq!(
+        label_decisions(TWIN, &twin_seat),
+        HOST_LABELLED,
+        "the deny holds for the twin, and the allow rule matches it"
+    );
+    assert!(
+        rig.turn(DECLARED, "BUILD-CONFIGURED").await,
+        "the configured agent runs a turn"
+    );
+    let configured = rig.build_inputs(DECLARED, "BUILD-CONFIGURED").await;
+    assert_host_inputs(DECLARED, &configured);
+    assert_eq!(
+        twin, configured,
+        "the twin is built from the host's inputs as the configured agent is"
+    );
+    assert_eq!(
+        rig.requests()
+            .iter()
+            .filter(|request| request.contains("TWIN-KICKOFF"))
+            .count(),
+        1,
+        "the twin's first message runs once"
+    );
+    assert_eq!(
+        customizer.builds_of(TWIN),
+        1,
+        "the host's customizer composes the twin's build once"
+    );
+    rig.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// A runtime that learns only when its host completes the bootstrap whether
+// it composes an agent customizer
+// ---------------------------------------------------------------------------
+
+/// A mob over `state` composed the way a host composes one with
+/// `UnifiedRuntime::bootstrap` over a persistent spec that declares no agent
+/// customizer: bootstrapped, and its bootstrap not completed yet (no
+/// identity context is installed, and it is not activated without one).
+/// Such a runtime learns only when its host completes the bootstrap whether
+/// it composes an agent customizer. Its members' model reports no selection
+/// of its own, so each request names the model its member was built with.
+async fn bootstrap_undeclared(state: &Path, definition: MobDefinition) -> Rig {
+    std::fs::create_dir_all(state).expect("state root");
+    let (asked_tx, asked) = mpsc::unbounded_channel();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mob_id = definition.id.to_string();
+    let (storage, provenance) =
+        meerkat_meta::mob_composition_manifest::persistent_mob_storage(state.join("mob.sqlite3"))
+            .expect("open persistent mob storage");
+    let spec = meerkat_meta::MobBootstrapSpec::persistent(
+        definition,
+        storage,
+        provenance,
+        state.to_path_buf(),
+        16,
+    )
+    .await
+    .expect("compose persistent Meta stores")
+    .with_child_mob_storage(meerkat_meta::ChildMobStorage::ProcessBound)
+    .with_options(meerkat_meta::MobBootstrapOptions {
+        allow_ephemeral_sessions: true,
+        notify_orchestrator_on_resume: true,
+        default_llm_client: Some(Arc::new(RecordingClient {
+            asked: asked_tx,
+            requests: Arc::clone(&requests),
+            pinned: false,
+        })),
+    });
+    let runtime = Box::pin(meerkat_meta::UnifiedRuntime::bootstrap(
+        spec,
+        meerkat_meta::MetaConfig {
+            modules: Vec::new(),
+            discovery: meerkat_meta::DiscoverySpec {
+                namespace: mob_id,
+                modules: Vec::new(),
+            },
+            pre_spawn: Vec::new(),
+        },
+        Duration::from_secs(10),
+    ))
+    .await
+    .expect("bootstrap the UnifiedRuntime");
+    Rig {
+        runtime,
+        asked,
+        requests,
+        declared: declared_spec(),
+    }
+}
+
+/// Set in the child process of a row whose first process is killed: the
+/// state directory that first process runs in.
+const FIRST_PROCESS_STATE: &str = "META_CREATED_IDENTITIES_FIRST_PROCESS_STATE";
+
+/// The state directory of a row's first process, when this process is the
+/// child that runs it.
+fn first_process_state() -> Option<std::path::PathBuf> {
+    std::env::var_os(FIRST_PROCESS_STATE).map(Into::into)
+}
+
+/// Run the first process of the row `row` over `state` in a child process
+/// that exits without shutting its runtime down. No Stop is recorded, so the
+/// mob's log stays running, as a killed process leaves it, and the next
+/// process's mob starts inside `UnifiedRuntime::bootstrap`. (A clean
+/// shutdown records a Stop: the next start then lifts the mob only once its
+/// host completes the bootstrap.)
+fn run_first_process_killed(row: &str, state: &Path) {
+    let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", row, "--nocapture", "--test-threads=1"])
+        .env(FIRST_PROCESS_STATE, state)
+        .status()
+        .expect("run the first process in a child process");
+    assert!(child.success(), "the row's first process failed: {child}");
+}
+
+impl Rig {
+    /// Install the identity context a [`bootstrap_undeclared`] runtime's
+    /// host composes, and bootstrap nothing yet: the state directory's
+    /// continuity substrate, the identity bridge every composition builds,
+    /// a roster that declares [`DECLARED`], and `customizer` installed on
+    /// the identity runtime when the host composes one. Neither the spec
+    /// nor the context carries it. The runtime's doors answer from now on;
+    /// its bootstrap is not complete.
+    async fn install_identities(
+        &mut self,
+        state: &Path,
+        customizer: Option<Arc<dyn AgentCustomizer>>,
+    ) {
+        let substrate = meerkat_meta::gateway_wiring::open_identity_substrate(
+            &state.join("continuity.sqlite3"),
+        )
+        .await
+        .expect("open the identity substrate");
+        let handle = meerkat_meta::gateway_wiring::identity_mob_handle(&self.runtime);
+        let bridge = meerkat_meta::gateway_wiring::identity_session_bridge(
+            self.runtime.mob_runtime(),
+            handle.clone(),
+        );
+        let identity_runtime = meerkat_meta::identity_first::IdentityRuntime::new(
+            meerkat_meta::identity_first::IdentityRuntimeConfig {
+                continuity_store: substrate.continuity_store,
+                lease_provider: substrate.lease_provider,
+                runtime_instance_id: "meta-created-identities".to_string(),
+                has_runtime_store: true,
+                durability_policy: meerkat_meta::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(Arc::new(bridge)),
+                default_timeout: None,
+            },
+        )
+        .with_runtime_services(meerkat_meta::identity_first::AgentRuntimeServices::new(
+            handle,
+        ));
+        identity_runtime.set_agent_customizer(customizer).await;
+        let context = Arc::new(
+            meerkat_meta::identity_first::IdentityFirstRuntimeContext::new(
+                Arc::new(identity_runtime),
+                Arc::new(DeclaredRoster(self.declared.clone())),
+                None,
+                None,
+                Some(self.runtime.mob_handle().definition().clone()),
+            ),
+        );
+        self.runtime.install_identity_first_context(context);
+    }
+
+    /// Complete the bootstrap with the identity bootstrap of the context
+    /// [`Self::install_identities`] installed.
+    async fn bootstrap_installed_identities(&mut self) {
+        let declared = self.declared.clone();
+        Box::pin(
+            self.runtime
+                .bootstrap_installed_identity_first_context(&[declared]),
+        )
+        .await
+        .expect("bootstrap the installed identity context");
+    }
+
+    /// [`Self::install_identities`], then [`Self::bootstrap_installed_identities`].
+    async fn bootstrap_identities(
+        &mut self,
+        state: &Path,
+        customizer: Option<Arc<dyn AgentCustomizer>>,
+    ) {
+        self.install_identities(state, customizer).await;
+        self.bootstrap_installed_identities().await;
+    }
+
+    /// Whether Core holds `name` as an identity owed its seat: it holds no
+    /// member of it.
+    fn owed_its_seat(&self, name: &str) -> bool {
+        matches!(
+            self.runtime
+                .mob_handle()
+                .identity_entry(&meerkat_mob::AgentIdentity::from(name)),
+            Ok(IdentityEntryRead::Entry(entry))
+                if entry.standing
+                    == EntryStanding::Unseated(meerkat_mob::UnseatedEntryCause::SeatOwed)
+        )
+    }
+
+    /// How many model requests carried `marker`.
+    fn requests_with(&self, marker: &str) -> usize {
+        self.requests()
+            .iter()
+            .filter(|request| request.contains(marker))
+            .count()
+    }
+}
+
+/// A runtime composed with `UnifiedRuntime::bootstrap` over a spec that
+/// declares no agent customizer learns of the customizer its host installs
+/// on the identity runtime only at its identity bootstrap. The mob of a
+/// killed process starts inside `bootstrap`, before the host can install
+/// anything, and embodies the seats it owes: none of them is built then.
+/// Two agents are owed their seat, as in the row above: one whose row lacks
+/// the label the host's customizer sets, and a twin whose row carries it.
+/// The first process is killed. When `bootstrap` returns in the second,
+/// both are still owed their seat and neither ran. The identity bootstrap
+/// then finds the customizer, and the host's build step decides each seat:
+/// the agent whose row lacks the label stays refused (no member, no
+/// session, no first message, and its status shows the label rule's
+/// reason), and the twin is built from the host's inputs as the configured
+/// agent is, on a seat that carries the label, and runs its first message
+/// once.
+///
+/// RED before such a runtime refused the build while it had not learned of
+/// its customizer: the start built both agents from their rows alone inside
+/// `bootstrap`, with no comparison of the customizer's labels, and the
+/// refused agent ran its first message.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_builds_no_owed_seat_before_a_bootstrap_composition_learns_of_its_customizer() {
+    const MOB_ID: &str = "meta-created-identities-undeclared-start";
+    const REFUSED: &str = "keeper-refused";
+    const TWIN: &str = "keeper-twin";
+    if let Some(state) = first_process_state() {
+        // The first process. The label rule refuses the first spawn of the
+        // agent whose row lacks the host's label, and the host refuses the
+        // twin's build: both creates commit, and both agents are owed their
+        // seat. The process then exits without a shutdown.
+        let mut rig = bootstrap_undeclared(&state, build_rows_definition(MOB_ID)).await;
+        rig.bootstrap_identities(
+            &state,
+            Some(Arc::new(RefusingBuildsOf {
+                name: TWIN,
+                composing: ComposingCustomizer::default(),
+            }) as Arc<dyn AgentCustomizer>),
+        )
+        .await;
+        rig.create_request(
+            meerkat_mob::CreatedIdentityRequest::new(created_spec(REFUSED).with_initial_message(
+                meerkat_core::ContentInput::Text("REFUSED-KICKOFF".to_string()),
+            )),
+            REFUSED,
+        )
+        .await;
+        rig.create_request(
+            meerkat_mob::CreatedIdentityRequest::new(
+                host_labelled_spec(TWIN, "worker").with_initial_message(
+                    meerkat_core::ContentInput::Text("TWIN-KICKOFF".to_string()),
+                ),
+            ),
+            TWIN,
+        )
+        .await;
+        assert!(
+            rig.owed_its_seat(REFUSED) && rig.owed_its_seat(TWIN),
+            "both agents are owed their seat"
+        );
+        assert!(
+            rig.request_with("REFUSED-KICKOFF").is_none()
+                && rig.request_with("TWIN-KICKOFF").is_none(),
+            "nothing was built"
+        );
+        std::process::exit(0);
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    run_first_process_killed(
+        "a_start_builds_no_owed_seat_before_a_bootstrap_composition_learns_of_its_customizer",
+        &state,
+    );
+
+    // The second process. The mob was left running, so its start ran inside
+    // `bootstrap` and embodied both owed seats before the host could
+    // install its customizer.
+    let mut rig = bootstrap_undeclared(&state, build_rows_definition(MOB_ID)).await;
+    assert!(
+        rig.owed_its_seat(REFUSED) && rig.owed_its_seat(TWIN),
+        "the start built neither agent before the runtime learned of its host's customizer: \
+         both stay owed their seat"
+    );
+    let customizer = Arc::new(ComposingCustomizer::default());
+    rig.bootstrap_identities(
+        &state,
+        Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>),
+    )
+    .await;
+    assert!(
+        rig.asked("TWIN-KICKOFF").await,
+        "the twin's first message runs once the runtime is composed"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // The agent the label rule refuses: never built, never run.
+    assert!(
+        rig.request_with("REFUSED-KICKOFF").is_none(),
+        "the refused agent's first message never runs"
+    );
+    assert!(
+        rig.owed_its_seat(REFUSED) && !rig.session_built(REFUSED).await,
+        "Core holds no member of the refused agent, and nothing was built for it"
+    );
+    assert!(
+        customizer.builds_of(REFUSED) >= 1,
+        "the host's build step was asked about the refused agent once the runtime was composed"
+    );
+    let refused = rig.seat_status(REFUSED).await;
+    assert!(
+        refused.shows_the_label_refusal() && refused.state == "dormant",
+        "the label rule decided: the status shows its reason: {refused:?}"
+    );
+
+    // The twin: built from the host's inputs, on a seat that carries the
+    // label, as the configured agent is.
+    let twin = rig.build_inputs(TWIN, "TWIN-KICKOFF").await;
+    assert_host_inputs(TWIN, &twin);
+    assert_eq!(
+        rig.member(TWIN).await.labels,
+        host_labelled_row(),
+        "the twin's seat carries its row's labels, the host's among them"
+    );
+    assert!(
+        rig.turn(DECLARED, "BUILD-CONFIGURED").await,
+        "the configured agent runs a turn"
+    );
+    let configured = rig.build_inputs(DECLARED, "BUILD-CONFIGURED").await;
+    assert_host_inputs(DECLARED, &configured);
+    assert_eq!(
+        twin, configured,
+        "the twin is built from the host's inputs as the configured agent is"
+    );
+    assert_eq!(
+        rig.requests_with("TWIN-KICKOFF"),
+        1,
+        "the twin's first message runs once"
+    );
+    assert_eq!(
+        customizer.builds_of(TWIN),
+        1,
+        "the host's customizer composes the twin's build once"
+    );
+    rig.shutdown().await;
+}
+
+/// The same runtime, and a delivery that reaches a dormant agent before the
+/// host completed the bootstrap. Two agents are created with no first
+/// message on a turn-driven profile, so each is seated and nothing is
+/// built: one whose row lacks the label the host's customizer sets, and a
+/// twin whose row carries it. The host installs its identity context (its
+/// doors answer from then on) and has not bootstrapped it yet. A send to
+/// each agent then builds neither: it is refused for now within its bound,
+/// nothing is delivered, and the model is not asked. The identity bootstrap
+/// finds the customizer. The twin's delivery, sent again, builds it from
+/// the host's inputs and runs once; the delivery to the agent whose row
+/// lacks the label is refused with the label rule's reason, and that agent
+/// is never built.
+///
+/// RED before such a runtime refused the build while it had not learned of
+/// its customizer: the first send built each agent from its row alone, with
+/// no comparison of the customizer's labels, and both ran.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delivery_builds_no_created_agent_before_a_bootstrap_composition_learns_of_its_customizer()
+ {
+    const REFUSED: &str = "keeper-unlabelled";
+    const TWIN: &str = "keeper-labelled";
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let mut rig = bootstrap_undeclared(temp.path(), build_rows_definition(&mob_id)).await;
+    rig.create(REFUSED).await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(host_labelled_spec(TWIN, "worker")),
+        TWIN,
+    )
+    .await;
+    assert!(
+        rig.seated(REFUSED) && rig.seated(TWIN),
+        "both agents are seated, and nothing is built"
+    );
+    let customizer = Arc::new(ComposingCustomizer::default());
+    rig.install_identities(
+        temp.path(),
+        Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>),
+    )
+    .await;
+
+    // Before the host completed the bootstrap: neither send builds its
+    // agent, and each answers.
+    for (name, work) in [(REFUSED, "REFUSED-WORK"), (TWIN, "TWIN-WORK")] {
+        let sent = tokio::time::timeout(TURN_BOUND, rig.send(name, work))
+            .await
+            .unwrap_or_else(|_| panic!("the send to {name} answers within its bound"));
+        assert!(
+            sent["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("retry")),
+            "{name}: a send before the runtime learned of its host's customizer is refused for \
+             now, and builds nothing: {sent}"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        rig.request_with("REFUSED-WORK").is_none() && rig.request_with("TWIN-WORK").is_none(),
+        "neither agent ran"
+    );
+    assert!(
+        !rig.session_built(REFUSED).await && !rig.session_built(TWIN).await,
+        "nothing was built for either agent"
+    );
+
+    rig.bootstrap_installed_identities().await;
+
+    // The twin's delivery, sent again: built from the host's inputs, once.
+    assert!(
+        rig.turn(TWIN, "TWIN-WORK").await,
+        "the twin's delivery, sent again, runs"
+    );
+    let twin = rig.build_inputs(TWIN, "TWIN-WORK").await;
+    assert_host_inputs(TWIN, &twin);
+    assert_eq!(
+        rig.requests_with("TWIN-WORK"),
+        1,
+        "the twin's delivery runs once"
+    );
+
+    // The agent the label rule refuses: its delivery is refused with the
+    // rule's reason, and it is never built.
+    let sent = rig.send(REFUSED, "REFUSED-WORK").await;
+    assert!(
+        !sent["error"].is_null() && names_the_label_key(&sent["error"].to_string()),
+        "the delivery to the agent whose row lacks the host's label is refused, naming the \
+         label key and the remedy: {sent}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        rig.request_with("REFUSED-WORK").is_none() && !rig.session_built(REFUSED).await,
+        "the refused agent never runs, and nothing is built for it"
+    );
+    assert!(
+        customizer.builds_of(REFUSED) >= 1,
+        "the host's build step was asked about the refused agent"
+    );
+    rig.shutdown().await;
+}
+
+impl Rig {
+    /// Create `name` at runtime with the first message `kickoff` through
+    /// Core's store-owned create, and answer what the create says of its
+    /// kickoff spawn, rendered.
+    async fn create_kicked(&self, name: &str, kickoff: &str) -> String {
+        let created = self
+            .runtime
+            .mob_handle()
+            .create_store_owned_identities(
+                meerkat_mob::StoreOwnedIdentityCreate::new(
+                    operation(&format!("create-{name}")),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    vec![meerkat_mob::CreatedIdentityRequest::new(
+                        created_spec(name).with_initial_message(meerkat_core::ContentInput::Text(
+                            kickoff.to_string(),
+                        )),
+                    )],
+                ),
+                allow(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("Core creates {name}: {error}"));
+        assert!(
+            matches!(
+                created.change,
+                meerkat_mob::IdentityChangeOutcome::Committed { .. }
+            ),
+            "Core creates {name}: {:?}",
+            created.change
+        );
+        format!(
+            "{:?}",
+            created
+                .embodied
+                .get(&meerkat_mob::AgentIdentity::from(name))
+        )
+    }
+
+    /// The model the turn `marker` asked.
+    fn model_asked(&self, marker: &str) -> Value {
+        let rendered = self
+            .request_with(marker)
+            .unwrap_or_else(|| panic!("the turn {marker:?} was asked"));
+        serde_json::from_str::<Value>(&rendered).expect("a rendered model request")["model"].clone()
+    }
+
+    /// Ask Core to wake `name`'s member, as a host with no identity door
+    /// does, and answer what Core answers. Bounded: a wake that does not
+    /// answer fails the row.
+    async fn wake(&self, name: &str) -> Result<(), meerkat_mob::MobError> {
+        let handle = self.runtime.mob_handle();
+        let member = meerkat_mob::AgentIdentity::from(name);
+        tokio::time::timeout(TURN_BOUND, handle.ensure_member_live(&member))
+            .await
+            .unwrap_or_else(|_| panic!("the wake of {name} answers within its bound"))
+    }
+
+    /// Ask Core to wake `name`'s member until Core admits the wake, as the
+    /// caller of a wake refused for now asks again. Bounded: every answer
+    /// before the admission must be that refusal.
+    async fn wake_until_admitted(&self, name: &str) {
+        let deadline = std::time::Instant::now() + TURN_BOUND;
+        loop {
+            let woken = self.wake(name).await;
+            if woken.is_ok() {
+                return;
+            }
+            assert!(
+                refused_for_now(&woken) && std::time::Instant::now() < deadline,
+                "{name}: the wake, asked again, is admitted: {woken:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+}
+
+/// Whether `woken`, what Core answered a wake, is the refusal for now of a
+/// member whose host asked to retry its build: retryable, with nothing
+/// built.
+fn refused_for_now(woken: &Result<(), meerkat_mob::MobError>) -> bool {
+    matches!(
+        woken,
+        Err(meerkat_mob::MobError::MemberWakeRefused { refusal, .. })
+            if refusal.is_retryable() && refusal.as_str() == "host_preparation_pending"
+    )
+}
+
+/// Whether `answer`, what a create says of its kickoff spawn, names the two
+/// calls that complete a runtime's bootstrap.
+fn names_the_bootstrap_calls(answer: &str) -> bool {
+    answer.contains("install_and_bootstrap_identity_first_context")
+        && answer.contains("activate_without_identity_context")
+}
+
+/// On a runtime composed with `UnifiedRuntime::bootstrap` over a spec that
+/// declares no agent customizer, an agent created with a first message
+/// before its host completed the bootstrap is not built: the create
+/// commits, its answer says what the host must do, and the agent is owed its
+/// seat. The process is killed. The next process's mob starts inside
+/// `bootstrap` and does not build the agent either, while the bootstrap is
+/// not complete. The identity bootstrap of a host that composes no
+/// customizer then settles that there is none: the agent is seated from its
+/// row (its profile's model, its row's labels) and its first message runs
+/// once. A second identity bootstrap seats nothing again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owed_seat_is_seated_from_its_row_once_a_bootstrap_composition_learns_it_has_no_customizer()
+ {
+    const MOB_ID: &str = "meta-created-identities-undeclared-none";
+    const KEEPER: &str = "keeper-plain";
+    const KICKOFF: &str = "PLAIN-KICKOFF";
+    if let Some(state) = first_process_state() {
+        // The first process: its host never completes the bootstrap.
+        let rig = bootstrap_undeclared(&state, definition(MOB_ID)).await;
+        let spawn = rig.create_kicked(KEEPER, KICKOFF).await;
+        assert!(
+            names_the_bootstrap_calls(&spawn),
+            "the create's answer says what the host must do: {spawn}"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            rig.owed_its_seat(KEEPER) && rig.request_with(KICKOFF).is_none(),
+            "the agent is owed its seat and was not built"
+        );
+        std::process::exit(0);
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    run_first_process_killed(
+        "an_owed_seat_is_seated_from_its_row_once_a_bootstrap_composition_learns_it_has_no_customizer",
+        &state,
+    );
+
+    // The second process: the mob was left running, so its start ran inside
+    // `bootstrap`.
+    let mut rig = bootstrap_undeclared(&state, definition(MOB_ID)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        rig.owed_its_seat(KEEPER) && rig.request_with(KICKOFF).is_none(),
+        "the start seats nothing while the runtime's bootstrap is not complete"
+    );
+    rig.bootstrap_identities(&state, None).await;
+    assert!(
+        rig.asked(KICKOFF).await,
+        "the agent is seated once the bootstrap learned that its host composes no customizer"
+    );
+    assert!(rig.seated(KEEPER), "Core holds the agent's member");
+    assert_eq!(
+        rig.model_asked(KICKOFF),
+        json!("gpt-5.5"),
+        "the agent is built from its row: on its profile's model"
+    );
+    assert_eq!(
+        rig.member(KEEPER).await.labels,
+        created_labels(),
+        "the agent's seat carries its row's labels"
+    );
+
+    // A second identity bootstrap decides nothing again and seats nothing.
+    let declared = rig.declared.clone();
+    Box::pin(
+        rig.runtime
+            .bootstrap_installed_identity_first_context(&[declared]),
+    )
+    .await
+    .expect("a second identity bootstrap");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        rig.requests_with(KICKOFF),
+        1,
+        "the agent's first message runs once"
+    );
+    rig.shutdown().await;
+}
+
+/// The same on the path with no identity context: the activation without
+/// one (`UnifiedRuntime::activate_without_identity_context`) settles that
+/// the composition has no customizer. One agent is created with a first
+/// message before its host completed the bootstrap and is owed its seat;
+/// another is seated with nothing built. The process is killed. In the next
+/// process, before the activation, the first is still owed its seat and a
+/// wake of the second is refused for now with nothing built. The
+/// activation seats the first from its row and its first message runs once;
+/// the wake of the second, asked again, builds it from its row. A second
+/// activation seats nothing again, and an agent created with a first
+/// message afterwards is built at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owed_seat_is_seated_from_its_row_once_by_the_activation_without_an_identity_context() {
+    const MOB_ID: &str = "meta-created-identities-undeclared-classic";
+    const KEEPER: &str = "keeper-classic";
+    const KICKOFF: &str = "CLASSIC-KICKOFF";
+    const QUIET: &str = "keeper-quiet";
+    const LATER: &str = "keeper-later";
+    const LATER_KICKOFF: &str = "LATER-KICKOFF";
+    if let Some(state) = first_process_state() {
+        // The first process: its host never completes the bootstrap.
+        let rig = bootstrap_undeclared(&state, definition(MOB_ID)).await;
+        let spawn = rig.create_kicked(KEEPER, KICKOFF).await;
+        assert!(
+            names_the_bootstrap_calls(&spawn),
+            "the create's answer says what the host must do: {spawn}"
+        );
+        rig.create(QUIET).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            rig.owed_its_seat(KEEPER) && rig.request_with(KICKOFF).is_none(),
+            "the agent created with a first message is owed its seat and was not built"
+        );
+        assert!(rig.seated(QUIET), "the agent created with none is seated");
+        std::process::exit(0);
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    run_first_process_killed(
+        "an_owed_seat_is_seated_from_its_row_once_by_the_activation_without_an_identity_context",
+        &state,
+    );
+
+    // The second process: the mob was left running, so its start ran inside
+    // `bootstrap`.
+    let mut rig = bootstrap_undeclared(&state, definition(MOB_ID)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        rig.owed_its_seat(KEEPER) && rig.request_with(KICKOFF).is_none(),
+        "the start seats nothing while the runtime's bootstrap is not complete"
+    );
+    let woken = rig.wake(QUIET).await;
+    assert!(
+        refused_for_now(&woken),
+        "a wake before the bootstrap is complete is refused for now: {woken:?}"
+    );
+
+    rig.runtime
+        .activate_without_identity_context()
+        .await
+        .expect("activate without an identity context");
+    assert!(
+        rig.asked(KICKOFF).await,
+        "the agent is seated by the activation without an identity context"
+    );
+    assert!(rig.seated(KEEPER), "Core holds the agent's member");
+    assert_eq!(
+        rig.model_asked(KICKOFF),
+        json!("gpt-5.5"),
+        "the agent is built from its row: on its profile's model"
+    );
+    assert_eq!(
+        rig.member(KEEPER).await.labels,
+        created_labels(),
+        "the agent's seat carries its row's labels"
+    );
+
+    // The wake refused before the activation, asked again.
+    rig.wake_until_admitted(QUIET).await;
+
+    // A second activation decides nothing again and seats nothing.
+    rig.runtime
+        .activate_without_identity_context()
+        .await
+        .expect("a second activation is a no-op");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        rig.requests_with(KICKOFF),
+        1,
+        "the agent's first message runs once"
+    );
+
+    // The bootstrap is complete: a create with a first message is built at
+    // once.
+    let spawn = rig.create_kicked(LATER, LATER_KICKOFF).await;
+    assert!(
+        rig.asked(LATER_KICKOFF).await && rig.seated(LATER),
+        "an agent created after the activation runs its first message: {spawn}"
+    );
     rig.shutdown().await;
 }

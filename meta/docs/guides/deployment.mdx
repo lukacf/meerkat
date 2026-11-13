@@ -304,6 +304,15 @@ that store:
 `meta_gateway` runs none of these side effects: it composes no customizer, no
 retirement hook and no agent memory.
 
+An agent whose record is its row in the mob's identity store (one created at
+run time) that is archived or removed is owed what an identity that leaves
+the roster is owed: the harvest of the compactions its last session holds,
+that session's distillation, an exit interview and the retirement hook, which
+hears the cause `unlisted`. They run right after its member's retirement
+ended, by the same rules as above; no order is promised between them and the
+answer of the archive or the removal. A removal of an archived agent owes
+nothing more.
+
 A retirement that distills the session it ends, or drops its memory scope,
 first harvests the compactions that session holds: a delete, a reset, a
 role move, the roster's unlisting, and a rotation a host starts directly on

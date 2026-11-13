@@ -27,6 +27,10 @@ pub struct RuntimeDecisions {
     ingresses: Arc<DecisionIngressDeclarations>,
     events: Option<DecisionEventRecord>,
     realm: Option<RealmId>,
+    /// Signalled when a decision of this runtime changed in a way that may
+    /// owe work (held, decided, withdrawn): what wakes the executors the
+    /// runtime drives ([`super::DecisionExecutorDriver`]).
+    work: Arc<tokio::sync::Notify>,
 }
 
 /// Where the runtime records which decision each attested decide event was
@@ -71,6 +75,7 @@ impl RuntimeDecisions {
             ingresses: Arc::default(),
             events: None,
             realm: None,
+            work: Arc::default(),
         }
     }
 
@@ -103,6 +108,7 @@ impl RuntimeDecisions {
                 mob_id: mob_id.into(),
             }),
             realm: Some(realm),
+            work: Arc::default(),
         }
     }
 
@@ -117,6 +123,19 @@ impl RuntimeDecisions {
     /// through it.
     pub fn owner(&self) -> &DurableDecisionService {
         &self.owner
+    }
+
+    /// Say that a decision of this runtime changed in a way that may owe
+    /// work: one was held, decided or withdrawn. The executors the runtime
+    /// drives make a pass; with none, nothing happens. A surface that
+    /// writes a decision through [`Self::owner`] calls it after the write.
+    pub fn notify_work(&self) {
+        self.work.notify_one();
+    }
+
+    /// The signal [`Self::notify_work`] raises.
+    pub(crate) fn work_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.work)
     }
 
     /// Whether the runtime keeps durable decisions.

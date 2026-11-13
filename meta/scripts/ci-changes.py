@@ -249,6 +249,12 @@ LANE_INPUTS = (
     ("crates/meerkat-meta/src/rpc_gateway.rs", {"python", "extension_state"}),
     ("crates/meerkat-meta/src/rpc.rs", {"python", "flow_editor", "console"}),
     ("crates/meerkat-meta/src/rpc/", {"python"}),
+    # The long-term agent family: the Python SDK tests compare its closed
+    # vocabularies with the SDK's and name the module's directory, the
+    # console's tests read its refusal kinds and the family's RPC methods.
+    ("crates/meerkat-meta/src/identity_creation/", {"python"}),
+    ("crates/meerkat-meta/src/identity_creation/refusal.rs", {"console"}),
+    ("crates/meerkat-meta/src/rpc/identity_methods.rs", {"console"}),
     # Other sources the console and flow editor contract tests read.
     ("crates/meerkat-meta/src/mcp_apps_sandbox.rs", {"console"}),
     ("crates/meerkat-meta/src/rpc/topology_methods.rs", {"console"}),

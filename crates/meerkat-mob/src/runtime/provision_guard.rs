@@ -168,7 +168,10 @@ impl PendingProvision {
                 // A rebuild that is rolled back leaves no run-start hold its
                 // build preparation staged for the member's next
                 // registration: that registration's build is prepared again.
-                if self.rollback_origin == RollbackOrigin::RevivalOrRebuild
+                // Nor does a rolled-back fresh spawn, whose build the host
+                // prepares for a store-owned identity.
+                if (self.rollback_origin == RollbackOrigin::RevivalOrRebuild
+                    || self.session_origin == ProvisionSessionOrigin::Fresh)
                     && let Err(error) = self
                         .provisioner
                         .unstage_member_registration_run_start_hold(

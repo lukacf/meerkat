@@ -267,6 +267,15 @@ pub struct Roster {
     /// first build applies.
     #[serde(skip)]
     seat_builds: BTreeMap<SessionId, Arc<crate::runtime::SeatBuild>>,
+    /// The labels each identity's last seat row carries, with that row's
+    /// generation, from its `MemberSpawned` row (`MemberSpawnedEvent::labels`).
+    /// A member's entry reads the same labels until a store-owned
+    /// identity's update moves its row: the entry then follows the row
+    /// ([`Self::set_store_owned_seat_labels`]) and this keeps what the
+    /// journal's seat row holds, which is what a label restamp is owed
+    /// against ([`Self::seat_row_labels`]).
+    #[serde(skip)]
+    seat_row_labels: BTreeMap<AgentIdentity, (Generation, BTreeMap<String, String>)>,
     /// The sessions whose member comms endpoint (and so its public key) a
     /// journal row of this mob recorded: a `MemberSpawned` or a
     /// `MemberSessionBindingRecovered` row naming the session with its
@@ -405,6 +414,13 @@ impl Roster {
                 {
                     self.incarnation_builds.remove(agent_identity);
                 }
+                if self
+                    .seat_row_labels
+                    .get(agent_identity)
+                    .is_some_and(|(spawned, _)| spawned == generation)
+                {
+                    self.seat_row_labels.remove(agent_identity);
+                }
             }
             MobEventKind::RespawnTopologyAbandoned { agent_identity, .. } => {
                 // A stale abandonment marker can replay after a successor
@@ -537,6 +553,7 @@ impl Roster {
                 self.resume_from_roles.clear();
                 self.incarnation_builds.clear();
                 self.seat_builds.clear();
+                self.seat_row_labels.clear();
                 self.sessions_with_recorded_endpoint.clear();
             }
             _ => {}
@@ -587,6 +604,7 @@ impl Roster {
             resume_from_roles: BTreeMap::new(),
             incarnation_builds: BTreeMap::new(),
             seat_builds: BTreeMap::new(),
+            seat_row_labels: BTreeMap::new(),
             sessions_with_recorded_endpoint: BTreeSet::new(),
             entries: entries
                 .into_iter()
@@ -776,6 +794,63 @@ impl Roster {
         *build = Arc::new(next);
     }
 
+    /// Set the labels of a store-owned identity's seat to `labels`, its
+    /// row's: the roster entry of `agent_identity` reads them from now on.
+    /// Answers whether the entry changed: an identity no member holds, and
+    /// a seat that carries them already, change nothing.
+    ///
+    /// A store-owned member's seat carries its row's labels and no others,
+    /// and the row is the identity's record. So the roster follows the row
+    /// before any restamp seats the row's labels: in the step that commits
+    /// an update of the identity (whatever its member step then answers: a
+    /// restamp, or none because the member holds work, the step failed or
+    /// no same-session successor can serve it), and at a start for a row
+    /// that records its seat is owed a label restamp
+    /// (`CreatedIdentityRecord::label_restamp_owed`). No other seat is
+    /// touched: a label only a seat carries stays on its entry. Only the
+    /// roster entry changes: no seat row is written, the member keeps its
+    /// generation, fence and session, and its live session keeps the labels
+    /// it was built with until its next build.
+    ///
+    /// The roster is not the journal. The journal's last seat row of the
+    /// member keeps the labels it was seated with until the member's
+    /// restamp (an update of the identity while it is idle, a respawn, a
+    /// reset), and with it its three readers: a predecessor build, which
+    /// seats the member from that row; the binding journal's labels
+    /// (`MemberBinding::labels`); and the record census
+    /// (`IdentityRecordCensus::seats_stale`), which counts the row until
+    /// then.
+    pub(crate) fn set_store_owned_seat_labels(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        labels: &BTreeMap<String, String>,
+    ) -> bool {
+        match self.entries.get_mut(agent_identity) {
+            Some(entry) if entry.labels != *labels => {
+                entry.labels.clone_from(labels);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The labels of `agent_identity`'s last seat row, as the journal holds
+    /// them: what the member was last seated with, whatever its entry reads
+    /// since ([`Self::set_store_owned_seat_labels`]). The entry's own labels
+    /// for a member no spawn row of this projection recorded; `None` for an
+    /// identity no member holds.
+    pub(crate) fn seat_row_labels(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Option<&BTreeMap<String, String>> {
+        let entry = self.entries.get(agent_identity)?;
+        Some(
+            self.seat_row_labels
+                .get(agent_identity)
+                .map_or(&entry.labels, |(_, labels)| labels),
+        )
+    }
+
     /// Whether a journal row of this mob recorded the member comms endpoint
     /// of `session_id` (its public key): peers trusted that key, so a seat of
     /// the session whose key pair is missing is refused rather than given a
@@ -834,6 +909,10 @@ impl Roster {
             }
         }
         let identity = &member_spawned.agent_identity;
+        self.seat_row_labels.insert(
+            identity.clone(),
+            (member_spawned.generation, member_spawned.labels.clone()),
+        );
         match member_spawned.kickoff_prompt() {
             Some(prompt) => {
                 self.owed_kickoff_prompts.insert(

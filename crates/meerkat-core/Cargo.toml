@@ -54,7 +54,7 @@ toml_edit = { workspace = true }
 # The realm admission fences: open flags, fchmod/fchown and statfs, without
 # unsafe code.
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1", features = ["fs"] }
+rustix = { version = "1.1.6", features = ["fs"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
@@ -91,7 +91,7 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 
 # The admission fence rows set a umask and read the process's groups.
 [target.'cfg(unix)'.dev-dependencies]
-rustix = { version = "1.1", features = ["fs", "process"] }
+rustix = { version = "1.1.6", features = ["fs", "process"] }
 
 [package.metadata.cargo-machete]
 ignored = ["getrandom", "js-sys"]  # cfg(target_arch = "wasm32")

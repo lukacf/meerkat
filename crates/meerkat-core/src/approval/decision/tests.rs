@@ -1313,6 +1313,36 @@ fn a_grant_child_decision_is_decided_by_people_only() {
 }
 
 #[test]
+fn an_identity_create_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("identity.create");
+}
+
+#[test]
+fn an_identity_update_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("identity.update");
+}
+
+#[test]
+fn an_identity_archive_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("identity.archive");
+}
+
+#[test]
+fn an_identity_unarchive_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("identity.unarchive");
+}
+
+#[test]
+fn an_identity_remove_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("identity.remove");
+}
+
+#[test]
+fn an_identity_adopt_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("identity.adopt");
+}
+
+#[test]
 fn a_tool_grant_issue_decision_is_decided_by_people_only() {
     assert_decided_by_people_only("tool_grant.issue");
 }

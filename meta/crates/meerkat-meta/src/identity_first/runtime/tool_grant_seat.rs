@@ -96,6 +96,13 @@ impl IdentityRuntime {
                      next reconcile retries them"
                 );
             }
+        } else if self.core_live_member(identity).await?.is_none()
+            && let Some(refusal) = self.unseated_refusal(identity).await
+        {
+            // The door seated no member, and Core's entry of the name says
+            // why (archived, or awaiting its host's preparation, its held
+            // creation or its seat): the grant finds no member, typed.
+            return Err(refusal);
         }
         Ok(())
     }

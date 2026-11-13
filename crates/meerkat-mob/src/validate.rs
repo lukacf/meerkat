@@ -74,6 +74,17 @@ pub enum DiagnosticCode {
     /// name a tool. Whether a well-formed name belongs to the profile's
     /// composed tool families is checked when a member is built.
     MalformedToolDeny,
+    /// A definition update drops a profile (a rename drops the old name)
+    /// that a created agent's row names: the agent could not be seated,
+    /// or unarchived, on a profile the definition no longer has. Emitted
+    /// by [`crate::MobStorage::update_definition`], which reads the
+    /// mob's rows; `location` is `profiles.<name>`, and the message names
+    /// the agents and what an operator can do. An update that drops a
+    /// profile while a created agent's row cannot be read by this build
+    /// is refused under this code too, since such a row may name the
+    /// profile: `location` is then `profiles`, and the message names the
+    /// agents whose rows cannot be read.
+    ProfileHeldByIdentity,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -107,6 +118,7 @@ impl fmt::Display for DiagnosticCode {
             Self::InvalidImageGenerationProvider => "invalid_image_generation_provider",
             Self::JsonOutputWithoutSchema => "json_output_without_schema",
             Self::UnknownProfileKey => "unknown_profile_key",
+            Self::ProfileHeldByIdentity => "profile_held_by_identity",
         };
         f.write_str(s)
     }

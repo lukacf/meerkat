@@ -613,10 +613,11 @@ impl MobActor {
                 generation,
             ),
         };
-        let continuity_intent = spec
-            .continuity_intent
-            .clone()
-            .for_profile(&profile, &agent_identity);
+        let continuity_intent = spec.continuity_intent.clone().for_seat(
+            &profile,
+            &agent_identity,
+            spec.created_custody,
+        );
         // A session a seat named and no build created (its member was retired
         // before its first wake) is seated unborn again: MobMachine's fact.
         let session_never_born = super::super::boot_plan::domain_seat_session_never_born(
@@ -1603,11 +1604,33 @@ impl MobActor {
             spec.override_profile = entry.effective_profile_override.clone();
             spec.model_override = entry.effective_model_override.clone();
         }
+        // An auto-compact floor the request names rides the successor's
+        // profile override, the carrier a spawn's is: set over the member's
+        // own override or its role's profile, or removed again, after which
+        // an override that equals the role's profile is no override.
+        if let Some(floor) = request.compaction_floor {
+            let role_profile = self
+                .definition
+                .resolve_profile(&role, self.realm_profile_store.as_ref())
+                .await?;
+            match (floor, spec.override_profile.take()) {
+                (Some(floor), own) => {
+                    let mut profile = own.unwrap_or_else(|| role_profile.clone());
+                    profile.auto_compact_threshold = Some(floor);
+                    spec.override_profile = Some(profile);
+                }
+                (None, Some(mut profile)) => {
+                    profile.auto_compact_threshold = role_profile.auto_compact_threshold;
+                    spec.override_profile = (profile != role_profile).then_some(profile);
+                }
+                (None, None) => {}
+            }
+        }
         spec.definition_wiring = entry.definition_wiring;
         // The continuity the current incarnation was spawned with (its spawn
         // row's). An incarnation no spawn row records (a legacy reset) has
         // none to keep: refused, never defaulted.
-        spec.continuity_intent = self
+        let recorded = self
             .roster
             .read()
             .await
@@ -1618,6 +1641,19 @@ impl MobActor {
                     "no spawn row records the member's current continuity: a same-session successor cannot keep it",
                 )
             })?;
+        // A store-owned identity's seat is a durable identity's, whatever
+        // was recorded for it (an earlier release's seat, or the seat an
+        // adoption kept from a plain worker). Its successor takes no
+        // custody, so the plan asks here whose seat it is; any other
+        // member's successor keeps what was recorded.
+        spec.continuity_intent = if super::super::created_identity::host_composes_seat(
+            self.dsl_authority.state(),
+            agent_identity,
+        ) {
+            recorded.for_store_owned_successor(agent_identity)
+        } else {
+            recorded
+        };
         spec.initial_message = request.initial_message.clone();
         spec.launch_mode = crate::launch::MemberLaunchMode::Resume {
             bridge_session_id: session_id,
@@ -2166,7 +2202,17 @@ impl MobActor {
             .with_seat_rotation(Some(crate::runtime::SeatRotation::successor(
                 entry.generation,
                 link.target,
-            )));
+            )))
+            // A fork's lineage belongs to its identity, which the rotation
+            // keeps: the next incarnation's row stores the root MobMachine
+            // holds for it after this step (the step records nothing), so
+            // replay of the row writes the entry MobMachine holds.
+            .with_instruction_lineage_root(
+                crate::runtime::operator_instruction_delivery::member_lineage_root(
+                    prepared.authority.state(),
+                    identity,
+                ),
+            );
         let mut batch = vec![
             NewMobEvent {
                 mob_id: self.definition.id.clone(),
@@ -2546,7 +2592,17 @@ impl SettledSeatChunk {
                     // A resume seat that takes another role than its session
                     // was last built under records the declared migration,
                     // which the session's next build declares.
-                    .with_resume_from_role(seat.candidate.resume_from_role.clone());
+                    .with_resume_from_role(seat.candidate.resume_from_role.clone())
+                    // A seat of a fork-derived identity whose fork lineage
+                    // MobMachine still holds (a reseat of a fork) stores the
+                    // root on its row: the seat records nothing, and replay
+                    // of the row writes the entry MobMachine holds.
+                    .with_instruction_lineage_root(
+                        crate::runtime::operator_instruction_delivery::member_lineage_root(
+                            state,
+                            &seat.candidate.agent_identity,
+                        ),
+                    );
                 for transition in transitions {
                     self.effects.extend(transition.into_effects());
                 }

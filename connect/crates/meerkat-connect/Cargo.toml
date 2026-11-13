@@ -61,7 +61,7 @@ cookie = "=0.18.2"
 keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "=1.1.5", features = ["net", "fs"] }
+rustix = { version = "=1.1.6", features = ["net", "fs"] }
 dbus-secret-service = { version = "=4.1.0", default-features = false, features = ["crypto-rust", "vendored"] }
 
 [target.'cfg(unix)'.dependencies]

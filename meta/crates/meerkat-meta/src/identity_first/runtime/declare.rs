@@ -1631,7 +1631,9 @@ impl IdentityRuntime {
         let lifecycle_lock = self.lifecycle_lock_for(identity).await;
         let _lifecycle_guard = lifecycle_lock.lock().await;
         self.event_channels.write().await.remove(identity);
-        self.entries.write().await.remove(identity);
+        let mut entries = self.entries.write().await;
+        entries.remove(identity);
+        entries.note_registration(identity);
     }
 
     /// The rows of the first-boot manifest still to carry out, by identity.
@@ -1646,45 +1648,6 @@ impl IdentityRuntime {
         }
     }
 
-    /// The refusal Core's identity management of an identity answers: an
-    /// identity a host adopted (Core holds its identity intent row) is
-    /// read-only to every Meta verb, and so is a store-owned identity (Core
-    /// holds its created entry's row, and its MobMachine drives it); a row
-    /// this build cannot read, or a kind it does not know, refuses too.
-    pub(super) fn host_adoption_refusal(
-        management: meerkat_mob::MemberIdentityManagement,
-        identity: &AgentIdentity,
-    ) -> Result<(), IdentityRuntimeError> {
-        match management {
-            meerkat_mob::MemberIdentityManagement::CommandDriven => Ok(()),
-            meerkat_mob::MemberIdentityManagement::IntentManaged => {
-                Err(IdentityRuntimeError::IdentityHostAdopted {
-                    identity: identity.clone(),
-                })
-            }
-            meerkat_mob::MemberIdentityManagement::CreatedEntry => {
-                Err(IdentityRuntimeError::IdentityStoreOwned {
-                    identity: identity.clone(),
-                })
-            }
-            // An intent row this build cannot read may declare anything:
-            // never act on it until it reads.
-            meerkat_mob::MemberIdentityManagement::IntentUnreadable => {
-                Err(IdentityRuntimeError::IdentityHistoryUnavailable {
-                    identity: identity.clone(),
-                    detail: "Core holds an identity intent row for the identity that this \
-                             build cannot read"
-                        .to_string(),
-                })
-            }
-            // A management kind this build does not know: never act on it.
-            _ => Err(IdentityRuntimeError::IdentityHistoryUnavailable {
-                identity: identity.clone(),
-                detail: "Core reports an identity management kind this build does not know"
-                    .to_string(),
-            }),
-        }
-    }
     /// Record `spec` as its identity's registration: a new or replaced
     /// entry, or an update of a registered one, with Core's answer noted for
     /// the views in the same write when `declaration_refused` is `Some`

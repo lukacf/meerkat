@@ -38,7 +38,7 @@ const UNREGISTER_PENDING: &str = "UnregisterPending { stage: \"shutdown_runtime_
 
 static NEXT_MOB: AtomicU64 = AtomicU64::new(0);
 
-fn unique(prefix: &str) -> String {
+pub(super) fn unique(prefix: &str) -> String {
     format!("{prefix}-{}", NEXT_MOB.fetch_add(1, Ordering::Relaxed))
 }
 
@@ -244,13 +244,13 @@ impl LlmClient for ScriptedModel {
 
 /// What persists across lifetimes besides the state directory: the model and
 /// the record of host tool calls.
-struct Host {
+pub(super) struct Host {
     model: Arc<ScriptedModel>,
     dispatched: Arc<Mutex<Vec<String>>>,
 }
 
 impl Host {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             model: Arc::new(ScriptedModel::default()),
             dispatched: Arc::new(Mutex::new(Vec::new())),
@@ -288,7 +288,7 @@ fn durable(dir: &Path) -> ChildMobStorage {
 /// One runtime lifetime: the stock persistent composition over `dir`, with
 /// persistent sessions, a persistent root mob, child-available host tools and
 /// whatever `configure` selects.
-async fn lifetime(
+pub(super) async fn lifetime(
     dir: &Path,
     mob_id: &str,
     host: &Host,
@@ -3493,5 +3493,231 @@ async fn a_side_chat_of_a_member_off_the_launch_binding_is_refused_before_anythi
         recorded_member_bindings(dir.path()).await.len(),
         before.len(),
         "the refusal committed no session"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Members on socket comms: the composition serves one member
+// ---------------------------------------------------------------------------
+
+/// The members' configuration of a launch with the member socket option:
+/// TCP comms on a kernel-picked port.
+fn socket_member_config() -> Config {
+    let mut config = Config::default();
+    config.comms.mode = meerkat_core::CommsRuntimeMode::Tcp;
+    config.comms.address = Some("127.0.0.1:0".to_string());
+    config
+}
+
+/// The refusal `member` is answered while another member has the
+/// composition's place. It names the refused member only.
+fn socket_place_refusal_of(member: &str) -> String {
+    format!(
+        "member '{member}' cannot be created: this gateway's members run on socket comms \
+         (member_comms_address, or [comms] mode tcp or uds), which serve one member per \
+         gateway, and another member of this gateway already holds its comms key. Retire \
+         that member first, or run the members on in-process comms."
+    )
+}
+
+/// `refused` is the refusal of `member`, and carries none of `holder_facts`
+/// (the name, mob and session of the member that holds the place).
+fn assert_socket_place_refusal(entry: &str, refused: &str, member: &str, holder_facts: &[String]) {
+    assert!(
+        refused.contains(&socket_place_refusal_of(member)),
+        "{entry} must be refused while another member holds the place: {refused}"
+    );
+    for fact in holder_facts {
+        assert!(
+            !refused.contains(fact.as_str()),
+            "{entry}: the refusal names nothing of the member that holds the place, but it \
+             carries {fact:?}: {refused}"
+        );
+    }
+}
+
+/// With socket comms the members' transport key belongs to the realm, so
+/// the composition serves one member. While the root mob's first member
+/// holds the place, every other way an agent seats a member is refused
+/// before anything is built, in a text that names nothing of the holder:
+/// its spawn tool, a helper, a fork helper and a
+/// durable fork in the root mob, a member of a child mob it created, and a
+/// member of its implicit delegation mob. Retiring the holder frees the
+/// place, for a child mob's member too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_socket_composition_serves_one_member_across_the_root_and_the_child_mobs() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let host = Host::new();
+    let root_id = unique("socket-root");
+    let runtime =
+        configured_lifetime(dir.path(), &root_id, &host, socket_member_config(), None).await;
+    let owner = coordinator_session(&runtime).await;
+    let state = runtime.agent_mob_mcp_state().expect("agent mob state");
+    let root = MobId::from(root_id.as_str());
+    let coordinator = AgentIdentity::from("coordinator");
+    // What no refusal may carry of the holder. A fork names its source
+    // itself, so its refusal is checked for the holder's mob and session.
+    let holder_place = [root_id.clone(), owner.to_string()];
+    let holder = [
+        "coordinator".to_string(),
+        root_id.clone(),
+        owner.to_string(),
+    ];
+
+    let refused = state
+        .mob_spawn(
+            &root,
+            ProfileName::from("coordinator"),
+            AgentIdentity::from("second"),
+            Some(MobRuntimeMode::TurnDriven),
+            None,
+            None,
+        )
+        .await
+        .expect_err("a second member of the root mob");
+    assert_socket_place_refusal("the spawn tool", &refused.to_string(), "second", &holder);
+
+    let helper_options = || {
+        let mut options = meerkat_mob::HelperOptions::default();
+        options.role_name = Some(ProfileName::from("coordinator"));
+        options
+    };
+    let refused = state
+        .mob_spawn_helper(
+            &root,
+            AgentIdentity::from("helper"),
+            "say one word".to_string(),
+            helper_options(),
+            "answer",
+            4096,
+        )
+        .await
+        .expect_err("a helper of the root mob");
+    assert_socket_place_refusal("a helper", &refused.to_string(), "helper", &holder);
+
+    let refused = state
+        .mob_fork_helper(
+            &root,
+            &coordinator,
+            AgentIdentity::from("fork-helper"),
+            "say one word".to_string(),
+            meerkat_mob::ForkContext::default(),
+            helper_options(),
+            "answer",
+            4096,
+        )
+        .await
+        .expect_err("a fork helper of the holder");
+    assert_socket_place_refusal(
+        "a fork helper",
+        &refused.to_string(),
+        "fork-helper",
+        &holder_place,
+    );
+
+    let refused = state
+        .mob_fork_member(
+            &root,
+            &coordinator,
+            AgentIdentity::from("fork-member"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("a durable fork of the holder");
+    assert_socket_place_refusal(
+        "a durable fork",
+        &refused.to_string(),
+        "fork-member",
+        &holder_place,
+    );
+
+    let child_id = MobId::from(unique("socket-child").as_str());
+    state
+        .mob_create_definition_with_owner_bridge_session(
+            child_definition(&child_id),
+            owner.clone(),
+            true,
+            false,
+        )
+        .await
+        .expect("create the child mob");
+    let child_worker = || {
+        state.mob_spawn(
+            &child_id,
+            ProfileName::from("worker"),
+            AgentIdentity::from("worker-a"),
+            Some(MobRuntimeMode::TurnDriven),
+            None,
+            None,
+        )
+    };
+    let refused = child_worker().await.expect_err("a member of a child mob");
+    assert_socket_place_refusal(
+        "a child mob's member",
+        &refused.to_string(),
+        "worker-a",
+        &holder,
+    );
+
+    let implicit = state
+        .get_or_create_implicit_mob_for_bridge_session(&owner.to_string(), "gpt-5.5")
+        .await
+        .expect("the holder's implicit delegation mob");
+    let refused = state
+        .mob_spawn(
+            &implicit,
+            ProfileName::from("delegate"),
+            AgentIdentity::from("delegate-a"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("a member of the implicit delegation mob");
+    assert_socket_place_refusal("a delegate", &refused.to_string(), "delegate-a", &holder);
+
+    let root_members: Vec<_> = runtime
+        .handle()
+        .list_members()
+        .await
+        .into_iter()
+        .map(|entry| entry.agent_identity)
+        .collect();
+    assert_eq!(
+        root_members,
+        std::slice::from_ref(&coordinator),
+        "no refused member is seated"
+    );
+    let child = state.handle_for(&child_id).await.expect("child handle");
+    assert!(
+        child.list_members().await.is_empty(),
+        "no refused member is seated in the child mob"
+    );
+
+    // The implicit delegation mob ends with its owner, so the child mob's
+    // member is the next one built.
+    runtime
+        .handle()
+        .retire(coordinator)
+        .await
+        .expect("retire the holder");
+    child_worker()
+        .await
+        .expect("the child mob's member takes the freed place");
+    let refused = runtime
+        .handle()
+        .spawn_spec(SpawnMemberSpec::new(
+            ProfileName::from("coordinator"),
+            AgentIdentity::from("second"),
+        ))
+        .await
+        .expect_err("a root member while the child mob's member holds the place");
+    assert_socket_place_refusal(
+        "a root spawn",
+        &refused.to_string(),
+        "second",
+        &["worker-a".to_string(), child_id.to_string()],
     );
 }

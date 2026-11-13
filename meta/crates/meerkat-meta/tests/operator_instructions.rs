@@ -329,6 +329,7 @@ async fn meta_set_instruction_maps_identity_and_profile_to_core() {
         targets.get("persona"),
         Some(&OperatorInstructionTarget::Member {
             agent_identity: meerkat_meta::member_comms_id::roster_member_id_for_identity(IDENTITY),
+            include_forks: false,
         }),
         "{targets:#?}"
     );
@@ -458,6 +459,77 @@ async fn meta_set_instruction_maps_identity_and_profile_to_core() {
         "the refused writes changed nothing: {after:#?}"
     );
     let _ = &booted.session_id;
+    booted.unified.shutdown().await;
+}
+
+/// A record written for a member and its forks (Core's `include_forks`, set
+/// through the mob handle a Rust host holds) reads through
+/// `meta/instruction_status` with its scope, and a record for the member
+/// alone reads without the member. Meta's own write verb cannot set the
+/// scope: a target that carries it is refused before Core, nothing written.
+#[tokio::test(flavor = "multi_thread")]
+async fn meta_instruction_status_shows_a_records_fork_scope() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let booted = boot(&temp.path().join("state")).await;
+    let roster_member = meerkat_meta::member_comms_id::roster_member_id_for_identity(IDENTITY);
+    let write = |key: &str, include_forks: bool| meerkat_mob::OperatorInstructionWrite {
+        slot: meerkat_core::InstructionSlot {
+            namespace: meerkat_core::InstructionNamespace::new("host").expect("namespace"),
+            key: meerkat_core::InstructionKey::new(key).expect("key"),
+        },
+        revision: meerkat_core::InstructionRevision::new(1).expect("revision"),
+        body: PERSONA.to_string(),
+        content_sha256: None,
+        target: OperatorInstructionTarget::Member {
+            agent_identity: roster_member.clone(),
+            include_forks,
+        },
+    };
+    for (key, include_forks) in [("family", true), ("own", false)] {
+        booted
+            .unified
+            .mob_handle()
+            .set_operator_instruction(write(key, include_forks))
+            .await
+            .expect("Core commits the record");
+    }
+
+    let status = rpc(&booted, "meta/instruction_status", json!({})).await;
+    let status = result_of(&status);
+    assert_eq!(
+        record(status, "family")["target"],
+        json!({"kind": "member", "identity": IDENTITY, "include_forks": true}),
+        "a record for a member and its forks shows its scope: {status:#?}"
+    );
+    assert_eq!(
+        record(status, "own")["target"],
+        json!({"kind": "member", "identity": IDENTITY}),
+        "a record for the member alone carries no scope member: {status:#?}"
+    );
+
+    let refused = rpc(
+        &booted,
+        "meta/set_instruction",
+        json!({
+            "namespace": "host",
+            "key": "scoped",
+            "revision": 1,
+            "body": PERSONA,
+            "target": {"kind": "member", "identity": IDENTITY, "include_forks": true},
+        }),
+    )
+    .await;
+    assert_eq!(refused["error"]["code"], json!(-32602), "{refused:#?}");
+    let after = booted
+        .unified
+        .mob_handle()
+        .operator_instruction_status(meerkat_mob::OperatorInstructionStatusQuery::default())
+        .await
+        .expect("Core reads its operator instructions");
+    assert_eq!(
+        after.generation, 2,
+        "the refused write changed nothing: {after:#?}"
+    );
     booted.unified.shutdown().await;
 }
 

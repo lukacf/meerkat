@@ -409,6 +409,12 @@ dispatches Meta's two candidate tiers of the same commit
 them): they build before Core's tag exists, and Meta's promotion refuses a
 candidate whose `crates/` tree differs from the tree of that tag.
 
+Connect is tagged on the commit the Core and Meta tags name, or on a later
+commit of the default branch whose Core and Meta sources are identical to
+that commit's. No workflow checks that equality: the release owner compares
+the two commits before the Connect tag is pushed, and Connect's release
+manifest and notes name both commits when they differ.
+
 The tag run looks the prebuild up after `require_ci_green`
 (`release_prebuild`, `scripts/release-find-prebuild`): a `release.yml`
 dispatch on `main`, in this repository, started and triggered by the

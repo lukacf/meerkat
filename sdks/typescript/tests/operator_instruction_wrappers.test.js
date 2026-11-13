@@ -242,6 +242,47 @@ describe("operator instruction wrappers", () => {
     });
   }
 
+  it("a member target's fork scope is sent and read back", async () => {
+    const scoped = { kind: "member", agent_identity: "worker-1", include_forks: true };
+    const alone = { kind: "member", agent_identity: "worker-1" };
+    const page = mobStatus(memberStatus());
+    const record = page.desired[0];
+    page.desired = [
+      { ...record, key: "family", target: scoped },
+      { ...record, key: "own", target: alone },
+      { ...record, key: "explicit", target: { ...alone, include_forks: false } },
+    ];
+    const { client, calls } = fakeClient({
+      "mob/set_instruction": MOB_WRITE,
+      "mob/instruction_status": page,
+    });
+
+    await new Mob(client, "team").setInstruction(
+      "app.example",
+      "family",
+      1,
+      "Sign as the family.",
+      scoped,
+    );
+    assert.deepEqual(calls[0].params.target, scoped, "the write carries the scope");
+
+    const status = await client.mobInstructionStatus("team");
+    assert.deepEqual(
+      status.desired.map((entry) => entry.target),
+      [scoped, alone, alone],
+      "the status read keeps the scope where the record carries it",
+    );
+
+    const malformed = structuredClone(page);
+    malformed.desired = [{ ...record, target: { ...alone, include_forks: "yes" } }];
+    const refusing = fakeClient({ "mob/instruction_status": malformed });
+    await assert.rejects(refusing.client.mobInstructionStatus("team"), (error) => {
+      assert.ok(error instanceof MeerkatError);
+      assert.equal(error.code, "INVALID_RESPONSE");
+      return true;
+    });
+  });
+
   it("the session verbs send the exact request shapes", async () => {
     const { client, calls } = fakeClient({
       "session/set_instruction": SESSION_WRITE,

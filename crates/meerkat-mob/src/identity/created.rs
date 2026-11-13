@@ -677,10 +677,14 @@ impl IdentityRemovalRecord {
 /// broken seal) reads unreadable for its identity alone
 /// ([`CreatedIdentityObservation::Unreadable`]).
 ///
-/// The row is complete with this release: spec, revision, presence, a
-/// pending role migration, owned edges, provenance, a removal record and
-/// whether its host holds its creation. A later change of its shape takes a
-/// new schema version.
+/// The row holds: spec, revision, presence, a pending role migration,
+/// owned edges, provenance, a removal record and whether its host holds its
+/// creation (all since 0.9.9 to 0.9.11), and whether its seat is owed a
+/// label restamp (0.9.15: an optional key, absent on every row that owes
+/// none, so those rows and their digests are byte for byte what an earlier
+/// release wrote; a row that carries it reads unreadable to an earlier
+/// release, for its identity alone, until it is let go). Any other change
+/// of its shape takes a new schema version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -700,6 +704,18 @@ pub struct CreatedIdentityRecord {
     pub provenance: CreatedIdentityProvenance,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_role_migration: Option<PendingRoleMigration>,
+    /// Whether the identity's seat is owed a label restamp: an update
+    /// committed while its seated member's last seat row carried other
+    /// labels than the updated row, and no seat row has carried the row's
+    /// labels since. Only an update's commit sets it, in the update's own
+    /// transaction; it is let go once a seat row carries the row's labels
+    /// (a restamp, a respawn, a rotation, a seat), and by an archive or a
+    /// removal, after which no seat is owed anything. While it is set a
+    /// start seats the row's labels on the member's roster entry and a
+    /// build of the member is compared with the row's labels. A row that
+    /// owes none carries no such key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub label_restamp_owed: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owned_edges: Vec<OwnedIdentityEdge>,
     /// The removal that tombstoned the identity, once one did.
@@ -733,6 +749,7 @@ impl CreatedIdentityRecord {
             spec: None,
             provenance,
             pending_role_migration: None,
+            label_restamp_owed: false,
             owned_edges: Vec::new(),
             removal: None,
             held_creation: false,
@@ -759,6 +776,7 @@ impl CreatedIdentityRecord {
             spec: Some(spec),
             provenance,
             pending_role_migration: None,
+            label_restamp_owed: false,
             owned_edges: Vec::new(),
             removal: None,
             held_creation: false,
@@ -774,6 +792,16 @@ impl CreatedIdentityRecord {
         pending: Option<PendingRoleMigration>,
     ) -> Result<Self, IdentityIntentError> {
         self.pending_role_migration = pending;
+        self.resealed()
+    }
+
+    /// The row with its owed label restamp recorded (or let go), sealed
+    /// again.
+    pub(crate) fn with_label_restamp_owed(
+        mut self,
+        owed: bool,
+    ) -> Result<Self, IdentityIntentError> {
+        self.label_restamp_owed = owed;
         self.resealed()
     }
 
@@ -809,11 +837,14 @@ impl CreatedIdentityRecord {
         self.resealed()
     }
 
-    /// The row after an update: `spec` at the next revision, sealed again.
+    /// The row after an update: `spec` at the next revision, with the
+    /// role migration and the label restamp the update leaves owed, sealed
+    /// again.
     pub(crate) fn updated(
         mut self,
         spec: CreatedIdentitySpec,
         pending_role_migration: Option<PendingRoleMigration>,
+        label_restamp_owed: bool,
     ) -> Result<Self, IdentityIntentError> {
         self.revision =
             self.revision
@@ -823,6 +854,7 @@ impl CreatedIdentityRecord {
                 })?;
         self.spec = Some(spec);
         self.pending_role_migration = pending_role_migration;
+        self.label_restamp_owed = label_restamp_owed;
         self.resealed()
     }
 
@@ -943,6 +975,8 @@ impl CreatedIdentityRecord {
             provenance: &'a CreatedIdentityProvenance,
             #[serde(skip_serializing_if = "Option::is_none")]
             pending_role_migration: Option<&'a PendingRoleMigration>,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            label_restamp_owed: bool,
             #[serde(skip_serializing_if = "<[OwnedIdentityEdge]>::is_empty")]
             owned_edges: &'a [OwnedIdentityEdge],
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -960,6 +994,7 @@ impl CreatedIdentityRecord {
             spec: self.spec.as_ref(),
             provenance: &self.provenance,
             pending_role_migration: self.pending_role_migration.as_ref(),
+            label_restamp_owed: self.label_restamp_owed,
             owned_edges: &self.owned_edges,
             removal: self.removal.as_ref(),
             held_creation: self.held_creation,
@@ -1535,6 +1570,59 @@ mod tests {
             classify_created_identity_row(&serde_json::to_vec(&forged).expect("encode")),
             Some(CreatedIdentityObservation::Unreadable { .. })
         ));
+    }
+
+    /// A row's owed label restamp is one optional key. A row that owes none
+    /// carries no such key and keeps its digest, byte for byte what a
+    /// release without the key wrote and reads. A row that owes one
+    /// carries the key under another digest, reads back as written, and
+    /// lets it go to the bytes and digest it had before.
+    #[test]
+    fn a_created_identity_row_carries_an_owed_label_restamp_only_while_one_is_owed() {
+        let row = alpha_row();
+        let stored = serde_json::to_vec(&row).expect("encode");
+        assert!(!row.label_restamp_owed);
+        assert!(
+            serde_json::to_value(&row)
+                .expect("encode")
+                .get("label_restamp_owed")
+                .is_none(),
+            "a row that owes no restamp carries no key"
+        );
+        let cleared = row
+            .clone()
+            .with_label_restamp_owed(false)
+            .expect("a sealed row");
+        assert_eq!(cleared.authority_digest, row.authority_digest);
+        assert_eq!(serde_json::to_vec(&cleared).expect("encode"), stored);
+
+        let owed = row
+            .clone()
+            .with_label_restamp_owed(true)
+            .expect("a sealed row");
+        assert_ne!(owed.authority_digest, row.authority_digest);
+        let owed_stored = serde_json::to_vec(&owed).expect("encode");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&owed_stored)
+                .expect("decode")
+                .get("label_restamp_owed"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            classify_created_identity_row(&owed_stored),
+            Some(CreatedIdentityObservation::Created(owed.clone())),
+            "the row reads back as written"
+        );
+        let settled = owed.with_label_restamp_owed(false).expect("a sealed row");
+        assert_eq!(serde_json::to_vec(&settled).expect("encode"), stored);
+
+        // An update writes what it is told is owed, at the next revision.
+        let updated = row
+            .clone()
+            .updated(alpha_spec(), None, true)
+            .expect("the updated row");
+        assert!(updated.label_restamp_owed);
+        assert_eq!(updated.revision, row.revision + 1);
     }
 
     /// A receipt is replayed only under the same request digest.

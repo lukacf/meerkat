@@ -15,6 +15,9 @@ import {
   shortSpan,
 } from "../lib/agent-activity";
 import { LifecycleConfirm, type ConfirmedLifecycleAction } from "./LifecycleConfirm";
+import { ROSTER_LISTING_SUPERSEDED_NOTE, type AgentIdentityControls } from "../lib/identity-changes";
+import type { IdentityChangesApi } from "../lib/use-identity-changes";
+import { AgentChangePanel, type OpenAgentChange } from "./IdentityChangePanels";
 import { useMeasuredWidth } from "../lib/use-element-width";
 import { CopyButton } from "../../../packages/console-components/src/copy-button";
 import {
@@ -77,6 +80,10 @@ export type ConsoleInspectView = IdentityInspectViewState & {
   /** Who may see the agent ("public", "internal"). */
   visibility?: string;
   response_phase?: ConsoleAgent["response_phase"];
+  /** The status says that the host's roster lists this name while the
+   * agent is served from its record: the roster's entry is not applied.
+   * Only `true` is carried. */
+  roster_listing_superseded?: boolean;
 };
 
 /** Status words and tone for an identity: the repair hold and health problems
@@ -191,6 +198,8 @@ export function AgentDetailsPanel({
   work,
   spawnedBy,
   now,
+  identityChanges,
+  rosterListingSuperseded,
   children,
 }: {
   identity: string;
@@ -212,7 +221,14 @@ export function AgentDetailsPanel({
   spawnedBy?: string;
   /** A fixed clock (tests, the gallery). */
   now?: () => number;
-  /** The schedules section, when offered. */
+  /** The changes of this agent's record (Edit, Archive, Remove) the
+   * gateway offers this viewer. */
+  identityChanges?: { api: IdentityChangesApi; controls: AgentIdentityControls } | null;
+  /** The agent's record says that the host's configuration lists this name
+   * too (`roster_listing_superseded` of `meta/identity/get`). The note at
+   * the status says it, as it does when the details answer says so. */
+  rosterListingSuperseded?: boolean;
+  /** The record and schedules sections, when offered. */
   children?: React.ReactNode;
 }): React.JSX.Element {
   const directory = useAgentDirectory();
@@ -221,6 +237,13 @@ export function AgentDetailsPanel({
   const nowMs = now ? now() : ledger.nowMs;
   const [showIds, setShowIds] = useShowTechnicalIds("agent-details");
   const [confirming, setConfirming] = React.useState<ConfirmedLifecycleAction | null>(null);
+  // The change of an agent's record that is open. It carries its agent:
+  // the agent it was opened for is the one it names, reads and changes,
+  // whatever the pane shows by then, and it shows only while the pane still
+  // shows that agent. The name is the one the agent had when it opened: an
+  // archived or removed agent leaves the roster, and its outcome still
+  // names it as it was asked for.
+  const [changing, setChangingState] = React.useState<{ change: OpenAgentChange; identity: string; displayName: string } | null>(null);
   const view = inspect as ConsoleInspectView | undefined | null;
   // Named the way the sidebar names the agent.
   const name = agent
@@ -279,6 +302,23 @@ export function AgentDetailsPanel({
     menuItems.push({ kind: "item", id: "retire", label: `${actions.retire.label}…`, textValue: actions.retire.label, destructive: true, onSelect: () => setConfirming("retire"), testId: `inspect-action:${identity}:retire` });
   }
   if (menuItems.length) menuItems.push({ kind: "separator", id: "lifecycle" });
+  const identityControls = identityChanges?.controls;
+  const setChanging = (change: OpenAgentChange) =>
+    setChangingState((current) => (current && current.identity === identity
+      ? { ...current, change }
+      : { change, identity, displayName: name }));
+  if (identityControls?.edit) {
+    menuItems.push({ kind: "item", id: "edit", label: "Edit…", textValue: "Edit", onSelect: () => setChanging("edit"), testId: `inspect-action:${identity}:edit` });
+  }
+  if (identityControls?.archive) {
+    menuItems.push({ kind: "item", id: "archive", label: "Archive…", textValue: "Archive", onSelect: () => setChanging("archive"), testId: `inspect-action:${identity}:archive` });
+  }
+  if (identityControls?.remove) {
+    menuItems.push({ kind: "item", id: "remove", label: "Remove…", textValue: "Remove", destructive: true, onSelect: () => setChanging("remove"), testId: `inspect-action:${identity}:remove` });
+  }
+  if (identityControls?.edit || identityControls?.archive || identityControls?.remove) {
+    menuItems.push({ kind: "separator", id: "record" });
+  }
   menuItems.push({ kind: "checkbox", id: "technical-ids", label: "Show technical IDs", checked: showIds, onChange: setShowIds, testId: "inspect-menu:technical-ids" });
   if (onRefresh) menuItems.push({ kind: "item", id: "refresh", label: "Refresh now", glyph: "refresh", onSelect: onRefresh, testId: "inspect-menu:refresh" });
 
@@ -332,6 +372,20 @@ export function AgentDetailsPanel({
             testId={`inspect-confirm:${identity}:${confirming}`}
             confirmTestId={`inspect-confirm-yes:${identity}:${confirming}`}
             cancelTestId={`inspect-confirm-cancel:${identity}:${confirming}`}
+          />
+        </div>
+      ) : null}
+      {changing && changing.identity === identity && identityChanges ? (
+        <div className="agent-details__confirm agent-details__change" data-testid={`inspect-change:${identity}`}>
+          <AgentChangePanel
+            key={changing.identity}
+            api={identityChanges.api}
+            change={changing.change}
+            name={changing.identity}
+            displayName={changing.displayName}
+            controls={identityChanges.controls}
+            onClose={() => setChangingState(null)}
+            onSwitch={setChanging}
           />
         </div>
       ) : null}
@@ -407,6 +461,11 @@ export function AgentDetailsPanel({
                   spawnedBy ? { label: "Started by", value: <AgentName id={spawnedBy} link /> } : null,
                 ]}
               />
+              {view.roster_listing_superseded === true || rosterListingSuperseded === true ? (
+                <Notice tone="neutral" className="agent-details__status-note" testId={`inspect-roster-superseded:${identity}`}>
+                  {ROSTER_LISTING_SUPERSEDED_NOTE}
+                </Notice>
+              ) : null}
               <Part label="Activity · 24h" action={`${countWords(turnsToday, "turn")} today`} testId={`inspect-activity:${identity}`}>
                 <div ref={barsRef} className="agent-details__bars-box" />
                 <ActivityBars

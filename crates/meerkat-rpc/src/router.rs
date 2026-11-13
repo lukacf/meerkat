@@ -16071,6 +16071,104 @@ mod tests {
         );
     }
 
+    /// A member target's `include_forks` crosses the router both ways:
+    /// `mob/set_instruction` takes it, and `mob/instruction_status` answers
+    /// the record's target with it. A record written without it, or with an
+    /// explicit `false`, answers the target the method always answered, and
+    /// the member is refused on a profile target.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_instruction_verbs_carry_a_member_targets_fork_scope() {
+        let (router, _notif_rx) = test_router().await;
+        let mob_id = "mob-operator-instructions-fork-scope";
+        mob_with_one_worker(&router, mob_id).await;
+
+        for (key, target) in [
+            (
+                "family",
+                serde_json::json!({ "kind": "member", "agent_identity": "worker-1", "include_forks": true }),
+            ),
+            (
+                "own",
+                serde_json::json!({ "kind": "member", "agent_identity": "worker-1" }),
+            ),
+            (
+                "explicit",
+                serde_json::json!({ "kind": "member", "agent_identity": "worker-1", "include_forks": false }),
+            ),
+        ] {
+            let receipt = result_value(
+                &router
+                    .dispatch(make_request(
+                        "mob/set_instruction",
+                        serde_json::json!({
+                            "mob_id": mob_id,
+                            "namespace": "host",
+                            "key": key,
+                            "revision": 1,
+                            "body": "Answer formally.",
+                            "target": target
+                        }),
+                    ))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(receipt["disposition"], "committed", "{key}: {receipt}");
+            assert_eq!(receipt["matched_members"], 1, "{key}: {receipt}");
+        }
+
+        let status = result_value(
+            &router
+                .dispatch(make_request(
+                    "mob/instruction_status",
+                    serde_json::json!({ "mob_id": mob_id }),
+                ))
+                .await
+                .unwrap(),
+        );
+        let target_of = |key: &str| {
+            status["desired"]
+                .as_array()
+                .expect("desired records")
+                .iter()
+                .find(|record| record["key"] == key)
+                .unwrap_or_else(|| panic!("no record for {key}: {status}"))["target"]
+                .clone()
+        };
+        assert_eq!(
+            target_of("family"),
+            serde_json::json!({ "kind": "member", "agent_identity": "worker-1", "include_forks": true }),
+            "the status read answers the scope the write carried"
+        );
+        for key in ["own", "explicit"] {
+            assert_eq!(
+                target_of(key),
+                serde_json::json!({ "kind": "member", "agent_identity": "worker-1" }),
+                "{key}: a record for the member alone answers no scope member"
+            );
+        }
+
+        let refused = router
+            .dispatch(make_request(
+                "mob/set_instruction",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "namespace": "host",
+                    "key": "profile",
+                    "revision": 1,
+                    "body": "Answer formally.",
+                    "target": { "kind": "profile", "profile": "worker", "include_forks": true }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            refused.error.as_ref().map(|error| error.code),
+            Some(error::INVALID_PARAMS),
+            "the fork scope belongs to a member target only"
+        );
+    }
+
     #[cfg(feature = "mob")]
     #[tokio::test]
     async fn mob_member_send_host_route_targets_canonical_member_path() {

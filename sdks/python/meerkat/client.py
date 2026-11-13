@@ -2381,7 +2381,9 @@ class MeerkatClient:
     ) -> MobInstructionWriteResult:
         """Write one operator instruction for the members ``target`` selects:
         ``{"kind": "mob"}``, ``{"kind": "profile", "profile": ...}`` or
-        ``{"kind": "member", "agent_identity": ...}``.
+        ``{"kind": "member", "agent_identity": ...}``, the last optionally
+        with ``"include_forks": True`` for the member and the forks of its
+        fork family.
 
         Returns once the record is in the mob's journal; delivery to the
         members is asynchronous (see :meth:`mob_instruction_status`).

@@ -241,22 +241,21 @@ enum IdentityMarker {
 }
 
 /// Read `binding`'s marker against `identity`, the Meta identity its member
-/// id decodes to (`None` when it decodes to none).
+/// id decodes to (`None` when it decodes to none). A member of an identity
+/// whose record is its row in the mob's identity store is the identity's
+/// own, as one that carries the identity's marker is: Core seats no other
+/// member under such a name.
 fn identity_marker(
     binding: &meerkat_mob::MemberBinding,
     identity: Option<&crate::identity_first::AgentIdentity>,
 ) -> IdentityMarker {
+    if let Some(identity) = identity
+        && crate::identity_first::runtime::binding_is_the_identitys_by_core(binding, identity)
+    {
+        return IdentityMarker::Matches;
+    }
     match binding.continuity_intent() {
-        meerkat_mob::SpawnContinuityIntent::DurableIdentity { .. } => match identity {
-            Some(identity)
-                if crate::identity_first::runtime::binding_carries_identity_marker(
-                    binding, identity,
-                ) =>
-            {
-                IdentityMarker::Matches
-            }
-            _ => IdentityMarker::Foreign,
-        },
+        meerkat_mob::SpawnContinuityIntent::DurableIdentity { .. } => IdentityMarker::Foreign,
         _ => IdentityMarker::Absent,
     }
 }

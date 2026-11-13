@@ -18,7 +18,14 @@ export interface AccessFamily {
 export const ACCESS_FAMILIES: readonly AccessFamily[] = [
   { id: "view", label: "View", actions: ["agent.view", "topology.view", "topology.audit", "mob.observe"] },
   { id: "message", label: "Message", actions: ["agent.send", "schedule.manage"] },
-  { id: "lifecycle", label: "Lifecycle", actions: ["agent.spawn", "agent.respawn", "agent.retire", "agent.reset"] },
+  {
+    id: "lifecycle",
+    label: "Lifecycle",
+    actions: [
+      "agent.spawn", "agent.respawn", "agent.retire", "agent.reset",
+      "agent.identity.create", "agent.identity.manage", "agent.identity.remove",
+    ],
+  },
   { id: "tools", label: "Tools", actions: ["agent.tool_grants.manage"] },
   {
     id: "approvals",

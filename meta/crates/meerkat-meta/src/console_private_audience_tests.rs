@@ -1557,9 +1557,12 @@ async fn a_private_member_is_hidden_on_every_read_without_access_configuration()
         assert!(!crate::console_aggregator::timeline_frame_visible_to(
             &bob, frame
         ));
-        assert!(crate::console_aggregator::timeline_frame_visible_to(
-            &alice, frame
-        ));
+        assert_eq!(
+            crate::console_aggregator::timeline_frame_visible_to(&alice, frame),
+            frame.source.member_provenance.is_some(),
+            "the owner reads the frame that carries her member's witness; one with none is \
+             read by an administrator only"
+        );
         let decider = crate::console_aggregator::TimelineFrameDecider::new(bob.clone());
         assert!(!decider.visible(frame));
     }
@@ -1965,8 +1968,8 @@ async fn a_workgraph_goal_aimed_at_a_hidden_member_targets_no_one() -> TestResul
 
 /// A console with no local runtime (sign-in for Alice and Bob, no access
 /// configuration) over an aggregator of a runtime with the worker `alpha`
-/// and Alice's private side chat `alpha-side`, which has one frame the
-/// console captured no provenance for (`PRIVATE-DELTA`).
+/// and Alice's private side chat `alpha-side`, which has one frame that
+/// carries the side chat's witness (`PRIVATE-DELTA`).
 async fn aggregator_only_console(
     mob_id: &str,
 ) -> Result<(tempfile::TempDir, MobRuntime, Router), Box<dyn std::error::Error + Send + Sync>> {
@@ -2001,25 +2004,35 @@ async fn aggregator_only_console(
         ConsoleEventStore::new(),
         Arc::new(crate::console_aggregator::AllowAllConsoleVisibilityPolicy),
     );
+    let side_session = runtime
+        .handle()
+        .get_member(&AgentIdentity::from("alpha-side"))
+        .await?
+        .and_then(|entry| entry.bridge_session_id().map(ToString::to_string))
+        .ok_or("the side chat's session")?;
+    let provenance = aggregator
+        .capture_member_provenance_for_test("agg", "alpha-side", &side_session)
+        .await
+        .ok_or("the owner captures the side chat")?;
     aggregator
         .store()
         .append_if_absent(NewConsoleFrame {
             id: None,
-            dedupe_key: "uncaptured-private".to_string(),
+            dedupe_key: "captured-private".to_string(),
             timestamp_ms: 2_000,
             runtime_key: "agg".to_string(),
             identity: "alpha-side".to_string(),
             conversation_id: Some("alpha-side".to_string()),
-            session_id: None,
+            session_id: Some(side_session),
             kind: "text_delta".to_string(),
             status: ConsoleFrameStatus::Completed,
             payload: json!({ "delta": "PRIVATE-DELTA" }),
             source: ConsoleFrameSource {
-                member_provenance: None,
+                member_provenance: Some(provenance),
                 kind: ConsoleFrameSourceKind::ConsoleEvent,
                 source_cursor: None,
             },
-            source_event_id: Some("uncaptured-private".to_string()),
+            source_event_id: Some("captured-private".to_string()),
             interaction_id: None,
             turn_id: None,
             run_id: None,
@@ -3246,6 +3259,485 @@ async fn mob_check_and_retire_member_answer_a_hidden_member_as_an_absent_one() -
 
 /// The arguments of a daily `meerkat_schedule_create` named `name` aimed at
 /// `target`.
+/// Who is private to a person is said by the member's own roster row, not
+/// by what this process built. With a record of built members that knows
+/// nobody (a member seated and never built here, or the record not yet
+/// read after a start), a shared agent's `mob_check_member` and
+/// `mob_retire_member` of a private member still answer as for a name no
+/// member holds and retire nothing, and the private member's own council
+/// is still refused.
+#[tokio::test]
+async fn per_member_tools_hide_a_private_member_this_process_has_not_built() -> TestResult {
+    const MOB: &str = "private-unbuilt-member";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let overrides = runtime
+        .implicit_delegate_retirement_overrides()
+        .ok_or("the runtime installs the agent mob tools")?;
+    let side = AgentIdentity::from("alpha-side");
+    let row = runtime
+        .handle()
+        .get_member(&side)
+        .await?
+        .ok_or("the private member has a roster row")?;
+    assert!(
+        crate::access::private_owner(&row.labels).is_some(),
+        "its roster row names its person"
+    );
+    // A record that knows no member of the mob.
+    let unread = crate::private_owners::PrivateOwners::default();
+    let check = |member: &str| json!({ "mob_id": MOB, "member_id": member });
+    let answer = |outcome: Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError>,
+                  name: &str| {
+        let text = match outcome {
+            Ok(outcome) => format!("ok: {outcome:?}"),
+            Err(error) => format!("error: {}", error.to_transcript_content()),
+        };
+        text.replace(name, "<member>")
+    };
+
+    let shared = crate::mob_handle_runtime::agent_mob_tool_wrapper_as_member_with_owners_for_test(
+        OwnedMemberTools::new(runtime.handle(), "alpha"),
+        overrides.clone(),
+        &runtime,
+        member_session(&runtime, "alpha").await?,
+        unread.clone(),
+    );
+    for tool in ["mob_check_member", "mob_retire_member"] {
+        let hidden = answer(
+            agent_tool_call(&shared, tool, check("alpha-side")).await,
+            "alpha-side",
+        );
+        let absent = answer(
+            agent_tool_call(&shared, tool, check("alpha-gone")).await,
+            "alpha-gone",
+        );
+        assert_eq!(
+            hidden, absent,
+            "a shared agent's {tool} of a private member answers as for an absent member"
+        );
+    }
+    assert!(
+        runtime.handle().get_member(&side).await?.is_some(),
+        "the private member was not retired"
+    );
+
+    let tools = OwnedMemberTools::new(runtime.handle(), "alpha-side");
+    let side_chat =
+        crate::mob_handle_runtime::agent_mob_tool_wrapper_as_member_with_owners_for_test(
+            tools.clone(),
+            overrides,
+            &runtime,
+            member_session(&runtime, "alpha-side").await?,
+            unread,
+        );
+    let council = json!({
+        "question": "Which of us remembers the code word?",
+        "participants": ["alpha"],
+    });
+    match agent_tool_call(&side_chat, "council", council).await {
+        Err(meerkat_core::ToolError::PolicyDenied { denial }) => {
+            assert_eq!(denial.code, "private_member_council", "{}", denial.message);
+        }
+        other => panic!("a private member's council is refused as a policy denial: {other:?}"),
+    }
+    assert!(
+        tools.calls().is_empty(),
+        "the council tool never ran for the private member"
+    );
+    Ok(())
+}
+
+/// The member list an agent's mob tools answer keeps to the same audience
+/// as its per-member tools: with manage scope over the mob, an agent's
+/// `mob_list_members` lists no member private to a person the agent does
+/// not act for (the row is absent, not redacted) and still lists every
+/// other member; the private member's own list names it. The host's own
+/// reads are unchanged.
+#[tokio::test]
+async fn a_member_list_names_no_private_member_the_caller_does_not_act_for() -> TestResult {
+    const MOB: &str = "private-member-list";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    seeded_member(&runtime, "worker", "beta", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let handle = runtime.handle();
+    let side = AgentIdentity::from("alpha-side");
+    assert!(
+        handle.get_member(&side).await?.is_some(),
+        "the host reads the private member"
+    );
+
+    // The names `member`'s own mob tools list, with manage scope over the mob.
+    type Listed = Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>>;
+    let listed = async |member: &str| -> Listed {
+        let authority =
+            meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()?;
+        let authority = meerkat_runtime::mob_operator_authority::grant_manage_mob(
+            &authority,
+            handle.mob_id().as_str(),
+            handle.live_incarnation(),
+        )?;
+        let session = member_session(&runtime, member).await?;
+        let surface: Arc<dyn meerkat_core::AgentToolDispatcher> =
+            Arc::new(meerkat_mob_mcp::AgentMobToolSurface::new(
+                runtime
+                    .agent_mob_mcp_state()
+                    .ok_or("the runtime installs the agent mob tools")?,
+                None,
+                authority,
+                "gpt-5.5".to_string(),
+                session.clone(),
+                None,
+                None,
+                None,
+            ));
+        let tools = surface
+            .bind_ops_lifecycle(
+                Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                session,
+            )
+            .map_err(|error| format!("bind the tool lifecycle: {error:?}"))?
+            .into_dispatcher();
+        let outcome = agent_tool_call(&tools, "mob_list_members", json!({ "mob_id": MOB }))
+            .await
+            .map_err(|error| error.to_transcript_content())?;
+        let payload: Value = serde_json::from_str(&outcome.result.text_content())?;
+        let names: Vec<String> = payload["members"]
+            .as_array()
+            .ok_or("the list answers members")?
+            .iter()
+            .filter_map(|entry| entry["agent_identity"].as_str().map(str::to_owned))
+            .collect();
+        Ok(names)
+    };
+    let names = |member: &str| member.to_owned();
+
+    let shared = listed("alpha").await?;
+    assert!(
+        shared.contains(&names("alpha")) && shared.contains(&names("beta")),
+        "a shared agent is listed the shared members: {shared:?}"
+    );
+    assert!(
+        !shared.contains(&names("alpha-side")),
+        "a shared agent is listed no member private to a person: {shared:?}"
+    );
+    let private = listed("alpha-side").await?;
+    assert!(
+        private.contains(&names("alpha-side")) && private.contains(&names("beta")),
+        "the private member is listed itself and the shared members: {private:?}"
+    );
+    Ok(())
+}
+
+/// Meerkat's own agent mob tools for `member` of `runtime`, holding the
+/// capability to create mobs and manage scope over the mob, and the session
+/// they are bound to.
+async fn agent_mob_tools_of(
+    runtime: &MobRuntime,
+    member: &str,
+) -> Result<
+    (
+        Arc<dyn meerkat_core::AgentToolDispatcher>,
+        meerkat_core::types::SessionId,
+    ),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let handle = runtime.handle();
+    let authority = meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()?;
+    let authority = meerkat_runtime::mob_operator_authority::grant_manage_mob(
+        &authority,
+        handle.mob_id().as_str(),
+        handle.live_incarnation(),
+    )?;
+    let session = member_session(runtime, member).await?;
+    let surface: Arc<dyn meerkat_core::AgentToolDispatcher> =
+        Arc::new(meerkat_mob_mcp::AgentMobToolSurface::new(
+            runtime
+                .agent_mob_mcp_state()
+                .ok_or("the runtime installs the agent mob tools")?,
+            None,
+            authority,
+            "gpt-5.5".to_string(),
+            session.clone(),
+            None,
+            None,
+            None,
+        ));
+    let tools = surface
+        .bind_ops_lifecycle(
+            Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+            session.clone(),
+        )
+        .map_err(|error| format!("bind the tool lifecycle: {error:?}"))?
+        .into_dispatcher();
+    Ok((tools, session))
+}
+
+/// One tool call's answer within a minute, as text with the member name
+/// `member` masked: the answers for two names compare equal when they
+/// differ in nothing but the name.
+async fn masked_tool_answer(
+    call: impl std::future::Future<
+        Output = Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError>,
+    >,
+    member: &str,
+) -> String {
+    match tokio::time::timeout(std::time::Duration::from_mins(1), call).await {
+        Ok(Ok(outcome)) => format!("ok: {}", outcome.result.text_content()),
+        Ok(Err(error)) => format!("error: {}", error.to_transcript_content()),
+        Err(_) => "no answer within a minute".to_string(),
+    }
+    .replace(member, "<member>")
+}
+
+/// A shared member's agent, with the capability to create mobs and manage
+/// scope over the mob, names a member private to a person it does not act
+/// for as a council participant and as either end of a wire: `council`,
+/// `mob_wire`, `mob_unwire`, `wire_members` and `unwire_members` each
+/// answer exactly as for a name no member holds, and the private member's
+/// wiring is unchanged.
+#[tokio::test]
+async fn council_and_wiring_tools_answer_a_private_member_as_an_absent_one() -> TestResult {
+    const MOB: &str = "private-council-wire";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    seeded_member(&runtime, "worker", "beta", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let side = AgentIdentity::from("alpha-side");
+    let wiring_of_side =
+        async || -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(runtime
+                .handle()
+                .get_member(&side)
+                .await?
+                .ok_or("the private member is seated")?
+                .wired_to
+                .iter()
+                .map(ToString::to_string)
+                .collect())
+        };
+    let wiring_before = wiring_of_side().await?;
+    let (surface, session) = agent_mob_tools_of(&runtime, "alpha").await?;
+    let tools = crate::mob_handle_runtime::agent_mob_tool_wrapper_as_member_for_test(
+        surface,
+        runtime
+            .implicit_delegate_retirement_overrides()
+            .ok_or("the runtime installs the agent mob tools")?,
+        &runtime,
+        session.clone(),
+    );
+
+    let council = |member: &str| {
+        json!({
+            "council_id": format!("private-{member}"),
+            "topic": "What were you asked so far?",
+            "participants": [{ "mob_id": MOB, "member_id": member, "role": "witness" }],
+            "max_rounds": 1,
+        })
+    };
+    let absent = masked_tool_answer(
+        agent_tool_call(&tools, "council", council("alpha-gone")),
+        "alpha-gone",
+    )
+    .await;
+    assert!(
+        absent.starts_with("error:"),
+        "a participant no member holds is refused: {absent}"
+    );
+    let hidden = masked_tool_answer(
+        agent_tool_call(&tools, "council", council("alpha-side")),
+        "alpha-side",
+    )
+    .await;
+    assert_eq!(
+        hidden, absent,
+        "a council naming a private member answers as for a name no member holds"
+    );
+
+    // Each end of a wire: the private member beside a name no member holds.
+    let ends = [
+        (
+            ("beta", "alpha-side"),
+            ("beta", "alpha-gone"),
+            "as the peer",
+        ),
+        (
+            ("alpha-side", "beta"),
+            ("alpha-gone", "beta"),
+            "as the member",
+        ),
+    ];
+    for tool in ["mob_wire", "mob_unwire"] {
+        let args = |(member, peer): (&str, &str)| json!({ "mob_id": MOB, "member_id": member, "peer": { "local": peer } });
+        for (private, gone, position) in ends {
+            let hidden =
+                masked_tool_answer(agent_tool_call(&tools, tool, args(private)), "alpha-side")
+                    .await;
+            let absent =
+                masked_tool_answer(agent_tool_call(&tools, tool, args(gone)), "alpha-gone").await;
+            assert!(
+                absent.starts_with("error:"),
+                "{tool}: a name no member holds is refused: {absent}"
+            );
+            assert_eq!(
+                hidden, absent,
+                "{tool}: a private member named {position} answers as a name no member holds"
+            );
+        }
+    }
+    let member_tools = runtime.handle().member_operator_tools_for_test()?;
+    for tool in ["wire_members", "unwire_members"] {
+        let call = async |(member, peer): (&str, &str)| {
+            let args = serde_json::value::RawValue::from_string(
+                json!({ "member_id": member, "peer_member_id": peer }).to_string(),
+            )
+            .map_err(|error| meerkat_core::ToolError::invalid_arguments(tool, error.to_string()))?;
+            member_tools
+                .dispatch_with_context(
+                    meerkat_core::types::ToolCallView {
+                        id: "member-tool-call",
+                        name: tool,
+                        args: &args,
+                    },
+                    &meerkat_core::ToolDispatchContext::default()
+                        .with_runtime_identity(session.clone(), None),
+                )
+                .await
+        };
+        for (private, gone, position) in ends {
+            let hidden = masked_tool_answer(call(private), "alpha-side").await;
+            let absent = masked_tool_answer(call(gone), "alpha-gone").await;
+            assert!(
+                absent.starts_with("error:"),
+                "{tool}: a name no member holds is refused: {absent}"
+            );
+            assert_eq!(
+                hidden, absent,
+                "{tool}: a private member named {position} answers as a name no member holds"
+            );
+        }
+    }
+    assert_eq!(
+        wiring_of_side().await?,
+        wiring_before,
+        "the private member's wiring is unchanged"
+    );
+    Ok(())
+}
+
+/// Meerkat's own `mob_check_member` and `mob_retire_member` keep to the
+/// audience without Meta's wrapper around them: with manage scope, a shared
+/// member's agent naming a member private to a person it does not act for
+/// is answered exactly as for a name no member holds, and the private
+/// member stays seated.
+#[tokio::test]
+async fn meerkats_check_and_retire_tools_answer_a_private_member_as_an_absent_one() -> TestResult {
+    const MOB: &str = "private-check-unwrapped";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let (tools, _session) = agent_mob_tools_of(&runtime, "alpha").await?;
+    let member = |member: &str| json!({ "mob_id": MOB, "member_id": member });
+
+    for tool in ["mob_check_member", "mob_retire_member"] {
+        let absent = masked_tool_answer(
+            agent_tool_call(&tools, tool, member("alpha-gone")),
+            "alpha-gone",
+        )
+        .await;
+        let hidden = masked_tool_answer(
+            agent_tool_call(&tools, tool, member("alpha-side")),
+            "alpha-side",
+        )
+        .await;
+        assert_eq!(
+            hidden, absent,
+            "{tool}: a private member answers as for a name no member holds"
+        );
+    }
+    assert!(
+        runtime
+            .handle()
+            .get_member(&AgentIdentity::from("alpha-side"))
+            .await?
+            .is_some(),
+        "the private member stays seated"
+    );
+    Ok(())
+}
+
+/// The wiring a member list shows of a shared member names no member
+/// private to a person the caller does not act for: with the host's wire
+/// between a shared member and a private one in place, a shared agent's
+/// `mob_list_members` lists the shared member without that peer, and the
+/// private member's own list names it.
+#[tokio::test]
+async fn a_member_list_names_no_private_member_in_a_shared_members_wiring() -> TestResult {
+    const MOB: &str = "private-list-wiring";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    seeded_member(&runtime, "worker", "beta", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    runtime
+        .handle()
+        .wire(
+            AgentIdentity::from("beta"),
+            AgentIdentity::from("alpha-side"),
+        )
+        .await?;
+
+    type Peers = Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>>;
+    let peers_of_beta = async |member: &str| -> Peers {
+        let (tools, _session) = agent_mob_tools_of(&runtime, member).await?;
+        let outcome = agent_tool_call(&tools, "mob_list_members", json!({ "mob_id": MOB }))
+            .await
+            .map_err(|error| error.to_transcript_content())?;
+        let payload: Value = serde_json::from_str(&outcome.result.text_content())?;
+        let row = payload["members"]
+            .as_array()
+            .ok_or("the list answers members")?
+            .iter()
+            .find(|entry| entry["agent_identity"] == "beta")
+            .ok_or("the shared member is listed")?
+            .clone();
+        Ok(row["wired_to"]
+            .as_array()
+            .ok_or("the row carries its wiring")?
+            .iter()
+            .filter_map(|peer| peer.as_str().map(str::to_owned))
+            .collect())
+    };
+
+    let shared = peers_of_beta("alpha").await?;
+    assert!(
+        !shared.contains(&"alpha-side".to_owned()),
+        "a shared agent reads no private member in a shared member's wiring: {shared:?}"
+    );
+    let private = peers_of_beta("alpha-side").await?;
+    assert!(
+        private.contains(&"alpha-side".to_owned()),
+        "the private member reads itself in the shared member's wiring: {private:?}"
+    );
+    Ok(())
+}
+
 fn daily_schedule(name: &str, target: Value) -> Value {
     json!({
         "name": name,

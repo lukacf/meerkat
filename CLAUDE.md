@@ -716,7 +716,7 @@ and its CI must be green before a release tag (`require_ci_green`):
   and `wasm-timers` to the push (`example_web_wasm` false, named in
   `deferred_to_push`): the cold wasm build of the runtime's closure alone
   took about 20 minutes. On a push or dispatch `example-web` gets 50 minutes,
-  `integration` 70 and `mcp-confinement-positive` 50 (a pull request keeps
+  `integration` 110 and `mcp-confinement-positive` 50 (a pull request keeps
   25, 30 and 40), `feature-check` 60, `closure-check` 90 (120 for a
   product's all-target part), `clippy` and
   `closure-tests` 120 (a pull request's Clippy 90) and `main-unit` 150:

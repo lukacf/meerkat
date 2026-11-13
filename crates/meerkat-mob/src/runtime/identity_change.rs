@@ -346,7 +346,10 @@ impl IdentityArchiveChange {
 /// identity's row takes the new spec at its next revision, in the change's
 /// store transaction, and its member is changed exactly as the declared
 /// apply changes a roster-owned identity's member for the same change of
-/// spec: a descriptive change keeps it, a runtime-mode change restamps it
+/// spec, a label change excepted: a descriptive change keeps it, a label
+/// change restamps it with the row's labels on its own session (a
+/// roster-owned member is kept: the declared apply stores no labels), a
+/// runtime-mode change restamps it
 /// on its own session, and a profile change moves it to the new profile on
 /// its own session (the store-owned identity's migration from its current
 /// profile is declared by the update itself, and kept in its row until the
@@ -2174,15 +2177,23 @@ pub(super) fn declared_entry_receipt_outcome(
 }
 
 /// A store-owned update's row, written at the change's final sink: the
-/// identity's current row (`current`) at its next revision with `spec`, and
+/// identity's current row (`current`) at its next revision with `spec`,
 /// `pending_role_migration`, the migration the update declares, kept until
-/// the restamp commits; and, when the row's spec digest is not the one the
-/// change was decided against, the stale refusal (with the current digest
-/// and revision) MobMachine's admission answers.
+/// the restamp commits, and its owed label restamp; and, when the row's
+/// spec digest is not the one the change was decided against, the stale
+/// refusal (with the current digest and revision) MobMachine's admission
+/// answers.
+///
+/// The row owes its seat a label restamp when it owed one already, or when
+/// `seat_trails`: a member holds the identity and its last seat row carries
+/// other labels than `spec`'s. The update's member step then restamps an
+/// idle member, and a seat row that carries the row's labels lets the owed
+/// restamp go; a member that holds work keeps it owed.
 pub(super) fn store_owned_update_row(
     spec: &CreatedIdentitySpec,
     expected_spec_digest: &str,
     pending_role_migration: Option<crate::identity::PendingRoleMigration>,
+    seat_trails: bool,
     current: Option<crate::identity::CreatedIdentityObservation>,
     roster_owned: bool,
 ) -> Result<(CreatedIdentityRowWrite, Option<IdentityChangeRefusal>), MobError> {
@@ -2217,8 +2228,9 @@ pub(super) fn store_owned_update_row(
     let expected = CreatedIdentityRowExpectation::Current {
         authority_digest: row.authority_digest.clone(),
     };
+    let label_restamp_owed = row.label_restamp_owed || seat_trails;
     let record = row
-        .updated(spec.clone(), pending_role_migration)
+        .updated(spec.clone(), pending_role_migration, label_restamp_owed)
         .map_err(invalid)?;
     Ok((CreatedIdentityRowWrite { record, expected }, stale))
 }
@@ -2356,11 +2368,12 @@ pub(super) fn entry_change_row(
     };
     Ok(match (verdict, current) {
         // The removal ends the identity's owned edges with it: its
-        // tombstone owns none.
+        // tombstone owns none, and owes no seat a label restamp.
         (Verdict::Retiring | Verdict::Removed, Some(row)) => {
             let written = row
                 .clone()
                 .with_owned_edges(Vec::new())
+                .and_then(|written| written.with_label_restamp_owed(false))
                 .and_then(|written| written.with_presence(CreatedIdentityPresence::Removed))
                 .and_then(|written| written.with_removal(removal()))
                 .map_err(invalid)?;
@@ -2386,10 +2399,15 @@ pub(super) fn entry_change_row(
             .map_err(invalid)?,
             expected: CreatedIdentityRowExpectation::Absent,
         }),
+        // An archive retires the identity's member: no seat is owed a
+        // label restamp, and its unarchive seats the row's labels.
         (Verdict::Archiving | Verdict::Archived, Some(row)) => {
             let written = row
                 .clone()
-                .with_presence(CreatedIdentityPresence::Archived { archived_session })
+                .with_label_restamp_owed(false)
+                .and_then(|written| {
+                    written.with_presence(CreatedIdentityPresence::Archived { archived_session })
+                })
                 .map_err(invalid)?;
             Some(updated(row, written))
         }
@@ -3638,7 +3656,8 @@ impl super::MobHandle {
     /// embodied; a placed or externally bound identity is hosted on its
     /// first use; and one whose host holds its creation (`held_creation`)
     /// awaits it while it was never created. Once the member holds the
-    /// spec's profile, the row lets its role migration go.
+    /// spec's profile, the row lets its role migration go, and once a seat
+    /// row carries the spec's labels, its owed label restamp.
     pub(super) async fn seat_store_owned_from_spec(
         &self,
         identity: &AgentIdentity,
@@ -3661,8 +3680,8 @@ impl super::MobHandle {
 
     /// [`Self::seat_store_owned_from_spec`], answering the seat as the
     /// declared apply answers it, a failed or deferred seat included; an
-    /// error only when the apply itself could not run. The row lets its
-    /// role migration go once the member holds the spec's profile.
+    /// error only when the apply itself could not run. The row lets go of
+    /// what the seat settles ([`Self::settle_store_owned_restamps`]).
     pub(super) async fn seat_store_owned_outcome(
         &self,
         identity: &AgentIdentity,
@@ -3697,9 +3716,52 @@ impl super::MobHandle {
                 "the seat of store-owned '{identity}' was not answered"
             ))
         })?;
-        self.settle_store_owned_role_migration(identity).await?;
+        self.settle_store_owned_restamps(identity).await?;
         Ok(seat)
     }
+}
+
+/// What a build or a restamp of a store-owned member reads of its
+/// identity's row.
+pub(super) enum StoreOwnedSeatRow {
+    /// The row's labels, and whether the row records that its seat is owed
+    /// a label restamp.
+    Row {
+        labels: BTreeMap<String, String>,
+        label_restamp_owed: bool,
+    },
+    /// The store holds no row of the identity, or one with no spec.
+    Absent,
+    /// The store holds a row of the identity this build cannot read.
+    Unreadable,
+}
+
+/// One point read of `identity`'s row in `store`, the mob's identity store
+/// ([`StoreOwnedSeatRow`]). A read the store cannot serve is its error,
+/// never a row that is absent.
+pub(super) async fn store_owned_seat_row(
+    store: &dyn crate::store::MobIdentityMemberStore,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+) -> Result<StoreOwnedSeatRow, MobError> {
+    Ok(
+        match store.observe_created_identity(mob_id, identity).await? {
+            Some(crate::identity::CreatedIdentityObservation::Created(row)) => {
+                let label_restamp_owed = row.label_restamp_owed;
+                match row.spec {
+                    Some(spec) => StoreOwnedSeatRow::Row {
+                        labels: spec.labels,
+                        label_restamp_owed,
+                    },
+                    None => StoreOwnedSeatRow::Absent,
+                }
+            }
+            Some(crate::identity::CreatedIdentityObservation::Unreadable { .. }) => {
+                StoreOwnedSeatRow::Unreadable
+            }
+            None => StoreOwnedSeatRow::Absent,
+        },
+    )
 }
 
 impl super::MobHandle {
@@ -3711,13 +3773,60 @@ impl super::MobHandle {
     /// revision and the change's receipt in one store transaction; the
     /// verdict is then realized as a roster-owned identity's change of the
     /// same spec is ([`IdentityUpdateOutcome::applied`]). A descriptive
-    /// change (display name, labels, context, instructions) keeps the member
+    /// change (display name, context, instructions) keeps the member
     /// and is in the row at once: a seat whose session no build created yet
     /// takes the new context and instructions at its first build; otherwise
     /// the seat keeps its recorded build inputs, as a roster-owned
-    /// identity's does, and its labels change when it is seated again or
-    /// respawned with them ([`super::MemberRespawn::with_labels`], counted
-    /// in `seats_stale` until then). A runtime-mode change is a restamp on
+    /// identity's does. A label change is in the row at once and restamps
+    /// the seated member with the row's labels on its own session
+    /// ([`super::DeclaredEntryOutcome::Restamped`]; the same-session respawn
+    /// with [`super::MemberRespawn::with_labels`]): every build of a
+    /// store-owned member must carry exactly its seat's labels
+    /// ([`super::MemberBuildPreparer::prepare_store_owned_seat`]), and what
+    /// decides on a member's labels reads its seat. The
+    /// member keeps its identity entry, session, conversation and edges;
+    /// nothing is built or woken, and no kickoff runs again. A member that
+    /// holds work is not interrupted: the update commits and answers
+    /// [`super::DeclaredEntryOutcome::Deferred`]. A label update of a busy
+    /// member is recorded in its row, and the mob's roster reads the row's
+    /// labels ([`Self::get_member`] and the member lists) from the step
+    /// that commits the row, whatever the member step then answers and
+    /// whether or not this call's caller is still there. The running
+    /// session takes them at its next build (a key the row dropped stays
+    /// in a resumed session's own peer metadata, as at every resume): the
+    /// member keeps its generation, fence and session, and no seat row is
+    /// written. The same holds when the member step fails
+    /// ([`super::DeclaredEntryOutcome::Failed`]) and for a member a
+    /// same-session successor cannot serve (a placed one, one wired to a
+    /// placed member, one on a session service that keeps no durable
+    /// sessions), whose update answers
+    /// [`super::DeclaredEntryOutcome::Kept`]; its release is tried before
+    /// the respawn that is then refused (in these three cases it releases
+    /// nothing; a member whose session cannot be kept is released and then
+    /// kept), and its restamp stays owed. The roster is not the
+    /// journal: the member's last seat row keeps the labels it was seated
+    /// with until its restamp, and so do the readers of that row, the
+    /// binding journal's labels and `seats_stale`
+    /// ([`Self::identity_record_census`]).
+    ///
+    /// The restamp stays owed, and the row records it
+    /// (`CreatedIdentityRecord::label_restamp_owed`): the update's commit
+    /// writes it, in its own transaction, when a member holds the identity
+    /// and its last seat row carries other labels than the updated row,
+    /// and the row lets it go once a seat row carries the row's labels. So
+    /// an update of an idle identity makes its seat equal its row, whatever
+    /// its seat carried. A retry of the update (it replays) or the
+    /// identity's next update carries the restamp out once the member is
+    /// idle; a retry while the member still holds work restamps nothing
+    /// and leaves it owed. A respawn with the row's labels, a rotation and
+    /// a reset settle it too. While it is owed, a start seats the row's
+    /// labels on the member's roster entry and a build of the member is
+    /// compared with the row's labels, so an update that was answered
+    /// never leaves its member refused its build, in this process or after
+    /// a restart; a build writes no seat row and settles nothing. A seat
+    /// whose row owes no restamp is left alone by a start and compared
+    /// with its own labels at a build. A runtime-mode
+    /// change is a restamp on
     /// the member's own session; a profile change is the declared migration
     /// from the member's current role, kept in the row until the restamp
     /// commits (a crash before it is carried out by the next start); either
@@ -3842,13 +3951,14 @@ impl super::MobHandle {
             Some(DeclaredChangeAnswer::Committed(receipt)) => {
                 let applied = outcome.entries.remove(&spec.identity);
                 // The restamp committed, or the member already holds the
-                // profile: the row lets the migration go.
-                if let Err(error) = self.settle_store_owned_role_migration(&spec.identity).await {
+                // profile and a seat row carries the labels: the row lets
+                // go of what is settled.
+                if let Err(error) = self.settle_store_owned_restamps(&spec.identity).await {
                     tracing::warn!(
                         mob_id = %self.mob_id(),
                         agent_identity = %spec.identity,
                         error = %error,
-                        "a store-owned update's row kept its role migration"
+                        "a store-owned update's row kept what its restamps had settled"
                     );
                 }
                 Ok(IdentityUpdateOutcome {
@@ -3892,11 +4002,17 @@ impl super::MobHandle {
             .map(|profile| ProfileName::from(profile.as_str()))
     }
 
-    /// Let a store-owned identity's row go of the role migration it keeps,
-    /// once the member holds the row's profile (its restamp committed): a
-    /// follow-up write of the row, checked against the row read here, that
-    /// a newer change of the row supersedes.
-    pub(super) async fn settle_store_owned_role_migration(
+    /// Let a store-owned identity's row go of what its member's seat has
+    /// settled, each by observation: the role migration it keeps, once the
+    /// member holds the row's profile (its restamp committed); and its owed
+    /// label restamp, once the member's last seat row carries the row's
+    /// labels (a label, runtime-mode or role restamp, a respawn, a rotation
+    /// or a seat wrote that row). One follow-up write of the row, checked
+    /// against the row read here, that a newer change of the row
+    /// supersedes. A build writes no seat row, so no build settles
+    /// anything; an identity no member holds keeps what it owes until its
+    /// next seat.
+    pub(super) async fn settle_store_owned_restamps(
         &self,
         identity: &AgentIdentity,
     ) -> Result<(), MobError> {
@@ -3910,20 +4026,34 @@ impl super::MobHandle {
         else {
             return Ok(());
         };
-        let Some(profile) = row.spec.as_ref().map(|spec| spec.profile.clone()) else {
+        let Some(spec) = row.spec.as_ref() else {
             return Ok(());
         };
-        if row.pending_role_migration.is_none()
-            || self.seated_role(identity).as_ref() != Some(&profile)
-        {
+        let role_settled = row.pending_role_migration.is_some()
+            && self.seated_role(identity).as_ref() == Some(&spec.profile);
+        let labels_settled = row.label_restamp_owed
+            && self
+                .roster
+                .read()
+                .await
+                .seat_row_labels(identity)
+                .is_some_and(|seat| *seat == spec.labels);
+        if !role_settled && !labels_settled {
             return Ok(());
         }
         let expected = CreatedIdentityRowExpectation::Current {
             authority_digest: row.authority_digest.clone(),
         };
-        let record = row.with_pending_role_migration(None).map_err(|error| {
+        let invalid = |error: crate::identity::IdentityIntentError| {
             MobError::Internal(format!("a store-owned identity's row: {error}"))
-        })?;
+        };
+        let mut record = row;
+        if role_settled {
+            record = record.with_pending_role_migration(None).map_err(invalid)?;
+        }
+        if labels_settled {
+            record = record.with_label_restamp_owed(false).map_err(invalid)?;
+        }
         store
             .settle_created_identity_row(&CreatedIdentityRowWrite { record, expected })
             .await?;
@@ -3932,13 +4062,17 @@ impl super::MobHandle {
 
     /// Declare a store-owned identity again from its row's spec, under
     /// created custody, through the declared apply's own verdicts: what an
-    /// update's restamp left owed (a crash, or a member busy at the update)
-    /// is carried out, with the migration from the role its member holds,
-    /// and nothing is written when the member already matches its spec. The
-    /// row then lets its role migration go once the member holds its
-    /// profile. An identity no member holds, an archived one and one
-    /// awaiting its host's preparation are left as they are: their seat
-    /// takes the spec.
+    /// update's member step left owed is carried out once the member is
+    /// idle. That is the runtime-mode restamp or the role move a crash, a
+    /// dropped caller or a busy member prevented (with the migration from
+    /// the role its member holds), and the label restamp the row records
+    /// as owed (`CreatedIdentityRecord::label_restamp_owed`). A member that
+    /// still holds work is left as it is and keeps what it is owed; a
+    /// member that matches its row, with nothing owed, is written nothing.
+    /// The row then lets go of what the member's seat settled
+    /// ([`Self::settle_store_owned_restamps`]). An identity no member
+    /// holds, an archived one and one awaiting its host's preparation are
+    /// left as they are: their seat takes the spec.
     pub(super) async fn redeclare_store_owned_identity(
         &self,
         identity: &AgentIdentity,
@@ -3976,6 +4110,30 @@ impl super::MobHandle {
         {
             return Err(error);
         }
-        self.settle_store_owned_role_migration(identity).await
+        self.settle_store_owned_restamps(identity).await
+    }
+
+    /// [`Self::settle_store_owned_restamps`] after a seat row this handle
+    /// wrote outside an update (a respawn, a rotation), for a store-owned
+    /// identity only: one read of its row, and a write only when something
+    /// is let go. Never fails its caller: what it could not let go stays
+    /// recorded, and the identity's next update, retry or seat settles it.
+    pub(super) async fn settle_store_owned_seat_row(&self, identity: &AgentIdentity) {
+        if self.identity_member.is_none()
+            || !super::created_identity::host_composes_seat(
+                &self.machine_state_watch_rx.borrow(),
+                identity,
+            )
+        {
+            return;
+        }
+        if let Err(error) = self.settle_store_owned_restamps(identity).await {
+            tracing::warn!(
+                mob_id = %self.mob_id(),
+                agent_identity = %identity,
+                error = %error,
+                "a store-owned identity's row kept what its new seat row had settled"
+            );
+        }
     }
 }

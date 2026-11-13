@@ -285,6 +285,10 @@ pub struct Timeouts {
     pub profile: u64,
     /// A remove.
     pub remove: u64,
+    /// An archive or an unarchive.
+    pub archive: u64,
+    /// An adoption.
+    pub adopt: u64,
     /// The largest timeout.
     pub max: u64,
 }
@@ -300,6 +304,8 @@ impl Timeouts {
             ChangeClass::Authority => self.authority,
             ChangeClass::Profile => self.profile,
             ChangeClass::Remove => self.remove,
+            ChangeClass::Archive => self.archive,
+            ChangeClass::Adopt => self.adopt,
         }
     }
 }
@@ -470,6 +476,65 @@ impl IdentityCreationPolicy {
         &self.approval
     }
 
+    /// Refuse what a launch cannot name in this release: the approval
+    /// outcome `notify`, for which no notice reaches an approver, the
+    /// outcome `review`, for which no reviewer decides, and the preparation
+    /// `constructed`, whose held construction no method of this release
+    /// asks for or activates. Each would otherwise do less than it says:
+    /// the refusal names the policy path and what a host writes instead.
+    /// The preparation modes `none` and `required` are the ones served (the
+    /// host settles a required preparation with
+    /// `meta/identity/settle_preparation`); any other mode is refused, so a
+    /// mode added later is not served by default.
+    pub fn check_served(&self) -> Result<(), PolicyRefusal> {
+        let refused = |path: String, feature: &str| {
+            refusal(
+                path,
+                PolicyRefusalKind::Unsupported {
+                    feature: feature.to_owned(),
+                },
+            )
+        };
+        if let Some((profile, rule)) = self.preparation.iter().find(|(_, rule)| {
+            !matches!(rule.mode, PreparationMode::None | PreparationMode::Required)
+        }) {
+            return Err(refused(
+                format!("preparation.{profile}.mode"),
+                &format!(
+                    "the preparation {} (no method of this release holds or activates a \
+                     construction, so an agent of the profile would wait for it without end: \
+                     write required, which the host settles with \
+                     meta/identity/settle_preparation)",
+                    rule.mode.token()
+                ),
+            ));
+        }
+        let not_served = |kind: ApprovalKind| match kind {
+            ApprovalKind::Notify => Some(
+                "the outcome notify (no notice reaches an approver in this release: write \
+                 allow, whose consent reads back from the agent's record and from its \
+                 operation, or require_approval)",
+            ),
+            ApprovalKind::Review => Some(
+                "the outcome review (no reviewer decides in this release: write \
+                 require_approval, or review in the host's own code before it asks under allow)",
+            ),
+            _ => None,
+        };
+        for (index, rule) in self.approval.rules.iter().enumerate() {
+            if let Some(feature) = not_served(rule.outcome.kind) {
+                return Err(refused(
+                    format!("approval.rules[{index}].outcome.kind"),
+                    feature,
+                ));
+            }
+        }
+        if let Some(feature) = not_served(self.approval.default.kind) {
+            return Err(refused("approval.default.kind".to_owned(), feature));
+        }
+        Ok(())
+    }
+
     /// Check the policy against the profiles of the mob definition: every
     /// profile a preparation or a selector names must be one of them. A
     /// misspelled one would seat that profile's identities unprepared, or
@@ -567,6 +632,10 @@ pub fn resolve_launch_policy(
         (None, RuntimeOptionPolicy::Disabled) => return Ok(None),
     };
     policy.check_mob_profiles(profiles)?;
+    // What no launch of this release serves is refused first, on every
+    // host, so the refusal a host reads names what it can write instead. A
+    // construction also needs a native host, which is asked after it.
+    policy.check_served()?;
     if !has_native_host && let Some(profile) = policy.constructed_profile() {
         return Err(PolicyRefusal::new(
             format!("preparation.{profile}"),
@@ -1182,6 +1251,8 @@ fn timeouts(config: &TimeoutsConfig) -> Result<Timeouts, PolicyRefusal> {
         ("authority", config.authority),
         ("profile", config.profile),
         ("remove", config.remove),
+        ("archive", config.archive),
+        ("adopt", config.adopt),
     ] {
         if !(1..=config.max).contains(&value) {
             return Err(refusal(
@@ -1202,6 +1273,8 @@ fn timeouts(config: &TimeoutsConfig) -> Result<Timeouts, PolicyRefusal> {
         authority: config.authority,
         profile: config.profile,
         remove: config.remove,
+        archive: config.archive,
+        adopt: config.adopt,
         max: config.max,
     })
 }

@@ -183,6 +183,9 @@ async fn create(
     let trigger = trigger_param(call.params)?.ok_or_else(|| invalid("trigger is required"))?;
     let name = optional_string(call.params, "name")?;
     let target = sendable_target(call, schedules, identity).await?;
+    refuse_archived(call, &target).await?;
+    #[cfg(test)]
+    schedules.wait_at_write_hold().await;
     let send = ConsoleScheduledSend::new(target, content, sender, now_epoch_seconds());
     caller_current(call)?;
     let schedule = schedules
@@ -201,7 +204,73 @@ async fn create(
         })
         .await
         .map_err(schedule_error)?;
+    let schedule = paused_if_archived_since(call, schedules, &send.identity, schedule).await;
     Ok(schedule_item(&schedules.service, &schedule, &send, true).await)
+}
+
+/// Refuse a create or an update for an agent Core holds archived, as a send
+/// to it is refused (`identity_archived`): an archive pauses the agent's
+/// schedules, and nothing would pause one written afterwards. A pause, a
+/// resume and a delete by name stay. An entry Core could not read refuses
+/// too, retryable: it is never read as "not archived".
+async fn refuse_archived(call: &ScheduleCall<'_>, identity: &str) -> Result<(), JsonRpcError> {
+    match archived_refusal(call, identity).await {
+        Ok(None) => Ok(()),
+        Ok(Some(refusal)) | Err(refusal) => Err(crate::rpc::identity_json_rpc_error(&refusal)),
+    }
+}
+
+/// The identity runtime's refusal of a schedule for `identity` while Core
+/// holds it archived; `Ok(None)` for any other agent, and on a console with
+/// no identity runtime, whose agents are never archived.
+async fn archived_refusal(
+    call: &ScheduleCall<'_>,
+    identity: &str,
+) -> Result<
+    Option<crate::identity_first::IdentityRuntimeError>,
+    crate::identity_first::IdentityRuntimeError,
+> {
+    let Some(identity_runtime) = call.identity_runtime else {
+        return Ok(None);
+    };
+    let Ok(parsed) = crate::identity_first::AgentIdentity::parse(identity) else {
+        return Ok(None);
+    };
+    identity_runtime.archived_refusal(&parsed).await
+}
+
+/// `schedule`, just created for `identity`, paused for its target when the
+/// agent was archived since the create read it: an archive lists its
+/// agent's schedules once, after it committed, so one written after that
+/// listing is in none, and the archive committed before this read. The
+/// pause is the schedule lifecycle's own for a target that takes no
+/// deliveries, which the agent's unarchive ends.
+async fn paused_if_archived_since(
+    call: &ScheduleCall<'_>,
+    schedules: &AttachedConsoleSchedules,
+    identity: &str,
+    schedule: Schedule,
+) -> Schedule {
+    if !matches!(archived_refusal(call, identity).await, Ok(Some(_))) {
+        return schedule;
+    }
+    match schedules
+        .service
+        .pause_for_target(&schedule.schedule_id)
+        .await
+    {
+        Ok((paused, _)) => paused,
+        Err(error) => {
+            tracing::warn!(
+                target: "meta::console",
+                %error,
+                schedule_id = %schedule.schedule_id,
+                "a console schedule created while its agent was archived could not be paused \
+                 for it: it stays active until it is paused by name"
+            );
+            schedule
+        }
+    }
 }
 
 /// A change is defined again as its caller: by the schedule's sender, it
@@ -223,6 +292,7 @@ async fn update(
     unchanged_since(expected, &read)?;
     takeover_confirmed(&current.sender, &sender, take_over)?;
     let target = sendable_target(call, schedules, &current.identity).await?;
+    refuse_archived(call, &target).await?;
     #[cfg(test)]
     schedules.wait_at_write_hold().await;
     caller_current(call)?;
@@ -596,7 +666,7 @@ async fn schedule_item(
     } else {
         Vec::new()
     };
-    json!({
+    let mut item = json!({
         "schedule_id": schedule.schedule_id.to_string(),
         "identity": send.identity,
         "name": schedule.config.name,
@@ -611,7 +681,17 @@ async fn schedule_item(
         "created_at_utc": schedule.config.created_at_utc,
         "updated_at_utc": schedule.config.updated_at_utc,
         "next_due_at_utc": next_due_at_utc,
-    })
+    });
+    // Whose pause it is, as the schedule's own lifecycle records it: said
+    // only of a schedule paused because its agent takes no deliveries (its
+    // agent is archived), never of an active schedule or of a pause
+    // somebody asked for by name.
+    if schedule.paused_for_target()
+        && let Some(members) = item.as_object_mut()
+    {
+        members.insert("paused_for_target".to_string(), Value::Bool(true));
+    }
+    item
 }
 
 /// An instant held in whole seconds since the epoch, as UTC.

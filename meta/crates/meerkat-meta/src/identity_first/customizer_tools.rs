@@ -50,6 +50,7 @@ use meerkat_mob::{
     SpawnMemberSpec,
 };
 
+use super::bridge::SessionBridge;
 use super::types::AgentIdentity;
 
 /// The session's mob operator authority, as the agent factory binds it.
@@ -505,22 +506,33 @@ fn same_dispatcher(a: &Arc<dyn AgentToolDispatcher>, b: &Arc<IdentityCustomizerT
     std::ptr::eq(Arc::as_ptr(a).cast::<()>(), Arc::as_ptr(b).cast::<()>())
 }
 
-/// Attaches a registered identity member's customizer-tool dispatcher to
-/// every meerkat-side build of it: restart restore and explicit resume
-/// (`SpawnSource::Resume`), respawn, delivery-time repair, and raw spawns
-/// that target the identity's member id. Members that are not registered
-/// identities are left untouched.
+/// Attaches an identity member's customizer-tool dispatcher to every
+/// meerkat-side build of it: its first build, restart restore and explicit
+/// resume (`SpawnSource::Resume`), respawn, delivery-time repair, and raw
+/// spawns that target the identity's member id. A member is an identity's
+/// when the identity is registered, when its labels carry the
+/// runtime-authoritative `agent_identity` label, or when Core holds its
+/// member id as an identity entry (`Self::watch_identity_entries`). Every
+/// other member is left untouched.
 pub struct CustomizerToolsSpawnCustomizer {
     /// The registry it attaches from. Unset while the composition that
     /// installed it has not learned whether it composes an agent customizer:
     /// it then attaches nothing.
     registry: std::sync::OnceLock<Arc<CustomizerToolRegistry>>,
+    /// The session bridge whose published read of Core's identity entries
+    /// tells that a member id is an identity's
+    /// ([`SessionBridge::holds_identity_entry`]). Weak: the bridge holds the
+    /// mob this customizer is installed on. Unset until the identity runtime
+    /// is bound: a build Core starts before that attaches by registration or
+    /// label only.
+    entries: std::sync::OnceLock<std::sync::Weak<dyn SessionBridge>>,
 }
 
 impl CustomizerToolsSpawnCustomizer {
     pub fn new(registry: Arc<CustomizerToolRegistry>) -> Self {
         Self {
             registry: std::sync::OnceLock::from(registry),
+            entries: std::sync::OnceLock::new(),
         }
     }
 
@@ -530,6 +542,7 @@ impl CustomizerToolsSpawnCustomizer {
     pub(crate) fn deferred() -> Self {
         Self {
             registry: std::sync::OnceLock::new(),
+            entries: std::sync::OnceLock::new(),
         }
     }
 
@@ -537,6 +550,29 @@ impl CustomizerToolsSpawnCustomizer {
     /// registry already keeps it.
     pub(crate) fn arm(&self, registry: Arc<CustomizerToolRegistry>) {
         let _ = self.registry.set(registry);
+    }
+
+    /// From now on a member whose id Core holds as an identity entry gets
+    /// its identity's dispatcher at each build, registered or not: the first
+    /// build of an identity created at run time (its kickoff, a wake before
+    /// any roster pass or door named it) then carries the host customizer's
+    /// tools, which Meta's build preparer publishes into the dispatcher
+    /// before Core provisions the member. `bridge` reads Core's published
+    /// machine state: no store read, no actor command, no wake. A customizer
+    /// that watches a bridge already keeps it.
+    pub(crate) fn watch_identity_entries(&self, bridge: &Arc<dyn SessionBridge>) {
+        let _ = self.entries.set(Arc::downgrade(bridge));
+    }
+}
+
+impl crate::member_comms_id::IdentityEntries for CustomizerToolsSpawnCustomizer {
+    /// Whether Core holds `member` as an identity entry, as the watched
+    /// bridge reads it; `false` while no bridge is watched.
+    fn holds_identity_entry(&self, member: &MobAgentIdentity) -> bool {
+        self.entries
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|bridge| bridge.holds_identity_entry(member))
     }
 }
 
@@ -566,13 +602,17 @@ impl CustomizerToolsSpawnCustomizer {
         // restored identity member even when meerkat restores the mob before
         // Meta has seen the roster, so it is registered here, at its first
         // build, and receives the identity's tools when they are published.
+        // A member id Core holds as an identity entry is an identity's too,
+        // whoever seated it: its dispatcher is attached at its first build,
+        // before the runtime registered it.
         let entry = match registry.for_member(&spec.identity) {
             Some(entry) => entry,
-            None if spec
-                .labels
-                .as_ref()
-                .and_then(crate::member_comms_id::durable_identity_label)
-                .is_some() =>
+            None if crate::member_comms_id::resolve_member_identity(
+                self,
+                &spec.identity,
+                spec.labels.as_ref().unwrap_or(&BTreeMap::new()),
+            )
+            .is_some() =>
             {
                 registry.ensure_member(&spec.identity)
             }

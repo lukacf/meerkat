@@ -9,10 +9,14 @@
 //!   `decisions.admin`;
 //! - the requester, a Console human matched by its verified principal,
 //!   reads the status of its own request, and reads it whole only for a
-//!   kind whose requester may see what it asked for (`tool_grant.issue`);
-//!   the requester of a child grant (`grant.child`), a held release
-//!   (`route.release`), a gating release (`gating.release`) or any other
-//!   kind never does;
+//!   kind whose requester may see what it asked for (`tool_grant.issue`,
+//!   and a change of an agent: `identity.create`, `identity.update`,
+//!   `identity.archive`, `identity.unarchive`, `identity.remove`,
+//!   `identity.adopt`); the requester of a child grant (`grant.child`), a
+//!   held release (`route.release`), a gating release (`gating.release`) or
+//!   any other kind never does. Reading its own request never lets a
+//!   person decide it: a person cannot approve their own request, whatever
+//!   approver id they hold;
 //! - any other caller, an Open Console's anonymous caller included, sees
 //!   nothing of the decision: it reads as a decision that is not there.
 //!
@@ -54,8 +58,19 @@ use super::wire::{
 use crate::access::{ACTION_DECISIONS_ADMIN, ACTION_DECISIONS_VIEW, AccessView};
 use crate::http_console::ConsoleCallerRefusal;
 
-/// The kinds whose requester may read what it asked for.
-const REQUESTER_READS_CONTENT: &[&str] = &["tool_grant.issue"];
+/// The kinds whose requester may read what it asked for: a tool grant
+/// request, and a change of an agent (the `identity.*` kinds), whose
+/// rendering its requester is shown already when it asks what the change
+/// would get.
+const REQUESTER_READS_CONTENT: &[&str] = &[
+    "tool_grant.issue",
+    "identity.create",
+    "identity.update",
+    "identity.archive",
+    "identity.unarchive",
+    "identity.remove",
+    "identity.adopt",
+];
 
 /// The Console caller of one decision request.
 pub(crate) struct ConsoleDecisionCaller<'a> {
@@ -488,12 +503,15 @@ fn withdraw(decisions: &RuntimeDecisions, id: &Value, params: Value) -> Value {
         .owner()
         .withdraw(&decision_id, &DecisionWithdrawer::Host)
     {
-        Ok(row) => wire::success(
-            id,
-            DecisionResult {
-                decision: wire_decision(&row, false),
-            },
-        ),
+        Ok(row) => {
+            decisions.notify_work();
+            wire::success(
+                id,
+                DecisionResult {
+                    decision: wire_decision(&row, false),
+                },
+            )
+        }
         Err(error) => wire::decision_error(id, error),
     }
 }

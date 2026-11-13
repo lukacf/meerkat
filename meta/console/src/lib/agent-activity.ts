@@ -164,7 +164,11 @@ export function agentNowLine(agent: ConsoleAgent, activity: AgentActivity, nowMs
   const progress = agent.progress;
   const lastProgress = progress && progress.last_progress_at_ms > 0 ? progress.last_progress_at_ms : null;
   if (health.kind === "retired" || health.kind === "retiring") return { text: health.word, live: false };
-  if (health.kind === "broken") return { text: "Broken: it needs a respawn or a reset", live: false };
+  // The console knows that the agent is broken, not why. A respawn or a
+  // reset is what most broken agents need; an agent whose record lacks a
+  // label its host requires needs neither, only the label. So the line
+  // names the two as what may be needed.
+  if (health.kind === "broken") return { text: "Broken: it may need a respawn or a reset", live: false };
   if (health.kind === "stalled") {
     return { text: lastProgress ? `No progress for ${shortSpan(nowMs - lastProgress)}, its run still open` : "No progress, its run still open", live: false };
   }

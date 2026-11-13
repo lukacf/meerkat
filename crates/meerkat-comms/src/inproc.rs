@@ -32,6 +32,30 @@
 //! and hands it off once, through the ordinary receipt path, after the owner
 //! answered that the member is ready. A key with neither route is not a
 //! member: the send fails `PeerNotFound` exactly as before.
+//!
+//! # A route never outlives its inbox
+//!
+//! A runtime registers its inbox in its own namespace. A host that links two
+//! namespaces may register the same inbox in a second one, so that senders
+//! there reach the member. When the inbox leaves the registry by its own
+//! runtime's doing (the runtime releases its route, is dropped, or is
+//! replaced by a successor that names it), every registration of that inbox
+//! in another namespace leaves with it, in the same write. A send there then
+//! finds no live route: it takes the member's wake route, or fails
+//! `PeerNotFound`, instead of handing envelopes to an inbox nobody drains.
+//! Removing a route by its key alone
+//! ([`InprocRegistry::unregister_in_namespace`]) is a host taking back its
+//! own registration while the inbox lives: it removes that one registration
+//! and nothing else.
+//!
+//! The rule holds at registration too. The registry records that an inbox
+//! left (a private mark on the inbox, set in the write in which it leaves
+//! and never cleared: a runtime publishes its inbox once). A registration
+//! of such an inbox, in any namespace, installs nothing and is refused
+//! ([`RegistrationRejection::InboxGone`]). So a host that reads a
+//! participant's inbox and then registers a route to it cannot install a
+//! route to an inbox that left between its two steps. An inbox that is only
+//! closed for peer ingress has not left and still registers.
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -120,6 +144,17 @@ pub enum RegistrationRejection {
     /// `InprocRegistry::replace_sender_in_namespace`. A registrant that can do
     /// neither has not proved the incumbent is gone.
     NameOccupied { holder_pubkey: PubKey },
+    /// The supplied inbox has already left the registry through its own
+    /// runtime: the runtime released its route, was dropped, or a successor
+    /// replaced it. A route never outlives its inbox, so nothing is
+    /// registered.
+    ///
+    /// A host that reads a participant's inbox in one namespace and
+    /// registers a route to it in another gets this when the participant
+    /// left between its two steps. It means "the participant is not there
+    /// now", exactly as when the read finds no inbox: resolve the
+    /// participant again (a seated member is woken through its wake route).
+    InboxGone,
 }
 
 impl std::fmt::Display for RegistrationRejection {
@@ -141,6 +176,11 @@ impl std::fmt::Display for RegistrationRejection {
                  of who holds the name, not a key or trust failure; it may well be this \
                  registrant's own earlier generation",
                 holder_pubkey.to_pubkey_string()
+            ),
+            Self::InboxGone => f.write_str(
+                "the inbox has left the registry (its runtime released its route, was dropped \
+                 or was replaced), so a route to it would deliver to nobody; the participant is \
+                 not there now: resolve its current inbox and register that",
             ),
         }
     }
@@ -305,11 +345,17 @@ pub trait InprocPeerWaker: Send + Sync {
     fn member_is_waking(&self, member: &str) -> bool;
 }
 
-/// A seated member's wake route.
+/// A wake route: a seated member's own, or a host forwarder's.
 #[derive(Clone)]
 struct WakeRoute {
     member: String,
     waker: Weak<dyn InprocPeerWaker>,
+    /// Published by a host forwarder
+    /// ([`InprocRegistry::publish_forwarder_wake_route`]): the route stands
+    /// in its namespace for a member seated in another namespace. A lookup
+    /// in any namespace skips it, so the member's own owner stays the one
+    /// route such a lookup finds.
+    forwarder: bool,
 }
 
 /// A wake route whose owner is alive.
@@ -325,9 +371,13 @@ struct NamespaceState {
     peers: HashMap<PubKey, InprocPeer>,
     /// Map from name to pubkey for name-based lookup.
     names: HashMap<String, PubKey>,
-    /// Wake routes of seated members, by key. A declared projection of their
-    /// owners' membership (published and retracted only from the owners'
-    /// machine effects); never an inbox and never a name claim.
+    /// Wake routes, by key; never an inbox and never a name claim. A mob
+    /// owner's routes are a declared projection of its membership (published
+    /// and retracted only from the owner's machine effects). A host
+    /// forwarder's routes stand in this namespace for members of another
+    /// namespace hosted by the same process that a member here is durably
+    /// linked to; a forwarder never publishes over an owner's route and
+    /// never retracts one.
     wake_routes: HashMap<PubKey, WakeRoute>,
     /// Live routes their runtime closed for peer ingress while it lives on
     /// (a stopped mob's live members). Never resolved for delivery and never a
@@ -365,6 +415,36 @@ impl RegistryState {
 
     fn namespace_is_empty(&self, namespace: &str) -> bool {
         self.namespace_len(namespace) == 0
+    }
+
+    /// Drop every live registration of `inbox` outside `home`, and free the
+    /// name each one held: a route never outlives its inbox.
+    ///
+    /// Called under the write lock in which `inbox` leaves `home`, and only
+    /// by the two paths the inbox's own runtime takes (its exact-generation
+    /// release and its exact-generation replacement). A registration of the
+    /// inbox in another namespace is a route a host that links two
+    /// namespaces installed to it. Left behind, it would keep answering for
+    /// a member that is gone, and a send there would never reach the
+    /// member's wake route. Inbox identity decides alone: a registration of
+    /// any other inbox stays, whatever key and name it is under, and so
+    /// does every wake route.
+    fn forget_inbox_outside(&mut self, home: &str, inbox: &InboxSender) {
+        for (namespace, namespace_state) in &mut self.namespaces {
+            if namespace == home {
+                continue;
+            }
+            let NamespaceState { peers, names, .. } = namespace_state;
+            peers.retain(|pubkey, peer| {
+                if !peer.sender.same_inbox(inbox) {
+                    return true;
+                }
+                if names.get(&peer.name) == Some(pubkey) {
+                    names.remove(&peer.name);
+                }
+                false
+            });
+        }
     }
 }
 
@@ -443,6 +523,9 @@ impl InprocRegistry {
     ///   registrant's own rename ([`RegistrationOutcome::ReplacedPubkey`]). The
     ///   claimed name was unbound, so the one rule is satisfied.
     /// - a zero pubkey is refused ([`RegistrationRejection::ZeroPubkey`]).
+    /// - an inbox that already left the registry through its own runtime is
+    ///   refused ([`RegistrationRejection::InboxGone`]): a route never
+    ///   outlives its inbox.
     ///
     /// Callers must observe the outcome rather than assume a clean success.
     pub fn register_with_meta_in_namespace(
@@ -472,6 +555,18 @@ impl InprocRegistry {
         };
 
         let mut state = self.state.write();
+        // A route never outlives its inbox: an inbox that left (marked under
+        // this lock by the path it left through) is registered nowhere.
+        if peer.sender.has_left() {
+            tracing::debug!(
+                inproc_namespace = %namespace,
+                peer_name = %name,
+                "refusing inproc registration of an inbox that has left the registry"
+            );
+            return RegistrationOutcome::Rejected {
+                reason: RegistrationRejection::InboxGone,
+            };
+        }
         let namespace_state = state.namespace_mut(namespace);
 
         // Fail closed before any mutation, on occupancy alone. A live route
@@ -521,6 +616,8 @@ impl InprocRegistry {
     ///
     /// All checks happen under the registry write lock. A stale predecessor or
     /// occupied replacement key therefore leaves the live route unchanged.
+    /// The replaced inbox leaves the registry: its registrations in other
+    /// namespaces go in the same write (see the module text).
     pub(crate) fn replace_sender_in_namespace(
         &self,
         namespace: &str,
@@ -568,6 +665,8 @@ impl InprocRegistry {
         namespace_state
             .names
             .insert(name.to_string(), replacement_pubkey);
+        current_sender.mark_left();
+        state.forget_inbox_outside(namespace, current_sender);
         Ok(())
     }
 
@@ -579,6 +678,10 @@ impl InprocRegistry {
     }
 
     /// Unregister an agent by pubkey from an explicit namespace.
+    ///
+    /// This removes the one registration under `pubkey` in `namespace`,
+    /// whichever inbox it holds, and nothing in any other namespace: a host
+    /// takes back a route it registered while the inbox lives on.
     pub fn unregister_in_namespace(&self, namespace: &str, pubkey: &PubKey) -> bool {
         let mut state = self.state.write();
         if let Some(namespace_state) = state.namespaces.get_mut(namespace)
@@ -592,6 +695,12 @@ impl InprocRegistry {
 
     /// Remove a route only when its exact inbox generation is still current.
     /// A closed route of the same generation is forgotten too.
+    ///
+    /// Called by the inbox's own runtime when the inbox leaves (its release
+    /// or its drop), so every registration of the inbox in another namespace
+    /// goes in the same write (see the module text), whether or not
+    /// `namespace` still held it. Returns whether this call removed the
+    /// live route in `namespace`.
     pub(crate) fn unregister_sender_in_namespace(
         &self,
         namespace: &str,
@@ -599,6 +708,8 @@ impl InprocRegistry {
         sender: &InboxSender,
     ) -> bool {
         let mut state = self.state.write();
+        sender.mark_left();
+        state.forget_inbox_outside(namespace, sender);
         let Some(namespace_state) = state.namespaces.get_mut(namespace) else {
             return false;
         };
@@ -735,23 +846,28 @@ impl InprocRegistry {
     /// Look up an inproc peer by pubkey across all namespaces.
     ///
     /// Cross-namespace delivery has no typed target namespace. If the same
-    /// canonical identity is live in more than one namespace, fail closed
-    /// rather than choosing whichever namespace the map happens to yield first.
+    /// canonical identity is live in more than one namespace with different
+    /// inboxes, fail closed rather than choosing whichever namespace the map
+    /// happens to yield first. Registrations of the SAME inbox are one
+    /// route: a member's own registration, and the route a host that links
+    /// two namespaces holds to that inbox in the linked one, deliver to the
+    /// same place whichever is taken.
     pub(crate) fn get_by_pubkey_any_namespace(&self, pubkey: &PubKey) -> Option<InboxSender> {
         if pubkey.is_zero() {
             return None;
         }
         let state = self.state.read();
-        let mut found = None;
+        let mut found: Option<&InboxSender> = None;
         for namespace_state in state.namespaces.values() {
             if let Some(peer) = namespace_state.peers.get(pubkey) {
-                if found.is_some() {
-                    return None;
+                match found {
+                    Some(first) if !first.same_inbox(&peer.sender) => return None,
+                    Some(_) => {}
+                    None => found = Some(&peer.sender),
                 }
-                found = Some(peer.sender.clone());
             }
         }
-        found
+        found.cloned()
     }
 
     /// Look up an inproc peer name by public key.
@@ -807,12 +923,18 @@ impl InprocRegistry {
         self.state.write().namespaces.clear();
     }
 
-    /// Publish a seated member's wake route under `pubkey` in `namespace`.
+    /// Publish a wake route under `pubkey` in `namespace`.
     ///
-    /// Called only from the owner's machine effects (a seating transition).
+    /// A mob owner publishes the route of a member seated in `namespace`
+    /// with this, only from its machine effects (a seating transition). A
+    /// host forwarder, which stands in `namespace` for a member of another
+    /// namespace hosted by the same process, publishes with
+    /// [`Self::publish_forwarder_wake_route`] instead, and never over an
+    /// owner's route.
     /// The route occupies no name and never delivers: a live route under the
     /// same key always wins. Re-publishing replaces the key's route (the
-    /// owner's own projection rebuild). A zero key is refused.
+    /// publisher's own projection rebuild); the registry does not check who
+    /// published the route it replaces. A zero key is refused.
     pub fn publish_wake_route(
         &self,
         namespace: &str,
@@ -820,12 +942,52 @@ impl InprocRegistry {
         member: impl Into<String>,
         waker: Weak<dyn InprocPeerWaker>,
     ) -> bool {
+        self.insert_wake_route(namespace, pubkey, member.into(), waker, false)
+    }
+
+    /// Publish a host forwarder's wake route under `pubkey` in `namespace`.
+    ///
+    /// A forwarder's route stands in `namespace` for a member that is seated
+    /// in ANOTHER namespace hosted by the same process: asked to wake, its
+    /// owner hands the request to the member's own owner (see
+    /// [`Self::wake_route_owner_in_namespace`]). Only a host that composes
+    /// the two namespaces and holds a durable link between a member of
+    /// `namespace` and that member publishes one; a mob owner publishes its
+    /// members' routes with [`Self::publish_wake_route`], and a forwarder
+    /// never publishes over an owner's route.
+    ///
+    /// The route is marked as a forwarder's. A send scoped to `namespace`
+    /// finds it like any wake route. A lookup in ANY namespace (a sender
+    /// with no namespace) skips it, so the key keeps exactly one route for
+    /// such a sender, the member's own owner's, as if the forwarder's were
+    /// not there. Everything else is as for [`Self::publish_wake_route`]:
+    /// no name is occupied, a live route under the key wins, re-publishing
+    /// replaces the key's route in `namespace`, and a zero key is refused.
+    pub fn publish_forwarder_wake_route(
+        &self,
+        namespace: &str,
+        pubkey: PubKey,
+        member: impl Into<String>,
+        waker: Weak<dyn InprocPeerWaker>,
+    ) -> bool {
+        self.insert_wake_route(namespace, pubkey, member.into(), waker, true)
+    }
+
+    fn insert_wake_route(
+        &self,
+        namespace: &str,
+        pubkey: PubKey,
+        member: String,
+        waker: Weak<dyn InprocPeerWaker>,
+        forwarder: bool,
+    ) -> bool {
         if pubkey.is_zero() {
             return false;
         }
         let route = WakeRoute {
-            member: member.into(),
+            member,
             waker,
+            forwarder,
         };
         self.state
             .write()
@@ -835,10 +997,12 @@ impl InprocRegistry {
         true
     }
 
-    /// Retract a wake route, only while it is still `waker`'s: an owner can
-    /// never retract a route another owner published for the same key.
-    /// Called only from the owner's machine effects (an unseating
-    /// transition or an endpoint migration).
+    /// Retract a wake route, only while it is still `waker`'s: a publisher
+    /// that passes its own owner can never retract a route another owner
+    /// published for the same key. Called by the route's publisher only: a
+    /// mob owner from its machine effects (an unseating transition or an
+    /// endpoint migration), a host forwarder when its durable link goes. A
+    /// forwarder never retracts an owner's route.
     pub fn retract_wake_route(
         &self,
         namespace: &str,
@@ -867,6 +1031,35 @@ impl InprocRegistry {
             .is_some_and(|ns| ns.wake_routes.contains_key(pubkey))
     }
 
+    /// The owner of the wake route published for `pubkey` in `namespace`,
+    /// with the owner's own name for the member.
+    ///
+    /// A host-composition read: a host that runs two namespaces in one
+    /// process and declared a link between them uses it to hand a wake to
+    /// the member's own owner, which still answers from its machine. The
+    /// read publishes and retracts nothing, wakes nobody and hands out no
+    /// inbox; `None` when the namespace has no wake route for the key (no
+    /// other namespace is consulted). A route whose owner is gone answers
+    /// `Some` with a `Weak` that does not upgrade: nothing in this process
+    /// can wake that member, as for the registry's own sends
+    /// (`mob_unavailable`).
+    ///
+    /// The answer is for forwarding a wake to the owner and for nothing
+    /// else: it is never passed to [`Self::retract_wake_route`],
+    /// [`Self::publish_wake_route`] or
+    /// [`Self::publish_forwarder_wake_route`].
+    pub fn wake_route_owner_in_namespace(
+        &self,
+        namespace: &str,
+        pubkey: &PubKey,
+    ) -> Option<(String, Weak<dyn InprocPeerWaker>)> {
+        self.state
+            .read()
+            .namespace(namespace)
+            .and_then(|ns| ns.wake_routes.get(pubkey))
+            .map(|route| (route.member.clone(), Weak::clone(&route.waker)))
+    }
+
     fn live_route(&self, scope: RouteScope<'_>, pubkey: &PubKey) -> Option<InboxSender> {
         match scope {
             RouteScope::Namespace(namespace) => self.get_by_pubkey_in_namespace(namespace, pubkey),
@@ -879,7 +1072,10 @@ impl InprocRegistry {
     /// `Err(())` when the key has a route whose owner is gone (its mob actor
     /// exited without retracting it): the member exists, but nothing in this
     /// process can wake it. In any namespace, a key routed in more than one
-    /// namespace fails closed as no route, exactly as live routes do.
+    /// namespace fails closed as no route, as live routes to different
+    /// inboxes do; a
+    /// forwarder's route is not counted and never answered there, so a key
+    /// with its owner's route and forwarders' routes resolves to the owner.
     fn wake_route(
         &self,
         scope: RouteScope<'_>,
@@ -898,7 +1094,11 @@ impl InprocRegistry {
                 RouteScope::AnyNamespace => {
                     let mut found = None;
                     for namespace_state in state.namespaces.values() {
-                        if let Some(route) = namespace_state.wake_routes.get(pubkey) {
+                        let own_route = namespace_state
+                            .wake_routes
+                            .get(pubkey)
+                            .filter(|route| !route.forwarder);
+                        if let Some(route) = own_route {
                             if found.is_some() {
                                 return Ok(None);
                             }
@@ -977,8 +1177,11 @@ impl InprocRegistry {
     /// re-derived from the global registry between an isolation check and the
     /// inbox handoff - a second any-namespace lookup would open a window where
     /// the peer re-registers elsewhere and delivery crosses the namespace
-    /// boundary. A wake route is looked up in the same namespace, so a member
-    /// is never woken from another namespace.
+    /// boundary. A wake route is looked up in the same namespace, so the
+    /// registry itself never wakes a member from another namespace. A host
+    /// that declared a link between two namespaces may publish an owner of
+    /// its own in the sender's namespace and forward the wake to the
+    /// member's own owner (see [`Self::wake_route_owner_in_namespace`]).
     // Over the lint's threshold: the extra arguments are the `namespace`
     // delivery authority that distinguishes this send from its any-namespace
     // sibling, and the process-local governed origin that rides beside the

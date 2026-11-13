@@ -542,7 +542,7 @@ pub(crate) fn extract_member_endpoints(kind: &MobEventKind) -> Vec<String> {
         MobEventKind::ExternalPeerWired { local, .. }
         | MobEventKind::ExternalPeerUnwired { local, .. } => vec![local.to_string()],
         MobEventKind::OperatorInstructionCommitted(event) => match &event.target {
-            meerkat_mob::OperatorInstructionTarget::Member { agent_identity } => {
+            meerkat_mob::OperatorInstructionTarget::Member { agent_identity, .. } => {
                 vec![agent_identity.to_string()]
             }
             _ => Vec::new(),

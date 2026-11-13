@@ -194,3 +194,42 @@ export function renderingOf(answer: unknown): string | undefined {
 export function phaseWords(phase: string): string {
   return humanizeEnum(phase);
 }
+
+const IDENTITY_CHANGE_KIND_WORDS: Readonly<Record<string, string>> = {
+  "identity.create": "New long-term agent",
+  "identity.update": "Change of a long-term agent",
+  "identity.archive": "Archive of a long-term agent",
+  "identity.unarchive": "Unarchive of a long-term agent",
+  "identity.remove": "Removal of a long-term agent",
+  "identity.adopt": "Release of an agent from configuration",
+};
+
+/** Whether a decision is held for a change of a long-term agent. */
+export function isIdentityChangeDecision(kind: string): boolean {
+  return kind.startsWith("identity.");
+}
+
+/** A decision's kind in words; a kind this console has no words for reads
+ *  as its token in words. */
+export function decisionKindWords(kind: string): string {
+  return IDENTITY_CHANGE_KIND_WORDS[kind] ?? humanizeEnum(kind);
+}
+
+/**
+ * The withdrawal of this page's own requests from their decision cards.
+ * `decisionIds` are the decisions the gateway answered this page's own
+ * changes with: the cards the console knows to be the requester's own, from
+ * that answer and nothing else. `withdraw` withdraws the request such a
+ * decision is held for and answers null, or what the console says when the
+ * withdrawal is refused: its own sentence, and for the card's Details the
+ * gateway's own where it gave one.
+ */
+export interface OwnDecisionWithdrawal {
+  decisionIds: ReadonlySet<string>;
+  withdraw: (decisionId: string) => Promise<WithdrawalRefused | null>;
+}
+
+export interface WithdrawalRefused {
+  sentence: string;
+  detail?: string;
+}

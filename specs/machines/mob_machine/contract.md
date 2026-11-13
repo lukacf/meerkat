@@ -344,6 +344,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_instruction_recorded`: `Map<AgentIdentity, u64>`
 - `member_instruction_blocked`: `Map<AgentIdentity, MemberInstructionBlock>`
 - `member_dispatch_admission_lineage`: `Map<AgentIdentity, AgentRuntimeId>`
+- `member_instruction_lineage`: `Map<AgentIdentity, AgentIdentity>`
 
 ## Inputs
 - `RunFlow`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
@@ -618,6 +619,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RestoreOwnedIdentityEdge`(edge: WiringEdge, owner: AgentIdentity)
 - `ResolveMemberDispatchAdmission`(agent_identity: AgentIdentity, lineage: MemberDispatchAdmissionLineage, host_answer: MemberDispatchAdmissionHostAnswer)
 - `RecordMemberDispatchAdmissionLineage`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
+- `RecordMemberInstructionLineage`(agent_identity: AgentIdentity, root_identity: AgentIdentity)
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, runtime_epoch_id: Option<RuntimeEpochId>)
@@ -958,7 +960,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `peer_notice_disposition`(recipient_phase: Option<MemberMaterializationPhase>, sender_phase: Option<MemberMaterializationPhase>, notice_class: PeerInputClass) -> `PeerNoticeDisposition`
 - `member_registration_releasable`(residency: Option<MemberMaterializationPhase>, placed: Bool, sealed: Bool, has_endpoint: Bool, epoch_recorded: Bool, wired_to_placed: Bool) -> `Bool`
 - `member_release_verdict`(seated: Bool, placed: Bool, residency: Option<MemberMaterializationPhase>, releasable: Bool, wired_to_placed: Bool) -> `MemberReleaseVerdict`
-- `operator_instruction_target_applies`(kind: InstructionTargetKind, profile: String, member: Option<AgentIdentity>, member_profile: Option<String>, agent_identity: AgentIdentity) -> `Bool`
+- `operator_instruction_target_applies`(kind: InstructionTargetKind, profile: String, member: Option<AgentIdentity>, member_profile: Option<String>, agent_identity: AgentIdentity, lineage_root: Option<AgentIdentity>) -> `Bool`
 - `operator_instruction_write_well_formed`(revision: u64, digest: String, kind: InstructionTargetKind, profile: String, member: Option<AgentIdentity>) -> `Bool`
 
 ## Command Plans
@@ -1161,6 +1163,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_instruction_facts_only_for_members`
 - `member_instruction_generations_bounded`
 - `destroyed_mob_holds_no_operator_instructions`
+- `member_instruction_lineage_names_another_member`
 
 ## Transitions
 ### `ClassifyFlowRunTerminalityTerminalRunning`
@@ -19399,6 +19402,30 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `OperatorInstructionRefused`
 - To: `Stopped`
 
+### `SetOperatorInstructionAdvanceSlotLimitExceededRunning`
+- From: `Running`
+- On: `SetOperatorInstruction`(slot, revision, digest, body_bytes, target_kind, target_profile, target_member)
+- Guards:
+  - `write_well_formed`
+  - `body_within_limit`
+  - `revision_not_below_current`
+  - `revision_advances`
+  - `slot_limit_reached`
+- Emits: `OperatorInstructionRefused`
+- To: `Running`
+
+### `SetOperatorInstructionAdvanceSlotLimitExceededStopped`
+- From: `Stopped`
+- On: `SetOperatorInstruction`(slot, revision, digest, body_bytes, target_kind, target_profile, target_member)
+- Guards:
+  - `write_well_formed`
+  - `body_within_limit`
+  - `revision_not_below_current`
+  - `revision_advances`
+  - `slot_limit_reached`
+- Emits: `OperatorInstructionRefused`
+- To: `Stopped`
+
 ### `SetOperatorInstructionAdvanceOverBudgetRunning`
 - From: `Running`
 - On: `SetOperatorInstruction`(slot, revision, digest, body_bytes, target_kind, target_profile, target_member)
@@ -19407,6 +19434,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `body_within_limit`
   - `revision_not_below_current`
   - `revision_advances`
+  - `slot_room`
   - `over_budget`
 - Emits: `OperatorInstructionRefused`
 - To: `Running`
@@ -19419,6 +19447,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `body_within_limit`
   - `revision_not_below_current`
   - `revision_advances`
+  - `slot_room`
   - `over_budget`
 - Emits: `OperatorInstructionRefused`
 - To: `Stopped`
@@ -19431,6 +19460,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `body_within_limit`
   - `revision_not_below_current`
   - `revision_advances`
+  - `slot_room`
   - `within_budget`
 - Emits: `OperatorInstructionCommitted`
 - To: `Running`
@@ -19443,6 +19473,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `body_within_limit`
   - `revision_not_below_current`
   - `revision_advances`
+  - `slot_room`
   - `within_budget`
 - Emits: `OperatorInstructionCommitted`
 - To: `Stopped`
@@ -21212,6 +21243,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `identity_runtime_matches`
   - `member_local`
+- To: `Stopped`
+
+### `RecordMemberInstructionLineageRunning`
+- From: `Running`
+- On: `RecordMemberInstructionLineage`(agent_identity, root_identity)
+- Guards:
+  - `member_seated`
+  - `root_is_another_member`
+  - `no_snapshot_recorded`
+- To: `Running`
+
+### `RecordMemberInstructionLineageStopped`
+- From: `Stopped`
+- On: `RecordMemberInstructionLineage`(agent_identity, root_identity)
+- Guards:
+  - `member_seated`
+  - `root_is_another_member`
+  - `no_snapshot_recorded`
 - To: `Stopped`
 
 ### `EndIdentityLifeRunning`

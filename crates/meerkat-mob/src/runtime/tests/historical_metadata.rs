@@ -612,3 +612,94 @@ async fn retained_metadata_profile_unrestricted_matches_native_gate_after_retire
     assert_retained_profile_policy_matches_native_gate(RetainedProfileRestriction::Unrestricted)
         .await;
 }
+
+/// `recorded_build_instructions` on the persistent service answers exactly
+/// what the committed build state records, from the committed document's
+/// metadata (this fixture keeps WholeBlob documents). Sections come back as
+/// recorded and an empty list as an empty list. An absent record is none,
+/// never "built with none". A session with no build state and an unknown
+/// session are none. An archived session still answers its record. A
+/// corrupt record is an error, never none.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn recorded_build_instructions_answer_exactly_the_committed_record() {
+    let (service, _, runtime_store) = persistent_metadata_fixture();
+    let sections = vec![
+        "Keep answers to one line.".to_string(),
+        "Name the desk you answer for.".to_string(),
+    ];
+    let session_recording = |recorded: Option<Vec<String>>| {
+        let mut session = factory_policy_session(Session::new(), "recording-model".into(), 1024);
+        session
+            .set_build_state(meerkat_core::SessionBuildState {
+                additional_instructions: recorded,
+                ..meerkat_core::SessionBuildState::default()
+            })
+            .expect("test build state serializes");
+        session
+    };
+
+    for recorded in [None, Some(Vec::new()), Some(sections.clone())] {
+        let session = session_recording(recorded.clone());
+        commit_metadata_session(runtime_store.as_ref(), &session).await;
+        assert_eq!(
+            service
+                .recorded_build_instructions(session.id())
+                .await
+                .expect("read the committed record"),
+            recorded,
+            "the read answers what the committed build state records, and nothing else"
+        );
+    }
+
+    let mut archived = session_recording(Some(sections.clone()));
+    archived
+        .set_lifecycle_terminal(meerkat_core::SessionLifecycleTerminal::Archived)
+        .expect("lifecycle terminal serializes");
+    commit_metadata_session(runtime_store.as_ref(), &archived).await;
+    assert_eq!(
+        service
+            .recorded_build_instructions(archived.id())
+            .await
+            .expect("read an archived session's record"),
+        Some(sections.clone()),
+        "an archived session still answers its record"
+    );
+    assert!(
+        service
+            .load_persisted_session_metadata(archived.id())
+            .await
+            .expect("the ordinary metadata read")
+            .is_none(),
+        "instrument honesty: the ordinary reads hide the archived session"
+    );
+
+    assert_eq!(
+        service
+            .recorded_build_instructions(&SessionId::new())
+            .await
+            .expect("read a session no store holds"),
+        None,
+        "a session no store holds has no record"
+    );
+
+    let corrupt = session_recording(Some(sections));
+    let mut document = serde_json::to_value(&corrupt).expect("session serializes");
+    document["metadata"][meerkat_core::SESSION_BUILD_STATE_KEY] =
+        serde_json::json!({ "additional_instructions": "not a list" });
+    runtime_store
+        .commit_session_snapshot(
+            &meerkat_runtime::LogicalRuntimeId::for_session(corrupt.id()),
+            meerkat_runtime::SerializedSessionSnapshot {
+                session_snapshot: serde_json::to_vec(&document)
+                    .expect("corrupt document serializes")
+                    .into(),
+            },
+        )
+        .await
+        .expect("commit the corrupt document");
+    service
+        .recorded_build_instructions(corrupt.id())
+        .await
+        .expect_err("a corrupt record is a read fault, never none");
+}

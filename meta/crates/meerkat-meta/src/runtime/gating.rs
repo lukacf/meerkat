@@ -6,6 +6,11 @@ use super::module_boundary::{
 };
 use super::*;
 
+/// The event type of the audit entry gating leaves when it cannot read
+/// whether a memory conflict applies. Its `detail.error` is the failed
+/// read's error text.
+pub(crate) const MEMORY_CONFLICT_LOOKUP_FAILED_EVENT: &str = "memory_conflict_lookup_failed";
+
 fn valid_gating_origin(origin: &GatingOrigin) -> bool {
     !origin.identity.trim().is_empty()
         && origin
@@ -559,7 +564,7 @@ impl MetaRuntimeHandle {
                     self.append_gating_audit(GatingAuditEntry {
                         audit_id: String::new(),
                         timestamp_ms: 0,
-                        event_type: "memory_conflict_lookup_failed".to_string(),
+                        event_type: MEMORY_CONFLICT_LOOKUP_FAILED_EVENT.to_string(),
                         action_id: action_id.clone(),
                         pending_id: None,
                         actor_id: actor_id.clone(),

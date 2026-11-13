@@ -2214,19 +2214,32 @@ pub(super) async fn handle_cross_mob_peer_info(
 ) -> JsonRpcResponse {
     let member_id = params.get("member_id").and_then(Value::as_str);
     match member_id {
-        Some(mid) if !mid.is_empty() => match runtime.local_member_peer_info(mid).await {
-            Ok((peer_id, comms_name, address)) => JsonRpcResponse {
-                jsonrpc: JSONRPC_VERSION.to_string(),
-                id: response_id,
-                result: Some(serde_json::json!({
+        Some(mid) if !mid.is_empty() => match runtime.local_member_peer_facts(mid).await {
+            Ok(facts) => {
+                let mut result = serde_json::json!({
                     "member_id": mid,
                     "mob_id": runtime.mob_id(),
-                    "comms_name": comms_name,
-                    "peer_id": peer_id,
-                    "address": address,
-                })),
-                error: None,
-            },
+                    "comms_name": facts.comms_name,
+                    "peer_id": facts.peer_id,
+                    "address": facts.address,
+                    // The member's transport key: what a peer's descriptor
+                    // of this member carries.
+                    "pubkey_b64": facts.pubkey_b64,
+                });
+                // Present only for a member with a socket endpoint; never
+                // null (a reader may copy every value as text).
+                if let (Some(dialable), Some(fields)) =
+                    (facts.dialable_address, result.as_object_mut())
+                {
+                    fields.insert("dialable_address".to_string(), Value::String(dialable));
+                }
+                JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: Some(result),
+                    error: None,
+                }
+            }
             Err(err) => JsonRpcResponse {
                 jsonrpc: JSONRPC_VERSION.to_string(),
                 id: response_id,

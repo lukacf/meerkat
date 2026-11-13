@@ -40,11 +40,17 @@ export type InstructionLowering = WireInstructionLowering | InstructionAdvisoryU
  * members of one profile, or one member. A target is a predicate over the
  * roster: a profile or member that does not exist yet selects nobody until
  * it does.
+ *
+ * A member target may carry `include_forks` (false when absent): the record
+ * then follows the member's fork family from its root. Written for a member
+ * that is not itself a fork it also selects every fork below it; written
+ * for a fork it selects that member only. A status read carries the member
+ * only when it is true.
  */
 export type InstructionTarget =
   | { kind: "mob" }
   | { kind: "profile"; profile: string }
-  | { kind: "member"; agent_identity: string };
+  | { kind: "member"; agent_identity: string; include_forks?: boolean };
 
 /** Options of an operator-instruction write. */
 export interface InstructionWriteOptions {
@@ -390,8 +396,17 @@ function target(value: unknown, context: string): InstructionTarget {
       return { kind: "mob" };
     case "profile":
       return { kind: "profile", profile: str(data, "profile", context) };
-    case "member":
-      return { kind: "member", agent_identity: str(data, "agent_identity", context) };
+    case "member": {
+      const agentIdentity = str(data, "agent_identity", context);
+      // The fork scope is a boolean, left out when false.
+      const includeForks = data.include_forks ?? false;
+      if (typeof includeForks !== "boolean") {
+        throw invalid(context, "include_forks must be a boolean");
+      }
+      return includeForks
+        ? { kind: "member", agent_identity: agentIdentity, include_forks: true }
+        : { kind: "member", agent_identity: agentIdentity };
+    }
     default:
       throw invalid(context, `unsupported target kind ${JSON.stringify(data.kind)}`);
   }

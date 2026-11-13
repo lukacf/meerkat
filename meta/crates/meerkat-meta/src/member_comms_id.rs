@@ -70,6 +70,12 @@ use std::borrow::Cow;
 /// Return a safe durable-identity projection from raw member labels.
 /// `rt:*` belongs exclusively to generated runtime aliases and must never be
 /// minted by a caller-controlled label on an unrelated raw member.
+///
+/// This is the label half of [`resolve_member_identity`], which is what a
+/// reader of "which identity is this member" calls: a member Core holds as
+/// an identity entry is its identity's without the label. The few callers
+/// that ask the label itself are named, each with its reason, by the source
+/// guard in `member_identity_guard_tests`.
 pub(crate) fn durable_identity_label(
     labels: &std::collections::BTreeMap<String, String>,
 ) -> Option<&str> {
@@ -78,6 +84,82 @@ pub(crate) fn durable_identity_label(
         .map(String::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty() && !is_reserved_generated_alias(value))
+}
+
+/// What answers whether Core holds a member id as an identity entry: the mob
+/// handle ([`meerkat_mob::MobHandle::identity_entry`], a read of the machine
+/// state the actor last published: no actor command, no wake), a session
+/// bridge's read of the same state, or, for a call site that may have
+/// neither, an `Option` of one (`None` answers `false`).
+pub(crate) trait IdentityEntries {
+    /// Whether Core holds roster member id `member_id` as an identity entry.
+    /// A read that fails answers `false`: the member is then resolved by its
+    /// label alone, as every member was before this read existed.
+    fn holds_identity_entry(&self, member_id: &meerkat_mob::ids::AgentIdentity) -> bool;
+}
+
+impl IdentityEntries for meerkat_mob::MobHandle {
+    fn holds_identity_entry(&self, member_id: &meerkat_mob::ids::AgentIdentity) -> bool {
+        matches!(
+            self.identity_entry(member_id),
+            Ok(meerkat_mob::IdentityEntryRead::Entry(_))
+        )
+    }
+}
+
+impl IdentityEntries for dyn crate::identity_first::SessionBridge {
+    fn holds_identity_entry(&self, member_id: &meerkat_mob::ids::AgentIdentity) -> bool {
+        crate::identity_first::SessionBridge::holds_identity_entry(self, member_id)
+    }
+}
+
+impl<T: IdentityEntries + ?Sized> IdentityEntries for Option<&T> {
+    fn holds_identity_entry(&self, member_id: &meerkat_mob::ids::AgentIdentity) -> bool {
+        self.is_some_and(|entries| entries.holds_identity_entry(member_id))
+    }
+}
+
+/// A fixed set of roster member ids Core is taken to hold as identity
+/// entries: what a unit test lends the resolver in place of a mob.
+#[cfg(test)]
+impl IdentityEntries for std::collections::BTreeSet<meerkat_mob::ids::AgentIdentity> {
+    fn holds_identity_entry(&self, member_id: &meerkat_mob::ids::AgentIdentity) -> bool {
+        self.contains(member_id)
+    }
+}
+
+/// The identity a member is: Meta's ONE answer to "which identity is this
+/// member". Every production reader asks here; none reads the
+/// `agent_identity` label itself (the source guard in
+/// `member_identity_guard_tests` holds the exceptions, each with its reason).
+///
+/// - The identity its `agent_identity` label names, when the label is usable
+///   ([`durable_identity_label`]: trimmed, not empty, never a generated
+///   `rt:*` alias). The label wins: a member that carries it resolves exactly
+///   as it did when the label was the only reading.
+/// - Otherwise, for a member Core holds as an identity entry (`core`), the
+///   identity its member id decodes to
+///   ([`durable_identity_for_roster_member`]). An identity whose record is
+///   its row in the mob's identity store (created at run time, or adopted)
+///   is seated by Core with its row's labels, which carry no such label, and
+///   it is its identity's member all the same.
+/// - `None` for every other member: a plain worker, a helper, a side chat.
+///
+/// `member_id` is the member's ROSTER id (Core's spelling, the one a roster
+/// entry carries). A caller that holds a public alias encodes it first
+/// ([`mob_member_id`]); one that holds a supplied id of unknown spelling
+/// maps it with [`roster_member_id_for_supplied_id`].
+pub(crate) fn resolve_member_identity<'a>(
+    core: &(impl IdentityEntries + ?Sized),
+    member_id: &meerkat_mob::ids::AgentIdentity,
+    labels: &'a std::collections::BTreeMap<String, String>,
+) -> Option<Cow<'a, str>> {
+    durable_identity_label(labels)
+        .map(Cow::Borrowed)
+        .or_else(|| {
+            core.holds_identity_entry(member_id)
+                .then(|| Cow::Owned(durable_identity_for_roster_member(member_id.as_str())))
+        })
 }
 
 /// Validate labels accepted by raw member-creation surfaces.

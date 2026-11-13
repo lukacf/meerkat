@@ -260,6 +260,44 @@ async def test_mob_status_refuses_an_unknown_closed_value() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_member_targets_fork_scope_is_sent_and_read_back() -> None:
+    """A member target's ``include_forks`` crosses the SDK both ways: a write
+    sends it, a status read keeps it on the record that carries it and leaves
+    it off a record without it, and a value that is not a boolean is
+    refused."""
+    scoped = {"kind": "member", "agent_identity": "worker-1", "include_forks": True}
+    alone = {"kind": "member", "agent_identity": "worker-1"}
+    page = mob_status(member_status())
+    record = page["desired"][0]
+    page["desired"] = [
+        {**record, "key": "family", "target": scoped},
+        {**record, "key": "own", "target": alone},
+        {**record, "key": "explicit", "target": {**alone, "include_forks": False}},
+    ]
+    client, calls = fake_client(
+        {"mob/set_instruction": MOB_WRITE, "mob/instruction_status": page}
+    )
+
+    await Mob(client, "team").set_instruction(
+        "app.example", "family", 1, "Sign as the family.", scoped
+    )
+    assert calls[0][1]["target"] == scoped, "the write carries the scope"
+
+    status = await client.mob_instruction_status("team")
+    assert [record["target"] for record in status["desired"]] == [
+        scoped,
+        alone,
+        alone,
+    ], "the status read keeps the scope where the record carries it"
+
+    page["desired"] = [{**record, "target": {**alone, "include_forks": "yes"}}]
+    client, _ = fake_client({"mob/instruction_status": page})
+    with pytest.raises(MeerkatError) as refused:
+        await client.mob_instruction_status("team")
+    assert refused.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
 async def test_session_verbs_send_the_exact_request_shapes() -> None:
     client, calls = fake_client(
         {

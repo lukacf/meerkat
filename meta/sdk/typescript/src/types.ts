@@ -4024,9 +4024,9 @@ export interface IdentityStatus {
   /**
    * `true` when Core drives the identity itself, so Meta's lifecycle verbs
    * refuse it: a host intent declaration in Core manages it (the verbs throw
-   * `IdentityHostAdoptedError`), or it is store-owned, created at runtime or
-   * adopted into store custody (they throw a plain `RpcError`, `-32603` with
-   * `data.kind` `"identity_store_owned"`).
+   * `IdentityHostAdoptedError`). `false` for every other identity: one
+   * created at run time, or adopted into the mob's identity store, is served
+   * by the verbs as a configured one is (it read `true` through 0.9.13).
    */
   readonly intentManaged: boolean;
   /** Core's convergence status, when `intentManaged` is set and Core could read it. */
@@ -4051,6 +4051,27 @@ export interface IdentityStatus {
    * no binding for the identity.
    */
   readonly memberId?: string | null;
+  /**
+   * `true` when the host's roster lists this name while the agent is served
+   * from its record (an adopted agent whose roster still lists it, for one):
+   * the roster's entry for the name is not applied, and a change of the agent
+   * is a change of its record. The gateway writes it only when it is so; the
+   * parser reads `false` otherwise.
+   */
+  readonly rosterListingSuperseded?: boolean;
+  /**
+   * `true` when the agent is archived: it has no member, and deliveries to
+   * it are refused until its unarchive. The gateway writes it only when it
+   * is so; the parser reads `false` otherwise.
+   */
+  readonly archived?: boolean;
+  /**
+   * `true` when the agent waits for its host's preparation: it has no
+   * member yet, and `runtime.identities.settlePreparation` seats it. The
+   * gateway writes it only when it is so; the parser reads `false`
+   * otherwise.
+   */
+  readonly preparationPending?: boolean;
 }
 
 export interface DeliveryScopeUnavailable {
@@ -4100,6 +4121,9 @@ export function parseIdentityStatus(raw: unknown): IdentityStatus {
       d.customizer_tools_pending !== null && typeof d.customizer_tools_pending === "object"
         ? { ...asRecord(d.customizer_tools_pending) }
         : null,
+    rosterListingSuperseded: d.roster_listing_superseded === true,
+    archived: d.archived === true,
+    preparationPending: d.preparation_pending === true,
     ...parseIdentityViewParts(d),
   };
 }

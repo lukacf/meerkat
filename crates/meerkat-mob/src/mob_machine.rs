@@ -1574,6 +1574,14 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         input: MobMachineCatalogInput::RecordMemberDispatchAdmissionLineage,
         reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
     },
+    // The record of a fork-derived member's lineage root for operator
+    // instructions (0.9.15): the fork's seat applies it with its seat
+    // commit, and the replay of a spawn row that carries the root applies it
+    // again; neither is a surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordMemberInstructionLineage,
+        reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
+    },
 ];
 
 #[doc(hidden)]

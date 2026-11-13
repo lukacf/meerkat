@@ -1,0 +1,752 @@
+"use strict";
+
+// A scripted family of the long-term agent changes and reads the console
+// calls (`meta/identity/*`), for the console's own rows: the unit and
+// component rows drive it through a transport, the browser row through the
+// mock console server. It keeps agents in memory and answers every call in
+// the wire's own shapes: a change's typed outcome (`done`,
+// `pending_decision`, `pending_preparation`), a refusal as the one JSON-RPC
+// error (code -32058, the refusal's sentence as the message, the typed
+// refusal as `data`), the flat directory verdict, and the record a read
+// answers. The refusal sentences are the gateway's own.
+
+const crypto = require("node:crypto");
+
+const IDENTITY_REFUSED_CODE = -32058;
+
+const SENTENCES = {
+  invalid_name: "The name is not a valid agent name: choose another.",
+  name_taken: "The name is taken: choose another. A removed agent's name is never available again.",
+  profile_unknown: "The mob has no profile of this name: name one of the mob's profiles.",
+  peer_unknown: "The peer is no agent you may name: list agents of the mob, or other agents of the same request.",
+  change_denied: "The host's rules deny this change for you: it was not made, and repeating it changes nothing.",
+  identity_unknown: "No agent has this name: list the agents and name one.",
+  stale_spec: "The agent changed since you read it: read it again and send the current spec digest.",
+  operation_reused: "This operation id was used with another request: send a new id for a new request, or the same request to read its result.",
+  owner_read_only: "This agent is declared by the host's configuration, and a run-time change does not write the host's configuration: change it there, or release the agent from configuration first (adopt), after which it is changed at run time.",
+  not_archived: "The agent is not archived: there is nothing to unarchive.",
+  decision_not_found: "No such decision.",
+  changes_held: "The host holds changes of agents for now: retry the same request later.",
+  unsupported: "The request needs something this release does not support: leave it out.",
+};
+
+const RETRYABLE = new Set(["changes_held"]);
+
+function refusal(kind, field, members = {}, detail) {
+  return {
+    kind,
+    ...(field ? { field } : {}),
+    retryable: RETRYABLE.has(kind),
+    detail: detail || SENTENCES[kind] || "The change was refused.",
+    ...members,
+  };
+}
+
+function stable(value) {
+  if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sha256(text) {
+  return `sha256:${crypto.createHash("sha256").update(text).digest("hex")}`;
+}
+
+const NAME = /^[a-z][a-z0-9-]{0,62}$/;
+
+/**
+ * The family. `options.requester` is the console caller as the gateway
+ * attributes it (`{kind: "human", id}` for a signed-in person, `{kind:
+ * "host", id: "console"}` otherwise); `options.now` a clock.
+ */
+function createScriptedIdentityFamily(options = {}) {
+  const requester = options.requester || { kind: "human", id: "principal:[\"human\",\"example\",\"dana\"]" };
+  const now = options.now || (() => Date.now());
+  const flags = { available: true, can_create: true, can_change: true, can_remove: true, ...(options.flags || {}) };
+  // Per agent: the two affordances the experience read carries. Absent
+  // means both true.
+  const affordances = new Map();
+  const profiles = options.profiles || [
+    { profile: "worker", verdict: "allowed" },
+    { profile: "reviewer", verdict: "needs_decision", lines: ["A person decides each new reviewer."] },
+    { profile: "operator", verdict: "not_allowed", reason: "The host's rules keep operators to its configuration." },
+  ];
+  const agents = new Map();
+  // What the host's rules give a change of an agent's profile to one
+  // profile (`allow`, `require_approval`, `deny`), and what the directory
+  // says of naming one agent as a peer. Absent means allowed.
+  const profileChanges = new Map();
+  const peerVerdicts = new Map();
+  // What the host's rules give a change of who reaches an agent or of how
+  // it runs: `allow` or `require_approval`.
+  let capabilityChange = "allow";
+  // The team's schedules, by the agent each targets: `{schedule_id, name?,
+  // state}` with state `active`, `paused_by_name` (somebody paused it) or
+  // `paused_for_target` (its agent's archive paused it). A family that is
+  // given no schedules says nothing of them in any answer.
+  const schedules = new Map();
+  let givesSchedules = options.schedules === true;
+  // Per agent: how many schedules the next pass can change before one
+  // cannot be read. That pass answers `incomplete`; the pass after it
+  // follows the rest.
+  const scheduleFaults = new Map();
+  // The team's members that are no long-term agent of their own.
+  const members = [];
+  const tombstones = new Set();
+  const operations = new Map();
+  const held = new Map();
+  const calls = [];
+  const scripted = [];
+  let decisions = 0;
+
+  function digestOf(agent) {
+    return sha256(stable({
+      name: agent.name, profile: agent.profile, display_name: agent.display_name ?? null,
+      instructions: agent.instructions, context: agent.context ?? null, labels: agent.labels, peers: agent.peers,
+      addressability: agent.addressability, runtime_mode_override: agent.runtime_mode_override ?? null,
+    }));
+  }
+
+  function seed(agent) {
+    const record = {
+      name: agent.name,
+      display_name: agent.display_name,
+      profile: agent.profile || "worker",
+      spec_revision: agent.spec_revision ?? 1,
+      archived: agent.archived === true,
+      readiness: agent.readiness || (agent.archived ? "unseated" : "dormant"),
+      provenance: agent.provenance,
+      open_operations: agent.open_operations || [],
+      instructions: agent.instructions || [],
+      context: agent.context,
+      labels: agent.labels || {},
+      peers: agent.peers || [],
+      // Who reaches it (`addressable` or `internal_only`) and how it runs
+      // (`autonomous_host`, `turn_driven`, or nothing: as its profile says).
+      addressability: agent.addressability || "addressable",
+      runtime_mode_override: agent.runtime_mode_override,
+      // Whether the host's configuration lists this name while the agent is
+      // served from its record. The gateway writes it only when it is true;
+      // a test may set another value to see how it is read.
+      roster_listing_superseded: agent.roster_listing_superseded,
+      // Scripted only, never written: a change of this agent is refused
+      // `owner_read_only`.
+      configured: agent.configured === true,
+    };
+    agents.set(record.name, record);
+    return record;
+  }
+
+  for (const agent of options.agents || [
+    { name: "helper", display_name: "Helper", profile: "worker", configured: true, instructions: ["Help the team."] },
+    {
+      name: "warden", display_name: "The warden", profile: "worker",
+      instructions: ["Guard the records.", "Answer in one paragraph."],
+      labels: { team: "records" }, peers: ["helper"],
+      provenance: { entered: "created", requester_kind: "agent", requester: "helper", at_ms: 1_762_000_000_000, consent: { form: "allowed" } },
+    },
+  ]) seed(agent);
+
+  function operationId(requestId) {
+    const namespace = crypto.createHash("sha256").update(`${requester.kind}:${requester.id}`).digest("hex").slice(0, 32);
+    return `${requester.kind}.${namespace}.${requestId}`;
+  }
+
+  function summary(agent) {
+    return {
+      name: agent.name,
+      // The display name is written only where the agent has one.
+      ...(agent.display_name ? { display_name: agent.display_name } : {}),
+      profile: agent.profile,
+      spec_digest: digestOf(agent),
+      spec_revision: agent.spec_revision,
+      archived: agent.archived,
+      readiness: agent.readiness,
+      ...(agent.provenance ? { provenance: agent.provenance } : {}),
+      ...(agent.open_operations.length ? { open_operations: agent.open_operations } : {}),
+      // Each is written only when it is not the default: an addressable
+      // agent, and one that runs as its profile says, say nothing.
+      ...(agent.addressability === "internal_only" ? { addressability: "internal_only" } : {}),
+      ...(agent.runtime_mode_override ? { runtime_mode_override: agent.runtime_mode_override } : {}),
+      // Written only when the host's configuration also lists the name.
+      ...(agent.roster_listing_superseded !== undefined && agent.roster_listing_superseded !== false
+        ? { roster_listing_superseded: agent.roster_listing_superseded }
+        : {}),
+    };
+  }
+
+  const ADDRESSABILITY = ["addressable", "internal_only"];
+  const RUNTIME_MODES = ["autonomous_host", "turn_driven"];
+
+  // A refusal of a value the wire does not know for one of the two members,
+  // at the path `prefix` gives them; null when both are fine.
+  function capabilityRefusal(spec, prefix) {
+    if (spec.addressability !== undefined && !ADDRESSABILITY.includes(spec.addressability)) {
+      return refusal("invalid_request", `${prefix}addressability`, { problem: "malformed" }, "addressability is addressable or internal_only.");
+    }
+    if (spec.runtime_mode_override !== undefined && !RUNTIME_MODES.includes(spec.runtime_mode_override)) {
+      return refusal("invalid_request", `${prefix}runtime_mode_override`, { problem: "malformed" }, "runtime_mode_override is autonomous_host or turn_driven.");
+    }
+    return null;
+  }
+
+  // A schedule as an answer names it: its id, and its name where it has one.
+  function namedSchedule(schedule) {
+    return { schedule_id: schedule.schedule_id, ...(schedule.name ? { name: schedule.name } : {}) };
+  }
+
+  // Have the schedules that target `name` follow a change of it, as the
+  // launch's schedule owner does after the change committed, and answer
+  // the ones it was done to: an archive pauses the active ones for their
+  // target, an unarchive resumes exactly those, a removal ends every one.
+  // Asked again it changes nothing where nothing is left to do.
+  function followSchedules(name, effect) {
+    const all = schedules.get(name) || [];
+    const due = all.filter(schedule =>
+      effect === "paused" ? schedule.state === "active"
+        : effect === "resumed" ? schedule.state === "paused_for_target"
+          : true);
+    const limit = scheduleFaults.get(name);
+    scheduleFaults.delete(name);
+    const done = limit === undefined ? due : due.slice(0, limit);
+    for (const schedule of done) {
+      if (effect === "paused") schedule.state = "paused_for_target";
+      else if (effect === "resumed") schedule.state = "active";
+    }
+    if (effect === "ended") schedules.set(name, all.filter(schedule => !done.includes(schedule)));
+    return {
+      effect,
+      count: done.length,
+      schedules: done.map(namedSchedule),
+      ...(done.length < due.length ? { incomplete: true } : {}),
+    };
+  }
+
+  // The schedules a change of `name` would take with it, as they are now,
+  // for a plan: an archive and an unarchive would move the ones that are
+  // active or paused for their target and leave a pause somebody asked for
+  // by name; a removal would end every one. Nothing is changed by asking,
+  // and no scripted fault of a pass is used up.
+  function plannedSchedules(name, effect) {
+    const due = (schedules.get(name) || []).filter(schedule =>
+      effect === "ended" || schedule.state === "active" || schedule.state === "paused_for_target");
+    return { effect, count: due.length, schedules: due.map(namedSchedule) };
+  }
+
+  function record(agent) {
+    return {
+      ...summary(agent),
+      instructions: agent.instructions,
+      ...(agent.context !== undefined ? { context: agent.context } : {}),
+      labels: agent.labels,
+      peers: agent.peers,
+    };
+  }
+
+  function outcomeOf(agent, state, extra = {}) {
+    return {
+      name: agent.name,
+      state,
+      ...(state === "removed" ? {} : { spec_digest: digestOf(agent), spec_revision: agent.spec_revision }),
+      ...extra,
+    };
+  }
+
+  function provenance() {
+    return {
+      entered: "created",
+      requester_kind: requester.kind,
+      requester: requester.id,
+      at_ms: now(),
+      consent: { form: "allowed" },
+    };
+  }
+
+  // The agent a change of one agent names, at the digest it read; a refusal
+  // otherwise.
+  function target(params) {
+    const agent = agents.get(params.name);
+    if (!agent) return { refused: refusal("identity_unknown", "name") };
+    if (agent.configured) return { refused: refusal("owner_read_only", "name") };
+    const current = digestOf(agent);
+    if (params.expected_spec_digest !== current) {
+      return {
+        refused: refusal("stale_spec", "expected_spec_digest", {
+          current_digest: current, current_revision: agent.spec_revision,
+        }),
+      };
+    }
+    return { agent };
+  }
+
+  function create(params) {
+    const specs = Array.isArray(params.agents) ? params.agents : [];
+    if (specs.length === 0) return { refused: refusal("invalid_request", "agents", { problem: "empty" }, "The request names no agent.") };
+    for (const [index, spec] of specs.entries()) {
+      if (typeof spec.name !== "string" || !NAME.test(spec.name)) return { refused: refusal("invalid_name", `agents[${index}].name`) };
+      if (tombstones.has(spec.name)) return { refused: refusal("name_taken", `agents[${index}].name`, { by: "removed" }) };
+      if (agents.has(spec.name)) return { refused: refusal("name_taken", `agents[${index}].name`, { by: "identity" }) };
+      const profile = profiles.find(entry => entry.profile === spec.profile);
+      if (!profile) return { refused: refusal("profile_unknown", `agents[${index}].profile`, { profile: spec.profile }) };
+      if (profile.verdict === "not_allowed") return { refused: refusal("change_denied", `agents[${index}].profile`, { change: "create" }) };
+      const capability = capabilityRefusal(spec, `agents[${index}].`);
+      if (capability) return { refused: capability };
+      for (const [peerIndex, peer] of (spec.peers || []).entries()) {
+        if (!agents.has(peer) && !specs.some(other => other.name === peer)) {
+          return { refused: refusal("peer_unknown", `agents[${index}].peers[${peerIndex}]`) };
+        }
+      }
+    }
+    const commit = (preparation) => specs.map((spec) => {
+      const agent = seed({
+        name: spec.name, display_name: spec.display_name, profile: spec.profile,
+        instructions: spec.instructions || [], context: spec.context, labels: spec.labels || {},
+        peers: spec.peers || [], provenance: provenance(),
+        addressability: spec.addressability, runtime_mode_override: spec.runtime_mode_override,
+        readiness: preparation ? "preparation_pending" : "dormant",
+      });
+      // A first message that did not start leaves the seat owed; the script
+      // says so with a first message that begins with "owed:".
+      const owed = typeof spec.first_message === "string" && spec.first_message.startsWith("owed:");
+      if (owed) agent.readiness = "unseated";
+      return outcomeOf(agent, preparation ? "pending_preparation" : "committed", { seat: owed ? "owed" : "seated" });
+    });
+    const needsDecision = specs.some(spec => profiles.find(entry => entry.profile === spec.profile)?.verdict === "needs_decision");
+    if (needsDecision) return { hold: () => commit(false) };
+    if (specs.some(spec => spec.labels && spec.labels.preparation === "host")) return { preparation: commit(true) };
+    return { agents: commit(false) };
+  }
+
+  // What the host's rules give a change of an agent's profile, checked
+  // before anything is written: a refusal, or what the rules give it
+  // (`allow`, or `require_approval`). The rules of a profile change are
+  // their own, not a create's: the script's answer per profile, `allow`
+  // where it has none.
+  function judgeUpdate(params) {
+    const found = target(params);
+    if (found.refused) return found;
+    const set = params.set || {};
+    if (set.profile !== undefined && !profiles.some(entry => entry.profile === set.profile)) {
+      return { refused: refusal("profile_unknown", "set.profile", { profile: set.profile }) };
+    }
+    const rule = set.profile !== undefined ? profileChanges.get(set.profile) || "allow" : "allow";
+    if (rule === "deny") return { refused: refusal("change_denied", "set.profile", { change: "profile" }) };
+    // A profile whose agents the host prepares before their first use
+    // takes no agent that was not prepared for it: the move is refused
+    // when it is asked, and its plan answers the same.
+    if (rule === "prepared") {
+      return {
+        refused: refusal("unsupported", "set.profile", { feature: "move_into_prepared_profile" },
+          "An agent is not moved into a profile its host prepares: the host prepares an agent of that profile before its first use, and this agent was not. Create the agent in that profile instead. Nothing was changed."),
+      };
+    }
+    const capability = capabilityRefusal(set, "set.");
+    if (capability) return { refused: capability };
+    // Who reaches an agent and how it runs are a change class of their
+    // own, under the script's rule for it.
+    const capabilityRule = set.addressability !== undefined || set.runtime_mode_override !== undefined ? capabilityChange : "allow";
+    for (const [index, peer] of (params.peers_add || []).entries()) {
+      if (!agents.has(peer)) return { refused: refusal("peer_unknown", `peers_add[${index}]`) };
+    }
+    for (const key of set.labels_remove || []) {
+      if (set.labels && Object.hasOwn(set.labels, key)) {
+        return { refused: refusal("invalid_request", "set.labels_remove", { problem: "conflicting" }, "A label is both set and removed.") };
+      }
+    }
+    return { agent: found.agent, rule: rule === "require_approval" || capabilityRule === "require_approval" ? "require_approval" : rule };
+  }
+
+  function update(params) {
+    const judged = judgeUpdate(params);
+    if (judged.refused) return judged;
+    const agent = judged.agent;
+    const set = params.set || {};
+    const apply = () => {
+      const before = stable(agent.instructions);
+      if (set.display_name !== undefined) agent.display_name = set.display_name;
+      if (set.instructions !== undefined) agent.instructions = set.instructions;
+      if (set.context !== undefined) agent.context = set.context;
+      if (set.labels !== undefined) agent.labels = { ...agent.labels, ...set.labels };
+      for (const key of set.labels_remove || []) delete agent.labels[key];
+      if (set.profile !== undefined) agent.profile = set.profile;
+      if (set.addressability !== undefined) agent.addressability = set.addressability;
+      if (set.runtime_mode_override !== undefined) agent.runtime_mode_override = set.runtime_mode_override;
+      agent.peers = [...agent.peers.filter(peer => !(params.peers_remove || []).includes(peer)), ...(params.peers_add || []).filter(peer => !agent.peers.includes(peer))];
+      agent.spec_revision += 1;
+      // What became of an instructions change: the script's answer for this
+      // agent, the next run by default, `unchanged` for the same text.
+      const instructions = set.instructions === undefined
+        ? undefined
+        : before === stable(agent.instructions)
+          ? { kind: "unchanged" }
+          : (agent.instruction_outcome || { kind: "applies_at_next_run" });
+      return [outcomeOf(agent, "committed", instructions ? { instructions } : {})];
+    };
+    return judged.rule === "require_approval" ? { hold: apply } : { agents: apply() };
+  }
+
+  // What a change of a whole agent does to the schedules that target it.
+  const SCHEDULE_EFFECTS = { archive: "paused", unarchive: "resumed", remove: "ended" };
+
+  // `meta/identity/plan`: the outcome a change would get. Nothing is held
+  // and nothing is written. The script plans the changes the console asks
+  // a plan of: an update, and an archive, an unarchive and a removal, whose
+  // plan also says which schedules the change would take with it, on a
+  // family that is given them.
+  function plan(params) {
+    const { change: planned, request_id: requestId, ...body } = params;
+    if (typeof requestId !== "string" || !requestId) {
+      return { error: refusal("invalid_request", "request_id", { problem: "empty" },
+        "A change names its operation: send a request_id, and the same one again to read the change's result.") };
+    }
+    if (Object.hasOwn(SCHEDULE_EFFECTS, planned)) {
+      // Judged as the change would be, at the digest it names.
+      const found = target(body);
+      if (found.refused) return { error: found.refused };
+      if (planned === "unarchive" && !found.agent.archived) return { error: refusal("not_archived", "name") };
+      const rendering = `${planned[0].toUpperCase()}${planned.slice(1)} ${found.agent.name}`;
+      return {
+        result: {
+          outcome: "allow",
+          change: planned,
+          timeout_ms: 3_600_000,
+          request_digest: sha256(stable(body)),
+          subject_digest: sha256(rendering),
+          rendering,
+          ...(givesSchedules ? { schedules: plannedSchedules(found.agent.name, SCHEDULE_EFFECTS[planned]) } : {}),
+        },
+      };
+    }
+    if (planned !== "update") {
+      return { error: refusal("invalid_request", "change", { problem: "malformed" },
+        "Name the change to plan: change is create, update, archive, unarchive, remove or adopt, beside that change's own params.") };
+    }
+    const judged = judgeUpdate(body);
+    if (judged.refused) return { error: judged.refused };
+    const rendering = `Update ${judged.agent.name}`;
+    return {
+      result: {
+        outcome: judged.rule,
+        change: body.set && body.set.profile !== undefined ? "profile"
+          : body.set && (body.set.addressability !== undefined || body.set.runtime_mode_override !== undefined) ? "capability"
+            : "descriptive",
+        ...(judged.rule === "require_approval" ? { approver_id: "owner" } : {}),
+        timeout_ms: 3_600_000,
+        request_digest: sha256(stable(body)),
+        subject_digest: sha256(rendering),
+        rendering,
+      },
+    };
+  }
+
+  function whole(params, change) {
+    const found = target(params);
+    if (found.refused) return found;
+    const agent = found.agent;
+    // The first answer of the change says what became of the agent's
+    // schedules, on a family that is given them.
+    const followed = () => (givesSchedules ? { schedules: followSchedules(agent.name, SCHEDULE_EFFECTS[change]) } : {});
+    if (change === "archive") {
+      agent.archived = true;
+      agent.readiness = "unseated";
+      return { agents: [outcomeOf(agent, "archived", followed())] };
+    }
+    if (change === "unarchive") {
+      if (!agent.archived) return { refused: refusal("not_archived", "name") };
+      agent.archived = false;
+      agent.readiness = "dormant";
+      return { agents: [outcomeOf(agent, "restored", followed())] };
+    }
+    agents.delete(agent.name);
+    tombstones.add(agent.name);
+    for (const other of agents.values()) other.peers = other.peers.filter(peer => peer !== agent.name);
+    return { agents: [outcomeOf(agent, "removed", followed())] };
+  }
+
+  // An outcome as a replay answers it: without what became of the
+  // schedules, which only the first answer of a change states.
+  function replayOf(outcome) {
+    if (!Array.isArray(outcome.agents)) return outcome;
+    return { ...outcome, agents: outcome.agents.map(({ schedules: _schedules, ...agent }) => agent) };
+  }
+
+  function change(method, params) {
+    const { request_id: requestId, ...body } = params;
+    if (typeof requestId !== "string" || !requestId) {
+      return { error: refusal("invalid_request", "request_id", { problem: "empty" },
+        "A change names its operation: send a request_id, and the same one again to read the change's result.") };
+    }
+    const id = operationId(requestId);
+    const fingerprint = stable({ method, body });
+    const known = operations.get(id);
+    if (known) {
+      if (known.fingerprint !== fingerprint) return { error: refusal("operation_reused", "request_id") };
+      // The same request under the same id answers the same state again and
+      // writes nothing. A change of a whole agent has its schedules follow
+      // it again (so a caller that got no answer makes them converge), and
+      // the replay states nothing of them.
+      const effect = SCHEDULE_EFFECTS[method.slice("meta/identity/".length)];
+      if (givesSchedules && effect && typeof body.name === "string") followSchedules(body.name, effect);
+      return { result: known.outcome, replayed: true };
+    }
+    const done = method === "meta/identity/create" ? create(body)
+      : method === "meta/identity/update" ? update(body)
+        : whole(body, method.slice("meta/identity/".length));
+    if (done.refused) return { error: done.refused };
+    let outcome;
+    if (done.hold) {
+      decisions += 1;
+      const decisionId = `decision-${decisions}`;
+      const deadlineMs = now() + 3_600_000;
+      outcome = { outcome: "pending_decision", operation_id: id, decision_id: decisionId, deadline_ms: deadlineMs };
+      held.set(id, { decisionId, deadlineMs, kind: `identity.${method.slice("meta/identity/".length)}`, commit: done.hold });
+    } else if (done.preparation) {
+      outcome = { outcome: "pending_preparation", operation_id: id, agents: done.preparation };
+    } else {
+      outcome = { outcome: "done", operation_id: id, agents: done.agents };
+    }
+    operations.set(id, { fingerprint, outcome: replayOf(outcome) });
+    return { result: outcome };
+  }
+
+  function operationOf(params) {
+    if (typeof params.request_id === "string" && params.operation_id === undefined) return operationId(params.request_id);
+    if (typeof params.operation_id === "string" && params.request_id === undefined) return params.operation_id;
+    return null;
+  }
+
+  // A page of a read: one stable order that `after` continues. The order is
+  // the one the agents came to exist in, not name order, as the gateway's
+  // own order is none a caller can compute.
+  function page(entries, after, key) {
+    const rest = after ? entries.slice(entries.findIndex(entry => entry[key] === after) + 1) : entries;
+    const size = options.pageSize || 100;
+    const shown = rest.slice(0, size);
+    return { shown, next: rest.length > size ? shown[shown.length - 1][key] : undefined };
+  }
+
+  function answer(method, params) {
+    switch (method) {
+      case "meta/identity/create":
+      case "meta/identity/update":
+      case "meta/identity/archive":
+      case "meta/identity/unarchive":
+      case "meta/identity/remove":
+        return change(method, params);
+      case "meta/identity/withdraw": {
+        const id = operationOf(params);
+        const decision = id && held.get(id);
+        if (!decision) return { error: refusal("decision_not_found") };
+        held.delete(id);
+        operations.delete(id);
+        return { result: { operation_id: id, decision_id: decision.decisionId } };
+      }
+      case "meta/identity/operation": {
+        const id = operationOf(params);
+        if (!id) return { error: refusal("invalid_request", "request_id", { problem: "conflicting" }, "Name the operation by request_id or by operation_id.") };
+        const known = operations.get(id);
+        return { result: known ? known.outcome : { outcome: "unknown", operation_id: id } };
+      }
+      case "meta/identity/get": {
+        const agent = agents.get(params.name);
+        return agent ? { result: record(agent) } : { error: refusal("identity_unknown", "name") };
+      }
+      case "meta/identity/list": {
+        const listed = [...agents.values()]
+          .filter(agent => params.include_archived === true || !agent.archived)
+          .filter(agent => !params.profile || agent.profile === params.profile)
+          .map(summary);
+        const { shown, next } = page(listed, params.after, "name");
+        return { result: { agents: shown, ...(next ? { next } : {}) } };
+      }
+      case "meta/identity/directory": {
+        const peers = [...agents.values()]
+          .filter(agent => !agent.archived)
+          .map(agent => ({
+            name: agent.name,
+            ...(agent.display_name ? { display_name: agent.display_name } : {}),
+            profile: agent.profile,
+            ...(peerVerdicts.get(agent.name) || { verdict: "allowed" }),
+          }));
+        const { shown, next } = page(peers, params.after, "name");
+        return { result: { profiles: params.after ? [] : profiles, peers: shown, ...(next ? { next } : {}) } };
+      }
+      case "meta/identity/plan":
+        return plan(params);
+      default:
+        return null;
+    }
+  }
+
+  return {
+    IDENTITY_REFUSED_CODE,
+    flags,
+    calls,
+    agents,
+    /** The methods this family serves, as `meta/capabilities` lists them. */
+    methods: [
+      "meta/identity/create", "meta/identity/update", "meta/identity/archive", "meta/identity/unarchive",
+      "meta/identity/remove", "meta/identity/withdraw", "meta/identity/operation", "meta/identity/get",
+      "meta/identity/list", "meta/identity/directory", "meta/identity/plan",
+    ],
+    seed,
+    /**
+     * A member of the team that is no long-term agent of its own (a side
+     * chat of an agent, a helper an agent started): a roster row, and no
+     * record in the family. `row` gives its `identity`, `label` and what
+     * marks it (`side_chat_of`, or `labels.spawned_by`). Its two
+     * affordances are false; a row that names `affordances` gives its own
+     * (`undefined` for a row that carries none).
+     */
+    seedMember(row) {
+      members.push({
+        agent_id: row.identity,
+        member_id: row.identity,
+        kind: "identity",
+        role: "worker",
+        state: "active",
+        addressable: true,
+        affordances: { can_send_message: true, can_change_identity: false, can_remove_identity: false },
+        ...row,
+      });
+    },
+    /** Set one agent's two affordances as the experience read carries them. */
+    setAffordances(name, value) { affordances.set(name, value); },
+    /** What the host's rules give a change of an agent's profile to
+     * `profile`: `allow`, `require_approval` or `deny`; `prepared` for a
+     * profile whose agents the host prepares, which takes no move. */
+    setProfileChange(profile, rule) { profileChanges.set(profile, rule); },
+    /** What the directory says of naming `name` as a peer: `{verdict,
+     * reason?, lines?}`. */
+    setPeerVerdict(name, verdict) { peerVerdicts.set(name, verdict); },
+    /** What the host's rules give a change of who reaches an agent or of
+     * how it runs: `allow` or `require_approval`. */
+    setCapabilityChange(rule) { capabilityChange = rule; },
+    /**
+     * The schedules that target `name`: `[{schedule_id, name?, state?}]`,
+     * state `active` (the default), `paused_by_name` or
+     * `paused_for_target`. Giving any makes this a family that is given
+     * its launch's schedules: the first answer of an archive, an unarchive
+     * and a removal then says what became of them.
+     */
+    setSchedules(name, list) {
+      givesSchedules = true;
+      schedules.set(name, list.map(schedule => ({ state: "active", ...schedule })));
+    },
+    /** The schedules that target `name`, as they stand. */
+    schedulesOf(name) { return (schedules.get(name) || []).map(schedule => ({ ...schedule })); },
+    /** The next pass over the schedules of `name` changes `count` of them
+     * and then cannot read one: it answers `incomplete`. */
+    failSchedulesAfter(name, count) { scheduleFaults.set(name, count); },
+    /** What became of the next instructions change of `name`. */
+    setInstructionOutcome(name, outcome) { agents.get(name).instruction_outcome = outcome; },
+    /**
+     * Script the next call of `method`: `{refuse: {kind, field?, detail?,
+     * ...}}` answers that refusal and writes nothing, `{fail: "after"}`
+     * carries the call out and then loses the answer, `{fail: "before"}`
+     * loses the call.
+     */
+    scriptNext(method, script) { scripted.push({ method, script }); },
+    /** Decide a held change as a person would: it commits, or ends refused. */
+    decide(decisionId, approve = true) {
+      for (const [id, decision] of held) {
+        if (decision.decisionId !== decisionId) continue;
+        held.delete(id);
+        const known = operations.get(id);
+        if (approve) known.outcome = { outcome: "done", operation_id: id, agents: decision.commit() };
+        else operations.delete(id);
+        return true;
+      }
+      return false;
+    },
+    /**
+     * The held changes as `meta/decisions/list` answers them to their
+     * requester: a status row each (where the decision stands, never what
+     * it holds).
+     */
+    decisionStatuses() {
+      return [...held.values()].map(decision => ({
+        decision_id: decision.decisionId,
+        kind: decision.kind,
+        phase: "open",
+        deadline_at_ms: decision.deadlineMs,
+      }));
+    },
+    /**
+     * One call, as the console RPC answers it: `{result}`, `{error: {code,
+     * message, data}}`, `{lost: true}` for a scripted transport loss, or
+     * null for a method outside the family.
+     */
+    handle(method, params = {}) {
+      if (!method.startsWith("meta/identity/")) return null;
+      // The console transport names its caller on every command; the
+      // gateway takes that member out before the strict parse.
+      const { expected_caller_scope: _scope, ...own } = params;
+      calls.push({ method, params: own });
+      const index = scripted.findIndex(entry => entry.method === method);
+      const script = index >= 0 ? scripted.splice(index, 1)[0].script : null;
+      if (script?.fail === "before") return { lost: true };
+      // Another answer of the gateway than the family's own refusal (access
+      // denied, a read-only console, a candidate launch): given whole.
+      if (script?.error) return { error: script.error };
+      if (script?.refuse) {
+        const { kind, field, detail, ...members } = script.refuse;
+        const data = refusal(kind, field, members, detail);
+        return { error: { code: IDENTITY_REFUSED_CODE, message: data.detail, data } };
+      }
+      const answered = answer(method, own);
+      if (!answered) return null;
+      if (script?.fail === "after") return { lost: true };
+      if (answered.error) return { error: { code: IDENTITY_REFUSED_CODE, message: answered.error.detail, data: answered.error } };
+      return { result: answered.result };
+    },
+    /**
+     * The roster rows of the family's agents with a member (not archived),
+     * and of the team's other members (`seedMember`).
+     *
+     * The two affordances are true only for an agent whose record the team
+     * keeps at run time: false for an agent the host's configuration
+     * declares, and for a member that is no long-term agent of its own (a
+     * side chat, a helper). The script can say otherwise per agent
+     * (`setAffordances`), so a row can turn one input off, or on.
+     */
+    experienceAgents() {
+      // An archived agent has no member, and neither has one that still
+      // waits for its host's preparation: the roster has no row for them.
+      const own = [...agents.values()].filter(agent => !agent.archived && agent.readiness !== "preparation_pending").map((agent) => {
+        const scripted = affordances.get(agent.name) || {};
+        const offered = !agent.configured;
+        return {
+          agent_id: agent.name,
+          member_id: agent.name,
+          identity: agent.name,
+          label: agent.display_name || agent.name,
+          kind: "identity",
+          profile: agent.profile,
+          role: agent.profile,
+          state: "active",
+          addressable: true,
+          affordances: {
+            can_send_message: true,
+            can_change_identity: scripted.can_change_identity ?? offered,
+            can_remove_identity: scripted.can_remove_identity ?? offered,
+          },
+        };
+      });
+      return [...own, ...members];
+    },
+    /** The section the experience read carries: each flag as scripted. */
+    experienceSection() {
+      return {
+        available: flags.available,
+        can_create: flags.can_create,
+        can_change: flags.can_change,
+        can_remove: flags.can_remove,
+      };
+    },
+  };
+}
+
+module.exports = { createScriptedIdentityFamily, IDENTITY_REFUSED_CODE };

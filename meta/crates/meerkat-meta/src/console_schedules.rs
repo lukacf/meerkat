@@ -378,7 +378,7 @@ pub(crate) fn refuse_reserved_runnable_name(name: &HostRunnableName) -> Result<(
 pub(crate) struct AttachedConsoleSchedules {
     pub(crate) service: ScheduleService,
     pub(crate) firing: ScheduleFiringHostBinding,
-    /// Test hook: while set, the next console schedule update or pause waits
+    /// Test hook: while set, the next console schedule create, update or pause waits
     /// here after its reads and before it writes.
     #[cfg(test)]
     pub(crate) write_hold: Arc<std::sync::Mutex<Option<ScheduleWriteHold>>>,
@@ -388,7 +388,7 @@ pub(crate) struct AttachedConsoleSchedules {
     pub(crate) resume_hold: Arc<std::sync::Mutex<Option<ScheduleWriteHold>>>,
 }
 
-/// Test hook: holds a console schedule update or pause between its reads and
+/// Test hook: holds a console schedule create, update or pause between its reads and
 /// its write until the test releases it.
 #[cfg(test)]
 #[derive(Clone)]
@@ -424,7 +424,7 @@ impl ScheduleWriteHold {
 
 #[cfg(test)]
 impl AttachedConsoleSchedules {
-    /// Hold the next update or pause with `hold`.
+    /// Hold the next create, update or pause with `hold`.
     pub(crate) fn hold_writes(&self, hold: ScheduleWriteHold) {
         *self
             .write_hold
@@ -440,7 +440,7 @@ impl AttachedConsoleSchedules {
             .unwrap_or_else(PoisonError::into_inner) = Some(hold);
     }
 
-    /// Wait at the hold, when one is set: the first update or pause to reach
+    /// Wait at the hold, when one is set: the first create, update or pause to reach
     /// it takes it, so a change made meanwhile passes.
     pub(crate) async fn wait_at_write_hold(&self) {
         Self::wait_at(&self.write_hold).await;

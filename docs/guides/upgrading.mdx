@@ -55,6 +55,490 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.15
+
+This section is for systems running 0.9.14 or 0.9.13. The full list of
+changes is in the CHANGELOG under `## [0.9.15]`.
+
+From 2026-11-13 until Connect 0.9.15 is published, the Connect release to
+use with Core 0.9.15 and Meta 0.9.15 is Connect 0.9.14. A Python environment
+with the `native-host` extra of Connect 0.9.14's `meerkat-toolkit` cannot
+take `meerkat-meta` 0.9.15 until Connect 0.9.15 is published: the extra
+requires `meerkat-meta==0.9.14`. In that pairing:
+
+- Connect 0.9.14's archives are built with Core 0.9.14 and Meta 0.9.14. What
+  0.9.15 changes in Core and Meta is not in the Connect CLI or the Connect
+  gateway until Connect 0.9.15.
+- `@rkat/toolkit` 0.9.14 accepts `@rkat/sdk` 0.9.15 and `@rkat/meta-sdk`
+  0.9.15 beside it: its optional peers accept 0.9.14 and later below 0.10.0.
+- Without that extra, the Python `meerkat-toolkit` 0.9.14 puts no
+  requirement on `meerkat-meta`.
+- The pairing rests on these published version requirements. It was not run
+  as a whole before Core 0.9.15 and Meta 0.9.15 were published.
+
+State that 0.9.14 or 0.9.13 persisted loads under 0.9.15 as it is. What
+that rests on differs by store:
+
+- **Core's stores** (the mob, schedule, session and runtime stores: the
+  SQLite stores and, for a realm kept in the host's own database, the stores
+  the host store SPI carries): no migration and no adoption step. No store
+  schema, journal, session or machine state version changes, and each stored
+  field 0.9.15 adds is written only when it is set and read as unset when
+  absent. This rests on a comparison of the stored forms of the two releases
+  and on the tests of the forms that gained a field, not on loading state
+  that a 0.9.14 binary wrote.
+- **Meta's own stores:** no change was found in the serialized form or the
+  schema version of a stored Meta type. This rests on a read of this
+  release's changes to Meta, not on an audit of each stored form.
+- **A store the host implements itself** (a host-supplied schedule store,
+  for example) holds Core's serialized forms, so the same holds for it
+  provided it stores them whole and keeps the keys it does not know.
+
+### Configuration documents are readable by their owner only
+
+On Unix the engine writes every configuration document readable by its
+owner only (mode 0600), whatever the process umask: a config document
+(`~/.rkat/config.toml`, a project's `.rkat/config.toml`, a realm's own
+`config.toml`), the `config_state.json` beside it, and `mcp.toml`
+(`~/.rkat/mcp.toml`, a project's `.rkat/mcp.toml`). Through 0.9.14 these
+files took the umask's mode. The one exception is a directory that has the
+setgid bit: the documents written there are 0640, readable by the
+directory's group. A document the engine writes is never writable by its
+group and never readable by others. See
+[File permissions](/concepts/configuration#file-permissions).
+
+**Do:**
+
+- A document an earlier release wrote keeps its mode until the engine next
+  rewrites it. To make the existing ones owner-only now, run `chmod 600` on
+  each that exists: `~/.rkat/config.toml`, `~/.rkat/config_state.json` and
+  `~/.rkat/mcp.toml`; a project's `.rkat/config.toml` and `.rkat/mcp.toml`;
+  and each realm's `config.toml` and `config_state.json` in its realm
+  directory (`<project-root>/.rkat/realms/<realm>/` for the CLI, or
+  `<state-root>/<realm>/`).
+- Where several local accounts read a document through group permissions (a
+  project checkout or a realm directory shared by a group, or an install
+  that runs a helper or a verifier under another account), the group loses
+  that read at the document's next rewrite unless the document's directory
+  has the setgid bit. Set it once on each shared directory, with
+  `chmod g+s <dir>` (the `.rkat` directory of a shared project, a shared
+  realm directory): the documents written there are then 0640 with the
+  directory's group. A document the engine already rewrote as 0600 stays
+  0600: run `chmod g+r` on it once.
+- An install that cannot set the bit grants the read itself after each
+  write, with `chmod g+r` or an ACL on the document. A write replaces the
+  file, so a grant on the file before it does not carry over, and a default
+  ACL on the directory does not reach a file that is created 0600.
+
+The admission fence file keeps its own rule: `admission.lock` is 0640 with
+its directory's group in every directory.
+
+### `rkat run --comms-binding-out` replaces what is at its path
+
+`rkat run --comms-binding-out <PATH>` no longer writes into what is already
+at the path. It removes the file there and creates a new one that only its
+owner can read (0600 on Unix), whatever the umask and whatever mode the
+older file had. The flag is described under
+[CLI usage](/guides/comms#cli-usage) in the comms guide.
+
+**Do**, where an install relied on the old write:
+
+- **A symbolic link at the path:** give the flag the path of the file
+  itself. The link is replaced by a regular file, whether it pointed to a
+  regular file or to nothing. Through 0.9.14 the binding was written through
+  the link into the file it named; now that file is left as it was, or not
+  created, and does not receive the binding.
+- **A named pipe, a socket, a device or a directory at the path**, or a
+  symbolic link to one of them, is refused and left untouched. So is any
+  path in `/proc` or in `/dev`, whatever it holds; `/dev/shm`, a memory file
+  system for ordinary files, is the one exception.
+  `--comms-binding-out /dev/stdout`, or a named pipe a supervisor reads the
+  binding from, worked before and is now an error: write the binding to a
+  regular file (one under `/dev/shm` will do) and have the supervisor read
+  that.
+- **The directory of the path** must let `rkat` remove and create a file in
+  it. A binding file that was created for `rkat` in a directory it cannot
+  write could be rewritten in place before, and now fails: give `rkat` a
+  directory it can write.
+- **A supervisor under another account** than `rkat` can no longer read the
+  binding file (under the common umask 022 it could). Run the supervisor
+  under the same account, or grant it the read after each write (`chmod`,
+  or an ACL on the file): the file is a new one every time, so a grant on
+  the older file does not carry over.
+- **A binding file an earlier release wrote** keeps its mode until it is
+  written again: run `chmod 600` on it, or delete it once the supervisor
+  has read it.
+
+The descriptor file of `rkat mob host --descriptor-out` is owner-only in
+the same way.
+
+### `rkat run --output json`: a failed run prints a failure document
+
+A failed `rkat run --output json` (or `--json`, with or without `--resume`)
+now ends stdout with a JSON failure document, `{"error": {...}}`. Through
+0.9.14 a failed run wrote no document to stdout. The exit statuses and the
+stderr text are unchanged, and text and HTML output print no document. See
+[JSON failure document](/cli/configuration#json-failure-document).
+
+**Do:** a script must not read non-empty stdout as success, nor parse the
+last stdout document as a run result without looking at it. Decide by the
+exit status, or by the document's top-level key: `error` is a failure,
+`status` (`"pending_tool_call"`) a run waiting for an external tool result,
+and anything else the run result.
+
+### A definition update that drops a profile agents were created on
+
+`MobStorage::update_definition` (on Meta, a declared definition update:
+`runtime_options.declare_spec_update`) refuses an update that drops a
+profile, or renames it, while a created agent's row names the profile: the
+answer is the diagnostic `profile_held_by_identity` at `profiles.<name>`,
+which names the agents, and nothing is written. Earlier releases accepted
+the update, and such an agent then failed each restore.
+
+**Before such an update:** keep the profile, or update those agents to
+another profile or remove them. An archived agent holds its profile; a
+removed one does not. A start that carries no update starts as before.
+
+**After a rollback from a later release:** a created agent's row that
+release wrote may not be readable by this one. While the mob has such a
+row, an update that drops or renames a profile is refused the same way, at
+`profiles`, naming those agents, since such a row may name the profile.
+Keep the profile, or run the update on the release that reads the rows.
+
+**Exported agents:** an import of exported agents
+(`MobHandle::import_created_identities`) restores their rows without
+judging their profiles against the definition, and between the purge and
+the import the check reads no row. Keep the profiles of exported agents
+until the import.
+
+**Code that reads diagnostics:** a consumer that reads diagnostic codes as
+text meets a code it did not know, `profile_held_by_identity`. Rust code
+that matches `meerkat_mob::DiagnosticCode` exhaustively adds an arm for
+`ProfileHeldByIdentity`, which is appended last.
+
+### Schedules paused for their target, and a rollback
+
+A schedule can be paused for its target (`ScheduleService::pause_for_target`):
+it is stored as a paused schedule whose machine state carries
+`paused_for_target: true`, and only such a schedule is resumed when its
+target takes deliveries again. Nothing changes for a schedule that is not
+paused that way, and the upgrade needs no step.
+
+**Rolling back:** an earlier release reads such a schedule as paused and
+never resumes it on its own. It ignores the mark, and drops it when it
+writes the schedule while it is paused (an update, a pause by name, a
+target snapshot sync, a late supersession acknowledgement); a schedule it
+does not write keeps the mark. After returning to 0.9.15, a schedule whose
+mark was dropped stays paused when its target comes back: resume by name
+the schedules of the targets that take deliveries again and are still
+paused. The loss is on the safe side: such a schedule never fires at a
+target that takes no delivery.
+
+### Store-owned agents: seats an earlier release recorded
+
+A store-owned identity is an agent whose record is its row in the mob's
+identity store, an agent created at run time for example. Two notes apply
+to a mob that holds such agents from 0.9.9 through 0.9.14. Neither needs a
+step for the upgrade itself.
+
+**A seat recorded ephemeral.** From 0.9.15 the seat of a store-owned
+identity is a durable identity's, whatever its profile says of durability.
+A seat that was recorded ephemeral (by a release from 0.9.9 through 0.9.14,
+for an identity on a profile without `durable = true`, or kept by an
+adoption from a plain worker) is not converted at a start or at the
+adoption. The identity joins the durable resume gate and Core's lists of
+durable identities (`MobHandle::durable_identity_members`,
+`MemberBindingHistory::durable_identity_bindings`) at its next seat, or at
+a respawn of its member (`MobHandle::respawn_member`), which keeps its
+conversation.
+
+**Do:** a host whose checks read those lists respawns the members it needs
+listed now.
+
+**Seat labels an earlier release left behind.** 0.9.9 through 0.9.14 kept
+a seated member's labels at a label update of its identity, so such a seat
+can carry other labels than its row. Those releases wrote no record of an
+owed restamp, so no start and no build of 0.9.15 moves the seat's labels.
+`MobHandle::identity_record_census()` counts such seats in `seats_stale`.
+
+**Do:** while `seats_stale` is above zero, bring each such seat up to date
+before the host adopts `MemberBuildPreparer::prepare_store_owned_seat` or a
+spawn customizer that sets labels. Respawn the member with its row's labels
+(`MobHandle::respawn_member` with `MemberRespawn::new().with_labels(..)`),
+or update the identity while its member is idle: any update then makes the
+seat equal the row. A host that answers such a member's seat from its row
+is otherwise refused the member's build, with a refusal that names the
+label keys that differ. A seat whose owed restamp 0.9.15 recorded itself
+(see [Rolling back to 0.9.14](#rolling-back-to-0-9-14)) is counted in
+`seats_stale` too and needs no step here: its builds are compared with the
+row's labels.
+
+### Operator instruction limits bound a member's snapshot
+
+No action is needed to upgrade. A mob's operator instruction limits (64
+records and 1 MiB of Active bodies) now bound one member's snapshot, the
+shared records plus the member-targeted records that name the member, not
+the mob as a whole. A mob can hold a member-targeted record for each of any
+number of members, and a member's session and status row no longer list
+other members' member-targeted records. For a session that 0.9.14 wrote,
+this holds from the mob's next write of the member's snapshot: until then
+the session keeps the slots it was given. Shared records (targeted at every
+member or at a profile) keep the bound they had. See
+[Operator instructions](/guides/mobs#operator-instructions).
+
+Rust code that matches on the kernel's
+`meerkat_machine_kernels::generated::mob::TransitionId` by variant: the enum
+gains `SetOperatorInstructionAdvanceSlotLimitExceededRunning` and
+`SetOperatorInstructionAdvanceSlotLimitExceededStopped`, appended last, so
+an exhaustive match needs the two arms and no existing variant's
+discriminant moves.
+
+### Operator instructions for a member and its forks
+
+No action is needed to upgrade: a member-targeted record stays its member's
+alone unless it is written with `include_forks`, and a fork then runs under
+the records written for the first member of its fork family and its forks
+(see
+[Operator instructions](/guides/mobs#operator-instructions)). One behaviour
+changes without the field: a durable fork child has its operator instruction
+snapshot, with the records the mob targets at every member or at its
+profile, recorded before it is seated, and a fork whose snapshot
+cannot be recorded is refused `fork_member_provision_failed`.
+
+Rust code: `meerkat_mob::OperatorInstructionTarget::Member` and
+`meerkat_contracts::WireInstructionTarget::Member` gain the field
+`include_forks` (`false` keeps the meaning the variant had); the machine
+types gain the items the CHANGELOG lists under Breaking, each appended
+last.
+
+Clients and servers of an earlier release: a client that decodes operator
+instruction targets with an earlier release's `meerkat-contracts` refuses a
+`mob/instruction_status` page that lists a record written with
+`include_forks` (its target type denies unknown fields), so upgrade such
+clients before the first such write; a page with no such record is
+unchanged, because the field is left out when false. A server of an earlier
+release refuses a `mob/set_instruction` whose target carries the field.
+
+Forks seated by an earlier release: a fork seated by a release before
+0.9.15, or while rolled back to one, has no lineage root on its stored spawn
+row. No record written with `include_forks` ever selects it, and a record
+written for it and its forks reaches its own forks, which are rooted at it.
+
+Rolling back: a release before 0.9.15 reads a record written with
+`include_forks` as a record for the member alone, and ignores the lineage
+root that a fork's stored spawn row carries (there the fork is a member with
+no fork family), so on that release these records do not select the forks.
+Nothing is refused. What the return to 0.9.15 restores depends on the mob's
+store:
+
+- **SQLite store**: no stored row is rewritten. The lineage of every fork
+  seated on 0.9.15 is restored from its spawn row and the records select
+  those forks again; write each such record at a new revision after the
+  return, which delivers it to every fork it selects.
+- **Host store** (a realm kept in the host's own database through the host
+  store SPI): the earlier release writes the mob's journal again at its next
+  checkpoint, from what it read, without the fork scope of the records and
+  without the lineage roots. They do not come back: after the return those
+  records are their members' alone and the forks seated before have no
+  lineage. Write the records again, at a new revision, with
+  `include_forks`; they then select the forks seated from then on.
+
+### Meta 0.9.15
+
+Meta 0.9.15 pins Core `=0.9.15`. The full list is in `meta/CHANGELOG.md`
+under `## [0.9.15]`.
+
+- Identity policy: an enabled policy that names an approval outcome or a
+  preparation mode this release does not carry out is refused at init. That
+  is the approval outcome `notify` or `review`, in a rule or as the default,
+  and the preparation mode `constructed`, in `runtime_options.identity_creation`
+  or in the policy a native Rust host returns from
+  `GatewayHostComposition::identity_creation_policy`. The refusal names the
+  policy path (`approval.rules[<n>].outcome.kind`, `approval.default.kind`
+  or `preparation.<profile>.mode`) and what to write instead. 0.9.14
+  accepted `notify` and `review`, and accepted `constructed` on a launch
+  with a native Rust host composition (it refused it on every other
+  launch), and nothing acted on them: no notice reaches an approver for
+  `notify`, no reviewer decides for `review`, and no method holds or
+  activates a construction. **Do:** write `allow` where the policy
+  says `notify` (the consent a change committed under reads back from
+  `meta/identity/get`, `meta/identity/list` and `meta/identity/operation`);
+  write `require_approval` where it says `review`, or review the request in
+  your own code before you ask under `allow`; and write the preparation
+  mode `required` where it says `constructed`, which the host settles with
+  `meta/identity/settle_preparation`. The page "Identity policy" of Meta's
+  reference (`meta/docs/reference/identity-policy.mdx`) describes the
+  policy.
+- A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
+  or the `bootstrap_with_*` family must complete the bootstrap before an
+  agent created at run time can be built: with an identity bootstrap
+  (`install_and_bootstrap_identity_first_context`, or
+  `bootstrap_installed_identity_first_context` and its held variants) or
+  with `activate_without_identity_context`. Until one of them returns,
+  every build of such an agent is refused for now, with a reason that names
+  both calls, and one warning is logged per process. An agent that starts at
+  its creation (it was given a first message, or its profile runs as an
+  autonomous host, the default) and one the mob's start owes its seat stay
+  owed their seat, and the call that completes the bootstrap seats them. A
+  delivery to an agent seated dormant is refused retryable
+  (`host_preparation_pending`) and nothing is delivered: the sender sends
+  it again once the bootstrap is complete. Creating an agent that builds
+  nothing (no first message, a turn-driven profile) is unchanged. Through
+  0.9.14 such an agent was built from its record at once.
+  `UnifiedRuntimeBuilder` and both gateway binaries complete the bootstrap
+  themselves. **Do:** a host of that kind calls one of them after its
+  bootstrap.
+- Rust: `identity_creation::ChangeClass` gains the variants `Archive` (an
+  archive and an unarchive) and `Adopt`. **Do:** add both arms to each
+  exhaustive match on it.
+- Rust: `identity_creation::NameTakenBy` loses the variants `Declared` and
+  `Created` and gains `Identity`: a `name_taken` refusal names its holder as
+  `identity`, `removed`, `worker` or `unreadable`. The implicit
+  discriminants of `Removed`, `Worker` and `Unreadable` are now 1, 2 and 3
+  (they were 2, 3 and 4), and their places in the derived order
+  (`PartialOrd`, `Ord`) moved with them; the order among the three is
+  unchanged, and `Identity` sorts first, where `Declared` did. **Do:**
+  replace the arms for `Declared` and `Created` with one for `Identity`,
+  and check code that casts a variant to its discriminant or compares two
+  variants.
+- Rust: `IdentityStatus` gains the members `record` (`IdentityRecordFacts`)
+  and `roster_listing_superseded`, and `RestoreFlowResult` gains the member
+  `roster_listings_superseded`. On the wire each new member of the status is
+  left out while it is unset, so the status of a seated agent is written as
+  before while `roster_listing_superseded` is `false`. **Do:** a struct
+  literal of either type sets its new members: `record: Default::default()`
+  and `roster_listing_superseded: false` on `IdentityStatus`,
+  `roster_listings_superseded: Default::default()` on `RestoreFlowResult`.
+- Rust, source only: `CustomizerToolsSpawnCustomizer` no longer implements
+  the auto traits `UnwindSafe` and `RefUnwindSafe`: it now holds a
+  late-bound reference to the session bridge, which has neither. **Do:**
+  code that passes one across `std::panic::catch_unwind` wraps it in
+  `std::panic::AssertUnwindSafe`.
+- Python SDK (`meerkat-meta`) and TypeScript SDK (`@rkat/meta-sdk`): the
+  refusal kinds of `runtime.identities` (`IDENTITY_REFUSAL_KINDS`), its
+  instruction outcomes and its seats are closed vocabularies, so a kind
+  added by a later release is a breaking change of the SDKs. **Do:**
+  upgrade the SDKs with the gateway.
+
+### Rolling back to 0.9.14
+
+What this subsection says an earlier release does was established by
+reading the 0.9.14 source, not by running a 0.9.14 binary over state that
+0.9.15 wrote.
+
+0.9.14 and earlier releases read what 0.9.15 writes without a refusal (a
+record written with `include_forks` reads there as its member's alone, see
+above), with two exceptions: a created agent's row that records an owed
+label restamp, and a mob whose operator instruction records are past what
+an earlier release holds in one mob. Check for both on 0.9.15, before the
+rollback. A third stored form is read without a refusal and is changed by
+what the earlier release writes: a schedule paused for its target, at the
+end of this subsection.
+
+**A created agent's row that records an owed label restamp.** The row of a
+store-owned identity carries the key `label_restamp_owed` while an update
+of the agent has committed labels that its seated member's seat row does
+not carry yet: the member held work at the update, say. The row lets the
+key go once a seat row carries the row's labels, and an archive or a
+removal drops it. A row that owes none carries no such key and reads on
+earlier releases as before.
+
+Releases 0.9.9 through 0.9.14 read a row that carries the key as
+unreadable, for that agent only. The mob starts, and its other agents are
+unaffected. While the host runs the earlier release, every change of that
+agent is refused, commands and work addressed to it are refused, and
+nothing is spawned or seated under its name; a member that is already
+seated stays seated. The row is kept as stored, on the SQLite store and on
+a host store, so 0.9.15 reads it again after the return: the agent is out
+of service while rolled back, and nothing of it is lost. An earlier release
+cannot settle the owed restamp, since it cannot read the row: settle it on
+0.9.15 before the rollback, or return to 0.9.15.
+
+Before a rollback, on 0.9.15, read `MobHandle::identity_record_census()`
+(with no running mob, `MobStorage::read_identity_record_rows` for a store
+file or `MobStorage::identity_record_rows` for a storage). While
+`label_restamps_owed` is above zero, settle each owed restamp:
+
+- retry the update, or update the agent again
+  (`MobHandle::update_store_owned_identity`), while its member is idle;
+- or respawn its member with the row's labels (`MobHandle::respawn_member`
+  with `MemberRespawn::new().with_labels(..)`);
+- a member no same-session successor can serve (a placed member, a member
+  wired to a placed member, a member on a session service that keeps no
+  durable sessions) is settled by none of these: rotate it
+  (`MobHandle::rotate_member`), or archive or remove its agent.
+
+`rkat storage doctor` and Meta's storage doctor do not report this count,
+and a host that uses only the SDKs has no read for it in 0.9.15: the Rust
+calls above are the read.
+
+**Operator instruction records past an earlier release's totals.** An
+earlier release bounds the mob as a whole at 64
+records and 1 MiB of Active bodies, and puts every record of the mob in
+every member's snapshot. Only 0.9.15 admits more, as member-targeted
+records, in two ways:
+
+- **more than 64 records** in the mob (a revoked record keeps its slot and
+  counts);
+- **more than 1 MiB of Active bodies** over all the mob's records together,
+  with 64 records or fewer (five members that each hold a 256 KiB record of
+  their own, for example).
+
+An earlier release does not refuse such a mob when it starts: its release
+build replays the journal without an error and the mob comes up with its
+members. It then cannot serve the mob, because every step that checks the
+mob's recovered state against the earlier bounds is refused:
+
+- every spawn into the mob is refused, with an internal error that says the
+  mob's state could not be recovered;
+- every flow run is refused before it starts, for the same reason;
+- with more than 64 records, every member's operator instruction delivery
+  is also refused by the member's session (`slot_limit_exceeded`) and
+  retried without end: the status read shows the member `owed` with that
+  `last_failure`, and no later write reaches it. What a member's session
+  already applied stays in effect. A member whose build mints a new session
+  fails to build, because the mob cannot carry its snapshot into the
+  session.
+
+Turns of the members that are already seated, the roster and the journal
+are not affected, and 0.9.15 serves the mob again without a repair. A mob
+within both totals is unaffected in either direction, whatever its records'
+targets.
+
+Before a rollback, run `rkat storage doctor` on 0.9.15: it lists each such
+mob database (`operator-instruction-mob-totals`, with its record count and
+its Active bytes). The doctor reads mob databases on disk. For a mob kept
+in a host store, read `mob/instruction_status`
+(`MobHandle::operator_instruction_status`) without `namespace` and `key`:
+`desired` lists every record of the mob, revoked ones included, with each
+one's effect and, while it is Active, its `body_bytes`; count the records
+and add up the bytes of the Active ones. A revoke lowers the bytes but not
+the count: a revoked
+record keeps its slot. For each listed mob, do one of these first:
+
+- keep the processes that serve that mob on 0.9.15;
+- bring it back within both totals where only the bytes are over: revoke
+  records, or write shorter bodies, until the Active bodies of the whole
+  mob are at most 1 MiB;
+- reset the mob (`mob/lifecycle` with `reset`, `MobHandle::reset`), which
+  retires its members and clears its operator instruction records, then seat
+  its members and write the records it needs again, at most 64 records and
+  1 MiB in total;
+- destroy the mob, or move its database out of the mob root, as for a mob
+  an earlier release refuses.
+
+**A schedule paused for its target.** Nothing is refused, and the pause is
+not lost. 0.9.14 has no such mark: it ignores `paused_for_target` and reads
+the schedule as paused, so the schedule stays paused while rolled back, and
+nothing on 0.9.14 resumes it when its target takes deliveries again. Any
+write of the schedule by the earlier release while it is paused (an update,
+a pause by name, a target snapshot sync, a late supersession
+acknowledgement) stores it without the mark; a schedule the earlier release
+did not write keeps the mark. After the return to 0.9.15 a schedule that
+kept its mark is resumed with its target, and one whose mark was dropped
+stays paused when its target comes back, until it is resumed by name. See
+[Schedules paused for their target, and a rollback](#schedules-paused-for-their-target%2C-and-a-rollback).
+
 ## Upgrading to 0.9.14
 
 This section is for systems running 0.9.13. The full list of changes is in
@@ -1909,17 +2393,42 @@ preparation (`preparations_open`), the held constructions
 last seat row predates their row's labels or profile (`seats_stale`: 0.9.8
 rebuilds such a member from its seat row; a respawn with the row's labels,
 `MemberRespawn::with_labels`, or a restamp brings the seat row up to date).
+From 0.9.15 a label update restamps its idle member
+itself, so only a seat an earlier release left behind, or one whose member
+was not restamped at its update (it held work, say), counts here. From
+that release on, an update that leaves its member's restamp owed records
+it in the identity's row (`label_restamps_owed` counts those rows): the
+mob's roster reads the row's labels from the update's commit and from each
+start on (a host's own respawn of the member with other labels in between
+keeps those on its roster entry until the next start or the restamp, while
+its builds carry the row's), the member's builds are compared with them,
+and a retry of the
+update, the identity's next update while the member is idle, or a respawn
+with the row's labels settles it. Such a seat needs no step before its
+host adopts `MemberBuildPreparer::prepare_store_owned_seat` or a spawn
+customizer that sets labels. A seat an earlier release left behind carries
+no such record: respawn it with its row's labels, or update the identity
+while its member is idle, before the host adopts either, since no start
+and no build moves its labels and a host that answers such a seat from its
+row is refused the member's build. Releases 0.9.9 through 0.9.14 read a row
+that records an owed restamp as unreadable, for that identity alone:
+settle the owed restamps before a rollback to one of them (the store-level
+row counts below report `label_restamps_owed` with no running mob).
+The count names the seat rows a downgrade would read: step 3 of the
+downgrade cycle brings them up to date.
 Change receipts are rows of the identity store's receipts table under keys
 0.9.8 never asks for.
 
 From 0.9.10 the rows are also counted with no running mob, by the same
 rule, read-only. `MobStorage::read_identity_record_rows` counts a store
 file's rows per mob (`IdentityRecordRows`: `created_rows`, `archived`,
-`tombstones`, `unreadable`), and `MobStorage::identity_record_rows` counts a
+`tombstones`, `unreadable`, and from 0.9.15 `label_restamps_owed`, the rows
+that record an owed label restamp), and `MobStorage::identity_record_rows` counts a
 storage's mob, a host store's included. `rkat storage doctor` reports them
 for each mob database that holds any, and Meta's storage doctor for a Meta
 state directory, as the Info finding `identity-store-rows` with the counts
-only.
+only. The doctors do not print the owed label restamp count; the row
+counts do (`label_restamps_owed`), so read that count before a rollback.
 
 0.9.8 reads WorkGraph items whose evidence withdraws earlier evidence, but it
 ignores `withdraws` and drops the field when it rewrites such an item (any

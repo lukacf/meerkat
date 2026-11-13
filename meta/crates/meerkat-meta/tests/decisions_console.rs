@@ -437,6 +437,62 @@ async fn requester_reads_status_only(access: &str) {
     runtime.shutdown().await;
 }
 
+/// The requester of a change of an agent reads its own request whole, for
+/// each `identity.*` kind: the rendering is what it asked for, shown to it
+/// already when it asks what the change would get. Reading it gives no
+/// standing to decide it: the Console serves no decide.
+#[tokio::test]
+async fn the_requester_of_a_change_of_an_agent_reads_its_own_request_whole() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console(&state, Some(ENFORCED), true).await;
+    let owner = decisions_of(&state);
+    for kind in [
+        "identity.create",
+        "identity.update",
+        "identity.archive",
+        "identity.unarchive",
+        "identity.remove",
+        "identity.adopt",
+    ] {
+        let held = hold(&owner, kind, kind, "team:ops", console_requester(CAROL));
+        let reads = rpc(
+            &app,
+            Some(CAROL),
+            "meta/decisions/rendering",
+            json!({"decision_id": held.decision_id.to_string()}),
+        )
+        .await;
+        assert_eq!(
+            reads["result"]["rendering"],
+            json!(RENDERING),
+            "{kind}: {reads}"
+        );
+        let whole = rpc(
+            &app,
+            Some(CAROL),
+            "meta/decisions/get",
+            json!({"decision_id": held.decision_id.to_string()}),
+        )
+        .await;
+        assert!(whole["result"].get("decision").is_some(), "{kind}: {whole}");
+        let decide = rpc(
+            &app,
+            Some(CAROL),
+            "meta/decisions/decide",
+            json!({
+                "decision_id": held.decision_id.to_string(),
+                "approve": true,
+                "presented_digest": held.descriptor.subject_digest.to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(decide["error"]["code"], json!(-32601), "{kind}: {decide}");
+    }
+    drop(app);
+    runtime.shutdown().await;
+}
+
 #[tokio::test]
 async fn requester_cannot_read_a_held_release() {
     requester_reads_status_only(ENFORCED).await;

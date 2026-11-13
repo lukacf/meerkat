@@ -193,6 +193,15 @@ impl Drop for SameProcessTopologyCoordinatorInner {
 /// Opening the same journal twice fails closed. This guarantees one owner for
 /// idempotency and crash recovery and prevents two host components from
 /// independently driving the same authority pair.
+///
+/// A principal is an access-rule subject: what it is shown and may change is
+/// decided by each runtime's installed access controller, and only while
+/// that controller enforces. Access to an agent private to a person is
+/// enforced here only under an installed, enforcing access controller; a
+/// runtime without one shows and changes every endpoint for every principal.
+/// Under an enforcing controller each entry that takes a principal reads the
+/// runtime's agents first, and an endpoint of a runtime that none of its
+/// agents holds is shown to an access administrator only.
 #[derive(Clone)]
 pub struct SameProcessTopologyCoordinator {
     inner: Arc<SameProcessTopologyCoordinatorInner>,
@@ -288,6 +297,9 @@ impl SameProcessTopologyCoordinator {
         right: &UnifiedRuntime,
         principal: Option<&str>,
     ) -> Result<TopologyBilateralSnapshot, TopologyControlError> {
+        // The principal's views decide on each runtime's agents as they
+        // are now.
+        prime_pair_access(left, right).await;
         let _coordinator = self.inner.mutation.lock().await;
         let (first, second) = canonical_runtimes(left, right)?;
         let _first_guard = first.topology_controller().mutation_guard().await;
@@ -303,6 +315,9 @@ impl SameProcessTopologyCoordinator {
         request: TopologyBilateralPlanRequest,
         principal: Option<&str>,
     ) -> Result<TopologyBilateralPlan, TopologyControlError> {
+        // The principal's views decide on each runtime's agents as they
+        // are now.
+        prime_pair_access(left, right).await;
         let _coordinator = self.inner.mutation.lock().await;
         let (first, second) = canonical_runtimes(left, right)?;
         let _first_guard = first.topology_controller().mutation_guard().await;
@@ -328,6 +343,9 @@ impl SameProcessTopologyCoordinator {
         principal: Option<&str>,
         actor: &str,
     ) -> Result<TopologyOperationReceipt, TopologyControlError> {
+        // The principal's views decide on each runtime's agents as they
+        // are now.
+        prime_pair_access(left, right).await;
         let _coordinator = self.inner.mutation.lock().await;
         let (first, second) = canonical_runtimes(left, right)?;
         let _first_guard = first.topology_controller().mutation_guard().await;
@@ -397,6 +415,9 @@ impl SameProcessTopologyCoordinator {
         operation_id: &str,
         principal: Option<&str>,
     ) -> Result<TopologyOperationReceipt, TopologyControlError> {
+        // The principal's views decide on each runtime's agents as they
+        // are now.
+        prime_pair_access(left, right).await;
         let _coordinator = self.inner.mutation.lock().await;
         let (first, second) = canonical_runtimes(left, right)?;
         let _first_guard = first.topology_controller().mutation_guard().await;
@@ -449,6 +470,9 @@ impl SameProcessTopologyCoordinator {
         after_seq: Option<u64>,
         limit: usize,
     ) -> Result<TopologyAuditPage, TopologyControlError> {
+        // The principal's views decide on each runtime's agents as they
+        // are now.
+        prime_pair_access(left, right).await;
         let _coordinator = self.inner.mutation.lock().await;
         let (first, second) = canonical_runtimes(left, right)?;
         let _first_guard = first.topology_controller().mutation_guard().await;
@@ -1612,20 +1636,71 @@ fn canonical_runtimes<'a>(
     }
 }
 
-fn access_view(runtime: &UnifiedRuntime, principal: Option<&str>) -> Option<AccessView> {
-    runtime
-        .access_controller()
-        .map(|controller| controller.view_for_subject(principal))
+/// One authority's access view of a principal, with the authority it speaks
+/// for: it decides an endpoint of its own authority on what that authority
+/// read of its agents ([`prime_pair_access`]).
+struct AuthorityView {
+    authority: String,
+    view: AccessView,
 }
 
-fn view_allows(view: Option<&AccessView>, action: &str, identity: &str) -> bool {
+impl std::ops::Deref for AuthorityView {
+    type Target = AccessView;
+
+    fn deref(&self) -> &AccessView {
+        &self.view
+    }
+}
+
+impl AuthorityView {
+    /// Whether `endpoint` is withheld because no agent of this authority
+    /// holds its name, as the authority's agents were last read: an endpoint
+    /// of this authority that its access attributes do not know is shown to
+    /// an access administrator only, as a name the principal was never
+    /// shown may be one. An endpoint of the other authority is that
+    /// authority's to decide.
+    fn withholds_unheld(&self, endpoint: &TopologyEndpoint) -> bool {
+        !self.view.is_admin()
+            && endpoint.authority.as_deref() == Some(self.authority.as_str())
+            && !self.view.knows_agent(&endpoint.identity)
+    }
+}
+
+fn access_view(runtime: &UnifiedRuntime, principal: Option<&str>) -> Option<AuthorityView> {
+    runtime.access_controller().map(|controller| AuthorityView {
+        authority: runtime.mob_id(),
+        view: controller.view_for_subject(principal),
+    })
+}
+
+/// Read each runtime's agents into its installed access controller, when
+/// that controller enforces: its roster, and the record of every agent no
+/// member is seated for, through the Console's one read of them
+/// ([`crate::http_console::prime_access_cache_from_runtime`]). The views of
+/// a principal decide on these attributes, so every entry that takes a
+/// principal reads them first and waits for no Console request to have done
+/// it.
+async fn prime_pair_access(left: &UnifiedRuntime, right: &UnifiedRuntime) {
+    for runtime in [left, right] {
+        if let Some(controller) = runtime
+            .access_controller()
+            .filter(|controller| controller.enabled())
+        {
+            crate::http_console::prime_access_cache_from_runtime(runtime.mob_runtime(), controller)
+                .await;
+        }
+    }
+}
+
+fn view_allows(view: Option<&AuthorityView>, action: &str, identity: &str) -> bool {
     view.is_none_or(|view| !view.enforced() || view.allows_agent(action, identity))
 }
 
-fn endpoint_visible(view: Option<&AccessView>, endpoint: &TopologyEndpoint) -> bool {
+fn endpoint_visible(view: Option<&AuthorityView>, endpoint: &TopologyEndpoint) -> bool {
     view.is_none_or(|view| {
         !view.enforced()
-            || (view.can_view_agent(&endpoint.identity)
+            || (!view.withholds_unheld(endpoint)
+                && view.can_view_agent(&endpoint.identity)
                 && view.allows_agent(ACTION_AGENT_VIEW, &endpoint.identity)
                 && view.allows_agent(ACTION_TOPOLOGY_VIEW, &endpoint.identity))
     })
@@ -2297,4 +2372,65 @@ fn persist_coordinator_state(
             .map_err(|error| TopologyControlError::Persistence(error.to_string()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::access::{
+        AccessControlConfig, AccessController, AccessRule, AgentResourceAttributes,
+    };
+
+    /// Under an enforcing controller an endpoint of the view's own authority
+    /// that the access attributes do not know is shown to an access
+    /// administrator only; once the attributes know it (a member that ended,
+    /// private to no one) the rules decide it, and an endpoint of the other
+    /// authority is never withheld here.
+    #[test]
+    fn an_endpoint_of_its_own_authority_the_attributes_do_not_know_is_shown_to_an_administrator_only()
+     {
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root".to_string()],
+            rules: vec![AccessRule {
+                id: "principal-views".to_string(),
+                subjects: vec!["principal".to_string()],
+                actions: vec![
+                    ACTION_AGENT_VIEW.to_string(),
+                    ACTION_TOPOLOGY_VIEW.to_string(),
+                ],
+                agents: vec!["*".to_string()],
+                ..AccessRule::default()
+            }],
+            ..AccessControlConfig::default()
+        })
+        .expect("access controller");
+        let view_of = |subject: &str| AuthorityView {
+            authority: "mob-a".to_string(),
+            view: controller.view_for_subject(Some(subject)),
+        };
+        let endpoint_of = |authority: &str| TopologyEndpoint {
+            authority: Some(authority.to_string()),
+            identity: "gone".to_string(),
+        };
+        let own = endpoint_of("mob-a");
+
+        // The attributes do not know the name.
+        assert!(view_of("principal").withholds_unheld(&own));
+        assert!(!endpoint_visible(Some(&view_of("principal")), &own));
+        assert!(!view_of("root").withholds_unheld(&own));
+        assert!(endpoint_visible(Some(&view_of("root")), &own));
+        // The other authority's endpoint is that authority's to decide.
+        assert!(!view_of("principal").withholds_unheld(&endpoint_of("mob-b")));
+
+        // The attributes know the name as a member that ended, private to
+        // no one: the rules decide it.
+        controller.record_agent_attributes(AgentResourceAttributes {
+            identity: "gone".to_string(),
+            ..AgentResourceAttributes::default()
+        });
+        assert!(!view_of("principal").withholds_unheld(&own));
+        assert!(endpoint_visible(Some(&view_of("principal")), &own));
+    }
 }

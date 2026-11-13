@@ -298,6 +298,28 @@ test("console contract documents a login that ended before a decision was taken 
   }
 });
 
+test("console contract documents every method of the long-term agent family, and what a launch without an identity policy answers", () => {
+  const schema = JSON.parse(
+    readFileSync(resolve(process.cwd(), "../docs/rct/console-rest-sse-contract-v0.5.0.json"), "utf8"),
+  ) as ContractSchema;
+  const family = parseIdentityFamilyMethods(
+    readFileSync(resolve(process.cwd(), "../crates/meerkat-meta/src/rpc/identity_methods.rs"), "utf8"),
+  );
+  assert.equal(family.size > 0, true, "the family's registry lists its methods");
+  const methods = schema.surfaces.rpc.methods as Record<string, { errors?: Array<{ codes?: number[]; note?: string }> }>;
+  for (const method of family) {
+    const entry = methods[method];
+    assert.notEqual(entry, undefined, `the contract documents ${method}`);
+    const notes = (entry?.errors ?? []).map((error) => error.note ?? "").join(" ");
+    // The reads are served with or without a policy, and a change without
+    // an enabled one is refused: no launch with agents answers "no such
+    // method" for the family.
+    assert.equal(/does not serve the family/.test(notes), false, `${method}: a launch without a policy serves the reads`);
+    assert.equal(/change_denied/.test(notes), true, `${method}: a change without an enabled policy is refused change_denied`);
+    assert.equal(/-32601 only on a launch without agents of its own/.test(notes), true, method);
+  }
+});
+
 test("console contract route and method names stay synchronized with Rust http console source", () => {
   const schema = JSON.parse(
     readFileSync(resolve(process.cwd(), "../docs/rct/console-rest-sse-contract-v0.5.0.json"), "utf8"),
@@ -344,6 +366,19 @@ test("console contract route and method names stay synchronized with Rust http c
       "utf8",
     );
     for (const method of parseConsoleDecisionMethods(decisionWireSource, decisionConsoleSource)) {
+      dispatchedRpcMethods.add(method);
+    }
+  }
+  // The changes and reads of long-term agents dispatch through one guard
+  // (`identity_methods::is_identity_family_method(method)`) to the family's
+  // own handler, which serves the methods of its registry. Resolve the
+  // registry's constants while the HTTP dispatcher routes through the guard.
+  if (/identity_methods::is_identity_family_method\(/.test(rustSource)) {
+    const identitySource = readFileSync(
+      resolve(process.cwd(), "../crates/meerkat-meta/src/rpc/identity_methods.rs"),
+      "utf8",
+    );
+    for (const method of parseIdentityFamilyMethods(identitySource)) {
       dispatchedRpcMethods.add(method);
     }
   }
@@ -467,6 +502,22 @@ function parseWorkGraphMethodLists(source: string): Set<string> {
     for (const entry of list[1]!.matchAll(/"([^"]+)"/g)) {
       methods.add(entry[1]!);
     }
+  }
+  return methods;
+}
+
+/** The methods of the long-term agent family: the constants its registry
+ *  (`IDENTITY_FAMILY_METHODS`) lists, resolved in the same module. */
+function parseIdentityFamilyMethods(source: string): Set<string> {
+  const values = new Map<string, string>();
+  for (const match of source.matchAll(/const (IDENTITY_[A-Z_]+): &str = "([^"]+)"/g)) {
+    values.set(match[1]!, match[2]!);
+  }
+  const methods = new Set<string>();
+  const registry = /const IDENTITY_FAMILY_METHODS: &\[&str\] = &\[([^\]]*)\]/.exec(source);
+  for (const name of (registry?.[1] ?? "").matchAll(/IDENTITY_[A-Z_]+/g)) {
+    const value = values.get(name[0]);
+    if (value) methods.add(value);
   }
   return methods;
 }

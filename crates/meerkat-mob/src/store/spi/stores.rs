@@ -1498,6 +1498,25 @@ impl MobIdentityMemberStore for SpiMobIdentityStore {
             .await
     }
 
+    /// I: read.
+    async fn observe_created_identities(
+        &self,
+        mob_id: &MobId,
+        identities: &[AgentIdentity],
+    ) -> Result<
+        std::collections::BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation>,
+        MobStoreError,
+    > {
+        self.bundle
+            .read(
+                identity_read(),
+                self.bundle
+                    .identity
+                    .observe_created_identities(mob_id, identities),
+            )
+            .await
+    }
+
     /// I: the purge's rows and receipt, checked and applied in one locked
     /// in-memory step and committed as one host batch (the intents scope's
     /// rows the purge removed, and its receipt).

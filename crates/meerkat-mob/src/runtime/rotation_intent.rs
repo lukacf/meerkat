@@ -232,6 +232,15 @@ pub struct MemberRespawn {
     /// ([`super::MobHandle::ensure_member_live`]); otherwise it stays Dormant
     /// until its next delivery or owed kickoff wakes it.
     pub wake: bool,
+    /// The next incarnation's auto-compact floor; `None` keeps what the
+    /// member builds with. `Some(Some(floor))` sets the threshold on the
+    /// profile the next incarnation builds with (the member's own profile
+    /// override, or its role's profile as the definition resolves it), which
+    /// the incarnation then carries as its override. `Some(None)` removes a
+    /// floor: the override takes its role's threshold again, and an override
+    /// that then equals the role's profile is dropped, so the member follows
+    /// its role as it did before the floor.
+    pub compaction_floor: Option<Option<std::num::NonZeroU64>>,
     /// The build inputs the next incarnation's builds apply on the kept
     /// session (a declared role migration's composed build): its
     /// `MemberSpawned` row journals them, and each build of that
@@ -282,6 +291,16 @@ impl MemberRespawn {
     #[must_use]
     pub fn with_wake(mut self, wake: bool) -> Self {
         self.wake = wake;
+        self
+    }
+
+    /// Seat the next incarnation with the auto-compact floor `floor`
+    /// (`None` removes one a previous successor was seated with). A host
+    /// that rebuilds a member for a maintenance compaction asks for the
+    /// floor first and removes it afterwards.
+    #[must_use]
+    pub fn with_compaction_floor(mut self, floor: Option<std::num::NonZeroU64>) -> Self {
+        self.compaction_floor = Some(floor);
         self
     }
 

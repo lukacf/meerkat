@@ -191,7 +191,9 @@ its committed terminal boundary, and returns the labeled bounded result with
 explicit truncation, session attribution, usage, turn/tool counts, and any
 retirement cleanup error. Bidirectional comms wiring is attempted separately
 and reported by `wired`; it is useful for helper-to-parent messaging but is not
-the result carrier. Use explicit mob members for long-lived collaborators.
+the result carrier. Use explicit mob members for workers that outlive one
+task. A long-term agent (a durable identity) is created through the host's
+identity surface, not through the worker tools.
 
 ## Completion-feed wake
 

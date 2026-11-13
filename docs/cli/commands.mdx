@@ -619,7 +619,12 @@ operator-instruction events (`operator-instruction-mob-events`), which a
 release before 0.9.9 refuses, and the identity-store rows of schema version 2
 or later of each mob database that holds any (`identity-store-rows`, counts
 only), which a release before 0.9.9 does not read (see
-[Downgrading to 0.9.8](/guides/upgrading#downgrading-to-0-9-8)). Exit 0
+[Downgrading to 0.9.8](/guides/upgrading#downgrading-to-0-9-8)), and the mob
+databases whose journal holds more than 64 operator instruction records or
+more than 1 MiB of Active bodies in total
+(`operator-instruction-mob-totals`), which a release before 0.9.15 cannot
+serve (see
+[Rolling back to 0.9.14](/guides/upgrading#rolling-back-to-0-9-14)). Exit 0
 means no error-severity findings; exit 1 means errors were found.
 
 ```bash

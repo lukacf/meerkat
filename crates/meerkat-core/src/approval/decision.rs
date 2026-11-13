@@ -66,7 +66,9 @@ pub const APPROVAL_BRANCH_LABEL: &str = "decision.approval_branch";
 /// ([`DecisionContractError::ReviewStageNotAllowed`]), and each one's
 /// executor refuses an execution whose provenance is not a person's. A
 /// model reviewer's allow can therefore never approve a grant, a tool
-/// grant, a release or a gate.
+/// grant, a release, a gate or a change of an agent (its creation, update,
+/// archive, unarchive, removal or adoption): an agent never approves a
+/// change of an agent.
 ///
 /// The list must grow with each kind decided by people only, whichever crate
 /// owns the kind: a kind missing from it keeps a review stage.
@@ -75,6 +77,12 @@ pub const DECIDED_BY_PEOPLE_ONLY: &[&str] = &[
     "tool_grant.issue",
     "route.release",
     "gating.release",
+    "identity.create",
+    "identity.update",
+    "identity.archive",
+    "identity.unarchive",
+    "identity.remove",
+    "identity.adopt",
 ];
 
 /// Whether decisions of `kind` are decided by people only

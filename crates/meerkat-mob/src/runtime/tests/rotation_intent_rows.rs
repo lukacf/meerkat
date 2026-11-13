@@ -667,6 +667,83 @@ async fn declared_migration_restamps_on_the_same_session_in_one_step() {
     );
 }
 
+/// A same-session successor is seated with the auto-compact floor its
+/// request names: the floor rides the profile the successor builds with (its
+/// role's, here), which the successor then carries as its override, on the
+/// member's own session. Removing the floor gives the member its role's
+/// profile back, with no override left.
+///
+/// RED: drop `MemberRespawn::compaction_floor` from the plan
+/// (`plan_member_respawn` leaves the successor's profile as it was): the
+/// successor carries no floor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_same_session_successor_is_seated_with_the_floor_its_request_names() {
+    let mob = RotationMob::new("successor-floor").await;
+    mob.handle
+        .spawn_spec(worker_spec("floored"))
+        .await
+        .expect("spawn the member");
+    let session = mob.session("floored").await;
+    let floor = std::num::NonZeroU64::new(4096).expect("a floor");
+    let seated = |mob: &RotationMob| {
+        let handle = mob.handle.clone();
+        async move {
+            handle
+                .get_member(&id("floored"))
+                .await
+                .expect("roster read")
+                .expect("the member is seated")
+        }
+    };
+    assert_eq!(
+        seated(&mob).await.effective_profile_override,
+        None,
+        "the member follows its role's profile"
+    );
+
+    tokio::time::timeout(
+        STEP,
+        mob.handle.respawn_member(
+            id("floored"),
+            MemberRespawn::new().with_compaction_floor(Some(floor)),
+        ),
+    )
+    .await
+    .expect("the respawn answers")
+    .expect("the member is respawned with the floor");
+    let entry = seated(&mob).await;
+    assert_eq!(
+        (
+            entry.generation,
+            entry
+                .effective_profile_override
+                .as_ref()
+                .and_then(|profile| profile.auto_compact_threshold),
+        ),
+        (Generation::new(1), Some(floor)),
+        "the successor carries the floor on the profile it builds with"
+    );
+    assert_eq!(mob.session("floored").await, session, "on its own session");
+
+    tokio::time::timeout(
+        STEP,
+        mob.handle.respawn_member(
+            id("floored"),
+            MemberRespawn::new().with_compaction_floor(None),
+        ),
+    )
+    .await
+    .expect("the respawn answers")
+    .expect("the member is respawned without the floor");
+    let entry = seated(&mob).await;
+    assert_eq!(
+        (entry.generation, entry.effective_profile_override),
+        (Generation::new(2), None),
+        "the floor is gone and the member follows its role's profile again"
+    );
+    assert_eq!(mob.session("floored").await, session, "on its own session");
+}
+
 /// The kept topology of `kept-respawned` and `kept-peer`: MobMachine holds
 /// the member edge and the external edge, and the roster holds the member
 /// edge both ways and the external peer's recorded descriptor.

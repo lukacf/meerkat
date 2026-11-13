@@ -205,7 +205,7 @@ Verification contract: paths, symbols, boundary kinds, owner shells, write-sets,
 | `mob_wiring_alignment` | `Roster.wired_to`, `trust edges`, `edge locks` | `closed` | `Roster wiring projection contract + do_wire/handle_unwire edge-lock discipline` |
 | `mob_flow_target_selection_alignment` | `MobRun.role_targets`, `MobMachine member_profile_names`, `MobMachine member lifecycle` | `closed` | `FlowRoleTargets admitted run input + MobMachine member_profile_names and member lifecycle` |
 | `mob_member_materialization_authority` | `MobMachine member_materialization`, `MobMachine member_wake_attempts`, `MobMachine member_materialization_epoch` | `closed` | `MobMachine member_materialization through WakeMember, ReleaseMemberMaterialization and MemberMaterializationPhase` |
-| `mob_inproc_wake_route_projection` | `InprocRegistry wake routes`, `MobMachine member_peer_endpoints`, `MobMachine member_session_bindings` | `closed` | `InprocRegistry wake routes rebuilt from MobMachine PublishWakeRoute, RetractWakeRoute and RebuildWakeRoutes` |
+| `mob_inproc_wake_route_projection` | `InprocRegistry wake routes`, `MobMachine member_peer_endpoints`, `MobMachine member_session_bindings` | `closed` | `InprocRegistry wake routes rebuilt from MobMachine PublishWakeRoute, RetractWakeRoute and RebuildWakeRoutes, and a host forwarder's routes rebuilt from the host's durable links` |
 | `mob_session_owner_wake_registry_projection` | `session-owner wake registry`, `MobMachine member_session_bindings` | `closed` | `MobMachine PublishWakeRoute rebuilds and WakeMember decides` |
 | `mob_inproc_live_route_mechanics` | `InprocRegistry live routes` | `closed` | `InprocRegistry live routes, answered by MobMachine WakeMember on a miss` |
 

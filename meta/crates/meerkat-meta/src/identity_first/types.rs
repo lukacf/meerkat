@@ -1817,7 +1817,10 @@ impl IdentityLifecycleState {
 pub enum RetiredIdentityCause {
     /// A roster pass retired the member because the roster no longer lists
     /// the identity (an identity this runtime registered, or a live member
-    /// Meta spawned for an identity it never registered).
+    /// Meta spawned for an identity it never registered). Also the end of
+    /// the member of an agent whose record is its row in the mob's identity
+    /// store, by its archive or its removal: it leaves the mob's agents as
+    /// an identity that leaves the roster does, and is owed the same.
     Unlisted,
     /// An explicit retire of the identity: the member is released.
     Retire,
@@ -2010,12 +2013,13 @@ pub struct IdentityStatus {
     pub labels: std::collections::BTreeMap<String, String>,
     /// Core's generation of the binding `session_id` comes from.
     pub generation: Option<meerkat_mob::Generation>,
-    /// Whether Core drives the identity itself, so Meta's lifecycle verbs
-    /// refuse it: Core holds an identity intent row for it (a host adopted
-    /// it; the verbs answer `-32053`), or it is store-owned (created at
-    /// runtime, or adopted into store custody: Core holds its created entry's
-    /// row; the verbs answer `-32603` with `data.kind`
-    /// `identity_store_owned`).
+    /// Whether the host's lifecycle verbs refuse the identity because Core
+    /// drives it itself: Core holds an identity intent row for it (a host
+    /// adopted it; the verbs answer `-32053`), or a row this build cannot
+    /// read. `false` for every other identity, whichever record holds its
+    /// spec: an identity created at run time, or adopted into the mob's
+    /// identity store, is served by the verbs as a configured one is (it
+    /// read `true` through 0.9.13, when the verbs refused it).
     #[serde(default)]
     pub intent_managed: bool,
     /// Core's convergence diagnostics for an intent-managed identity, when
@@ -2045,6 +2049,43 @@ pub struct IdentityStatus {
     /// and optional on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub customizer_tools_pending: Option<CustomizerToolsPending>,
+    /// Whether the host's roster lists this name while the agent is served
+    /// from its record in the mob's identity store (a host adopted it into
+    /// the store, or created an agent under a name its roster lists): the
+    /// record is the agent's one owner, so the roster's entry for the name
+    /// is not applied, and an edit of it changes nothing. Read from the
+    /// roster as the runtime last read it; `false` for every other agent.
+    /// Additive on the wire, and absent while `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub roster_listing_superseded: bool,
+    /// What Core's entry of the identity's name says of an identity no
+    /// member holds ([`IdentityRecordFacts`]): whether it is archived, and
+    /// whether it awaits its host's preparation. Its members are members of
+    /// the status on the wire, each additive and absent while unset, so the
+    /// status of a seated identity is written as before. The identity's
+    /// spec digest and revision, who asked for it and the operations open
+    /// for it are not on its status: `meta/identity/get` and
+    /// `meta/identity/list` answer them, to each caller what it may read.
+    #[serde(flatten, default)]
+    pub record: IdentityRecordFacts,
+}
+
+/// Why no member holds an identity, on its status: each member is additive
+/// and optional on the wire, and absent while unset. Each is read from
+/// Core's entry of the identity's name on the read the status makes of it
+/// anyway, so no store is read and nothing is built, loaded or woken for
+/// it. No member says where the identity's record lives.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct IdentityRecordFacts {
+    /// Whether the identity is archived: it keeps its name and its record,
+    /// has no member, and deliveries to it are refused until its unarchive.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
+    /// Whether the identity awaits its host's preparation before its first
+    /// use: it has no member yet, and its host's settle seats it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preparation_pending: bool,
 }
 
 /// A refused wake an operator has to act on, as

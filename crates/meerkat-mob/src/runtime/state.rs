@@ -1529,6 +1529,26 @@ pub(super) enum MobCommand {
         agent_identity: AgentIdentity,
         reply_tx: oneshot::Sender<Result<bool, MobError>>,
     },
+    /// Test-only: realize one kickoff notice of `agent_identity`, as the
+    /// actor does for MobMachine's `EmitKickoffLifecycleNotice`. It stands
+    /// in for kickoff phases a row's fixture cannot reach (a callback
+    /// pending, a failure).
+    #[cfg(test)]
+    EmitKickoffNoticeForTest {
+        agent_identity: AgentIdentity,
+        intent: &'static str,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Test-only: the kind of endpoint the retirement unwire resolver answers
+    /// for `agent_identity` while `retiring` is the retiring member. The
+    /// resolver's callers are edges with a placed or a peer-only member,
+    /// which the wake rows' fixture does not have.
+    #[cfg(test)]
+    ResolveRetirementEndpointForTest {
+        agent_identity: AgentIdentity,
+        retiring: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<&'static str, MobError>>,
+    },
     #[cfg(test)]
     ParkActorForObservationTest {
         entered_tx: oneshot::Sender<()>,
@@ -2083,6 +2103,19 @@ pub(super) enum MobCommand {
         outcomes: Vec<super::operator_instruction_delivery::MemberInstructionDeliveryOutcome>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// A durable fork asks MobMachine, before it seats its child, for the
+    /// fork lineage root the child's seat records and the child's operator
+    /// instruction snapshot for its committed session (internal): one read
+    /// of the machine's state, no transition.
+    PrepareForkMemberInstructionBirth {
+        source: AgentIdentity,
+        child: AgentIdentity,
+        profile_name: ProfileName,
+        fork_session_id: SessionId,
+        reply_tx: oneshot::Sender<
+            Result<super::operator_instruction_delivery::ForkMemberInstructionBirth, MobError>,
+        >,
+    },
     PollEvents {
         after_cursor: u64,
         limit: usize,
@@ -2500,6 +2533,10 @@ impl MobCommand {
             #[cfg(test)]
             Self::OwedMemberWakeRetryArmedForTest { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
+            Self::EmitKickoffNoticeForTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::ResolveRetirementEndpointForTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
             Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
                 ShutdownAnswerClass::CallerRequest
             }
@@ -2573,6 +2610,7 @@ impl MobCommand {
             Self::GrantMemberTool { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PrepareMemberInstructionDelivery { .. } => ShutdownAnswerClass::CallerRequest,
             Self::SettleMemberInstructionDeliveries { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::PrepareForkMemberInstructionBirth { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PollEvents { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ReplayAllEvents { .. } => ShutdownAnswerClass::CallerRequest,
             Self::RecordOperatorActionProvenance { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2749,6 +2787,10 @@ impl MobCommand {
             #[cfg(test)]
             Self::OwedMemberWakeRetryArmedForTest { .. } => "OwedMemberWakeRetryArmedForTest",
             #[cfg(test)]
+            Self::EmitKickoffNoticeForTest { .. } => "EmitKickoffNoticeForTest",
+            #[cfg(test)]
+            Self::ResolveRetirementEndpointForTest { .. } => "ResolveRetirementEndpointForTest",
+            #[cfg(test)]
             Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
                 "InjectUnreadableNameAtLadderOpenForTest"
             }
@@ -2811,6 +2853,7 @@ impl MobCommand {
             Self::GrantMemberTool { .. } => "GrantMemberTool",
             Self::PrepareMemberInstructionDelivery { .. } => "PrepareMemberInstructionDelivery",
             Self::SettleMemberInstructionDeliveries { .. } => "SettleMemberInstructionDeliveries",
+            Self::PrepareForkMemberInstructionBirth { .. } => "PrepareForkMemberInstructionBirth",
             Self::PollEvents { .. } => "PollEvents",
             Self::ReplayAllEvents { .. } => "ReplayAllEvents",
             Self::RecordOperatorActionProvenance { .. } => "RecordOperatorActionProvenance",

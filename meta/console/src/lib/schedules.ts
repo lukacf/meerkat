@@ -127,6 +127,9 @@ export interface ConsoleSchedule {
   trigger: ConsoleScheduleTrigger | null;
   /** `active` or `paused`; any other phase is shown as it is. */
   phase: string;
+  /** Whether the gateway says the pause is the agent's: it paused the
+   * schedule because its agent is archived, and resumes it at the unarchive. */
+  pausedForTarget: boolean;
   revision: number | null;
   /** The principal the schedule sends as; null for an anonymous console, or when withheld. */
   sender: string | null;
@@ -240,6 +243,7 @@ export function parseConsoleSchedule(value: unknown): ConsoleSchedule | null {
     content: item.content,
     trigger: parseScheduleTrigger(item.trigger),
     phase: nonEmptyString(item.phase) ?? "unknown",
+    pausedForTarget: item.paused_for_target === true,
     revision: wholeNumber(item.revision),
     sender: senderHidden ? null : nonEmptyString(item.sender),
     senderHidden,
@@ -341,6 +345,14 @@ export function describeSchedulePhase(phase: string): string {
   if (phase === "active") return "Active";
   if (phase === "paused") return "Paused";
   return phase;
+}
+
+/** Why a paused schedule is paused, in words, when the gateway says the
+ * pause is its agent's; null for an active schedule and for a pause somebody
+ * asked for by name, which needs no reason. */
+export function describeSchedulePause(schedule: Pick<ConsoleSchedule, "phase" | "pausedForTarget">): string | null {
+  if (schedule.phase !== "paused" || !schedule.pausedForTarget) return null;
+  return "Paused because its agent is archived. It resumes when the agent is unarchived.";
 }
 
 /**
@@ -684,6 +696,8 @@ export function scheduleErrorMessage(error: unknown, command: ConsoleScheduleCom
       return "This schedule sends as someone else, so nothing was changed. Take it over to change it.";
     case "unknown_identity":
       return "The console does not know this agent.";
+    case "identity_archived":
+      return "This agent is archived, so its schedules cannot be created or changed until it is unarchived.";
     case "not_addressable":
       return "This agent takes no console messages, so it cannot be scheduled.";
     case "governed_target":

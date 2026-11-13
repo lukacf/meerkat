@@ -140,6 +140,51 @@ describe("AgentDetailsPanel", () => {
     expect(view.getByTestId("inspect-panel:identity:coordinator").querySelector(".cc-panel-head .cc-agent__avatar.is-live") !== null).toBe(true);
   });
 
+  it("says of a broken agent what may bring it back, and never that a respawn or a reset is what it needs", () => {
+    // A broken agent is not always one a respawn or a reset brings back: an
+    // agent whose record lacks a label its host requires runs again once
+    // its record carries the label, with neither. The line names the two
+    // controls as what may be needed.
+    const broken = { ...agent, state: "broken" } as ConsoleAgent;
+    const view = render(
+      <AgentDetailsPanel identity="identity:coordinator" inspect={inspect({ state: "broken" })} agent={broken} stateLabel="broken" actions={{}} />,
+    );
+    const now = view.getByTestId("inspect-now:identity:coordinator").querySelector(".agent-details__now")?.textContent;
+    expect(now).toBe("Broken: it may need a respawn or a reset");
+    expect(view.getByTestId("inspect-state:identity:coordinator").textContent).toBe("Broken");
+  });
+
+  it("says at the status that the host's configuration also lists the agent, when its record or its details say so", () => {
+    const open = (props: { rosterListingSuperseded?: boolean; said?: boolean }) => render(
+      <AgentDetailsPanel
+        identity="identity:coordinator"
+        inspect={props.said ? ({ ...inspect(), roster_listing_superseded: true } as IdentityInspectViewState) : inspect()}
+        agent={agent}
+        stateLabel="active"
+        actions={{}}
+        rosterListingSuperseded={props.rosterListingSuperseded}
+      />,
+    );
+    const noteOf = (view: ReturnType<typeof render>) => view.queryAllByTestId("inspect-roster-superseded:identity:coordinator");
+    // The agent's record says so.
+    let view = open({ rosterListingSuperseded: true });
+    expect(noteOf(view)).toHaveLength(1);
+    expect(noteOf(view)[0]?.textContent).toBe(
+      "The host's configuration lists an agent of this name too. That entry is not applied: this agent runs from its own record, and a change made here changes that record.",
+    );
+    view.unmount();
+    // The record and the details answer both say so: one note.
+    view = open({ rosterListingSuperseded: true, said: true });
+    expect(noteOf(view)).toHaveLength(1);
+    view.unmount();
+    // Neither says so: no note.
+    for (const props of [{}, { rosterListingSuperseded: false }]) {
+      view = open(props);
+      expect(noteOf(view)).toHaveLength(0);
+      view.unmount();
+    }
+  });
+
   it("shows a glance at the day, the recent turns part and the ego graph of its peers", () => {
     const view = render(
       <AgentDirectoryProvider directory={directory}>

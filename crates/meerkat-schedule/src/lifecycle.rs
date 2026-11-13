@@ -52,6 +52,18 @@ pub enum ScheduleLifecycleInput {
     ConfirmOccurrencesSuperseded {
         ack: OccurrenceSupersessionAck,
     },
+    /// The schedule's target stopped taking deliveries for now: an Active
+    /// schedule is paused for its target. A schedule that is already
+    /// Paused keeps the pause it has, and a Deleted one is left as it is.
+    PauseForTarget {
+        at_utc: DateTime<Utc>,
+    },
+    /// The schedule's target takes deliveries again: a schedule paused for
+    /// its target is resumed. Any other schedule is left as it is, a
+    /// schedule somebody paused by name included.
+    ResumeForTarget {
+        at_utc: DateTime<Utc>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2528,6 +2540,54 @@ impl Schedule {
                 write_back_schedule(&dsl_state, &mut schedule)?;
                 schedule.config.updated_at_utc = at_utc;
                 let effects = map_schedule_effects(&transition)?;
+                Ok(schedule_lifecycle_mutator(
+                    schedule,
+                    effects,
+                    false,
+                    write_precondition,
+                ))
+            }
+
+            ScheduleLifecycleInput::PauseForTarget { at_utc } => {
+                let mut schedule = schedule.ok_or(ScheduleLifecycleError::MissingSchedule)?;
+                let write_precondition = ScheduleWritePrecondition::matches(&schedule)?;
+                let dsl_input = sched_dsl::ScheduleLifecycleInput::PauseForTarget {
+                    at_utc_ms: schedule_datetime_to_millis(at_utc, "at_utc")?,
+                };
+                let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
+                // An input that had nothing to do leaves the machine's state
+                // as it was, and the schedule with it, its update time
+                // included.
+                let changed = dsl_state != schedule.machine_state;
+                write_back_schedule(&dsl_state, &mut schedule)?;
+                let effects = map_schedule_effects(&transition)?;
+                if changed {
+                    schedule.config.updated_at_utc = at_utc;
+                }
+                Ok(schedule_lifecycle_mutator(
+                    schedule,
+                    effects,
+                    false,
+                    write_precondition,
+                ))
+            }
+
+            ScheduleLifecycleInput::ResumeForTarget { at_utc } => {
+                let mut schedule = schedule.ok_or(ScheduleLifecycleError::MissingSchedule)?;
+                let write_precondition = ScheduleWritePrecondition::matches(&schedule)?;
+                let dsl_input = sched_dsl::ScheduleLifecycleInput::ResumeForTarget {
+                    at_utc_ms: schedule_datetime_to_millis(at_utc, "at_utc")?,
+                };
+                let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
+                // An input that had nothing to do leaves the machine's state
+                // as it was, and the schedule with it, its update time
+                // included.
+                let changed = dsl_state != schedule.machine_state;
+                write_back_schedule(&dsl_state, &mut schedule)?;
+                let effects = map_schedule_effects(&transition)?;
+                if changed {
+                    schedule.config.updated_at_utc = at_utc;
+                }
                 Ok(schedule_lifecycle_mutator(
                     schedule,
                     effects,

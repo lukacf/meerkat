@@ -639,9 +639,20 @@ A profile's member operator tools (`member_status`, `retire_member`,
 `force_cancel_member`, `list_members`) apply the same rule. With manage scope,
 all of these tools reach every member, as before. A host can hide members
 from other members' operator tools (`MobBuilder::with_member_tool_audience`):
-`member_status`, `retire_member` and `force_cancel_member` answer a member its
-audience hides from the calling member exactly as a member the mob does not
-hold, with manage scope too, and do nothing to it.
+`member_status`, `retire_member`, `force_cancel_member`, `mob_check_member`
+and `mob_retire_member` answer a member its audience hides from the calling
+member exactly as a member the mob does not hold, with manage scope too, and
+do nothing to it; `wire_members`, `unwire_members`, `mob_wire` and
+`mob_unwire` answer so for either member they name, and `council` for a
+participant; `spawn_member` and `spawn_many_members` answer so for the
+source of a fork launch, and refuse a resume of a session bound to such a
+member as a resume of a session nobody holds; `list_members` and
+`mob_list_members` leave such a member out of the list and out of every
+listed member's `wired_to`; and the report of `mob_destroy` names no such
+member. A placed
+member's calls are asked about as that member's. The audience is handed the
+labels the calling member and the target carry on their own roster rows, so
+its rule can rest on a member's durable labels.
 
 A member placed on a member host holds manage scope over its mob, including
 the privileged spawn arguments, unless its controlling host narrowed it with

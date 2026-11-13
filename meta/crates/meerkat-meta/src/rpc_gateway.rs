@@ -830,6 +830,27 @@ fn launch_identity_creation_policy(
     .map_err(|refusal| refusal.to_string())
 }
 
+/// The native host composition's own check of an identity request and
+/// its consequence lines, as the identity family asks them.
+struct HostIdentityHooks(Arc<dyn GatewayHostComposition>);
+
+impl crate::identity_creation::IdentityHostHooks for HostIdentityHooks {
+    fn validate(
+        &self,
+        request: &crate::identity_creation::IdentityRequest,
+    ) -> Result<(), crate::identity_creation::ValidationRefusal> {
+        self.0.validate_identity_request(request)
+    }
+
+    fn consequences(
+        &self,
+        request: &crate::identity_creation::IdentityRequest,
+    ) -> Result<Vec<crate::identity_creation::ConsequenceLine>, crate::identity_creation::HookRefusal>
+    {
+        self.0.identity_consequences(request)
+    }
+}
+
 #[derive(Default)]
 struct InMemoryEventLogStore {
     events: std::sync::Mutex<Vec<PersistedEvent>>,
@@ -16467,8 +16488,8 @@ pub trait GatewayHostComposition: Send + Sync + 'static {
     /// them. They are computed before anything is held and again when the
     /// operation executes, and the same request must give the same lines.
     /// `Err` refuses the request `consequences_unavailable`: it is never
-    /// rendered without them. The default states none. A gateway host
-    /// declares the host callback `identity.consequences` instead.
+    /// rendered without them. The default states none. A host behind an SDK
+    /// supplies none in this release: its decisions render without them.
     fn identity_consequences(
         &self,
         request: &crate::identity_creation::IdentityRequest,
@@ -18128,8 +18149,9 @@ external_addressable = true
     // The identity policy, settled before the durable phase: the native
     // host's Rust form or the init option, never both, checked against the
     // definition's profiles, and refused on a launch without persistence.
-    // Nothing acts on it yet; the operation executor takes it from here.
-    let _identity_creation = launch_identity_creation_policy(
+    // The launch attaches it to its identity runtime, below, before the
+    // identity bootstrap.
+    let identity_creation = launch_identity_creation_policy(
         host,
         std::mem::take(&mut gateway_options.identity_creation),
         &definition,
@@ -19673,6 +19695,13 @@ external_addressable = true
     // which Meerkat materializes without the spawn customizers, and the
     // durable child mobs agents created, which a restore rebuilds from their
     // stored definitions. An in-memory mob storage starts with none of them.
+    // The mob storage's realm profiles, for the family of the mob's
+    // long-term agents: a held change of an agent on a profile bound to a
+    // realm profile shows what that profile declares.
+    let identity_realm_profiles_db = mob_spec
+        .mob_storage_provenance
+        .persistent_path()
+        .map(std::path::Path::to_path_buf);
     if let Some(binding) = gateway_options.member_auth_binding.as_ref() {
         let booted = launch_definition.as_ref().unwrap_or(&mob_spec.definition);
         if let Some(event_log_db) = mob_spec.mob_storage_provenance.persistent_path() {
@@ -19733,6 +19762,18 @@ external_addressable = true
     } else {
         None
     };
+    // One line at the start: with the member socket option the gateway
+    // serves one member, and this roster declares more.
+    if gateway_options.member_comms_address.is_some()
+        && let Some(roster) = boot_roster.as_deref()
+        && roster.len() > 1
+    {
+        tracing::warn!(
+            declared_members = roster.len(),
+            "{}",
+            crate::member_socket_place::SEVERAL_DECLARED_MEMBERS_WARNING
+        );
+    }
     // Each identity with a pending first-boot row waits for the roster
     // pass's declaration of it: the mob materializes none of them at start,
     // and refuses their wakes retryable until the declaration that carries
@@ -19916,6 +19957,10 @@ external_addressable = true
     // OnceCell defers the binding without restructuring bootstrap. The
     // roster slot feeds mob-purpose context once restore_flow has run.
     let steward_late_runtime = StewardLateRuntime::default();
+    // The runtime, for the notices of decided identity changes: a back-edge
+    // bound once the runtime is shared, read per notice.
+    let identity_notices_runtime: Arc<std::sync::OnceLock<std::sync::Weak<UnifiedRuntime>>> =
+        Arc::new(std::sync::OnceLock::new());
     let steward_roster_slot: Arc<std::sync::Mutex<Vec<crate::identity_first::DurableAgentSpec>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut agent_memory_steward: Option<Arc<crate::memory::steward::StewardEngine>> = None;
@@ -20106,6 +20151,7 @@ external_addressable = true
                             mob_purpose: Some(Arc::new(GatewayMobPurposeSource {
                                 mob: mob_definition.id.to_string(),
                                 roster: steward_roster_slot.clone(),
+                                identities: Arc::downgrade(&irt),
                             })),
                             private_members: Some(runtime.mob_runtime().private_member_source()),
                             steward_gating: Some(Arc::new(GatewayMemoryGatingBridge {
@@ -20382,6 +20428,52 @@ external_addressable = true
         // identity supervisors. A refusal fails init before that bootstrap,
         // and the existing init cleanup shuts the runtime down.
         runtime.install_identity_first_context(Arc::clone(&identity_context));
+        // The launch's identity policy, attached once: from here on the
+        // runtime serves the changes of its long-term agents under it, and
+        // the agents' identity tools are mounted. A launch without a
+        // policy keeps the family its identity install attached: the reads
+        // are served and every change is refused.
+        if let Some(policy) = identity_creation.clone() {
+            // An agent that asked for a change a person decided is told by
+            // a keyed send to its own name. The route reads the runtime
+            // when a notice is delivered and keeps nothing of it.
+            let notices_runtime = identity_notices_runtime.clone();
+            let mut options = crate::identity_creation::IdentityFamilyOptions::new()
+                .with_decision_notices(Arc::new(crate::identity_creation::KeyedSendNotices::new(
+                    move || {
+                        notices_runtime
+                            .get()
+                            .and_then(std::sync::Weak::upgrade)
+                            .and_then(|runtime| runtime.identity_runtime())
+                    },
+                )));
+            if let Some(host) = host {
+                options = options.with_host_hooks(Arc::new(HostIdentityHooks(Arc::clone(host))));
+            }
+            // The launch's schedules follow an agent's archive, unarchive
+            // and removal. The registry is the one the schedule host adopts
+            // the mob's members into further on.
+            if let Some((schedule_service, mob_target_registry, ..)) = schedule_host_inputs.as_ref()
+            {
+                options = options.with_schedules(Arc::new(
+                    crate::schedule_wiring::MobAgentSchedules::new(
+                        schedule_service.clone(),
+                        mob_target_registry.clone(),
+                    ),
+                ));
+            }
+            if let Some(db) = identity_realm_profiles_db.as_deref() {
+                match meerkat_mob::store::SqliteRealmProfileStore::open(db) {
+                    Ok(store) => options = options.with_realm_profiles(Arc::new(store)),
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "the mob storage's realm profiles cannot be opened: a held change of \
+                         an agent on a profile bound to a realm profile is refused"
+                    ),
+                }
+            }
+            runtime.attach_identity_policy(policy, options);
+        }
         if let Some(host) = host {
             host.bind_identity_runtime(runtime)
                 .await
@@ -20693,6 +20785,7 @@ external_addressable = true
     // Bind the steward's late runtime seams and wire gating decisions back
     // to staged promotion commits (§10.2).
     steward_late_runtime.bind(runtime.clone());
+    let _ = identity_notices_runtime.set(Arc::downgrade(&runtime));
     runtime
         .set_gating_escalation_routes(gateway_options.gating.escalation.clone())
         .await;
@@ -21602,16 +21695,35 @@ impl StewardLateRuntime {
     }
 }
 
-/// Mob-purpose context from the hosted mob's id plus the restored roster's
-/// labels (no mob-level purpose field exists — verified; a `mob_purpose`
-/// or `purpose` label on any member spec is adopted as the mob's purpose).
+/// Mob-purpose context from the hosted mob's id, the launch's roster and the
+/// agents created at run time.
+///
+/// The purpose is configuration: no mob-level purpose field exists, so a
+/// `mob_purpose` or `purpose` label on a spec of the launch's roster is
+/// adopted as the mob's purpose, and nothing else is. A configured agent is
+/// listed with its roster labels. An agent whose record is its row in the
+/// mob's identity store (created at run time, or adopted into the store) is
+/// listed while it is a member of the mob, with its name and its profile and
+/// nothing else ([`crate::identity_first::IdentityRuntime::row_registered_members`]):
+/// its labels, display name, context, instructions and first message are a
+/// requester's text, which enters no steward prompt and decides nothing
+/// here. A roster's listing of a name its row holds gives way to the row.
 struct GatewayMobPurposeSource {
     mob: String,
     roster: Arc<std::sync::Mutex<Vec<crate::identity_first::DurableAgentSpec>>>,
+    /// The launch's identity runtime, which serves the agents created at
+    /// run time. Weak: the runtime holds the steward that holds this source.
+    identities: std::sync::Weak<crate::identity_first::IdentityRuntime>,
 }
 
 impl crate::MobPurposeSource for GatewayMobPurposeSource {
     fn mob_contexts(&self) -> Vec<crate::memory::steward::MobContext> {
+        // Read before the roster is locked: neither read waits on the other.
+        let row_members = self
+            .identities
+            .upgrade()
+            .map(|identities| identities.row_registered_members())
+            .unwrap_or_default();
         let roster = self.roster.lock().unwrap_or_else(|err| err.into_inner());
         let purpose = roster.iter().find_map(|spec| {
             spec.labels
@@ -21619,10 +21731,22 @@ impl crate::MobPurposeSource for GatewayMobPurposeSource {
                 .or_else(|| spec.labels.get("purpose"))
                 .cloned()
         });
-        let member_labels = roster
+        let mut member_labels = roster
             .iter()
+            .filter(|spec| !row_members.contains_key(&spec.identity))
             .map(|spec| (spec.identity.as_str().to_string(), spec.labels.clone()))
-            .collect();
+            .collect::<Vec<_>>();
+        member_labels.extend(row_members.into_iter().filter_map(|(identity, profile)| {
+            profile.map(|profile| {
+                (
+                    identity.as_str().to_string(),
+                    std::collections::BTreeMap::from([(
+                        "profile".to_string(),
+                        profile.as_str().to_string(),
+                    )]),
+                )
+            })
+        }));
         vec![crate::memory::steward::MobContext {
             mob: self.mob.clone(),
             purpose,
@@ -27293,7 +27417,7 @@ mod identity_creation_launch_tests {
         assert!(refused.contains("\"ghost\""), "{refused}");
         let mut known = policy_value();
         known["approval"]["rules"][0]["target"] = json!({"profile": ["default"]});
-        known["preparation"] = json!({"default": {"mode": "required"}});
+        known["preparation"] = json!({"default": {"mode": "none"}});
         assert!(
             launch(
                 None,
@@ -27659,5 +27783,724 @@ mod strict_live_private_owner_tests {
             ),
             "the gateway's composition decides with its access controller"
         );
+    }
+}
+
+/// The steward's mob context of a launch whose mob holds agents created at
+/// run time: each row boots the gateway's runtime composition over a state
+/// directory, creates agents through Core, and reads the model requests a
+/// steward dream over the launch's context source composed.
+#[cfg(test)]
+mod steward_context_tests {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex as StdMutex;
+
+    use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
+
+    use super::*;
+    use crate::AgentMemoryProvider as _;
+    use crate::MobPurposeSource as _;
+    use crate::identity_first::{
+        AgentAddressability, AgentIdentity, DurableAgentSpec, MutableRosterProvider,
+    };
+    use crate::memory::distiller::TranscriptSlice;
+    use crate::memory::records::{MemoryAuthor, MemoryKind, MemoryScope, NewMemoryRecord};
+    use crate::memory::{
+        DistillerError, DreamOutcome, StewardClientHandle, StewardConfig, StewardEngine,
+        StewardError, StewardProfile, TranscriptSource,
+    };
+
+    /// The agent the host's roster configures.
+    const CONFIGURED: &str = "host-keeper";
+    /// The mob's purpose, as the host configures it on its roster.
+    const PURPOSE: &str = "keep the desk's record current";
+    /// Text a requester chose for an agent it created.
+    const MARKER: &str = "REQUESTER-CHOSEN-7c1e";
+    /// The steward's realm.
+    const REALM: &str = "default";
+    /// A member that retired before the dream: its exit interview is owed.
+    const RETIRED: &str = "retired-clerk";
+
+    /// A model that keeps every request it is asked, whole, and answers each:
+    /// an exit interview with no verdict, any other phase with an empty
+    /// reply of every shape the steward parses.
+    #[derive(Default)]
+    struct RecordingModel {
+        requests: StdMutex<Vec<String>>,
+    }
+
+    impl RecordingModel {
+        fn requests(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for RecordingModel {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(&'a self, request: &'a LlmRequest) -> meerkat_client::types::LlmStream<'a> {
+            let asked = serde_json::to_string(request).unwrap_or_default();
+            let reply = if asked.contains("(retired: ") {
+                "[]".to_string()
+            } else {
+                json!({
+                    "requests": [], "ops": [], "proposal_verdicts": [],
+                    "quarantine_verdicts": [], "open_loop_escalations": [],
+                    "contradictions": [], "working_set": []
+                })
+                .to_string()
+            };
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(asked);
+            Box::pin(futures::stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: reply,
+                    meta: None,
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// The steward's model handle: one model, never re-resolved.
+    struct OneModel(Arc<RecordingModel>);
+
+    #[async_trait]
+    impl StewardClientHandle for OneModel {
+        async fn client(&self) -> Result<Arc<dyn LlmClient>, StewardError> {
+            Ok(self.0.clone())
+        }
+        fn invalidate(&self) {}
+    }
+
+    struct NoTranscripts;
+
+    #[async_trait]
+    impl TranscriptSource for NoTranscripts {
+        async fn read(
+            &self,
+            _session_key: &str,
+            _from_index: u64,
+        ) -> Result<Option<TranscriptSlice>, DistillerError> {
+            Ok(None)
+        }
+    }
+
+    /// The configured agent's roster row, with `labels`.
+    fn configured(labels: &[(&str, &str)]) -> DurableAgentSpec {
+        DurableAgentSpec {
+            identity: AgentIdentity::parse(CONFIGURED).expect("an identity"),
+            profile: "worker".into(),
+            addressability: AgentAddressability::Addressable,
+            display_name: None,
+            labels: labels
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect(),
+            context: None,
+            additional_instructions: Vec::new(),
+            initial_message: None,
+            runtime_mode_override: None,
+            backend: None,
+            binding: None,
+            placement: None,
+        }
+    }
+
+    /// A launch over the state directory `state`, as a gateway boots it: its
+    /// roster is `roster`, its members are turn driven (no seat owes a turn)
+    /// and their model is `members`.
+    async fn boot(
+        state: &std::path::Path,
+        roster: &[DurableAgentSpec],
+        members: &Arc<RecordingModel>,
+    ) -> UnifiedRuntime {
+        let mob_id = format!("steward-context-{}", uuid::Uuid::new_v4());
+        let definition = MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "{mob_id}"
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+external_addressable = true
+[profiles.worker.tools]
+comms = true
+[profiles.analyst]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+external_addressable = true
+[profiles.analyst.tools]
+comms = true
+"#
+        ))
+        .expect("a mob definition");
+        Box::pin(
+            UnifiedRuntime::builder()
+                .definition(definition)
+                .persistent_state(state)
+                .continuity_from_state_dir(state)
+                .await
+                .expect("the state directory's identity substrate")
+                .roster_provider(Arc::new(MutableRosterProvider::new(roster.to_vec())))
+                .identity_runtime_instance_id("steward-context")
+                .default_llm_client(Arc::clone(members) as Arc<dyn LlmClient>)
+                .build(),
+        )
+        .await
+        .expect("the gateway's runtime composition")
+    }
+
+    /// The steward's mob context source of `runtime`'s launch over `roster`,
+    /// as the gateway's init composes it.
+    fn steward_source(
+        runtime: &UnifiedRuntime,
+        roster: &[DurableAgentSpec],
+    ) -> Arc<GatewayMobPurposeSource> {
+        Arc::new(GatewayMobPurposeSource {
+            mob: runtime.mob_handle().definition().id.to_string(),
+            roster: Arc::new(std::sync::Mutex::new(roster.to_vec())),
+            identities: Arc::downgrade(
+                runtime
+                    .identity_runtime()
+                    .expect("the identity runtime")
+                    .runtime(),
+            ),
+        })
+    }
+
+    fn operation(name: &str) -> meerkat_mob::IdentityOperation {
+        meerkat_mob::IdentityOperation::new(
+            name,
+            meerkat_core::approval::decision::Sha256Digest::of(name.as_bytes()).as_str(),
+        )
+    }
+
+    fn allow() -> meerkat_mob::IdentityChangeConsentInput<'static> {
+        meerkat_mob::IdentityChangeConsentInput::Policy(meerkat_mob::IdentityPolicyOutcome::Allow)
+    }
+
+    fn committed<E>(change: &Result<meerkat_mob::IdentityChangeOutcome, E>) -> bool {
+        matches!(
+            change,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        )
+    }
+
+    /// The change path's step once a change of `name`'s record committed.
+    /// The profiles the steward's context reads are then exactly the
+    /// profiles of the registrations made from rows.
+    async fn record_changed(runtime: &UnifiedRuntime, name: &str) {
+        let identities = runtime.identity_runtime().expect("the identity runtime");
+        identities.runtime().note_agent_record_changed(name).await;
+        assert!(
+            identities.runtime().row_profiles_in_step().await,
+            "the row profiles follow the registrations after a change of {name}"
+        );
+    }
+
+    /// Create an agent at run time from `spec`, through Core.
+    async fn create(runtime: &UnifiedRuntime, spec: meerkat_mob::CreatedIdentitySpec) {
+        let name = spec.identity.as_str().to_string();
+        let change = runtime
+            .mob_handle()
+            .create_store_owned_identities(
+                meerkat_mob::StoreOwnedIdentityCreate::new(
+                    operation(&format!("create-{name}")),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    vec![meerkat_mob::CreatedIdentityRequest::new(spec)],
+                ),
+                allow(),
+            )
+            .await
+            .map(|created| created.change);
+        assert!(committed(&change), "Core creates {name}: {change:?}");
+        record_changed(runtime, &name).await;
+    }
+
+    /// Archive the created agent `name`, through Core.
+    async fn archive(runtime: &UnifiedRuntime, name: &str) {
+        let change = runtime
+            .mob_handle()
+            .archive_identity(
+                meerkat_mob::IdentityArchiveChange::new(
+                    operation(&format!("archive-{name}")),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    name,
+                ),
+                allow(),
+            )
+            .await;
+        assert!(committed(&change), "Core archives {name}: {change:?}");
+        record_changed(runtime, name).await;
+    }
+
+    /// Remove the created agent `name`, through Core. The change path's
+    /// step is the caller's to run.
+    async fn remove(runtime: &UnifiedRuntime, name: &str) {
+        let change = runtime
+            .mob_handle()
+            .remove_identity(
+                meerkat_mob::IdentityRemoval::new(
+                    operation(&format!("remove-{name}")),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    name,
+                ),
+                allow(),
+            )
+            .await;
+        assert!(committed(&change), "Core removes {name}: {change:?}");
+    }
+
+    async fn registered(runtime: &UnifiedRuntime, name: &str) -> bool {
+        runtime
+            .identity_runtime()
+            .expect("the identity runtime")
+            .runtime()
+            .contains(&AgentIdentity::parse(name).expect("an identity"))
+            .await
+    }
+
+    /// Every model request one steward dream over `source` composed: the
+    /// dream consolidates, and holds the exit interview of [`RETIRED`], so
+    /// both prompts that carry the mob context are among them.
+    async fn dream_requests(source: &Arc<GatewayMobPurposeSource>) -> Vec<String> {
+        let memory = tempfile::tempdir().expect("a memory directory");
+        let store = crate::SqliteAgentMemoryStore::open(memory.path()).expect("a memory store");
+        store
+            .remember_authored(
+                &MemoryScope::Identity {
+                    realm: REALM.to_string(),
+                    identity: RETIRED.to_string(),
+                },
+                NewMemoryRecord {
+                    kind: MemoryKind::Fact,
+                    title: "Ledger close".to_string(),
+                    description: "when the ledger closes".to_string(),
+                    body: "The ledger closes on Fridays.".to_string(),
+                    tags: Vec::new(),
+                    evidence: Vec::new(),
+                    verification: None,
+                },
+                MemoryAuthor::Operator { principal: None },
+            )
+            .await
+            .expect("the retired member's record");
+        let model = Arc::new(RecordingModel::default());
+        let engine = Arc::new(
+            StewardEngine::new(
+                StewardProfile::embedded_default(),
+                StewardConfig {
+                    enabled: true,
+                    min_signals: 1,
+                    ..StewardConfig::default()
+                },
+                Arc::new(OneModel(Arc::clone(&model))),
+                Arc::new(store),
+                Arc::new(NoTranscripts),
+                REALM,
+            )
+            .with_mob_context(Arc::clone(source) as Arc<dyn crate::MobPurposeSource>),
+        );
+        engine.note_identity_retired(RETIRED, None, "retire").await;
+        engine.note_session_completed();
+        let outcome = engine.dream_now().await;
+        assert!(
+            matches!(outcome, DreamOutcome::Completed(_)),
+            "the dream completes: {outcome:?}"
+        );
+        let requests = model.requests();
+        let with_context = requests
+            .iter()
+            .filter(|request| request.contains(&format!("mob '{}'", source.mob)))
+            .count();
+        assert!(
+            with_context >= 2,
+            "the consolidation and the exit interview carry the mob context: {with_context} of {}",
+            requests.len()
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("(retired: retire)")),
+            "the exit interview was composed, among {} requests",
+            requests.len()
+        );
+        requests
+    }
+
+    /// The mob context `source` answers, for an assertion's message.
+    fn listed(source: &GatewayMobPurposeSource) -> String {
+        format!("{:?}", source.mob_contexts())
+    }
+
+    /// A member line of the mob context, as a model request carries it.
+    fn member_line(name: &str, labels: &str) -> String {
+        format!("  member {name} [{labels}]\\n")
+    }
+
+    /// How many of `requests` carry `text`.
+    fn carrying(requests: &[String], text: &str) -> usize {
+        requests
+            .iter()
+            .filter(|request| request.contains(text))
+            .count()
+    }
+
+    /// The steward's member lines list an agent created at run time by its
+    /// name and its profile, in the consolidation and in the exit interview.
+    /// The configured agent's line and the mob's purpose are what they were
+    /// before the agent was created.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_steward_lists_a_created_agent_by_name_and_profile_beside_its_configured_twin() {
+        let state = tempfile::tempdir().expect("a state directory");
+        let roster = [configured(&[("mob_purpose", PURPOSE), ("role", "desk")])];
+        let members = Arc::new(RecordingModel::default());
+        let runtime = boot(state.path(), &roster, &members).await;
+        let source = steward_source(&runtime, &roster);
+        let twin = member_line(CONFIGURED, &format!("mob_purpose={PURPOSE}, role=desk"));
+        let purpose = format!("  purpose: {PURPOSE}\\n");
+
+        let before = dream_requests(&source).await;
+        let configured_context = source.mob_contexts();
+        assert_eq!(carrying(&before, &twin), 2, "{}", listed(&source));
+        assert_eq!(carrying(&before, &purpose), 2, "{}", listed(&source));
+
+        create(
+            &runtime,
+            meerkat_mob::CreatedIdentitySpec::new("keeper", "analyst"),
+        )
+        .await;
+        let after = dream_requests(&source).await;
+        assert_eq!(
+            carrying(&after, &member_line("keeper", "profile=analyst")),
+            2,
+            "the created agent is listed by its name and its profile: {}",
+            listed(&source)
+        );
+        assert_eq!(
+            carrying(&after, &twin),
+            2,
+            "the configured agent's line is unchanged: {}",
+            listed(&source)
+        );
+        assert_eq!(
+            carrying(&after, &purpose),
+            2,
+            "the purpose is unchanged: {}",
+            listed(&source)
+        );
+        let context = source.mob_contexts();
+        assert_eq!(context.len(), 1, "{context:?}");
+        assert_eq!(context[0].purpose, configured_context[0].purpose);
+        assert_eq!(
+            context[0].member_labels,
+            [
+                configured_context[0].member_labels.clone(),
+                vec![(
+                    "keeper".to_string(),
+                    BTreeMap::from([("profile".to_string(), "analyst".to_string())]),
+                )],
+            ]
+            .concat(),
+            "the configured agent's entry is what it was, and the created agent follows it"
+        );
+        let _ = runtime.shutdown().await;
+    }
+
+    /// No text a requester chose for an agent it created reaches a model
+    /// request of the steward: not its labels (keys or values), its display
+    /// name, its context, its instructions or its first message. The agent
+    /// is still listed, by its name and its profile.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_text_a_requester_chose_for_a_created_agent_reaches_a_steward_request() {
+        let state = tempfile::tempdir().expect("a state directory");
+        let roster = [configured(&[("role", "desk")])];
+        let members = Arc::new(RecordingModel::default());
+        let runtime = boot(state.path(), &roster, &members).await;
+        let source = steward_source(&runtime, &roster);
+
+        let mut spec = meerkat_mob::CreatedIdentitySpec::new("keeper", "analyst");
+        spec.display_name = Some(format!("{MARKER} display name"));
+        spec.labels = BTreeMap::from([
+            ("note".to_string(), format!("{MARKER} label value")),
+            (format!("{MARKER}-key"), "label key".to_string()),
+        ]);
+        spec.context = Some(json!({ "description": format!("{MARKER} description") }));
+        spec.additional_instructions = vec![format!("{MARKER} instructions")];
+        spec.initial_message = Some(meerkat_core::ContentInput::Text(format!(
+            "{MARKER} first message"
+        )));
+        create(&runtime, spec).await;
+
+        let requests = dream_requests(&source).await;
+        assert_eq!(
+            carrying(&requests, MARKER),
+            0,
+            "no steward request carries the requester's text: {}",
+            listed(&source)
+        );
+        let context = listed(&source);
+        assert!(!context.contains(MARKER), "{context}");
+        assert_eq!(
+            carrying(&requests, &member_line("keeper", "profile=analyst")),
+            2,
+            "the created agent is listed by its name and its profile: {context}"
+        );
+        let _ = runtime.shutdown().await;
+    }
+
+    /// A `purpose` or `mob_purpose` label of an agent created at run time is
+    /// never the mob's purpose: with a configured purpose the steward reads
+    /// that one, byte for byte, and with none it reads none.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_created_agents_purpose_label_is_never_the_mobs_purpose() {
+        const CLAIMED: &str = "CLAIMED-PURPOSE-41d0";
+        for configured_purpose in [Some(PURPOSE), None] {
+            let state = tempfile::tempdir().expect("a state directory");
+            let roster = [match configured_purpose {
+                Some(purpose) => configured(&[("purpose", purpose)]),
+                None => configured(&[("role", "desk")]),
+            }];
+            let members = Arc::new(RecordingModel::default());
+            let runtime = boot(state.path(), &roster, &members).await;
+            let source = steward_source(&runtime, &roster);
+            for (name, key) in [("claims-purpose", "purpose"), ("claims-mob", "mob_purpose")] {
+                let mut spec = meerkat_mob::CreatedIdentitySpec::new(name, "worker");
+                spec.labels = BTreeMap::from([(key.to_string(), format!("{CLAIMED} by {name}"))]);
+                create(&runtime, spec).await;
+            }
+
+            let requests = dream_requests(&source).await;
+            let listed = listed(&source);
+            assert_eq!(
+                carrying(&requests, CLAIMED),
+                0,
+                "no steward request carries a created agent's purpose label: {listed}"
+            );
+            let context = source.mob_contexts();
+            assert_eq!(
+                context[0].purpose.as_deref(),
+                configured_purpose,
+                "the mob's purpose is the configured one"
+            );
+            let purpose_line = match configured_purpose {
+                Some(purpose) => format!("  purpose: {purpose}\\n"),
+                None => "  purpose: (none declared".to_string(),
+            };
+            assert_eq!(carrying(&requests, &purpose_line), 2, "{listed}");
+            for name in ["claims-purpose", "claims-mob"] {
+                assert_eq!(
+                    carrying(&requests, &member_line(name, "profile=worker")),
+                    2,
+                    "{name} is listed by its name and its profile: {listed}"
+                );
+            }
+            let _ = runtime.shutdown().await;
+        }
+    }
+
+    /// An archived agent and a removed one are no members: the steward lists
+    /// neither, whether or not this runtime still holds a registration of
+    /// its name, and still lists the created agent that stays.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_steward_lists_no_archived_and_no_removed_created_agent() {
+        let state = tempfile::tempdir().expect("a state directory");
+        let roster = [configured(&[("role", "desk")])];
+        let members = Arc::new(RecordingModel::default());
+        let runtime = boot(state.path(), &roster, &members).await;
+        let source = steward_source(&runtime, &roster);
+        const KEPT: &str = "stays-a17";
+        const ARCHIVED: &str = "archived-b28";
+        const REMOVED: &str = "removed-c39";
+        const FORGOTTEN: &str = "removed-d40";
+        for name in [KEPT, ARCHIVED, REMOVED, FORGOTTEN] {
+            create(
+                &runtime,
+                meerkat_mob::CreatedIdentitySpec::new(name, "worker"),
+            )
+            .await;
+        }
+        archive(&runtime, ARCHIVED).await;
+        // Removed, and the change path's step is not run for it.
+        remove(&runtime, REMOVED).await;
+        // Removed, and the change path's step forgot its registration.
+        remove(&runtime, FORGOTTEN).await;
+        record_changed(&runtime, FORGOTTEN).await;
+        assert!(
+            registered(&runtime, ARCHIVED).await,
+            "an archived agent keeps its registration"
+        );
+        assert!(!registered(&runtime, FORGOTTEN).await);
+
+        let requests = dream_requests(&source).await;
+        let listed = listed(&source);
+        for name in [ARCHIVED, REMOVED, FORGOTTEN] {
+            assert_eq!(
+                carrying(&requests, name),
+                0,
+                "{name} is not listed: {listed}"
+            );
+        }
+        assert_eq!(
+            carrying(&requests, &member_line(KEPT, "profile=worker")),
+            2,
+            "the created agent that stays is listed: {listed}"
+        );
+        let _ = runtime.shutdown().await;
+    }
+
+    /// Building the steward's context builds, wakes and loads no member: a
+    /// created agent Core holds seated and unmaterialized is listed, and
+    /// after the context was read and a dream ran over it Core holds it, and
+    /// the configured agent, as before, and no member's model was asked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn building_the_stewards_context_wakes_and_loads_no_member() {
+        let state = tempfile::tempdir().expect("a state directory");
+        let roster = [configured(&[("role", "desk")])];
+        let members = Arc::new(RecordingModel::default());
+        let runtime = boot(state.path(), &roster, &members).await;
+        let source = steward_source(&runtime, &roster);
+        create(
+            &runtime,
+            meerkat_mob::CreatedIdentitySpec::new("sleeper", "worker"),
+        )
+        .await;
+        let unmaterialized = |name: &str| {
+            runtime
+                .mob_handle()
+                .member_unmaterialized(&meerkat_mob::AgentIdentity::from(name))
+        };
+        assert!(
+            unmaterialized("sleeper"),
+            "Core holds the created agent's member unmaterialized"
+        );
+        let configured_before = unmaterialized(CONFIGURED);
+
+        for _ in 0..3 {
+            let _ = source.mob_contexts();
+        }
+        let requests = dream_requests(&source).await;
+        assert_eq!(
+            carrying(&requests, &member_line("sleeper", "profile=worker")),
+            2,
+            "the dormant created agent is listed: {}",
+            listed(&source)
+        );
+        assert!(
+            unmaterialized("sleeper"),
+            "the created agent's member is still unmaterialized"
+        );
+        assert_eq!(
+            unmaterialized(CONFIGURED),
+            configured_before,
+            "the configured agent's member is as it was"
+        );
+        assert!(
+            members.requests().is_empty(),
+            "no member's model was asked: {:?}",
+            members.requests()
+        );
+        let _ = runtime.shutdown().await;
+    }
+
+    /// Change a created agent's row from the spec `from` to `to`, through
+    /// Core, as the change `step`.
+    async fn update(
+        runtime: &UnifiedRuntime,
+        step: &str,
+        from: &meerkat_mob::CreatedIdentitySpec,
+        to: meerkat_mob::CreatedIdentitySpec,
+    ) {
+        let name = to.identity.as_str().to_string();
+        let change = runtime
+            .mob_handle()
+            .update_store_owned_identity(
+                meerkat_mob::StoreOwnedIdentityUpdate::new(
+                    operation(&format!("{step}-{name}")),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    to,
+                    from.spec_digest().expect("the row's digest"),
+                ),
+                allow(),
+            )
+            .await
+            .map(|updated| updated.change);
+        assert!(committed(&change), "Core updates {name}: {change:?}");
+        record_changed(runtime, &name).await;
+    }
+
+    /// The steward's line of a created agent follows its row: an update of
+    /// its labels changes nothing the steward reads, and an update of its
+    /// profile shows at the next read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_stewards_line_of_a_created_agent_follows_its_rows_profile() {
+        let state = tempfile::tempdir().expect("a state directory");
+        let roster = [configured(&[("role", "desk")])];
+        let members = Arc::new(RecordingModel::default());
+        let runtime = boot(state.path(), &roster, &members).await;
+        let source = steward_source(&runtime, &roster);
+        let line_of_keeper = || {
+            source.mob_contexts()[0]
+                .member_labels
+                .iter()
+                .find(|(name, _)| name == "keeper")
+                .map(|(_, labels)| format!("{labels:?}"))
+        };
+        let created = meerkat_mob::CreatedIdentitySpec::new("keeper", "analyst");
+        create(&runtime, created.clone()).await;
+        assert_eq!(
+            line_of_keeper().as_deref(),
+            Some(r#"{"profile": "analyst"}"#)
+        );
+
+        let mut relabelled = created.clone();
+        relabelled.labels = BTreeMap::from([("note".to_string(), format!("{MARKER} label"))]);
+        update(&runtime, "relabel", &created, relabelled.clone()).await;
+        assert_eq!(
+            line_of_keeper().as_deref(),
+            Some(r#"{"profile": "analyst"}"#),
+            "an update of the row's labels changes nothing the steward reads"
+        );
+
+        let mut moved = relabelled.clone();
+        moved.profile = "worker".into();
+        update(&runtime, "move", &relabelled, moved).await;
+        assert_eq!(
+            line_of_keeper().as_deref(),
+            Some(r#"{"profile": "worker"}"#),
+            "an update of the row's profile shows at the next read"
+        );
+
+        let requests = dream_requests(&source).await;
+        let listed = listed(&source);
+        assert_eq!(carrying(&requests, MARKER), 0, "{listed}");
+        assert_eq!(
+            carrying(&requests, &member_line("keeper", "profile=worker")),
+            2,
+            "{listed}"
+        );
+        let _ = runtime.shutdown().await;
     }
 }

@@ -422,4 +422,22 @@ describe("SchedulesSection", () => {
       { schedule_id: "sch_1", expected_revision: 5, take_over_sender: true },
     ]);
   });
+
+  it("says in words when a schedule is paused because its agent is archived", async () => {
+    const { run } = gateway([
+      item({ phase: "paused", paused_for_target: true, next_due_at_utc: null }),
+      item({ schedule_id: "sch_2", phase: "paused", next_due_at_utc: null }),
+      item({ schedule_id: "sch_3" }),
+    ]);
+    const view = render(section(run, true));
+    await waitFor(() => expect(present(view, "schedule:sch_3")).toBe(true));
+
+    expect(view.getByTestId("schedule-phase:sch_1").textContent).toBe("Paused");
+    expect(view.getByTestId("schedule-pause-reason:sch_1").textContent).toBe(
+      "Paused because its agent is archived. It resumes when the agent is unarchived.",
+    );
+    // A pause somebody asked for by name, and an active schedule, say nothing of it.
+    expect(present(view, "schedule-pause-reason:sch_2")).toBe(false);
+    expect(present(view, "schedule-pause-reason:sch_3")).toBe(false);
+  });
 });

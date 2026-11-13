@@ -1001,6 +1001,69 @@ async fn stable_harness_with_roster(
     (runtime, context, calls)
 }
 
+/// A member of an identity whose record is its row in the mob's identity
+/// store acts as that identity, as a configured identity's member does: its
+/// session resolves the agent principal of its name.
+///
+/// RED before such a member resolved a principal: its session answered
+/// `AuthorityUnavailable` (it carries no mark of an identity-first spawn).
+#[tokio::test(flavor = "multi_thread")]
+async fn extension_store_owned_identity_member_acts_as_its_identity() {
+    use meerkat_meta::access::{AccessControlConfig, AccessController, AccessRule};
+    const CREATED: &str = "durable:keeper";
+    let access = AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec!["operator".into()],
+        rules: vec![AccessRule {
+            id: "allow".into(),
+            actions: vec!["extension.*".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    let path = tempfile::tempdir().unwrap();
+    let (runtime, context, _calls) = stable_harness(path.path(), access).await;
+    // Core holds the identity under the comms-safe member id its name
+    // encodes to.
+    let member = meerkat_meta::member_comms_id::mob_member_id(CREATED);
+    let created = runtime
+        .mob_handle()
+        .create_store_owned_identities(
+            meerkat_mob::StoreOwnedIdentityCreate::new(
+                meerkat_mob::IdentityOperation::new(
+                    "create-keeper",
+                    meerkat_core::approval::decision::Sha256Digest::of(b"create-keeper").as_str(),
+                ),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                vec![meerkat_mob::CreatedIdentityRequest::new(
+                    meerkat_mob::CreatedIdentitySpec::new(member.as_str(), "worker"),
+                )],
+            ),
+            meerkat_mob::IdentityChangeConsentInput::Policy(
+                meerkat_mob::IdentityPolicyOutcome::Allow,
+            ),
+        )
+        .await
+        .expect("Core creates the identity");
+    assert!(matches!(
+        created.change,
+        meerkat_mob::IdentityChangeOutcome::Committed { .. }
+    ));
+    runtime
+        .mob_handle()
+        .ensure_member_live(&member)
+        .await
+        .expect("Core builds the identity's member");
+    let session = member_session(&runtime, &member).await;
+    assert_eq!(
+        caller(&context, &session).await.principal(),
+        &Principal::Agent(CREATED.into()),
+        "the member's session acts as the identity"
+    );
+    runtime.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn extension_native_first_turn_creation_has_stable_owner_after_reset_and_restore() {
     use meerkat_meta::access::{AccessControlConfig, AccessController, AccessEffect, AccessRule};

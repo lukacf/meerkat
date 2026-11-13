@@ -362,6 +362,102 @@ export const IDENTITY_WAKE_HELD_KINDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The long-term agent family (`meta/identity/*`) refused a request; nothing
+ * of it was written. Every refusal of the family rides this one code, and
+ * the error data is the typed refusal: `{kind, field?, retryable, detail,
+ * ...the kind's own members}`. Params the gateway cannot read are this
+ * error too, with kind `invalid_request`, never JSON-RPC invalid params:
+ * problem `malformed` for an unknown member or a wrong type, `empty` for a
+ * change without its `request_id`. One refusal is not the family's: a
+ * candidate launch refuses every writer before the family is reached, with
+ * the gateway-wide `-32047` and data `kind` `candidate_launch`.
+ */
+export const IDENTITY_REFUSED_CODE = -32058 as const;
+/**
+ * The identity refusal kinds, a closed vocabulary: a new kind is a breaking
+ * change. It is the gateway's own list (`IdentityRefusalKind`), and the SDK
+ * suite fails when the two differ.
+ */
+export const IDENTITY_REFUSAL_KIND_TOKENS = [
+  // Profile.
+  "profile_unknown",
+  "profile_not_allowed",
+  "privileged_field",
+  "grant_revoked",
+  // Request data.
+  "reserved_key",
+  "authority_field_needs_approval",
+  "authority_field_invalid",
+  "text_too_large",
+  "consequences_unavailable",
+  "invalid_request",
+  // Name.
+  "invalid_name",
+  "name_taken",
+  // Peers.
+  "peer_not_allowed",
+  "peer_unknown",
+  // Policy.
+  "batch_too_large",
+  "validation_refused",
+  "change_denied",
+  "unsupported",
+  // Agents and operations.
+  "identity_unknown",
+  "self_change_refused",
+  "private_requester",
+  "stale_spec",
+  "operation_reused",
+  "owner_read_only",
+  "not_adoptable",
+  "not_archived",
+  "declared_apply_open",
+  "admission_unsettled",
+  "predecessor_mismatch",
+  "import_refused",
+  "purge_refused",
+  "preparation_not_pending",
+  "preparation_mismatch",
+  "construction_open",
+  "stale_attempt",
+  "not_constructed",
+  "construction_required",
+  "activation_pending",
+  // Decisions.
+  "approval_unavailable",
+  "decision_open",
+  "subject_widened",
+  "decision_closed",
+  "decision_not_found",
+  // Decide side.
+  "evidence_required",
+  "subject_changed",
+  "presentation_incomplete",
+  "requester_cannot_decide",
+  "approver_not_eligible",
+  "decided_before_presentation",
+  // Admission.
+  "changes_held",
+  "host_preparation_pending",
+  "candidate_launch",
+  "identity_member",
+  "storage_unsupported",
+  "mob_not_running",
+  "purged",
+  "construction_refused",
+] as const;
+/** One kind of the closed identity refusal vocabulary. */
+export type IdentityRefusalKind = (typeof IDENTITY_REFUSAL_KIND_TOKENS)[number];
+/** The identity refusal kinds, as a set. */
+export const IDENTITY_REFUSAL_KINDS: ReadonlySet<string> = new Set(
+  IDENTITY_REFUSAL_KIND_TOKENS,
+);
+/** Whether `kind` is one of {@link IDENTITY_REFUSAL_KINDS}. */
+export function isIdentityRefusalKind(kind: string): kind is IdentityRefusalKind {
+  return IDENTITY_REFUSAL_KINDS.has(kind);
+}
+
+/**
  * Mob announcements (`meta/mob_announcements/*`) are not enabled on this
  * gateway. Every announcement refusal's data carries `kind`; an unknown kind
  * keeps its family's class.
@@ -839,6 +935,113 @@ export class ToolGrantRequestRefusedError extends RpcError {
         ? { ...(refusal as Record<string, unknown>) }
         : {};
     this.refusalKind = typeof this.refusal.kind === "string" ? this.refusal.kind : null;
+  }
+}
+
+/**
+ * Why a request of the long-term agent family was refused.
+ *
+ * `kind` is one of {@link IDENTITY_REFUSAL_KINDS}
+ * ({@link IdentityRefusalKind}). `field` is the request field the refusal
+ * concerns, as a path into the request as the wire names it
+ * (`agents[1].name`, `set.labels`, `peers_add[0]`, `name`); `null` for the
+ * request as a whole. `detail` says what was wrong and what to send
+ * instead, in one sentence. `retryable` says whether the same request may
+ * succeed later unchanged (`null` when the gateway did not say). `details`
+ * holds the kind's own members, under the wire's names: for example
+ * `current_digest` and `current_revision` for `stale_spec`, `by` for
+ * `name_taken`, `reason` for `not_adoptable`, `change` for `change_denied`.
+ *
+ * The vocabulary is closed, and a gateway newer than this SDK may still send
+ * a kind this SDK does not list. It reaches you as the same type with its
+ * token in `kind` and `knownKind` false: handle it as a refusal you do not
+ * know, by `retryable` and `detail`.
+ */
+export interface IdentityRefusal {
+  readonly kind: IdentityRefusalKind | (string & {});
+  /** Whether `kind` is one of {@link IDENTITY_REFUSAL_KINDS}. */
+  readonly knownKind: boolean;
+  readonly field: string | null;
+  readonly detail: string | null;
+  readonly retryable: boolean | null;
+  readonly details: Readonly<Record<string, unknown>>;
+}
+
+/** The members of a refusal that are not the kind's own details. */
+const IDENTITY_REFUSAL_MEMBERS: ReadonlySet<string> = new Set([
+  "kind",
+  "field",
+  "detail",
+  "retryable",
+  "outcome",
+]);
+
+/**
+ * The refusal `data` carries; `null` unless it is an object whose `kind` is
+ * text.
+ */
+export function parseIdentityRefusal(data: unknown): IdentityRefusal | null {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
+  const payload = data as Record<string, unknown>;
+  const kind = payload.kind;
+  if (typeof kind !== "string") return null;
+  const details: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (!IDENTITY_REFUSAL_MEMBERS.has(key)) details[key] = value;
+  }
+  return {
+    kind,
+    knownKind: IDENTITY_REFUSAL_KINDS.has(kind),
+    field: typeof payload.field === "string" ? payload.field : null,
+    detail: typeof payload.detail === "string" ? payload.detail : null,
+    retryable: typeof payload.retryable === "boolean" ? payload.retryable : null,
+    details,
+  };
+}
+
+/**
+ * The long-term agent family (`meta/identity/*`) refused a request; nothing
+ * of it was written.
+ *
+ * This is the one refusal error of the family: every call of
+ * `MetaRuntime.identities` rejects with it for every refusal. The gateway
+ * answers {@link IDENTITY_REFUSED_CODE} with the typed refusal as the error
+ * data; both must match, and any other answer stays a plain
+ * {@link RpcError}. `refusal` is the {@link IdentityRefusal}; `kind`,
+ * `knownKind`, `field`, `detail`, `retryable` and `details` read it, and
+ * `detail` is the error's message when the gateway sent no sentence. A kind
+ * newer than this SDK is still this error, with its token in `kind` and
+ * `knownKind` false. Params the gateway cannot read are this error with
+ * kind `invalid_request`.
+ *
+ * One refusal is not this error: on a candidate launch every write of the
+ * family is refused before the family is reached, with the gateway-wide
+ * `-32047`, which keeps the class the SDK gives that code
+ * ({@link AnnouncementRefusedError}, `kind` `candidate_launch`).
+ */
+export class IdentityRefusedError extends RpcError {
+  readonly kind: IdentityRefusalKind | (string & {});
+  readonly knownKind: boolean;
+  readonly field: string | null;
+  readonly detail: string;
+  readonly retryable: boolean | null;
+  readonly details: Readonly<Record<string, unknown>>;
+
+  constructor(
+    message: string,
+    readonly refusal: IdentityRefusal,
+    requestId = "",
+    method = "",
+    data?: unknown,
+  ) {
+    super(IDENTITY_REFUSED_CODE, message, requestId, method, data);
+    this.name = "IdentityRefusedError";
+    this.kind = refusal.kind;
+    this.knownKind = refusal.knownKind;
+    this.field = refusal.field;
+    this.detail = refusal.detail ?? message;
+    this.retryable = refusal.retryable;
+    this.details = refusal.details;
   }
 }
 

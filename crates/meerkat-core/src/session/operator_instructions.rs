@@ -33,9 +33,13 @@ use std::collections::BTreeMap;
 /// The one render version of an operator-instruction entry. A stored row is
 /// never re-rendered; a future format is a new version.
 pub const INSTRUCTION_ENTRY_RENDER_VERSION_V1: u16 = 1;
-/// The most slots one owner (a session or a mob) holds.
+/// The most slots one session's target holds: a session's own slots, or a
+/// mob member's snapshot (the mob's shared records plus the member-targeted
+/// records that name the member). A mob holds any number of member-targeted
+/// records over all its members.
 pub const MAX_OPERATOR_INSTRUCTION_SLOTS: usize = 64;
-/// The most UTF-8 bytes the Active bodies of one owner sum to.
+/// The most UTF-8 bytes the Active bodies of one session's target sum to (a
+/// session's own, or one mob member's snapshot).
 pub const MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES: usize = 1024 * 1024;
 /// The stored mob event schema version at which a mob journals its
 /// operator-instruction events: the records it committed and the member

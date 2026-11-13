@@ -200,7 +200,10 @@ fn roots(port: u16) -> Roots {
     std::fs::write(
         realm.join("config.toml"),
         format!(
-            r#"[self_hosted.servers.loopback]
+            r#"[self_hosted]
+default_model = "{DECLARED_MODEL}"
+
+[self_hosted.servers.loopback]
 base_url = "http://127.0.0.1:{port}/v1"
 
 [self_hosted.models."{DECLARED_MODEL}"]

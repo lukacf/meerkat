@@ -92,6 +92,16 @@ a restart. Opening the session wakes the run, so no new input is needed.
 Meerkat does not look for open runs at start-up; a session nobody opens keeps
 its open run until its next open.
 
+<Warning>
+Known issue, noted 2026-11-13. On Meerkat 0.6.0 through 0.9.14, a stored
+session whose first turn after a restart cannot rebuild it, because something
+the session needs is unavailable at that moment, loses the mobs it owns,
+permanently: the agents it created, its delegates and its forks. This was
+confirmed on JSON-RPC (`rkat-rpc` and the SDKs that use it). See the
+[known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
+for the affected cases and what to do.
+</Warning>
+
 - **The run keeps its identity.** It continues under the same run id, and
   its event stream shows `run_resumed`, naming the run, the round and whether
   the run continues at the round's tools (`tools_pending`) or at its next

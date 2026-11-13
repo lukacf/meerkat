@@ -480,6 +480,46 @@ async function fullStory() {
     assert.equal((await call("meta/identity/list", {})).result.agents.some(entry => entry.name === "held-one"), false);
     await page.getByTestId("identity-cancel").click();
 
+    // A viewer who is no administrator of the runtime is told how many
+    // schedules a change takes with it, and not which: the plan and the
+    // change's first answer carry the effect and the count without the
+    // list. The question and the result then say the count and no name.
+    await fixture.control("access", { mode: "no-admin" });
+    try {
+      const withheld = (await call("meta/identity/plan", {
+        change: "archive", request_id: "plan-of-no-administrator", name: "scout", expected_spec_digest: record.spec_digest,
+      })).result;
+      assert.deepEqual(withheld.schedules, { effect: "paused", count: 1 }, "the plan counts the schedule and does not list it");
+      await openAgent("scout");
+      await page.getByTestId("roster-action:scout:archive").click();
+      const counted = page.getByTestId("identity-confirm:scout:archive");
+      await counted.getByTestId("identity-confirm-schedules").getByText("Its schedule will be paused until it is unarchived.").waitFor();
+      assert.equal(/Morning report/.test(await counted.textContent()), false, "the question does not name the schedule");
+      await page.screenshot({ path: path.join(evidence, "real-identity-story-archive-asked-no-administrator.png"), fullPage: true });
+      await counted.getByTestId("identity-confirm-yes").click();
+      await outcome(/is stopping$|is archived$/);
+      await outcome("Its schedule is paused until it is unarchived.");
+      const told = await notice.textContent();
+      assert.equal(told.includes("Morning report") || told.includes(morning.schedule_id), false, "the result names no schedule, by name or by id");
+      assert.deepEqual(await schedule(), [{ name: "Morning report", phase: "paused", paused_for_target: true }]);
+      await gone(agent("scout"), "the archived agent in the roster");
+      await page.getByTestId("identity-confirm-cancel").click();
+      await archivedRow("scout");
+      await page.getByTestId("roster-archived-action:scout:unarchive").click();
+      const back = page.getByTestId("identity-confirm:scout:unarchive");
+      await back.getByTestId("identity-confirm-schedules").getByText("Its schedule will run again.").waitFor();
+      assert.equal(/Morning report/.test(await back.textContent()), false);
+      await back.getByTestId("identity-confirm-yes").click();
+      await outcome(/is back$/);
+      await outcome("Its schedule runs again.");
+      assert.equal(/Morning report/.test(await notice.textContent()), false);
+      assert.deepEqual(await schedule(), [{ name: "Morning report", phase: "active", paused_for_target: false }]);
+      await agent("scout").waitFor();
+      await page.getByTestId("identity-confirm-cancel").click();
+    } finally {
+      await fixture.control("access", { mode: "open" });
+    }
+
     // Remove: for good. Its name is then taken for ever.
     await openAgent("scout");
     await page.getByTestId("roster-action:scout:remove").click();
@@ -538,7 +578,7 @@ async function fullStory() {
     // Each change the browser sent names a request id of its own.
     const ids = ["create", "update", "archive", "unarchive", "remove"]
       .flatMap(change => sent(fixture, `meta/identity/${change}`).map(params => params.request_id));
-    assert.equal(ids.length, 11);
+    assert.equal(ids.length, 13);
     assert.equal(ids.every(id => typeof id === "string" && id.length > 0), true);
     assert.equal(new Set(ids).size, ids.length);
     assert.deepEqual(errors, []);

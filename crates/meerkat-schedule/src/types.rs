@@ -2336,6 +2336,12 @@ struct ScheduleMachineStateWire {
     next_occurrence_ordinal: u64,
     #[serde(default)]
     superseded_ack_ids: BTreeSet<String>,
+    /// Whether the schedule is paused for its target. Written only when it
+    /// is, so a schedule that is not reads and writes as before; a state
+    /// stored before this field has none and loads as not paused for its
+    /// target.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    paused_for_target: bool,
 }
 
 impl From<&sched_dsl::ScheduleLifecycleMachineState> for ScheduleMachineStateWire {
@@ -2364,6 +2370,7 @@ impl From<&sched_dsl::ScheduleLifecycleMachineState> for ScheduleMachineStateWir
                 .iter()
                 .map(|id| id.0.clone())
                 .collect(),
+            paused_for_target: state.paused_for_target,
         }
     }
 }
@@ -2420,6 +2427,7 @@ impl TryFrom<ScheduleMachineStateWire> for sched_dsl::ScheduleLifecycleMachineSt
                 .into_iter()
                 .map(sched_dsl::OccurrenceId)
                 .collect(),
+            paused_for_target: wire.paused_for_target,
         })
     }
 }
@@ -2500,6 +2508,16 @@ impl<'de> Deserialize<'de> for Schedule {
 }
 
 impl Schedule {
+    /// Whether this schedule is paused for its target: its target stopped
+    /// taking deliveries and the schedule was Active then
+    /// ([`crate::ScheduleService::pause_for_target`]). Only such a pause
+    /// ends when the target takes deliveries again; a schedule somebody
+    /// paused or resumed by name since is theirs, and answers `false`.
+    #[must_use]
+    pub fn paused_for_target(&self) -> bool {
+        self.machine_state.paused_for_target
+    }
+
     pub fn new(
         request: CreateScheduleRequest,
     ) -> Result<Self, crate::lifecycle::ScheduleLifecycleError> {

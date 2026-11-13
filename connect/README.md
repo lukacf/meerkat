@@ -6,18 +6,26 @@ catalog. Describe a task, review the proposed access and let Connect guide setup
 
 ## Install and use
 
-Connect 0.9.10 is released for Linux x86_64 with glibc 2.39. Its Apple Silicon
+Connect 0.9.14 is released for Linux x86_64 with glibc 2.39. Its Apple Silicon
 macOS archives (macOS 13.5 or later) are not built yet and follow later.
-Install [Meerkat Core 0.9.10](https://github.com/lukacf/meerkat/releases/tag/v0.9.10)
+Install [Meerkat Core 0.9.14](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
 for the ordinary `rkat` agent. Connect supplies its own Python, Node/npm,
 integration library and setup resources.
+
+From 2026-11-13 until Connect 0.9.15 is published, the Connect release to
+use with Core 0.9.15 and Meta 0.9.15 is Connect 0.9.14. A Python environment
+with the `native-host` extra of Connect 0.9.14's `meerkat-toolkit` cannot
+take `meerkat-meta` 0.9.15 until Connect 0.9.15 is published: the extra
+requires `meerkat-meta==0.9.14`. Connect 0.9.14's archives are built with
+Core 0.9.14 and Meta 0.9.14; see the
+[upgrade guide](../docs/guides/upgrading.mdx) for the limits of that pairing.
 
 Download the complete Connect CLI archive and verify its checksum:
 
 ```sh
-platform=linux-x86_64 # 0.9.10 has no macos-arm64 archive yet.
-archive="meerkat-connect-0.9.10-$platform.tar.gz"
-release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.10
+platform=linux-x86_64 # 0.9.14 has no macos-arm64 archive yet.
+archive="meerkat-connect-0.9.14-$platform.tar.gz"
+release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.14
 curl -fLO "$release/$archive"
 curl -fLO "$release/$archive.sha256"
 sha256sum -c "$archive.sha256" # On macOS: shasum -a 256 -c "$archive.sha256"
@@ -90,7 +98,7 @@ qualify the published release or a deployed provider flow.
 - REST and an outer MCP Connect entry point are deferred. MCP servers used as
   integrations are included.
 
-See [release notes](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.10) for platform assets and compatibility,
+See [release notes](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.14) for platform assets and compatibility,
 [BUILDING.md](BUILDING.md) to build from source, and
 [source provenance](SOURCE-PROVENANCE.md) for upstream attribution and catalog
 identity. The [documentation source](docs/site) contains the full contracts.

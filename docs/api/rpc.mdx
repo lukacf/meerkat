@@ -3097,9 +3097,10 @@ seated.
 
 <Warning>
 Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, a
-`mob/spawn` that resumes an existing session can archive that session, and
-the mobs it owns are then destroyed, if the mob is stopped or the host shuts
-down while the spawn is still in progress. See the
+`mob/spawn` that resumes an existing session can archive that session if the
+mob is stopped or the host shuts down while the spawn is still in progress.
+Read from the source and not yet confirmed by a test: the mobs that session
+owns are then destroyed at the next start. See the
 [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
 for the affected releases, the cases and what to do.
 </Warning>

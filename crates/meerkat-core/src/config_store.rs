@@ -9,7 +9,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
 
 /// Resolved paths attached to a config store context.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -711,6 +710,15 @@ impl ConfigStore for TaggedConfigStore {
 /// ([`ConfigError::AdmissionInProgress`]) with nothing written. Its raw
 /// writes ([`ConfigStore::set_held`] and the patch forms) take the guard of
 /// a caller that holds the fence and the custody.
+///
+/// A document can hold credential material (an inline secret, a command
+/// source's environment, a realm MCP server's literal arguments, environment
+/// and headers), so on Unix every write gives the document, and the
+/// generation sidecar beside it, an owner's mode whatever the process umask:
+/// 0600, or 0640 (readable by the directory's group) when the document's
+/// directory has the setgid bit. The file has the mode from its creation. A
+/// write never adds a permission an existing document lacked, and never
+/// changes a directory's mode.
 pub struct FileConfigStore {
     path: PathBuf,
     create_if_missing: bool,
@@ -889,7 +897,10 @@ impl FileConfigStore {
     /// Replace the document atomically under `guard`, which must hold the
     /// document's admission fence (a guard that does not is refused with
     /// nothing written): write a sibling temp file, sync it, rename it over
-    /// the document.
+    /// the document. The temp file is created with a config document's
+    /// mode (`document_file`: owner-only on Unix, whatever the umask), which
+    /// the rename gives the document; the directory keeps its own. A write
+    /// that fails publishes nothing and removes its temp file.
     async fn write_content(
         &self,
         guard: &AdmissionGuard,
@@ -899,15 +910,7 @@ impl FileConfigStore {
         let parent = parent_directory(&self.path);
         tokio::fs::create_dir_all(&parent).await?;
         let tmp_path = parent.join(format!(".config.tmp.{}", crate::time_compat::new_uuid_v7()));
-        let mut tmp = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-            .await?;
-        tmp.write_all(content.as_bytes()).await?;
-        tmp.sync_all().await?;
-        drop(tmp);
-        tokio::fs::rename(&tmp_path, &self.path).await?;
+        crate::document_file::replace(&tmp_path, &self.path, content.as_bytes()).await?;
         Ok(())
     }
 
@@ -4580,5 +4583,429 @@ tier = \"r2\"\n";
             Config::template_toml()
         );
         assert_eq!(generation_beside(&document).await, 1);
+    }
+
+    /// The mode of the files a file store writes, on Unix. A document can
+    /// hold credential material (an inline secret, a command source's
+    /// environment, a realm MCP server's literal arguments, environment and
+    /// headers), so the store writes it, and the generation sidecar beside
+    /// it, owner-only whatever the process umask; in a directory whose setgid
+    /// bit says it is shared through its group, also readable by that group.
+    #[cfg(unix)]
+    mod document_modes {
+        use super::*;
+        use crate::process_isolation_tests::{
+            create_setgid_directory, mode_bits, set_mode, under_each_umask,
+            under_each_umask_refusing_writes,
+        };
+        use std::os::unix::fs::MetadataExt as _;
+
+        fn store_at(document: &Path) -> FileConfigStore {
+            FileConfigStore::new(
+                document.to_path_buf(),
+                *crate::model_profile::test_catalog::TEST_CATALOG,
+            )
+        }
+
+        /// A file an earlier release or an operator left at `path` with
+        /// `mode`, whatever this process's umask.
+        fn existing(path: &Path, content: &str, mode: u32) {
+            std::fs::write(path, content).expect("write the existing file");
+            set_mode(path, mode);
+        }
+
+        async fn patch_max_tokens(store: &FileConfigStore, max_tokens: u32) {
+            store
+                .patch(ConfigDelta(serde_json::json!({ "max_tokens": max_tokens })))
+                .await
+                .expect("a patch");
+        }
+
+        fn temporary_files(directory: &Path, prefix: &str) -> Vec<PathBuf> {
+            std::fs::read_dir(directory)
+                .expect("the document's directory")
+                .map(|entry| entry.expect("a directory entry").path())
+                .filter(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with(prefix))
+                })
+                .collect()
+        }
+
+        /// A document a store creates, and the generation sidecar beside
+        /// it, are 0600 under any umask. The directory the write created
+        /// keeps the mode the umask gives it. RED before: both files took
+        /// the umask's mode (0644 under 022), readable by every local user.
+        #[test]
+        fn a_document_a_store_creates_is_owner_only_under_any_umask() {
+            under_each_umask(
+                module_path!(),
+                "a_document_a_store_creates_is_owner_only_under_any_umask",
+                |umask| async move {
+                    let temp = tempfile::tempdir().expect("tempdir");
+                    let directory = temp.path().join("created-by-the-write");
+                    let document = directory.join("config.toml");
+                    let config = Config {
+                        max_tokens: Some(100),
+                        ..Config::default()
+                    };
+                    store_at(&document)
+                        .set(config)
+                        .await
+                        .expect("a full replace");
+                    assert_eq!(
+                        mode_bits(&directory) & 0o777,
+                        0o777 & !umask,
+                        "the directory keeps the umask's mode"
+                    );
+                    assert_eq!(mode_bits(&document), 0o600, "the document");
+                    assert_eq!(
+                        mode_bits(&directory.join(GENERATION_FILE)),
+                        0o600,
+                        "the generation sidecar"
+                    );
+                    assert!(
+                        temporary_files(&directory, ".config").is_empty(),
+                        "no temporary file is left"
+                    );
+                },
+            );
+        }
+
+        /// The document a bootstrapping store creates from its template is
+        /// 0600 under any umask, with its generation sidecar.
+        #[test]
+        fn a_template_document_is_owner_only_under_any_umask() {
+            under_each_umask(
+                module_path!(),
+                "a_template_document_is_owner_only_under_any_umask",
+                |_umask| async move {
+                    let temp = tempfile::tempdir().expect("tempdir");
+                    let document = temp.path().join("config.toml");
+                    let store = FileConfigStore {
+                        path: document.clone(),
+                        create_if_missing: true,
+                        catalog: *crate::model_profile::test_catalog::TEST_CATALOG,
+                        realm_chain: None,
+                    };
+                    store.get().await.expect("a read that creates the template");
+                    assert_eq!(
+                        std::fs::read_to_string(&document).expect("the created document"),
+                        Config::template_toml()
+                    );
+                    assert_eq!(mode_bits(&document), 0o600, "the template document");
+                    assert_eq!(
+                        mode_bits(&temp.path().join(GENERATION_FILE)),
+                        0o600,
+                        "the generation sidecar"
+                    );
+                },
+            );
+        }
+
+        /// A rewrite of a document an earlier release left readable by
+        /// group and others ends owner-only, and so does its sidecar.
+        #[test]
+        fn a_rewrite_of_a_readable_document_ends_owner_only_under_any_umask() {
+            under_each_umask(
+                module_path!(),
+                "a_rewrite_of_a_readable_document_ends_owner_only_under_any_umask",
+                |_umask| async move {
+                    let temp = tempfile::tempdir().expect("tempdir");
+                    let document = temp.path().join("config.toml");
+                    let sidecar = temp.path().join(GENERATION_FILE);
+                    existing(&document, "max_tokens = 100\n", 0o644);
+                    existing(&sidecar, "{\"generation\":3}", 0o644);
+                    let store = store_at(&document);
+                    patch_max_tokens(&store, 200).await;
+                    assert_eq!(store.get().await.expect("a read").max_tokens, Some(200));
+                    assert_eq!(generation_beside(&document).await, 4);
+                    assert_eq!(mode_bits(&document), 0o600, "the rewritten document");
+                    assert_eq!(mode_bits(&sidecar), 0o600, "the rewritten sidecar");
+                },
+            );
+        }
+
+        /// A rewrite never loosens a mode: a 0600 document stays 0600, and
+        /// a document its owner made read-only (0400) stays 0400, with its
+        /// sidecar. RED before: the rewrite gave both the umask's mode.
+        #[test]
+        fn a_rewrite_never_loosens_a_stricter_mode_under_any_umask() {
+            under_each_umask(
+                module_path!(),
+                "a_rewrite_never_loosens_a_stricter_mode_under_any_umask",
+                |_umask| async move {
+                    for mode in [0o600, 0o400] {
+                        let temp = tempfile::tempdir().expect("tempdir");
+                        let document = temp.path().join("config.toml");
+                        let sidecar = temp.path().join(GENERATION_FILE);
+                        existing(&document, "max_tokens = 100\n", mode);
+                        existing(&sidecar, "{\"generation\":3}", mode);
+                        let store = store_at(&document);
+                        patch_max_tokens(&store, 200).await;
+                        assert_eq!(store.get().await.expect("a read").max_tokens, Some(200));
+                        assert_eq!(generation_beside(&document).await, 4);
+                        assert_eq!(mode_bits(&document), mode, "the document keeps {mode:o}");
+                        assert_eq!(mode_bits(&sidecar), mode, "the sidecar keeps {mode:o}");
+                    }
+                },
+            );
+        }
+
+        /// A write the filesystem refuses fails, and publishes nothing: no
+        /// new document, the old one still in place (the same file), and no
+        /// generation sidecar. Every write to a regular file is refused in
+        /// this row's process. RED before: the write's error was dropped
+        /// (the file was synced without waiting for the write's result), so
+        /// the replace reported success and renamed its empty temporary
+        /// file over the document.
+        ///
+        /// The failed write also removes the temporary file it created, so
+        /// retries against a full disk leave nothing behind. RED before: each
+        /// failed attempt left its `.config.tmp.<id>` or
+        /// `.config_state.tmp.<id>` beside the document.
+        #[test]
+        fn a_refused_write_fails_and_publishes_nothing() {
+            under_each_umask_refusing_writes(
+                module_path!(),
+                "a_refused_write_fails_and_publishes_nothing",
+                |_umask| async move {
+                    let config = || Config {
+                        max_tokens: Some(100),
+                        ..Config::default()
+                    };
+                    let temp = tempfile::tempdir().expect("tempdir");
+                    let document = temp.path().join("config.toml");
+                    let sidecar = temp.path().join(GENERATION_FILE);
+                    store_at(&document)
+                        .set(config())
+                        .await
+                        .expect_err("the refused write fails the replace");
+                    assert!(!document.exists(), "no document was published");
+                    assert!(!sidecar.exists(), "no generation was published");
+                    assert_eq!(
+                        temporary_files(temp.path(), ".config.tmp."),
+                        Vec::<PathBuf>::new(),
+                        "the failed write removed its temporary file"
+                    );
+
+                    // An old document (empty: this process can write none)
+                    // stays the file it was.
+                    let kept = temp.path().join("kept");
+                    std::fs::create_dir(&kept).expect("a directory");
+                    let document = kept.join("config.toml");
+                    std::fs::File::create(&document).expect("the old document");
+                    let old = std::fs::metadata(&document).expect("its metadata").ino();
+                    store_at(&document)
+                        .set(config())
+                        .await
+                        .expect_err("the refused write fails the replace");
+                    assert_eq!(
+                        std::fs::metadata(&document).expect("its metadata").ino(),
+                        old,
+                        "the old document was not replaced"
+                    );
+                    assert_eq!(
+                        temporary_files(&kept, ".config.tmp."),
+                        Vec::<PathBuf>::new(),
+                        "the failed rewrite removed its temporary file"
+                    );
+
+                    let guard = AdmissionGuard::try_acquire(vec![AdmissionFence::beside(&sidecar)])
+                        .expect("the directory's fence");
+                    crate::config_runtime::write_generation_at(&guard, &sidecar, 1)
+                        .await
+                        .expect_err("the refused write fails the publication");
+                    assert!(!sidecar.exists(), "no generation was published");
+                    assert_eq!(
+                        temporary_files(temp.path(), ".config_state.tmp."),
+                        Vec::<PathBuf>::new(),
+                        "the failed publication removed its temporary file"
+                    );
+                },
+            );
+        }
+
+        /// A write whose rename fails removes its temporary file too, and
+        /// returns the rename's error: here the generation path is a
+        /// directory, which a file cannot be renamed onto. RED before: the
+        /// `.config_state.tmp.<id>` file stayed beside it.
+        #[tokio::test]
+        async fn a_failed_rename_removes_the_temporary_file() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let sidecar = temp.path().join(GENERATION_FILE);
+            std::fs::create_dir(&sidecar).expect("a directory at the generation path");
+            let guard = AdmissionGuard::try_acquire(vec![AdmissionFence::beside(&sidecar)])
+                .expect("the directory's fence");
+            crate::config_runtime::write_generation_at(&guard, &sidecar, 1)
+                .await
+                .expect_err("a file cannot be renamed onto a directory");
+            assert!(sidecar.is_dir(), "the directory is still there");
+            assert_eq!(
+                temporary_files(temp.path(), ".config_state.tmp."),
+                Vec::<PathBuf>::new(),
+                "the failed rename removed its temporary file"
+            );
+        }
+
+        /// The temporary file of a write is owner-only from its creation,
+        /// before any byte of the document is in it: the file the writers'
+        /// one helper creates is empty and 0600 by name, also where a looser
+        /// document is being replaced, and 0640 in a directory shared
+        /// through its group. A failed write removes its temporary file, so
+        /// the row reads the file where it is created, not what a store
+        /// leaves behind. RED before the mode rule: the temporary files were
+        /// created with the umask's mode (0644 under 022).
+        #[test]
+        fn a_temporary_file_is_owner_only_before_any_byte_under_any_umask() {
+            under_each_umask(
+                module_path!(),
+                "a_temporary_file_is_owner_only_before_any_byte_under_any_umask",
+                |_umask| async move {
+                    let temp = tempfile::tempdir().expect("tempdir");
+                    let created = |temporary: PathBuf, document: PathBuf| async move {
+                        let file = crate::document_file::create_replacement(&temporary, &document)
+                            .await
+                            .expect("the write's temporary file");
+                        let metadata = file.metadata().await.expect("its metadata");
+                        assert_eq!(metadata.len(), 0, "no byte was written");
+                        mode_bits(&temporary)
+                    };
+
+                    let document = temp.path().join("config.toml");
+                    assert_eq!(
+                        created(temp.path().join(".config.tmp.new"), document.clone()).await,
+                        0o600,
+                        "the temporary file of a new document"
+                    );
+                    existing(&document, "max_tokens = 100\n", 0o644);
+                    assert_eq!(
+                        created(temp.path().join(".config.tmp.rewrite"), document).await,
+                        0o600,
+                        "the temporary file of a rewrite of a readable document"
+                    );
+
+                    let shared = temp.path().join("shared");
+                    create_setgid_directory(&shared);
+                    assert_eq!(
+                        created(shared.join(".config.tmp.new"), shared.join("config.toml")).await,
+                        0o640,
+                        "the temporary file of a shared directory's document"
+                    );
+                },
+            );
+        }
+
+        /// A document path that is a symbolic link behaves as before: the
+        /// read follows the link, and the write replaces the link itself
+        /// with a regular file, leaving the file it pointed to untouched
+        /// (its bytes and its mode). The new file is owner-only.
+        #[test]
+        fn a_write_through_a_symbolic_link_replaces_the_link_under_any_umask() {
+            under_each_umask(
+                module_path!(),
+                "a_write_through_a_symbolic_link_replaces_the_link_under_any_umask",
+                |_umask| async move {
+                    let temp = tempfile::tempdir().expect("tempdir");
+                    let target = temp.path().join("elsewhere.toml");
+                    existing(&target, "max_tokens = 100\n", 0o644);
+                    let directory = temp.path().join("linked");
+                    std::fs::create_dir(&directory).expect("the document's directory");
+                    let document = directory.join("config.toml");
+                    std::os::unix::fs::symlink(&target, &document).expect("the link");
+
+                    let store = store_at(&document);
+                    assert_eq!(
+                        store
+                            .get()
+                            .await
+                            .expect("a read through the link")
+                            .max_tokens,
+                        Some(100)
+                    );
+                    patch_max_tokens(&store, 200).await;
+
+                    let written = std::fs::symlink_metadata(&document).expect("the document");
+                    assert!(
+                        written.file_type().is_file(),
+                        "the write replaced the link with a regular file"
+                    );
+                    assert_eq!(store.get().await.expect("a read").max_tokens, Some(200));
+                    assert_eq!(
+                        std::fs::read_to_string(&target).expect("the link's old target"),
+                        "max_tokens = 100\n",
+                        "the file the link pointed to keeps its bytes"
+                    );
+                    assert_eq!(mode_bits(&target), 0o644, "and its mode");
+                    assert_eq!(mode_bits(&document), 0o600, "the new file is owner-only");
+                },
+            );
+        }
+
+        /// A directory with the setgid bit is shared through its group on
+        /// purpose: a document written there, and its sidecar, are 0640
+        /// under any umask and belong to the directory's group, never
+        /// group-writable and never readable by others. The same directory
+        /// without the bit gets 0600, and a document an operator made 0600
+        /// in the shared directory stays 0600. RED before: every one of
+        /// them took the umask's mode.
+        ///
+        /// The row asserts the mode and the group. It does not read the
+        /// document as a second user of that group: the test user cannot
+        /// become one.
+        #[test]
+        fn a_setgid_directory_shares_a_document_with_its_group_under_any_umask() {
+            under_each_umask(
+                module_path!(),
+                "a_setgid_directory_shares_a_document_with_its_group_under_any_umask",
+                |_umask| async move {
+                    let temp = tempfile::tempdir().expect("tempdir");
+                    let directory = temp.path().join("shared");
+                    let group = create_setgid_directory(&directory);
+
+                    let document = directory.join("config.toml");
+                    let sidecar = directory.join(GENERATION_FILE);
+                    let store = store_at(&document);
+                    patch_max_tokens(&store, 100).await;
+                    for file in [&document, &sidecar] {
+                        assert_eq!(
+                            mode_bits(file),
+                            0o640,
+                            "{} is group-readable",
+                            file.display()
+                        );
+                        assert_eq!(
+                            std::fs::metadata(file).expect("the file").gid(),
+                            group,
+                            "{} belongs to the directory's group",
+                            file.display()
+                        );
+                    }
+
+                    // A document an earlier release left group-writable and
+                    // readable by others is narrowed to 0640.
+                    set_mode(&document, 0o664);
+                    patch_max_tokens(&store, 200).await;
+                    assert_eq!(
+                        mode_bits(&document),
+                        0o640,
+                        "never group-writable or public"
+                    );
+
+                    // An operator's 0600 in the shared directory stays 0600.
+                    set_mode(&document, 0o600);
+                    patch_max_tokens(&store, 300).await;
+                    assert_eq!(mode_bits(&document), 0o600, "an operator's 0600 is kept");
+
+                    // The same directory without the bit: owner-only.
+                    set_mode(&directory, 0o770);
+                    std::fs::remove_file(&document).expect("remove the document");
+                    std::fs::remove_file(&sidecar).expect("remove the sidecar");
+                    patch_max_tokens(&store, 400).await;
+                    assert_eq!(mode_bits(&document), 0o600, "no setgid bit, no group read");
+                    assert_eq!(mode_bits(&sidecar), 0o600, "nor for the sidecar");
+                },
+            );
+        }
     }
 }

@@ -1410,10 +1410,11 @@ them.
   download receives: the CLI, and the `rkat-rpc` the Python and TypeScript
   SDKs download and start. The skill inventory is in its prompt again, so
   prompt content and input token counts change against 0.8.23 through
-  0.9.14 on that platform: the first request of a plain `rkat run` grows by
-  about 2.3 kB with the default configuration. `rkat run --skill <built-in
-  id>` loads the skill. Mob members and delegated members get their
-  `mob-communication` instructions and their `task-workflow` or
+  0.9.14 on that platform: with the default configuration the first request
+  of a plain `rkat run` names all 6 built-in skills `rkat` lists by default
+  (none of them on 0.9.14) and is about 2.3 kB larger. `rkat run --skill
+  <built-in id>` loads the skill. Mob members and delegated members get
+  their `mob-communication` instructions and their `task-workflow` or
   `workgraph-workflow` instructions. SDK calls that check a capability first
   (`invoke_skill`, `has_capability`, `require_capability`) start working.
   Project and user skills that declare `requires_capabilities`, which those
@@ -1421,10 +1422,11 @@ them.
   configuration and an empty project a binary lists this many built-in
   skills: `rkat` 6, `rkat-rpc` 11, `rkat-rest` 7, `rkat-mcp` 11; the other
   built-in skills require capabilities that surface leaves off by default.
-  A project that kept its own copy of a built-in skill under the built-in's
-  id can remove it: `rkat skill list` shows the copy and the built-in side
-  by side, both active, and `rkat run --skill <id>` loads the built-in, not
-  the copy, without a message.
+  A project's own copy of a built-in skill, kept under the built-in's id, is
+  harmless after the upgrade and not what `--skill <id>` loads:
+  `rkat skill list` shows the copy and the built-in side by side, both
+  active, and `rkat run --skill <id>` loads the built-in, not the copy,
+  without a message. The copy can be removed.
 
 ### Known limitations
 

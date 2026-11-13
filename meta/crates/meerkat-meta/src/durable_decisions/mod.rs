@@ -52,6 +52,7 @@ pub use ingress::{
 pub(crate) use owner::DecisionEventBinding;
 pub use owner::RuntimeDecisions;
 pub use stdio::{DecisionNoticeSink, StdioDecisionConnection};
+pub(crate) use wire::decision_error;
 pub use wire::{
     DECISION_NOTICE_METHOD, DECISIONS_METHOD_PREFIX, DecisionAttestationRequest,
     MetaDecisionDecideParams, MetaDecisionListResult, MetaDecisionNotice, MetaDecisionNoticeEvent,

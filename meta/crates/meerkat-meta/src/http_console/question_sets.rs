@@ -9,11 +9,16 @@
 //!
 //! The decide keeps, in order, every check of an approval's decide. The
 //! arm refuses a request that names an approver before it branches. Then:
-//! the asking member must be one the caller may view (`access_denied`,
-//! "access denied to approval origin"); the caller must be a verified
+//! the asking member must be one the read would list the set for, by that
+//! same rule (`access_denied`, "access denied to approval origin"); the
+//! caller must be a verified
 //! person ([`ConsoleApprovalDecider`], `approver_unauthenticated`); the
 //! decision is `approve` with answers, or `reject`/`deny`
-//! ([`console_gating_decision`]). The person's decision is then handed to
+//! ([`console_gating_decision`]). A request the set would not take is
+//! refused before anything is recorded for it: the decision's own refusals
+//! (`not_open`, `subject_changed`) typed, in the form the decision methods
+//! give them, and answers that are not valid for the set as invalid
+//! params. The person's decision is then handed to
 //! the decision owner ([`crate::ask_user::answer_question_set`]) as one
 //! attested human decision: person authenticated, in the login it was made
 //! in, on the ingress `console`. The checks an approval's decide makes
@@ -37,7 +42,7 @@ use crate::access::AccessDecisionFence;
 use crate::ask_user::{
     CONSOLE_CHANNEL, HeldQuestionSet, QuestionSetChoice, QuestionSetDecide, QuestionSetEvent,
     QuestionSetRefusal, answer_question_set, held_question_set, open_question_sets,
-    question_set_request, question_sets_result,
+    question_set_request, question_sets_result, refused_answer,
 };
 use crate::durable_decisions::{DecisionEventBinding, RuntimeDecisions};
 
@@ -126,7 +131,9 @@ pub(super) async fn decide(
     governance: &ConsoleSendGovernance,
     authenticated_principal: Option<&str>,
 ) -> Value {
-    if access_view.is_some_and(|view| !view.can_view_agent(set.asker())) {
+    // The asking member is checked by the read's own rule: a caller the
+    // read does not list the set to cannot decide it by its id.
+    if !gating_origin_visible(access_view, set.asker()) {
         return access_denied_rpc_error(response_id, "access denied to approval origin");
     }
     let Some(decider) =
@@ -151,8 +158,8 @@ pub(super) async fn decide(
     };
     // A request the set would not take is refused before anything is
     // recorded for it.
-    if let Some(message) = set.refuses(&verdict, &presented_digest) {
-        return invalid_params(response_id, message);
+    if let Some(refusal) = set.refuses(&verdict, &presented_digest) {
+        return refusal_answer(response_id, &set, refusal, None);
     }
     // The person, authenticated in the login the request was made in.
     let approver = decider
@@ -235,15 +242,39 @@ pub(super) async fn decide(
     drop(fence);
     match decided {
         Ok(decided) => response_value(response_id, Some(decided.wire()), None),
-        Err(QuestionSetRefusal::NotEligible) => match refused {
-            Some(refusal) => refusal.into_rpc_error(response_id),
-            None => invalid_params(response_id, crate::ask_user::NO_LONGER_OPEN),
-        },
-        Err(QuestionSetRefusal::Invalid(message)) => invalid_params(response_id, message),
-        Err(QuestionSetRefusal::NotAQuestionSet) => {
-            invalid_params(response_id, crate::ask_user::NO_LONGER_OPEN)
+        Err(refusal) => refusal_answer(response_id, &set, refusal, refused),
+    }
+}
+
+/// The answer to a decide of `set` that was not taken. The decision's own
+/// refusals are typed, in the form the decision methods give them; a person
+/// who was not eligible when the decision committed gets the refusal of the
+/// check that failed (`fenced`), as an approval's decide answers it.
+fn refusal_answer(
+    response_id: Value,
+    set: &HeldQuestionSet,
+    refusal: QuestionSetRefusal,
+    fenced: Option<ConsoleDecideRefusal>,
+) -> Value {
+    match (refusal, fenced) {
+        (QuestionSetRefusal::NotEligible, Some(fenced)) => fenced.into_rpc_error(response_id),
+        (QuestionSetRefusal::NotEligible, None) => refused_answer(
+            &response_id,
+            set.decision_id(),
+            meerkat_runtime::decision::DecisionRefusal::NotEligible,
+        ),
+        (QuestionSetRefusal::Refused(refusal), _) => {
+            refused_answer(&response_id, set.decision_id(), refusal)
         }
-        Err(QuestionSetRefusal::Failed(error)) => internal_error(
+        // The read found the set a moment ago: it is no longer one this
+        // route decides.
+        (QuestionSetRefusal::NotAQuestionSet, _) => refused_answer(
+            &response_id,
+            set.decision_id(),
+            meerkat_runtime::decision::DecisionRefusal::NotOpen,
+        ),
+        (QuestionSetRefusal::Invalid(message), _) => invalid_params(response_id, message),
+        (QuestionSetRefusal::Failed(error), _) => internal_error(
             response_id,
             format!("the question set could not be decided: {error}"),
         ),

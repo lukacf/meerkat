@@ -128,6 +128,12 @@ impl<'a> Viewer<'a> {
     }
 
     fn sight(&self, row: &StoredDecision) -> Sight {
+        // A question set is its asking member's: whatever the caller holds
+        // or administers, the set of a member hidden from them reads as a
+        // decision that is not there.
+        if !self.sees_asker(row) {
+            return Sight::Nothing;
+        }
         if self.administers || self.held.contains(row.descriptor.approver_id.as_str()) {
             return Sight::Whole;
         }
@@ -140,6 +146,23 @@ impl<'a> Viewer<'a> {
                 }
             }
             _ => Sight::Nothing,
+        }
+    }
+
+    /// Whether the caller may see the member that asked `row`, when `row`
+    /// is a question set (`crate::ask_user`): the rule the gating reads
+    /// apply to an entry's origin, so a member private to someone else, or
+    /// one the Console does not know while it keeps its people apart, is
+    /// hidden. A decision of any other kind has no asker to hide. A
+    /// question set whose asker cannot be read is shown only where the
+    /// Console keeps nobody apart.
+    fn sees_asker(&self, row: &StoredDecision) -> bool {
+        match crate::ask_user::question_set_asker(row) {
+            crate::ask_user::QuestionSetAsker::NotAQuestionSet => true,
+            crate::ask_user::QuestionSetAsker::Asker(asker) => {
+                crate::http_console::gating_origin_visible(self.caller.access_view, &asker)
+            }
+            crate::ask_user::QuestionSetAsker::Unreadable => self.caller.access_view.is_none(),
         }
     }
 
@@ -304,7 +327,8 @@ fn list(
     let viewer = Viewer::of(caller);
     if viewer.administers {
         // The administrator reads the store's own page and cursor, and is
-        // told of the rows the server cannot read.
+        // told of the rows the server cannot read. A question set of a
+        // member hidden from them is left out, as every read leaves it out.
         let (_, listing) = match read_page(id, &params, decisions) {
             Ok(page) => page,
             Err(answer) => return answer,
@@ -315,6 +339,7 @@ fn list(
                 decisions: listing
                     .decisions
                     .iter()
+                    .filter(|row| viewer.sight(row) != Sight::Nothing)
                     .map(|row| wire_decision(row, false))
                     .collect(),
                 statuses: Vec::new(),

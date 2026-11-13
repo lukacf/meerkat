@@ -77,12 +77,6 @@ pub(crate) const CONSOLE_CHANNEL: &str = "console";
 /// The ingress and channel of an answer the stdio host carries.
 pub(crate) const HOST_CHANNEL: &str = "host";
 
-/// What a decide of a set that ended is told.
-pub(crate) const NO_LONGER_OPEN: &str = "the question set is no longer open";
-
-/// What a decide on another digest than the set's is told.
-const CHANGED_SINCE_SHOWN: &str = "the question set changed since it was shown";
-
 /// The key the notice of the decision `decision_id` is sent under: a notice
 /// asked for twice is delivered once.
 pub fn ask_user_notice_key(decision_id: &str) -> String {
@@ -655,25 +649,28 @@ impl HeldQuestionSet {
     }
 
     /// Why the set, as this read found it, would not take `verdict` on the
-    /// digest `presented`: it is no longer open, it changed since it was
-    /// shown, or the answers are not valid for it. A route asks before it
-    /// records anything for a request; the hand-off decides again.
+    /// digest `presented`: the refusal the decision itself gives a decide
+    /// of a set that is no longer open (`not_open`: a read that finds a set
+    /// past its deadline records its expiry) or on another digest than the
+    /// set's (`subject_changed`), or answers that are not valid for the
+    /// set. A route asks before it records anything for a request; the
+    /// hand-off decides again.
     pub(crate) fn refuses(
         &self,
         verdict: &QuestionSetVerdict,
         presented: &Sha256Digest,
-    ) -> Option<String> {
+    ) -> Option<QuestionSetRefusal> {
         if self.row.state.phase != DecisionPhase::Open {
-            return Some(NO_LONGER_OPEN.to_owned());
+            return Some(QuestionSetRefusal::Refused(DecisionRefusal::NotOpen));
         }
         if *presented != self.row.descriptor.subject_digest {
-            return Some(CHANGED_SINCE_SHOWN.to_owned());
+            return Some(QuestionSetRefusal::Refused(DecisionRefusal::SubjectChanged));
         }
         match verdict {
             QuestionSetVerdict::Answer(answers) => {
                 AskUserAnswers::for_set(&self.body.questions, answers.clone())
                     .err()
-                    .map(|error| error.to_string())
+                    .map(|error| QuestionSetRefusal::Invalid(error.to_string()))
             }
             QuestionSetVerdict::Dismiss => None,
         }
@@ -901,14 +898,61 @@ pub(crate) enum QuestionSetRefusal {
     /// The id names no question set: a route answers it as it answers an
     /// unknown pending id, and the decision it names, if any, is untouched.
     NotAQuestionSet,
-    /// The request is at fault, or the set no longer takes a decision: an
-    /// invalid params answer with this sentence.
+    /// The request is at fault: an invalid params answer with this
+    /// sentence.
     Invalid(String),
+    /// The decision itself refused the answer (it is no longer open, the
+    /// digest is not the set's, ...): a route answers it typed, in the form
+    /// the decision methods give a refusal ([`refused_answer`]).
+    Refused(DecisionRefusal),
     /// The decider was not eligible when the decision committed: the route
     /// that built the eligibility says why.
     NotEligible,
     /// The decision owner failed: nothing is known to be decided.
     Failed(String),
+}
+
+/// The JSON-RPC answer `id` gets when the decision `decision_id` refused a
+/// decide with `refusal`: the typed form of the decision methods
+/// (`data.kind = "decision_refused"` with the refusal), never a sentence of
+/// this module's own.
+pub(crate) fn refused_answer(
+    id: &Value,
+    decision_id: &DecisionId,
+    refusal: DecisionRefusal,
+) -> Value {
+    crate::durable_decisions::decision_error(
+        id,
+        DecisionError::Refused {
+            decision_id: decision_id.clone(),
+            refusal,
+        },
+    )
+}
+
+/// Whose question set a decision is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum QuestionSetAsker {
+    /// The decision is of another kind.
+    NotAQuestionSet,
+    /// The asking member's identity.
+    Asker(String),
+    /// A question set whose body this version cannot read: its asker is
+    /// not known.
+    Unreadable,
+}
+
+/// Whose question set `row` is: what a read of decisions asks before it
+/// shows one, since a question set is seen only by who may see its asking
+/// member.
+pub(crate) fn question_set_asker(row: &StoredDecision) -> QuestionSetAsker {
+    match row.descriptor.kind.as_str() {
+        ASK_USER_QUESTIONS_KIND => match AskUserBody::of(row) {
+            Ok(body) => QuestionSetAsker::Asker(body.asker),
+            Err(_) => QuestionSetAsker::Unreadable,
+        },
+        _ => QuestionSetAsker::NotAQuestionSet,
+    }
 }
 
 /// Hand one person's decision of a question set to the decision owner.
@@ -998,13 +1042,7 @@ pub(crate) fn answer_question_set(
         }
         Err(DecisionError::Refused { refusal, .. }) => Err(match refusal {
             DecisionRefusal::NotEligible => QuestionSetRefusal::NotEligible,
-            DecisionRefusal::SubjectChanged => {
-                QuestionSetRefusal::Invalid(CHANGED_SINCE_SHOWN.to_owned())
-            }
-            DecisionRefusal::NotOpen | DecisionRefusal::Expired => {
-                QuestionSetRefusal::Invalid(NO_LONGER_OPEN.to_owned())
-            }
-            _ => QuestionSetRefusal::Invalid("the question set did not take the answer".to_owned()),
+            refusal => QuestionSetRefusal::Refused(refusal),
         }),
         Err(error) => Err(QuestionSetRefusal::Failed(error.to_string())),
     }

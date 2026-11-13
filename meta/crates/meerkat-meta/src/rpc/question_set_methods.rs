@@ -12,8 +12,8 @@ use meerkat_core::approval::ApprovalAssurance;
 use meerkat_core::approval::consent::{
     AuthenticatedApprover, ConsentEligibility, ConsentIneligible,
 };
-use meerkat_core::approval::decision::DecisionReference;
-use meerkat_runtime::decision::{DecisionClock, SystemDecisionClock};
+use meerkat_core::approval::decision::{DecisionId, DecisionReference};
+use meerkat_runtime::decision::{DecisionClock, DecisionRefusal, SystemDecisionClock};
 
 use super::*;
 use crate::ask_user::{
@@ -113,7 +113,7 @@ pub(crate) fn gating_decide_question_set(
     response_id: Value,
 ) -> JsonRpcResponse {
     let Some((decisions, set)) = named_question_set(runtime, params) else {
-        return invalid(response_id, crate::ask_user::NO_LONGER_OPEN);
+        return invalid(response_id, "pending_id names no question set");
     };
     // The request is read as every gating decide is: `approver_id` is
     // required, and the same refusals answer what it lacks.
@@ -187,8 +187,16 @@ pub(crate) fn gating_decide_question_set(
     match answer_question_set(&decisions, decide, &HostEligible) {
         Ok(decided) => answered(response_id, decided.wire()),
         Err(QuestionSetRefusal::Invalid(message)) => invalid(response_id, message),
-        Err(QuestionSetRefusal::NotAQuestionSet | QuestionSetRefusal::NotEligible) => {
-            invalid(response_id, crate::ask_user::NO_LONGER_OPEN)
+        Err(QuestionSetRefusal::Refused(refusal)) => {
+            refused_by_decision(response_id, set.decision_id(), refusal)
+        }
+        Err(QuestionSetRefusal::NotEligible) => {
+            refused_by_decision(response_id, set.decision_id(), DecisionRefusal::NotEligible)
+        }
+        // The read found the set a moment ago: it is no longer one this
+        // route decides.
+        Err(QuestionSetRefusal::NotAQuestionSet) => {
+            refused_by_decision(response_id, set.decision_id(), DecisionRefusal::NotOpen)
         }
         Err(QuestionSetRefusal::Failed(error)) => refused(
             response_id,
@@ -196,4 +204,21 @@ pub(crate) fn gating_decide_question_set(
             format!("the question set could not be decided: {error}"),
         ),
     }
+}
+
+/// The decision's own refusal of a decide, in the typed form the decision
+/// methods give it (`data.kind = "decision_refused"` with the refusal).
+fn refused_by_decision(
+    response_id: Value,
+    decision_id: &DecisionId,
+    refusal: DecisionRefusal,
+) -> JsonRpcResponse {
+    let answer = crate::ask_user::refused_answer(&response_id, decision_id, refusal);
+    serde_json::from_value(answer).unwrap_or_else(|error| {
+        refused(
+            response_id,
+            -32603,
+            format!("the decision's refusal could not be encoded: {error}"),
+        )
+    })
 }

@@ -929,7 +929,7 @@ fn gating_audit_entry_origin(entry: &crate::runtime::GatingAuditEntry) -> Option
 /// console keeps apart from other people, only when the console knows the
 /// agent ([`AccessView::withholds_unknown_member`]): an origin it does not
 /// know may have been private to a person.
-fn gating_origin_visible(access_view: Option<&AccessView>, identity: &str) -> bool {
+pub(crate) fn gating_origin_visible(access_view: Option<&AccessView>, identity: &str) -> bool {
     access_view.is_none_or(|view| {
         view.can_view_agent(identity) && !view.withholds_unknown_member(identity)
     })

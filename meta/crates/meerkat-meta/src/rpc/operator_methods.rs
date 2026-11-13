@@ -547,13 +547,21 @@ struct InstructionStatusParams {
 }
 
 /// A record's target as Meta's host verbs name it: a member target names the
-/// member's Meta identity.
+/// member's Meta identity, and carries Meerkat's fork scope when the record
+/// was written for the member and the forks of its fork family (left out
+/// when false, so a record for the member alone reads as it always did).
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum InstructionTargetView {
     Mob,
-    Profile { profile: String },
-    Member { identity: String },
+    Profile {
+        profile: String,
+    },
+    Member {
+        identity: String,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        include_forks: bool,
+    },
 }
 
 impl From<meerkat_contracts::WireInstructionTarget> for InstructionTargetView {
@@ -563,10 +571,17 @@ impl From<meerkat_contracts::WireInstructionTarget> for InstructionTargetView {
             meerkat_contracts::WireInstructionTarget::Profile { profile } => {
                 Self::Profile { profile }
             }
-            meerkat_contracts::WireInstructionTarget::Member { agent_identity } => Self::Member {
+            // Meta's status view names a member target by its Meta identity
+            // and shows the record's fork scope as Meerkat holds it. Meta's
+            // own write verb cannot set the scope.
+            meerkat_contracts::WireInstructionTarget::Member {
+                agent_identity,
+                include_forks,
+            } => Self::Member {
                 identity: crate::member_comms_id::durable_identity_for_roster_member(
                     &agent_identity,
                 ),
+                include_forks,
             },
         }
     }
@@ -736,6 +751,29 @@ fn operator_instruction_error_response(
     }
 }
 
+/// The refusal of a host write or revoke in a namespace the platform keeps
+/// for itself (`meerkat.identity.`, where an agent's own instructions are
+/// recorded): `-32602` with Meerkat's closed code `invalid_request`, and
+/// nothing is written. `None` for every other namespace.
+fn reserved_instruction_namespace_refusal(
+    response_id: &Value,
+    namespace: &meerkat_core::InstructionNamespace,
+) -> Option<JsonRpcResponse> {
+    if !crate::identity_first::runtime::is_reserved_instruction_namespace(namespace.as_str()) {
+        return None;
+    }
+    Some(operator_instruction_error_response(
+        response_id.clone(),
+        &meerkat_mob::OperatorInstructionError::Refused(
+            meerkat_core::InstructionWriteError::InvalidRequest(format!(
+                "the instruction namespace {namespace} is reserved: namespaces that start with \
+                 {} hold each agent's own instructions, which change with the agent's spec",
+                crate::identity_first::runtime::RESERVED_INSTRUCTION_NAMESPACE_PREFIX
+            )),
+        ),
+    ))
+}
+
 /// The answer of a committed or repeated write: Meerkat's receipt, which
 /// names no member.
 fn operator_instruction_receipt_response(
@@ -773,6 +811,9 @@ pub(super) async fn handle_set_instruction(
         Ok(params) => params,
         Err(response) => return *response,
     };
+    if let Some(refusal) = reserved_instruction_namespace_refusal(&response_id, &params.namespace) {
+        return refusal;
+    }
     let target = match params.target {
         InstructionTargetParams::Mob {} => meerkat_mob::OperatorInstructionTarget::Mob,
         InstructionTargetParams::Profile { profile } => {
@@ -792,10 +833,13 @@ pub(super) async fn handle_set_instruction(
                 Ok(resolved) => resolved,
                 Err(response) => return *response,
             };
+            // The host verb names one agent's own instructions: the record
+            // is that member's alone.
             meerkat_mob::OperatorInstructionTarget::Member {
                 agent_identity: crate::member_comms_id::roster_member_id_for_identity(
                     resolved.identity.as_str(),
                 ),
+                include_forks: false,
             }
         }
     };
@@ -855,6 +899,9 @@ pub(super) async fn handle_revoke_instruction(
         Ok(params) => params,
         Err(response) => return *response,
     };
+    if let Some(refusal) = reserved_instruction_namespace_refusal(&response_id, &params.namespace) {
+        return refusal;
+    }
     let slot = meerkat_core::InstructionSlot {
         namespace: params.namespace,
         key: params.key,
@@ -2636,6 +2683,28 @@ mod tests {
         mob_id: &str,
         fork_instruction_policy: meerkat_core::ForkInstructionPolicy,
     ) -> OperatorVerbHarness {
+        operator_verb_harness_built(member, mob_id, fork_instruction_policy, false).await
+    }
+
+    /// [`operator_verb_harness`] for an identity whose record is its row in
+    /// the mob's identity store: Core creates it, and the identity runtime
+    /// registers it from that row.
+    async fn operator_verb_harness_of_a_row(member: &str, mob_id: &str) -> OperatorVerbHarness {
+        operator_verb_harness_built(
+            member,
+            mob_id,
+            meerkat_core::ForkInstructionPolicy::default(),
+            true,
+        )
+        .await
+    }
+
+    async fn operator_verb_harness_built(
+        member: &str,
+        mob_id: &str,
+        fork_instruction_policy: meerkat_core::ForkInstructionPolicy,
+        record_is_its_row: bool,
+    ) -> OperatorVerbHarness {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let state = temp_dir.path().join("state");
         std::fs::create_dir_all(&state).expect("state dir");
@@ -2729,6 +2798,12 @@ comms = true
         )
         .await
         .expect("bootstrap unified runtime");
+        // The host completes the runtime's bootstrap: an agent created at
+        // run time is built only after that.
+        runtime
+            .activate_without_identity_context()
+            .await
+            .expect("complete the runtime's bootstrap");
         let handle = runtime.mob_handle();
 
         // Identity-first member: the roster id is the mk--encoded generated
@@ -2749,24 +2824,54 @@ comms = true
             "agent_identity".to_string(),
             durable_identity.as_str().to_string(),
         );
-        handle
-            .ensure_member(
-                meerkat_mob::SpawnMemberSpec::new(
-                    meerkat_mob::ProfileName::from("worker"),
-                    roster_identity.clone(),
+        if record_is_its_row {
+            let created = handle
+                .create_store_owned_identities(
+                    meerkat_mob::StoreOwnedIdentityCreate::new(
+                        meerkat_mob::IdentityOperation::new(
+                            "create-the-row",
+                            meerkat_core::approval::decision::Sha256Digest::of(b"create-the-row")
+                                .as_str(),
+                        ),
+                        meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                        vec![meerkat_mob::CreatedIdentityRequest::new(
+                            meerkat_mob::CreatedIdentitySpec::new(roster_id.as_str(), "worker"),
+                        )],
+                    ),
+                    meerkat_mob::IdentityChangeConsentInput::Policy(
+                        meerkat_mob::IdentityPolicyOutcome::Allow,
+                    ),
                 )
-                .with_labels(member_labels),
-            )
-            .await
-            .expect("spawn identity-first member");
-        handle
-            .wait_for_members_kickoff_complete(
-                std::slice::from_ref(&roster_identity),
-                // A settle bound only: the assertions below check state, not elapsed time.
-                Some(Duration::from_secs(30)),
-            )
-            .await
-            .expect("member kickoff settled");
+                .await
+                .expect("Core creates the identity");
+            assert!(
+                matches!(
+                    created.change,
+                    meerkat_mob::IdentityChangeOutcome::Committed { .. }
+                ),
+                "{:?}",
+                created.change
+            );
+        } else {
+            handle
+                .ensure_member(
+                    meerkat_mob::SpawnMemberSpec::new(
+                        meerkat_mob::ProfileName::from("worker"),
+                        roster_identity.clone(),
+                    )
+                    .with_labels(member_labels),
+                )
+                .await
+                .expect("spawn identity-first member");
+            handle
+                .wait_for_members_kickoff_complete(
+                    std::slice::from_ref(&roster_identity),
+                    // A settle bound only: the assertions below check state, not elapsed time.
+                    Some(Duration::from_secs(30)),
+                )
+                .await
+                .expect("member kickoff settled");
+        }
         // Durable identity authority over that member, bridged by the
         // production MobSessionBridge (the gateway wiring). Core's journal
         // binds the member spawned above; the identity runtime reads its
@@ -2788,10 +2893,20 @@ comms = true
             bridge: Some(Arc::new(bridge)),
             default_timeout: None,
         }));
-        identity_runtime
-            .register(worker_spec(&identity))
-            .await
-            .expect("the identity registers");
+        if record_is_its_row {
+            assert!(
+                identity_runtime
+                    .register_from_row(&identity)
+                    .await
+                    .expect("the identity's row reads"),
+                "the identity registers from its row"
+            );
+        } else {
+            identity_runtime
+                .register(worker_spec(&identity))
+                .await
+                .expect("the identity registers");
+        }
 
         // Install the identity authority on the unified runtime so its
         // identity health monitor drives the completion cursor from member
@@ -2953,6 +3068,90 @@ comms = true
             "an unowned identity must surface the typed unknown-identity refusal: {response:#?}"
         );
 
+        harness.teardown().await;
+    }
+
+    /// `meta/compact_member` with a compaction floor serves an identity whose
+    /// record is its row in the mob's identity store as it serves a
+    /// configured one, over the production bridge and its own floor
+    /// registry: the rebuild seats Core's same-session successor with the
+    /// floor, the forced compaction lands on the member's own session, the
+    /// floor is removed again, and the agent takes its next delivery with
+    /// no restart and without compacting again.
+    ///
+    /// RED before the rebuild named the floor to Core's same-session
+    /// successor: the verb answered `identity_store_owned`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_member_with_a_floor_serves_an_identity_whose_record_is_its_row() {
+        let harness = operator_verb_harness_of_a_row("keeper", "operator-compact-row").await;
+        let fat = "seeded transcript ballast ".repeat(160);
+        for turn in 0..8 {
+            harness.run_turn(format!("turn {turn}: {fat}")).await;
+        }
+        let messages_before = harness.settled_transcript_count().await;
+        assert!(
+            messages_before >= 16,
+            "seed must materialize a fat transcript, got {messages_before}"
+        );
+        let session_before = harness
+            .identity_runtime
+            .status(&harness.identity)
+            .await
+            .expect("the identity's status")
+            .session_id;
+
+        let response = rpc(
+            &harness,
+            "meta/compact_member",
+            serde_json::json!({
+                "identity": harness.member_alias,
+                "floor_tokens": 256,
+                "timeout_ms": 30_000,
+            }),
+        )
+        .await;
+        assert!(
+            response["error"].is_null(),
+            "compact_member must succeed: {response:#?}"
+        );
+        let result = &response["result"];
+        assert_eq!(
+            result["compaction_applied"],
+            Value::Bool(true),
+            "{result:#?}"
+        );
+        assert!(
+            result["messages_after"].as_u64() < result["messages_before"].as_u64(),
+            "compaction must shrink the transcript: {result:#?}"
+        );
+        assert!(
+            harness.floors.get(&harness.identity).is_none(),
+            "the floor registry must be disarmed after the verb"
+        );
+        assert_eq!(
+            harness
+                .identity_runtime
+                .status(&harness.identity)
+                .await
+                .expect("the identity's status")
+                .session_id,
+            session_before,
+            "the rebuilds keep the member's session"
+        );
+
+        // The next delivery is taken with no restart, by a build without
+        // the floor: it appends instead of compacting again.
+        let count_after_verb = harness.settled_transcript_count().await;
+        harness.run_turn("post-verb probe turn".to_string()).await;
+        crate::test_wait::poll_until(
+            &format!(
+                "the restored build appended to the durable transcript instead of re-compacting \
+                 (still {count_after_verb} messages)"
+            ),
+            crate::test_wait::STRUCTURAL_BACKSTOP,
+            async || harness.transcript_facts().await.0 > count_after_verb,
+        )
+        .await;
         harness.teardown().await;
     }
 

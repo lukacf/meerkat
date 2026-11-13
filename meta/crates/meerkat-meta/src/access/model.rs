@@ -58,6 +58,20 @@ pub const ACTION_AGENT_RESET: &str = "agent.reset";
 /// (`meta/tool_grants/grant` and `meta/tool_grants/revoke`). Reading them
 /// (`list`, `audit`) rides `agent.view`.
 pub const ACTION_AGENT_TOOL_GRANTS_MANAGE: &str = "agent.tool_grants.manage";
+/// Create long-term agents (`meta/identity/create`). It names no agent: a
+/// rule grants it for the console as a whole. Which profiles a caller may
+/// create agents of, and under which outcome, is the host's identity
+/// policy; this action only opens the method to the caller.
+pub const ACTION_AGENT_IDENTITY_CREATE: &str = "agent.identity.create";
+/// Change a long-term agent: update, archive and unarchive it, and release
+/// it from configuration (`meta/identity/update`, `archive`, `unarchive`,
+/// `adopt`), on the agent the request names. Reading agents (`list`, `get`,
+/// `directory`, `operation`) rides `agent.view`.
+pub const ACTION_AGENT_IDENTITY_MANAGE: &str = "agent.identity.manage";
+/// Remove a long-term agent for good (`meta/identity/remove`), on the agent
+/// the request names. Kept apart from `agent.identity.manage` because a
+/// removal is permanent: the name is never available again.
+pub const ACTION_AGENT_IDENTITY_REMOVE: &str = "agent.identity.remove";
 /// Read gating queues and audit history.
 pub const ACTION_GATING_VIEW: &str = "gating.view";
 /// Decide pending gating approvals.
@@ -170,6 +184,9 @@ pub const ACCESS_ACTIONS: &[&str] = &[
     ACTION_AGENT_RETIRE,
     ACTION_AGENT_RESET,
     ACTION_AGENT_TOOL_GRANTS_MANAGE,
+    ACTION_AGENT_IDENTITY_CREATE,
+    ACTION_AGENT_IDENTITY_MANAGE,
+    ACTION_AGENT_IDENTITY_REMOVE,
     ACTION_GATING_VIEW,
     ACTION_GATING_DECIDE,
     ACTION_DECISIONS_VIEW,

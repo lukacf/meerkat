@@ -50,6 +50,90 @@ them.
   `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
   read the binding file. See Security and the Upgrade notes.
 
+- Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
+  `meerkat-machine-kernels`: the schedule lifecycle machine gains a state
+  field and two inputs, and its public types follow.
+  `meerkat_schedule::ScheduleLifecycleInput` gains the variants
+  `PauseForTarget` and `ResumeForTarget`. In `meerkat-machine-schema`
+  (`catalog::dsl::schedule_lifecycle`), `ScheduleLifecycleInput` and
+  `ScheduleLifecycleInputVariant` gain `PauseForTarget` and
+  `ResumeForTarget`, and `ScheduleLifecycleMachineState` gains the public
+  field `paused_for_target: bool`. In `meerkat-machine-kernels`
+  (`generated::schedule_lifecycle`), `Input` and `InputKind` gain
+  `PauseForTarget` and `ResumeForTarget`, `TransitionId` gains
+  `PauseForTargetActive`, `PauseForTargetPaused`, `PauseForTargetDeleted`,
+  `ResumeForTargetPausedForTarget`, `ResumeForTargetPausedByName`,
+  `ResumeForTargetActive` and `ResumeForTargetDeleted`, and `State` gains
+  the public field `paused_for_target: bool`. Every new variant is appended
+  last, so no existing variant's implicit discriminant moves. A transition
+  id is Rust source only: no store, journal, digest or snapshot carries
+  one, so the variants appended here and in the entries below make no
+  stored state unreadable in either direction. Exhaustive
+  matches must add the new variants, code that builds
+  `ScheduleLifecycleMachineState` or the kernel `State` literally must set
+  the field, and a serialized kernel `State` without the field no longer
+  deserializes. Stored schedules load unchanged: the persisted form is the
+  schedule's own wire type (`ScheduleMachineStateWire` in
+  `crates/meerkat-schedule/src/types.rs`), where `paused_for_target` is read
+  as false when absent and left out when false, so a schedule that 0.9.14
+  stored reads as before and a schedule that is not paused for its target is
+  stored as 0.9.14 stores it. No Meerkat store holds the generated kernel
+  `State`: only an embedder that serializes it itself is affected. For a
+  rollback with schedules paused for their target, see the Upgrade notes.
+
+- Rust API of `meerkat-mob`: `DiagnosticCode` gains the variant
+  `ProfileHeldByIdentity` (wire `profile_held_by_identity`), appended last,
+  so no existing variant's implicit discriminant moves. `DiagnosticCode` is
+  a closed enum: an exhaustive match on it must add an arm. See Changed.
+
+- `meerkat-machine-kernels`: the kernel `generated::mob::TransitionId` gains
+  `SetOperatorInstructionAdvanceSlotLimitExceededRunning` and
+  `SetOperatorInstructionAdvanceSlotLimitExceededStopped`, the refusal of a
+  higher revision that would move an operator instruction record into a full
+  member snapshot (see Changed). They are appended last, after
+  `ResolveSubmitWorkRejectionIdentityMemberUnreadableName`, so no existing
+  variant's implicit discriminant moves; an exhaustive match on the enum
+  needs the two arms.
+
+- `meerkat-mob`, `meerkat-contracts`: the member variant of an operator
+  instruction target gains the field `include_forks: bool`, for a record
+  written for a member and its forks (see Added):
+  `OperatorInstructionTarget::Member { agent_identity, include_forks }` and
+  `WireInstructionTarget::Member { agent_identity, include_forks }`. Code that
+  builds either variant names the field (`include_forks: false` keeps the
+  meaning it had), and a pattern that lists the variant's fields needs it or
+  `..`. Nothing changes on the wire or in a stored row for a record without
+  it: the field is left out when false and reads false when absent.
+
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-mob`:
+  MobMachine holds a fork's lineage for operator instructions (see Added).
+  In `meerkat-machine-schema`, `MobMachineState` gains the field
+  `member_instruction_lineage`, `MobMachineInput` and
+  `MobMachineInputVariant` gain `RecordMemberInstructionLineage`, and
+  `InstructionTargetKind` gains `MemberAndForks`. In `meerkat-mob` the
+  generated `MobMachineCatalogInput` gains `RecordMemberInstructionLineage`
+  (and its `ALL` entry). In
+  `meerkat-machine-kernels` the kernel's `generated::mob::State` gains the
+  field `member_instruction_lineage`, `generated::mob::Input` and
+  `generated::mob::InputKind` gain `RecordMemberInstructionLineage`,
+  `generated::mob::InstructionTargetKind` gains `MemberAndForks`, and
+  `generated::mob::TransitionId` gains
+  `RecordMemberInstructionLineageRunning` and
+  `RecordMemberInstructionLineageStopped`. Each is appended last (the
+  `TransitionId` pair after
+  `SetOperatorInstructionAdvanceSlotLimitExceededStopped`), so no existing
+  variant's implicit discriminant moves; an exhaustive match on one of the
+  enums needs the new arms, and code that builds either state names the
+  field.
+
+- `meerkat-mob`: `MemberToolAudience::hides` takes two more arguments,
+  `caller_labels` and `target_labels`: the labels the calling member and
+  the target carry on their own roster rows at the call, `None` for one
+  the roster holds no row for. Meerkat hands them in from one roster read,
+  so a host's rule about a member's durable labels holds for a member the
+  host did not build in this process. An implementation adds the two
+  parameters; one that decides by identity alone ignores them.
+
 ### Added
 
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
@@ -75,6 +159,281 @@ them.
   the `ErrorCode` of a failed turn's typed terminal cause. JSON-RPC and the
   `rkat run` failure document read a failed turn's code from that one
   mapping; the JSON-RPC codes are unchanged.
+
+- Schedule: a schedule can follow its target. `ScheduleService::pause_for_target`
+  pauses an Active schedule because its target stopped taking deliveries for
+  now, and the schedule remembers that the pause is its target's
+  (`Schedule::paused_for_target`). `ScheduleService::resume_for_target`
+  resumes exactly the schedules paused that way and plans their occurrences
+  as a resume by name does. Both answer `(Schedule, bool)`: the schedule
+  after the call and whether this call changed it. A schedule somebody
+  paused by name keeps that pause through both calls. A pause or a resume by
+  name of a schedule paused for its target takes it over: it is no longer
+  the target's. So does a revise that changes its target (whom it names,
+  or what it sends): the schedule stays paused until somebody resumes it.
+  One owner of a target's lifecycle sends the two calls for it: a second
+  sender's resume would end the first one's pause. A call that has nothing
+  to do answers the schedule unchanged and writes nothing, for a deleted
+  schedule too, so the owner of the target's lifecycle can make it again
+  after a crash. The `ScheduleLifecycleMachine` owns the fact (state
+  `paused_for_target`, inputs `PauseForTarget` and `ResumeForTarget`); a
+  stored schedule carries it in its machine state only while it is true, so
+  a schedule that is not paused for its target is stored as before, and one
+  stored by an earlier release loads as not paused for its target. No
+  `schedule/*` RPC method, REST route, schedule tool or wire type changes,
+  and no read of a schedule on those surfaces says whose pause it is yet.
+
+- Mob: `MobHandle::members_hidden_from` answers which of the members it is
+  given the host's member tool audience
+  (`MobBuilder::with_member_tool_audience`) hides from a calling member.
+  It is the one place the audience is asked, and the member tools that
+  name or list members ask through it: `member_status`, `retire_member`,
+  `force_cancel_member`, `wire_members`, `unwire_members`, `list_members`,
+  `spawn_member` and `spawn_many_members` (the source of a fork launch,
+  and the member a resumed session is bound to), and the mob tools'
+  `mob_check_member`, `mob_retire_member`, `mob_wire`, `mob_unwire`,
+  `mob_list_members`, `council` and `mob_destroy` (the members its report
+  names). A target the roster holds no row for is handed to the
+  audience without labels, and the host decides from its own record.
+  Empty when the host installed no audience.
+
+- `MobHandle::seat_owed_store_owned_identities` seats, while the mob runs,
+  every store-owned identity that is owed its seat (the spawn of its
+  create's kickoff failed), and answers the identities still owed
+  afterwards. It runs the pass a start runs, so a host need not restart the
+  mob to seat such an identity; its kickoff then runs once. The pass also
+  carries out what the rows keep owed besides: the retirement of a removed
+  or archived identity whose member is not retiring yet.
+
+- Mob: `MobHandle::identity_records` reads the rows of many identities in
+  the mob's identity store at once, in pages of at most
+  `IDENTITY_ENTRY_PAGE_MAX` names, one store read per page, where
+  `identity_record` reads one row per call. A host that serves many
+  store-owned identities reads their rows at a start with a number of store
+  reads that does not grow with their number beyond pages. A name the store
+  holds no row of is absent from the answer. Additive.
+
+- Mob: `MemberRespawn::with_compaction_floor` (and the public field
+  `MemberRespawn::compaction_floor`) seats a member's same-session
+  successor (`MobHandle::respawn_member`) with an auto-compact floor.
+  `Some(floor)` sets the threshold on the profile the successor builds
+  with (the member's own profile override, or its role's profile), which
+  the successor then carries as its override; `None` removes a floor
+  again, and an override that then equals the role's profile is dropped,
+  so the member follows its role as before. A host that rebuilds a member
+  for a maintenance compaction names the floor first and removes it
+  afterwards. A request that names no floor keeps what the member builds
+  with. Additive: `MemberRespawn` is non-exhaustive.
+
+- Mob: a store-owned identity's row records a label restamp its seat is
+  owed (`CreatedIdentityRecord::label_restamp_owed`), and
+  `IdentityRecordCensus::label_restamps_owed` counts the rows that do; so
+  does `IdentityRecordRows::label_restamps_owed`, with no running mob
+  (`MobStorage::read_identity_record_rows`,
+  `MobStorage::identity_record_rows`). An
+  update's commit writes it, in the update's own transaction, when a
+  member holds the identity and its last seat row carries other labels
+  than the updated row; the row lets it go once a seat row carries the
+  row's labels (the update's restamp, a retry's, a runtime-mode or role
+  restamp, a respawn with the row's labels, a rotation, a seat), and an
+  archive or a removal drops it. A row that owes none carries no such key
+  and is byte for byte what 0.9.14 writes. See Changed for what reads it,
+  and Upgrade notes for a rollback. Additive: the three types are
+  non-exhaustive.
+
+- Mob: `MemberBuildPreparer::prepare_store_owned_seat` lets a host compose
+  the seat of a store-owned identity's member for each of its builds. Core
+  seats such a member from its row in the mob's identity store, with no
+  host step, so until now its host could give it tools only. The method
+  receives the request Core lowered and sets build inputs on it, as a host
+  does on the spec of a member it spawns itself. Core asks at every build
+  of the member, before the host's spawn customizer and before
+  `prepare_member_build`: before the fresh spawn of its create (one with a
+  first message), of a start's owed seat and of a rotation, and at every
+  wake and boot restore. A seat Core holds Dormant asks nothing until it is
+  built. Every build takes the profile and model overrides of the answer
+  (the model and the provider parameters) and the overlays that are
+  objects of the host's process: the external tools, the compaction
+  curator and the tool dispatch admission. No journal holds those and a
+  process keeps them only for a member it built, so a build after a
+  restart has them only from this answer: a tool dispatch admission the
+  host sets here gates the member's tool calls after a restart too, and
+  its compaction curator still summarizes. In a process that already built
+  the member, the external tools overlay it kept for the member stands, as
+  for every member. The first build of the member's
+  session also takes the context, the additional instructions, the system
+  prompt override and the other inputs of a first build (the tool
+  policies, the budget limits, the auth binding and the shell
+  environment, which no member's rebuild on its durable session takes). A
+  later build keeps what its session was first built with. No build
+  relies on an earlier
+  answer, so the host answers the same from the row and its own
+  state each time, and may be asked more than once for one seat. The seat's
+  runtime mode, binding, placement and first message stay as Core
+  lowered them, and an answer that changed the seat's identity, role,
+  launch mode or custody is refused. The seat's labels are its row's
+  labels: Core lowers them from the row at a fresh spawn; at a wake or a
+  restore they are the labels the member was last seated with, or the
+  row's labels while the row records that the seat is owed a label
+  restamp (see Changed). A build must carry exactly the
+  seat's labels: what decides on a member's labels (an access rule, an
+  audience) reads its seat. Core compares them at every build it composes,
+  twice: on the host's answer, and on the labels the build carries once
+  the host's spawn customizer ran, whether or not a build preparer is
+  configured. A key that is added, dropped or given another value is
+  refused for good and the member is not built;
+  `MemberBuildPreparationRefusal::store_owned_seat_labels` is that refusal
+  (its reason names the label keys, never a value, and the remedy: the
+  label belongs in the identity's row, at its create or by an update),
+  public so that a host can refuse first with the same reason. The
+  comparison is not made where Core composes no build of the seat: a spawn
+  its host wrote itself under created custody (a placed or externally
+  bound member, a held spawn, an owner-bound spawn); a live actor that is
+  kept, which builds nothing; a reload or warm revival of a member, which
+  rebuilds it with its seat's labels, the profile and tool overlay of its
+  last build in the process and its session's own context and
+  instructions, and asks its host for no seat; and an explicit resume of a
+  stopped mob, which rebuilds each member from its seat as the host's
+  spawn customizer makes it, labels included, and asks its host for no
+  seat either (see Known limitations). Core asks the preparer the mob was
+  built with from the mob's start on, and waits for no composition of the
+  host's own. A host that composes its preparer after the mob starts must
+  therefore refuse a fresh store-owned seat, retryably, until it is
+  composed, and must call `MobHandle::seat_owed_store_owned_identities`
+  once it is: until that call or the mob's next start the identity stays
+  owed its seat.
+  A refusal fails the build before anything is built: at a spawn the
+  identity stays owed its seat and the mob's next start asks again; at a
+  wake or a restore a retryable refusal leaves the member Dormant and its
+  next wake asks again once the retry is due (`BuildPreparationRetry`),
+  and a refusal for good, as every label refusal is, records the member
+  broken until it is respawned or reset, or, for a label refusal, until
+  its row carries the label: after that update it is served at the next
+  send, with no respawn or reset. Core reads the identity's row
+  once at each wake and restore of such a member, before the host is
+  asked. A row the identity store cannot serve then, or holds in a form
+  this build cannot read, ends that build for a retry as a store that
+  cannot serve the member (`MemberWakeRefusal::ResumeGateUnavailable`),
+  never as the host's refusal: the host's build preparer is asked
+  nothing (its spawn customizer still runs), nothing is
+  built, the member stays Dormant and is not broken, and a later wake
+  builds it once the row reads again. Additive: the method is defaulted
+  and composes nothing, so hosts that do not implement it see no change
+  from it.
+
+- Operator instructions for a member and its forks. A member-targeted record
+  written with `include_forks`
+  (`{"kind":"member","agent_identity":...,"include_forks":true}` on
+  `mob/set_instruction`, `OperatorInstructionTarget::Member { include_forks:
+  true, .. }` in Rust) follows the member's fork family from its root.
+  Written for a member that is not itself a fork, it selects that member and
+  every fork below it, forks of forks included. Written for a member that is
+  itself a fork, it selects that member only: a fork of a fork follows the
+  records written for the first member of its family, not for the fork it
+  was taken from. Each member's row of `mob/instruction_status` lists the
+  records of its snapshot, a fork's included, and the write's
+  `matched_members` counts the seated members the record selects. Without
+  the field, the default, a member-targeted record stays its member's alone
+  and a fork runs without it, as before. A durable fork (`fork_off`,
+  `MobHandle::fork_member` and its bounded and detached forms,
+  `mob/fork_member`, a live delegation's fork) has its snapshot recorded in
+  its committed session before it is seated; a helper fork is born with
+  it. A seated fork follows
+  the record like any member it selects: a higher revision and the revoke
+  reach it as entries appended at its next fresh run start, and nothing in
+  the source's or the fork's conversation is rewritten. MobMachine owns the
+  lineage (`member_instruction_lineage`, written by
+  `RecordMemberInstructionLineage` in the fork's seat step and restored from
+  the fork's spawn row after a restart) and selects forks in its target
+  predicate (`InstructionTargetKind::MemberAndForks`;
+  `operator_instruction_target_applies_to_lineage` is the predicate in
+  Rust), so a write, a higher revision, a revoke and a replay owe the seated
+  forks themselves. A lineage names the first member of its family by name,
+  as a target does, across lives: the forks of a member that was removed
+  keep following the records written for that name until those are revoked,
+  and a record written with `include_forks` for a new member seated under
+  that name, as a fork or not, reaches the earlier member's forks too (the
+  one exception to "that member only"). The two limits count such a
+  record in the snapshot of every other name too (any name may be seated as
+  a fork of that member), so no fork is refused at its seat for room, and a
+  member that holds 64 records of its own blocks every `include_forks`
+  write for another member; at a write refused `slot_limit_exceeded` or
+  `active_set_budget_exceeded` the mob now logs a warning that names the
+  member whose snapshot would be full and what fills it, or says that the
+  shared records alone fill every snapshot (the refusal itself is
+  unchanged). The Python and TypeScript SDKs carry the scope both ways:
+  `InstructionTarget`'s member form gains the optional `include_forks`
+  (`Mob.set_instruction` / `setInstruction` send it, and
+  `mob_instruction_status` / `mobInstructionStatus` keep it on a record
+  that carries it and refuse a value that is not a boolean). Limits: the
+  participants of a
+  temporary council are seated in the council's own mob and are not
+  covered (see Known limitations); a governed runtime still refuses every
+  write (`prepared_authorization_required`).
+
+- `meerkat-mob`: `MobSessionService::recorded_build_instructions(session_id)`
+  (a provided trait method) reads the instruction sections a session was
+  built with (`additional_instructions`), from the session's committed build
+  state: the read a host uses to compare what a member's session holds with
+  what it would build the member with now (a member's session id is
+  `MobHandle::resolve_bridge_session_id`). It never materializes the
+  session, wakes no member and sends the mob actor no command.
+  `Ok(Some(sections))` is what the session records, and `Ok(Some(vec![]))`
+  is a session built with none. `Ok(None)` means the sections are not known:
+  the service holds no committed session under that id (a seat no build has
+  created yet has none, and a session another host keeps is not committed
+  here), or the session's record does not say (a session built by 0.9.14 or
+  an earlier release, or one whose record such a release erased, see Fixed).
+  A first build may append the host's spawn customizer's sections, so a
+  session records its spec's sections followed by those. The read takes no
+  caller principal: a surface that serves it admits its caller first.
+  `PersistentSessionService` answers from the committed metadata alone and
+  decodes no transcript row: the committed head on a HeadCanonical store,
+  and on a WholeBlob store the committed body, fetched and verified, with
+  its rows skipped. It still answers an archived session's record. Core's
+  RPC and CLI hosts forward the method to that service. The trait default
+  answers the same for a session that is not archived, from the persisted
+  session, which loads its transcript: a host's own decorator over a
+  durable session service forwards the method to keep the read from
+  loading it. This method is the one read of the record for a host. Three
+  more items are public only because the read crosses crates; they are its
+  plumbing, not further reads:
+  `PersistentSessionService::load_authoritative_session_build_state` (the
+  committed build state, from the metadata alone), and the decoders
+  `meerkat_core::try_session_build_state_from_map` and
+  `SessionMetadataDocument::try_build_state`.
+
+- `rkat storage doctor` lists each mob database whose operator instruction
+  records are past what a release before this one holds in one mob: more
+  than 64 records, or more than 1 MiB of Active bodies in total
+  (`operator-instruction-mob-totals`, informational, with both totals). Such
+  a release cannot serve that mob (see Upgrade notes).
+  `meerkat_store::doctor::operator_instruction_mob_totals` is the census
+  behind it.
+
+- `meerkat-comms`: `InprocRegistry::wake_route_owner_in_namespace` reads the
+  owner of the wake route published for a key in a namespace, with the
+  owner's name for the member. It is a read for a host that runs two
+  namespaces in one process and declared a link between them: the host hands
+  a wake to the member's own owner, which still answers from its machine.
+  The read publishes and retracts nothing, wakes nobody and hands out no
+  inbox, and for a send scoped to a namespace the registry itself still
+  never wakes a member from another namespace. `publish_wake_route` and
+  `retract_wake_route` now document that second publisher: a host forwarder
+  never publishes over an owner's route and never retracts one.
+
+- `meerkat-comms`: `InprocRegistry::publish_forwarder_wake_route` publishes
+  a host forwarder's wake route, marked as such. A send scoped to the
+  route's namespace finds it like any wake route; a lookup in any namespace
+  (a sender with no namespace) skips it, so such a sender still finds the
+  member's own owner as its one route. No route published with
+  `publish_wake_route` is marked, so nothing changes for existing
+  publishers.
+
+- `meerkat-comms`: `RegistrationRejection::InboxGone`, the answer of a
+  registration whose inbox already left the registry through its own
+  runtime (see Changed). Nothing is registered. `RegistrationRejection` is
+  non-exhaustive, so code that matches it compiles unchanged.
 
 ### Changed
 
@@ -125,6 +484,249 @@ them.
   prints none, and no other command prints one. See "JSON failure
   document" in `docs/cli/configuration.mdx`.
 
+- Mob: a label update of a store-owned identity
+  (`update_store_owned_identity`) seats the row's labels at once: its
+  seated member is restamped on its own session at the next generation
+  (the same-session respawn a runtime-mode change makes, with
+  `MemberRespawn::with_labels`), and the update answers
+  `DeclaredEntryOutcome::Restamped`. What decides the restamp is the
+  comparison, in the commit of any update of a seated store-owned
+  identity, of its last seat row's labels with the updated row's (the
+  commit records a difference as an owed restamp, see below), not the
+  update's own label change: an update that moves no label restamps a seat that
+  carries other labels than the row, so a seat an earlier release left
+  stale is corrected by the identity's next update, and a label a
+  host-written spawn seated outside the row is dropped by it (for a member
+  a same-session successor can serve; see below). From 0.9.9 through
+  0.9.14 a label
+  update kept the member with the labels it was seated with until its host
+  respawned it (`IdentityRecordCensus::seats_stale` counted the seat).
+  With the label rule above a build must carry exactly its seat's labels,
+  and what decides on a member's labels reads its seat, so the seat
+  follows its row at the update, not at a later respawn. The restamp keeps
+  the member: the same identity entry, session and conversation, its edges
+  and its comms key; nothing is built or woken (a live idle member is
+  released, and its next delivery wakes it), no kickoff runs again, and
+  its next build resumes its session. A member that holds work is not
+  interrupted: the update commits and answers
+  `DeclaredEntryOutcome::Deferred`. A label update of a busy agent is
+  recorded in its row, and the mob's roster reads the row's labels
+  (`get_member`, the member lists) from the step that commits the row,
+  whatever the member step then answers and whether or not the update's
+  caller is still there. The running session takes them at its next build
+  (a key the row dropped stays in a resumed session's own peer metadata,
+  as at every resume). Nothing else of the member moves: the same
+  generation, fence and session, and no seat row is written. The same
+  holds when the member step fails (`Failed`), and for a member a
+  same-session successor cannot serve (a placed member, a member wired to
+  a placed member, a member on a session service that keeps no durable
+  sessions), whose update answers `Kept` as before. Such a member is not
+  left exactly as it was: its release is tried before the respawn that is
+  then refused
+  (in the three cases named it releases nothing; a member whose session
+  cannot be kept, lost or archived say, is released and then kept), and
+  its restamp stays owed. The roster is not the
+  journal: the member's last seat row keeps the labels it was seated with
+  until its restamp, and so do the readers of that row, the binding
+  journal's labels and `seats_stale`. The restamp stays owed, and the row
+  records it (`CreatedIdentityRecord::label_restamp_owed`, see Added). A
+  retry of the same update (it replays) or the identity's next update
+  carries the restamp out once the member is idle; a retry while the
+  member still holds work restamps nothing and leaves it owed. A respawn
+  with the row's labels, a rotation and a reset settle it too, as does a
+  runtime-mode or role restamp of the same update. While the restamp is
+  owed, a start seats the row's labels on the member's roster entry (it
+  reads the rows anyway, and builds, wakes and writes nothing), and a
+  build of the member is compared with the row's labels: a label update
+  that was answered never leaves its member refused its build, in the
+  process that answered it or after any number of restarts. A build
+  writes no seat row, so no build settles the owed restamp. One act
+  moves the roster entry away from the row meanwhile: a host's own
+  respawn of the member with other labels (`MemberRespawn::with_labels`)
+  seats those on its seat row and roster entry, which keep them until
+  the next start or the restamp, while the member's builds carry the
+  row's labels. Nothing else
+  moves a seat's labels. A seat whose row owes no restamp keeps every
+  label it carries at a start and is compared with its own labels at a
+  build, as before this release: a label a host seated outside the row is
+  kept, or refused by the label rule, never dropped by a start or a
+  build. It goes at the identity's next update, which makes an idle
+  member's seat equal its row, as before. A host's own declaration of a
+  store-owned identity (`apply_declared_roster` with created custody)
+  restamps no label, declared or not: a label reaches a store-owned seat
+  through the identity's row. The label rule is unchanged: a label the
+  row lacks is refused as above. A
+  roster-owned
+  identity's label change is unchanged: its member is kept, and its host
+  labels its builds (the declared apply stores no labels). See Upgrade
+  notes for seats an earlier release left with other labels than their
+  row.
+
+- Mob: the labels a store-owned member's build carries are compared with
+  its seat's after the host's spawn customizer
+  (`MobBuilder::with_spawn_member_customizer`) ran, at the fresh spawn of
+  its create, of a start's owed seat and of a rotation, and at every wake
+  and boot restore. Through 0.9.14 a label the customizer set reached such
+  a member unchecked: at a fresh spawn it was seated with a label its row
+  does not carry. Now the build is refused for good, naming the label keys
+  and never a value, as an answer of the host's seat composition is: the
+  spawn fails with the identity owed its seat, or the wake fails and the
+  member is recorded broken, and nothing is built. A host that labels its
+  members in its customizer puts those labels in the store-owned
+  identity's row. Members the host spawns itself and roster-owned
+  identities are not compared.
+
+- Durable decisions of the kinds `identity.create`, `identity.update`,
+  `identity.archive`, `identity.unarchive`, `identity.remove` and
+  `identity.adopt` (a change of an agent) are decided by people only
+  (`DECIDED_BY_PEOPLE_ONLY`): a hold of one that names a reviewer is refused
+  `ReviewStageNotAllowed`, so an agent never approves a change of an agent.
+  No released surface held a decision of these kinds.
+
+- `MobStorage::update_definition` refuses an update that drops a profile a
+  created agent's row names (a rename drops the old name): the agent could
+  not be seated, or unarchived, on a profile the definition no longer has,
+  and failed each restore with a profile-not-found reason. The refusal is
+  `MobError::DefinitionError` with one diagnostic per such profile, code
+  `profile_held_by_identity`, `location` `profiles.<name>`; its message
+  names the agents on the profile (the first five, the rest counted) and
+  says what an operator can do: keep the profile, or update or remove those
+  agents first. An archived agent holds its profile; a removed one does
+  not. While the mob has a created agent's row this release cannot read
+  (one a later release wrote), an update that drops a profile is refused
+  too, with one more diagnostic of the same code at `profiles` that names
+  those agents, since such a row may name the profile: keep the profile,
+  or run the update on the release that reads the rows. An update that
+  drops no profile reads no row and is judged as before, and so is every
+  start. Nothing is written, and the check reads the mob's stored rows
+  only. It accepted such an update before.
+
+- `meerkat-mob`: a durable fork child has its operator instruction snapshot
+  recorded before its seat. The mob records the child's snapshot (the shared
+  records, and the records written for the first member of its fork family
+  and its forks, see Added) in the child's committed session before it
+  seats the child. Before, a child was seated
+  over its committed session with no snapshot and received it by delivery
+  after its seat, which nothing ordered before the first run of a fork that
+  starts its own turn (`fork_off`, a detached fork, a live delegation's
+  fork): such a child could run its only run without the records the mob
+  targets at every member or at its profile. A mob that never held a record
+  writes nothing, as before. A child whose snapshot cannot be recorded is
+  not seated: the fork fails `fork_member_provision_failed`, as it does
+  when its seat fails. That holds for every refusal of the record, also
+  one that only blocked a seated child before (`owned_by_session`,
+  `owned_by_other_mob`, `slot_managed_by_activation`, and
+  `durability_unavailable` from a session service that keeps no durable
+  session document or a wrapper that does not forward the record): once
+  the mob has recorded its first operator instruction, a durable fork over
+  such a session fails and seats nobody.
+
+- `meerkat-mob`, `meerkat-machine-schema`: a mob's operator instruction
+  limits bound one member's snapshot, not the mob. A member's snapshot is
+  the shared records (targeted at every member or at a profile) plus the
+  member-targeted records that name the member, and it holds at most 64
+  records and 1 MiB of Active bodies. Before, the mob as a whole held at
+  most 64 records and 1 MiB, revoked records included until a reset, so a
+  host that kept one member-targeted record per agent was refused
+  `slot_limit_exceeded` at its 65th agent for the life of the mob. A mob now
+  holds a member-targeted record for each of any number of members. Shared
+  records are in every snapshot and keep the bound they had; a mob that
+  holds 64 shared records has no room for a member's own. The limits count
+  a member-targeted record under the member it names, seated or not, so the
+  records of a retired or never-seated name keep taking room from new
+  shared records until they are written with another target or the mob is
+  reset; leaving such names out is not in this release. Every write the
+  earlier bound admitted is still admitted. The refusal codes
+  are unchanged (`slot_limit_exceeded`, `active_set_budget_exceeded`); a
+  higher revision that would move a record into a full snapshot (a member's
+  record retargeted to every member, or to a member whose snapshot is full)
+  is now refused `slot_limit_exceeded` as a new slot is. The journal row,
+  the session document and the wire types are unchanged. Behaviour change:
+  `MobHandle::set_operator_instruction`, `mob/set_instruction` and Meta's
+  `meta/set_instruction` keep their signatures.
+
+- `meerkat-mob`: a member's operator instruction snapshot no longer lists
+  other members' member-targeted records. Before, every member's session
+  recorded every record of its mob (bodiless where the record did not select
+  the member) and every member's row of `mob/instruction_status`
+  (`MobHandle::operator_instruction_status`) listed them all as
+  `not_targeted`. A member's recorded target and its status row now name
+  the shared records and its own (a fork's also name the records written
+  for the first member of its fork family and its forks, see Added); a
+  record that moves to another member
+  leaves the first member's target, its session revokes the slot at its
+  next fresh run start, and the status row lists that record until then.
+  The page's `desired` list still names every record of the mob.
+
+- `meerkat-mob`, `meerkat-machine-schema`: the cost of a member-targeted
+  record no longer grows with the mob's seats. A write, a revoke or the
+  replay of a member-targeted record looks its one member up instead of
+  testing every seated member, the body of such a record stays in its
+  journal row and is read when its member's snapshot is built (the mob held
+  every Active body in memory), and a member's snapshot skips other
+  members' records without parsing them. The members a write owes are
+  the same as before. Limit: a record write still grows with the number of
+  records the mob holds (measured with one member-targeted record per
+  agent: 2.1 ms at 1,000 records, 39 ms at 10,000), because the mob shell
+  copies the whole machine state on each step; a member's run start does
+  not grow with other members' records, and a mob load pays a constant per
+  record.
+
+- `meerkat-mob`: the mob logs one warning for a member's failed operator
+  instruction record, at its first failure, and again only when the
+  failure's class changes or after a record landed, never one per retry;
+  the warning names the mob, the member and the class. A member's
+  `last_failure` in `mob/instruction_status` is diagnostic: it is kept in
+  the mob's process and not across a restart.
+
+- Mob: in a running mob a wire, and in every state an unwire, between two
+  members or of a member and an external peer answers a name the mob does
+  not hold as member not found before any refusal about the other member,
+  about the external peer's binding or about the edge; before, such a call
+  could answer that other refusal (an open approval branch, a Broken
+  member, an identity entry an agent may not wire, a binding the mob
+  refuses, an edge MobMachine does not admit) instead. The same holds for
+  a call that gives one name as both members: a name the mob does not hold
+  answers member not found, where it answered that the call needs two
+  different members.
+
+- `meerkat-mob-mcp`: the text of the agent mob tools `delegate` and
+  `mob_create` no longer sends a model to `mob_create` and `mob_spawn_member`
+  for "long-lived collaborators" and "long-lived teams". They say that those
+  tools make workers the calling agent manages and retires, and that a
+  long-term agent (a durable, named member with its own conversation and
+  memory) is made with `identity_create` when the agent's tool list has it.
+  Meerkat Meta mounts that tool where the host's identity policy enables it.
+  No tool's behavior or schema changes.
+
+- `meerkat-comms`: for a sender with no namespace, two live registrations
+  of the SAME inbox under one key are one route (a member's own, and the
+  route a host that links two namespaces holds to that inbox in the linked
+  one): the envelope is handed to that inbox once. Before, any second
+  registration under the key made it ambiguous and the send was refused.
+  Registrations of different inboxes under one key are still ambiguous:
+  nothing is handed off. Sends scoped to a namespace are unchanged.
+
+- `meerkat-comms`: a route never outlives its inbox. When a runtime's
+  in-process inbox leaves the registry (`CommsRuntime::retire_inproc_route`,
+  the runtime's drop, or a successor's
+  `PreparedCommsRuntime::publish_replacing`), every registration of that
+  inbox in another namespace (a route a host that links two namespaces
+  installed to it) is removed in the same step. A send scoped to that
+  namespace then finds no live route: it takes the member's wake route,
+  which builds the member, or answers `PeerNotFound`. Before, such a
+  registration stayed and kept answering for an inbox that was gone: every
+  send to it was refused, and none reached the wake route, so a member
+  released to rest was never built by a peer message from the other
+  namespace. Registrations of other inboxes are not touched, and
+  `InprocRegistry::unregister_in_namespace` still removes exactly the one
+  registration it names. The rule holds at registration too: registering an
+  inbox that already left installs nothing and is refused
+  (`RegistrationRejection::InboxGone`), so a host that read a member's
+  inbox just before the member left cannot put a route to it back. An
+  inbox that is only closed for peer ingress has not left and still
+  registers.
+
 ### Fixed
 
 - `meerkat-core`: a turn that fails because a provider failure outlasted the
@@ -169,6 +771,148 @@ them.
   `.config.tmp.<id>` or `.config_state.tmp.<id>` file behind on every
   attempt, and so does a failed `mcp.toml` write. Affects 0.3.3 through
   0.9.14.
+
+- Mob: the member lists a member's own tools answer (`list_members`, and
+  the mob tools' `mob_list_members`) leave out a member the host's member
+  tool audience hides from the caller, with manage scope too, as
+  `member_status`, `retire_member` and `force_cancel_member` already
+  answered such a member as one the mob does not hold. Through 0.9.14 a
+  list named it. The wiring a listed member's row shows (`wired_to`, and
+  its external peers) names no member or external peer the audience hides
+  from the caller either. Hosts with no audience see no change.
+
+- Mob: the wire tools keep to the host's member tool audience
+  (`MobBuilder::with_member_tool_audience`) too.
+  `wire_members`, `unwire_members`, `mob_wire` and `mob_unwire` answer a
+  call that names a member the audience hides from the caller, beside
+  another member or an external peer, exactly as the same call with a name
+  the mob does not hold in its place, and wire or unwire nothing. Through
+  0.9.14 a member with manage scope over the mob could learn that a member
+  hidden from it exists and reach it through these tools. Hosts with no
+  audience see no change.
+
+- Mob: the mob tools' `mob_check_member` and `mob_retire_member` ask the
+  host's member tool audience themselves, before the caller's scope or
+  ownership is looked at, and answer a member it hides from the caller
+  exactly as a name the mob does not hold. Through 0.9.14, with a host that
+  had not wrapped the two tools, a member could learn that a member hidden
+  from it exists, and one with manage scope over the mob could read its
+  status and retire it.
+
+- Mob: the report `mob_destroy` answers an agent with names no member the
+  host's member tool audience hides from that agent: not in its member
+  lists, not in an error text, not in the refusal of an incomplete destroy.
+  Through 0.9.14 it could name such a member.
+
+- Mob: a placed member's operator calls (`member_status`, `retire_member`,
+  `force_cancel_member`, `wire_members`, `unwire_members`, `list_members`)
+  reach the host's member tool audience as that member's.
+  Through 0.9.14 the audience was asked about them as about a call no
+  member made (`caller` `None`), so a placed member was shown what such a
+  call is shown, not what the member itself is shown. An absent caller is
+  now a call made by no member of the mob.
+
+- Mob: Core asks the host's member build preparer
+  (`MobBuilder::with_member_build_preparer`) before the spawn of a
+  store-owned identity's member, as it asks before a wake and a boot
+  restore: the member Core starts at the identity's create to run its first
+  message, and the seat a start owes it. The preparer is asked once, off
+  the actor, before the provision, about the session the spawn names (which
+  no build has created yet), with the wired peers the mob's durable wiring
+  records for the identity at that moment: none for an identity no edge
+  names yet, and the edges the mob holds for it otherwise (the owned edges
+  a start recovered for an identity owed its seat, say). Through 0.9.14
+  that member was built and ran its kickoff with nothing the host prepares
+  for a build, for example without the tools it publishes for the member's
+  identity. A refusal, for now or for good, is a failed kickoff spawn: the
+  create stays committed, nothing is built, the identity is owed its seat,
+  and the mob's next start asks again. A hold the host asks for
+  (`HoldUntilReleased`) holds the member's run starts until
+  `release_member_run_starts`. Hosts with no preparer see no change.
+
+- Mob: the seat of a store-owned identity (one created at run time, whose
+  record is its row in the mob's identity store) is a durable identity's,
+  whatever its profile says of durability: its spawn row records
+  `SpawnContinuityIntent::DurableIdentity`, keyed by the identity, as the
+  seat of a `durable = true` profile's member does. Such an identity is a
+  long-term agent by definition. Its member is therefore built with the
+  mob's durable resume gate bound on its registration
+  (`MobBuilder::with_durable_resume_gate`), and it is listed by
+  `MobHandle::durable_identity_members` and
+  `MemberBindingHistory::durable_identity_bindings`, so a host's checks
+  over its durable identities cover it. Before, a store-owned identity on
+  a profile without `durable = true` was seated ephemeral and was absent
+  from all of these. A plain worker's seat is unchanged. The local refusal
+  of a `durable = true` profile on a session service that keeps no durable
+  sessions still follows the profile alone: on such a service a
+  store-owned identity is seated and recorded durable as on any other, and
+  nothing is refused; its sessions end with the service, as before. A
+  placed store-owned identity requires durable sessions on its member
+  host, as every placed durable identity does (the materialize preflight
+  follows the recorded intent). A seat recorded ephemeral (by a release
+  from 0.9.9 on, or the seat an adoption kept from a plain worker) becomes
+  a durable identity's at the identity's next seat: a reset, an unarchive,
+  a seat a start owes, or a respawn of its member
+  (`MobHandle::respawn_member`), which keeps the conversation.
+
+- `meerkat`, `meerkat-mob` (0.5.1 through 0.9.14): a session keeps the
+  instruction sections it was built with. A session's durable build state
+  records the `additional_instructions` of its build, and every build wrote
+  that record from its own request, so a build that resumed the session and
+  named no sections erased it: a mob member's first rebuild after a restart
+  or a wake, a fork child's seating (the child never recorded its source's
+  sections), and an MCP server `meerkat_resume` without
+  `additional_instructions`. No conversation was affected: the sections are
+  rendered once, into the first build's system prompt row, which stays in
+  the transcript and is what every later request, live channel and recovered
+  session reads. Only the record was lost, so a host could not read what a
+  member had been built with. The record is now kept across builds. A
+  build that names sections records those, as before, and an empty list
+  clears them; that holds whether or not the build writes a prompt, so a
+  resume that names sections and is given no system prompt records them
+  and writes no prompt row (the record can then name sections that no
+  prompt row holds, as before). A build that names none and writes no
+  prompt (every resume that is given no system prompt) keeps the recorded
+  ones. A build that names none and writes a prompt records an empty list
+  (`"additional_instructions": []` in the stored build state, the value a
+  build given an empty list already stored): a first build, and a resume
+  that is given an explicit system prompt, whose new prompt row holds no
+  sections. In Core the MCP server's `meerkat_resume` with `system_prompt`
+  is such a resume; a direct `AgentFactory` embedder can build one, and so
+  can a host whose build hook sets a prompt on a resume. An absent record
+  therefore means "not known" and nothing else. Sessions written by
+  earlier releases load unchanged and a resume that writes no prompt
+  leaves their stored build state as it is; a record an earlier release
+  erased stays absent.
+
+- `meerkat-mob`: a record owed to a local member seated dormant on a
+  conversation it already has is tried at every wake a delivery causes,
+  after the conversation is loaded and before the member is Live. When the
+  member's session takes the write then (it answers within 5 seconds, the
+  mob's journal answers the read of the member's own records within 5
+  seconds, and no other delivery to the member is in flight past 5
+  seconds), the record is in that conversation before the run that woke the
+  member starts, and that run carries the entry once. A write that fails or
+  is not answered in time leaves the member owed: the mob tries again at
+  once when the member is Live again and then on its own retry, at most 30
+  seconds after its previous attempt ended, and the entry reaches the first
+  run that starts after a write succeeded. A write an owner refuses, or a
+  session service that keeps no durable session document, blocks the
+  member: the record is not tried again until a write selects the member
+  again, the member is seated again, or the mob restarts. Before, the
+  record reached the session whenever the mob's delivery next landed, and
+  where the store-only record could not reach the conversation until the
+  member's wake had loaded it, the run that woke the member started without
+  the record and the agent got it one run late (0.9.9 through 0.9.14). The mob
+  answers other commands while a wake tries its record. Limits: a lift, a
+  start, a warm reload and a placed member do not pass the wake step. A
+  member seated eagerly on a conversation (a spawn with a Resume launch)
+  and a member the mob brings up itself are recorded by the mob's own
+  delivery, tried at once when the member is Live and not ordered before a
+  run of it. A member the mob brings up itself at a start or a lift with
+  work already queued may start that run before the write is tried; the
+  entry then reaches the first run that starts after the write. A member
+  that stays Live between runs is not tried at each run start.
 
 - `meerkat-mob`: a kickoff notice to a wired peer that was being woken held
   the whole mob for 30 seconds (0.9.7 through 0.9.14: since a send to a member
@@ -251,6 +995,32 @@ them.
   seconds later, removes the edge on both sides. (A peer that was not
   materialized when a rollback began and was woken during it could be left
   with such a trust entry in the same releases.)
+
+- `meerkat-mob`: a member whose comms key another member of its mob already
+  holds is refused before anything of it is recorded. The refusal is a wiring
+  error that names the refused member alone, two members spawned at the same
+  moment cannot both pass, and nothing of the refused member is left behind.
+  Through 0.9.14 such a member was left half admitted, its callers read an
+  internal error, and its mob did not start again. The member that holds the
+  key is named in one warning line of the log, not in any text a caller
+  reads.
+- `meerkat-mob`: a mob whose records already hold such a member starts,
+  whether it was running or stopped when its host went away. The member is
+  listed broken with a reason that says to retire it, holds no endpoint and
+  is never woken; the member that holds the key is untouched. Retiring the
+  broken member is enough, and the next start is clean, as long as the mob
+  has not been lifted with the member in it: for a mob that was running,
+  retire it before any stop and lift of the mob; for a mob that was stopped,
+  retire it before the mob is lifted. After a lift see Known limitations. On
+  records written before this fix, the member that is kept is the one
+  recorded first. A member whose session comes up, at a start, on a key
+  another member holds is listed broken alone in the same way, and the start
+  goes on.
+- `meerkat-mob`: a declared member that is refused because another member
+  holds its comms key is built once, not again after every retry period. It
+  is built again when its declaration changes, when a member of the mob is
+  retired, or when a spawn in the mob is rolled back. Its convergence status
+  carries the refusal.
 
 ### Security
 
@@ -391,6 +1161,33 @@ them.
 
   Affects 0.3.0 through 0.9.14.
 
+- Mob: the fork and resume launches of `spawn_member` and
+  `spawn_many_members` keep to the host's member tool audience
+  (`MobBuilder::with_member_tool_audience`). A fork launch (a placed
+  member's included) answers a source the audience hides from the caller
+  as a source the mob does not hold. A resume launch that names a session
+  bound to such a member is refused exactly as a resume of a session
+  nobody holds. Before, these launches were not held to the audience.
+  Affects 0.9.11 through 0.9.14.
+
+- Mob: `council` keeps to the host's member tool audience too: a
+  participant the audience hides from the convener is answered exactly as
+  a name the mob does not hold, and nothing is forked. Before, `council`
+  was not held to the audience. Affects 0.9.11 through 0.9.14.
+
+- `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486, in
+  Cargo.lock and in the example workspaces' lockfiles. Releases through
+  0.9.14 build with 1.1.5. `meerkat-core` depends on `rustix` directly and
+  now requires rustix 1.1.6 or later, so a build that resolves it with a
+  lock of its own moves too. `rustix` is also taken through `fs4`,
+  `tempfile`, `which`, and `xattr` through `tar`. The advisory is about the
+  `getxattr` and `listxattr` functions of `rustix::fs` (with their `l` and
+  `f` forms), which mark bytes they never wrote as initialized when they
+  are given a zero-length buffer. No Meerkat crate calls them. Of the
+  crates Meerkat builds with only `xattr` does, and `tar`, the one crate
+  that uses `xattr`, calls it only to set attributes while unpacking, so
+  Meerkat's own use is not known to be affected.
+
 ### Upgrade notes
 
 - A configuration document an earlier release wrote keeps its mode until
@@ -456,6 +1253,124 @@ them.
   (`"pending_tool_call"`) a run waiting for an external tool result, and
   anything else the run result. Text and HTML output are unchanged.
 
+- A definition update that drops a profile agents were created on. Before
+  the update, keep the profile, or update those agents to another profile
+  or remove them: `MobStorage::update_definition` now refuses the update
+  with the diagnostic `profile_held_by_identity` and writes nothing (see
+  Changed). The stored definition stays as it was, so a start that carries
+  no update starts as before. While this release cannot read a created
+  agent's row of the mob (one a later release wrote, after a rollback), an
+  update that drops or renames a profile is refused the same way, since
+  such a row may name the profile: keep the profile, or run the update on
+  the release that reads the rows. An import of exported agents
+  (`MobHandle::import_created_identities`) restores their rows without
+  judging their profiles against the definition, and the check reads no
+  row between the purge and the import: keep the profiles of exported
+  agents until the import. A consumer that reads diagnostic codes as
+  text meets a code it did not know; one that matches `DiagnosticCode`
+  exhaustively adds an arm. See `docs/guides/upgrading.mdx`.
+
+- Schedules paused for their target, and a rollback. A schedule paused for
+  its target (see Added) is stored as a paused schedule whose machine state
+  carries `paused_for_target: true`. An earlier release reads it as paused,
+  never resumes it on its own, ignores the mark, and drops the mark when it
+  writes the schedule while it is paused. After a rollback and a return to
+  this release such a schedule stays paused when its target takes
+  deliveries again: resume it by name. A schedule the earlier release did
+  not write keeps the mark. See `docs/guides/upgrading.mdx`.
+
+- Mob: a store-owned identity's seat that was recorded ephemeral (by a
+  release from 0.9.9 on before this one, for an identity on a profile
+  without `durable = true`, or kept by an adoption from a plain worker) is
+  not converted at a start or at the adoption: the identity joins the
+  durable resume gate and Core's lists of durable identities at its next
+  seat or at a respawn of its member (`MobHandle::respawn_member`), which
+  keeps its conversation.
+
+- Mob: a seated store-owned identity whose seat an earlier release left
+  with other labels than its row (0.9.9 through 0.9.14 kept the member's
+  labels at a label update) carries no record of an owed restamp: those
+  releases wrote none. So no start and no build moves its labels. Read
+  `MobHandle::identity_record_census()`: while `seats_stale` is above zero,
+  bring each such seat up to date before the host adopts
+  `MemberBuildPreparer::prepare_store_owned_seat` or a spawn customizer
+  that sets labels: respawn the member with its row's labels
+  (`MobHandle::respawn_member` with `MemberRespawn::new().with_labels(..)`),
+  or update the identity while its member is idle (any update then makes
+  the seat equal the row). A host that answers such a member's seat from
+  its row is otherwise refused the member's build, naming the label keys
+  that differ.
+
+- Mob, rollback: releases 0.9.9 through 0.9.14 read a row that carries
+  `label_restamp_owed` as unreadable, for that one identity (its name is
+  reserved, and nothing acts on it), until the owed restamp is settled.
+  Before a rollback, read `MobHandle::identity_record_census()` (or, with
+  no running mob, `MobStorage::read_identity_record_rows` or
+  `MobStorage::identity_record_rows`) and settle
+  every owed restamp while `label_restamps_owed` is above zero: retry the
+  update, or update the identity again, while its agent is idle, or
+  respawn its member with the row's labels (`MobHandle::respawn_member`
+  with `MemberRespawn::new().with_labels(..)`). A member no same-session
+  successor can serve (placed, wired to a placed member, or on a session
+  service that keeps no durable sessions) is settled by none of these:
+  rotate it (`MobHandle::rotate_member`), or archive or remove its
+  identity. A row that owes none
+  carries no such key and reads on those releases as before.
+
+- Rolling back to 0.9.14 or earlier: an earlier release cannot serve a mob
+  whose operator instruction records are past what it holds in one mob,
+  which only this release admits (as member-targeted records): more than 64
+  records, or more than 1 MiB of Active bodies over all the mob's records
+  together. An earlier release's build does not refuse such a mob at its
+  start: it replays the journal without an error, and then refuses every
+  step that checks the mob's recovered state, which is every spawn into the
+  mob and every flow run (an internal error that says the state could not
+  be recovered). With more than 64 records it also refuses every member's
+  operator instruction delivery in the member's session
+  (`slot_limit_exceeded`, retried without end; the status read shows the
+  member `owed` with that failure) and fails to build a member that needs a
+  new session. Before a rollback run `rkat storage doctor`, which lists
+  each such mob (`operator-instruction-mob-totals`, with both totals), and
+  for each: keep its processes on this release, or bring its Active bodies
+  back within 1 MiB where only the bytes are over, or reset the mob (which
+  clears the records) and write within both totals again, or destroy it. A
+  revoke lowers the bytes, not the count: a revoked record keeps its slot.
+  Mobs within both totals are unaffected in either direction. A journal an
+  earlier release wrote replays on this one without a refusal. See "Rolling
+  back to 0.9.14" in `docs/guides/upgrading.mdx`.
+
+- Clients and servers of an earlier release and `include_forks`: a client
+  that decodes operator instruction targets with an earlier release's
+  `meerkat-contracts` (`WireInstructionTarget` denies unknown fields)
+  refuses a `mob/instruction_status` page that lists a record written with
+  `include_forks`; upgrade such clients before the first such write. A page
+  with no such record is unchanged: the field is left out when false. A
+  server of an earlier release refuses a `mob/set_instruction` whose target
+  carries the field; it never writes it as a record for the member alone.
+
+- Forks seated by an earlier release, and rolling back with operator
+  instruction records written for a member and its forks (`include_forks`).
+  A fork seated by a release before this one, or while rolled back to one,
+  has no lineage root on its stored spawn row: no record written with
+  `include_forks` ever selects it, and a record written for it and its
+  forks reaches its own forks, which are rooted at it. Rolling back: an
+  earlier release reads such a record as a record for the member alone and
+  ignores the lineage root on a fork's spawn row (there the fork is a
+  member with no fork family), so on that release these records do not
+  select the forks. Nothing is refused. What the return to this release
+  restores depends on the mob's store. On the SQLite store no stored row is
+  rewritten: the lineage of every fork seated on this release is restored
+  from its spawn row and the records select those forks again; write each
+  such record at a new revision after the return, which delivers it to
+  every fork it selects. On a host store (a realm kept in the host's own
+  database through the host store SPI) the earlier release writes the
+  mob's journal again at its next checkpoint, from what it read: without
+  the fork scope of the records and without the lineage roots. They do not
+  come back: after the return those records are their members' alone and
+  the forks seated before have no lineage. Write the records again, at a
+  new revision, with `include_forks`; they then select the forks seated
+  from then on.
+
 ### Known limitations
 
 - The owner-only rule of this release (see Security) covers the
@@ -469,6 +1384,30 @@ them.
   permissions the manifest had). Keep the directories that hold them closed
   to other accounts, or run under a umask of 077.
 
+- Mob: an explicit resume of a stopped mob (`MobHandle::resume`) rebuilds
+  each member from its seat as the host's spawn customizer makes it and
+  takes the customizer's labels into the rebuilt member without comparing
+  them with the seat's: the host's seat composition
+  (`MemberBuildPreparer::prepare_store_owned_seat`) is not asked there, so
+  a label a customizer sets reaches a store-owned member on that path. A
+  reload or warm revival asks the host for no seat either, but rebuilds
+  the member with its seat's own labels.
+
+- Operator instructions for a member and its forks (`include_forks`). The
+  participants of a temporary council are not covered: they are seated in
+  the council's own mob. A session forked outside the mob and seated later
+  as a member is not a fork for this rule. A placed helper fork whose seat
+  the mob repairs after its host stopped in the middle of it is seated
+  outside its fork family, and no record written for the family reaches it
+  (the mob logs a warning that names the member). After a fork's seat fails
+  and the host restarts, a member seated later under that fork's name can
+  be counted in the fork family and receive the records written for the
+  family's first member and its forks: give the new member another name,
+  or write those records again without `include_forks`.
+
+- Mob: the schedule tools are not checked against the member tool audience
+  on a host that mounts them itself.
+
 - `meerkat-mob`: a spawn rollback that is still owed when the mob is
   stopped (the refused spawn answered `rollback remains owned for retry`)
   is finished by a later resume, and it can take more than one, because a
@@ -476,6 +1415,23 @@ them.
   succeeds and the member is removed; and a mob that is restarted from its
   storage before the rollback has recorded its start has the member seated
   with part of its edges and does not remove it by itself.
+
+- `meerkat-mob`, `meerkat-comms`: when a member is refused because another
+  member holds its comms key, that member's comms runtime has already been
+  built: the member that holds the key loses its in-process comms route, and
+  under Unix-socket comms its socket, until its own comms runtime is next
+  built (a wake after it was released, a respawn, or a restart of the
+  process). Work sent to it through the mob is not affected. Under TCP comms
+  with a fixed port, the refused member's build fails when it binds its
+  listener, before its key is judged: that is an ordinary build failure, and
+  a declared member is built again on the reconciler's retry periods.
+- `meerkat-mob`: a broken member of this kind cannot be retired cleanly once
+  its mob has been lifted with the member in it (started stopped, or stopped
+  and lifted later): the retire answers an error, the member stays retiring
+  and its name cannot be used again until the host restarts. The restart
+  completes the retirement, and the next start is clean. A host that lifts a
+  stopped mob when it starts (the Meta gateways do) always meets this: retire
+  the member, then restart the host.
 
 ## [0.9.14] - 2026-11-11
 

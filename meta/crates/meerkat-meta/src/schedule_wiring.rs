@@ -577,6 +577,10 @@ pub struct ScheduleMobTargetRegistry {
     /// The record of who the adopted runtime's members are private to,
     /// retired members included ([`Self::adopt_mob_runtime`]).
     private_owners: Arc<RwLock<Option<crate::private_owners::PrivateOwners>>>,
+    /// The adopted runtime's own mob, over its non-owning observer handle
+    /// ([`Self::adopt_mob_runtime`]): Core's entry of an agent's name is read
+    /// from it.
+    mob: Arc<RwLock<Option<MobHandle>>>,
 }
 
 /// The mob state a registry resolves bridge sessions against, held weakly:
@@ -614,13 +618,122 @@ impl ScheduleMobTargetRegistry {
     }
 
     /// Adopt `runtime`'s mobs: the mob state bridge sessions resolve against
-    /// ([`Self::set_mob_state`]), and the record of who its members are
-    /// private to, which still knows a member its mob has retired.
+    /// ([`Self::set_mob_state`]), the record of who its members are private
+    /// to, which still knows a member its mob has retired, and the runtime's
+    /// own mob, whose entry of an agent's name says where the agent stands.
     pub(crate) fn adopt_mob_runtime(&self, runtime: &crate::mob_handle_runtime::MobRuntime) {
         self.set_mob_state(runtime.agent_mob_mcp_state());
         if let Ok(mut guard) = self.private_owners.write() {
             *guard = Some(runtime.private_owners().clone());
         }
+        if let Ok(mut guard) = self.mob.write() {
+            *guard = Some(runtime.observer().handle());
+        }
+    }
+
+    /// Core's entry of the member `member` in the adopted runtime's mob:
+    /// `None` when no runtime was adopted, when `mob_id` names another mob,
+    /// and for a name that is no identity entry. Read from the machine state
+    /// the mob's actor last published: it asks the actor nothing and wakes
+    /// nothing.
+    fn core_entry(
+        &self,
+        mob_id: Option<&str>,
+        member: &str,
+    ) -> Result<Option<meerkat_mob::IdentityEntryView>, meerkat_mob::MobError> {
+        let Some(mob) = self.mob.read().ok().and_then(|guard| guard.clone()) else {
+            return Ok(None);
+        };
+        if mob_id.is_some_and(|mob_id| mob_id != mob.mob_id().as_str()) {
+            return Ok(None);
+        }
+        Ok(
+            match mob.identity_entry(&meerkat_mob::AgentIdentity::from(member))? {
+                meerkat_mob::IdentityEntryRead::Entry(entry) => Some(entry),
+                _ => None,
+            },
+        )
+    }
+
+    /// The agent a schedule aimed at `target` is sent to, by its name, when
+    /// Core holds that agent archived: the member a member target names, or
+    /// the agent an identity target names (by its member id or by its
+    /// name). `None` for an agent of any other standing and for a target
+    /// that names no agent this way (a session, a helper, a flow, a host
+    /// runnable).
+    fn archived_target(
+        &self,
+        target: &TargetBinding,
+    ) -> Result<Option<String>, meerkat_mob::MobError> {
+        let (mob_id, members) = match target {
+            TargetBinding::Mob(binding) => match binding.as_ref() {
+                MobTargetBinding::Member {
+                    mob_id, member_id, ..
+                } => (Some(mob_id.clone()), vec![member_id.clone()]),
+                MobTargetBinding::Flow { .. }
+                | MobTargetBinding::SpawnHelper { .. }
+                | MobTargetBinding::ForkHelper { .. } => return Ok(None),
+            },
+            TargetBinding::Identity(binding) => {
+                match parse_mob_member_schedule_identity(binding.identity()) {
+                    Some(named) => (Some(named.mob_id), vec![named.member]),
+                    None => (
+                        None,
+                        vec![
+                            binding.identity().to_string(),
+                            crate::member_comms_id::mob_member_id_str(binding.identity())
+                                .into_owned(),
+                        ],
+                    ),
+                }
+            }
+            TargetBinding::Session(_) | TargetBinding::HostRunnable(_) => return Ok(None),
+        };
+        for member in members {
+            let archived = self
+                .core_entry(mob_id.as_deref(), &member)?
+                .is_some_and(|entry| {
+                    matches!(
+                        entry.standing,
+                        meerkat_mob::EntryStanding::Unseated(
+                            meerkat_mob::UnseatedEntryCause::Archived
+                        )
+                    )
+                });
+            if archived {
+                return Ok(Some(
+                    crate::member_comms_id::runtime_alias_str(&member).into_owned(),
+                ));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The sessions Core's entry records for the member `member` of mob
+    /// `mob_id`: the session its member is bound to, and, while no member
+    /// holds the identity, the session its archive kept, on which its
+    /// unarchive seats it again. Empty when no runtime was adopted and for
+    /// a name that is no identity entry.
+    fn entry_sessions(
+        &self,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<Vec<String>, meerkat_mob::MobError> {
+        let Some(entry) = self.core_entry(Some(mob_id), member)? else {
+            return Ok(Vec::new());
+        };
+        let bound = match &entry.standing {
+            meerkat_mob::EntryStanding::Seated(seated)
+            | meerkat_mob::EntryStanding::Retiring(seated) => seated.session_id.as_ref(),
+            // No member holds the identity, or it stands in a way this build
+            // does not know: no member's session is read for it.
+            _ => None,
+        };
+        Ok(bound
+            .into_iter()
+            .chain(entry.archived_session.as_ref())
+            .map(ToString::to_string)
+            .collect())
     }
 
     async fn resolve_bridge_session(&self, session_id: &str) -> Option<(String, String)> {
@@ -789,6 +902,223 @@ impl ScheduleMobTargetRegistry {
             Some(Some(state)) => state,
         };
         MobSessionResolution::Resolved(bridge_session_member(&state, session_id).await)
+    }
+}
+
+/// The schedules of a launch, as the family of changes of its long-term
+/// agents has them follow an agent
+/// ([`crate::identity_creation::AgentSchedules`]): the schedules that
+/// target the agent (a member target of it, an identity target naming it,
+/// a session target naming its session, or a Console caller's schedule
+/// for it) are paused for their target by its archive, resumed by its
+/// unarchive when they are paused for their target, and ended by its
+/// removal. Whose pause a pause is, the schedule's own lifecycle records;
+/// nothing is kept here.
+///
+/// This is the one sender of the schedule lifecycle's two target inputs
+/// (`ScheduleService::pause_for_target`, `resume_for_target`) in a launch:
+/// a schedule holds one mark for its target, so a second sender for the
+/// same target would end the first one's pause with its own resume.
+///
+/// A removed agent's entry records no session any more, so a schedule that
+/// names only the session of a removed agent is not found by its removal:
+/// its fires end as a missing target until somebody deletes it.
+#[derive(Clone)]
+pub struct MobAgentSchedules {
+    service: ScheduleService,
+    targets: ScheduleMobTargetRegistry,
+}
+
+impl MobAgentSchedules {
+    /// The schedules of `service`, whose targets `targets` resolves to the
+    /// members of the launch's mob.
+    #[must_use]
+    pub fn new(service: ScheduleService, targets: ScheduleMobTargetRegistry) -> Self {
+        Self { service, targets }
+    }
+
+    /// The schedules that target the agent `agent` of the mob `mob_id`
+    /// and are not deleted, in the service's order. A read of Core's entry
+    /// of the agent that fails is an error: the agent's session schedules
+    /// would be left out without a word.
+    async fn targeting(
+        &self,
+        mob_id: &str,
+        agent: &str,
+    ) -> Result<Vec<Schedule>, meerkat::ScheduleDomainError> {
+        let Some(member) = crate::identity_creation::core_member_name(agent) else {
+            return Ok(Vec::new());
+        };
+        let sessions = self
+            .targets
+            .entry_sessions(mob_id, member.as_str())
+            .map_err(|error| {
+                meerkat::ScheduleDomainError::Internal(format!(
+                    "reading Core's entry of the agent: {error}"
+                ))
+            })?;
+        let mut targeting = Vec::new();
+        for schedule in self.service.list().await? {
+            if self
+                .names_agent(&schedule.target, mob_id, agent, member.as_str(), &sessions)
+                .await
+            {
+                targeting.push(schedule);
+            }
+        }
+        Ok(targeting)
+    }
+
+    /// Whether `target` names the agent `agent`, member `member` of the mob
+    /// `mob_id`, in any form a schedule names an agent: a member target of
+    /// it; an identity target naming it, by its member id or by its name;
+    /// a session target naming a session of it (the session a live member
+    /// of it holds, or one of `sessions`, which Core's entry records for
+    /// it); or a Console caller's schedule for it.
+    async fn names_agent(
+        &self,
+        target: &TargetBinding,
+        mob_id: &str,
+        agent: &str,
+        member: &str,
+        sessions: &[String],
+    ) -> bool {
+        if let Some(send) = crate::console_schedules::ConsoleScheduledSend::of_target(target) {
+            return send.identity == agent;
+        }
+        if let TargetBinding::Session(session) = target
+            && let Some(session_id) = session_target_session(session)
+            && sessions.contains(&session_id)
+        {
+            return true;
+        }
+        self.targets
+            .target_names_member(target, mob_id, member)
+            .await
+            || (member != agent
+                && self
+                    .targets
+                    .target_names_member(target, mob_id, agent)
+                    .await)
+    }
+
+    /// Whether `schedule` stands as `effect` leaves an agent's schedule:
+    /// paused for its target after an archive, active after an unarchive,
+    /// deleted after a removal.
+    fn stands(effect: crate::identity_creation::ScheduleEffect, schedule: &Schedule) -> bool {
+        use crate::identity_creation::ScheduleEffect;
+        match effect {
+            ScheduleEffect::Paused => schedule.paused_for_target(),
+            ScheduleEffect::Resumed => schedule.phase == SchedulePhase::Active,
+            ScheduleEffect::Ended => schedule.phase == SchedulePhase::Deleted,
+        }
+    }
+
+    fn named(schedule: &Schedule) -> crate::identity_creation::ScheduleRef {
+        crate::identity_creation::ScheduleRef::new(
+            schedule.schedule_id.to_string(),
+            schedule.config.name.clone(),
+        )
+    }
+}
+
+#[async_trait]
+impl crate::identity_creation::AgentSchedules for MobAgentSchedules {
+    async fn follow(
+        &self,
+        mob_id: &str,
+        agent: &str,
+        effect: crate::identity_creation::ScheduleEffect,
+    ) -> crate::identity_creation::SchedulesFollowed {
+        use crate::identity_creation::{ScheduleEffect, SchedulesFollowed};
+        let targeting = match self.targeting(mob_id, agent).await {
+            Ok(targeting) => targeting,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    agent,
+                    "the schedules that target an agent could not be listed: they do not follow \
+                     its change until the same request is asked again"
+                );
+                return SchedulesFollowed::new(effect, Vec::new(), true);
+            }
+        };
+        let mut followed = Vec::new();
+        let mut incomplete = false;
+        for schedule in &targeting {
+            let id = &schedule.schedule_id;
+            // Each call is the schedule's own lifecycle's to decide: it
+            // changes nothing where it has nothing to do. What is listed
+            // is the schedule as the call answers it, whichever call
+            // brought it there, never the listing made before it: asked
+            // again after a follow that did a part, a follow answers as a
+            // whole one does.
+            let after = match effect {
+                ScheduleEffect::Paused => self
+                    .service
+                    .pause_for_target(id)
+                    .await
+                    .map(|(paused, _)| paused),
+                ScheduleEffect::Resumed => self
+                    .service
+                    .resume_for_target(id)
+                    .await
+                    .map(|(resumed, _)| resumed),
+                ScheduleEffect::Ended => self.service.delete(id).await,
+            };
+            match after.map(|after| Self::stands(effect, &after)) {
+                Ok(true) => followed.push(Self::named(schedule)),
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        agent,
+                        schedule_id = %id,
+                        "a schedule that targets an agent did not follow its change: it does \
+                         when the same request is asked again"
+                    );
+                    incomplete = true;
+                }
+            }
+        }
+        SchedulesFollowed::new(effect, followed, incomplete)
+    }
+
+    async fn planned(
+        &self,
+        mob_id: &str,
+        agent: &str,
+        effect: crate::identity_creation::ScheduleEffect,
+    ) -> crate::identity_creation::SchedulesFollowed {
+        use crate::identity_creation::{ScheduleEffect, SchedulesFollowed};
+        match self.targeting(mob_id, agent).await {
+            Ok(targeting) => SchedulesFollowed::new(
+                effect,
+                targeting
+                    .iter()
+                    // What the follow would answer: an archive and an
+                    // unarchive move a schedule that is active or paused for
+                    // its target and leave a pause somebody asked for by
+                    // name; a removal ends every one.
+                    .filter(|schedule| match effect {
+                        ScheduleEffect::Paused | ScheduleEffect::Resumed => {
+                            schedule.phase == SchedulePhase::Active || schedule.paused_for_target()
+                        }
+                        ScheduleEffect::Ended => true,
+                    })
+                    .map(Self::named)
+                    .collect(),
+                false,
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    agent,
+                    "the schedules that target an agent could not be listed for a plan"
+                );
+                SchedulesFollowed::new(effect, Vec::new(), true)
+            }
+        }
     }
 }
 
@@ -1044,7 +1374,83 @@ fn written_target(args: &Value) -> Option<TargetBinding> {
         .and_then(|target| serde_json::from_value::<TargetBinding>(target.clone()).ok())
 }
 
-/// Why a schedule create or update is refused for its target, if it is.
+/// The policy denial code of a schedule that would point at an archived
+/// agent: the kind a delivery to an archived agent is refused with.
+const ARCHIVED_SCHEDULE_TARGET: &str = "identity_archived";
+
+/// Why a schedule create or update is refused for its target, if it is: by
+/// the calling member's reach ([`private_target_refusal`]), else because
+/// the schedule would point at an archived agent
+/// ([`archived_target_refusal`]).
+async fn schedule_target_refusal(
+    registry: &ScheduleMobTargetRegistry,
+    service: &ScheduleService,
+    name: &str,
+    args: &Value,
+    context: &meerkat_core::ToolDispatchContext,
+) -> Option<meerkat_core::ToolError> {
+    if let Some(refusal) = private_target_refusal(registry, service, name, args, context).await {
+        return Some(refusal);
+    }
+    archived_target_refusal(registry, service, name, args).await
+}
+
+/// Why a schedule create or update is refused because the schedule would
+/// point at an archived agent, if it is. The target a schedule has after
+/// the call is the one the call writes, else, for an update, the one the
+/// schedule holds: when it names an agent Core holds archived (a member
+/// target or an identity target; Core's entry of the name is read at the
+/// call), the call is refused as a policy denial
+/// ([`ARCHIVED_SCHEDULE_TARGET`]). An archive pauses its agent's schedules,
+/// and nothing would pause one pointed at the agent afterwards. A pause, a
+/// resume and a delete of the agent's schedules stay, and so does an update
+/// that moves a schedule to another agent. An entry Core could not read
+/// refuses the call as temporarily unavailable: it is never read as "not
+/// archived".
+async fn archived_target_refusal(
+    registry: &ScheduleMobTargetRegistry,
+    service: &ScheduleService,
+    name: &str,
+    args: &Value,
+) -> Option<meerkat_core::ToolError> {
+    let target = match written_target(args) {
+        Some(target) => target,
+        None if name == "meerkat_schedule_update" => {
+            let schedule_id = args
+                .get("schedule_id")
+                .and_then(Value::as_str)
+                .and_then(|raw| meerkat::ScheduleId::parse(raw).ok())?;
+            service.get(&schedule_id).await.ok()?.target
+        }
+        None => return None,
+    };
+    match registry.archived_target(&target) {
+        Ok(None) => None,
+        Ok(Some(agent)) => Some(meerkat_core::ToolError::policy_denied(
+            meerkat_core::ToolConsequenceDenial::new(
+                ARCHIVED_SCHEDULE_TARGET,
+                format!(
+                    "{name} refused: {agent} is archived and takes no deliveries until it is \
+                     unarchived. No schedule is created for it or changed while it is archived; \
+                     its schedules can still be paused, resumed, deleted or moved to another agent"
+                ),
+            ),
+        )),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "whether a schedule's target is archived could not be read: the call is refused"
+            );
+            Some(meerkat_core::ToolError::unavailable(
+                name,
+                meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+            ))
+        }
+    }
+}
+
+/// Why a schedule create or update is refused for its target by the calling
+/// member's reach, if it is.
 ///
 /// A member private to a person (`caller` names it, with its owner) writes
 /// only schedules aimed at itself, so nothing of that person's conversation
@@ -1054,7 +1460,7 @@ fn written_target(args: &Value) -> Option<TargetBinding> {
 /// ([`PRIVATE_MEMBER_SCHEDULE_TARGET`]). Any other caller's target that names
 /// a member private to a person the caller is not private to is refused as
 /// an act on a member outside the caller's reach (`access_denied`).
-async fn schedule_target_refusal(
+async fn private_target_refusal(
     registry: &ScheduleMobTargetRegistry,
     service: &ScheduleService,
     name: &str,
@@ -2563,6 +2969,10 @@ pub fn spawn_schedule_claim_watchdog(
         }
     })
 }
+
+#[cfg(test)]
+#[path = "schedule_wiring_follow_tests.rs"]
+mod follow_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -4577,7 +4987,7 @@ comms = true
                 calls: llm_calls.clone(),
             })),
         });
-        let runtime = crate::UnifiedRuntime::bootstrap(
+        let mut runtime = crate::UnifiedRuntime::bootstrap(
             mob_spec,
             crate::MetaConfig {
                 modules: vec![],
@@ -4591,6 +5001,12 @@ comms = true
         )
         .await
         .expect("bootstrap schedule test runtime");
+        // The host completes the runtime's bootstrap: an agent created at
+        // run time is built only after that.
+        runtime
+            .activate_without_identity_context()
+            .await
+            .expect("complete the runtime's bootstrap");
         let handle = runtime.mob_handle();
 
         // An identity created at runtime: Core seats it Dormant, and its row

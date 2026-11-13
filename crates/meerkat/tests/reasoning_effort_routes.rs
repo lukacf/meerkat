@@ -777,6 +777,23 @@ impl Param {
         );
     }
 
+    /// As `report_cell`, for a second thing the row `test` asserts on this
+    /// route, which the row manifest lists as a row of its own under the
+    /// word `case`: the line names the case too. It asserts nothing.
+    fn report_case(self, test: &str, case: &str, model: &str, level: EffortLevel) {
+        println!(
+            "reasoning-effort-receipt-cell {}",
+            json!({
+                "test": test,
+                "case": case,
+                "cell": self.receipt_cell(),
+                "model": model,
+                "level": level.as_wire_str(),
+                "route": self.route().to_string(),
+            })
+        );
+    }
+
     /// The wire paths the route writes a level to.
     fn fields(self) -> Vec<String> {
         let fields: &[&str] = match self {
@@ -1552,6 +1569,13 @@ async fn unsupported_level_is_refused_before_any_provider_request() {
             );
             let level = fixture.level();
             assert!(level <= EffortLevel::High);
+            // The one line of this case: its own row of the receipt.
+            param.report_case(
+                "unsupported_level_is_refused_before_any_provider_request",
+                "second_thinking_type",
+                &fixture.model,
+                level,
+            );
             let refusal = refused(
                 &fixture,
                 ProviderParamsOverride {

@@ -70,12 +70,14 @@ const runtime = await MeerkatRuntime.initFromMobpack(wasm, mobpackBytes, {
 ```
 
 <Warning>
-A key passed to the browser runtime is in the page. Anyone who can load the
-page can read it, in the page's code and in the requests the browser sends to
-the provider. Pass a real provider key only when it is the key of the person
-using the page (one they enter themselves, or yours on your own machine). For
-a page you serve to other people, use the proxy form below: the browser gets
-a dummy key, and the proxy adds the real one on the server.
+A key written into the page's code is sent to everyone who loads the page,
+and each of them can read it, in the code and in the requests the browser
+sends to the provider. Write a provider key into the page only on your own
+machine. A key that the person using the page enters stays in that person's
+browser: other visitors do not get it, but every script running in the page
+can read it. For a page you serve to other people, let each person enter a
+key of their own, or use the proxy form below: the browser gets a dummy key,
+and the proxy adds the real one on the server.
 </Warning>
 
 Mobpack ingress is fail-closed. The default is strict trust with an empty

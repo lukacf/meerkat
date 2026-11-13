@@ -13,7 +13,7 @@ A mobpack is not a VM, container, or complete host image. It carries a mob
 definition and the files of its mob directory. It does not carry the Meerkat
 binary, OS packages, or operator network policy. It should not carry provider
 credentials or secret environment values either, but nothing removes them:
-`rkat mob pack` archives every file under the mob directory (see
+`rkat mob pack` archives every regular file under the mob directory (see
 [What is packed](#what-is-packed)).
 </Note>
 
@@ -64,8 +64,7 @@ token fails instead of silently downgrading execution.
 depth. It prints no warning and no list of them. Hidden files are included:
 an env file placed there (`.env`, `.env.local`) is in the pack with its
 contents, and so is the whole `.git` directory when the mob directory is a
-repository of its own. Only the output file and the signing key are left out
-when they lie inside the directory.
+repository of its own.
 
 A pack is a gzip-compressed tar archive: anyone who has the file can read
 every file in it. A web build copies the pack into its bundle as
@@ -74,6 +73,8 @@ every file in it. A web build copies the pack into its bundle as
 Before you share a pack or host a bundle:
 
 - Keep env files, keys and repository metadata out of the mob directory.
+- Keep the signing key and the pack output outside the mob directory, as the
+  commands in this guide do.
 - List what the pack holds: `rkat mob inspect <pack>` prints one `file` line
   for each archived file. It also reads the `mobpack.bin` of a built bundle.
 - Move out everything that is not the manifest, the definition and the assets
@@ -282,8 +283,11 @@ user-supplied key or your authenticated proxy. Serve the directory
 - `meerkat-bootstrap.js` — reusable ES module exporting `bootMobpack(opts)`; import it from your own app
 - `meerkat_web_runtime.js` — the wasm-bindgen glue
 - `meerkat_web_runtime_bg.wasm` — the compiled meerkat agent stack
-- `mobpack.bin` — the packed mob artifact (loaded via the runtime's `init_runtime`): the pack itself, unchanged, so anyone who can load the page can download every file in it (see [What is packed](#what-is-packed))
+- `mobpack.bin` — the packed mob artifact (loaded via the runtime's `init_runtime`)
 - `manifest.web.toml` — derived web manifest
+
+`mobpack.bin` is the pack itself, unchanged: anyone who can load the page can
+download every file in it (see [What is packed](#what-is-packed)).
 
 The generated `bootMobpack` bakes in the trust policy this bundle was built with
 (`--trust-policy`); override it (and supply `trusted_signers`) for signed/strict
@@ -311,12 +315,13 @@ const result = await session.turn("Your prompt here");
 const events = session.pollEvents();
 ```
 
-The key in that call is in the page: anyone who can load the page can read
-it. Use a real provider key this way only on your own machine or when it is
-the key of the person using the page. For a page you serve to other people,
-give the runtime a dummy key and the base URL of your authenticated proxy,
-which adds the real key on the server; see
-[Initialize runtime](/examples/wasm#initialize-runtime).
+A key written into the page's code, as in that call, is sent to everyone who
+loads the page, and each of them can read it. Do that only on your own
+machine. For a page you serve to other people, either let each person enter
+a key of their own at run time, which stays in that person's browser (every
+script running in the page can read it there), or give the runtime a dummy
+key and the base URL of your authenticated proxy, which adds the real key on
+the server; see [Initialize runtime](/examples/wasm#initialize-runtime).
 
 For production, set `mobpackTrust.policy` to `"strict"` and supply
 `mobpackTrust.trustedSigners`, mapping each verified signer id to its

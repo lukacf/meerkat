@@ -198,7 +198,9 @@ them.
   - For Rust embedders: `AgentToolDispatcher::tool_catalog_control_plane`
     (new, defaulted) says how a source needs the control tools shown:
     `ToolCatalogControlPlane::Always`, `OnDemand` or `Never` (new enum,
-    `meerkat-core`). The default answers `Always` for a source that sets
+    `meerkat-core`; it is `#[non_exhaustive]`, so a match on it outside
+    `meerkat-core` needs a wildcard arm). The default answers `Always` for a
+    source that sets
     `ToolCatalogCapabilities::may_require_catalog_control_plane` and `Never`
     otherwise, so existing sources behave as before; the flag keeps meaning
     "mount the control tools for this source". A wrapper forwards its inner

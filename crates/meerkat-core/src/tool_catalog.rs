@@ -252,7 +252,11 @@ pub fn stable_owner_key_for_tool(tool: &ToolDef) -> Option<String> {
 /// for this source. This says whether a mounted control plane is in every
 /// model request or only when it is useful. The variants are ordered: a
 /// composition takes the strongest need of its sources.
+///
+/// More answers may be added later: code outside this crate that matches on
+/// the enum needs a wildcard arm.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum ToolCatalogControlPlane {
     /// The source does not ask for the control tools. A session still mounts
     /// them when it has a deferrable tool or a connecting source.

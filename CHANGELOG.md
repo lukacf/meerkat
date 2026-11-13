@@ -121,6 +121,11 @@ them.
   Added). A match over the enum without a wildcard arm handles the new
   variant.
 
+- The generated TypeScript and Web SDK types gain a new union member: the
+  run-failure reason `reasoning_effort_refused`. An exhaustive `switch`
+  without a default over that union needs the new case; nothing changes at
+  run time (an SDK that does not know the value keeps the raw data).
+
 ### Added
 
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider

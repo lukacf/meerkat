@@ -1707,6 +1707,7 @@ jobs:
           sparse-checkout: |
             crates/*/Cargo.toml
             crates/*/src/
+            crates/*/skills/
           sparse-checkout-cone-mode: false
 
       - name: Download Windows artifacts
@@ -2485,7 +2486,10 @@ jobs:
           sparse-checkout-cone-mode: false
 
       # The registration check compares a binary's answer with what the
-      # release tree registers: the crates' sources, nothing else.
+      # release tree registers: the crates' manifests, sources and built-in
+      # skill texts (the check reads a skill's body for the mob member
+      # rkat-rpc spawns), nothing else. scripts/test_check_release_binary_registrations.py
+      # fails when a list here lacks a file the check reads.
       - name: Checkout the release tree's registrations
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -2495,6 +2499,7 @@ jobs:
           sparse-checkout: |
             crates/*/Cargo.toml
             crates/*/src/
+            crates/*/skills/
           sparse-checkout-cone-mode: false
 
       - name: Download the Intel macOS archives
@@ -2570,6 +2575,7 @@ jobs:
           sparse-checkout: |
             crates/*/Cargo.toml
             crates/*/src/
+            crates/*/skills/
           sparse-checkout-cone-mode: false
 
       - name: Download the archives of this target

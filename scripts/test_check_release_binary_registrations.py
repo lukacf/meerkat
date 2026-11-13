@@ -14,7 +14,17 @@ not register, an ungated built-in skill missing, a built-in the source does
 not register, a capability or an ungated skill the source gained that the
 binary lacks, and an ELF file with two init-array tables (read, never run, so
 it is refused for a target the host cannot run too). A release version in the
-environment never skips the check. No network beyond loopback, no Rust build.
+environment never skips the check. A row of the check's exclusion table is
+honoured when it names a registered capability and refused when it does not.
+
+Three release jobs give the check a sparse checkout of the release tree
+instead of a full one. The last cases read those jobs' `sparse-checkout`
+lists from .github/workflows/release.yml and require that each list holds
+every file the check reads: the check runs on a tree made of exactly the
+files a list selects, and every source file the check reads in this checkout
+is matched against the list. A list that lacks a path the check reads (the
+member assertion's skill body lives outside `src/`) fails here, not in a
+release run. No network beyond loopback, no Rust build.
 """
 
 from __future__ import annotations
@@ -23,6 +33,8 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -31,6 +43,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECK = ROOT / "scripts" / "check-release-binary-registrations"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+# The step that checks out the tree a job passes to the check as
+# `--source-root release-tree`, and that flag.
+RELEASE_TREE_STEP = "- name: Checkout the release tree's registrations"
+RELEASE_TREE_FLAG = "--source-root release-tree"
+# The exclusion table of the check, as the cases that fill it find it.
+NOT_REPORTED_LINE = "NOT_REPORTED: dict[str, dict[str, str]] = {surface: {} for surface in SURFACES}\n"
 
 CAPABILITIES = ["sessions", "skills", "work_graph"]
 UNGATED = ["alpha-reference", "beta-reference"]
@@ -352,18 +371,139 @@ def load_checker():
     return module
 
 
-def run(binary: Path, source: Path, *flags: str, version: str | None = None) -> subprocess.CompletedProcess:
+def run(
+    binary: Path, source: Path, *flags: str, version: str | None = None, check: Path = CHECK
+) -> subprocess.CompletedProcess:
     env = {key: value for key, value in os.environ.items() if key != "VERSION"}
     if version is not None:
         env["VERSION"] = version
     return subprocess.run(
-        [sys.executable, str(CHECK), *flags, "--source-root", str(source), str(binary)],
+        [sys.executable, str(check), *flags, "--source-root", str(source), str(binary)],
         env=env,
         capture_output=True,
         text=True,
         timeout=300,
         check=False,
     )
+
+
+def check_with_not_reported(directory: Path, rows: dict[str, str]) -> Path:
+    """A copy of the check whose exclusion table holds `rows` for every
+    binary. The table's line must occur exactly once, so a rewording of it
+    fails here instead of leaving the table untested."""
+    text = CHECK.read_text(encoding="utf-8")
+    if text.count(NOT_REPORTED_LINE) != 1:
+        raise SystemExit(
+            f"{CHECK} holds the line {NOT_REPORTED_LINE.strip()!r} {text.count(NOT_REPORTED_LINE)} times, "
+            "expected once: update NOT_REPORTED_LINE in this test"
+        )
+    directory.mkdir(parents=True, exist_ok=True)
+    copy = directory / CHECK.name
+    copy.write_text(
+        text.replace(
+            NOT_REPORTED_LINE,
+            f"NOT_REPORTED: dict[str, dict[str, str]] = {{surface: {rows!r} for surface in SURFACES}}\n",
+        ),
+        encoding="utf-8",
+    )
+    return copy
+
+
+def release_tree_checkouts() -> tuple[dict[str, list[str]], set[str], set[str]]:
+    """(job id -> the sparse-checkout patterns of its release-tree checkout
+    step, the ids of the jobs that have that step, the ids of the jobs that
+    pass `release-tree` to the check), read from the release workflow's text.
+    A step without a list is a full checkout: nothing can be missing from it."""
+    lines = RELEASE_WORKFLOW.read_text(encoding="utf-8").split("\n")
+    lists: dict[str, list[str]] = {}
+    steps: set[str] = set()
+    users: set[str] = set()
+    job = ""
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        head = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
+        if head:
+            job = head.group(1)
+        if RELEASE_TREE_FLAG in line:
+            users.add(job)
+        if line.strip() == RELEASE_TREE_STEP:
+            steps.add(job)
+            step_indent = len(line) - len(line.lstrip())
+            cursor = index + 1
+            while cursor < len(lines):
+                inner = lines[cursor]
+                indent = len(inner) - len(inner.lstrip())
+                if inner.strip() and indent <= step_indent:
+                    break
+                if inner.strip() == "sparse-checkout: |":
+                    patterns = lists.setdefault(job, [])
+                    cursor += 1
+                    while cursor < len(lines) and (
+                        not lines[cursor].strip() or len(lines[cursor]) - len(lines[cursor].lstrip()) > indent
+                    ):
+                        if lines[cursor].strip():
+                            patterns.append(lines[cursor].strip())
+                        cursor += 1
+                    continue
+                if inner.strip().startswith("sparse-checkout:"):
+                    # A sparse list in a form this reader does not read: an
+                    # empty list for the job, which the cases refuse.
+                    lists.setdefault(job, [])
+                cursor += 1
+        index += 1
+    return lists, steps, users
+
+
+def sparse_selects(patterns: list[str], path: str) -> bool:
+    """Whether a non-cone sparse checkout with `patterns` holds the file at
+    `path` (posix, relative to the root). Models the pattern forms the
+    release workflow uses: a root-relative pattern with `*` inside a path
+    segment, selecting a file or, with or without a trailing `/`, a directory
+    and everything beneath it. Any other form raises: extend the model before
+    using it."""
+    segments = path.split("/")
+    for pattern in patterns:
+        body = pattern.rstrip("/")
+        if (
+            not body
+            or body.startswith(("/", "!", "#"))
+            or "/" not in body
+            or any(token in body for token in ("**", "?", "[", "\\"))
+        ):
+            raise ValueError(f"sparse pattern form not modelled by this test: {pattern!r}")
+        matcher = re.compile("/".join(re.escape(part).replace(r"\*", "[^/]*") for part in body.split("/")))
+        # A directory match selects what is beneath it; a pattern with a
+        # trailing slash matches directories only.
+        longest = len(segments) - 1 if pattern.endswith("/") else len(segments)
+        if any(matcher.fullmatch("/".join(segments[:count])) for count in range(1, longest + 1)):
+            return True
+    return False
+
+
+def sparse_tree(source: Path, target: Path, patterns: list[str]) -> Path:
+    """The files of `source` a sparse checkout with `patterns` holds, copied to `target`."""
+    for path in sorted(source.rglob("*")):
+        if path.is_file() and sparse_selects(patterns, path.relative_to(source).as_posix()):
+            copy = target / path.relative_to(source)
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, copy)
+    return target
+
+
+def files_the_check_reads(checker, root: Path) -> list[str]:
+    """Every file under `root` the check opens when it is given `root` as the
+    source root, on a binary whose mob member it spawns: each crate's
+    manifest and sources, and the body of the member's skill."""
+    read: set[Path] = set(root.glob("crates/*/Cargo.toml"))
+    for texts in checker.crate_sources(root):
+        read.update(texts)
+    _, _, bodies = checker.registrations(root)
+    body = bodies.get(checker.MEMBER_SKILL)
+    if body is None:
+        raise checker.NoAnswer(f"{root} registers no `{checker.MEMBER_SKILL}` skill with a body file")
+    read.add(body)
+    return sorted(path.resolve().relative_to(root.resolve()).as_posix() for path in read)
 
 
 FAILURES: list[str] = []
@@ -587,6 +727,83 @@ def main() -> int:
             check=False,
         )
         expect("--surface names the binary of a Bazel output", surfaced, 0, "rkat-rpc: READ")
+
+        # The exclusion table: a row must name a capability the source
+        # registers, and it then takes exactly that capability out of what the
+        # binary must report.
+        expect(
+            "a row of the exclusion table that names no registered capability is refused",
+            run(good, source, check=check_with_not_reported(work / "table-stale", {"no_such_capability": "contract"})),
+            1,
+            "NOT_REPORTED in scripts/check-release-binary-registrations names ['no_such_capability'] for rkat",
+            "remove the rows",
+        )
+        excluding = check_with_not_reported(work / "table-row", {"work_graph": "contract"})
+        expect(
+            "a row of the exclusion table takes its capability out of what the binary must report",
+            run(write_stub(work / "capability-excluded", "rkat", CAPABILITIES[:2], healthy), source, check=excluding),
+            0,
+            "RUN: 2 capabilities, equal to the source registrations",
+        )
+        expect(
+            "a binary that reports a capability its row excludes is refused",
+            run(good, source, check=excluding),
+            1,
+            "not registered in the source for it: work_graph",
+        )
+
+        # The release jobs that give the check a checkout of the release tree
+        # of their own: a sparse list must hold every file the check reads.
+        lists, steps, users = release_tree_checkouts()
+        named = subprocess.CompletedProcess(
+            [],
+            0 if users and users == steps else 1,
+            f"jobs that pass `release-tree` to the check: {sorted(users)}; "
+            f"jobs with the step `{RELEASE_TREE_STEP[8:]}`: {sorted(steps)}",
+            "",
+        )
+        expect(
+            "every release job that passes a release tree to the check checks it out by the step this test reads",
+            named,
+            0,
+        )
+        reading = load_checker()
+        try:
+            read_here: list[str] | None = files_the_check_reads(reading, ROOT)
+            unreadable = ""
+        except (OSError, ValueError, reading.NoAnswer) as error:
+            read_here, unreadable = None, f"{type(error).__name__}: {error}"
+        for job, patterns in sorted(lists.items()):
+            try:
+                selected = sparse_tree(source, work / "sparse" / job, patterns)
+                on_sparse_tree = run(work / "good" / "rkat-rpc", selected)
+            except ValueError as error:
+                on_sparse_tree = subprocess.CompletedProcess([], 1, "", str(error))
+            expect(
+                f"{job}: the check runs on a tree made of exactly the files its sparse list selects",
+                on_sparse_tree,
+                0,
+                "the mob member it spawned carries the `mob-communication` skill",
+            )
+            if read_here is None:
+                covered = subprocess.CompletedProcess([], 1, "", unreadable)
+            else:
+                try:
+                    left_out = [path for path in read_here if not sparse_selects(patterns, path)]
+                    covered = subprocess.CompletedProcess(
+                        [],
+                        1 if left_out else 0,
+                        f"sparse list {patterns} leaves out {len(left_out)} of the {len(read_here)} files "
+                        f"the check reads: {', '.join(left_out[:8])}",
+                        "",
+                    )
+                except ValueError as error:
+                    covered = subprocess.CompletedProcess([], 1, "", str(error))
+            expect(
+                f"{job}: its sparse list selects every file the check reads in this checkout",
+                covered,
+                0,
+            )
 
     if FAILURES:
         print("\n" + "\n".join(FAILURES), file=sys.stderr)

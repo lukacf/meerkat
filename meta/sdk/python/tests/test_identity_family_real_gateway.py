@@ -400,11 +400,10 @@ async def test_update_changes_an_agent_and_says_when_instructions_apply(tmp_path
         assert isinstance(updated, IdentityDone), updated
         agent = updated.agents[0]
         assert agent.spec_digest != digest
-        # What became of the instructions change is on the outcome when the
-        # launch carries instruction changes to its agents; it is one of
-        # the closed kinds then.
-        if agent.instructions is not None:
-            assert agent.instructions.kind in INSTRUCTION_OUTCOME_KINDS
+        # An update that names `set.instructions` answers what became of
+        # the instructions change, as one of the closed kinds.
+        assert agent.instructions is not None
+        assert agent.instructions.kind in INSTRUCTION_OUTCOME_KINDS
         record = await identities.get("editor")
         assert record.display_name == "Chief editor"
         assert record.instructions == ("Edit for clarity.", "Keep the author's voice.")

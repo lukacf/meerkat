@@ -365,14 +365,12 @@ describe("identity family on a real gateway", () => {
       assert.ok(updated.outcome === "done", JSON.stringify(updated));
       const agent = updated.agents[0];
       assert.notEqual(agent.specDigest, digest);
-      // What became of the instructions change is on the outcome when the
-      // launch carries instruction changes to its agents; it is one of the
-      // closed kinds then.
-      if (agent.instructions !== null) {
-        assert.ok(
-          (INSTRUCTION_OUTCOME_KINDS as readonly string[]).includes(agent.instructions.kind),
-        );
-      }
+      // An update that names `set.instructions` answers what became of the
+      // instructions change, as one of the closed kinds.
+      assert.ok(agent.instructions !== null);
+      assert.ok(
+        (INSTRUCTION_OUTCOME_KINDS as readonly string[]).includes(agent.instructions.kind),
+      );
       const record = await identities.get("editor");
       assert.equal(record.displayName, "Chief editor");
       assert.deepEqual(record.instructions, ["Edit for clarity.", "Keep the author's voice."]);

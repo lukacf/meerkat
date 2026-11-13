@@ -55,6 +55,24 @@
   },
   "allow": [
     {
+      "path": "connect/docs/site/quickstart.mdx",
+      "match": "v0\\.9\\.14$",
+      "reason": "Connect's docs install the published Connect 0.9.14 release, released with Core 0.9.14 and Meta 0.9.14; it is the Connect release to use until Connect 0.9.15 is published.",
+      "removed_by": "the change that moves Connect's docs to the published Connect 0.9.15 assets"
+    },
+    {
+      "path": "docs/connect/quickstart.mdx",
+      "match": "v0\\.9\\.14$",
+      "reason": "Connect's docs install the published Connect 0.9.14 release, released with Core 0.9.14 and Meta 0.9.14; it is the Connect release to use until Connect 0.9.15 is published.",
+      "removed_by": "the change that moves Connect's docs to the published Connect 0.9.15 assets"
+    },
+    {
+      "path": "connect/README.md",
+      "match": "v0\\.9\\.14$|^meerkat-meta==0\\.9\\.14$",
+      "reason": "Connect's README installs the published Connect 0.9.14 release, released with Core 0.9.14 and Meta 0.9.14; it is the Connect release to use until Connect 0.9.15 is published.",
+      "removed_by": "the change that moves Connect's README and docs to the published Connect 0.9.15 assets"
+    },
+    {
       "path": "scripts/check_inrepo_version_pins.py",
       "reason": "The check's own description quotes example pins of each shape it finds."
     },
@@ -279,12 +297,6 @@
       "path": "connect/.github/workflows/checks.yml",
       "reason": "A copy of the standalone repository's workflow; GitHub runs only the root workflows, and ci.yml's connect-checks job runs these checks.",
       "removed_by": "the change that removes the standalone repositories' workflow copies under connect/.github and meta/.github"
-    },
-    {
-      "path": "connect/README.md",
-      "match": "v0\\.9\\.10$",
-      "reason": "Connect's README describes and installs the Connect 0.9.10 release with Core 0.9.10.",
-      "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
     },
     {
       "path": "connect/sdk/python/HOME_ASSISTANT.md",

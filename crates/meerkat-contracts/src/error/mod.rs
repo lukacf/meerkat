@@ -372,6 +372,44 @@ impl WireError {
     }
 }
 
+/// The failure document of `rkat run --output json`: the last document on
+/// stdout when the run fails, in place of the run result.
+///
+/// `error` is the same envelope the other surfaces report. For a turn that
+/// ended in failure its `code` is [`turn_failure_error_code`] and its
+/// `details` are `{"error": TurnErrorMetadata}`; for any other typed failure
+/// they are that error's own code and wire data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireRunFailure {
+    pub error: WireError,
+}
+
+/// The [`ErrorCode`] of a failed turn's typed terminal cause.
+///
+/// One mapping for every surface that reports a failed turn by code: the
+/// JSON-RPC error of a turn that fails through the runtime
+/// ([`ErrorCode::jsonrpc_code`]) and the `rkat run` failure document
+/// ([`WireRunFailure`]). It gives a cause the code
+/// [`agent_transport_error_code`] gives the equivalent agent error, so a turn
+/// reports the same class whichever path its failure takes. The cause kind
+/// alone decides.
+pub fn turn_failure_error_code(turn_error: &meerkat_core::TurnErrorMetadata) -> ErrorCode {
+    use meerkat_core::TurnTerminalCauseKind as Cause;
+    match turn_error.kind {
+        Cause::LlmFailure | Cause::RetryExhausted => ErrorCode::ProviderError,
+        Cause::BudgetExhausted | Cause::TimeBudgetExceeded => ErrorCode::BudgetExhausted,
+        Cause::HookDenied => ErrorCode::HookDenied,
+        Cause::Unknown
+        | Cause::HookFailure
+        | Cause::ToolFailure
+        | Cause::StructuredOutputValidationFailed
+        | Cause::TurnLimitReached
+        | Cause::RuntimeApplyFailure
+        | Cause::FatalFailure => ErrorCode::InternalError,
+    }
+}
+
 /// Audience-safe session details, including typed runtime readiness.
 pub fn session_error_details(error: &meerkat_core::SessionError) -> Option<serde_json::Value> {
     match error {
@@ -538,6 +576,96 @@ impl From<meerkat_core::SessionError> for WireError {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// The JSON-RPC integer a failed turn of each terminal cause kind
+    /// answers. The match has no wildcard arm, so a new kind does not
+    /// compile until it is given its integer here.
+    fn golden_turn_failure_jsonrpc_code(kind: meerkat_core::TurnTerminalCauseKind) -> i32 {
+        use meerkat_core::TurnTerminalCauseKind as Kind;
+        match kind {
+            Kind::LlmFailure | Kind::RetryExhausted => -32010,
+            Kind::BudgetExhausted | Kind::TimeBudgetExceeded => -32011,
+            Kind::HookDenied => -32012,
+            Kind::Unknown
+            | Kind::HookFailure
+            | Kind::ToolFailure
+            | Kind::StructuredOutputValidationFailed
+            | Kind::TurnLimitReached
+            | Kind::RuntimeApplyFailure
+            | Kind::FatalFailure => -32603,
+        }
+    }
+
+    /// JSON-RPC and the `rkat run` failure document read a failed turn's
+    /// code from one mapping: for every terminal cause kind, its code is the
+    /// JSON-RPC integer that kind has always answered.
+    #[test]
+    fn rpc_and_cli_share_the_turn_failure_code() {
+        use meerkat_core::TurnTerminalCauseKind as Kind;
+        let kinds = [
+            Kind::Unknown,
+            Kind::HookDenied,
+            Kind::HookFailure,
+            Kind::LlmFailure,
+            Kind::ToolFailure,
+            Kind::StructuredOutputValidationFailed,
+            Kind::BudgetExhausted,
+            Kind::TimeBudgetExceeded,
+            Kind::RetryExhausted,
+            Kind::TurnLimitReached,
+            Kind::RuntimeApplyFailure,
+            Kind::FatalFailure,
+        ];
+        for kind in kinds {
+            let turn_error = meerkat_core::TurnErrorMetadata::terminal(
+                kind,
+                meerkat_core::TurnTerminalOutcome::Failed,
+                "turn failed",
+            );
+            assert_eq!(
+                turn_failure_error_code(&turn_error).jsonrpc_code(),
+                golden_turn_failure_jsonrpc_code(kind),
+                "{kind:?}"
+            );
+        }
+        // The cause kind alone decides: the other typed fields do not.
+        let mut retryable = meerkat_core::TurnErrorMetadata::terminal(
+            Kind::ToolFailure,
+            meerkat_core::TurnTerminalOutcome::Failed,
+            "turn failed",
+        );
+        retryable.retryable = Some(true);
+        retryable.provider = Some("provider".to_string());
+        assert_eq!(
+            turn_failure_error_code(&retryable),
+            ErrorCode::InternalError
+        );
+    }
+
+    /// The run failure document is the wire error under one `error` key, and
+    /// nothing else.
+    #[test]
+    fn run_failure_document_wraps_the_wire_error() {
+        let document = WireRunFailure {
+            error: WireError::new(ErrorCode::ProviderError, "turn abandoned")
+                .with_details(serde_json::json!({ "error": { "kind": "llm_failure" } })),
+        };
+        let json = serde_json::to_value(&document).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "error": {
+                    "code": "PROVIDER_ERROR",
+                    "category": "provider",
+                    "message": "turn abandoned",
+                    "details": { "error": { "kind": "llm_failure" } },
+                }
+            })
+        );
+        let parsed: WireRunFailure = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.error.code, ErrorCode::ProviderError);
+        assert_eq!(parsed.error.category, ErrorCategory::Provider);
+    }
 
     /// A turn refused by instruction activation history is a typed agent
     /// error; on the wire it keeps the code its configuration-string form had.

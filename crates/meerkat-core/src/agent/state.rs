@@ -9361,12 +9361,17 @@ where
                 .map_err(|refusal| AgentError::OperationRefused { refusal })?
         };
         self.terminal_error_detail = Some(error.to_string());
-        // Diagnostic fidelity is safe to retain only when the generated cause
-        // remains LlmFailure. Retry exhaustion is a different generated cause
-        // and is intentionally reconstructed from terminal truth.
-        if retry_failure.is_none() {
-            self.terminal_error_metadata = crate::TurnErrorMetadata::from_agent_error(error);
-        }
+        // The typed provider facts ride beside the generated terminal as
+        // diagnostic data, under the cause the machine is about to commit:
+        // `LlmFailure` for a failure that is not retried, `RetryExhausted`
+        // for one that outlasted the retries. The terminal witness refuses
+        // facts whose kind is not the generated cause, so neither form can
+        // relabel the terminal.
+        self.terminal_error_metadata = if retry_failure.is_some() {
+            crate::TurnErrorMetadata::retry_exhausted_from_llm_error(error)
+        } else {
+            crate::TurnErrorMetadata::from_agent_error(error)
+        };
         let transition = self.apply_turn_input(TurnExecutionInput::FatalFailure {
             run_id: ctx.run_id.clone(),
             failure,
@@ -33384,6 +33389,9 @@ mod tests {
         fallback_proposals: std::sync::atomic::AtomicUsize,
         fallback_commits: std::sync::atomic::AtomicUsize,
         fail_backup: std::sync::atomic::AtomicBool,
+        /// With `fail_backup`: the backup fails rate limited, under its own
+        /// provider tag, instead of overloaded like the primary.
+        backup_rate_limited: std::sync::atomic::AtomicBool,
         fail_post_activation_identity_read_once: std::sync::atomic::AtomicBool,
         seen_tools: Mutex<Vec<Vec<String>>>,
         seen_notice_bodies: Mutex<Vec<Vec<String>>>,
@@ -33804,6 +33812,7 @@ mod tests {
                 fallback_proposals: std::sync::atomic::AtomicUsize::new(0),
                 fallback_commits: std::sync::atomic::AtomicUsize::new(0),
                 fail_backup: std::sync::atomic::AtomicBool::new(false),
+                backup_rate_limited: std::sync::atomic::AtomicBool::new(false),
                 fail_post_activation_identity_read_once: std::sync::atomic::AtomicBool::new(false),
                 seen_tools: Mutex::new(Vec::new()),
                 seen_notice_bodies: Mutex::new(Vec::new()),
@@ -33845,6 +33854,16 @@ mod tests {
             let client = Self::new();
             client
                 .fail_backup
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            client
+        }
+
+        /// The primary fails overloaded and the backup fails rate limited:
+        /// two targets that fail for different reasons.
+        fn with_terminal_backup_rate_limit() -> Self {
+            let client = Self::with_terminal_backup_failure();
+            client
+                .backup_rate_limited
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             client
         }
@@ -34401,6 +34420,18 @@ mod tests {
                     "mock overloaded",
                 ));
             }
+            if self
+                .backup_rate_limited
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(AgentError::llm(
+                    "backup-mock",
+                    crate::error::LlmFailureReason::RateLimited {
+                        retry_after: Some(Duration::from_millis(1)),
+                    },
+                    "backup rate limited",
+                ));
+            }
             if self.fail_backup.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(AgentError::llm(
                     "mock",
@@ -34770,6 +34801,455 @@ mod tests {
                 assert_eq!(cause_kind, crate::TurnTerminalCauseKind::RetryExhausted);
             }
             other => panic!("expected typed TerminalFailure, got {other:?}"),
+        }
+    }
+
+    /// One scripted provider failure: the provider tag, the typed reason and
+    /// the display message of one failed attempt.
+    type ScriptedLlmFailure = (&'static str, LlmFailureReason, &'static str);
+
+    /// Fails every provider call with the next scripted failure; the last
+    /// one repeats for every later call.
+    struct ScriptedFailureClient {
+        script: Vec<ScriptedLlmFailure>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for ScriptedFailureClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let &(provider, ref reason, message) = self
+                .script
+                .get(call)
+                .or_else(|| self.script.last())
+                .expect("a scripted failure");
+            Err(AgentError::llm(provider, reason.clone(), message))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    fn scripted_overload_503() -> ScriptedLlmFailure {
+        (
+            "mock",
+            LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                LlmProviderErrorKind::ServerOverloaded,
+                serde_json::json!({ "status": 503 }),
+            )),
+            "Server overloaded (503)",
+        )
+    }
+
+    fn scripted_server_error_500() -> ScriptedLlmFailure {
+        (
+            "mock",
+            LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                LlmProviderErrorKind::ServerError,
+                serde_json::json!({ "status": 500 }),
+            )),
+            "Server error (500)",
+        )
+    }
+
+    /// The 1 ms hint is above the zero backoff of
+    /// [`run_scripted_failures`], so it is the whole retry delay: no 30 s
+    /// rate-limit floor.
+    fn scripted_rate_limit_429() -> ScriptedLlmFailure {
+        (
+            "mock",
+            LlmFailureReason::RateLimited {
+                retry_after: Some(Duration::from_millis(1)),
+            },
+            "Rate limited (429)",
+        )
+    }
+
+    fn scripted_invalid_request_400() -> ScriptedLlmFailure {
+        (
+            "mock",
+            LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                LlmProviderErrorKind::InvalidRequest,
+                serde_json::json!({ "status": 400 }),
+            )),
+            "Invalid request (400)",
+        )
+    }
+
+    /// What a runtime-backed caller gets from a run whose provider calls all
+    /// fail: the returned error, the typed turn error the runtime publishes
+    /// (the agent's terminal witness), the provider calls made and the
+    /// events emitted.
+    struct ScriptedFailureRun {
+        error: AgentError,
+        turn_error: crate::TurnErrorMetadata,
+        provider_calls: usize,
+        events: Vec<crate::AgentEvent>,
+    }
+
+    impl ScriptedFailureRun {
+        fn retrying_events(&self) -> usize {
+            self.events
+                .iter()
+                .filter(|event| matches!(event, crate::AgentEvent::Retrying { .. }))
+                .count()
+        }
+
+        /// The `error_report` and `terminal_cause_kind` of the run's one
+        /// `RunFailed` event.
+        fn run_failed_event(
+            &self,
+        ) -> (
+            &crate::event::AgentErrorReport,
+            Option<crate::TurnTerminalCauseKind>,
+        ) {
+            let mut failed = self.events.iter().filter_map(|event| match event {
+                crate::AgentEvent::RunFailed {
+                    error_report,
+                    terminal_cause_kind,
+                    ..
+                } => Some((error_report, *terminal_cause_kind)),
+                _ => None,
+            });
+            let event = failed.next().expect("the run emits RunFailed");
+            assert!(failed.next().is_none(), "the run emits one RunFailed");
+            event
+        }
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    async fn run_scripted_failures(
+        script: Vec<ScriptedLlmFailure>,
+        max_retries: u32,
+    ) -> ScriptedFailureRun {
+        let client = Arc::new(ScriptedFailureClient {
+            script,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .retry_policy(crate::retry::RetryPolicy {
+                max_retries,
+                initial_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                multiplier: 1.0,
+                call_timeout: None,
+                stream_inactivity_timeout: None,
+            })
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+
+        let (tx, mut rx) = mpsc::channel(1024);
+        let error = agent
+            .run_with_events("scripted provider failures".to_string().into(), tx)
+            .await
+            .expect_err("a run whose provider calls all fail must fail");
+        let turn_error = agent
+            .take_runtime_terminal_failure_witness()
+            .expect("the terminal witness projects")
+            .expect("a failed runtime turn carries its typed turn error");
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        ScriptedFailureRun {
+            error,
+            turn_error,
+            provider_calls: client.calls.load(std::sync::atomic::Ordering::SeqCst),
+            events,
+        }
+    }
+
+    /// A provider that answers 503 until the retries run out: the typed turn
+    /// error keeps `retry_exhausted` and its detail text, and carries the
+    /// provider, the typed reason of the last failed attempt and
+    /// `retryable: true` in the fields a non-retryable provider failure
+    /// fills.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn retry_exhausted_turn_error_carries_the_overload_cause() {
+        let run = run_scripted_failures(vec![scripted_overload_503()], 2).await;
+
+        assert!(
+            matches!(
+                run.error,
+                AgentError::TerminalFailure {
+                    outcome: TurnTerminalOutcome::Failed,
+                    cause_kind: crate::TurnTerminalCauseKind::RetryExhausted,
+                    ..
+                }
+            ),
+            "{:?}",
+            run.error
+        );
+        assert_eq!(run.provider_calls, 3, "one call and two retries");
+        assert_eq!(
+            serde_json::to_value(&run.turn_error).expect("the turn error serializes"),
+            serde_json::json!({
+                "kind": "retry_exhausted",
+                "terminal": true,
+                "outcome": "failed",
+                "detail": "Terminal failure: Failed (RetryExhausted): retry exhausted: \
+                           LLM error (mock): Server overloaded (503)",
+                "provider": "mock",
+                "retryable": true,
+                "reason": {
+                    "reason_type": "llm_provider_error",
+                    "provider_error_kind": "server_overloaded",
+                    "provider_error_retryability": "retryable",
+                    "provider_error": { "status": 503 },
+                },
+            })
+        );
+    }
+
+    /// A rate limit that outlasts the retries reports `llm_rate_limited`
+    /// with the last attempt's `Retry-After` hint.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn retry_exhausted_turn_error_carries_the_rate_limit_cause() {
+        let run = run_scripted_failures(vec![scripted_rate_limit_429()], 1).await;
+
+        assert_eq!(
+            run.turn_error.kind,
+            crate::TurnTerminalCauseKind::RetryExhausted
+        );
+        assert_eq!(run.provider_calls, 2, "one call and one retry");
+        assert_eq!(run.turn_error.provider.as_deref(), Some("mock"));
+        assert_eq!(run.turn_error.retryable, Some(true));
+        assert_eq!(run.turn_error.model, None);
+        assert_eq!(
+            run.turn_error.reason,
+            Some(crate::event::AgentErrorReason::LlmRateLimited {
+                retry_after_ms: Some(1),
+            })
+        );
+    }
+
+    /// Transport failures and the agent loop's own deadlines that outlast
+    /// the retries report the reason of their class: a network timeout
+    /// `llm_network_timeout`, a reset connection `llm_provider_error` of kind
+    /// `connection_reset`, and a call timeout or a stalled stream
+    /// `llm_call_timeout` (the reason a stalled stream already projects to).
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn retry_exhausted_turn_error_carries_the_transport_cause() {
+        use crate::event::AgentErrorReason;
+
+        let cases: Vec<(ScriptedLlmFailure, AgentErrorReason)> = vec![
+            (
+                (
+                    "mock",
+                    LlmFailureReason::NetworkTimeout {
+                        duration_ms: 30_000,
+                    },
+                    "Network timeout after 30000ms",
+                ),
+                AgentErrorReason::LlmNetworkTimeout {
+                    duration_ms: 30_000,
+                },
+            ),
+            (
+                (
+                    "mock",
+                    LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                        LlmProviderErrorKind::ConnectionReset,
+                        serde_json::json!({ "message": "connection reset by peer" }),
+                    )),
+                    "Connection reset",
+                ),
+                AgentErrorReason::LlmProviderError {
+                    provider_error_kind: LlmProviderErrorKind::ConnectionReset,
+                    provider_error_retryability:
+                        crate::error::LlmProviderErrorRetryability::Retryable,
+                    provider_error: serde_json::json!({ "message": "connection reset by peer" }),
+                },
+            ),
+            (
+                (
+                    "mock",
+                    LlmFailureReason::CallTimeout { duration_ms: 500 },
+                    "LLM call timed out after 500ms",
+                ),
+                AgentErrorReason::LlmCallTimeout { duration_ms: 500 },
+            ),
+            (
+                (
+                    "mock",
+                    LlmFailureReason::StreamStalled { inactivity_ms: 40 },
+                    "LLM stream produced no events",
+                ),
+                AgentErrorReason::LlmCallTimeout { duration_ms: 40 },
+            ),
+        ];
+
+        for (failure, expected_reason) in cases {
+            let label = failure.2;
+            let run = run_scripted_failures(vec![failure], 1).await;
+
+            assert_eq!(
+                run.turn_error.kind,
+                crate::TurnTerminalCauseKind::RetryExhausted,
+                "{label}"
+            );
+            assert_eq!(run.provider_calls, 2, "{label}: one call and one retry");
+            assert_eq!(run.turn_error.provider.as_deref(), Some("mock"), "{label}");
+            assert_eq!(run.turn_error.retryable, Some(true), "{label}");
+            assert_eq!(run.turn_error.reason, Some(expected_reason), "{label}");
+        }
+    }
+
+    /// Attempts that fail for different reasons report the LAST one, the
+    /// failure that ended the retries, with its own provider tag.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn retry_exhausted_turn_error_carries_the_last_attempt_cause() {
+        let run = run_scripted_failures(
+            vec![
+                scripted_server_error_500(),
+                scripted_rate_limit_429(),
+                scripted_overload_503(),
+            ],
+            2,
+        )
+        .await;
+
+        assert_eq!(run.provider_calls, 3, "one call and two retries");
+        assert_eq!(
+            run.turn_error.kind,
+            crate::TurnTerminalCauseKind::RetryExhausted
+        );
+        assert_eq!(run.turn_error.provider.as_deref(), Some("mock"));
+        assert_eq!(run.turn_error.retryable, Some(true));
+        assert_eq!(
+            run.turn_error.reason,
+            Some(crate::event::AgentErrorReason::LlmProviderError {
+                provider_error_kind: LlmProviderErrorKind::ServerOverloaded,
+                provider_error_retryability: crate::error::LlmProviderErrorRetryability::Retryable,
+                provider_error: serde_json::json!({ "status": 503 }),
+            })
+        );
+
+        // The same failures in another order end on the rate limit, from a
+        // different provider tag: the last attempt's facts, not the first's.
+        let run = run_scripted_failures(
+            vec![
+                scripted_overload_503(),
+                scripted_server_error_500(),
+                (
+                    "mock-secondary",
+                    LlmFailureReason::RateLimited {
+                        retry_after: Some(Duration::from_millis(1)),
+                    },
+                    "Rate limited (429)",
+                ),
+            ],
+            2,
+        )
+        .await;
+
+        assert_eq!(run.provider_calls, 3, "one call and two retries");
+        assert_eq!(run.turn_error.provider.as_deref(), Some("mock-secondary"));
+        assert_eq!(run.turn_error.retryable, Some(true));
+        assert_eq!(
+            run.turn_error.reason,
+            Some(crate::event::AgentErrorReason::LlmRateLimited {
+                retry_after_ms: Some(1),
+            })
+        );
+    }
+
+    /// A provider failure no retry clears (a 400) is not retried and keeps
+    /// the typed turn error it had: `llm_failure`, the provider, the typed
+    /// reason and `retryable: false`.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn non_retryable_provider_failure_turn_error_is_unchanged() {
+        let run = run_scripted_failures(vec![scripted_invalid_request_400()], 2).await;
+
+        assert_eq!(run.provider_calls, 1, "a 400 is not retried");
+        assert_eq!(run.retrying_events(), 0);
+        assert_eq!(
+            serde_json::to_value(&run.turn_error).expect("the turn error serializes"),
+            serde_json::json!({
+                "kind": "llm_failure",
+                "terminal": true,
+                "outcome": "failed",
+                "detail": "Terminal failure: Failed (LlmFailure): LLM failure terminal turn: \
+                           LLM error (mock): Invalid request (400)",
+                "provider": "mock",
+                "retryable": false,
+                "reason": {
+                    "reason_type": "llm_provider_error",
+                    "provider_error_kind": "invalid_request",
+                    "provider_error_retryability": "non_retryable",
+                    "provider_error": { "status": 400 },
+                },
+            })
+        );
+        let (report, terminal_cause_kind) = run.run_failed_event();
+        assert_eq!(report.class, AgentErrorClass::Llm);
+        assert_eq!(
+            report.reason,
+            Some(crate::event::AgentErrorReason::TurnTerminalCause {
+                outcome: TurnTerminalOutcome::Failed,
+                cause_kind: crate::TurnTerminalCauseKind::LlmFailure,
+            })
+        );
+        assert_eq!(
+            terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::LlmFailure)
+        );
+    }
+
+    /// The typed turn error is data for the caller: it changes neither how
+    /// often Meerkat calls the provider (one call plus `max_retries`
+    /// retries, each announced by one `Retrying` event) nor the `RunFailed`
+    /// event, which names the terminal cause and carries no provider facts.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn retry_exhaustion_keeps_its_attempt_count_and_run_failed_event() {
+        for max_retries in [0_u32, 1, 3] {
+            let run = run_scripted_failures(vec![scripted_overload_503()], max_retries).await;
+
+            assert_eq!(
+                run.provider_calls,
+                max_retries as usize + 1,
+                "max_retries {max_retries}: one call plus the retries"
+            );
+            assert_eq!(
+                run.retrying_events(),
+                max_retries as usize,
+                "max_retries {max_retries}: one Retrying event per retry"
+            );
+            let (report, terminal_cause_kind) = run.run_failed_event();
+            assert_eq!(report.class, AgentErrorClass::Llm);
+            assert_eq!(
+                report.reason,
+                Some(crate::event::AgentErrorReason::TurnTerminalCause {
+                    outcome: TurnTerminalOutcome::Failed,
+                    cause_kind: crate::TurnTerminalCauseKind::RetryExhausted,
+                })
+            );
+            assert_eq!(report.message, run.error.to_string());
+            assert_eq!(
+                terminal_cause_kind,
+                Some(crate::TurnTerminalCauseKind::RetryExhausted)
+            );
         }
     }
 
@@ -36135,6 +36615,87 @@ mod tests {
         assert_eq!(
             agent.tool_scope.visibility_state().unwrap(),
             commits[0].3.next_state
+        );
+    }
+
+    /// Model-fallback exhaustion shares the retry-exhausted terminal. When
+    /// the primary and the fallback target fail for different reasons, the
+    /// typed turn error carries the failure that ended the retries: the
+    /// fallback target's provider tag and its reason (here a rate limit),
+    /// not the primary's overload that started the fallback.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn fallback_exhaustion_turn_error_carries_the_fallback_target_failure() {
+        use crate::retry::RetryPolicy;
+
+        let client = Arc::new(FallbackActivatingClient::with_terminal_backup_rate_limit());
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let coordinator = Arc::new(RecordingStickyFallbackCoordinator::default());
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new(),
+            explicit_hot_swap_session("primary"),
+        )
+        .with_effective_model_registry(client.registry())
+        .max_tokens_per_turn(777)
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing)
+        .with_sticky_model_fallback_commit_coordinator(coordinator.clone())
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            multiplier: 1.0,
+            call_timeout: None,
+            stream_inactivity_timeout: None,
+        })
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+
+        let error = agent
+            .run("both targets fail".to_string().into())
+            .await
+            .expect_err("the fallback retry should exhaust the generated retry budget");
+        assert!(
+            matches!(
+                &error,
+                AgentError::TerminalFailure {
+                    outcome: TurnTerminalOutcome::Failed,
+                    cause_kind: crate::TurnTerminalCauseKind::RetryExhausted,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(client.model(), "backup", "the fallback target was active");
+        assert_eq!(coordinator.calls(), 1);
+        assert_eq!(
+            client.seen_requests().len(),
+            2,
+            "one call on the primary and one on the fallback target"
+        );
+
+        let turn_error = agent
+            .take_runtime_terminal_failure_witness()
+            .expect("the terminal witness projects")
+            .expect("a failed runtime turn carries its typed turn error");
+        assert_eq!(
+            turn_error.kind,
+            crate::TurnTerminalCauseKind::RetryExhausted
+        );
+        assert_eq!(turn_error.provider.as_deref(), Some("backup-mock"));
+        assert_eq!(turn_error.retryable, Some(true));
+        assert_eq!(
+            turn_error.reason,
+            Some(crate::event::AgentErrorReason::LlmRateLimited {
+                retry_after_ms: Some(1),
+            })
         );
     }
 

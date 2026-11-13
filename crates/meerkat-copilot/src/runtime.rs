@@ -12809,6 +12809,19 @@ mod tests {
                 diagnostic,
                 "upstream echo: Bearer <redacted>, then Bearer <redacted>"
             );
+
+            // Only the bearers this account signed with are replaced: any
+            // other text, credential-shaped or not, is returned as it was.
+            // (The made-up values are assembled here so no scanner reads the
+            // source as a secret.)
+            let other = format!(
+                "upstream echo: authorization: Bearer {}, api_key={}",
+                "notsignedbythisaccount".repeat(2),
+                "notsignedeither".repeat(2),
+            );
+            let mut diagnostic = other.clone();
+            authorizer.redact_response_diagnostic(&mut diagnostic);
+            assert_eq!(diagnostic, other);
         }
 
         /// T11: no token in any variable, or only whitespace, is
@@ -15775,7 +15788,7 @@ mod tests {
             AccountLevelStatement::Stated(levels.to_vec())
         }
 
-        /// R2.5: the levels are those of the entry the route resolved for
+        /// The levels are those of the entry the route resolved for
         /// the session's model. A session on the catalog spelling of a
         /// model the account writes with a dot observes that entry's levels
         /// on its endpoint; a model the account lists under its own id
@@ -15865,7 +15878,7 @@ mod tests {
             );
         }
 
-        /// R2.5, over the fixture list: every family's routed client reports
+        /// Over the fixture list: every family's routed client reports
         /// its Copilot backend, the endpoint the list gives the model, and
         /// the statement of that model's entry.
         #[tokio::test]
@@ -15949,7 +15962,7 @@ mod tests {
             }
         }
 
-        /// R2.6: the account's token is minted and its model discovery
+        /// The account's token is minted and its model discovery
         /// failed, so the account holds no list. Each family's route is on
         /// its optimistic endpoint and the account's statement is
         /// unavailable: nothing stands in for the list.
@@ -15988,7 +16001,7 @@ mod tests {
             );
         }
 
-        /// R2.7: an observation reads the route the account's cached list
+        /// An observation reads the route the account's cached list
         /// resolves. It sends nothing, with a loaded list and without one,
         /// however often it is asked.
         #[tokio::test]
@@ -16035,7 +16048,7 @@ mod tests {
             }
         }
 
-        /// R2.11: an entry without the field states no levels; an empty
+        /// An entry without the field states no levels; an empty
         /// array states that the model takes none. The two are different
         /// statements.
         #[tokio::test]
@@ -16076,7 +16089,7 @@ mod tests {
             }
         }
 
-        /// R2.13: Copilot Messages takes a level only as the pair adaptive
+        /// Copilot Messages takes a level only as the pair adaptive
         /// thinking with effort. An entry there that states levels and
         /// states `adaptive_thinking: false` cannot take the pair, so it
         /// states no usable levels; with `adaptive_thinking: true`, or with

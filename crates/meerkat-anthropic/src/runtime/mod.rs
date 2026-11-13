@@ -131,6 +131,9 @@ struct ClaudeAiOAuthAuthorizer {
     metadata: AuthMetadata,
     runtime: oauth::AnthropicOAuthRuntime,
     cached: std::sync::Mutex<Option<ManagedClaudeAiCredential>>,
+    /// The access tokens requests were signed with, a refreshed-out one
+    /// included.
+    signed_tokens: meerkat_core::auth::SignedCredentials,
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
@@ -161,6 +164,7 @@ impl ClaudeAiOAuthAuthorizer {
             metadata: metadata.clone(),
             runtime,
             cached: std::sync::Mutex::new(None),
+            signed_tokens: meerkat_core::auth::SignedCredentials::new(),
         };
         let lease = authorizer.lease_key();
         // Unattended setup never waits behind an operating-system credential
@@ -371,6 +375,7 @@ impl HttpAuthorizer for ClaudeAiOAuthAuthorizer {
         req: &mut meerkat_core::HttpAuthorizationRequest<'_>,
     ) -> Result<(), AuthError> {
         let (_guard, access_token) = self.current_credential().await?;
+        self.signed_tokens.record(&access_token);
         req.headers
             .push(("Authorization".into(), format!("Bearer {access_token}")));
         req.headers.push((
@@ -379,6 +384,10 @@ impl HttpAuthorizer for ClaudeAiOAuthAuthorizer {
         ));
         req.headers.push(("x-app".to_string(), "cli".to_string()));
         Ok(())
+    }
+
+    fn visit_signed_credentials(&self, visit: &mut dyn FnMut(&str)) {
+        self.signed_tokens.visit(visit);
     }
 
     fn label(&self) -> &'static str {
@@ -1534,6 +1543,50 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn redacts_the_access_token_it_signed_with() {
+            use meerkat_core::HttpAuthorizer as _;
+            let fixture = fixture("echo", None).await;
+            let mut headers = Vec::new();
+            let mut request = meerkat_core::HttpAuthorizationRequest {
+                method: "POST",
+                url: "http://127.0.0.1:9/model",
+                headers: &mut headers,
+            };
+            fixture.authorizer.authorize(&mut request).await.unwrap();
+            let bearer = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value.clone())
+                .unwrap();
+            let token = bearer.strip_prefix("Bearer ").unwrap();
+            assert!(!token.is_empty());
+            // A response that repeats the access token (its header as sent,
+            // the bare value, a URL carrying it) loses it in the
+            // authorizer's redaction.
+            for echo in [
+                format!("upstream echo: rejected request with header authorization: {bearer}"),
+                format!("upstream echo: value {bearer} was refused"),
+                format!("upstream echo: credential {token} was refused"),
+                format!(
+                    "upstream echo: GET http://upstream.invalid/v1/models?session={token}&page=2"
+                ),
+            ] {
+                let mut diagnostic = echo;
+                fixture
+                    .authorizer
+                    .redact_response_diagnostic(&mut diagnostic);
+                assert!(
+                    !diagnostic.contains(token),
+                    "a credential is left in: {diagnostic}"
+                );
+                assert!(
+                    diagnostic.contains("upstream echo"),
+                    "the text around the credential is kept: {diagnostic}"
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn optional_account_claim_may_be_absent_but_cannot_repin_the_authorizer() {
             let fixture = fixture("claims", Some("same-account")).await;
             let snapshot = fixture.owner.snapshot(&fixture.lease);
@@ -1817,7 +1870,7 @@ mod tests {
         connection
     }
 
-    /// R2.1, the Claude family: the Messages client reports the backend the
+    /// The Claude family: the Messages client reports the backend the
     /// connection it was built for names, whichever credential shape built
     /// it, and the client a host builds directly reports the Claude API. No
     /// account list and no operator levels are theirs to state.
@@ -1900,7 +1953,7 @@ mod tests {
         );
     }
 
-    /// R2.2, Messages on the direct backends: the level Core writes on the
+    /// Messages on the direct backends: the level Core writes on the
     /// tag (`effort` alone) reaches the wire as `output_config.effort`, and
     /// the rest of the body is the body of the same request without a level.
     #[cfg(not(target_arch = "wasm32"))]
@@ -2290,7 +2343,7 @@ mod copilot_wire_model_tests {
         assert_eq!(recorded.body["model"], "claude-opus-5");
     }
 
-    /// R2.1: the Copilot route's Messages client reports the Copilot backend
+    /// The Copilot route's Messages client reports the Copilot backend
     /// of the Claude family. The account's statement is the routed client's
     /// to add, so this client states none.
     #[test]
@@ -2315,7 +2368,7 @@ mod copilot_wire_model_tests {
         );
     }
 
-    /// R2.2, Messages on the Copilot route: Core writes the level there as
+    /// Messages on the Copilot route: Core writes the level there as
     /// the pair adaptive thinking with effort. The request that carries the
     /// pair sends `thinking: {"type": "adaptive"}` and `output_config.effort`
     /// and nothing else the same request without a level does not send: no

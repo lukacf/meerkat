@@ -183,5 +183,7 @@ Delivery:
   `UnknownEvent`.
 - Live subscribers that fall behind get `stream_truncated` (`stream_lagged`).
 - CLI: `rkat run --stream` prints text on stdout and tool, retry, compaction,
-  budget and hook lines on stderr; `--output json` prints the final result. There is no JSON-lines event output; `--line-format` only sets how
+  budget and hook lines on stderr; `--output json` prints one final document
+  after any streamed text: the result, or `{"error": {...}}` when the run
+  fails. There is no JSON-lines event output; `--line-format` only sets how
   `--stdin lines` input is parsed.

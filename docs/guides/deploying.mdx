@@ -116,8 +116,10 @@ adds an 8 GiB swap file when total swap is below 8 GiB; it does not set
 `CARGO_BUILD_JOBS=2` or inject the per-package optimization pins shown below.
 The subsequent `verify_windows_binaries` job runs on `windows-2025-vs2026`,
 extracts the archives, executes each binary's `--version`, checks
-`rkat --help`, and checks the SQLite lock profile `rkat storage doctor --json`
-reports (see [SQLite Lock Profile](#sqlite-lock-profile)); it does not compile
+`rkat --help`, checks the SQLite lock profile `rkat storage doctor --json`
+reports (see [SQLite Lock Profile](#sqlite-lock-profile)), and asks each
+binary for its capabilities and built-in skills
+(`scripts/check-release-binary-registrations`); it does not compile
 them natively. These workflow settings are
 not new wall-time or memory measurements. Continuous integration
 (`.github/workflows/ci.yml`) uses BuildBuddy for its broad lane and hosted

@@ -53,8 +53,29 @@ them.
 - `meerkat-core`: the constant `DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD` is
   removed (`meerkat_core::tool_catalog::DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD`):
   the number of deferred-eligible tools no longer starts the deferred tool
-  catalog. `DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD` keeps its name and type
-  and changes from 160 to 8,192. See Changed.
+  catalog. See Changed.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`: the deferred
+  tool catalog starts at a byte budget instead of at two deferrable tools.
+  `select_catalog_mode_from_snapshot` keeps its signature and selects the
+  deferred mode only while a tool source is connecting or from 8,192 bytes
+  of deferrable names, descriptions and schemas
+  (`DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD`, which keeps its name and
+  type and changes from 160 to 8,192). A session with a few small MCP or
+  registered tools therefore sends them in every request and no longer
+  defers them. See Changed and the Upgrade notes.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`,
+  `meerkat-tools`, `meerkat-mcp`, `meerkat-rpc`, `meerkat-workgraph`:
+  `tool_catalog_search` and `tool_catalog_load` are in a model request only
+  while a deferrable tool waits behind the catalog, while a tool source is
+  connecting, or when a tool source asks for them always; a call of one
+  outside that is refused with `access_denied`. A session on the RPC server
+  (`rkat-rpc`, `rkat rpc`) with nothing to defer carries neither, and a
+  session whose only deferrable tools are WorkGraph's two attention tools
+  carries those two and no control tool. The WorkGraph tool surface no
+  longer sets `ToolCatalogCapabilities::may_require_catalog_control_plane`.
+  See Changed and the Upgrade notes.
 
 ### Added
 
@@ -81,6 +102,21 @@ them.
   the `ErrorCode` of a failed turn's typed terminal cause. JSON-RPC and the
   `rkat run` failure document read a failed turn's code from that one
   mapping; the JSON-RPC codes are unchanged.
+
+- `meerkat-core`, `meerkat-mcp`, `meerkat-tools`: for Rust tool sources and
+  hosts, how a source needs the deferred catalog's control tools shown (see
+  Changed). `AgentToolDispatcher::tool_catalog_control_plane` is a new
+  defaulted method that answers with the new enum
+  `meerkat_core::ToolCatalogControlPlane`: `Always`, `OnDemand` or `Never`.
+  The enum is `#[non_exhaustive]`, so a match on it outside `meerkat-core`
+  needs a wildcard arm. The default answers `Always` for a source that sets
+  `ToolCatalogCapabilities::may_require_catalog_control_plane` and `Never`
+  otherwise, so existing sources behave as before; the flag keeps meaning
+  "mount the control tools for this source".
+  `McpRouterAdapter::with_control_plane_on_demand` (`meerkat-mcp`) makes a
+  router ask on demand.
+  `CatalogControlDispatcher::should_announce_for` (`meerkat-tools`) says
+  whether a session's system prompt explains the control tools.
 
 ### Changed
 
@@ -195,23 +231,13 @@ them.
     defer when it starts mounts none, as before. Tools that arrive later
     stay in every request for its lifetime, whatever their size; the next
     session defers them.
-  - For Rust embedders: `AgentToolDispatcher::tool_catalog_control_plane`
-    (new, defaulted) says how a source needs the control tools shown:
-    `ToolCatalogControlPlane::Always`, `OnDemand` or `Never` (new enum,
-    `meerkat-core`; it is `#[non_exhaustive]`, so a match on it outside
-    `meerkat-core` needs a wildcard arm). The default answers `Always` for a
-    source that sets
-    `ToolCatalogCapabilities::may_require_catalog_control_plane` and `Never`
-    otherwise, so existing sources behave as before; the flag keeps meaning
-    "mount the control tools for this source". A wrapper forwards its inner
-    dispatcher's answer and a composition takes the strongest; a wrapper
-    that forwards only the capabilities turns an inner `OnDemand` into
-    `Always`. `McpRouterAdapter::with_control_plane_on_demand` (new,
-    `meerkat-mcp`) makes a router ask on demand. The RPC callback dispatcher
-    keeps the flag and asks on demand; the WorkGraph tool surface no longer
-    sets the flag.
-    `CatalogControlDispatcher::should_announce_for` (new, `meerkat-tools`)
-    says whether a session's system prompt explains the control tools.
+  - For Rust embedders (the new API is under Added): a wrapper forwards
+    its inner dispatcher's `tool_catalog_control_plane` answer and a
+    composition takes the strongest; a wrapper that forwards only the
+    capabilities turns an inner `OnDemand` into `Always`. The RPC callback
+    dispatcher keeps the flag
+    `ToolCatalogCapabilities::may_require_catalog_control_plane` and asks
+    on demand; the WorkGraph tool surface no longer sets the flag.
 
 - `meerkat-core`: a session whose catalog starts to defer keeps the tools
   its model already had. When registered or MCP tools take a running session

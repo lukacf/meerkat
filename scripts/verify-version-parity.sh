@@ -303,6 +303,25 @@ else
     FAIL=1
 fi
 
+# ── 9. SDK gate of the reasoning effort option ─────────────────────────────
+# The Python and TypeScript SDKs send `reasoning_effort` only to a server
+# whose contract is at least the release that carries the option, and each
+# names that release in one constant. Both must name the version of the
+# CHANGELOG section that holds the option's Added entry: the next patch
+# release while the entry is under Unreleased, so a release cut that leaves
+# the entry there turns this red until the constants move.
+
+echo ""
+echo "Reasoning effort SDK gate:"
+if python3 "$ROOT/scripts/check_reasoning_effort_gate.py" --root "$ROOT"; then
+    green "  Reasoning effort SDK gate: OK"
+else
+    red "FAIL: an SDK's reasoning effort gate does not name the option's release"
+    red "  Move _REASONING_EFFORT_MIN_CONTRACT (sdks/python/meerkat/client.py) and"
+    red "  REASONING_EFFORT_MIN_CONTRACT (sdks/typescript/src/client.ts) to the expected version"
+    FAIL=1
+fi
+
 # ── Summary ─────────────────────────────────────────────────────────────────
 
 echo ""

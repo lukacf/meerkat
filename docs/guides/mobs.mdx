@@ -1167,9 +1167,9 @@ is `{"mob_id": "...", "ok": true}`.
 
 <Warning>
 Known issue in 0.9.5 through 0.9.14 (0.8.51 through 0.9.4 not determined),
-noted 2026-11-13, read from the source and not yet confirmed by a test: if a
-client has a turn of its own queued on that member's session
-(`mob/turn_start`, or `turn/start` on the member's session id),
+noted 2026-11-13, confirmed by a test for `turn/start` on the member's
+session id (`mob/turn_start` reaches the same path, read from the source):
+if a client has a turn of its own queued on that member's session,
 `mob/cancel_all_work` also abandons it, and the mobs that member's session
 owns are then destroyed. Work the mob itself admitted (member sends,
 submitted work) does not trigger this. See the

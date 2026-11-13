@@ -38122,6 +38122,16 @@ mod tests {
         mob_state: &meerkat_mob_mcp::MobMcpState,
         prefix: &str,
     ) -> meerkat_mob::MobId {
+        mob_state
+            .mob_create_definition(rpc_worker_mob_definition(prefix))
+            .await
+            .expect("create the mob")
+    }
+
+    /// The definition of [`rpc_worker_mob`]: one turn-driven `worker`
+    /// profile.
+    #[cfg(feature = "mob")]
+    fn rpc_worker_mob_definition(prefix: &str) -> meerkat_mob::MobDefinition {
         let mut definition = meerkat_mob::MobDefinition::explicit(meerkat_mob::MobId::from(
             format!("{prefix}-{}", uuid::Uuid::new_v4().simple()),
         ));
@@ -38151,10 +38161,7 @@ mod tests {
                 durable: false,
             })),
         );
-        mob_state
-            .mob_create_definition(definition)
-            .await
-            .expect("create the mob")
+        definition
     }
 
     /// Spawn the turn-driven `worker-1` member on `mob_id`, answering its
@@ -41587,6 +41594,756 @@ mod tests {
         assert_eq!(stored_meta.model, "claude-sonnet-4-5");
         assert_eq!(stored_meta.provider, meerkat_core::Provider::Anthropic);
         assert_eq!(stored_meta.provider_params, Some(provider_params));
+    }
+
+    /// The last message of a model request the failed-start rows' client
+    /// refuses: a turn that fails inside its run, after its input was
+    /// applied.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    const FAILED_START_REFUSED_REQUEST: &str = "the provider refuses this request";
+
+    /// The prompt of the input the failed-start rows queue behind the turn
+    /// that fails.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    const FAILED_START_QUEUED_INPUT: &str = "the input queued behind the failing turn";
+
+    /// The host's model client of the failed-start rows. It serves Anthropic
+    /// models only, so a turn that switches to another provider's model
+    /// cannot be applied on it. It holds each model request until the row
+    /// releases it, and then refuses a request whose last message is
+    /// [`FAILED_START_REFUSED_REQUEST`]. One read of its provider can be
+    /// held, so a row can queue an input behind the turn whose apply reads
+    /// it, and the held read can answer another provider: the build that
+    /// reads it fails, as a build does whose provider client is not
+    /// available.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[derive(Default)]
+    struct FailedStartLlmClient {
+        calls: AtomicUsize,
+        release: Notify,
+        /// A request whose last message is [`FAILED_START_QUEUED_INPUT`]
+        /// started.
+        queued_input_seen: AtomicBool,
+        hold_next_provider_read: AtomicBool,
+        held_read_answers_another_provider: AtomicBool,
+        provider_read_held: AtomicBool,
+        provider_read_released: AtomicBool,
+    }
+
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[async_trait]
+    impl LlmClient for FailedStartLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            let last_message = request
+                .messages
+                .last()
+                .map(|message| format!("{message:?}"))
+                .unwrap_or_default();
+            let refused = last_message.contains(FAILED_START_REFUSED_REQUEST);
+            let queued_input = last_message.contains(FAILED_START_QUEUED_INPUT);
+            Box::pin(async_stream::stream! {
+                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                if queued_input {
+                    self.queued_input_seen.store(true, AtomicOrdering::SeqCst);
+                }
+                self.release.notified().await;
+                if refused {
+                    yield Err(LlmError::InvalidRequest {
+                        message: FAILED_START_REFUSED_REQUEST.to_string(),
+                    });
+                    return;
+                }
+                yield Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "Released response".to_string(),
+                    meta: None,
+                });
+                yield Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                });
+                yield Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::success(StopReason::EndTurn),
+                });
+            })
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            if self
+                .hold_next_provider_read
+                .swap(false, AtomicOrdering::SeqCst)
+            {
+                self.provider_read_held.store(true, AtomicOrdering::SeqCst);
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !self.provider_read_released.load(AtomicOrdering::SeqCst)
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if self
+                    .held_read_answers_another_provider
+                    .load(AtomicOrdering::SeqCst)
+                {
+                    return meerkat_core::Provider::OpenAI;
+                }
+            }
+            meerkat_core::Provider::Anthropic
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// What a session still holds after one of its turns failed, and what
+    /// became of the input queued behind that turn.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[derive(Debug, PartialEq, Eq)]
+    struct FailedStartFacts {
+        /// The child mob the session owns is still there.
+        child_mob_kept: bool,
+        /// The members the child mob still lists.
+        child_mob_members: usize,
+        /// The child mob member's session is still stored.
+        child_member_session_stored: bool,
+        /// The session's implicit mob is still there.
+        implicit_mob_kept: bool,
+        /// The session's MCP adapter is still attached after the failure.
+        mcp_adapter_attached: bool,
+        /// The session's runtime registration is still there after the
+        /// failure.
+        runtime_registered: bool,
+        /// The session is still stored, and not archived.
+        session_stored: bool,
+        /// The input queued behind the failed turn reached the provider.
+        queued_input_reached_the_provider: bool,
+        /// How the queued input ended.
+        queued_input: FailedStartQueuedInput,
+        /// The answer to a plain turn after the failure.
+        next_turn: Result<(), String>,
+        /// The session's MCP adapter is attached after that turn.
+        mcp_adapter_attached_after_the_next_turn: bool,
+    }
+
+    /// How the input queued behind a failed turn ended.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[derive(Debug, PartialEq, Eq)]
+    enum FailedStartQueuedInput {
+        Completed,
+        /// It ended with the runtime registration it was queued on, without
+        /// a run: answered that its runtime was terminated, or abandoned
+        /// when its apply found the registration being retired.
+        EndedWithoutARun,
+        /// Its waiter failed or did not answer.
+        Unanswered(String),
+    }
+
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    impl FailedStartFacts {
+        /// A turn that fails inside its run costs the session its own
+        /// answer and nothing else.
+        fn nothing_lost() -> Self {
+            Self {
+                child_mob_kept: true,
+                child_mob_members: 1,
+                child_member_session_stored: true,
+                implicit_mob_kept: true,
+                mcp_adapter_attached: true,
+                runtime_registered: true,
+                session_stored: true,
+                queued_input_reached_the_provider: true,
+                queued_input: FailedStartQueuedInput::Completed,
+                next_turn: Ok(()),
+                mcp_adapter_attached_after_the_next_turn: true,
+            }
+        }
+
+        /// A turn that fails at its start costs the session nothing it
+        /// owns: its mobs, their members and the session itself stay. The
+        /// failed start retires the session's live runtime (its
+        /// registration and its MCP adapter), which the next turn builds
+        /// again. The input queued on the retired registration ends with
+        /// it: its sender is answered and sends it again.
+        fn the_session_keeps_what_it_owns() -> Self {
+            Self {
+                mcp_adapter_attached: false,
+                runtime_registered: false,
+                queued_input_reached_the_provider: false,
+                queued_input: FailedStartQueuedInput::EndedWithoutARun,
+                ..Self::nothing_lost()
+            }
+        }
+    }
+
+    /// A materialized JSON-RPC session that owns a child mob with one
+    /// member (destroyed when its owner is archived, as a mob an agent
+    /// creates is), holds its implicit mob and has an MCP adapter attached.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    struct FailedStartSession {
+        _temp: tempfile::TempDir,
+        runtime: Arc<SessionRuntime>,
+        mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
+        client: Arc<FailedStartLlmClient>,
+        session_id: SessionId,
+        child_mob: meerkat_mob::MobId,
+        child_member_session: SessionId,
+        implicit_mob: meerkat_mob::MobId,
+    }
+
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    type FailedStartTurn = tokio::task::JoinHandle<Result<RunResult, RpcError>>;
+
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    impl FailedStartSession {
+        async fn materialized() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+            let mob_state = rpc_mob_state_with_realm(&runtime);
+            runtime.set_mob_state(Arc::clone(&mob_state));
+            let client = Arc::new(FailedStartLlmClient::default());
+            runtime.set_default_llm_client(Some(Arc::clone(&client) as Arc<dyn LlmClient>));
+            let session_id = runtime
+                .create_session(
+                    AgentBuildConfig::new("claude-sonnet-4-5"),
+                    None,
+                    None,
+                    Vec::new(),
+                )
+                .await
+                .expect("create the session");
+            let mut session = Self {
+                _temp: temp,
+                runtime,
+                mob_state,
+                client,
+                child_mob: meerkat_mob::MobId::from("not created yet"),
+                child_member_session: session_id.clone(),
+                implicit_mob: meerkat_mob::MobId::from("not created yet"),
+                session_id,
+            };
+
+            // The first turn materializes the session.
+            let first = session.spawn_turn("first", None);
+            session.release_request(1, "the first turn").await;
+            first.await.unwrap().expect("the first turn runs");
+
+            session.child_mob = session
+                .mob_state
+                .mob_create_definition_with_owner_bridge_session(
+                    rpc_worker_mob_definition("failed-start-child-mob"),
+                    session.session_id.clone(),
+                    true,
+                    false,
+                )
+                .await
+                .expect("create a child mob the session owns");
+            let (_identity, member_session) =
+                spawn_rpc_worker(&session.mob_state, &session.child_mob).await;
+            session.child_member_session = member_session;
+            session.implicit_mob = session
+                .mob_state
+                .get_or_create_implicit_mob_for_bridge_session(
+                    &session.session_id.to_string(),
+                    "claude-sonnet-4-5",
+                )
+                .await
+                .expect("the session's implicit mob");
+            let before = session.holdings().await;
+            assert_eq!(
+                before,
+                (true, 1, true, true, true, true, true),
+                "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+                 runtime registration, stored session) before any turn fails"
+            );
+            session
+        }
+
+        fn spawn_turn(
+            &self,
+            prompt: &'static str,
+            overrides: Option<crate::handlers::turn::TurnOverrides>,
+        ) -> FailedStartTurn {
+            let runtime = Arc::clone(&self.runtime);
+            let session_id = self.session_id.clone();
+            tokio::spawn(async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &session_id,
+                        prompt.into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        overrides,
+                    )
+                    .await
+            })
+        }
+
+        /// Whether the client's `expected`th model request started within
+        /// `within`.
+        async fn request_entered(&self, expected: usize, within: Duration) -> bool {
+            tokio::time::timeout(within, async {
+                while self.client.calls.load(AtomicOrdering::SeqCst) < expected {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok()
+        }
+
+        /// Wait for the client's `expected`th model request and release it.
+        async fn release_request(&self, expected: usize, description: &str) {
+            assert!(
+                self.request_entered(expected, Duration::from_secs(10))
+                    .await,
+                "{description} did not reach the provider"
+            );
+            self.client.release.notify_one();
+        }
+
+        async fn active_inputs(&self) -> usize {
+            self.runtime
+                .runtime_adapter
+                .list_active_inputs(&self.session_id)
+                .await
+                .map(|inputs| inputs.len())
+                .unwrap_or(0)
+        }
+
+        /// Wait until the session holds `expected` active inputs.
+        async fn wait_for_active_inputs(&self, expected: usize) {
+            for _ in 0..400 {
+                if self.active_inputs().await == expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            panic!(
+                "expected {expected} active inputs, found {}",
+                self.active_inputs().await
+            );
+        }
+
+        /// Hold the next read of the client's provider and start `turn`,
+        /// whose apply makes that read. Returns once the read is held: the
+        /// turn's input was admitted and its apply has not ended.
+        async fn start_turn_held_in_its_apply(
+            &self,
+            prompt: &'static str,
+            overrides: Option<crate::handlers::turn::TurnOverrides>,
+        ) -> FailedStartTurn {
+            self.client
+                .hold_next_provider_read
+                .store(true, AtomicOrdering::SeqCst);
+            let turn = self.spawn_turn(prompt, overrides);
+            for _ in 0..400 {
+                if self.client.provider_read_held.load(AtomicOrdering::SeqCst) {
+                    break;
+                }
+                assert!(
+                    !turn.is_finished(),
+                    "the turn was answered before its apply read the client's provider"
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert!(
+                self.client.provider_read_held.load(AtomicOrdering::SeqCst),
+                "the turn's apply reads the client's provider"
+            );
+            assert_eq!(
+                self.active_inputs().await,
+                1,
+                "the provider is read after the turn's input was admitted"
+            );
+            turn
+        }
+
+        /// Queue an input behind the session's current turn, as a peer
+        /// message, a completion notice or a scheduled delivery is queued:
+        /// through the runtime, not through a turn request (a turn request
+        /// waits for the running turn before it is admitted).
+        async fn queue_input_behind_the_current_turn(
+            &self,
+        ) -> meerkat_runtime::completion::CompletionHandle {
+            use meerkat_runtime::input::{Input, PromptInput};
+
+            let queued = Input::Prompt(PromptInput::from_content_input(
+                FAILED_START_QUEUED_INPUT.into(),
+                SessionRuntime::typed_text_turn(None),
+            ));
+            let (_, waiter) = self
+                .runtime
+                .runtime_adapter
+                .accept_input_with_completion(&self.session_id, queued)
+                .await
+                .expect("the runtime admits the queued input");
+            self.wait_for_active_inputs(2).await;
+            waiter.expect("an admitted prompt has a completion waiter")
+        }
+
+        /// Whether `session_id` is stored and not archived.
+        async fn stored_and_not_archived(&self, session_id: &SessionId) -> bool {
+            self.runtime
+                .load_persisted_session(session_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+                && !self
+                    .runtime
+                    .authoritative_session_archived(session_id)
+                    .await
+                    .unwrap_or(true)
+        }
+
+        /// (child mob, its members, its member's session, implicit mob, MCP
+        /// adapter, runtime registration, stored session).
+        async fn holdings(&self) -> (bool, usize, bool, bool, bool, bool, bool) {
+            (
+                self.mob_state.handle_for(&self.child_mob).await.is_ok(),
+                self.mob_state
+                    .mob_list_members(&self.child_mob)
+                    .await
+                    .map(|members| members.len())
+                    .unwrap_or(0),
+                self.stored_and_not_archived(&self.child_member_session)
+                    .await,
+                self.mob_state
+                    .find_implicit_mob_for_bridge_session(&self.session_id.to_string())
+                    .await
+                    == Some(self.implicit_mob.clone()),
+                self.runtime
+                    .mcp_sessions
+                    .read()
+                    .await
+                    .contains_key(&self.session_id),
+                self.runtime
+                    .runtime_adapter
+                    .contains_session(&self.session_id)
+                    .await,
+                self.stored_and_not_archived(&self.session_id).await,
+            )
+        }
+
+        async fn turn_answer(turn: FailedStartTurn) -> Result<(), String> {
+            match tokio::time::timeout(Duration::from_secs(10), turn).await {
+                Ok(joined) => joined
+                    .expect("the turn task")
+                    .map(|_| ())
+                    .map_err(|error| format!("{} {}", error.code, error.message)),
+                Err(_) => Err("no answer within 10 s".to_string()),
+            }
+        }
+
+        async fn queued_input_end(
+            queued: meerkat_runtime::completion::CompletionHandle,
+        ) -> FailedStartQueuedInput {
+            use meerkat_runtime::completion::CompletionOutcome;
+
+            match tokio::time::timeout(Duration::from_secs(10), queued.try_wait()).await {
+                Ok(Ok(CompletionOutcome::Completed(_))) => FailedStartQueuedInput::Completed,
+                Ok(Ok(_)) => FailedStartQueuedInput::EndedWithoutARun,
+                Ok(Err(error)) => FailedStartQueuedInput::Unanswered(format!("{error}")),
+                Err(_) => FailedStartQueuedInput::Unanswered("no answer within 10 s".to_string()),
+            }
+        }
+
+        /// Release the failed turn and read what the session holds after it
+        /// was answered. `queued` is the input queued behind it.
+        async fn facts_after_the_failed_turn(
+            &self,
+            queued: meerkat_runtime::completion::CompletionHandle,
+        ) -> FailedStartFacts {
+            // The queued input runs next, if it is still queued.
+            let queued_input_reached_the_provider =
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !self.client.queued_input_seen.load(AtomicOrdering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .is_ok();
+            if queued_input_reached_the_provider {
+                self.client.release.notify_one();
+            }
+            let queued_input = Self::queued_input_end(queued).await;
+            let (
+                child_mob_kept,
+                child_mob_members,
+                child_member_session_stored,
+                implicit_mob_kept,
+                mcp_adapter_attached,
+                runtime_registered,
+                session_stored,
+            ) = self.holdings().await;
+
+            // A plain turn after the failure.
+            let requests = self.client.calls.load(AtomicOrdering::SeqCst);
+            let next = self.spawn_turn("next", None);
+            if self
+                .request_entered(requests + 1, Duration::from_secs(5))
+                .await
+            {
+                self.client.release.notify_one();
+            }
+            let next_turn = Self::turn_answer(next).await;
+            FailedStartFacts {
+                child_mob_kept,
+                child_mob_members,
+                child_member_session_stored,
+                implicit_mob_kept,
+                mcp_adapter_attached,
+                runtime_registered,
+                session_stored,
+                queued_input_reached_the_provider,
+                queued_input,
+                next_turn,
+                mcp_adapter_attached_after_the_next_turn: self
+                    .runtime
+                    .mcp_sessions
+                    .read()
+                    .await
+                    .contains_key(&self.session_id),
+            }
+        }
+    }
+
+    /// A turn that switches a live session to a model the host cannot serve
+    /// fails when it is applied, after its input was admitted. That is the
+    /// caller's one turn, failed, and no archive of the session: the session
+    /// keeps the child mob it owns with its member, and its implicit mob.
+    /// The failed start retires the session's live runtime, which the next
+    /// turn builds again.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_model_switch_at_turn_start_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+
+        // The turn's model switch is held where it binds the host's client
+        // to the new model, and an input queues behind the turn.
+        let failing = session
+            .start_turn_held_in_its_apply(
+                "switches to a model the host cannot serve",
+                Some(crate::handlers::turn::TurnOverrides {
+                    model: Some("gpt-5.4".to_string()),
+                    provider: Some("openai".to_string()),
+                    ..Default::default()
+                }),
+            )
+            .await;
+        let queued = session.queue_input_behind_the_current_turn().await;
+        session
+            .client
+            .provider_read_released
+            .store(true, AtomicOrdering::SeqCst);
+        let failed = failing
+            .await
+            .unwrap()
+            .expect_err("the model switch fails at the turn's start");
+        assert_eq!(
+            session.client.calls.load(AtomicOrdering::SeqCst),
+            1,
+            "the failed turn made no model request"
+        );
+
+        assert_eq!(
+            session.facts_after_the_failed_turn(queued).await,
+            FailedStartFacts::the_session_keeps_what_it_owns(),
+            "the failed turn was answered {failed:?}"
+        );
+    }
+
+    /// A stored session that is not live (after a restart or an eviction) is
+    /// rebuilt by its next turn, after that turn's input was admitted. A
+    /// build that fails there (its provider client is not available) fails
+    /// that one turn, and is no archive of the session: the session keeps
+    /// the child mob it owns with its member, and its implicit mob. The
+    /// failed start retires the session's live runtime, which the next turn
+    /// builds again once the client is back.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_recovery_build_at_turn_start_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+        session
+            .runtime
+            .service
+            .discard_live_session(&session.session_id)
+            .await
+            .expect("the session is stored and no longer live");
+
+        // The recovering turn's build is held at its first read of the
+        // client's provider, an input queues behind the turn, and the held
+        // read then answers a provider that cannot serve the session.
+        session
+            .client
+            .held_read_answers_another_provider
+            .store(true, AtomicOrdering::SeqCst);
+        let failing = session
+            .start_turn_held_in_its_apply("recovers the session", None)
+            .await;
+        let queued = session.queue_input_behind_the_current_turn().await;
+        session
+            .client
+            .provider_read_released
+            .store(true, AtomicOrdering::SeqCst);
+        let failed = failing
+            .await
+            .unwrap()
+            .expect_err("the recovery build fails at the turn's start");
+        assert_eq!(
+            session.client.calls.load(AtomicOrdering::SeqCst),
+            1,
+            "the failed turn made no model request"
+        );
+
+        assert_eq!(
+            session.facts_after_the_failed_turn(queued).await,
+            FailedStartFacts::the_session_keeps_what_it_owns(),
+            "the failed turn was answered {failed:?}"
+        );
+    }
+
+    /// A recovery that fails on a runtime registration the request itself
+    /// created (the first request for a stored session after a restart)
+    /// takes that registration back, and is no archive of the session: the
+    /// session keeps the child mob it owns with its member, and its implicit
+    /// mob, and its next turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_recovery_on_a_new_registration_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+        // The session is stored, with no live session and no runtime
+        // registration, as after a restart.
+        session
+            .runtime
+            .service
+            .discard_live_session(&session.session_id)
+            .await
+            .expect("discard the live session");
+        session
+            .runtime
+            .runtime_adapter
+            .unregister_session(&session.session_id)
+            .await
+            .expect("unregister the session's runtime");
+        assert!(
+            !session
+                .runtime
+                .runtime_adapter
+                .contains_session(&session.session_id)
+                .await,
+            "the row starts without a runtime registration"
+        );
+
+        // A recovery whose model override names another provider's model
+        // is refused after it registered the session's runtime.
+        let overrides = crate::handlers::turn::TurnOverrides {
+            model: Some("gpt-5.4".to_string()),
+            provider: Some("anthropic".to_string()),
+            ..Default::default()
+        };
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let refused = session
+            .runtime
+            .try_recover_persisted_session(
+                &session.session_id,
+                ContentInput::Text("recover".to_string()),
+                event_tx,
+                false,
+                None,
+                None,
+                None,
+                Some(&overrides),
+            )
+            .await
+            .err()
+            .expect("the recovery is refused after it registered the runtime");
+        assert!(refused.message.contains("provider"), "{refused:?}");
+
+        assert_eq!(
+            session.holdings().await,
+            (true, 1, true, true, false, false, true),
+            "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+             runtime registration, stored session) after the failed recovery"
+        );
+        let next = session.spawn_turn("next", None);
+        session.release_request(2, "the next turn").await;
+        next.await.unwrap().expect("the next turn runs");
+        assert!(
+            session
+                .runtime
+                .mcp_sessions
+                .read()
+                .await
+                .contains_key(&session.session_id),
+            "the next turn attaches the session's MCP adapter again"
+        );
+    }
+
+    /// The guard of the rows above: archiving the session still destroys
+    /// the child mob it owns and its implicit mob.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_archive_still_destroys_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+
+        session
+            .runtime
+            .archive_session(&session.session_id)
+            .await
+            .expect("archive the session");
+
+        assert_eq!(
+            session.holdings().await,
+            (false, 0, false, false, false, false, false),
+            "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+             runtime registration, stored session) after the archive"
+        );
+    }
+
+    /// The control of the two rows above: a turn that fails inside its run,
+    /// after its input was applied, costs the session nothing else.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_that_fails_inside_its_run_costs_the_session_nothing_it_owns() {
+        let session = FailedStartSession::materialized().await;
+
+        // The turn's model request is held, and an input queues behind the
+        // turn; the provider then refuses the request.
+        let failing = session.spawn_turn(FAILED_START_REFUSED_REQUEST, None);
+        assert!(
+            session.request_entered(2, Duration::from_secs(10)).await,
+            "the turn reaches the provider"
+        );
+        let queued = session.queue_input_behind_the_current_turn().await;
+        session.client.release.notify_one();
+        let failed = failing
+            .await
+            .unwrap()
+            .expect_err("the provider refuses the turn's request");
+
+        assert_eq!(
+            session.facts_after_the_failed_turn(queued).await,
+            FailedStartFacts::nothing_lost(),
+            "the failed turn was answered {failed:?}"
+        );
     }
 
     #[tokio::test]

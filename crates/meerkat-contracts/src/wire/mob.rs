@@ -3019,7 +3019,7 @@ pub struct MobTurnStartParams {
     /// Set, clear, or keep the member session's provider-neutral reasoning
     /// effort level from this turn on, exactly as `turn/start` does: a level
     /// sets it, `{"action":"clear"}` removes it, and omission keeps it.
-    /// Since 0.9.15; an older server refuses the field.
+    /// Since 0.9.16; an older server refuses the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort:
         Option<WireTurnMetadataOverride<meerkat_core::model_profile::capabilities::EffortLevel>>,

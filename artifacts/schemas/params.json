@@ -43530,7 +43530,7 @@
             "type": "null"
           }
         ],
-        "description": "Set, clear, or keep the member session's provider-neutral reasoning\neffort level from this turn on, exactly as `turn/start` does: a level\nsets it, `{\"action\":\"clear\"}` removes it, and omission keeps it.\nSince 0.9.15; an older server refuses the field."
+        "description": "Set, clear, or keep the member session's provider-neutral reasoning\neffort level from this turn on, exactly as `turn/start` does: a level\nsets it, `{\"action\":\"clear\"}` removes it, and omission keeps it.\nSince 0.9.16; an older server refuses the field."
       },
       "self_hosted_server_id": {
         "description": "Exact configured local-server route for a self-hosted model.",

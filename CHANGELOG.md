@@ -1081,7 +1081,7 @@ them.
   (`"pending_tool_call"`) a run waiting for an external tool result, and
   anything else the run result. Text and HTML output are unchanged.
 
-- Before rolling back to 0.9.14 or earlier, clear the reasoning effort level
+- Before rolling back to 0.9.15 or earlier, clear the reasoning effort level
   from every session that set it (`rkat run --resume <SESSION>
   --no-reasoning-effort`, or a turn with `reasoning_effort`
   `{"action":"clear"}`), and let accepted turns that carry it

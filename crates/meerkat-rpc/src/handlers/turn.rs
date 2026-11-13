@@ -87,7 +87,7 @@ pub struct StartTurnParams {
     /// removes it, and omission keeps it. It is its own field: a turn that
     /// replaces or clears `provider_params` keeps the level unless it also
     /// names this field, or its new params name the nested
-    /// `reasoning_effort` key. Since 0.9.15; an older server refuses the
+    /// `reasoning_effort` key. Since 0.9.16; an older server refuses the
     /// field.
     #[serde(default)]
     pub reasoning_effort:

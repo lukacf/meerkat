@@ -262,7 +262,12 @@ class AgentSet:
 
     ``instructions`` and ``context`` are replaced whole. ``labels`` sets each
     key it names and keeps the agent's other labels; ``labels_remove`` names
-    keys to remove. A label change reaches the agent's member at once while
+    keys to remove. A reserved label the agent carries (one of Meta's own,
+    or one the policy reserves, that its configuration gave it before its
+    adoption) stays through an update that does not name it; an update that
+    would change or remove it is refused ``reserved_key`` at ``set.labels``,
+    the removal of one of Meta's own labels at ``set.labels_remove``. A
+    label change reaches the agent's member at once while
     the member is idle, on the same conversation; a member that held work
     then takes it at a retry of the update, at its next update or at its
     next seat. ``profile`` moves the agent to that profile's model and

@@ -264,6 +264,17 @@ it is truncated with a warning log.
 
 The following skills are embedded in component crates:
 
+<Warning>
+Known issue, noted 2026-11-13. The released Linux x86_64 downloads of `rkat`
+and `rkat-rpc` that were checked (0.8.52, 0.9.0, 0.9.10, 0.9.13 and 0.9.14) contain
+none of the built-in skills below: `rkat skill list` reports 0 skills and the
+capability report is empty, with no error, so a built-in slug given to
+`rkat run --skill` is not loaded. Skills supplied as files in a project
+(`.rkat/skills/`) are not affected: they load and work on those downloads.
+The macOS and Windows downloads and the other binaries have not been checked.
+See the [roadmap](https://support.rkat.ai/roadmap) for the status.
+</Warning>
+
 | ID | Name | Crate | Required capabilities |
 |----|------|-------|----------------------|
 | `hook-authoring` | Hook Authoring | `meerkat-hooks` | `hooks` |

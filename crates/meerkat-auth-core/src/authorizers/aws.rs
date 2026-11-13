@@ -130,6 +130,11 @@ pub struct AwsStsAuthorizer {
     /// construction remains a standalone user-owned credential authority so the
     /// API stays usable outside Meerkat runtime sessions.
     freshness_authority: AwsSigV4FreshnessAuthority,
+    /// The session tokens SigV4 requests carried.
+    signed_session_tokens: meerkat_core::auth::SignedCredentials,
+    /// The `Authorization` value and the signature of the last SigV4
+    /// requests: two values a request.
+    signed_authorizations: meerkat_core::auth::SignedCredentials,
 }
 
 enum AwsSigV4FreshnessAuthority {
@@ -187,6 +192,8 @@ impl AwsStsAuthorizer {
             provider,
             label,
             freshness_authority: AwsSigV4FreshnessAuthority::StandaloneDirect,
+            signed_session_tokens: meerkat_core::auth::SignedCredentials::new(),
+            signed_authorizations: meerkat_core::auth::SignedCredentials::new(),
         }
     }
 
@@ -288,11 +295,30 @@ impl HttpAuthorizer for AwsStsAuthorizer {
                 )?;
                 let signed = self.sign_sigv4(&creds, req, now).map_err(AuthError::from)?;
                 for (k, v) in signed {
+                    if k.eq_ignore_ascii_case("x-amz-security-token") {
+                        self.signed_session_tokens.record(&v);
+                    } else if k.eq_ignore_ascii_case("authorization") {
+                        self.signed_authorizations.record(&v);
+                        if let Some((_, signature)) = v.rsplit_once("Signature=") {
+                            self.signed_authorizations.record(signature);
+                        }
+                    }
                     req.headers.push((k, v));
                 }
                 Ok(())
             }
         }
+    }
+
+    /// The bearer token; for SigV4, the session token and the signed
+    /// `Authorization` values of the last requests. The secret access key
+    /// is never sent, so no response can repeat it.
+    fn visit_signed_credentials(&self, visit: &mut dyn FnMut(&str)) {
+        if let AwsCredentialProvider::BearerToken(token) = &self.provider {
+            visit(token);
+        }
+        self.signed_session_tokens.visit(visit);
+        self.signed_authorizations.visit(visit);
     }
 
     fn label(&self) -> &str {

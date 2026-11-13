@@ -23022,7 +23022,7 @@ mod tests {
         }
     }
 
-    /// R2.3: the reasoning effort levels an operator declares for a
+    /// The reasoning effort levels an operator declares for a
     /// self-hosted model reach the route the session's client reports,
     /// through the selected-target wrapper and the agent's adapter: the
     /// self-hosted backend of the resolved connection, the API of the
@@ -23170,7 +23170,7 @@ mod tests {
         controller.client().reasoning_route()
     }
 
-    /// R2.3, the other self-hosted backend kind: a realm binding whose
+    /// The other self-hosted backend kind: a realm binding whose
     /// backend profile is `openai_compatible` gives the session's client
     /// that kind as its route's backend, with the operator's levels. The
     /// kind is the resolved connection's, not a constant.

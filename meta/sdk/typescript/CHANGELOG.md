@@ -71,7 +71,7 @@
   process); the way to wire such a member again (`respawnMember`,
   `unwireLocal` on both sides with current `peerInfo`, `wireCrossMob`);
   with member socket endpoints, one member per gateway today.
-- A 0.9.15 client against a 0.9.14 gateway was exercised for one keyless row
+- A 0.9.15 client against a 0.9.14 gateway was exercised for one keyless suite
   only (the Meta Python SDK's own rows that start a real gateway without a
   provider key, against a gateway built at the 0.9.14 commit); no other
   client and no 0.9.14 runtime was exercised. The methods for agents created

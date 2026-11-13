@@ -90,14 +90,13 @@ All notable changes to the Python SDK are documented here.
   to fill, so it handed nothing on until that many bytes had arrived. A
   short run showed no event at all; a longer run showed its first events
   and not its last, usually `run_completed`, until later activity on the
-  stream; and the ASGI routes sent no response, because their response
-  starts with the first event. The stream is now read as it arrives.
-  The gateway and the TypeScript SDK were not affected. Affects every
-  `meerkat-meta` release, 0.9.0 through 0.9.14 (by reading the source at
-  each release tag; by a run on 0.9.14), and the package under its earlier
-  name, `meerkat-mobkit`, at least from 0.4.8 (the oldest release read). For
-  what to do on an affected release, see the known issue on the Meta 0.9.14
-  release page: https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14
+  stream; and the ASGI routes could get no response at all, because their
+  response starts with the first event. The stream is now read as it
+  arrives. The gateway and the TypeScript SDK were not affected. Affects
+  every release of the Python SDK `meerkat-meta`, 0.9.0 through 0.9.14 (read
+  from the released sources; confirmed by a run on 0.9.14). For what to do
+  on an affected release, see the known issue on the Meta 0.9.14 release
+  page: https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14
 
 ## 0.9.14
 

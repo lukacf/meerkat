@@ -22,6 +22,16 @@ import {
 } from "../lib/agent-activity";
 import { useMeasuredWidth } from "../lib/use-element-width";
 import { LifecycleConfirm, type ConfirmedLifecycleAction } from "./LifecycleConfirm";
+import { agentIdentityControls, agentShownName, waitsForItsHost, type AgentIdentityControls } from "../lib/identity-changes";
+import type { IdentityChangesApi } from "../lib/use-identity-changes";
+import {
+  AgentChangeButtons,
+  AgentChangePanel,
+  ArchivedAgents,
+  NewAgentForm,
+  PendingIdentityRequests,
+  type OpenAgentChange,
+} from "./IdentityChangePanels";
 import {
   ActivityBars,
   AgentAvatar,
@@ -92,7 +102,30 @@ interface RosterPanelProps {
   /** helper identity -> the identity that started it (from the topology read;
    * the live snapshot drops `spawned_by`). */
   lineage?: Readonly<Record<string, string>>;
+  /** Changes of the team's long-term agents (New agent, Edit, Archive,
+   * Unarchive, Remove), where the gateway serves them to this viewer. */
+  identityChanges?: IdentityChangesApi | null;
 }
+
+/** The change of an agent the roster has open: its own drawer, which stays
+ * when the change takes the agent out of the roster. */
+interface RosterAgentChange {
+  name: string;
+  displayName: string;
+  change: OpenAgentChange;
+  controls: Pick<AgentIdentityControls, "archive">;
+  /** The agent still waits for its host: it never started. */
+  waiting?: boolean;
+  /** The agent is archived already: it left the team at its archive. */
+  archived?: boolean;
+}
+
+const AGENT_CHANGE_WORDS: Record<OpenAgentChange, string> = {
+  edit: "Edit",
+  archive: "Archive",
+  unarchive: "Unarchive",
+  remove: "Remove",
+};
 
 type Bucket = AgentBucket;
 type Filter = "all" | Bucket;
@@ -287,7 +320,10 @@ export function RosterPanel({
   now,
   defaultOpenMemberId,
   lineage,
+  identityChanges,
 }: RosterPanelProps): React.JSX.Element {
+  const [creating, setCreating] = React.useState(false);
+  const [agentChange, setAgentChange] = React.useState<RosterAgentChange | null>(null);
   const ledger = useActivityLedger({ tickMs: 30_000 });
   const nowMs = now ? now() : ledger.nowMs;
   const navigation = useConsoleNavigation();
@@ -363,6 +399,8 @@ export function RosterPanel({
   const select = (agent: ConsoleAgent) => {
     setSel(agent.member_id);
     setDetailOpen(true);
+    setCreating(false);
+    setAgentChange(null);
     onSelect(agent);
   };
   const openDetails = (agent: ConsoleAgent) => {
@@ -502,7 +540,7 @@ export function RosterPanel({
     );
   }
 
-  const drawer = active ? (
+  const agentDrawer = active ? (
     <RosterDrawer
       key={active.agent.member_id}
       entry={active}
@@ -516,8 +554,60 @@ export function RosterPanel({
       onLifecycle={onLifecycle}
       onSelectPeer={select}
       onClose={() => setDetailOpen(false)}
+      identityControls={identityChanges ? agentIdentityControls(identityChanges.flags, active.agent.affordances) : undefined}
+      onIdentityChange={(change, controls) =>
+        setAgentChange({ name: active.agent.identity || active.agent.member_id, displayName: active.name, change, controls })}
     />
   ) : null;
+  // A change of an agent and New agent each take the drawer: the change's
+  // own drawer stays when the change takes the agent out of the roster, so
+  // its outcome is read where it was asked for.
+  const changeDrawer = identityChanges && agentChange ? (
+    <DetailDrawer
+      key={`${agentChange.name}:change`}
+      testId={`roster-change:${agentChange.name}`}
+      className="roster__drawer"
+      title={<span title={agentChange.name}>{agentChange.displayName}</span>}
+      ariaLabel={`${AGENT_CHANGE_WORDS[agentChange.change]} ${agentChange.displayName}`}
+      mark={<AgentAvatar name={agentChange.displayName} size={36} />}
+      subtitle={AGENT_CHANGE_WORDS[agentChange.change]}
+      onClose={() => setAgentChange(null)}
+      closeTestId="roster-change-close"
+      // A confirmation is a dialog of its own and takes focus on its safe
+      // choice; a form leaves it on the drawer's heading.
+      autoFocus={agentChange.change === "edit"}
+    >
+      <AgentChangePanel
+        api={identityChanges}
+        change={agentChange.change}
+        name={agentChange.name}
+        displayName={agentChange.displayName}
+        controls={agentChange.controls}
+        waiting={agentChange.waiting}
+        archived={agentChange.archived}
+        onClose={() => setAgentChange(null)}
+        onSwitch={(change) => setAgentChange({ ...agentChange, change })}
+      />
+    </DetailDrawer>
+  ) : null;
+  const createDrawer = identityChanges && creating ? (
+    <DetailDrawer
+      testId="roster-new-agent-drawer"
+      className="roster__drawer"
+      title="New agent"
+      subtitle="A long-term agent of this team"
+      onClose={() => setCreating(false)}
+      closeTestId="roster-new-agent-close"
+    >
+      <NewAgentForm api={identityChanges} onClose={() => setCreating(false)} />
+    </DetailDrawer>
+  ) : null;
+  const drawer = changeDrawer ?? createDrawer ?? (detailOpen ? agentDrawer : null);
+  const closeDrawer = () => {
+    if (changeDrawer) setAgentChange(null);
+    else if (createDrawer) setCreating(false);
+    else setDetailOpen(false);
+  };
 
   return (
     <PanelShell className="roster" testId="roster-panel" density={density} showTechnicalIds={showIds}>
@@ -526,6 +616,20 @@ export function RosterPanel({
         title="Roster"
         summary={summary}
         summaryTestId="roster-summary"
+        actions={identityChanges?.flags.canCreate ? (
+          <Button
+            variant="primary"
+            size="sm"
+            aria-expanded={creating}
+            onClick={() => {
+              setAgentChange(null);
+              setCreating(true);
+            }}
+            data-testid="roster-new-agent"
+          >
+            New agent
+          </Button>
+        ) : undefined}
         view={{
           ariaLabel: "Roster view",
           value: view,
@@ -613,10 +717,28 @@ export function RosterPanel({
       ) : null}
       <DrawerLayout
         className="roster__layout"
-        main={<div className="roster__main" data-view={view}>{main}</div>}
+        main={
+          <div className="roster__main" data-view={view}>
+            {identityChanges ? <PendingIdentityRequests api={identityChanges} /> : null}
+            {main}
+            {identityChanges ? (
+              <ArchivedAgents
+                api={identityChanges}
+                onOpen={(agent, change) => {
+                  setCreating(false);
+                  setAgentChange({
+                    name: agent.name, displayName: agentShownName(agent), change, controls: { archive: false },
+                    waiting: waitsForItsHost(agent),
+                    archived: agent.archived,
+                  });
+                }}
+              />
+            ) : null}
+          </div>
+        }
         drawer={drawer}
-        open={detailOpen && Boolean(active)}
-        onClose={() => setDetailOpen(false)}
+        open={Boolean(drawer)}
+        onClose={closeDrawer}
         persistKey="roster"
         defaultWidth={360}
         backLabel="All agents"
@@ -798,6 +920,8 @@ function RosterDrawer({
   onLifecycle,
   onSelectPeer,
   onClose,
+  identityControls,
+  onIdentityChange,
 }: {
   entry: RosterEntry;
   agents: ConsoleAgent[];
@@ -810,6 +934,9 @@ function RosterDrawer({
   onLifecycle: RosterPanelProps["onLifecycle"];
   onSelectPeer: (agent: ConsoleAgent) => void;
   onClose: () => void;
+  /** The changes of this agent's record the gateway offers this viewer. */
+  identityControls?: AgentIdentityControls;
+  onIdentityChange: (change: OpenAgentChange, controls: AgentIdentityControls) => void;
 }) {
   const ledger = useActivityLedger();
   const { agent, activity } = entry;
@@ -898,6 +1025,14 @@ function RosterDrawer({
               </Button>
             ) : null}
           </div>
+        ) : null}
+        {identityControls ? (
+          <AgentChangeButtons
+            controls={identityControls}
+            open={null}
+            onOpen={(change) => onIdentityChange(change, identityControls)}
+            testIdPrefix={`roster-action:${agent.member_id}`}
+          />
         ) : null}
         {confirming ? (
           <LifecycleConfirm

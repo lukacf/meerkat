@@ -174,6 +174,9 @@ async fn dedicated_held_member_admits_exact_g_and_refuses_foreign_history() {
             .await
             .unwrap();
         finish(f, "planning_parent", &p).await;
+        // P's custody settles in the background too: the planning
+        // preparation does not wait, and starts once P is promoted.
+        custody_promoted(f, &c.parent.original).await;
         assert_eq!(
             history(f, &c.lead_session).await,
             initial_g,

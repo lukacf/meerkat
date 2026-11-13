@@ -23,6 +23,72 @@ export function lifecycleConfirmWords(action: ConfirmedLifecycleAction, name: st
 const FOCUSABLE = "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
 /**
+ * What an inline confirmation does as a dialog: it takes focus on its safe
+ * choice (`cancelRef`) when it opens, keeps Tab and Shift+Tab inside it,
+ * cancels on Escape or a click outside, and gives focus back to the control
+ * that opened it. While `locked` (its action is being carried out) Escape
+ * and a click outside leave it open, so what the action came to is seen.
+ */
+export function useConfirmDialog(onCancel: () => void, locked = false) {
+  const rootRef = React.useRef<HTMLDivElement | null>(null);
+  const cancelRef = React.useRef<HTMLButtonElement | null>(null);
+  const opener = React.useRef<HTMLElement | null>(null);
+  const cancelRefLatest = React.useRef(onCancel);
+  cancelRefLatest.current = onCancel;
+  const lockedLatest = React.useRef(locked);
+  lockedLatest.current = locked;
+
+  React.useLayoutEffect(() => {
+    const doc = rootRef.current?.ownerDocument;
+    const active = doc?.activeElement as HTMLElement | null;
+    opener.current = active && active !== doc?.body && !rootRef.current?.contains(active) ? active : null;
+    cancelRef.current?.focus({ preventScroll: false });
+    return () => {
+      // Back to the control that asked, when it is still there.
+      const back = opener.current;
+      if (back?.isConnected) back.focus({ preventScroll: true });
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const doc = rootRef.current?.ownerDocument;
+    if (!doc) return undefined;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && rootRef.current?.contains(target)) return;
+      if (lockedLatest.current) return;
+      cancelRefLatest.current();
+    };
+    doc.addEventListener("pointerdown", onPointerDown, true);
+    return () => doc.removeEventListener("pointerdown", onPointerDown, true);
+  }, []);
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!lockedLatest.current) cancelRefLatest.current();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const items = Array.from(rootRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? []);
+    if (items.length === 0) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = rootRef.current?.ownerDocument.activeElement;
+    if (event.shiftKey && (active === first || !rootRef.current?.contains(active ?? null))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !rootRef.current?.contains(active ?? null))) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  return { rootRef, cancelRef, onKeyDown };
+}
+
+/**
  * The confirmation a destructive lifecycle action asks for (Retire, Reset):
  * an inline alert dialog that names the agent in words and says what will
  * happen, with the action and Cancel. It takes focus on Cancel (the safe
@@ -55,59 +121,9 @@ export function LifecycleConfirm({
   cancelTestId?: string;
 }): React.JSX.Element {
   const words = lifecycleConfirmWords(action, name);
-  const rootRef = React.useRef<HTMLDivElement | null>(null);
-  const cancelRef = React.useRef<HTMLButtonElement | null>(null);
-  const opener = React.useRef<HTMLElement | null>(null);
+  const { rootRef, cancelRef, onKeyDown } = useConfirmDialog(onCancel);
   const questionId = React.useId();
   const consequenceId = React.useId();
-  const cancelRefLatest = React.useRef(onCancel);
-  cancelRefLatest.current = onCancel;
-
-  React.useLayoutEffect(() => {
-    const doc = rootRef.current?.ownerDocument;
-    const active = doc?.activeElement as HTMLElement | null;
-    opener.current = active && active !== doc?.body && !rootRef.current?.contains(active) ? active : null;
-    cancelRef.current?.focus({ preventScroll: false });
-    return () => {
-      // Back to the control that asked, when it is still there.
-      const back = opener.current;
-      if (back?.isConnected) back.focus({ preventScroll: true });
-    };
-  }, []);
-
-  React.useEffect(() => {
-    const doc = rootRef.current?.ownerDocument;
-    if (!doc) return undefined;
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target as Node | null;
-      if (target && rootRef.current?.contains(target)) return;
-      cancelRefLatest.current();
-    };
-    doc.addEventListener("pointerdown", onPointerDown, true);
-    return () => doc.removeEventListener("pointerdown", onPointerDown, true);
-  }, []);
-
-  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      onCancel();
-      return;
-    }
-    if (event.key !== "Tab") return;
-    const items = Array.from(rootRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? []);
-    if (items.length === 0) return;
-    const first = items[0];
-    const last = items[items.length - 1];
-    const active = rootRef.current?.ownerDocument.activeElement;
-    if (event.shiftKey && (active === first || !rootRef.current?.contains(active ?? null))) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && (active === last || !rootRef.current?.contains(active ?? null))) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
 
   return (
     <div

@@ -229,8 +229,12 @@ async fn resolve_agent_event_member_id(
         .await
         .into_iter()
         .find(|entry| {
-            crate::member_comms_id::durable_identity_label(&entry.labels)
-                .is_some_and(|identity| identity == agent_id)
+            crate::member_comms_id::resolve_member_identity(
+                handle,
+                &entry.agent_identity,
+                &entry.labels,
+            )
+            .is_some_and(|identity| identity == agent_id)
         })
         .map(|entry| entry.agent_identity)
         .unwrap_or(direct)

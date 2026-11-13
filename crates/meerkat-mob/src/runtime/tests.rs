@@ -52,6 +52,8 @@ mod seat_comms_key;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod seat_declared_wiring;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod shared_transport_key_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod startup_binding_release;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod store_owned_identity_rows;
@@ -2085,6 +2087,9 @@ enum PersistedSessionReadRefusal {
     RevisionConflict,
     /// Any other store failure.
     StoreFailure,
+    /// The session's stored state does not decode: a failure that does not
+    /// clear on its own.
+    Corrupted,
 }
 
 impl PersistedSessionReadRefusal {
@@ -2100,6 +2105,9 @@ impl PersistedSessionReadRefusal {
             Self::StoreFailure => SessionError::Store(Box::new(std::io::Error::other(format!(
                 "durable read of session {session_id} failed"
             )))),
+            Self::Corrupted => SessionError::Store(Box::new(
+                meerkat_core::SessionStoreError::Corrupted(session_id.clone()),
+            )),
         }
     }
 }
@@ -15362,6 +15370,50 @@ struct PersistentMockAgent {
     session: Session,
     llm_identity: SessionLlmIdentity,
     transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
+    /// The comms runtime of a session a row gave a key seed
+    /// ([`set_persistent_mock_comms_seed`]); no other session has one.
+    comms: Option<Arc<MockCommsRuntime>>,
+}
+
+/// What a row asked [`PersistentMockBuilder`] to build one session with.
+struct PersistentMockComms {
+    /// The seed of the key the session's comms runtime loads.
+    seed: String,
+    /// How often the session was built since it was given a seed.
+    builds: u64,
+}
+
+/// The sessions [`PersistentMockBuilder`] builds with a comms runtime. Keyed
+/// by session id, which no two rows share.
+fn persistent_mock_comms() -> &'static Mutex<HashMap<SessionId, PersistentMockComms>> {
+    static COMMS: OnceLock<Mutex<HashMap<SessionId, PersistentMockComms>>> = OnceLock::new();
+    COMMS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// From its next build on, [`PersistentMockBuilder`] builds `session` with a
+/// comms runtime that loads the key of `seed`: two sessions given one seed
+/// come up on one transport key. A session never given a seed is built
+/// without a comms runtime.
+fn set_persistent_mock_comms_seed(session: &SessionId, seed: &str) {
+    persistent_mock_comms()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(session.clone())
+        .and_modify(|comms| comms.seed = seed.to_string())
+        .or_insert_with(|| PersistentMockComms {
+            seed: seed.to_string(),
+            builds: 0,
+        });
+}
+
+/// How often [`PersistentMockBuilder`] built `session` since the session was
+/// given a key seed.
+fn persistent_mock_comms_builds(session: &SessionId) -> u64 {
+    persistent_mock_comms()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(session)
+        .map_or(0, |comms| comms.builds)
 }
 
 #[async_trait]
@@ -15460,6 +15512,12 @@ impl SessionAgent for PersistentMockAgent {
     fn transient_turn_context_state(&self) -> meerkat_core::TransientTurnContextStateHandle {
         self.transient_turn_context_state.clone()
     }
+
+    fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        self.comms
+            .clone()
+            .map(|comms| comms as Arc<dyn meerkat_core::agent::CommsRuntime>)
+    }
 }
 
 struct PersistentMockBuilder;
@@ -15519,10 +15577,38 @@ impl SessionAgentBuilder for PersistentMockBuilder {
                 )))
             })?;
         }
+        // A session a row gave a key seed is built with a comms runtime on
+        // that key, and the build is counted.
+        let seed = persistent_mock_comms()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(session.id())
+            .map(|comms| {
+                comms.builds += 1;
+                comms.seed.clone()
+            });
+        let comms = seed.map(|seed| {
+            let mut comms = MockCommsRuntime::new(
+                &seed,
+                MockCommsBehavior::default(),
+                session.id().clone(),
+                None,
+            );
+            if let Some(name) = req
+                .build
+                .as_ref()
+                .and_then(|build| build.comms_name.clone())
+            {
+                comms.default_address = format!("inproc://{name}");
+                comms.default_name = name;
+            }
+            Arc::new(comms)
+        });
         Ok(PersistentMockAgent {
             session,
             llm_identity: test_llm_identity(req.model.clone()),
             transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
+            comms,
         })
     }
 }
@@ -30289,10 +30375,202 @@ impl MemberToolAudience for HideMemberFrom {
         &self,
         _mob_id: &MobId,
         caller: Option<&AgentIdentity>,
+        _caller_labels: Option<&BTreeMap<String, String>>,
         target: &AgentIdentity,
+        _target_labels: Option<&BTreeMap<String, String>>,
     ) -> bool {
         caller == Some(&self.caller) && target == &self.target
     }
+}
+
+/// A host's member tool audience that decides on the roster labels alone: a
+/// member whose row carries the label `kept_for` is hidden from every caller
+/// whose own row does not carry the same value.
+struct HideKeptMembers;
+
+impl MemberToolAudience for HideKeptMembers {
+    fn hides(
+        &self,
+        _mob_id: &MobId,
+        _caller: Option<&AgentIdentity>,
+        caller_labels: Option<&BTreeMap<String, String>>,
+        _target: &AgentIdentity,
+        target_labels: Option<&BTreeMap<String, String>>,
+    ) -> bool {
+        let kept_for = |labels: Option<&BTreeMap<String, String>>| {
+            labels.and_then(|labels| labels.get("kept_for")).cloned()
+        };
+        match kept_for(target_labels) {
+            Some(keeper) => kept_for(caller_labels) != Some(keeper),
+            None => false,
+        }
+    }
+}
+
+/// The audience is handed the labels the caller and the target carry on
+/// their own roster rows, so a host's rule about a member's durable labels
+/// holds for a member the host never built in this process. A member whose
+/// row carries the label is answered to a caller whose row does not carry
+/// it, with manage scope too, exactly as a member the mob does not hold; a
+/// caller whose row carries the same value is admitted, and a member whose
+/// row does not carry the label is admitted as before.
+#[tokio::test]
+async fn owned_member_tools_hand_the_audience_the_roster_labels_of_both_members() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    service.set_return_exact_run_result(true);
+    let handle = MobBuilder::new(sample_definition_with_mob_tools(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_member_tool_audience(Arc::new(HideKeptMembers))
+        .create()
+        .await
+        .expect("create mob");
+    let mob_id = handle.definition().id.to_string();
+    let kept_for = |keeper: &str| BTreeMap::from([("kept_for".to_string(), keeper.to_string())]);
+    for (member, labels) in [
+        ("labels-kept", Some(kept_for("ann"))),
+        ("labels-keeper", Some(kept_for("ann"))),
+        ("labels-other-keeper", Some(kept_for("bob"))),
+        ("labels-plain", None),
+    ] {
+        let mut spec = crate::runtime::handle::SpawnMemberSpec::new(
+            ProfileName::from("worker"),
+            AgentIdentity::from(member),
+        )
+        .with_initial_message(ContentInput::Text("source context".to_string()));
+        if let Some(labels) = labels {
+            spec = spec.with_labels(labels);
+        }
+        handle.spawn_spec(spec).await.expect("spawn the member");
+    }
+    let manager_tools = |caller: &'static str| {
+        let handle = handle.clone();
+        let mob_id = mob_id.clone();
+        async move {
+            owned_member_tool_dispatcher(
+                &handle,
+                &AgentIdentity::from(caller),
+                generated_mob_operator_authority_with_scope(&mob_id, handle.live_incarnation()),
+            )
+            .await
+        }
+    };
+    let plain = manager_tools("labels-plain").await;
+    let other_keeper = manager_tools("labels-other-keeper").await;
+    let keeper = manager_tools("labels-keeper").await;
+
+    // Each tool that names or lists members is asked, and the row says at
+    // its end which of them showed the kept member to a caller it is hidden
+    // from: every one of them goes through the audience.
+    let mut shown: Vec<String> = Vec::new();
+    let absent = |result: &Result<ToolDispatchOutcome, ToolError>| {
+        matches!(
+            result,
+            Err(ToolError::ExecutionFailedWithData { data, .. })
+                if data["kind"] == "member_not_found"
+        )
+    };
+    let listed = |tools: Arc<dyn AgentToolDispatcher>| async move {
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let result = tools
+            .dispatch(ToolCallView {
+                id: "audience-list",
+                name: "list_members",
+                args: &args,
+            })
+            .await
+            .expect("list_members dispatches");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.result.text_content()).expect("list payload");
+        let mut names: Vec<String> = payload["members"]
+            .as_array()
+            .expect("members array")
+            .iter()
+            .map(|entry| entry["agent_identity"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort_unstable();
+        names
+    };
+    for (tools, caller) in [
+        (&plain, "a caller whose row carries no such label"),
+        (&other_keeper, "a caller whose row carries another value"),
+    ] {
+        // The retirement is asked last: a tool that is not asked through
+        // the audience would carry it out.
+        for tool in ["member_status", "force_cancel_member"] {
+            if !absent(&dispatch_owned_member_tool(tools, tool, "labels-kept").await) {
+                shown.push(format!("{tool} by {caller}"));
+            }
+        }
+        if listed(Arc::clone(tools))
+            .await
+            .contains(&"labels-kept".to_owned())
+        {
+            shown.push(format!("list_members by {caller}"));
+        }
+    }
+    for (tools, caller) in [
+        (&plain, "a caller whose row carries no such label"),
+        (&other_keeper, "a caller whose row carries another value"),
+    ] {
+        if !absent(&dispatch_owned_member_tool(tools, "retire_member", "labels-kept").await) {
+            shown.push(format!("retire_member by {caller}"));
+        }
+    }
+    assert!(
+        shown.is_empty(),
+        "the kept member is answered as one the mob does not hold, and listed to no caller \
+         it is hidden from; shown by: {shown:?}"
+    );
+    assert_member_absence_error(
+        dispatch_owned_member_tool(&plain, "member_status", "labels-kept").await,
+        "member_not_found",
+        &mob_id,
+        "labels-kept",
+        "member_status of a hidden member",
+    );
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from("labels-kept"))
+            .await
+            .unwrap()
+            .is_some(),
+        "nothing is done to the hidden member"
+    );
+    dispatch_owned_member_tool(&keeper, "member_status", "labels-kept")
+        .await
+        .expect("a caller whose row carries the same value checks it");
+    dispatch_owned_member_tool(&other_keeper, "member_status", "labels-plain")
+        .await
+        .expect("a member whose row carries no such label is admitted as before");
+
+    // The lists in full: a member the audience hides from the caller is
+    // not in its list at all, with manage scope, and every other member is.
+    let everyone = [
+        "labels-keeper".to_owned(),
+        "labels-kept".to_owned(),
+        "labels-other-keeper".to_owned(),
+        "labels-plain".to_owned(),
+    ];
+    assert_eq!(
+        listed(plain).await,
+        vec!["labels-plain".to_owned()],
+        "a caller whose row carries no such label is listed no kept member"
+    );
+    assert_eq!(
+        listed(other_keeper).await,
+        vec!["labels-other-keeper".to_owned(), "labels-plain".to_owned()],
+        "a caller whose row carries another value is listed its own kind only"
+    );
+    assert_eq!(
+        listed(keeper).await,
+        everyone
+            .iter()
+            .filter(|name| *name != "labels-other-keeper")
+            .cloned()
+            .collect::<Vec<_>>(),
+        "a caller whose row carries the same value is listed the kept members"
+    );
 }
 
 /// A member the host's audience hides from the calling member
@@ -30377,6 +30655,1336 @@ async fn owned_member_tools_answer_a_member_hidden_from_the_caller_as_absent() {
     dispatch_owned_member_tool(&manager_tools, "member_status", "audience-forker")
         .await
         .expect("a member not hidden from the caller is admitted as before");
+}
+
+/// A mob whose host hides the members kept for a keeper
+/// ([`HideKeptMembers`]), with `members` seated: each with the keeper its
+/// row's `kept_for` label names, if any.
+async fn mob_with_kept_members(members: &[(&str, Option<&str>)]) -> MobHandle {
+    mob_with_audience(members, Arc::new(HideKeptMembers)).await
+}
+
+/// [`HideKeptMembers`], and every open approval branch is hidden from every
+/// caller as well.
+struct HideKeptMembersAndBranches;
+
+impl MemberToolAudience for HideKeptMembersAndBranches {
+    fn hides(
+        &self,
+        mob_id: &MobId,
+        caller: Option<&AgentIdentity>,
+        caller_labels: Option<&BTreeMap<String, String>>,
+        target: &AgentIdentity,
+        target_labels: Option<&BTreeMap<String, String>>,
+    ) -> bool {
+        target
+            .as_str()
+            .starts_with(crate::runtime::approval_branch::APPROVAL_BRANCH_IDENTITY_PREFIX)
+            || HideKeptMembers.hides(mob_id, caller, caller_labels, target, target_labels)
+    }
+}
+
+/// [`mob_with_kept_members`] with `audience` as the host's member tool
+/// audience.
+async fn mob_with_audience(
+    members: &[(&str, Option<&str>)],
+    audience: Arc<dyn MemberToolAudience>,
+) -> MobHandle {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    service.set_return_exact_run_result(true);
+    let handle = MobBuilder::new(sample_definition_with_mob_tools(), MobStorage::in_memory())
+        .with_session_service(service)
+        .with_member_tool_audience(audience)
+        .create()
+        .await
+        .expect("create mob");
+    for (member, keeper) in members {
+        let mut spec = crate::runtime::handle::SpawnMemberSpec::new(
+            ProfileName::from("worker"),
+            AgentIdentity::from(*member),
+        )
+        .with_initial_message(ContentInput::Text("source context".to_string()));
+        if let Some(keeper) = keeper {
+            spec = spec.with_labels(BTreeMap::from([(
+                "kept_for".to_string(),
+                (*keeper).to_string(),
+            )]));
+        }
+        handle.spawn_spec(spec).await.expect("spawn the member");
+    }
+    handle
+}
+
+/// The operator tools of member `caller` of the mob, with manage scope.
+async fn manage_scope_tools(handle: &MobHandle, caller: &str) -> Arc<dyn AgentToolDispatcher> {
+    owned_member_tool_dispatcher(
+        handle,
+        &AgentIdentity::from(caller),
+        generated_mob_operator_authority_with_scope(
+            handle.definition().id.as_str(),
+            handle.live_incarnation(),
+        ),
+    )
+    .await
+}
+
+/// One operator tool call with `args` through `dispatcher`.
+async fn dispatch_operator_tool(
+    dispatcher: &Arc<dyn AgentToolDispatcher>,
+    tool: &'static str,
+    args: serde_json::Value,
+) -> Result<ToolDispatchOutcome, ToolError> {
+    let raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+    dispatcher
+        .dispatch(ToolCallView {
+            id: "operator-tool-call",
+            name: tool,
+            args: &raw,
+        })
+        .await
+}
+
+/// A tool's answer with the member name `name` masked: the answers for two
+/// names compare equal when they differ in nothing but the name.
+fn masked_tool_answer(answer: &Result<ToolDispatchOutcome, ToolError>, name: &str) -> String {
+    match answer {
+        Ok(outcome) => format!("ok: {}", outcome.result.text_content()),
+        Err(error) => format!("error: {error:?}"),
+    }
+    .replace(name, "<member>")
+}
+
+/// `wire_members` and `unwire_members` ask the host's member tool audience
+/// about both members they name. A member it hides from the caller answers
+/// exactly as a name the mob does not hold, as the member and as the peer,
+/// with manage scope, and no edge is made. A caller the member is not
+/// hidden from wires and unwires it as before.
+#[tokio::test]
+async fn wire_members_answer_a_member_hidden_from_the_caller_as_absent() {
+    let handle = mob_with_kept_members(&[
+        ("wire-kept", Some("ann")),
+        ("wire-keeper", Some("ann")),
+        ("wire-plain", None),
+        ("wire-caller", None),
+    ])
+    .await;
+    let caller = manage_scope_tools(&handle, "wire-caller").await;
+    let keeper = manage_scope_tools(&handle, "wire-keeper").await;
+    let ends = |member: &str, peer: &str| serde_json::json!({ "member_id": member, "peer_member_id": peer });
+    let kept = AgentIdentity::from("wire-kept");
+
+    for tool in ["wire_members", "unwire_members"] {
+        // Each call naming the kept member, beside the same call naming a
+        // name the mob does not hold in its place.
+        for (kept_call, absent_call, position) in [
+            (
+                ends("wire-plain", "wire-kept"),
+                ends("wire-plain", "wire-gone"),
+                "as the peer",
+            ),
+            (
+                ends("wire-kept", "wire-plain"),
+                ends("wire-gone", "wire-plain"),
+                "as the member",
+            ),
+            (
+                ends("wire-nobody", "wire-kept"),
+                ends("wire-nobody", "wire-gone"),
+                "as the peer of a name the mob does not hold",
+            ),
+        ] {
+            let hidden = masked_tool_answer(
+                &dispatch_operator_tool(&caller, tool, kept_call).await,
+                "wire-kept",
+            );
+            let absent = masked_tool_answer(
+                &dispatch_operator_tool(&caller, tool, absent_call).await,
+                "wire-gone",
+            );
+            assert!(
+                absent.starts_with("error:"),
+                "{tool}: a name the mob does not hold is refused: {absent}"
+            );
+            assert_eq!(
+                hidden, absent,
+                "{tool}: a member hidden from the caller, named {position}, answers as a name \
+                 the mob does not hold"
+            );
+        }
+    }
+    assert!(
+        handle
+            .get_member(&kept)
+            .await
+            .unwrap()
+            .expect("the kept member is seated")
+            .wired_to
+            .is_empty(),
+        "no edge reaches the hidden member"
+    );
+
+    dispatch_operator_tool(&keeper, "wire_members", ends("wire-keeper", "wire-kept"))
+        .await
+        .expect("a caller the member is not hidden from wires it");
+    assert!(
+        handle
+            .get_member(&kept)
+            .await
+            .unwrap()
+            .expect("the kept member is seated")
+            .wired_to
+            .contains(&AgentIdentity::from("wire-keeper")),
+        "the keeper's wire is made"
+    );
+    dispatch_operator_tool(&keeper, "unwire_members", ends("wire-keeper", "wire-kept"))
+        .await
+        .expect("a caller the member is not hidden from unwires it");
+}
+
+/// The `wired_to` of a listed row names no member the host's member tool
+/// audience hides from the caller: a member wired to a hidden member is
+/// listed with its other peers only. A caller the member is not hidden from
+/// reads the whole wiring.
+#[tokio::test]
+async fn list_members_names_no_hidden_member_in_wired_to() {
+    let handle = mob_with_kept_members(&[
+        ("peers-kept", Some("ann")),
+        ("peers-keeper", Some("ann")),
+        ("peers-shown", None),
+        ("peers-caller", None),
+    ])
+    .await;
+    // The host wires a member every caller is shown to the kept member and
+    // to the caller.
+    for peer in ["peers-kept", "peers-caller"] {
+        handle
+            .wire(
+                AgentIdentity::from("peers-shown"),
+                AgentIdentity::from(peer),
+            )
+            .await
+            .expect("the host wires the members");
+    }
+    let wired_to_of_shown = |tools: Arc<dyn AgentToolDispatcher>| async move {
+        let listed = dispatch_operator_tool(&tools, "list_members", serde_json::json!({}))
+            .await
+            .expect("list_members dispatches");
+        let payload: serde_json::Value =
+            serde_json::from_str(&listed.result.text_content()).expect("list payload");
+        let row = payload["members"]
+            .as_array()
+            .expect("members array")
+            .iter()
+            .find(|entry| entry["agent_identity"] == "peers-shown")
+            .expect("the shown member is listed")
+            .clone();
+        let mut peers: Vec<String> = row["wired_to"]
+            .as_array()
+            .expect("wired_to array")
+            .iter()
+            .map(|peer| peer.as_str().unwrap().to_owned())
+            .collect();
+        peers.sort_unstable();
+        peers
+    };
+
+    assert_eq!(
+        wired_to_of_shown(manage_scope_tools(&handle, "peers-caller").await).await,
+        vec!["peers-caller".to_owned()],
+        "a listed row names no peer the audience hides from the caller"
+    );
+    assert_eq!(
+        wired_to_of_shown(manage_scope_tools(&handle, "peers-keeper").await).await,
+        vec!["peers-caller".to_owned(), "peers-kept".to_owned()],
+        "a caller the member is not hidden from reads the whole wiring"
+    );
+}
+
+/// A listed row names no external peer the host's member tool audience
+/// hides from the caller: neither in its `wired_to` nor with the peer's
+/// descriptor. A caller the peer is not hidden from reads both.
+#[tokio::test]
+async fn list_members_names_no_hidden_external_peer_of_a_listed_member() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    // A member of another mob, and the name its peers know it by.
+    let remote_definition = with_unique_mob_id(sample_definition(), "audience-remote");
+    let remote_mob_id = remote_definition.id.clone();
+    let remote = MobBuilder::new(remote_definition, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create the other mob");
+    let mut remote_spec = SpawnMemberSpec::new("worker", AgentIdentity::from("ext-kept"));
+    remote_spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    remote
+        .spawn_spec(remote_spec)
+        .await
+        .expect("spawn the other mob's member");
+    let remote_entry = remote
+        .get_member(&AgentIdentity::from("ext-kept"))
+        .await
+        .expect("read the other mob's member")
+        .expect("the other mob's member is seated");
+    let descriptor = external_descriptor_from_published_member(&remote_mob_id, &remote_entry);
+    let external = AgentIdentity::from(descriptor.name.as_str());
+
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition_with_mob_tools(), "audience-home"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .with_member_tool_audience(Arc::new(HideMemberFrom {
+        caller: AgentIdentity::from("ext-caller"),
+        target: external.clone(),
+    }))
+    .create()
+    .await
+    .expect("create mob");
+    for member in ["ext-shown", "ext-caller", "ext-other"] {
+        let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from(member));
+        spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+        handle.spawn_spec(spec).await.expect("spawn the member");
+    }
+    handle
+        .wire(
+            AgentIdentity::from("ext-shown"),
+            PeerTarget::External(descriptor),
+        )
+        .await
+        .expect("the host wires the member to the external peer");
+    let row_of_shown = |caller: &'static str| {
+        let handle = handle.clone();
+        async move {
+            let tools = manage_scope_tools(&handle, caller).await;
+            let listed = dispatch_operator_tool(&tools, "list_members", serde_json::json!({}))
+                .await
+                .expect("list_members dispatches");
+            let payload: serde_json::Value =
+                serde_json::from_str(&listed.result.text_content()).expect("list payload");
+            payload["members"]
+                .as_array()
+                .expect("members array")
+                .iter()
+                .find(|entry| entry["agent_identity"] == "ext-shown")
+                .expect("the wired member is listed")
+                .clone()
+        }
+    };
+
+    let row = row_of_shown("ext-other").await;
+    assert!(
+        row["wired_to"]
+            .as_array()
+            .expect("wired_to array")
+            .contains(&serde_json::json!(external.as_str()))
+            && row["external_peer_specs"].get(external.as_str()).is_some(),
+        "a caller the external peer is not hidden from reads it in the row: {row}"
+    );
+    let row = row_of_shown("ext-caller").await;
+    assert!(
+        !row.to_string().contains(external.as_str()),
+        "a listed row names no external peer the audience hides from the caller: {row}"
+    );
+}
+
+/// A host's member tool audience that decides by the calling member alone:
+/// it hides `kept_from` from `caller`, and `kept_for` from every caller but
+/// `caller` (a call no member made included).
+struct HideAroundOneCaller {
+    caller: AgentIdentity,
+    kept_from: AgentIdentity,
+    kept_for: AgentIdentity,
+}
+
+impl MemberToolAudience for HideAroundOneCaller {
+    fn hides(
+        &self,
+        _mob_id: &MobId,
+        caller: Option<&AgentIdentity>,
+        _caller_labels: Option<&BTreeMap<String, String>>,
+        target: &AgentIdentity,
+        _target_labels: Option<&BTreeMap<String, String>>,
+    ) -> bool {
+        if target == &self.kept_from {
+            caller == Some(&self.caller)
+        } else if target == &self.kept_for {
+            caller != Some(&self.caller)
+        } else {
+            false
+        }
+    }
+}
+
+/// One operator call of the placed member `member-a`, served by the
+/// controlling side's executor as it serves the member's own request.
+async fn placed_member_operator_call(
+    seams: &crate::runtime::upcall_responder::MobUpcallSeams,
+    authority: &crate::store::MobMemberOperatorAuthorityRecord,
+    request_id: &str,
+    op: crate::runtime::bridge_protocol::MemberOperatorOp,
+) -> crate::runtime::member_upcall::UpcallToolOutcome {
+    use crate::runtime::upcall_responder::UpcallServeSeams;
+
+    let pending = crate::store::MobMemberOperatorRequestRecord::pending(
+        crate::store::MobMemberOperatorRequestKey::new(
+            "member-a",
+            0,
+            1,
+            "host-a",
+            1,
+            "member-session-a",
+            request_id,
+        ),
+        crate::store::member_operator_op_digest(&op).expect("digest the operation"),
+    );
+    UpcallServeSeams::execute(seams, &pending, authority, request_id, op)
+        .await
+        .expect("the placed member's operation executes")
+}
+
+/// A placed member's operator calls reach the host's member tool audience
+/// as that member, not as a call no member made: a member the audience
+/// hides from the placed member is not in its list and answers its
+/// `member_status` as a member the mob does not hold, and a member the
+/// audience keeps for the placed member alone is listed to it and checked
+/// by it.
+#[tokio::test]
+async fn a_placed_members_operator_calls_ask_the_audience_as_that_member() {
+    use crate::runtime::bridge_protocol::MemberOperatorOp;
+    use crate::runtime::member_upcall::UpcallToolOutcome;
+    use crate::runtime::upcall_responder::MobUpcallSeams;
+
+    let kept_from = AgentIdentity::from("placed-kept-from");
+    let kept_for = AgentIdentity::from("placed-kept-for");
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "placed-member-audience"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service)
+    .with_member_tool_audience(Arc::new(HideAroundOneCaller {
+        caller: AgentIdentity::from("member-a"),
+        kept_from: kept_from.clone(),
+        kept_for: kept_for.clone(),
+    }))
+    .create()
+    .await
+    .expect("create mob");
+    seed_operator_execution_residency(&handle, "member-session-a").await;
+    for member in [&kept_from, &kept_for] {
+        handle
+            .spawn(ProfileName::from("worker"), member.clone(), None)
+            .await
+            .expect("spawn a local member");
+    }
+    let metadata_store: Arc<dyn MobRuntimeMetadataStore> =
+        Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    let seams = MobUpcallSeams::new(handle.clone(), metadata_store);
+    let authority = crate::store::MobMemberOperatorAuthorityRecord {
+        agent_identity: "member-a".to_string(),
+        generation: 0,
+        can_create_mobs: false,
+        can_mutate_profiles: false,
+        can_run_adaptive_packs: false,
+        managed_mob_scope: BTreeSet::from([handle.mob_id().as_str().to_string()]),
+        spawn_profile_scope: BTreeMap::new(),
+    };
+
+    let listed = match placed_member_operator_call(
+        &seams,
+        &authority,
+        "placed-audience-list",
+        MemberOperatorOp::ListMembers,
+    )
+    .await
+    {
+        UpcallToolOutcome::Ok { content, .. } => {
+            let payload: serde_json::Value = serde_json::from_str(&content).expect("list payload");
+            payload["members"]
+                .as_array()
+                .expect("members array")
+                .iter()
+                .map(|entry| entry["agent_identity"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        }
+        other => panic!("the placed member's list answers: {other:?}"),
+    };
+    assert!(
+        !listed.contains(&"placed-kept-from".to_owned()),
+        "a placed member is listed no member the audience hides from it: {listed:?}"
+    );
+    assert!(
+        listed.contains(&"placed-kept-for".to_owned()),
+        "a placed member is listed a member the audience keeps for it alone: {listed:?}"
+    );
+
+    match placed_member_operator_call(
+        &seams,
+        &authority,
+        "placed-audience-status-hidden",
+        MemberOperatorOp::MemberStatus {
+            member_id: "placed-kept-from".to_string(),
+        },
+    )
+    .await
+    {
+        UpcallToolOutcome::ToolError(error) => assert_eq!(
+            error.data.as_ref().map(|data| &data["kind"]),
+            Some(&serde_json::json!("member_not_found")),
+            "a member hidden from the placed member answers as one the mob does not hold: \
+             {error:?}"
+        ),
+        other => panic!(
+            "a member hidden from the placed member answers as one the mob does not hold: \
+             {other:?}"
+        ),
+    }
+    let own = placed_member_operator_call(
+        &seams,
+        &authority,
+        "placed-audience-status-own",
+        MemberOperatorOp::MemberStatus {
+            member_id: "placed-kept-for".to_string(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            own,
+            UpcallToolOutcome::Ok {
+                is_error: false,
+                ..
+            }
+        ),
+        "the placed member checks the member the audience keeps for it alone: {own:?}"
+    );
+}
+
+/// The arguments of a spawn of `child` whose launch forks member `source`.
+fn fork_launch_args(child: &str, source: &str) -> serde_json::Value {
+    serde_json::json!({
+        "profile": "worker",
+        "member_id": child,
+        "launch_mode": { "mode": "fork", "source_member_id": source },
+    })
+}
+
+/// `spawn_member` and `spawn_many_members` ask the host's member tool
+/// audience about the source of a fork launch. A source it hides from the
+/// caller answers exactly as a source the mob does not hold, with manage
+/// scope, whole for one member and per entry for many, also when the new
+/// member's name is taken, and nothing is seated. A caller the source is
+/// not hidden from forks it as before.
+#[tokio::test]
+async fn spawn_tools_answer_a_fork_of_a_member_hidden_from_the_caller_as_absent() {
+    let handle = mob_with_kept_members(&[
+        ("fork-kept", Some("ann")),
+        ("fork-keeper", Some("ann")),
+        ("fork-shown", None),
+        ("fork-caller", None),
+    ])
+    .await;
+    let caller = manage_scope_tools(&handle, "fork-caller").await;
+    let keeper = manage_scope_tools(&handle, "fork-keeper").await;
+    let many = |child: &str, source: &str| serde_json::json!({ "specs": [fork_launch_args(child, source)] });
+    let unknown_profile = |source: &str| {
+        let mut args = fork_launch_args("fork-profile-child", source);
+        args["profile"] = serde_json::json!("fork-no-such-profile");
+        args
+    };
+    let seated_before = handle.list_members().await.len();
+
+    // Each call is asked with a source the mob does not hold first: a fork
+    // the audience does not stop seats the new member.
+    for (tool, absent_call, hidden_call, form) in [
+        (
+            "spawn_member",
+            fork_launch_args("fork-child", "fork-gone"),
+            fork_launch_args("fork-child", "fork-kept"),
+            "one member",
+        ),
+        (
+            "spawn_member",
+            fork_launch_args("fork-shown", "fork-gone"),
+            fork_launch_args("fork-shown", "fork-kept"),
+            "one member under a name a member holds",
+        ),
+        (
+            "spawn_member",
+            unknown_profile("fork-gone"),
+            unknown_profile("fork-kept"),
+            "one member of a profile the mob does not define",
+        ),
+        (
+            "spawn_many_members",
+            many("fork-batch-child", "fork-gone"),
+            many("fork-batch-child", "fork-kept"),
+            "an entry of many",
+        ),
+    ] {
+        let absent = masked_tool_answer(
+            &dispatch_operator_tool(&caller, tool, absent_call).await,
+            "fork-gone",
+        );
+        let hidden = masked_tool_answer(
+            &dispatch_operator_tool(&caller, tool, hidden_call).await,
+            "fork-kept",
+        );
+        assert!(
+            form != "one member"
+                || (absent.contains("<member>") && absent.contains("mob member not found")),
+            "{tool}, {form}: a fork of a source the mob does not hold is refused as not \
+             found: {absent}"
+        );
+        assert!(
+            tool != "spawn_member" || absent.starts_with("error:"),
+            "{tool}, {form}: a fork of a source the mob does not hold seats nothing: {absent}"
+        );
+        assert_eq!(
+            hidden, absent,
+            "{tool}, {form}: a fork of a source hidden from the caller answers as a fork of a \
+             source the mob does not hold"
+        );
+    }
+    for child in ["fork-child", "fork-batch-child", "fork-profile-child"] {
+        assert!(
+            handle
+                .get_member(&AgentIdentity::from(child))
+                .await
+                .unwrap()
+                .is_none(),
+            "nothing is seated from the hidden source: {child}"
+        );
+    }
+    assert_eq!(
+        handle.list_members().await.len(),
+        seated_before,
+        "no refused fork seats a member"
+    );
+
+    let forked = masked_tool_answer(
+        &dispatch_operator_tool(
+            &keeper,
+            "spawn_member",
+            fork_launch_args("fork-keeper-child", "fork-kept"),
+        )
+        .await,
+        "fork-kept",
+    );
+    assert!(
+        forked.starts_with("ok:"),
+        "a caller the source is not hidden from forks it: {forked}"
+    );
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from("fork-keeper-child"))
+            .await
+            .unwrap()
+            .is_some(),
+        "the keeper's fork is seated"
+    );
+}
+
+/// A placed member's spawn lane asks the host's member tool audience about
+/// the source of a fork launch as that member: a source the audience hides
+/// from the placed member answers exactly as a source the mob does not
+/// hold, for one member and per entry for many, and a source the audience
+/// keeps for the placed member alone is not answered that way.
+#[tokio::test]
+async fn a_placed_members_fork_launch_asks_the_audience_as_that_member() {
+    use crate::runtime::bridge_protocol::{MemberOperatorOp, MemberOperatorSpawnSpec};
+    use crate::runtime::upcall_responder::MobUpcallSeams;
+    use meerkat_contracts::wire::{WireForkContext, WireMemberLaunchMode};
+
+    let kept_from = AgentIdentity::from("placed-fork-kept-from");
+    let kept_for = AgentIdentity::from("placed-fork-kept-for");
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "placed-member-fork-audience"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service)
+    .with_member_tool_audience(Arc::new(HideAroundOneCaller {
+        caller: AgentIdentity::from("member-a"),
+        kept_from: kept_from.clone(),
+        kept_for: kept_for.clone(),
+    }))
+    .create()
+    .await
+    .expect("create mob");
+    seed_operator_execution_residency(&handle, "member-session-a").await;
+    for member in [&kept_from, &kept_for] {
+        handle
+            .spawn(ProfileName::from("worker"), member.clone(), None)
+            .await
+            .expect("spawn a local member");
+    }
+    let metadata_store: Arc<dyn MobRuntimeMetadataStore> =
+        Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    let seams = MobUpcallSeams::new(handle.clone(), metadata_store);
+    let authority = crate::store::MobMemberOperatorAuthorityRecord {
+        agent_identity: "member-a".to_string(),
+        generation: 0,
+        can_create_mobs: false,
+        can_mutate_profiles: false,
+        can_run_adaptive_packs: false,
+        managed_mob_scope: BTreeSet::from([handle.mob_id().as_str().to_string()]),
+        spawn_profile_scope: BTreeMap::new(),
+    };
+    let fork = |child: &str, source: &str| MemberOperatorSpawnSpec {
+        profile: "worker".to_string(),
+        member_id: child.to_string(),
+        initial_message: None,
+        runtime_mode: None,
+        launch_mode: Some(WireMemberLaunchMode::Fork {
+            source_member_id: source.to_string(),
+            fork_context: WireForkContext::FullHistory,
+        }),
+        auto_wire_parent: None,
+        placement: None,
+        requested_tool_access_policy_present: false,
+        resolved_tool_access_policy: None,
+    };
+    let one =
+        |child: &str, source: &str| MemberOperatorOp::SpawnMember(Box::new(fork(child, source)));
+    let many = |child: &str, source: &str| MemberOperatorOp::SpawnManyMembers {
+        specs: vec![fork(child, source)],
+    };
+    let answer = |request_id: &'static str, op: MemberOperatorOp, name: &'static str| {
+        let seams = &seams;
+        let authority = &authority;
+        async move {
+            format!(
+                "{:?}",
+                placed_member_operator_call(seams, authority, request_id, op).await
+            )
+            .replace(name, "<member>")
+        }
+    };
+
+    for (form, absent_op, hidden_op, absent_id, hidden_id) in [
+        (
+            "one member",
+            one("placed-fork-child", "placed-fork-gone"),
+            one("placed-fork-child", "placed-fork-kept-from"),
+            "placed-fork-absent-one",
+            "placed-fork-hidden-one",
+        ),
+        (
+            "an entry of many",
+            many("placed-fork-batch-child", "placed-fork-gone"),
+            many("placed-fork-batch-child", "placed-fork-kept-from"),
+            "placed-fork-absent-many",
+            "placed-fork-hidden-many",
+        ),
+    ] {
+        let absent = answer(absent_id, absent_op, "placed-fork-gone").await;
+        let hidden = answer(hidden_id, hidden_op, "placed-fork-kept-from").await;
+        assert!(
+            absent.contains("<member>") && absent.contains("mob member not found"),
+            "{form}: a placed member's fork of a source the mob does not hold is refused as \
+             not found: {absent}"
+        );
+        assert_eq!(
+            hidden, absent,
+            "{form}: a placed member's fork of a source hidden from it answers as a fork of a \
+             source the mob does not hold"
+        );
+    }
+    let own = answer(
+        "placed-fork-own",
+        one("placed-fork-own-child", "placed-fork-kept-for"),
+        "placed-fork-kept-for",
+    )
+    .await;
+    assert!(
+        !(own.contains("<member>") && own.contains("mob member not found")),
+        "a source the audience keeps for the placed member alone is not answered as a source \
+         the mob does not hold: {own}"
+    );
+}
+
+/// One wire tool call per position of `hidden` beside member `other`, each
+/// beside the same call with a name the mob does not hold (`absent`) in its
+/// place: the two answers are equal but for the name.
+async fn assert_hidden_end_answers_as_absent_beside(
+    caller: &Arc<dyn AgentToolDispatcher>,
+    tool: &'static str,
+    other: &str,
+    hidden: &str,
+    absent: &str,
+) {
+    let ends = |member: &str, peer: &str| serde_json::json!({ "member_id": member, "peer_member_id": peer });
+    for (hidden_call, absent_call, position) in [
+        (ends(other, hidden), ends(other, absent), "as the peer"),
+        (ends(hidden, other), ends(absent, other), "as the member"),
+    ] {
+        let hidden_answer = masked_tool_answer(
+            &dispatch_operator_tool(caller, tool, hidden_call).await,
+            hidden,
+        );
+        let absent_answer = masked_tool_answer(
+            &dispatch_operator_tool(caller, tool, absent_call).await,
+            absent,
+        );
+        assert!(
+            absent_answer.starts_with("error:"),
+            "{tool}: a name the mob does not hold is refused: {absent_answer}"
+        );
+        assert_eq!(
+            hidden_answer, absent_answer,
+            "{tool}: beside '{other}', a member hidden from the caller, named {position}, \
+             answers as a name the mob does not hold"
+        );
+    }
+}
+
+/// A wire that names a Broken member beside a member the host's audience
+/// hides from the caller answers exactly as the same wire with a name the
+/// mob does not hold in the hidden member's place: member not found comes
+/// before the Broken member's refusal for every caller. A wire of the
+/// Broken member to a member the mob holds still answers that refusal.
+#[tokio::test]
+async fn wire_members_answer_a_hidden_member_beside_a_broken_member_as_absent() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let mut definition = sample_definition_with_mob_tools();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("beside-broken"),
+            None,
+        )
+        .await
+        .expect("spawn the member that breaks");
+    handle.stop().await.expect("stop");
+    let lost_session = handle
+        .get_member(&AgentIdentity::from("beside-broken"))
+        .await
+        .unwrap()
+        .expect("roster entry")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    service
+        .archive(&lost_session)
+        .await
+        .expect("archive the session");
+    service.delete_persisted_session(&lost_session).await;
+    crash_stop_and_release_routes(handle).await;
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    // The member is Broken only once the explicit resume's restore ran.
+    .with_member_restore_policy(MemberRestorePolicy::Eager)
+    .with_member_tool_audience(Arc::new(HideKeptMembers))
+    .resume()
+    .await
+    .expect("the mob resumes with a Broken member");
+    match resumed.resume().await {
+        Ok(())
+        | Err(MobError::InvalidTransition {
+            from: MobState::Running,
+            to: MobState::Running,
+        }) => {}
+        Err(error) => panic!("a Broken member still lets the mob resume: {error}"),
+    }
+    for (member, keeper) in [("beside-kept", Some("ann")), ("beside-caller", None)] {
+        let mut spec =
+            SpawnMemberSpec::new(ProfileName::from("worker"), AgentIdentity::from(member));
+        if let Some(keeper) = keeper {
+            spec = spec.with_labels(BTreeMap::from([(
+                "kept_for".to_string(),
+                keeper.to_string(),
+            )]));
+        }
+        resumed.spawn_spec(spec).await.expect("spawn the member");
+    }
+    let caller = manage_scope_tools(&resumed, "beside-caller").await;
+
+    assert_hidden_end_answers_as_absent_beside(
+        &caller,
+        "wire_members",
+        "beside-broken",
+        "beside-kept",
+        "beside-gone",
+    )
+    .await;
+    let held = masked_tool_answer(
+        &dispatch_operator_tool(
+            &caller,
+            "wire_members",
+            serde_json::json!({ "member_id": "beside-caller", "peer_member_id": "beside-broken" }),
+        )
+        .await,
+        "beside-broken",
+    );
+    assert!(
+        held.starts_with("error:") && !held.contains("mob member not found"),
+        "a wire of two members the mob holds still answers the Broken member's refusal: {held}"
+    );
+}
+
+/// A wire or unwire that names an open approval branch beside a member the
+/// host's audience hides from the caller answers exactly as the same call
+/// with a name the mob does not hold in the hidden member's place: member
+/// not found comes before the branch's refusal for every caller. A call
+/// that names the branch beside a member the mob holds still answers that
+/// refusal.
+#[tokio::test]
+async fn wire_members_answer_a_hidden_member_beside_an_approval_branch_as_absent() {
+    let handle =
+        mob_with_kept_members(&[("branch-kept", Some("ann")), ("branch-caller", None)]).await;
+    let grantee = AgentIdentity::from("branch-grantee");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), grantee.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle.spawn_spec(spec).await.expect("spawn the grantee");
+    let decision = meerkat_core::approval::decision::DecisionId::derive(
+        &meerkat_core::approval::decision::DecisionKind::new("grant.child").expect("kind"),
+        &meerkat_core::approval::decision::DecisionSubjectKey::new("wire-target")
+            .expect("subject key"),
+    );
+    let (branch, _) = handle
+        .open_approval_branch(&grantee, &decision)
+        .await
+        .expect("the approval branch opens");
+    let branch = branch.to_string();
+    let caller = manage_scope_tools(&handle, "branch-caller").await;
+
+    for tool in ["wire_members", "unwire_members"] {
+        assert_hidden_end_answers_as_absent_beside(
+            &caller,
+            tool,
+            &branch,
+            "branch-kept",
+            "branch-gone",
+        )
+        .await;
+        let held = masked_tool_answer(
+            &dispatch_operator_tool(
+                &caller,
+                tool,
+                serde_json::json!({ "member_id": "branch-caller", "peer_member_id": branch }),
+            )
+            .await,
+            &branch,
+        );
+        assert!(
+            held.starts_with("error:") && !held.contains("mob member not found"),
+            "{tool}: a call that names the branch beside a member the mob holds still answers \
+             the branch's refusal: {held}"
+        );
+    }
+}
+
+/// A wire or unwire an agent makes that names an identity entry beside a
+/// member the host's audience hides from the caller answers exactly as the
+/// same call with a name the mob does not hold in the hidden member's place:
+/// member not found comes before the refusal of the entry. A call that
+/// names the entry beside a member the caller is shown still answers that
+/// refusal, and no call wires the entry.
+#[tokio::test]
+async fn wire_members_answer_a_hidden_member_beside_an_identity_entry_as_absent() {
+    let handle = mob_with_kept_members(&[
+        ("entry-kept", Some("ann")),
+        ("entry-shown", None),
+        ("entry-caller", None),
+    ])
+    .await;
+    let entry = AgentIdentity::from("entry-held");
+    let mut spec =
+        SpawnMemberSpec::new(ProfileName::from("worker"), entry.clone()).with_entry_custody(true);
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("the host seats its identity entry");
+    let caller = manage_scope_tools(&handle, "entry-caller").await;
+
+    for tool in ["wire_members", "unwire_members"] {
+        assert_hidden_end_answers_as_absent_beside(
+            &caller,
+            tool,
+            "entry-held",
+            "entry-kept",
+            "entry-gone",
+        )
+        .await;
+        for (member, peer) in [("entry-held", "entry-shown"), ("entry-shown", "entry-held")] {
+            let shown = masked_tool_answer(
+                &dispatch_operator_tool(
+                    &caller,
+                    tool,
+                    serde_json::json!({ "member_id": member, "peer_member_id": peer }),
+                )
+                .await,
+                "entry-held",
+            );
+            assert!(
+                shown.starts_with("error:")
+                    && shown.contains("member '<member>' is an identity entry"),
+                "{tool}: a call that names the entry beside a member the caller is shown \
+                 ('{member}', '{peer}') still answers the refusal of the entry: {shown}"
+            );
+        }
+    }
+    assert!(
+        handle
+            .get_member(&entry)
+            .await
+            .expect("roster read")
+            .expect("the entry is seated")
+            .wired_to
+            .is_empty(),
+        "no edge reaches the identity entry"
+    );
+}
+
+/// One name given as both ends of a wire or unwire: a member the host's
+/// audience hides from the caller (an identity entry, an open approval
+/// branch) answers exactly as a name the mob does not hold, member not
+/// found. A member the caller is shown still answers that a wire needs two
+/// different members.
+#[tokio::test]
+async fn wire_members_answer_a_hidden_name_given_twice_as_absent() {
+    let handle = mob_with_audience(
+        &[("twice-shown", None), ("twice-caller", None)],
+        Arc::new(HideKeptMembersAndBranches),
+    )
+    .await;
+    let mut entry = SpawnMemberSpec::new(
+        ProfileName::from("worker"),
+        AgentIdentity::from("twice-entry"),
+    )
+    .with_entry_custody(true)
+    .with_labels(BTreeMap::from([(
+        "kept_for".to_string(),
+        "ann".to_string(),
+    )]));
+    entry.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(entry)
+        .await
+        .expect("the host seats its identity entry");
+    let grantee = AgentIdentity::from("twice-grantee");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), grantee.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle.spawn_spec(spec).await.expect("spawn the grantee");
+    let decision = meerkat_core::approval::decision::DecisionId::derive(
+        &meerkat_core::approval::decision::DecisionKind::new("grant.child").expect("kind"),
+        &meerkat_core::approval::decision::DecisionSubjectKey::new("twice-target")
+            .expect("subject key"),
+    );
+    let (branch, _) = handle
+        .open_approval_branch(&grantee, &decision)
+        .await
+        .expect("the approval branch opens");
+    let branch = branch.to_string();
+    let caller = manage_scope_tools(&handle, "twice-caller").await;
+
+    // Every name is asked on both tools before any answer is judged, so one
+    // run shows each answer that tells a hidden name from an unheld one.
+    let mut told_apart = Vec::new();
+    for tool in ["wire_members", "unwire_members"] {
+        let mut answers = Vec::new();
+        for name in ["twice-gone", "twice-entry", branch.as_str(), "twice-shown"] {
+            answers.push(masked_tool_answer(
+                &dispatch_operator_tool(
+                    &caller,
+                    tool,
+                    serde_json::json!({ "member_id": name, "peer_member_id": name }),
+                )
+                .await,
+                name,
+            ));
+        }
+        let [absent, hidden_entry, hidden_branch, shown] = answers.as_slice() else {
+            panic!("four names were asked");
+        };
+        if !(absent.starts_with("error:") && absent.contains("mob member not found")) {
+            told_apart.push(format!(
+                "{tool}: a name the mob does not hold, given twice, is not answered as one: \
+                 {absent}"
+            ));
+        }
+        if hidden_entry != absent {
+            told_apart.push(format!(
+                "{tool}: an identity entry hidden from the caller, given twice, answers \
+                 {hidden_entry}"
+            ));
+        }
+        if hidden_branch != absent {
+            told_apart.push(format!(
+                "{tool}: an approval branch hidden from the caller, given twice, answers \
+                 {hidden_branch}"
+            ));
+        }
+        if !(shown.starts_with("error:")
+            && shown.contains("requires distinct")
+            && !shown.contains("mob member not found"))
+        {
+            told_apart.push(format!(
+                "{tool}: a member the caller is shown, given twice, does not answer that the \
+                 call needs two different members: {shown}"
+            ));
+        }
+    }
+    assert!(
+        told_apart.is_empty(),
+        "a hidden name given twice answers as a name the mob does not hold, member not found:\n{}",
+        told_apart.join("\n")
+    );
+}
+
+/// In a stopped mob an agent's wire or unwire that names an identity entry
+/// is still refused for the entry: beside a member the caller is shown, and
+/// for a wire also beside a name the mob does not hold (a stopped mob looks
+/// no member up for a wire). An unwire beside such a name answers member
+/// not found, as in a running mob.
+#[tokio::test]
+async fn wire_members_refuse_an_identity_entry_in_a_stopped_mob() {
+    let handle = mob_with_kept_members(&[("stopped-shown", None), ("stopped-caller", None)]).await;
+    let mut entry = SpawnMemberSpec::new(
+        ProfileName::from("worker"),
+        AgentIdentity::from("stopped-entry"),
+    )
+    .with_entry_custody(true);
+    entry.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(entry)
+        .await
+        .expect("the host seats its identity entry");
+    let caller = manage_scope_tools(&handle, "stopped-caller").await;
+    handle.stop().await.expect("stop the mob");
+
+    for (tool, peer, refused_for_the_entry) in [
+        ("wire_members", "stopped-shown", true),
+        ("wire_members", "stopped-gone", true),
+        ("unwire_members", "stopped-shown", true),
+        ("unwire_members", "stopped-gone", false),
+    ] {
+        let answer = masked_tool_answer(
+            &dispatch_operator_tool(
+                &caller,
+                tool,
+                serde_json::json!({ "member_id": "stopped-entry", "peer_member_id": peer }),
+            )
+            .await,
+            "stopped-entry",
+        );
+        let expected = if refused_for_the_entry {
+            "member '<member>' is an identity entry"
+        } else {
+            "mob member not found: stopped-gone"
+        };
+        assert!(
+            answer.starts_with("error:") && answer.contains(expected),
+            "{tool} of the entry and '{peer}' in a stopped mob answers \"{expected}\": {answer}"
+        );
+    }
+}
+
+/// The end a wire tool answers as a member the mob does not hold
+/// (`MobHandle::wire_end_answered_absent`) is the end the mob itself names
+/// for two names it does not hold: the first of the two in the order of
+/// the call, for a wire and for an unwire.
+#[tokio::test]
+async fn the_absent_end_a_wire_tool_names_is_the_end_the_mob_names() {
+    let handle = mob_with_kept_members(&[
+        ("order-kept-a", Some("ann")),
+        ("order-kept-b", Some("ann")),
+        ("order-shown", None),
+        ("order-caller", None),
+    ])
+    .await;
+    let caller = AgentIdentity::from("order-caller");
+    let id = AgentIdentity::from;
+    for (first, second, hidden_first, hidden_second) in [
+        (
+            "order-gone-a",
+            "order-gone-b",
+            "order-kept-a",
+            "order-kept-b",
+        ),
+        (
+            "order-gone-b",
+            "order-gone-a",
+            "order-kept-b",
+            "order-kept-a",
+        ),
+        ("order-shown", "order-gone-a", "order-shown", "order-kept-a"),
+        ("order-gone-a", "order-shown", "order-kept-a", "order-shown"),
+    ] {
+        let named_by_the_mob = [
+            handle.wire(id(first), id(second)).await,
+            handle.unwire(id(first), id(second)).await,
+        ]
+        .map(|answer| match answer {
+            Err(MobError::MemberNotFound(member)) => member.to_string(),
+            other => panic!("a name the mob does not hold is not found: {other:?}"),
+        });
+        let position = |name: &str| {
+            if name == first { "first" } else { "second" }
+        };
+        let named_by_the_tool = handle
+            .wire_end_answered_absent(Some(&caller), &id(hidden_first), Some(&id(hidden_second)))
+            .await
+            .expect("an end hidden from the caller is answered as absent");
+        let tool_position = if named_by_the_tool.as_str() == hidden_first {
+            "first"
+        } else {
+            "second"
+        };
+        for named in &named_by_the_mob {
+            assert_eq!(
+                position(named),
+                tool_position,
+                "the tool names the end the mob names for ({first}, {second})"
+            );
+        }
+    }
+}
+
+/// The arguments of one resume launch of the session it is given.
+type ResumeLaunchArgs = Box<dyn Fn(&str) -> serde_json::Value>;
+
+/// A resume launch through `spawn_member` or `spawn_many_members` that
+/// names the session of a member the host's audience hides from the caller
+/// answers exactly as a resume of a session nobody holds, with manage
+/// scope, in every form the tools take a session in, and names neither the
+/// member nor its mob. A caller the member is not hidden from is told
+/// which member the session is bound to, as before.
+#[tokio::test]
+async fn spawn_tools_answer_a_resume_of_a_hidden_members_session_as_a_session_nobody_holds() {
+    let handle = mob_with_kept_members(&[
+        ("resume-kept", Some("ann")),
+        ("resume-keeper", Some("ann")),
+        ("resume-caller", None),
+    ])
+    .await;
+    let caller = manage_scope_tools(&handle, "resume-caller").await;
+    let keeper = manage_scope_tools(&handle, "resume-keeper").await;
+    let kept_session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("resume-kept"))
+        .await
+        .expect("the kept member's session")
+        .to_string();
+    let unheld_session = SessionId::new().to_string();
+    let by_bridge_field = |session: &str| {
+        serde_json::json!({
+            "profile": "worker",
+            "member_id": "resume-new",
+            "resume_bridge_session_id": session,
+        })
+    };
+    let forms: [(&'static str, &'static str, ResumeLaunchArgs); 5] = [
+        (
+            "spawn_member",
+            "resume_bridge_session_id",
+            Box::new(by_bridge_field),
+        ),
+        (
+            "spawn_member",
+            "resume_session_id",
+            Box::new(|session| {
+                serde_json::json!({
+                    "profile": "worker",
+                    "member_id": "resume-new",
+                    "resume_session_id": session,
+                })
+            }),
+        ),
+        (
+            "spawn_member",
+            "a resume launch mode",
+            Box::new(|session| {
+                serde_json::json!({
+                    "profile": "worker",
+                    "member_id": "resume-new",
+                    "launch_mode": { "mode": "resume", "bridge_session_id": session },
+                })
+            }),
+        ),
+        (
+            "spawn_member",
+            "a resume launch mode that declares a role",
+            Box::new(|session| {
+                serde_json::json!({
+                    "profile": "worker",
+                    "member_id": "resume-new",
+                    "launch_mode": {
+                        "mode": "resume",
+                        "bridge_session_id": session,
+                        "resume_from_role": "worker",
+                    },
+                })
+            }),
+        ),
+        (
+            "spawn_many_members",
+            "an entry of many",
+            Box::new(move |session| serde_json::json!({ "specs": [by_bridge_field(session)] })),
+        ),
+    ];
+    for (tool, form, args) in &forms {
+        let tool = *tool;
+        let unheld = masked_tool_answer(
+            &dispatch_operator_tool(&caller, tool, args(&unheld_session)).await,
+            &unheld_session,
+        );
+        let hidden = masked_tool_answer(
+            &dispatch_operator_tool(&caller, tool, args(&kept_session)).await,
+            &kept_session,
+        );
+        assert!(
+            unheld.contains("<member>") && !unheld.contains("agent_identity"),
+            "{tool}, {form}: a resume of a session nobody holds is refused: {unheld}"
+        );
+        assert_eq!(
+            hidden, unheld,
+            "{tool}, {form}: a resume of the session of a member hidden from the caller answers \
+             as a resume of a session nobody holds"
+        );
+    }
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from("resume-new"))
+            .await
+            .unwrap()
+            .is_none(),
+        "nothing is seated on the hidden member's session"
+    );
+
+    let told = masked_tool_answer(
+        &dispatch_operator_tool(&keeper, "spawn_member", (forms[0].2)(&kept_session)).await,
+        &kept_session,
+    );
+    assert!(
+        told.starts_with("error:") && told.contains("resume-kept"),
+        "a caller the member is not hidden from is told which member the session is bound \
+         to: {told}"
+    );
 }
 
 /// A force cancel reaches a fork child's run one of two typed ways. A run
@@ -92265,6 +93873,9 @@ fn mob_runtime_parity_field_value(
         "member_dispatch_admission_lineage" => {
             Some(MobRuntimeParityExprValue::Map(BTreeMap::new()))
         }
+        // The fork lineage for operator instructions: the parity probes seat
+        // no fork.
+        "member_instruction_lineage" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
         "member_wake_attempt_sequence" | "member_materialization_drift_count" => {
             Some(MobRuntimeParityExprValue::U64(0))
         }

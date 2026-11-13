@@ -11,7 +11,7 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Notify, oneshot};
 
 use crate::classify::{IngressClassificationContext, PeerCommsHandleSlot, PreparedIngressItem};
@@ -824,6 +824,9 @@ pub struct InboxSender {
     actionable_notify: Option<Arc<Notify>>,
     /// Shared drop counter. Classified path only.
     dropped_count: Option<Arc<AtomicU64>>,
+    /// Set once this inbox left the in-process registry through its own
+    /// runtime ([`InboxSender::mark_left`]). Shared by every clone.
+    left: Arc<AtomicBool>,
 }
 
 impl Inbox {
@@ -848,6 +851,7 @@ impl Inbox {
                 classified_queue: None,
                 actionable_notify: None,
                 dropped_count: None,
+                left: Arc::new(AtomicBool::new(false)),
             },
         )
     }
@@ -898,6 +902,7 @@ impl Inbox {
                 classified_queue: Some(classified_queue),
                 actionable_notify: Some(actionable_notify),
                 dropped_count: Some(dropped_count),
+                left: Arc::new(AtomicBool::new(false)),
             },
         )
     }
@@ -1019,6 +1024,20 @@ impl InboxSender {
     /// cleanup without exposing queue internals.
     pub(crate) fn same_inbox(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.notify, &other.notify)
+    }
+
+    /// Record that this inbox left the in-process registry through its own
+    /// runtime: the runtime released its route, was dropped, or a successor
+    /// replaced it. Set by the registry under its write lock, on exactly
+    /// those paths, and never cleared: a runtime publishes its inbox once,
+    /// so an inbox that left does not come back.
+    pub(crate) fn mark_left(&self) {
+        self.left.store(true, Ordering::Release);
+    }
+
+    /// Whether [`Self::mark_left`] ran for this inbox.
+    pub(crate) fn has_left(&self) -> bool {
+        self.left.load(Ordering::Acquire)
     }
 
     /// **Test-only seam for C-H3.** Simulate the classify-then-admit
@@ -2660,6 +2679,7 @@ mod tests {
             classified_queue: Some(classified_queue),
             actionable_notify: Some(actionable_notify),
             dropped_count: Some(counter.clone()),
+            left: Arc::new(AtomicBool::new(false)),
         };
 
         let first = sender.send_classified(InboxItem::External {
@@ -2696,6 +2716,7 @@ mod tests {
             classified_queue: Some(classified_queue.clone()),
             actionable_notify: Some(actionable_notify),
             dropped_count: Some(counter.clone()),
+            left: Arc::new(AtomicBool::new(false)),
         };
 
         assert_eq!(
@@ -2747,6 +2768,7 @@ mod tests {
             classified_queue: Some(classified_queue.clone()),
             actionable_notify: Some(actionable_notify),
             dropped_count: Some(counter.clone()),
+            left: Arc::new(AtomicBool::new(false)),
         };
 
         assert_eq!(
@@ -2804,6 +2826,7 @@ mod tests {
             classified_queue: Some(classified_queue.clone()),
             actionable_notify: Some(actionable_notify),
             dropped_count: Some(counter.clone()),
+            left: Arc::new(AtomicBool::new(false)),
         };
 
         assert_eq!(
@@ -2872,6 +2895,7 @@ mod tests {
             classified_queue: Some(classified_queue.clone()),
             actionable_notify: Some(actionable_notify),
             dropped_count: Some(counter.clone()),
+            left: Arc::new(AtomicBool::new(false)),
         };
 
         assert_eq!(
@@ -2937,6 +2961,7 @@ mod tests {
             classified_queue: Some(classified_queue.clone()),
             actionable_notify: Some(actionable_notify),
             dropped_count: Some(counter.clone()),
+            left: Arc::new(AtomicBool::new(false)),
         };
 
         for _ in 0..CAPACITY {

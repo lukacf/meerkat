@@ -666,6 +666,10 @@ async fn agent_events_sse_handler(
     // The stream decides under the policy committed before each event, not
     // the one the request read; the gate below reads the same view.
     let mut live_view = Some(LiveAccessView::new(audience));
+    // The attributes were read just above; the stream reads them again
+    // before it decides an item once that read is as old as a kept
+    // record's bound.
+    let mut prime_age = StreamPrimeAge::primed(std::time::Instant::now());
     // An agent private to another person is answered as a member the
     // console does not hold.
     if live_view
@@ -716,7 +720,8 @@ async fn agent_events_sse_handler(
                 // Read the roster again after each committed change, until
                 // none lands during the reads: the gate below then reads the
                 // configuration committed before the event is sent.
-                let mut changed = policy_changed;
+                let mut changed =
+                    policy_changed || prime_age.due(std::time::Instant::now());
                 while live.refresh() || changed {
                     changed = false;
                     prime_sse_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref())
@@ -857,6 +862,40 @@ pub(crate) fn mob_events_sse_router_with_access_and_priming(
             visibility_policy,
             prime_runtime,
         })
+}
+
+/// When a stream last read the roster and the agents' records into the
+/// access attributes its decisions read.
+///
+/// A stream reads them when it opens. An agent's record can change while
+/// the stream is open, and nothing wakes a stream for it, so a stream reads
+/// them again before it decides its next item once its last read is as old
+/// as the bound a kept record has
+/// ([`crate::identity_first::runtime::UNSEATED_RECORD_MAX_AGE`]): a stream
+/// opened before a change decides on the record as it was for that long at
+/// most. A stream with no item to decide reads nothing.
+pub(crate) struct StreamPrimeAge {
+    primed_at: std::time::Instant,
+}
+
+impl StreamPrimeAge {
+    /// A stream that read the attributes at `now`.
+    pub(crate) fn primed(now: std::time::Instant) -> Self {
+        Self { primed_at: now }
+    }
+
+    /// Whether the stream's last read is as old as the bound at `now`. It
+    /// then counts as read at `now`: the caller reads the attributes again
+    /// before it decides.
+    pub(crate) fn due(&mut self, now: std::time::Instant) -> bool {
+        if now.saturating_duration_since(self.primed_at)
+            < crate::identity_first::runtime::UNSEATED_RECORD_MAX_AGE
+        {
+            return false;
+        }
+        self.primed_at = now;
+        true
+    }
 }
 
 /// Refresh the access attribute cache from the live roster and the spawn
@@ -1000,6 +1039,23 @@ pub(crate) async fn project_structural_member(
 }
 
 impl ProjectedStructuralEvent {
+    /// Whether the event names, besides the member it is attributed to, a
+    /// member `view`'s attributes do not know that `asked` does not hold
+    /// yet. Each such member is added to `asked`.
+    fn names_member_unknown_to(
+        &self,
+        view: &AccessView,
+        asked: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        let mut unknown = false;
+        for endpoint in &self.endpoints {
+            if !view.knows_agent(endpoint) && asked.insert(endpoint.clone()) {
+                unknown = true;
+            }
+        }
+        unknown
+    }
+
     /// Decide the event under `access_view` and project its payload. Nothing
     /// here awaits, so a stream decides under the view it settled after its
     /// last await. Any view decides the agents private to another person; an
@@ -1096,6 +1152,10 @@ async fn mob_events_sse_handler(
     // The stream decides under the policy committed before each event, not
     // the one the request read; the gate below reads the same view.
     let mut live_view = Some(LiveAccessView::new(audience));
+    // The attributes were read just above; the stream reads them again
+    // before it decides an item once that read is as old as a kept
+    // record's bound.
+    let mut prime_age = StreamPrimeAge::primed(std::time::Instant::now());
     // `mob.observe` gates access to the merged stream surface. The events
     // flowing through it carry the same rich per-agent payload as
     // `/agents/{id}/events`, so each one is still filtered by `agent.view`
@@ -1144,7 +1204,8 @@ async fn mob_events_sse_handler(
                 StreamWake::Item(Some(attributed)) => (false, Some(attributed)),
             };
             if let Some(live) = live_view.as_mut() {
-                let mut changed = policy_changed;
+                let mut changed =
+                    policy_changed || prime_age.due(std::time::Instant::now());
                 while live.refresh() || changed {
                     changed = false;
                     prime_sse_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref())
@@ -1273,6 +1334,28 @@ mod tests {
     use super::*;
     use crate::access::{AccessControlConfig, AccessEffect, AccessRule, AgentResourceAttributes};
     use std::collections::BTreeMap;
+
+    /// A stream reads the agents' attributes again once its last read is as
+    /// old as the bound a kept record has, and not before: right below the
+    /// bound it decides on what it read, at the bound it reads again, and
+    /// that read starts a new bound.
+    #[test]
+    fn a_stream_reads_the_attributes_again_once_its_last_read_is_as_old_as_the_bound() {
+        let bound = crate::identity_first::runtime::UNSEATED_RECORD_MAX_AGE;
+        assert_eq!(bound, Duration::from_secs(20));
+        let below = bound.saturating_sub(Duration::from_millis(1));
+        let opened = std::time::Instant::now();
+        let mut age = StreamPrimeAge::primed(opened);
+        assert!(!age.due(opened));
+        assert!(!age.due(opened + below));
+        assert!(age.due(opened + bound), "the read is as old as the bound");
+        // The read at the bound counts: the next one is a bound later.
+        assert!(!age.due(opened + bound + Duration::from_millis(1)));
+        assert!(!age.due(opened + bound + below));
+        assert!(age.due(opened + bound + bound));
+        // An instant before the last read reads nothing.
+        assert!(!age.due(opened));
+    }
 
     struct RedactAndFilterPolicy;
 
@@ -1943,6 +2026,12 @@ fn mob_structural_events_sse_router_configured(
 /// SSE handlers can apply per-agent ABAC checks, and its authentication
 /// when a token identified it. `Err(())` means 401. A token is checked
 /// against the Console's session fence record `fences` as it is now.
+///
+/// The caller the route did not identify is told by its console, as the
+/// Console's own routes tell it ([`crate::runtime::console_identifies_people`]):
+/// kept apart from the console's people where it can identify a person, the
+/// one operator where it identifies nobody. A route with no decision state
+/// has no console to ask, and keeps its caller apart.
 pub(crate) fn sse_access_context(
     decisions: Option<&RuntimeDecisionState>,
     fences: &ConsoleSessionFences,
@@ -1958,6 +2047,7 @@ pub(crate) fn sse_access_context(
             authentication: None,
         });
     };
+    let identifies_people = crate::runtime::console_identifies_people(decisions, access);
     let bearer_token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -1981,9 +2071,11 @@ pub(crate) fn sse_access_context(
         )
     } else {
         // Open route: identify callers that volunteered a valid token so
-        // per-user ABAC grants apply; everyone else is anonymous. Without an
-        // access controller a token grants nothing, so it identifies nobody.
-        token.filter(|_| access.is_some()).and_then(|token| {
+        // per-user ABAC grants apply; everyone else is anonymous. A token is
+        // resolved only where the console can identify a person: without an
+        // access controller a token grants nothing, and without a key no
+        // token verifies.
+        token.filter(|_| identifies_people).and_then(|token| {
             crate::runtime::resolve_authorized_console_caller_from_token(decisions, fences, &token)
         })
     };
@@ -1995,7 +2087,8 @@ pub(crate) fn sse_access_context(
         access,
         caller.as_ref().map(|caller| caller.auth.email.as_str()),
         private_owner_key.as_deref(),
-    );
+    )
+    .on_console(identifies_people);
     Ok(SseCaller {
         access_view: access.map(|_| audience.clone()),
         audience,
@@ -2085,6 +2178,10 @@ async fn mob_structural_events_sse_handler(
     // The stream decides under the policy committed before each event, not
     // the one the request read; the gate below reads the same view.
     let mut live_view = Some(LiveAccessView::new(audience));
+    // The attributes were read just above; the stream reads them again
+    // before it decides an item once that read is as old as a kept
+    // record's bound.
+    let mut prime_age = StreamPrimeAge::primed(std::time::Instant::now());
     // Structural events span the whole mob: require the mob-wide
     // observation grant, mirroring `meta/mob_events/query`. Envelopes
     // attributed to a specific agent are additionally filtered by
@@ -2146,6 +2243,9 @@ async fn mob_structural_events_sse_handler(
     let visibility_handle = state.handle.clone();
     let visibility_policy = state.visibility_policy;
     let require_exact_authority = state.require_exact_authority;
+    // The members a mob-level event named that the attributes did not
+    // know: each is read for once.
+    let mut primed_unknown = std::collections::HashSet::<String>::new();
     let mut shutdown = shutdown.map(|axum::Extension(shutdown)| shutdown);
     let stream = stream! {
         loop {
@@ -2161,7 +2261,8 @@ async fn mob_structural_events_sse_handler(
                 StreamWake::Item(Some(event)) => (false, Some(event)),
             };
             if let Some(live) = live_view.as_mut() {
-                let mut changed = policy_changed;
+                let mut changed =
+                    policy_changed || prime_age.due(std::time::Instant::now());
                 while live.refresh() || changed {
                     changed = false;
                     prime_structural_access_cache(
@@ -2181,6 +2282,7 @@ async fn mob_structural_events_sse_handler(
                 continue;
             };
             let projection = store.project_event_with_authority(&event).await;
+            let mob_level = projection.envelope.agent_identity.is_none();
             if !crate::unified_runtime::mob_events::envelope_matches(&projection.envelope, &query) {
                 continue;
             }
@@ -2209,6 +2311,21 @@ async fn mob_structural_events_sse_handler(
                 require_exact_authority,
             )
             .await;
+            // A mob-level event reads nothing above. One that names a
+            // member the attributes do not know (a record that appeared
+            // since they were last read) reads them first, once for each
+            // such member: a member they do not know names no owner.
+            if mob_level
+                && let Some(view) = live_view.as_ref().map(LiveAccessView::view)
+                && projected.names_member_unknown_to(view, &mut primed_unknown)
+            {
+                prime_structural_access_cache(
+                    reprime_runtime.as_ref(),
+                    &reprime_handle,
+                    reprime_access.as_ref(),
+                )
+                .await;
+            }
             // Settled after the last await: the event is decided under the
             // configuration committed before it is sent.
             if let Some(live) = live_view.as_mut() {

@@ -451,7 +451,7 @@ async fn a_private_member_this_process_did_not_build_is_offered_no_identity_tool
         private
             .tool_catalog()
             .iter()
-            .all(|entry| !is_identity_tool(&entry.tool.name.to_string())),
+            .all(|entry| !is_identity_tool(entry.tool.name.as_ref())),
         "and its catalog holds none"
     );
     runtime.clear_identity_runtime_authority();

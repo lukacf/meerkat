@@ -373,7 +373,7 @@ async fn member_standing(state: &MobMcpState, mob_id: &MobId) -> (MobMemberStatu
         .list_members()
         .await
         .into_iter()
-        .find(|row| row.agent_identity == AgentIdentity::from("member"))
+        .find(|row| row.agent_identity.as_str() == "member")
         .expect("the member is in the mob's member list");
     (row.status, row.error)
 }

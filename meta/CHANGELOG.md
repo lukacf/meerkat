@@ -154,6 +154,19 @@ Security, Upgrade and Changed.
 - With no runtime registered, a console serves no stored frame whose member
   sat in a nested mob (a mob other than its runtime's own).
 
+- `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486. Releases
+  through 0.9.14 build with 1.1.5. `meerkat-meta` depends on `rustix`
+  directly and now requires rustix 1.1.6 or later (it accepted 1.1.4 and
+  later), so a build that resolves it with a lock of its own moves too.
+  `rustix` is also taken through Meerkat Core, `tempfile`, and `xattr`
+  through `tar`. The advisory is about the `getxattr` and `listxattr`
+  functions of `rustix::fs` (with their `l` and `f` forms), which mark
+  bytes they never wrote as initialized when they are given a zero-length
+  buffer. No Meta crate calls them. Of the crates Meta builds with only
+  `xattr` does, and `tar`, the one crate that uses `xattr`, calls it only
+  to set attributes while unpacking, so Meta's own use is not known to be
+  affected.
+
 ### Upgrade
 
 - A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`

@@ -3341,6 +3341,30 @@ class DefaultRulesOfEveryPayload(Scans):
             self.assertEqual((result.code, result.receipt), (3, None), path)
             self.assertIn("embedded default", result.stderr)
 
+    def test_a_rules_file_that_lacks_a_rule_stops_the_scan_when_the_hit_is_at_a_path_of_a_removed_allowlist_line(self):
+        # The scan removes the path allowlist lines for vendor, dist-info and lock file paths from the
+        # rules it scans with, so it reads those paths. A build's own default skips them, with the
+        # given rules file and with the embedded default alike: two runs that both pass over a file
+        # say nothing about the rules for it. The rules file is proved over those files too.
+        lacking = self.root / "lacking-default.toml"
+        lacking.write_text(DEFAULT_RULES + '\n[[rules]]\nid = "%s"\n' % RULE)
+        clean = self.product({"notes.txt": b"plain\n"})
+        later = self.payload(tar_bytes({"pkg/vendor/notes.txt": TAG + b"\n"}), name="other-0.0.0-linux-x86_64.tar.gz")
+        cases = (("a vendor directory", (self.product({"vendor/notes.txt": TAG + b"\n"}),), "vendor/notes.txt"),
+                 ("a dist-info directory", (self.product({"thing-1.0.dist-info/notes.txt": TAG + b"\n"}),), "thing-1.0.dist-info/notes.txt"),
+                 ("a lock file", (self.product({"package-lock.json": TAG + b"\n"}),), "package-lock.json"),
+                 ("a vendor directory of a second payload", (clean, later), "vendor/notes.txt"))
+        for note, payloads, path in cases:
+            with self.subTest(note):
+                # With the build's own default the scan reads the path: the finding refuses there.
+                result = self.scan(*payloads)
+                self.assertEqual((result.code, [(row["rule"], row["path"]) for row in result.listing["positions"]]), (1, [(TAG_RULE, path)]))
+                # With the file that lacks the rule the scan stops: the only hit lies at that path.
+                result = self.scan(*payloads, extra=["--default-config-current", lacking])
+                self.assertEqual((result.code, result.receipt is None), (3, True))
+                self.assertTrue(result.stderr.startswith("CREDENTIAL-LEG REFUSED tool-failure: "), result.stderr)
+                self.assertIn("embedded default", result.stderr)
+
 
 class MemberNames(Scans):
     """A printed path names one file: "!" stands only where an archive is entered and "#strings" only

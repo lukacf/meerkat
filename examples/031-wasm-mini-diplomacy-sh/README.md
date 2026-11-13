@@ -74,16 +74,29 @@ node --version                                 # 20+
 npm --version
 ```
 
-The script uses the prebuilt runtime at
-`sdks/web/wasm/meerkat_web_runtime_bg.wasm`. If it is missing or Rust code has
-changed, install `wasm-pack` and rebuild it first:
+The script reads the browser runtime from
+`sdks/web/wasm/meerkat_web_runtime_bg.wasm`, with its `meerkat_web_runtime.js`
+beside it. That directory is a build output and is not in a checkout, so
+provide the pair first. The quickest way is the released `@rkat/web` package
+of the same version as your `rkat` (if `rkat` is not on `PATH`, name the
+binary you run the example with):
+
+```bash
+npm pack "@rkat/web@$(rkat --version | awk '{print $2}')"
+tar -xzf rkat-web-*.tgz package/wasm
+export MEERKAT_WASM="$PWD/package/wasm/meerkat_web_runtime_bg.wasm"
+```
+
+To build it from this checkout instead (also after Rust changes), install
+`wasm-pack`, then run:
 
 ```bash
 npm --prefix sdks/web install
 npm --prefix sdks/web run build:wasm
 ```
 
-You can instead set `MEERKAT_WASM=/path/to/meerkat_web_runtime_bg.wasm`.
+`MEERKAT_WASM=/path/to/meerkat_web_runtime_bg.wasm` selects any other
+prebuilt runtime; its `meerkat_web_runtime.js` must be in the same directory.
 
 `./examples.sh` will automatically prefer repo-local binaries built by
 `./scripts/repo-cargo` when present.

@@ -49,17 +49,29 @@ Python 3 is required to emit the inline definition. No provider credentials are
 needed for packaging; an integrated host needs credentials for model calls.
 All CLI roots are example-local under `.work/`.
 
-The script uses `sdks/web/wasm/meerkat_web_runtime_bg.wasm` by default. To
-rebuild that artifact after Rust changes, install Node.js and `wasm-pack`, then
-run:
+The script reads the browser runtime from
+`sdks/web/wasm/meerkat_web_runtime_bg.wasm`, with its `meerkat_web_runtime.js`
+beside it. That directory is a build output and is not in a checkout, so
+provide the pair first. The quickest way is the released `@rkat/web` package
+of the same version as your `rkat` (if `rkat` is not on `PATH`, name the
+binary you run the example with):
+
+```bash
+npm pack "@rkat/web@$(rkat --version | awk '{print $2}')"
+tar -xzf rkat-web-*.tgz package/wasm
+export MEERKAT_WASM="$PWD/package/wasm/meerkat_web_runtime_bg.wasm"
+```
+
+To build it from this checkout instead (also after Rust changes), install
+Node.js and `wasm-pack`, then run:
 
 ```bash
 npm --prefix sdks/web install
 npm --prefix sdks/web run build:wasm
 ```
 
-Set `MEERKAT_WASM=/path/to/meerkat_web_runtime_bg.wasm` to use another
-prebuilt runtime.
+`MEERKAT_WASM=/path/to/meerkat_web_runtime_bg.wasm` selects any other
+prebuilt runtime; its `meerkat_web_runtime.js` must be in the same directory.
 
 If you are running from this repo checkout instead of a global install, the
 script will automatically prefer repo-local binaries built by

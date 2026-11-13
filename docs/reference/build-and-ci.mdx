@@ -742,7 +742,16 @@ attaches its output to a release yet.
   a live row is to show (`named_models`: a cell and a model id). A cell
   shows one only when it names that id on that route; a named model no cell
   shows is an entry of its own and a gap, `model_not_proven` when a cell of
-  the route had its id withheld and `model_not_observed` otherwise.
+  the route had its id withheld and `model_not_observed` otherwise. The
+  totals count those two on a line of their own, apart from the rows that
+  did not run.
+- A row may name a test that is written and not yet in the tree, with the
+  mark `awaited` on the test. A commit that does not define the test then
+  lists the row's cells as `not_run` with the reason `test_not_at_commit`;
+  without the mark a test the commit does not define is an error. The mark
+  goes when the test lands: the selftest fails while a marked test is in the
+  tree. The built-binary rows of the three direct provider routes and of the
+  self-hosted server name their tests this way until those tests are merged.
 - `make reasoning-effort-receipt RESULTS=<directory> OUT=<directory>` (or
   the script's `generate`) reads the version, the manifest and the test
   sources from the commit and writes both files. An entry is `executed` only
@@ -751,7 +760,7 @@ attaches its output to a release yet.
   such a result is `source_only`, a cell no test covers is `not_run`, and
   each is listed again under `gaps`. A leg without a result file, a result
   of no leg, a file that does not match its schema, and a row whose test the
-  commit does not define are errors.
+  commit does not define (unless the manifest marks it `awaited`) are errors.
 - The output is the same bytes for the same inputs, and holds no path, host
   name, URL, credential or e-mail address: such a string in an input is
   refused. `verify` checks a written receipt against its schema, its

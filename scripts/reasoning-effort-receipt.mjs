@@ -30,7 +30,10 @@
 //     row is `not_run`, and each is repeated under `gaps` with its reason.
 //   - It reads the version (`Cargo.toml`), the manifest and the test sources
 //     from the product commit itself (`git show`), and checks that every
-//     test a row names is defined in the file the row names.
+//     test a row names is defined in the file the row names. The one way
+//     around: a test the manifest marks as `awaited` (written, not yet in
+//     the tree) may be missing, and its row's cells are then `not_run` for
+//     that reason.
 //   - It writes no free text from a run: a leg result holds counts, test
 //     names, typed cells and a digest of the runner's output, never the
 //     output. Of what a test prints it reads only two kinds of line. A cell
@@ -749,29 +752,34 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
   }
 
   const sources = new Map();
+  // The test of a row as the commit has it, or null: the row names none, or
+  // it names one the manifest marks as awaited and the commit does not
+  // define (`awaited` then says which). A test the commit does not define
+  // is an error without that mark.
   const testOf = (row) => {
-    if (row.test === null) return null;
+    if (row.test === null) return { test: null, awaited: false };
     if (!sources.has(row.test.source)) {
       const bytes = readSource(row.test.source);
-      if (bytes === null) throw new ReceiptError(`row ${row.id} of the manifest names ${row.test.source}, which the commit does not have`);
-      sources.set(row.test.source, { text: Buffer.from(bytes).toString("utf8"), sha256: sha256(bytes) });
+      sources.set(row.test.source, bytes === null ? null : { text: Buffer.from(bytes).toString("utf8"), sha256: sha256(bytes) });
     }
     const source = sources.get(row.test.source);
-    if (!definesTest(source.text, row.test.name)) {
+    if (source === null || !definesTest(source.text, row.test.name)) {
+      if (row.test.awaited === true) return { test: null, awaited: true };
+      if (source === null) throw new ReceiptError(`row ${row.id} of the manifest names ${row.test.source}, which the commit does not have`);
       throw new ReceiptError(`row ${row.id} of the manifest names the test ${row.test.name}, which ${row.test.source} does not define at the commit`);
     }
-    return { package: row.test.package, target: row.test.target, name: row.test.name, source: row.test.source, source_sha256: source.sha256 };
+    return { test: { package: row.test.package, target: row.test.target, name: row.test.name, source: row.test.source, source_sha256: source.sha256 }, awaited: false };
   };
 
   const entries = [];
   for (const row of manifest.rows) {
     const leg = manifest.legs.find((item) => item.id === row.leg);
     const state = states.get(row.leg);
-    const test = testOf(row);
+    const { test, awaited } = testOf(row);
     // What the row as a whole comes to when no result of its own exists.
     const unexecuted =
       test === null
-        ? { status: "not_run", gap: "no_test_row" }
+        ? { status: "not_run", gap: awaited ? "test_not_at_commit" : "no_test_row" }
         : !state.ran
           ? { status: "source_only", gap: "leg_not_run" }
           : !state.atCommit
@@ -970,6 +978,12 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
       leg_tests: { run: sum("run"), passed: sum("passed"), failed: sum("failed"), skipped: sum("skipped") },
       by_mode: MODES.map((mode) => ({ mode, ...entryCounts(entries.filter((item) => item.mode === mode)) })),
       gaps: gaps.length,
+      // The named models no observed cell shows, on their own: a reader of
+      // the totals must not take them for rows that did not run.
+      named_models: {
+        not_proven: entries.filter((item) => item.gap === "model_not_proven").length,
+        not_observed: entries.filter((item) => item.gap === "model_not_observed").length,
+      },
     },
     legs,
     entries,
@@ -993,6 +1007,7 @@ const GAP_TEXT = {
   infrastructure_failure: "the run failed before it reported tests",
   leg_not_run: "its leg did not run",
   no_test_row: "no test covers it at this commit",
+  test_not_at_commit: "the test the manifest names for it is not in the source at this commit yet",
   ran_at_another_commit: "its leg ran at another commit",
   no_per_test_result: "its leg ran and reported counts only, not this test",
   test_not_in_leg_result: "its leg ran and did not run this test",
@@ -1113,6 +1128,8 @@ export function renderMarkdown(receipt) {
     ),
     "",
     `Tests the legs ran at this commit: ${totals.leg_tests.run} run, ${totals.leg_tests.passed} passed, ${totals.leg_tests.failed} failed, ${totals.leg_tests.skipped} skipped. Gaps: ${totals.gaps}.`,
+    "",
+    `Models named for a live row that no observed cell shows: ${totals.named_models.not_proven} not proven (a cell of the route had its model id withheld), ${totals.named_models.not_observed} not observed. They are not rows that did not run: their row ran here, and each is an entry of its own in the matrix and under the gaps.`,
     "",
     "## Legs",
     "",

@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import struct
 import tarfile
@@ -314,6 +315,11 @@ CONNECT = Path(__file__).resolve().parents[1]
 REVISION, TREE = "a" * 40, "b" * 40
 RESOURCES = "c" * 64
 LINKER_SIGNED, ADHOC = 0x20002, 0x2
+# The limit preflight enforces (every simulated lane lifts it: its work root is a long temporary path).
+WORK_ROOT_LIMIT = p.MACOS_WORK_ROOT_LIMIT
+WORKFLOW = CONNECT.parent / ".github/workflows/connect-release.yml"
+# The library's installer itself (repository code; loading it runs nothing): its own layout rule is asked.
+INSTALLER = load("library_consumer_installer", CONNECT / "scripts/install-library-consumer.py")
 
 
 def macho(*, cpu=0x0100000C, filetype=2, minimum=(11, 0), libraries=("/usr/lib/libSystem.B.dylib",),
@@ -1554,7 +1560,9 @@ def test_official_playwright_install_is_the_backends_command_with_the_closures_n
         "--server-name", "playwright-isolated"]
     assert call[3] is False and set(call[2]) == {"HOME", "TMPDIR", "PATH", "LC_ALL"}
     assert p.read_json(profile) == {"schema_version": 1, "chrome_executable": str(lane.chrome),
-        "chrome_sha256": p.digest(lane.chrome), "process_parent": str(run / "process")}
+        "chrome_sha256": p.digest(lane.chrome), "process_parent": str(work / "playwright")}
+    # The installer wants an existing parent outside the installation and creates its own directory there.
+    assert (work / "playwright").is_dir() and list((work / "playwright").iterdir()) == []
     assert p.read_json(selected) == p.PLAYWRIGHT_CONFIGURATION
     record = p.read_json(work / "cli-qualification/official-playwright.json")
     assert record["status"] == "passed" and "a browser start" in record["not_claimed"]
@@ -1565,6 +1573,34 @@ def test_official_playwright_install_is_the_backends_command_with_the_closures_n
     assert 'PLAYWRIGHT_PROFILE = "' + p.PLAYWRIGHT_CONFIGURATION["profile"] + '"' in installer
     assert "PLAYWRIGHT_OPERATIONS = " + json.dumps(p.PLAYWRIGHT_CONFIGURATION["operations"]) in installer
     assert '"mcpServers": {"' + p.PLAYWRIGHT_SERVER + '"' in installer
+
+
+def test_the_official_install_layout_fits_the_installers_socket_budget_at_every_allowed_work_root(lane):
+    # The installer keeps the Playwright endpoint's sockets at
+    # <process parent>/p-<16 hex>/sockets/dashboard/<16 characters>.sock and refuses, with one fixed line and
+    # before it creates anything, a layout whose socket path exceeds its budget (macOS allows 104 bytes).
+    # The producer derives the process parent and the destination from the work root alone, so the
+    # installer's own rule is asked here: for the work root the stage jobs set, and for the longest work
+    # root preflight accepts. A simulated lane cannot show this: its installer is a stand-in.
+    lane.through(lane.LAST)
+    call = next(call for call in lane.calls if call[0] == "official-playwright-install")
+    profile = p.read_json(option(call[1], "--playwright-host-profile"))
+    parent = Path(profile["process_parent"]).relative_to(lane.work)
+    destination = option(call[1], "--destination").relative_to(lane.work)
+    hosted = set(re.findall(r"^ +CONNECT_WORK: (\S+)$", WORKFLOW.read_text(), re.MULTILINE))
+    assert len(hosted) == 1, "the macOS jobs share one work root"
+    for root in (Path(hosted.pop()), Path("/" + "w" * (WORK_ROOT_LIMIT - 1))):
+        assert root.is_absolute() and len(str(root)) <= WORK_ROOT_LIMIT
+        process = INSTALLER.playwright_process({"process_parent": str(root / parent)}, root / destination)
+        assert process.parent == root / parent and process != root / destination
+
+
+def test_preflight_refuses_a_work_root_longer_than_the_limit_the_socket_paths_rely_on(lane, monkeypatch):
+    monkeypatch.setattr(p, "MACOS_WORK_ROOT_LIMIT", WORK_ROOT_LIMIT)
+    assert len(str(lane.work)) > WORK_ROOT_LIMIT
+    with pytest.raises(ValueError, match="work root too long for macOS Unix socket paths"):
+        lane.step("preflight")
+    assert lane.names() == [], "refused before any command"
 
 
 @pytest.mark.parametrize("fault", ("install_failed", "no_receipt"))
@@ -1581,13 +1617,23 @@ def test_a_failed_official_install_fails_the_stage(lane, fault):
             return original(name, argv, cwd, env)
 
         lane.effect = effect
-    with pytest.raises(ValueError, match="the official-playwright install route failed"):
+    # The installer answers every refusal with one fixed line. It creates its destination only after it
+    # accepted its inputs, the host profile, the runtimes, the configuration and the layout, so the
+    # refusal says whether a destination exists: that splits "refused before installing" from "failed
+    # while installing" for the reader of a hosted job's output.
+    reached = ("the installer created its destination and kept 1 log of its own there" if fault == "no_receipt"
+               else "the installer created no destination: it refused its inputs or its layout before it "
+                    "installed anything")
+    with pytest.raises(ValueError, match="the official-playwright install route failed") as raised:
         lane.step("check-official-install")
+    assert str(raised.value).endswith(" (" + reached + ")")
     assert not (lane.work / "cli-qualification/official-playwright.json").exists()
     # The failure names the route and keeps what the installer said about its npm.
     refused = p.read_json(lane.work / "cli-qualification/official-playwright.refused.json")
     assert refused["status"] == "refused" and refused["route"] == "official-playwright" and refused["reason"]
     assert refused["npm_version"] == ("11.17.0" if fault == "no_receipt" else None)
+    assert refused["destination_created"] is (fault == "no_receipt")
+    assert refused["installer_logs"] == (["npm-runtime.stdout"] if fault == "no_receipt" else [])
     assert p.macos_main(["check-official-install", "--work", str(lane.work)]) == 1
     with pytest.raises(ValueError, match="earlier step has no record: check-official-install"):
         lane.stage_record()

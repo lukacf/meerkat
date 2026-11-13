@@ -12,16 +12,17 @@ Common `rkat` workflows from the command line, with no application code.
 
 ## Prerequisites
 ```bash
-export OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-...
 ./scripts/repo-cargo build -p rkat --bin rkat
 ```
 
-The script does not pass `--model` or `--provider`. With a fresh, unpinned
-configuration it selects `gpt-6-astra`, so the OpenAI key must have access to
-that model. Explicit model/provider configuration can change the credentials
-needed; merely setting an API key does not select its provider. The script
-also starts an `--isolated` realm, so a model pinned only in the ordinary realm
-is not sufficient for every run.
+Every command that starts a session passes `--model claude-sonnet-4-6` (the
+`MODEL` variable set just before step 1 in `examples.sh`), so the Anthropic key is the
+only credential the script needs. Step 3 resumes the session from step 2
+without `--model` and keeps that session's model. To run against another
+provider, change `MODEL` and export that provider's key: setting an API key
+alone does not select its provider, and a `rkat run` without `--model` on a
+fresh configuration selects `gpt-6-astra`, which needs an OpenAI key.
 
 ## Run
 ```bash

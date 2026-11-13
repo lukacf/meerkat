@@ -15436,6 +15436,370 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         );
     }
 
+    /// The fault an armed [`ArmedFaultConfigStore`] answers its reads with.
+    #[cfg(feature = "mob")]
+    const FAILED_TURN_START_CONFIG_FAULT: &str =
+        "the realm config cannot be read at this turn's start";
+
+    /// A config store that serves `inner` until it is armed. An armed read
+    /// is refused with [`FAILED_TURN_START_CONFIG_FAULT`].
+    #[cfg(feature = "mob")]
+    struct ArmedFaultConfigStore {
+        inner: Arc<dyn ConfigStore>,
+        armed: AtomicBool,
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl ConfigStore for ArmedFaultConfigStore {
+        async fn get(&self) -> Result<Config, meerkat_core::ConfigError> {
+            if self.armed.load(AtomicOrdering::SeqCst) {
+                return Err(meerkat_core::ConfigError::Validation(
+                    FAILED_TURN_START_CONFIG_FAULT.to_string(),
+                ));
+            }
+            self.inner.get().await
+        }
+
+        async fn set(&self, config: Config) -> Result<(), meerkat_core::ConfigError> {
+            self.inner.set(config).await
+        }
+
+        async fn patch(&self, delta: ConfigDelta) -> Result<Config, meerkat_core::ConfigError> {
+            self.inner.patch(delta).await
+        }
+
+        fn metadata(&self) -> Option<meerkat_core::ConfigStoreMetadata> {
+            self.inner.metadata()
+        }
+
+        async fn set_held(
+            &self,
+            guard: &meerkat_core::AdmissionGuard,
+            config: Config,
+        ) -> Result<(), meerkat_core::ConfigError> {
+            self.inner.set_held(guard, config).await
+        }
+
+        async fn patch_held(
+            &self,
+            guard: &meerkat_core::AdmissionGuard,
+            delta: ConfigDelta,
+        ) -> Result<Config, meerkat_core::ConfigError> {
+            self.inner.patch_held(guard, delta).await
+        }
+    }
+
+    /// The definition of the child mob a [`RestSessionWithOwnedMobs`] owns:
+    /// one turn-driven `worker` profile. The mob id is unique per owner
+    /// session, because a mob's supervisor registers under its mob id in the
+    /// process-wide in-process comms registry.
+    #[cfg(feature = "mob")]
+    fn rest_owned_child_mob_definition(owner: &SessionId) -> meerkat_mob::MobDefinition {
+        let mut definition = meerkat_mob::MobDefinition::explicit(meerkat_mob::MobId::from(
+            format!("rest-owned-child-mob-{owner}"),
+        ));
+        definition.profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
+                model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                auth_binding: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+                durable: false,
+            })),
+        );
+        definition
+    }
+
+    /// A live REST session whose turns ran, which owns a child mob (destroyed
+    /// when its owner is archived, as a mob an agent creates is) and holds
+    /// its implicit mob.
+    ///
+    /// The session's runtime executor keeps the context it was attached
+    /// with. It is attached from a copy of the server state whose config
+    /// runtime reads through `config_fault`, while the continue handler
+    /// keeps the server's own. A continue made while the fault is armed
+    /// therefore passes every check the handler makes before it admits the
+    /// input, and fails where the executor's apply reads the realm config,
+    /// before the agent runs.
+    #[cfg(feature = "mob")]
+    struct RestSessionWithOwnedMobs {
+        _temp: TempDir,
+        state: AppState,
+        session_id: SessionId,
+        child_mob: meerkat_mob::MobId,
+        implicit_mob: meerkat_mob::MobId,
+        config_fault: Arc<ArmedFaultConfigStore>,
+        llm_calls: Arc<tokio::sync::watch::Sender<usize>>,
+    }
+
+    #[cfg(feature = "mob")]
+    impl RestSessionWithOwnedMobs {
+        async fn live() -> Self {
+            let temp = TempDir::new().unwrap();
+            let mut state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            // The mock counts each model request and returns its permit
+            // after use, so the one permit serves every request unheld.
+            let llm_calls = Arc::new(tokio::sync::watch::channel(0).0);
+            state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+                calls: Arc::clone(&llm_calls),
+                release: Arc::new(tokio::sync::Semaphore::new(1)),
+            }));
+            let config_fault = Arc::new(ArmedFaultConfigStore {
+                inner: Arc::clone(&state.config_store),
+                armed: AtomicBool::new(false),
+            });
+            let mut executor_state = state.clone();
+            executor_state.config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+                Arc::clone(&config_fault) as Arc<dyn ConfigStore>,
+                temp.path().join("failed-turn-start-config-state.json"),
+            ));
+            let session_id = create_completed_rest_runtime_session(&executor_state).await;
+
+            let child_mob = state
+                .mob_state
+                .mob_create_definition_with_owner_bridge_session(
+                    rest_owned_child_mob_definition(&session_id),
+                    session_id.clone(),
+                    true,
+                    false,
+                )
+                .await
+                .expect("create a child mob the session owns");
+            let implicit_mob = state
+                .mob_state
+                .get_or_create_implicit_mob_for_bridge_session(
+                    &session_id.to_string(),
+                    &resolved_default_model(&state).await,
+                )
+                .await
+                .expect("the session's implicit mob");
+            let session = Self {
+                _temp: temp,
+                state,
+                session_id,
+                child_mob,
+                implicit_mob,
+                config_fault,
+                llm_calls,
+            };
+
+            // A plain continue: the attached executor applies the session's
+            // turns, and a turn that runs costs the session neither mob.
+            let plain = session.continue_turn("a plain turn").await;
+            assert!(
+                matches!(plain, RequestTerminal::Publish(Ok(_))),
+                "a plain turn runs before any turn fails: {plain:?}"
+            );
+            assert_eq!(
+                (
+                    session.child_mob_kept().await,
+                    session.implicit_mob_kept().await,
+                    session.stored_and_not_archived().await,
+                ),
+                (true, true, true),
+                "(child mob, implicit mob, stored session) before any turn fails"
+            );
+            session
+        }
+
+        /// One plain continue of the session through the continue handler's
+        /// body, with the handler's own answer.
+        async fn continue_turn(
+            &self,
+            prompt: &str,
+        ) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
+            let session_id = self.session_id.to_string();
+            Box::pin(continue_session_inner(
+                &self.state,
+                &session_id,
+                ContinueSessionRequest {
+                    injected_context: None,
+                    transient_turn_context: None,
+                    session_id: session_id.clone(),
+                    prompt: ContentInput::Text(prompt.to_string()),
+                    system_prompt: None,
+                    output_schema: None,
+                    structured_output_retries: None,
+                    keep_alive: None,
+                    comms_name: None,
+                    peer_meta: None,
+                    verbose: false,
+                    model: None,
+                    provider: None,
+                    auth_binding: None,
+                    max_tokens: None,
+                    hooks_override: None,
+                    enable_web_search: None,
+                    skill_refs: None,
+                    turn_tool_overlay: None,
+                    additional_instructions: None,
+                },
+                None,
+            ))
+            .await
+        }
+
+        /// The model requests the session's turns have made.
+        fn model_requests(&self) -> usize {
+            *self.llm_calls.borrow()
+        }
+
+        /// Whether the child mob the session owns is still there.
+        async fn child_mob_kept(&self) -> bool {
+            self.state
+                .mob_state
+                .handle_for(&self.child_mob)
+                .await
+                .is_ok()
+        }
+
+        /// Whether the session's implicit mob is still the one it held.
+        async fn implicit_mob_kept(&self) -> bool {
+            self.state
+                .mob_state
+                .find_implicit_mob_for_bridge_session(&self.session_id.to_string())
+                .await
+                == Some(self.implicit_mob.clone())
+        }
+
+        /// Whether the session is stored and not archived: the body-free
+        /// read the completion cleanup itself makes.
+        async fn stored_and_not_archived(&self) -> bool {
+            matches!(
+                committed_source_archived(&self.state.session_service, &self.session_id).await,
+                Ok(Some(false))
+            )
+        }
+    }
+
+    /// A turn whose apply fails at its start, after its input was admitted,
+    /// is that one turn failed and no archive of the session. The session's
+    /// executor cannot read the realm config where it validates the turn, so
+    /// the apply fails before the agent runs. The session keeps the child mob
+    /// it owns and its implicit mob, stays stored and not archived, and runs
+    /// its next turn.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn a_failed_turn_start_keeps_the_mobs_a_rest_session_owns() {
+        let session = RestSessionWithOwnedMobs::live().await;
+        let requests_before = session.model_requests();
+
+        session
+            .config_fault
+            .armed
+            .store(true, AtomicOrdering::SeqCst);
+        let failed = session.continue_turn("a turn whose start fails").await;
+        session
+            .config_fault
+            .armed
+            .store(false, AtomicOrdering::SeqCst);
+
+        // The handler answers a continue it refuses before admission without
+        // publishing. A published `TURN_ABANDONED` whose error is a
+        // `runtime_apply_failure` is the completion of an admitted input
+        // whose apply failed, here on the armed config read.
+        match &failed {
+            RequestTerminal::Publish(Err(ApiError::InternalWithData { code, details, .. })) => {
+                assert_eq!(code.as_str(), "TURN_ABANDONED", "{failed:?}");
+                assert_eq!(
+                    details["error"]["kind"], "runtime_apply_failure",
+                    "{failed:?}"
+                );
+                assert!(
+                    details.to_string().contains(FAILED_TURN_START_CONFIG_FAULT),
+                    "the turn failed on the armed config read: {failed:?}"
+                );
+            }
+            other => panic!(
+                "the turn is admitted and its apply fails at its start, but it was answered \
+                 {other:?}"
+            ),
+        }
+        assert_eq!(
+            session.model_requests(),
+            requests_before,
+            "the failed turn made no model request"
+        );
+
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+            ),
+            (true, true),
+            "(child mob, implicit mob) after the failed turn start, which is no archive of the \
+             session"
+        );
+        assert!(
+            session.stored_and_not_archived().await,
+            "the session is still stored, and not archived, after the failed turn start"
+        );
+        let next = session.continue_turn("the next turn").await;
+        assert!(
+            matches!(next, RequestTerminal::Publish(Ok(_))),
+            "the session's next turn runs: {next:?}"
+        );
+        assert!(
+            session.model_requests() > requests_before,
+            "the next turn reached the model"
+        );
+    }
+
+    /// The guard of the row above: archiving the session through the archive
+    /// route still destroys the child mob it owns and its implicit mob.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn an_archive_still_destroys_the_mobs_a_rest_session_owns() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let session = RestSessionWithOwnedMobs::live().await;
+
+        let response = router(session.state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/sessions/{}", session.session_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::OK, "the archive answers: {payload}");
+        assert_eq!(payload["archived"], true, "{payload}");
+
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+                session.stored_and_not_archived().await,
+            ),
+            (false, false, false),
+            "(child mob, implicit mob, stored and not archived session) after the archive"
+        );
+    }
+
     #[test]
     fn test_create_session_request_rejects_reserved_surface_metadata_keys() {
         let app_context = serde_json::json!({

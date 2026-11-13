@@ -75828,6 +75828,9 @@ function refusalSentence(refusal) {
   if (refusal.kind === "unsupported" && refusal.data.feature === MOVE_INTO_PREPARED_PROFILE) {
     return "An agent cannot be moved into this profile: its host prepares the agents of this profile before their first use. Create a new agent in this profile instead.";
   }
+  if (refusal.kind === "reserved_key" && refusal.field === "set.labels_remove") {
+    return "This label is reserved by the host and cannot be removed here.";
+  }
   return Object.hasOwn(REFUSAL_SENTENCES, refusal.kind) ? REFUSAL_SENTENCES[refusal.kind] : UNKNOWN_REFUSAL_SENTENCE;
 }
 function readRefusalSentence(refusal) {

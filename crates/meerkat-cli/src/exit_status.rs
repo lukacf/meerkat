@@ -139,13 +139,29 @@ pub(crate) fn failure_document(error: &anyhow::Error) -> WireRunFailure {
 
 /// The wire data of the typed owner that decided the code, read from the
 /// projection the other surfaces report the same error with: a session
-/// error's data, a runtime driver error's native admission detail or the
-/// data of its teardown or hosting session error, a refused help-session
-/// resume's data, and a mob error's typed console detail. No data is built
-/// here, so the document holds what those surfaces hold and nothing more.
+/// error's data, an agent error's refused reasoning effort level (the data
+/// of the session error the other surfaces wrap it in), a runtime driver
+/// error's native admission detail or the data of its teardown or hosting
+/// session error, a refused help-session resume's data, and a mob error's
+/// typed console detail. No data is built here, so the document holds what
+/// those surfaces hold and nothing more.
 fn owner_details(owner: &(dyn std::error::Error + 'static)) -> Option<serde_json::Value> {
     if let Some(error) = owner.downcast_ref::<meerkat_core::SessionError>() {
         return session_error_details(error);
+    }
+    // This command reports a session's agent error as the agent error
+    // itself, so a refused reasoning effort level arrives here without its
+    // session error. Its details are that session error's own projection;
+    // the variant is named because an agent error cannot be cloned into one
+    // generically. An agent error whose session projection carries data and
+    // that has no arm here prints no details (a refused tool grant gate; see
+    // the row `agent_errors_with_wire_data_have_a_failure_document_decision`).
+    if let Some(meerkat_core::AgentError::ReasoningEffortRefused(refusal)) =
+        owner.downcast_ref::<meerkat_core::AgentError>()
+    {
+        return session_error_details(&meerkat_core::SessionError::Agent(
+            meerkat_core::AgentError::ReasoningEffortRefused(refusal.clone()),
+        ));
     }
     if let Some(error) = owner.downcast_ref::<meerkat_runtime::RuntimeDriverError>() {
         return runtime_driver_error_details(error);
@@ -1334,6 +1350,43 @@ mod tests {
         assert_eq!(in_turn_document["error"]["code"], "INVALID_PARAMS");
         assert_eq!(in_turn_document["error"]["message"], in_turn.to_string());
         assert_eq!(in_turn.to_string(), at_build.to_string());
+    }
+
+    /// Every agent error whose session error carries wire data on the other
+    /// surfaces has a decision here, because this command reports the agent
+    /// error without its session error: the document carries that data, or
+    /// it prints no details on purpose. The two below are every such agent
+    /// error (meerkat-core's row
+    /// `the_agent_errors_with_wire_data_are_the_listed_ones` names them and
+    /// does not compile when a variant is added without being placed).
+    #[test]
+    fn agent_errors_with_wire_data_have_a_failure_document_decision() {
+        // A refused reasoning effort level: the session projection's data.
+        let refusal: meerkat_core::ReasoningEffortRefusal = serde_json::from_value(refused_level(
+            "unsupported_level",
+            serde_json::json!(["low", "medium"]),
+        ))
+        .unwrap();
+        let projection = session_error_details(&SessionError::Agent(
+            AgentError::ReasoningEffortRefused(Box::new(refusal.clone())),
+        ));
+        assert!(projection.is_some());
+        let bare = anyhow::Error::from(AgentError::ReasoningEffortRefused(Box::new(refusal)));
+        assert_eq!(failure_document(&bare).error.details, projection);
+
+        // A refused scoped tool grant gate: no details. Its session error
+        // carries data, and this command does not print it for the bare
+        // agent error.
+        let gate = || {
+            AgentError::ToolGrantGateRefused(Box::new(
+                meerkat_core::tool_grant::GrantGateRefusal::NoGrantService,
+            ))
+        };
+        assert!(session_error_details(&SessionError::Agent(gate())).is_some());
+        assert_eq!(
+            failure_document(&anyhow::Error::from(gate())).error.details,
+            None
+        );
     }
 
     /// Joining a shutdown failure onto an earlier failure keeps the earlier

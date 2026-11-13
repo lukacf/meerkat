@@ -4861,6 +4861,111 @@ mod tests {
         }
     }
 
+    /// The `kind` of the wire data an agent error carries in its session
+    /// error's projection ([`SessionError::structured_data`]), or `None`.
+    ///
+    /// The match names every variant, so a new one does not compile until it
+    /// is placed here. A variant that carries wire data of its own needs its
+    /// arm in `structured_data`, and a decision on every surface that
+    /// reports an agent error without its session error: `rkat run` reads
+    /// the details of its failure document by variant (`owner_details` in
+    /// the CLI's exit status module, with its row
+    /// `agent_errors_with_wire_data_have_a_failure_document_decision`).
+    fn agent_error_wire_data_kind(error: &crate::error::AgentError) -> Option<&'static str> {
+        use crate::error::AgentError;
+        match error {
+            AgentError::ToolGrantGateRefused(_) => Some(SessionError::TOOL_GRANT_GATE_REFUSED_KIND),
+            AgentError::ReasoningEffortRefused(_) => {
+                Some(SessionError::REASONING_EFFORT_REFUSED_KIND)
+            }
+            AgentError::Llm { .. }
+            | AgentError::StoreError(..)
+            | AgentError::Tool { .. }
+            | AgentError::WithSettlementFailures { .. }
+            | AgentError::OperationRefused { .. }
+            | AgentError::PolicyIndeterminate { .. }
+            | AgentError::McpError(..)
+            | AgentError::SessionNotFound(..)
+            | AgentError::TokenBudgetExceeded { .. }
+            | AgentError::TimeBudgetExceeded { .. }
+            | AgentError::ToolCallBudgetExceeded { .. }
+            | AgentError::MaxTokensReached { .. }
+            | AgentError::ContentFiltered { .. }
+            | AgentError::MaxTurnsReached { .. }
+            | AgentError::Cancelled
+            | AgentError::InvalidStateTransition { .. }
+            | AgentError::OperationNotFound(..)
+            | AgentError::DepthLimitExceeded { .. }
+            | AgentError::ConcurrencyLimitExceeded
+            | AgentError::ConfigError(..)
+            | AgentError::InvalidToolAccess { .. }
+            | AgentError::SkillResolutionFailed { .. }
+            | AgentError::InternalError(..)
+            | AgentError::StickyModelFallbackAuthorityUnknown { .. }
+            | AgentError::ModelFallbackResumeHeld { .. }
+            | AgentError::SessionDurableProjectionAuthorityUnknown { .. }
+            | AgentError::BuildError(..)
+            | AgentError::SessionIdentityInUse(..)
+            | AgentError::DeclaredToolUnknown(..)
+            | AgentError::ToolArtifactRefused(..)
+            | AgentError::AuthReauthRequired { .. }
+            | AgentError::CallbackPending { .. }
+            | AgentError::CallbackBatchPending { .. }
+            | AgentError::StructuredOutputValidationFailed { .. }
+            | AgentError::InvalidOutputSchema(..)
+            | AgentError::HookDenied { .. }
+            | AgentError::HookTimeout { .. }
+            | AgentError::HookExecutionFailed { .. }
+            | AgentError::HookConfigInvalid { .. }
+            | AgentError::TerminalFailure { .. }
+            | AgentError::NoPendingBoundary
+            | AgentError::ControlAppendBlockedByCallbackBatch
+            | AgentError::DurableSnapshotSyncUnsupported
+            | AgentError::HookLaunchRefused { .. }
+            | AgentError::ClientModelChangeRequiresHotSwap { .. }
+            | AgentError::InstructionActivation(..)
+            | AgentError::StagedPromptDirectedTurnRefused
+            | AgentError::RunSuspended { .. } => None,
+        }
+    }
+
+    /// The agent errors that carry wire data of their own are the two the
+    /// list above names, and the session projection agrees with the list.
+    #[test]
+    fn the_agent_errors_with_wire_data_are_the_listed_ones() {
+        use crate::error::AgentError;
+        let refusal: crate::ReasoningEffortRefusal = serde_json::from_value(serde_json::json!({
+            "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+            "route": {"backend": "anthropic_api", "api": "messages"},
+            "reason": "unsupported_level",
+            "supported": ["low", "medium", "high"], "facts": "catalog",
+        }))
+        .unwrap();
+        let samples = [
+            AgentError::ToolGrantGateRefused(Box::new(
+                crate::tool_grant::GrantGateRefusal::NoGrantService,
+            )),
+            AgentError::ReasoningEffortRefused(Box::new(refusal)),
+            AgentError::ConfigError("a configuration error".to_string()),
+            AgentError::InternalError("an internal error".to_string()),
+            AgentError::Cancelled,
+        ];
+        let mut with_data = 0;
+        for sample in samples {
+            let listed = agent_error_wire_data_kind(&sample);
+            let label = sample.to_string();
+            let projected = SessionError::Agent(sample).structured_data();
+            let kind = projected
+                .as_ref()
+                .and_then(|data| data.get("kind"))
+                .and_then(serde_json::Value::as_str);
+            assert_eq!(kind, listed, "{label}");
+            assert_eq!(projected.is_some(), listed.is_some(), "{label}");
+            with_data += usize::from(listed.is_some());
+        }
+        assert_eq!(with_data, 2);
+    }
+
     #[test]
     fn provider_auth_failure_projects_every_kind_without_secret_fields() {
         let kinds = [

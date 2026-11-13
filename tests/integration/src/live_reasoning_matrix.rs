@@ -1097,10 +1097,8 @@ pub fn assemble_cells(candidates: Vec<(Provider, CellModel)>) -> Vec<MatrixCell>
                     });
                 }
             }
-            ReasoningLevelFacts::Unknown => {
-                if cell.unknown.is_none() {
-                    cell.unknown = Some(model);
-                }
+            ReasoningLevelFacts::Unknown if cell.unknown.is_none() => {
+                cell.unknown = Some(model);
             }
             _ => {}
         }
@@ -2536,9 +2534,11 @@ mod tests {
     /// authorizer asks for a fresh authorization
     /// (`CopilotAuthorizer::observe_response_with_receipt`), which looks the
     /// account up again (one identity lookup, one model list) and the client
-    /// sends the same request once more. So a live run that meets a 401
-    /// costs at most those three requests more, once. That resend is the
-    /// product's and is not in this row.
+    /// sends the same request once more: three requests more for that
+    /// request. When the second answer is a 401 too, the failure reaches the
+    /// gate and the run stops, so a live run pays those three once. When the
+    /// second answer succeeds, nothing reaches the gate and a later cell can
+    /// pay them again. That resend is the product's and is not in this row.
     #[tokio::test]
     async fn the_first_401_stops_the_run() {
         let error = LlmError::from_http_status(

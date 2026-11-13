@@ -1805,10 +1805,16 @@ fn endpoint_api(endpoint: meerkat_copilot::CopilotEndpoint) -> Option<meerkat_co
 /// - inference, at most one per cell and so at most four: the gate refuses
 ///   the next one before it reaches the client. The agent loop's own
 ///   retries are set to none.
-/// - a 401 on an inference request, once: the Copilot client itself looks
-///   the account up again (one identity lookup, one model list) and sends
-///   that request a second time before the failure reaches the gate. The
-///   run then stops. Nothing is sent again on a 429 or any other status.
+/// - a 401 on an inference request, three more for that request: the
+///   Copilot client itself looks the account up again (one identity lookup,
+///   one model list) and sends the request a second time before any
+///   failure reaches the gate. When the second answer is a 401 too, the
+///   run stops there, so those three are paid once: at most 11 requests
+///   when it is the last cell. When the second answer succeeds, the gate
+///   never sees the 401 and a later cell can pay the three again: the
+///   ceiling of a run is 4 + 4 * (1 + 3) = 20 requests. Without any 401 a
+///   run sends at most 8.
+/// - a 429, or any other status: nothing is sent again.
 ///
 /// No cell starts later than 200 seconds after the first route client was
 /// built and a turn is given 60 seconds, so every request is authorized
@@ -1876,8 +1882,10 @@ async fn copilot_live_reasoning_effort_matrix() {
     };
 
     // Per family and endpoint: the first catalog model whose entry states
-    // levels and the first whose entry states none. `stated` counts the
-    // models of each cell that state levels.
+    // levels and takes tool calls (the probe request offers a tool, and the
+    // account gate refuses one for a model that takes none), and the first
+    // whose entry states no levels. `stated` counts the models of each cell
+    // that state levels.
     let mut picks: Vec<(RouteModel, meerkat_core::ModelApi, bool)> = Vec::new();
     let mut stated: Vec<((Provider, meerkat_core::ModelApi), u32)> = Vec::new();
     for target in route_models(&config, &snapshot) {
@@ -1897,6 +1905,9 @@ async fn copilot_live_reasoning_effort_matrix() {
             match stated.iter_mut().find(|(key, _)| *key == cell) {
                 Some((_, count)) => *count += 1,
                 None => stated.push((cell, 1)),
+            }
+            if !target.supports_tools() {
+                continue;
             }
         } else if supports.reasoning_effort.is_some() {
             // An entry that states an empty set, or only words that name no

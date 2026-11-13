@@ -431,6 +431,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `runtime.admin`, every one, and an agent none. A read that cannot read
   the mob's held changes is refused `approval_unavailable` with a detail
   that says to read again. Rust API: `IdentityDecisions::open_operations`.
+- Python SDK (`meerkat-meta`) and TypeScript SDK (`@rkat/meta-sdk`):
+  `runtime.identities`, the calls of the long-term agent host methods
+  (`meta/identity/*`): `create`, `update`, `archive`, `unarchive`, `remove`,
+  `adopt`, `withdraw`, `changes_hold` (`changesHold`), and the reads `list`,
+  `get`, `operation`, `directory` and `plan`. A change needs the caller's
+  `request_id` and answers a typed outcome (`done`, `pending_decision`,
+  `pending_preparation`); a held decision is a normal answer, and `operation`
+  reads what became of it. Every refusal raises one error,
+  `IdentityRefusedError` (`-32058`), with the typed `kind`, `field`, `detail`,
+  `retryable` and the kind's own members. `IDENTITY_REFUSAL_KINDS` is the
+  closed vocabulary of 57 kinds: adding a kind is a breaking change of the
+  SDKs. Instruction outcomes and seats are closed vocabularies too; advisory
+  values are kept as the gateway sent them. See the guide "Create and change
+  long-term agents from host code".
+- Python SDK and TypeScript SDK: `MetaBuilder.identity_creation(policy)`
+  (`identityCreation`) sends the host's policy for changes of long-term
+  agents as `runtime_options.identity_creation`, unchanged. Without it every
+  change of `runtime.identities` is refused `change_denied`.
+- Python SDK and TypeScript SDK: the long-term agent calls carry the host
+  methods' newer members. A create's agent and an update's `set` take
+  `addressability` and `runtime_mode_override` (`runtimeModeOverride`), and
+  `get` and `list` read both back. An agent of an archive's, an unarchive's
+  and a removal's first answer, and a plan of those changes, carry
+  `schedules` (`SchedulesFollowed`): the schedules that target the agent
+  and what was done to them; a replay of the request states none.
+  `runtime.identities.settle_preparation(name, request_id)`
+  (`settlePreparation`) calls `meta/identity/settle_preparation`. The
+  identity status type reads `roster_listing_superseded`
+  (`rosterListingSuperseded`), `archived` and `preparation_pending`
+  (`preparationPending`), each false when the gateway leaves it out.
 
 ### Changed
 

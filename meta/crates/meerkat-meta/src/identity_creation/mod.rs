@@ -94,6 +94,8 @@ mod schedules;
 #[cfg(test)]
 mod interface_tests;
 #[cfg(test)]
+mod sdk_vocabulary_tests;
+#[cfg(test)]
 mod tests;
 
 pub use approval::{ApprovalPlan, PlanRequest, PlanTarget, PlannedOutcome, plan_approval};

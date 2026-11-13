@@ -1,6 +1,7 @@
 """Meta builder chain for composing and booting a Meta runtime."""
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +46,8 @@ class MetaBuilderConfig:
     fork_instruction_policy: str | None = None
     # ``runtime_options.decisions`` ingresses; ``None`` sends nothing.
     decision_ingresses: list[dict[str, Any]] | None = None
+    # ``runtime_options.identity_creation``, sent as given; ``None`` sends nothing.
+    identity_creation: dict[str, Any] | None = None
     routing_config_path: str | None = None
     host_runnables: list[str] = field(default_factory=list)
     installed_artifacts: list[ToolArtifactRef] | None = None
@@ -491,6 +494,36 @@ class MetaBuilder:
         an ingress not declared here.
         """
         self._config.decision_ingresses = [dict(entry) for entry in ingresses]
+        return self
+
+    def identity_creation(self, policy: Mapping[str, Any]) -> MetaBuilder:
+        """Launch with the host's policy for changes of long-term agents.
+
+        Emitted as ``runtime_options.identity_creation``, sent unchanged: the
+        gateway owns the policy's shape and refuses the init for one it
+        cannot read. Without a policy, and with one whose ``enabled`` is
+        false, every change of ``runtime.identities`` is refused
+        ``change_denied``. A rule selects by the change, the requester and
+        the target, and gives an outcome; this SDK's calls are the host on
+        the ``rpc`` surface::
+
+            Meta.builder().identity_creation({
+                "enabled": True,
+                "approval": {"rules": [{
+                    "change": ["adopt"],
+                    "requester": {"kind": "host", "surface": "rpc"},
+                    "outcome": {"kind": "allow"},
+                }]},
+            })
+
+        The outcomes of this release are ``allow``, ``require_approval``
+        (with an ``approver``) and ``deny``; a policy that names ``notify``
+        or ``review`` is refused at init. The policy needs a persistent
+        launch (``persistent_state``). Omitted entirely when never called.
+        """
+        if not isinstance(policy, Mapping):
+            raise TypeError("identity_creation takes the policy as a mapping")
+        self._config.identity_creation = copy.deepcopy(dict(policy))
         return self
 
     def routing(self, config_path: str) -> MetaBuilder:

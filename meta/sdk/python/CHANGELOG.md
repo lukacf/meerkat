@@ -4,6 +4,52 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `MetaRuntime.identities` (`IdentitiesHandle`) calls the long-term agent
+  host methods (`meta/identity/*`): `create`, `update`, `archive`,
+  `unarchive`, `remove`, `adopt`, `withdraw`, `changes_hold`, `list`, `get`,
+  `operation`, `directory` and `plan`. Requests are built from `AgentSpec`,
+  `AgentSet`, `CreateAgents`, `UpdateAgent` and `AgentRef`
+  (`meerkat_meta.identities`); every change takes a `request_id`. A change
+  returns `IdentityDone`, `IdentityPendingDecision` or
+  `IdentityPendingPreparation`; `operation` also answers `IdentityRefused`
+  and `IdentityOperationUnknown`. Reads return `AgentPage`, `AgentRecord`,
+  `AgentDirectoryPage` and `IdentityChangePlan`.
+- `IdentityRefusedError` (`IDENTITY_REFUSED_CODE`, `-32058`) is the one
+  refusal error of those calls: `kind`, `field`, `detail`, `retryable`,
+  `details`, `known_kind`, and the `IdentityRefusal` as `refusal`.
+  `IDENTITY_REFUSAL_KINDS` is the closed vocabulary (57 kinds); the suite
+  fails when it differs from the gateway's. `IDENTITY_OUTCOMES`,
+  `INSTRUCTION_OUTCOME_KINDS`, `INSTRUCTION_NEXT_SESSION_REASONS` and
+  `AGENT_SEATS` are closed too. A value newer than the SDK reaches the
+  caller as its token; an outcome token the SDK cannot read raises
+  `ContractMismatchError`.
+- `MetaBuilder.identity_creation(policy)` sends the launch policy for
+  changes of long-term agents as `runtime_options.identity_creation`,
+  unchanged.
+- `AgentSpec` and `AgentSet` take `addressability` (`addressable`,
+  `internal_only`) and `runtime_mode_override` (`autonomous_host`,
+  `turn_driven`); `AgentSummary` and `AgentRecord` read both back, each
+  `None` when it is the default.
+- `AgentOutcome.schedules` and `IdentityChangePlan.schedules`
+  (`SchedulesFollowed`, `ScheduleRef`): how the schedules that target an
+  agent stand after its archive, unarchive or removal, on the first
+  answer of the change, and the list a planned change would answer. A
+  replay of the request and an `operation` read state none. The list is
+  the host's (the stdio gateway gives it); an answer told without it, as
+  an agent and a Console caller without `runtime.admin` are answered,
+  reads as an empty `schedules` with its `count` kept.
+- `IdentitiesHandle.settle_preparation(name, request_id=...)` calls
+  `meta/identity/settle_preparation`: the host has prepared an agent whose
+  create answered `IdentityPendingPreparation`.
+- `IdentityStatus.roster_listing_superseded`: `True` when the host's
+  roster lists a name whose agent is served from its record.
+- `AgentSummary`, `AgentRecord`, `DirectoryPeer` and `IdentityChangePlan`
+  read `roster_listing_superseded` too, on `get`, `list`, `directory` and
+  `plan`; the gateway writes it only when it is so.
+- `IdentityStatus.archived` and `IdentityStatus.preparation_pending`:
+  `True` while the agent is archived, and while it waits for its host's
+  preparation. The gateway writes each only when it is so.
+
 ## 0.9.13
 
 No SDK API changes; released with Meta 0.9.13.

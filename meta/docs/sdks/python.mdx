@@ -466,6 +466,116 @@ retired identity); both are advisory. Every refusal raises
 `TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
 [Scoped tool grants](/api/rpc#scoped-tool-grants).
 
+### Long-term agents
+
+`runtime.identities` reads and changes the mob's long-term agents, one call
+per `meta/identity/*` host method. Every agent is read and changed the same
+way, whoever asked for it and by whatever route it came to exist. The
+[guide](/guides/long-term-agents) walks through adopting an agent your
+configuration declares.
+
+```python
+from meerkat_meta import AgentSet, AgentSpec, IdentityRefusedError
+
+identities = runtime.identities
+
+record = await identities.get("scout")           # AgentRecord
+page = await identities.list(include_archived=True)   # AgentPage: .agents, .next
+try:
+    outcome = await identities.adopt(
+        "scout", expected_spec_digest=record.spec_digest, request_id="adopt-scout-1",
+    )
+except IdentityRefusedError as refused:
+    refused.kind, refused.field, refused.detail, refused.retryable, refused.details
+else:
+    outcome.outcome          # "done", "pending_decision" or "pending_preparation"
+
+state = await identities.operation(request_id="adopt-scout-1")
+```
+
+| Call | Sends | Returns |
+| --- | --- | --- |
+| `create(agents, *, request_id, proposer=None, source_evidence=None)` | `agents`: a list of `AgentSpec(name, profile, display_name, instructions, context, labels, first_message, peers, addressability, runtime_mode_override)` | outcome |
+| `update(name, *, expected_spec_digest, request_id, set=None, peers_add=(), peers_remove=(), ...)` | `set`: `AgentSet(display_name, instructions, context, labels, labels_remove, profile, addressability, runtime_mode_override)` | outcome |
+| `archive`, `unarchive`, `remove`, `adopt` `(name, *, expected_spec_digest, request_id, ...)` | the agent and the spec digest you read | outcome |
+| `settle_preparation(name, *, request_id)` | the agent your host has prepared | outcome |
+| `withdraw(*, request_id=None, operation_id=None)` | exactly one of the two | `IdentityWithdrawn` |
+| `changes_hold(held, *, reason=None)` | | `IdentityChangesHold` |
+| `list(*, profile=None, include_archived=False, after=None)` | | `AgentPage` of `AgentSummary` |
+| `get(name)` | | `AgentRecord` |
+| `operation(*, request_id=None, operation_id=None)` | exactly one of the two | outcome, `IdentityRefused` or `IdentityOperationUnknown` |
+| `directory(*, query=None, after=None)` | | `AgentDirectoryPage` |
+| `plan(change, request)` | `change` and a `CreateAgents`, `UpdateAgent` or `AgentRef` | `IdentityChangePlan` |
+
+A change needs your `request_id`: the same id and request return the same
+state and commit at most once. `expected_spec_digest` is the agent's
+`spec_digest` as you read it. There is one spec digest on every surface: the
+same value in `list`, `get`, an outcome and `stale_spec`'s `current_digest`.
+
+An outcome is `IdentityDone` (`operation_id`, `agents`),
+`IdentityPendingDecision` (`operation_id`, `decision_id`, `deadline_ms`) or
+`IdentityPendingPreparation`; each has `.outcome`, its token. A held decision
+is a normal answer. The SDK does not poll: read `operation` when you want the
+state. Each `AgentOutcome` carries the agent's `spec_digest` afterwards, a
+create's `seat` (`seated` or `owed`) and an update's `instructions`
+(`InstructionOutcome`: `applies_at_next_run`, `applies_after_compaction`,
+`applies_at_next_session` with a `reason`, or `unchanged`).
+
+The first answer of an `archive`, an `unarchive` and a `remove` also carries
+the agent's `schedules` (`SchedulesFollowed`: `effect`, `count`,
+`schedules` of `ScheduleRef(schedule_id, name)`, `incomplete`): how the
+agent's schedules stand after the change. After an archive the list is the
+schedules paused for the agent; after an unarchive, its schedules that are
+active after the call (one somebody resumed by name meanwhile included);
+after a removal, the ended ones. The gateway gives your host the list; a
+caller that is not given it (an agent that asks for the change, a Console
+caller without `runtime.admin`) is told the `effect` and the `count` only,
+and such an answer reads as an empty `schedules` with its `count` kept. A
+replay of the request and an `operation` read state none, so compare a
+retry by `operation_id` and each agent's `state` and `spec_digest`, not
+whole. `IdentityChangePlan.schedules` carries the list a planned change
+would answer.
+
+`AgentSpec` and `AgentSet` take `addressability` (`addressable`,
+`internal_only`) and `runtime_mode_override` (`autonomous_host`,
+`turn_driven`), the members and values of a roster row; `AgentSummary` and
+`AgentRecord` read both back, each `None` when it is the default.
+
+A create of an agent of a profile whose preparation the policy names
+`required` returns `IdentityPendingPreparation`: prepare what the agent
+needs, then `settle_preparation(name, request_id=...)` seats it. An agent
+that awaits none refuses `preparation_not_pending`.
+
+`IdentityStatus.roster_listing_superseded` (`runtime.status(name)`) is
+`True` when the host's roster lists a name whose agent is served from its
+record, an adopted agent your roster still lists for one: the roster's
+entry is not applied. `get`, `list`, the directory and the plan of a change
+of such an agent read the same member (`AgentSummary`, `AgentRecord`,
+`DirectoryPeer`, `IdentityChangePlan`). `IdentityStatus.archived` is `True`
+while the agent
+is archived, and `IdentityStatus.preparation_pending` while it waits for
+its host's preparation; the gateway writes each only when it is so. An
+agent's spec digest, provenance and `open_operations` are read with `get`
+and `list`: `open_operations` names its create while it waits for its
+host, and each change of it that is held or approved and not yet carried
+out, and is empty when nothing is open.
+
+Every refusal of every call raises `IdentityRefusedError` (`-32058`); its
+kinds are the closed vocabulary `IDENTITY_REFUSAL_KINDS`. A kind newer than
+the SDK is the same error with `known_kind` false. Only `operation` answers a
+refusal as a value. A candidate launch refuses a change with the gateway-wide
+`AnnouncementRefusedError` (`kind` `candidate_launch`). Advisory values
+(`readiness`, a change's `state`, provenance, directory verdicts) are kept as
+the gateway sent them.
+
+The gateway changes agents only under the host's policy:
+`MetaBuilder.identity_creation(policy)` sends it as
+`runtime_options.identity_creation`. Without one every change is refused
+`change_denied`. The outcomes of this release are `allow`, `require_approval`
+and `deny`; a policy that names `notify` or `review` is refused at init. See
+the [policy reference](/reference/identity-policy) and, for the methods
+themselves, [Agent changes](/api/rpc#agent-changes).
+
 ### Realm MCP administration
 
 The stdio gateway lets its host administer the installation realm's own MCP
@@ -520,7 +630,11 @@ await rt.revoke_instruction("app.example", "tone", 2)
 ```
 
 A write returns once the record is durable; a refusal raises `RpcError` with
-`data["instruction_set_code"]` (for example `stale_revision`). The status
+`data["instruction_set_code"]` (for example `stale_revision`). A member
+target is for that member alone: `set_instruction` refuses a target that
+carries `include_forks`, and a record for a member and its forks is written
+by a Rust host that embeds Meta, through the mob handle's
+`set_operator_instruction` (`instruction_status` shows it). The status
 read never wakes a member and names each member by its `identity`; its
 advisory values (a pending or blocked `reason`, `residency`) may be new to
 this SDK, so keep them as they are. These replace
@@ -1475,6 +1589,7 @@ from meerkat_meta.errors import (
     IdentityHostAdoptedError,          # A host adopted the identity, so Meta's verbs leave it alone (-32053)
     IdentityWakeHeldError,             # The wake is held until an operator acts (-32603): .kind names the hold
     ToolGrantRequestRefusedError,      # A refused meta/tool_grants/* request (-32602): .refusal_kind, .refusal
+    IdentityRefusedError,              # A refused meta/identity/* request (-32058): .kind, .field, .detail, .retryable, .details
     RealmMcpRefusedError,              # A refused meta/realm_mcp/* request (-32602): .refusal_kind, .refusal
     RealmMcpUnavailableError,          # A realm MCP write could not be made now, or no credential store (-32004)
     RealmMcpOutcomeUnknownError,       # A realm MCP write began and its result is unknown (-32603)
@@ -1649,6 +1764,17 @@ from meerkat_meta import (
     AnnouncementFrontierError, AnnouncementRefusedError, AnnouncementNotFoundError,
     MOB_ANNOUNCEMENTS_UNAVAILABLE_CODE, ANNOUNCEMENT_CONFLICT_CODE,
     ANNOUNCEMENT_FRONTIER_CODE, ANNOUNCEMENT_REFUSED_CODE, ANNOUNCEMENT_NOT_FOUND_CODE,
+    # Long-term agents
+    IdentitiesHandle, AgentSpec, AgentSet, CreateAgents, UpdateAgent, AgentRef,
+    SourceEvidence, AgentPage, AgentSummary, AgentRecord, AgentProvenance,
+    AgentOutcome, InstructionOutcome, SchedulesFollowed, ScheduleRef,
+    IdentityDone, IdentityPendingDecision,
+    IdentityPendingPreparation, IdentityRefused, IdentityOperationUnknown,
+    IdentityRefusal, IdentityRefusedError, IdentityWithdrawn, IdentityChangesHold,
+    AgentDirectoryPage, DirectoryProfile, DirectoryPeer,
+    IdentityChangePlan, identity_outcome_from_dict,
+    IDENTITY_REFUSAL_KINDS, IDENTITY_REFUSED_CODE, IDENTITY_OUTCOMES,
+    INSTRUCTION_OUTCOME_KINDS, INSTRUCTION_NEXT_SESSION_REASONS, AGENT_SEATS,
     # Config modules
     auth, event_log, memory, runtime_store,
 )

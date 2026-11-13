@@ -4051,6 +4051,27 @@ export interface IdentityStatus {
    * no binding for the identity.
    */
   readonly memberId?: string | null;
+  /**
+   * `true` when the host's roster lists this name while the agent is served
+   * from its record (an adopted agent whose roster still lists it, for one):
+   * the roster's entry for the name is not applied, and a change of the agent
+   * is a change of its record. The gateway writes it only when it is so; the
+   * parser reads `false` otherwise.
+   */
+  readonly rosterListingSuperseded?: boolean;
+  /**
+   * `true` when the agent is archived: it has no member, and deliveries to
+   * it are refused until its unarchive. The gateway writes it only when it
+   * is so; the parser reads `false` otherwise.
+   */
+  readonly archived?: boolean;
+  /**
+   * `true` when the agent waits for its host's preparation: it has no
+   * member yet, and `runtime.identities.settlePreparation` seats it. The
+   * gateway writes it only when it is so; the parser reads `false`
+   * otherwise.
+   */
+  readonly preparationPending?: boolean;
 }
 
 export interface DeliveryScopeUnavailable {
@@ -4100,6 +4121,9 @@ export function parseIdentityStatus(raw: unknown): IdentityStatus {
       d.customizer_tools_pending !== null && typeof d.customizer_tools_pending === "object"
         ? { ...asRecord(d.customizer_tools_pending) }
         : null,
+    rosterListingSuperseded: d.roster_listing_superseded === true,
+    archived: d.archived === true,
+    preparationPending: d.preparation_pending === true,
     ...parseIdentityViewParts(d),
   };
 }

@@ -72,7 +72,11 @@ await rt.revokeInstruction("app.example", "tone", 2);
 
 A write resolves once the record is durable (`disposition` `"committed"`, or
 `"duplicate"` for an exact repeat); a refusal rejects with an RPC error whose
-`data.instruction_set_code` names it (for example `stale_revision`). The
+`data.instruction_set_code` names it (for example `stale_revision`). A
+member target is for that member alone: `setInstruction` refuses a target
+that carries `include_forks`, and a record for a member and its forks is
+written by a Rust host that embeds Meta, through the mob handle's
+`set_operator_instruction` (`instructionStatus` shows it). The
 status read never wakes a member and names each member by its `identity`;
 its advisory values (a pending or blocked `reason`, `residency`) may be new
 to this SDK, so keep them as they are. These replace
@@ -298,6 +302,124 @@ identity); both are advisory. Every refusal rejects with
 `ToolGrantRequestRefusedError`; its kinds are
 `TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
 [Scoped tool grants](/api/rpc#scoped-tool-grants).
+
+## Long-term agents
+
+`runtime.identities` reads and changes the mob's long-term agents, one call
+per `meta/identity/*` host method. Every agent is read and changed the same
+way, whoever asked for it and by whatever route it came to exist. The
+[guide](/guides/long-term-agents) walks through adopting an agent your
+configuration declares.
+
+```typescript
+import { IdentityRefusedError } from "@rkat/meta-sdk";
+
+const identities = runtime.identities;
+
+const record = await identities.get("scout"); // AgentRecord
+const page = await identities.list({ includeArchived: true }); // { agents, next }
+try {
+  const outcome = await identities.adopt("scout", {
+    expectedSpecDigest: record.specDigest,
+    requestId: "adopt-scout-1",
+  });
+  outcome.outcome; // "done", "pending_decision" or "pending_preparation"
+} catch (error) {
+  if (error instanceof IdentityRefusedError) {
+    error.kind, error.field, error.detail, error.retryable, error.details;
+  }
+}
+
+const state = await identities.operation({ requestId: "adopt-scout-1" });
+```
+
+| Call | Sends | Resolves |
+| --- | --- | --- |
+| `create(agents, { requestId, proposer?, sourceEvidence? })` | `agents`: `AgentSpec[]` (`name`, `profile`, `displayName`, `instructions`, `context`, `labels`, `firstMessage`, `peers`, `addressability`, `runtimeModeOverride`) | outcome |
+| `update(name, { expectedSpecDigest, requestId, set?, peersAdd?, peersRemove? })` | `set`: `AgentSet` (`displayName`, `instructions`, `context`, `labels`, `labelsRemove`, `profile`, `addressability`, `runtimeModeOverride`) | outcome |
+| `archive`, `unarchive`, `remove`, `adopt` `(name, { expectedSpecDigest, requestId })` | the agent and the spec digest you read | outcome |
+| `settlePreparation(name, { requestId })` | the agent your host has prepared | outcome |
+| `withdraw({ requestId } \| { operationId })` | exactly one of the two | `IdentityWithdrawn` |
+| `changesHold(held, { reason? })` | | `IdentityChangesHold` |
+| `list({ profile?, includeArchived?, after? })` | | `AgentPage` of `AgentSummary` |
+| `get(name)` | | `AgentRecord` |
+| `operation({ requestId } \| { operationId })` | exactly one of the two | `IdentityOperation` |
+| `directory({ query?, after? })` | | `AgentDirectoryPage` |
+| `plan(change, request)` | `change` and a `CreateAgents`, `UpdateAgent` or `AgentRef` | `IdentityChangePlan` |
+
+Options and answers are camelCase; the SDK spells the wire's names. A change
+needs your `requestId`: the same id and request return the same state and
+commit at most once. `expectedSpecDigest` is the agent's `specDigest` as you
+read it. There is one spec digest on every surface: the same value in `list`,
+`get`, an outcome and `stale_spec`'s `current_digest`.
+
+An outcome is a union discriminated by `outcome`: `done` (`operationId`,
+`agents`), `pending_decision` (`operationId`, `decisionId`, `deadlineMs`) or
+`pending_preparation`. A held decision is a normal answer. The SDK does not
+poll: read `operation` when you want the state; it also resolves `refused`
+(the operation ended refused) and `unknown`. Each `AgentOutcome` carries the
+agent's `specDigest` afterwards, a create's `seat` (`seated` or `owed`) and
+an update's `instructions` (`applies_at_next_run`,
+`applies_after_compaction`, `applies_at_next_session` with a `reason`, or
+`unchanged`).
+
+The first answer of an `archive`, an `unarchive` and a `remove` also carries
+the agent's `schedules` (`SchedulesFollowed`: `effect`, `count`,
+`schedules` of `{ scheduleId, name }`, `incomplete`): how the agent's
+schedules stand after the change; `null` otherwise. After an archive the
+list is the schedules paused for the agent; after an unarchive, its
+schedules that are active after the call (one somebody resumed by name
+meanwhile included); after a removal, the ended ones. The gateway gives
+your host the list; a caller that is not given it (an agent that asks for
+the change, a Console caller without `runtime.admin`) is told the `effect`
+and the `count` only, and such an answer reads as an empty `schedules` with
+its `count` kept. A
+replay of the request and an `operation` read state none, so compare a
+retry by `operationId` and each agent's `state` and `specDigest`, not
+whole. `IdentityChangePlan.schedules` carries the list a planned change
+would answer.
+
+`AgentSpec` and `AgentSet` take `addressability` (`addressable`,
+`internal_only`) and `runtimeModeOverride` (`autonomous_host`,
+`turn_driven`), the members and values of a roster row; `AgentSummary` and
+`AgentRecord` read both back, each `null` when it is the default.
+
+A create of an agent of a profile whose preparation the policy names
+`required` resolves `pending_preparation`: prepare what the agent needs,
+then `settlePreparation(name, { requestId })` seats it. An agent that
+awaits none refuses `preparation_not_pending`.
+
+`IdentityStatus.rosterListingSuperseded` (`runtime.status(name)`) is `true`
+when the host's roster lists a name whose agent is served from its record,
+an adopted agent your roster still lists for one: the roster's entry is not
+applied. `get`, `list`, the directory and the plan of a change of such an
+agent read the same member (`AgentSummary`, `AgentRecord`, `DirectoryPeer`,
+`IdentityChangePlan`). `IdentityStatus.archived` is `true` while the agent
+is archived,
+and `IdentityStatus.preparationPending` while it waits for its host's
+preparation; the gateway writes each only when it is so. An agent's spec
+digest, provenance and `openOperations` are read with `get` and `list`:
+`openOperations` names its create while it waits for its host, and each
+change of it that is held or approved and not yet carried out, and is
+empty when nothing is open.
+
+Every refusal of every call rejects with `IdentityRefusedError` (`-32058`);
+its kinds are the closed vocabulary `IDENTITY_REFUSAL_KINDS`
+(`IdentityRefusalKind`). A kind newer than the SDK is the same error with
+`knownKind` false. Only `operation` resolves a refusal as a value. A
+candidate launch refuses a change with the gateway-wide
+`AnnouncementRefusedError` (`kind` `candidate_launch`). `field` and the keys
+of `details` are in the wire's names (`agents[1].name`, `current_digest`).
+Advisory values (`readiness`, a change's `state`, provenance, directory
+verdicts) are kept as the gateway sent them.
+
+The gateway changes agents only under the host's policy:
+`MetaBuilder.identityCreation(policy)` sends it as
+`runtime_options.identity_creation`, in wire form. Without one every change
+is refused `change_denied`. The outcomes of this release are `allow`,
+`require_approval` and `deny`; a policy that names `notify` or `review` is
+refused at init. See the [policy reference](/reference/identity-policy) and,
+for the methods themselves, [Agent changes](/api/rpc#agent-changes).
 
 ## Realm MCP administration
 

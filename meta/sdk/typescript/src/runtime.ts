@@ -33,6 +33,44 @@ import {
   refuseInsideToolCallback,
 } from "./decisions.js";
 import {
+  agentRefParams,
+  createAgentsParams,
+  operationRefParams,
+  parseAgentDirectoryPage,
+  parseAgentPage,
+  parseAgentRecord,
+  parseIdentityChangePlan,
+  parseIdentityChangesHold,
+  parseIdentityOperation,
+  parseIdentityOutcome,
+  parseIdentityWithdrawn,
+  planParams,
+  settlePreparationParams,
+  updateAgentParams,
+  type AgentChangeOptions,
+  type AgentDirectoryPage,
+  type AgentPage,
+  type AgentRecord,
+  type AgentRef,
+  type AgentSet,
+  type AgentSpec,
+  type AgentSummary,
+  type CreateAgents,
+  type DirectoryOptions,
+  type IdentityChange,
+  type IdentityChangeOptions,
+  type IdentityChangePlan,
+  type IdentityChangeResult,
+  type IdentityChangesHold,
+  type IdentityOperation,
+  type IdentityWithdrawn,
+  type InstructionOutcome,
+  type ListAgentsOptions,
+  type OperationRef,
+  type UpdateAgent,
+  type UpdateAgentOptions,
+} from "./identities.js";
+import {
   MOB_EVENTS_STALE_CURSOR_CODE,
   CAPABILITY_UNAVAILABLE_CODE,
   CONSOLE_TIMELINE_REPLAY_UNAVAILABLE_CODE,
@@ -58,6 +96,9 @@ import {
   IDENTITY_HISTORY_UNAVAILABLE_CODE,
   IDENTITY_HOST_ADOPTED_CODE,
   IDENTITY_WAKE_HELD_KINDS,
+  IDENTITY_REFUSED_CODE,
+  IdentityRefusedError,
+  parseIdentityRefusal,
   CapabilityUnavailableError,
   CompositionProvenanceError,
   FlowRoleTargetsNotAppliedError,
@@ -718,6 +759,295 @@ export interface MonitorStartOptions {
   readonly maxRetainedDiagnosticBytes?: number;
 }
 
+/**
+ * Long-term agents from host code: one call per `meta/identity/*` method
+ * (`runtime.identities`).
+ *
+ * Every agent of the mob is read and changed here the same way, whoever
+ * asked for it and by whatever route it came to exist. A change is named by
+ * your `requestId`: the same id and request return the same state and commit
+ * at most once, so a retry after a lost answer is safe, and another request
+ * under the same id is refused `operation_reused`.
+ *
+ * A change resolves `done`, `pending_decision` (a person must decide: a
+ * normal answer, read it later with {@link IdentitiesHandle.operation}) or
+ * `pending_preparation` (the host prepares the agent, then
+ * {@link IdentitiesHandle.settlePreparation}). Every refusal of every call
+ * rejects with
+ * {@link IdentityRefusedError}, with the typed `kind`, `field` and `detail`;
+ * nothing of a refused change was written. Params the gateway cannot read
+ * are that error too (`invalid_request`). A candidate launch refuses every
+ * write before the family is reached, with the gateway-wide
+ * `AnnouncementRefusedError` (`kind` `candidate_launch`). A read never wakes
+ * an agent.
+ */
+export class IdentitiesHandle {
+  /** @internal */
+  constructor(private readonly runtime: MetaRuntime) {}
+
+  private async change(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<IdentityChangeResult> {
+    const raw = await this.runtime._rpc(method, params);
+    const outcome = parseIdentityOutcome(raw);
+    if (outcome.outcome === "refused") {
+      // One error for a refusal, however the gateway carried it.
+      const refusal = outcome.refusal;
+      throw new IdentityRefusedError(
+        refusal.detail ?? `identity change refused: ${refusal.kind}`,
+        refusal,
+        "",
+        method,
+        raw,
+      );
+    }
+    return outcome;
+  }
+
+  /**
+   * Create 1 to 256 long-term agents, all or nothing.
+   *
+   * Each {@link AgentSpec} names a unique `name` and a `profile` of the mob;
+   * the agents may name each other as `peers`. A new agent is dormant:
+   * nothing is loaded and nothing wakes until its first delivery or its
+   * `firstMessage`. Each agent's outcome carries its `specDigest` and its
+   * `seat` (`owed` when its first message did not start: the agent exists
+   * and is seated without a restart at its next delivery). A removed
+   * agent's name is never available again (`name_taken`). On a governed
+   * runtime a create that gives a `firstMessage` is refused before anything
+   * is written (`unsupported` at `agents[i].first_message`).
+   */
+  async create(
+    agents: readonly AgentSpec[],
+    options: IdentityChangeOptions,
+  ): Promise<IdentityChangeResult> {
+    return this.change("meta/identity/create", createAgentsParams({ ...options, agents }));
+  }
+
+  /**
+   * Change one long-term agent.
+   *
+   * `expectedSpecDigest` is the agent's `specDigest` as you read it: an
+   * agent that changed meanwhile refuses `stale_spec`, whose `details`
+   * carry `current_digest`. `set` is what changes ({@link AgentSet}). The
+   * agent's outcome carries its new `specDigest` and, for an instructions
+   * change, `instructions` ({@link InstructionOutcome}): the new text is in
+   * the record at once and reaches the agent at its next run; a run that
+   * starts within moments of the change may still use the earlier
+   * instructions; earlier instructions are never rewritten. A profile
+   * change moves the agent to that profile's model and tools on the same
+   * conversation. An agent the host's configuration declares refuses
+   * `owner_read_only`: change it there, or {@link IdentitiesHandle.adopt} it
+   * first.
+   */
+  async update(name: string, options: UpdateAgentOptions): Promise<IdentityChangeResult> {
+    return this.change("meta/identity/update", updateAgentParams({ ...options, name }));
+  }
+
+  /**
+   * Stop a long-term agent and keep it: its name, record, conversation and
+   * memory stay, messages to it are refused, and
+   * {@link IdentitiesHandle.unarchive} brings it back. Like any agent that
+   * leaves, it is owed the harvest and distillation of its last
+   * conversation, an exit interview and the retirement hook (cause
+   * `unlisted`); no order is promised between them and this answer. The
+   * schedules that target it are paused with it: the first answer's agent
+   * names the schedules that are paused for it (`schedules`); a replay
+   * states none. While it is archived no schedule is pointed at it through
+   * Meta: the agents' schedule tools and the Console refuse a create or an
+   * update that would (`identity_archived`).
+   */
+  async archive(name: string, options: AgentChangeOptions): Promise<IdentityChangeResult> {
+    return this.change("meta/identity/archive", agentRefParams({ ...options, name }));
+  }
+
+  /**
+   * Bring an archived agent back, on its archived conversation and its
+   * current instructions. Refused `not_archived` for an agent that is not
+   * archived. The schedules its archive paused are resumed, and the first
+   * answer's agent names the agent's schedules that are active after the
+   * call (`schedules`), one somebody resumed by name while it was archived
+   * included; a schedule somebody paused by name stays paused.
+   */
+  async unarchive(name: string, options: AgentChangeOptions): Promise<IdentityChangeResult> {
+    return this.change("meta/identity/unarchive", agentRefParams({ ...options, name }));
+  }
+
+  /**
+   * Remove a long-term agent for good. Its name can never be used again;
+   * its conversation and memory are kept and no other agent can reach them.
+   * It is owed what an archive owes (the harvest and distillation of its
+   * last conversation, an exit interview, the retirement hook); a removal of
+   * an archived agent owes nothing more. Every schedule that targets it is
+   * ended (the first answer's agent says which, `schedules`). Use
+   * {@link IdentitiesHandle.archive} when it may be needed later.
+   */
+  async remove(name: string, options: AgentChangeOptions): Promise<IdentityChangeResult> {
+    return this.change("meta/identity/remove", agentRefParams({ ...options, name }));
+  }
+
+  /**
+   * Release an agent from configuration: from now on it is changed at run
+   * time and configuration no longer declares it.
+   *
+   * The agent keeps its name, its conversation, its memory and the peers it
+   * has. `expectedSpecDigest` is its `specDigest` as
+   * {@link IdentitiesHandle.get} or {@link IdentitiesHandle.list} read it.
+   * The same `requestId` and request return the same state, so a retry is
+   * safe. Refused `not_adoptable` (`details.reason` says why; an agent that
+   * is changed at run time already answers `nothing_to_adopt`) and the
+   * retryable `declared_apply_open` while the host's configuration is being
+   * applied. Stop declaring the agent in configuration once the adoption
+   * committed.
+   */
+  async adopt(name: string, options: AgentChangeOptions): Promise<IdentityChangeResult> {
+    return this.change("meta/identity/adopt", agentRefParams({ ...options, name }));
+  }
+
+  /**
+   * Withdraw a change whose decision is still held; nothing of it is
+   * written. Name the change by your own `requestId` or by the
+   * `operationId` its outcome named: exactly one. Refused
+   * `decision_not_found` when no decision is held for it.
+   */
+  /**
+   * Say that the host has prepared an agent that awaited it.
+   *
+   * A create of an agent of a profile whose preparation the launch's policy
+   * names `required` answers `pending_preparation`: the agent reads
+   * `readiness` `preparation_pending`, takes no delivery and runs nothing.
+   * Prepare what it needs, then settle it: the agent is seated dormant and
+   * its first message, if it has one, runs once. The outcome's agent carries
+   * its `seat`: `owed` when its seat did not start (it is seated without a
+   * restart when the mob drives its owed seats again). The same `requestId`
+   * and `name` answer the same result and write nothing.
+   *
+   * Only the host's operator settles a preparation. Refused
+   * `preparation_not_pending` for an agent that awaits none (seated,
+   * archived, settled before), `identity_unknown` for a name no agent holds,
+   * `owner_read_only` for an agent the host's configuration declares with a
+   * preparation (its declaration settles it), and `change_denied` on a launch
+   * without an enabled policy. A host that cannot prepare an agent leaves it
+   * pending or removes it (`remove`).
+   */
+  async settlePreparation(
+    name: string,
+    options: { requestId: string },
+  ): Promise<IdentityChangeResult> {
+    return this.change(
+      "meta/identity/settle_preparation",
+      settlePreparationParams(name, options),
+    );
+  }
+
+  async withdraw(operation: OperationRef): Promise<IdentityWithdrawn> {
+    const params = operationRefParams(operation);
+    return parseIdentityWithdrawn(await this.runtime._rpc("meta/identity/withdraw", params));
+  }
+
+  /**
+   * Hold the mob's changes of agents (`held` true) or release them. While
+   * held, every change is refused the retryable `changes_held` and nothing
+   * of it is written. The hold does not survive a restart of the host: a
+   * host that means to keep changes held sets the hold again as soon as its
+   * start has answered, before it serves callers. The start itself is not
+   * held: what a launch carries out before this call (a held change that
+   * was approved, a change asked by an agent a schedule wakes) is carried
+   * out. `reason` is for the host's own record.
+   */
+  async changesHold(
+    held: boolean,
+    options: { reason?: string } = {},
+  ): Promise<IdentityChangesHold> {
+    const params: Record<string, unknown> = { held };
+    if (options.reason !== undefined) params.reason = options.reason;
+    return parseIdentityChangesHold(
+      await this.runtime._rpc("meta/identity/changes_hold", params),
+    );
+  }
+
+  /**
+   * One page of the mob's agents, in one stable order. Every agent is listed the
+   * same way, whoever asked for it and by whatever route it came to exist.
+   * `profile` keeps only agents of that profile; archived agents are listed
+   * only with `includeArchived`; `after` is the previous page's `next`. Each
+   * {@link AgentSummary} carries the `specDigest` a change names. Never
+   * wakes an agent.
+   */
+  async list(options: ListAgentsOptions = {}): Promise<AgentPage> {
+    const params: Record<string, unknown> = {
+      include_archived: options.includeArchived ?? false,
+    };
+    if (options.profile !== undefined) params.profile = options.profile;
+    if (options.after !== undefined) params.after = options.after;
+    return parseAgentPage(await this.runtime._rpc("meta/identity/list", params));
+  }
+
+  /**
+   * One agent in full: what {@link IdentitiesHandle.list} says of it, and
+   * its instructions, context, labels and peers. Refused `identity_unknown`
+   * for a name no agent has. Never wakes the agent.
+   */
+  async get(name: string): Promise<AgentRecord> {
+    return parseAgentRecord(await this.runtime._rpc("meta/identity/get", { name }));
+  }
+
+  /**
+   * The state of one change: read it after a lost answer, or to learn what
+   * became of a held decision.
+   *
+   * Name it by your own `requestId` or by the `operationId` an outcome
+   * named: exactly one. Resolves the change's outcome (`done`,
+   * `pending_decision`, `pending_preparation`, or `refused` for an
+   * operation that ended refused, as a value, not a rejection), or
+   * `unknown`: nothing committed under it and no decision is held, so
+   * asking the change commits it at most once. The SDK does not poll: call
+   * this when you want the state.
+   */
+  async operation(operation: OperationRef): Promise<IdentityOperation> {
+    const params = operationRefParams(operation);
+    return parseIdentityOperation(await this.runtime._rpc("meta/identity/operation", params));
+  }
+
+  /**
+   * One page of what may be named in a create or an update: the mob's
+   * profiles, and the agents that may be listed as peers, each with the
+   * verdict the host's rules give it. `query` keeps entries whose name or
+   * display name contains it; `after` is the previous page's `next`. Never
+   * wakes an agent.
+   */
+  async directory(options: DirectoryOptions = {}): Promise<AgentDirectoryPage> {
+    const params: Record<string, unknown> = {};
+    if (options.query !== undefined) params.query = options.query;
+    if (options.after !== undefined) params.after = options.after;
+    return parseAgentDirectoryPage(
+      await this.runtime._rpc("meta/identity/directory", params),
+    );
+  }
+
+  /**
+   * The outcome and the rendering a change would get; nothing is held and
+   * nothing is written. `change` is `create` (with a {@link CreateAgents}),
+   * `update` (an {@link UpdateAgent}), or `archive`, `unarchive`, `remove`
+   * or `adopt` (an {@link AgentRef}). A change the host's rules deny is
+   * refused, not planned.
+   */
+  plan(change: "create", request: CreateAgents): Promise<IdentityChangePlan>;
+  plan(change: "update", request: UpdateAgent): Promise<IdentityChangePlan>;
+  plan(
+    change: "archive" | "unarchive" | "remove" | "adopt",
+    request: AgentRef,
+  ): Promise<IdentityChangePlan>;
+  async plan(
+    change: IdentityChange,
+    request: CreateAgents | UpdateAgent | AgentRef,
+  ): Promise<IdentityChangePlan> {
+    const params = planParams(change, request);
+    return parseIdentityChangePlan(await this.runtime._rpc("meta/identity/plan", params));
+  }
+}
+
 /** Safe application-facing durable-job surface. */
 export class JobsHandle {
   /** @internal */
@@ -1036,6 +1366,12 @@ function rpcErrorFromPayload(
   if (code === WORKGRAPH_CONFLICT_CODE) {
     return new WorkGraphConflictError(message, rid, method, err.data);
   }
+  if (code === IDENTITY_REFUSED_CODE) {
+    const refusal = parseIdentityRefusal(err.data);
+    if (refusal !== null) {
+      return new IdentityRefusedError(message, refusal, rid, method, err.data);
+    }
+  }
   if (code === IDENTITY_UNRESUMABLE_CODE) {
     return new IdentityUnresumableError(message, rid, method, err.data);
   }
@@ -1099,6 +1435,8 @@ export class MetaRuntime {
   private _lastGatewayTransport: PersistentTransport | null = null;
   readonly jobs = new JobsHandle(this);
   readonly monitors = new MonitorsHandle(this);
+  /** Long-term agents from host code (`meta/identity/*`). */
+  readonly identities = new IdentitiesHandle(this);
 
   /** @internal */
   constructor(config: MetaBuilderConfig, transport?: PersistentTransport) {
@@ -1476,6 +1814,9 @@ export class MetaRuntime {
     }
     if (this._config.forkInstructionPolicy !== null) {
       runtimeOptions.fork_instruction_policy = this._config.forkInstructionPolicy;
+    }
+    if (this._config.identityCreation != null) {
+      runtimeOptions.identity_creation = structuredClone(this._config.identityCreation);
     }
     if (this._config.decisionIngresses != null) {
       runtimeOptions.decisions = decisionIngressesOption(this._config.decisionIngresses);
@@ -2677,6 +3018,10 @@ export class MetaRuntime {
    *
    * Host-only. `target` is `{ kind: "mob" }` (every member of the gateway's
    * mob), `{ kind: "profile", profile }` or `{ kind: "member", identity }`.
+   * A member target is for that member alone: Meta's verb refuses a target
+   * that carries `include_forks`, and a record for a member and its forks is
+   * written by a Rust host that embeds Meta, through the mob handle's
+   * `set_operator_instruction` ({@link instructionStatus} shows it).
    * The slot is `namespace` (one your host owns) and `key`; `revision` is at
    * least 1 and strictly increasing per slot; `body` is the exact text, at
    * most 256 KiB. `options.contentSha256` (`"sha256:<hex>"` of the body),

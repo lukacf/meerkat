@@ -162,6 +162,8 @@ export interface MetaBuilderConfig {
   forkInstructionPolicy: ForkInstructionPolicy | null;
   /** `runtime_options.decisions` ingresses; absent or `null` sends nothing. */
   decisionIngresses?: DecisionIngressDeclaration[] | null;
+  /** `runtime_options.identity_creation`, sent as given; absent or `null` sends nothing. */
+  identityCreation?: Record<string, unknown> | null;
   /** `runtime_options.member_restore`; absent or `null` sends nothing (on demand). */
   memberRestore?: MemberRestore | null;
   memoryConfig: unknown;
@@ -749,6 +751,39 @@ export class MetaBuilder {
       );
     }
     this._config.forkInstructionPolicy = policy;
+    return this;
+  }
+
+  /**
+   * Launch with the host's policy for changes of long-term agents
+   * (`runtime_options.identity_creation`), sent unchanged, in wire form: the
+   * gateway owns the policy's shape and refuses the init for one it cannot
+   * read. Without a policy, and with one whose `enabled` is false, every
+   * change of `runtime.identities` is refused `change_denied`. A rule
+   * selects by the change, the requester and the target, and gives an
+   * outcome; this SDK's calls are the host on the `rpc` surface:
+   *
+   * ```ts
+   * Meta.builder().identityCreation({
+   *   enabled: true,
+   *   approval: { rules: [{
+   *     change: ["adopt"],
+   *     requester: { kind: "host", surface: "rpc" },
+   *     outcome: { kind: "allow" },
+   *   }] },
+   * });
+   * ```
+   *
+   * The outcomes of this release are `allow`, `require_approval` (with an
+   * `approver`) and `deny`; a policy that names `notify` or `review` is
+   * refused at init. The policy needs a persistent launch
+   * (`persistentState`). Omitted entirely when never called.
+   */
+  identityCreation(policy: Readonly<Record<string, unknown>>): this {
+    if (typeof policy !== "object" || policy === null || Array.isArray(policy)) {
+      throw new TypeError("identityCreation takes the policy as an object");
+    }
+    this._config.identityCreation = structuredClone(policy) as Record<string, unknown>;
     return this;
   }
 

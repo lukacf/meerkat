@@ -1,4 +1,7 @@
-#![cfg(all(feature = "openai-live-e2e", not(target_arch = "wasm32")))]
+#![cfg(all(
+    any(feature = "openai-live-e2e", feature = "gpt-live-replay"),
+    not(target_arch = "wasm32")
+))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 //! Scenarios 97/98/99: public GPT Live (`gpt-live-1`) real-audio verticals.

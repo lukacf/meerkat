@@ -22,6 +22,13 @@
 //! Re-capture: `scripts/gpt-live-recapture-replay-fixture S104` (see the
 //! fixture README).
 
+/// The live gate's own file, compiled into this keyless target so that a
+/// normal lane runs the rows that test its judges (`config_tests` and the
+/// other rows beside the scenarios): they need no provider and no key. The
+/// scenarios themselves stay ignored (`lane:e2e-smoke`), as in their own
+/// target, and still stop at their first line without a provider key.
+#[path = "gpt_live_public_e2e.rs"]
+mod gpt_live_public_e2e;
 #[path = "support/gpt_live_replay.rs"]
 mod replay;
 #[path = "support/gpt_live_e2e.rs"]

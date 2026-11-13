@@ -15640,6 +15640,47 @@ mod tests {
         drop(stores);
     }
 
+    /// A safety sweep is not a wake. The sweep is armed when the watch
+    /// starts and ticks on its interval whatever the store does, so a quiet
+    /// window can hold one. Here one is waited for: for a subscriber its
+    /// catch-up reads the quiet store, publishes nothing and, like every
+    /// catch-up, wakes no tick after it.
+    #[test]
+    fn a_safety_sweep_on_a_quiet_store_is_not_a_wake() {
+        let (_dir, path) = temp_db_path();
+        drop(SqliteMobStores::open(&path).unwrap());
+        let _drained = SqliteMobStores::drain_observers(&path).expect("no owner remains");
+        let held = open_existing_read_connection(&path).unwrap();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        wait_for_watch_registrations(&path);
+        drop(held);
+        let catch_up = Arc::clone(&stores.event_bus.catch_up);
+        // With a subscriber the sweep reads the store instead of returning
+        // at once, so its catch-up tells that the sweep ran.
+        let mut rx = stores.event_store().subscribe().unwrap();
+        let ticks = count_watch_ticks(&catch_up);
+        let (swept_tx, swept_rx) = mpsc::channel();
+        lock_unpoisoned(&catch_up.test_hooks).in_catch_up = Some(Box::new(move |_: &Path| {
+            let _ = swept_tx.send(());
+        }));
+        swept_rx
+            .recv_timeout(Duration::from_millis(EVENT_WATCH_SAFETY_SWEEP_MS) + OBSERVER_HANG_GUARD)
+            .expect("the safety sweep reads the store for its subscriber");
+        // The quiet window after the sweep's own catch-up.
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            0,
+            "a safety sweep on a quiet store was counted as a wake"
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            "the sweep published to a subscriber of a quiet store"
+        );
+        assert_eq!(*lock_unpoisoned(&catch_up.latest_broadcast_cursor), 0);
+        drop(stores);
+    }
+
     #[test]
     fn observer_drain_on_its_own_watch_worker_stays_unjoined_and_keeps_custody() {
         let (_dir, path) = temp_db_path();

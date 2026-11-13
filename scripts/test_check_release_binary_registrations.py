@@ -676,6 +676,9 @@ def main() -> int:
             checker.check("rkat", good, source, "")
         except checker.Refused as refusal:
             answered = subprocess.CompletedProcess([], 1, "", str(refusal))
+        except checker.NoAnswer as failure:
+            # A check that cannot ask: a failed case here, not the end of the test.
+            answered = subprocess.CompletedProcess([], 2, "", f"no answer: {failure}")
         else:
             answered = subprocess.CompletedProcess([], 0, "accepted", "")
         expect(

@@ -24,6 +24,11 @@
 //!   error text. Every line then passes the [`Redactor`], which replaces the
 //!   account's private values and anything shaped like a GitHub token with
 //!   [`REDACTED`].
+//! - **Receipt.** Every cell a run reaches is also printed as one line the
+//!   reasoning effort execution receipt reads: [`RECEIPT_OBSERVATION_PREFIX`]
+//!   and one JSON object of typed fields. A failed cell carries the HTTP
+//!   status of its failure class and the class as its error code, and
+//!   nothing else of the failure.
 //!
 //! The gate counts requests at the client seam. What a provider client does
 //! below that seam is its own: the operator note of the live rows states it.
@@ -53,10 +58,16 @@ use meerkat_llm_core::{
     LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmReplayProjection, LlmRequest, LlmStream,
     PlainModelRoute, PreparedLlmRequest,
 };
+use serde::Serialize;
 use serde_json::json;
 
 /// What stands in a line for a private value.
 pub const REDACTED: &str = "<redacted>";
+
+/// What a line starts with that carries one cell of a run for the reasoning
+/// effort execution receipt. The rest of the line is one JSON object, a
+/// [`ReceiptObservation`].
+pub const RECEIPT_OBSERVATION_PREFIX: &str = "reasoning-effort-receipt-observation ";
 
 /// The most provider requests one cell (a provider family on one API) sends.
 /// One request is one streamed turn with the probe tool offered. A tool call
@@ -221,6 +232,15 @@ impl Lane {
         match self {
             Self::Copilot => "copilot-live reasoning",
             Self::Direct => "direct-live reasoning",
+        }
+    }
+
+    /// The row of the reasoning effort execution receipt the lane's cells
+    /// are observations of.
+    pub const fn receipt_row(self) -> &'static str {
+        match self {
+            Self::Copilot => "live.copilot_matrix",
+            Self::Direct => "live.direct_providers",
         }
     }
 }
@@ -1006,6 +1026,63 @@ impl MatrixLine {
 }
 
 // ---------------------------------------------------------------------------
+// Receipt observations
+// ---------------------------------------------------------------------------
+
+/// What a cell did with the level it was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReceiptOutcome {
+    /// A request with the level was sent.
+    Sent { level: &'static str },
+    /// Nothing was sent, for this reason: a word of the refusal reasons or
+    /// of [`FailureClass`].
+    Refused { reason: &'static str },
+}
+
+/// One cell of a run as the reasoning effort execution receipt reads it: an
+/// item of a leg result's `observations`. Every member is a typed field and
+/// none can hold a message. A failed cell carries the HTTP status of its
+/// failure class, when the class has one, and the class as its error code:
+/// a word of [`FailureClass`], never a provider's own text or code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReceiptObservation {
+    /// The receipt row the cell belongs to ([`Lane::receipt_row`]).
+    pub row: &'static str,
+    pub provider_family: &'static str,
+    pub backend: String,
+    pub api: &'static str,
+    pub model: String,
+    pub requested_level: &'static str,
+    pub outcome: ReceiptOutcome,
+    /// `pass`, `fail` or `skip`.
+    pub result: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<&'static str>,
+}
+
+impl ReceiptObservation {
+    /// The observation as its line: the prefix and one JSON object, members
+    /// in the order above.
+    pub fn line(&self) -> String {
+        String::new()
+    }
+}
+
+/// The sink of the live rows. A receipt line goes to stdout, where the
+/// receipt's reader takes a row's lines from; every other line goes to
+/// stderr, as the live rows print theirs.
+pub fn print_line(line: &str) {
+    if line.starts_with(RECEIPT_OBSERVATION_PREFIX) {
+        println!("{line}");
+    } else {
+        eprintln!("{line}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The driver
 // ---------------------------------------------------------------------------
 
@@ -1035,6 +1112,8 @@ pub struct MatrixCell {
     pub key: CellKey,
     /// The route as a run reports it (`<backend>/<api>`).
     pub route: String,
+    /// The route's backend, as the provider matrix names it.
+    pub backend: String,
     /// The source of the route's levels.
     pub facts: ReasoningFactsSource,
     /// The model with stated levels, when the route serves one.
@@ -1077,6 +1156,7 @@ pub fn assemble_cells(candidates: Vec<(Provider, CellModel)>) -> Vec<MatrixCell>
                 cells.push(MatrixCell {
                     key,
                     route: observation.route().to_string(),
+                    backend: observation.backend.as_str().to_string(),
                     facts: observation.backend.levels_source(),
                     probe: None,
                     unknown: None,
@@ -1198,6 +1278,55 @@ impl Emitter<'_> {
         (self.sink)(&text);
         self.summary.lines.push(text);
     }
+
+    /// Hand out one cell of the run as its receipt line. It passes the
+    /// redactor like every other line.
+    fn observe(&mut self, observation: &ReceiptObservation) {
+        let _ = observation.line();
+    }
+}
+
+/// The receipt observation of one model and level of `cell`. `failure` is
+/// the class of a failed cell and the HTTP status of that class.
+fn observation(
+    run: &MatrixRun,
+    cell: &MatrixCell,
+    model: &str,
+    requested: EffortLevel,
+    outcome: ReceiptOutcome,
+    failure: Option<(FailureClass, Option<u16>)>,
+    skipped: bool,
+) -> ReceiptObservation {
+    ReceiptObservation {
+        row: run.lane.receipt_row(),
+        provider_family: cell.key.provider.as_str(),
+        backend: cell.backend.clone(),
+        api: cell.key.api.as_str(),
+        model: model.to_string(),
+        requested_level: requested.as_wire_str(),
+        outcome,
+        result: match (failure, skipped) {
+            (Some(_), _) => "fail",
+            (None, true) => "skip",
+            (None, false) => "pass",
+        },
+        http_status: failure.and_then(|(_, status)| status),
+        error_code: failure.map(|(class, _)| class.as_str()),
+    }
+}
+
+/// What a failed refusal check did with its level: sent it when the check
+/// reached the provider, and otherwise nothing, for the failure's class.
+fn failed_refusal_outcome(class: FailureClass, level: EffortLevel) -> ReceiptOutcome {
+    if class == FailureClass::RefusalDispatched {
+        ReceiptOutcome::Sent {
+            level: level.as_wire_str(),
+        }
+    } else {
+        ReceiptOutcome::Refused {
+            reason: class.as_str(),
+        }
+    }
 }
 
 async fn build_agent(
@@ -1276,14 +1405,17 @@ enum ProbeOutcome {
         class: FailureClass,
         status: Option<u16>,
         detail: Option<&'static str>,
+        /// Whether the turn's request reached the route's client.
+        sent: bool,
     },
 }
 
-fn failed(class: FailureClass) -> ProbeOutcome {
+fn failed(class: FailureClass, sent: bool) -> ProbeOutcome {
     ProbeOutcome::Failed {
         class,
         status: None,
         detail: None,
+        sent,
     }
 }
 
@@ -1341,24 +1473,26 @@ async fn probe(
     let mut agent = match build_agent(run, cell.key, &probe.model, Arc::clone(&gate), level).await {
         Ok(agent) => agent,
         Err(BuildAgentError::ReasoningEffortRefused(_)) => {
-            return failed(FailureClass::StatedLevelRefused);
+            return failed(FailureClass::StatedLevelRefused, false);
         }
-        Err(_) => return failed(FailureClass::BuildFailed),
+        Err(_) => return failed(FailureClass::BuildFailed, false),
     };
     let outcome =
         tokio::time::timeout(run.turn_timeout, agent.run(PROBE_PROMPT.to_string().into())).await;
     let record = gate.record();
+    let sent = record.sent > 0;
     if probe.shape == BodyShape::MessagesAdaptiveEffort && record.effort_without_adaptive_thinking {
-        return failed(FailureClass::EffortWithoutAdaptiveThinking);
+        return failed(FailureClass::EffortWithoutAdaptiveThinking, sent);
     }
     match outcome {
-        Err(_) => failed(FailureClass::TurnTimeout),
+        Err(_) => failed(FailureClass::TurnTimeout, sent),
         Ok(Ok(result)) => {
             if record.sent != 1 || record.completed != 1 || record.refused != 0 {
                 return ProbeOutcome::Failed {
                     class: FailureClass::ReportMismatch,
                     status: None,
                     detail: Some("gate_count"),
+                    sent,
                 };
             }
             match report_mismatch(result.reasoning_effort.as_ref(), cell, probe, level) {
@@ -1367,6 +1501,7 @@ async fn probe(
                     class: FailureClass::ReportMismatch,
                     status: None,
                     detail: Some(detail),
+                    sent,
                 },
             }
         }
@@ -1376,15 +1511,16 @@ async fn probe(
                     class: failure.class,
                     status: failure.status,
                     detail: None,
+                    sent,
                 }
             } else if record.refused > 0 && record.completed > 0 {
                 ProbeOutcome::Cut
             } else if record.refused > 0 {
-                failed(FailureClass::BudgetSpent)
+                failed(FailureClass::BudgetSpent, sent)
             } else if matches!(error, AgentError::ReasoningEffortRefused(_)) {
-                failed(FailureClass::StatedLevelRefused)
+                failed(FailureClass::StatedLevelRefused, sent)
             } else {
-                failed(FailureClass::TurnFailed)
+                failed(FailureClass::TurnFailed, sent)
             }
         }
     }
@@ -1397,29 +1533,57 @@ async fn run_cell(emitter: &mut Emitter<'_>, cell: &MatrixCell) {
     // The refusals first: they send nothing.
     if let Some(unknown) = &cell.unknown {
         let level = EffortLevel::Low;
-        let line = match refused_without_request(run, cell.key, unknown, level).await {
+        let (line, seen) = match refused_without_request(run, cell.key, unknown, level).await {
             Ok(refusal)
                 if refusal.reason == ReasoningEffortRefusalReason::SupportedLevelsUnknown
                     && refusal.supported.is_none()
                     && refusal.facts.is_none() =>
             {
-                MatrixLine::Local {
-                    route: route.clone(),
-                    model: unknown.model.clone(),
-                    refused: refusal.reason,
-                }
+                (
+                    MatrixLine::Local {
+                        route: route.clone(),
+                        model: unknown.model.clone(),
+                        refused: refusal.reason,
+                    },
+                    observation(
+                        run,
+                        cell,
+                        &unknown.model,
+                        level,
+                        ReceiptOutcome::Refused {
+                            reason: reason_word(refusal.reason),
+                        },
+                        None,
+                        false,
+                    ),
+                )
             }
-            other => MatrixLine::Fail {
-                route: route.clone(),
-                model: unknown.model.clone(),
-                shape: None,
-                level: Some(level),
-                class: other.err().unwrap_or(FailureClass::RefusalMismatch),
-                status: None,
-                detail: Some("unknown_levels"),
-            },
+            other => {
+                let class = other.err().unwrap_or(FailureClass::RefusalMismatch);
+                (
+                    MatrixLine::Fail {
+                        route: route.clone(),
+                        model: unknown.model.clone(),
+                        shape: None,
+                        level: Some(level),
+                        class,
+                        status: None,
+                        detail: Some("unknown_levels"),
+                    },
+                    observation(
+                        run,
+                        cell,
+                        &unknown.model,
+                        level,
+                        failed_refusal_outcome(class, level),
+                        Some((class, None)),
+                        false,
+                    ),
+                )
+            }
         };
         emitter.emit(&line);
+        emitter.observe(&seen);
     }
 
     let Some(probe_model) = &cell.probe else {
@@ -1445,18 +1609,41 @@ async fn run_cell(emitter: &mut Emitter<'_>, cell: &MatrixCell) {
             Ok(refusal)
                 if refusal.reason == ReasoningEffortRefusalReason::UnsupportedLevel
                     && refusal.supported.as_deref() == Some(probe_model.supported.as_slice())
-                    && refusal.facts == Some(cell.facts) => {}
+                    && refusal.facts == Some(cell.facts) =>
+            {
+                emitter.observe(&observation(
+                    run,
+                    cell,
+                    &model,
+                    level,
+                    ReceiptOutcome::Refused {
+                        reason: reason_word(refusal.reason),
+                    },
+                    None,
+                    false,
+                ));
+            }
             other => {
                 cell_failed = true;
+                let class = other.err().unwrap_or(FailureClass::RefusalMismatch);
                 emitter.emit(&MatrixLine::Fail {
                     route: route.clone(),
                     model: model.clone(),
                     shape: Some(probe_model.shape),
                     level: Some(level),
-                    class: other.err().unwrap_or(FailureClass::RefusalMismatch),
+                    class,
                     status: None,
                     detail: Some("level_outside_the_set"),
                 });
+                emitter.observe(&observation(
+                    run,
+                    cell,
+                    &model,
+                    level,
+                    failed_refusal_outcome(class, level),
+                    Some((class, None)),
+                    false,
+                ));
             }
         }
     }
@@ -1466,8 +1653,16 @@ async fn run_cell(emitter: &mut Emitter<'_>, cell: &MatrixCell) {
         if run.budget.stop().is_some() {
             break;
         }
+        let sent_level = ReceiptOutcome::Sent {
+            level: level.as_wire_str(),
+        };
         match probe(run, cell, probe_model, level).await {
-            ProbeOutcome::Passed => passed.push(level),
+            ProbeOutcome::Passed => {
+                passed.push(level);
+                emitter.observe(&observation(
+                    run, cell, &model, level, sent_level, None, false,
+                ));
+            }
             ProbeOutcome::Cut => {
                 cell_failed = true;
                 emitter.emit(&MatrixLine::Cut {
@@ -1476,11 +1671,15 @@ async fn run_cell(emitter: &mut Emitter<'_>, cell: &MatrixCell) {
                     shape: probe_model.shape,
                     level,
                 });
+                emitter.observe(&observation(
+                    run, cell, &model, level, sent_level, None, true,
+                ));
             }
             ProbeOutcome::Failed {
                 class,
                 status,
                 detail,
+                sent,
             } => {
                 cell_failed = true;
                 emitter.emit(&MatrixLine::Fail {
@@ -1492,6 +1691,22 @@ async fn run_cell(emitter: &mut Emitter<'_>, cell: &MatrixCell) {
                     status,
                     detail,
                 });
+                let outcome = if sent {
+                    sent_level
+                } else {
+                    ReceiptOutcome::Refused {
+                        reason: class.as_str(),
+                    }
+                };
+                emitter.observe(&observation(
+                    run,
+                    cell,
+                    &model,
+                    level,
+                    outcome,
+                    Some((class, status)),
+                    false,
+                ));
             }
         }
     }
@@ -1833,6 +2048,55 @@ mod tests {
         summary
     }
 
+    /// The lines of a run that people read: every line but the receipt's.
+    fn human(summary: &MatrixSummary) -> Vec<&str> {
+        summary
+            .lines
+            .iter()
+            .map(String::as_str)
+            .filter(|line| !line.starts_with(RECEIPT_OBSERVATION_PREFIX))
+            .collect()
+    }
+
+    /// The receipt observations of a run, in the order it printed them.
+    fn observations(summary: &MatrixSummary) -> Vec<serde_json::Value> {
+        summary
+            .lines
+            .iter()
+            .filter_map(|line| line.strip_prefix(RECEIPT_OBSERVATION_PREFIX))
+            .map(|object| serde_json::from_str(object).expect("one JSON object"))
+            .collect()
+    }
+
+    /// An observation of the Copilot lane as the receipt reads it.
+    fn copilot_observation(
+        provider: Provider,
+        api: &str,
+        model: &str,
+        requested: &str,
+        outcome: serde_json::Value,
+        result: &str,
+    ) -> serde_json::Value {
+        json!({
+            "row": "live.copilot_matrix",
+            "provider_family": provider.as_str(),
+            "backend": "copilot",
+            "api": api,
+            "model": model,
+            "requested_level": requested,
+            "outcome": outcome,
+            "result": result,
+        })
+    }
+
+    fn sent_outcome(level: &str) -> serde_json::Value {
+        json!({"kind": "sent", "level": level})
+    }
+
+    fn refused_outcome(reason: &str) -> serde_json::Value {
+        json!({"kind": "refused", "reason": reason})
+    }
+
     const OPENAI_RESPONSES: CellKey = CellKey {
         provider: Provider::OpenAI,
         api: ModelApi::Responses,
@@ -2003,6 +2267,56 @@ mod tests {
                 "copilot-live reasoning SUMMARY pass=1 fail=1 cut=0 skip=2 local=1 requests=2/4 \
                  account=<redacted>",
             ]
+        );
+    }
+
+    /// A cell for the receipt is the prefix and one JSON object of typed
+    /// fields, in a fixed order; the status and the error code are members
+    /// of a failed cell only.
+    #[test]
+    fn a_receipt_observation_is_one_line_of_typed_fields() {
+        let failed = ReceiptObservation {
+            row: Lane::Copilot.receipt_row(),
+            provider_family: "openai",
+            backend: "copilot".to_string(),
+            api: "responses",
+            model: "model-a".to_string(),
+            requested_level: "low",
+            outcome: ReceiptOutcome::Sent { level: "low" },
+            result: "fail",
+            http_status: Some(429),
+            error_code: Some("rate_limited"),
+        };
+        assert_eq!(
+            failed.line(),
+            concat!(
+                "reasoning-effort-receipt-observation ",
+                r#"{"row":"live.copilot_matrix","provider_family":"openai","backend":"copilot","#,
+                r#""api":"responses","model":"model-a","requested_level":"low","#,
+                r#""outcome":{"kind":"sent","level":"low"},"result":"fail","#,
+                r#""http_status":429,"error_code":"rate_limited"}"#,
+            )
+        );
+        let refused = ReceiptObservation {
+            row: Lane::Direct.receipt_row(),
+            backend: "openai_api".to_string(),
+            requested_level: "max",
+            outcome: ReceiptOutcome::Refused {
+                reason: "unsupported_level",
+            },
+            result: "pass",
+            http_status: None,
+            error_code: None,
+            ..failed
+        };
+        assert_eq!(
+            refused.line(),
+            concat!(
+                "reasoning-effort-receipt-observation ",
+                r#"{"row":"live.direct_providers","provider_family":"openai","backend":"openai_api","#,
+                r#""api":"responses","model":"model-a","requested_level":"max","#,
+                r#""outcome":{"kind":"refused","reason":"unsupported_level"},"result":"pass"}"#,
+            )
         );
     }
 
@@ -2408,7 +2722,7 @@ mod tests {
         let openai = catalog_model(Provider::OpenAI, 0);
         let shape = cells[0].probe.as_ref().expect("probed").shape.as_str();
         assert_eq!(
-            summary.lines,
+            human(&summary),
             [
                 format!(
                     "copilot-live reasoning LOCAL route=copilot/responses model={} \
@@ -2447,6 +2761,73 @@ mod tests {
         assert_eq!(
             (summary.requests, summary.ceiling, summary.stopped),
             (3, 3, None)
+        );
+
+        // The receipt reads the same run as one observation per cell and
+        // level: what was refused without a request and what was sent.
+        let anthropic = catalog_model(Provider::Anthropic, 0);
+        let gemini = catalog_model(Provider::Gemini, 0);
+        let cell = copilot_observation;
+        assert_eq!(
+            observations(&summary),
+            [
+                cell(
+                    Provider::OpenAI,
+                    "responses",
+                    &catalog_model(Provider::OpenAI, 1),
+                    "low",
+                    refused_outcome("supported_levels_unknown"),
+                    "pass"
+                ),
+                cell(
+                    Provider::OpenAI,
+                    "responses",
+                    &openai,
+                    "xhigh",
+                    refused_outcome("unsupported_level"),
+                    "pass"
+                ),
+                cell(
+                    Provider::OpenAI,
+                    "responses",
+                    &openai,
+                    "low",
+                    sent_outcome("low"),
+                    "pass"
+                ),
+                cell(
+                    Provider::Anthropic,
+                    "messages",
+                    &anthropic,
+                    "medium",
+                    refused_outcome("unsupported_level"),
+                    "pass"
+                ),
+                cell(
+                    Provider::Anthropic,
+                    "messages",
+                    &anthropic,
+                    "low",
+                    sent_outcome("low"),
+                    "pass"
+                ),
+                cell(
+                    Provider::Gemini,
+                    "chat_completions",
+                    &gemini,
+                    "xhigh",
+                    refused_outcome("unsupported_level"),
+                    "pass"
+                ),
+                cell(
+                    Provider::Gemini,
+                    "chat_completions",
+                    &gemini,
+                    "low",
+                    sent_outcome("low"),
+                    "pass"
+                ),
+            ]
         );
 
         // One request per cell reached its client, none the silent model's.
@@ -2554,7 +2935,7 @@ mod tests {
             .is_some_and(|row| row.supports_reasoning);
         let shape = BodyShape::of(true, ModelApi::Responses, reasoning_row).map(BodyShape::as_str);
         assert_eq!(
-            summary.lines,
+            human(&summary),
             [
                 format!(
                     "copilot-live reasoning FAIL route=copilot/responses model={openai} \
@@ -2579,6 +2960,33 @@ mod tests {
                 class: FailureClass::AuthenticationFailed,
                 status: Some(401)
             })
+        );
+        // The receipt reads the failed cell as typed fields: the status, and
+        // the failure class as its error code. The cell that never started
+        // is no observation.
+        let mut failed = copilot_observation(
+            Provider::OpenAI,
+            "responses",
+            &openai,
+            "low",
+            sent_outcome("low"),
+            "fail",
+        );
+        failed["http_status"] = json!(401);
+        failed["error_code"] = json!("authentication_failed");
+        assert_eq!(
+            observations(&summary),
+            [
+                copilot_observation(
+                    Provider::OpenAI,
+                    "responses",
+                    &openai,
+                    "medium",
+                    refused_outcome("unsupported_level"),
+                    "pass",
+                ),
+                failed,
+            ]
         );
         assert!(summary.lines.iter().all(|line| !line.contains("private")));
     }
@@ -2614,6 +3022,21 @@ mod tests {
             "{:?}",
             summary.lines
         );
+        let failed = observations(&summary).pop().expect("the failed cell");
+        assert_eq!(
+            (
+                &failed["outcome"],
+                &failed["result"],
+                &failed["http_status"],
+                &failed["error_code"]
+            ),
+            (
+                &sent_outcome("low"),
+                &json!("fail"),
+                &json!(429),
+                &json!("rate_limited")
+            )
+        );
         assert!(summary.lines.iter().all(|line| !line.contains("private")));
     }
 
@@ -2645,13 +3068,26 @@ mod tests {
             "{:?}",
             summary.lines
         );
+        let lines = human(&summary);
         assert!(
-            summary.lines[0].contains(" CUT route=copilot/responses ")
-                && summary.lines[0].ends_with(
+            lines[0].contains(" CUT route=copilot/responses ")
+                && lines[0].ends_with(
                     "level=low reason=second_request_refused_by_budget first_request=answered"
                 ),
-            "{:?}",
-            summary.lines
+            "{lines:?}"
+        );
+        // For the receipt a cut cell is skipped: sent, and neither passed
+        // nor failed.
+        assert_eq!(
+            observations(&summary).pop(),
+            Some(copilot_observation(
+                Provider::OpenAI,
+                "responses",
+                &catalog_model(Provider::OpenAI, 0),
+                "low",
+                sent_outcome("low"),
+                "skip",
+            ))
         );
     }
 
@@ -2674,14 +3110,35 @@ mod tests {
         let summary = drive(&run, &cells).await;
         assert_eq!(client.requests().len(), 1, "never a second request");
         assert_eq!((summary.pass, summary.fail, summary.requests), (0, 2, 1));
+        let lines = human(&summary);
         assert!(
-            summary.lines[0].ends_with(
+            lines[0].ends_with(
                 "level=medium class=refusal_dispatched status=- detail=level_outside_the_set"
-            ) && summary.lines[1]
-                .ends_with("level=low class=request_budget_spent status=- detail=-"),
-            "{:?}",
-            summary.lines
+            ) && lines[1].ends_with("level=low class=request_budget_spent status=- detail=-"),
+            "{lines:?}"
         );
+        // The receipt reads both failures by their class: the level that was
+        // sent where it had to be refused, and the level that was never sent.
+        let openai = catalog_model(Provider::OpenAI, 0);
+        let mut dispatched = copilot_observation(
+            Provider::OpenAI,
+            "responses",
+            &openai,
+            "medium",
+            sent_outcome("medium"),
+            "fail",
+        );
+        dispatched["error_code"] = json!("refusal_dispatched");
+        let mut spent = copilot_observation(
+            Provider::OpenAI,
+            "responses",
+            &openai,
+            "low",
+            refused_outcome("request_budget_spent"),
+            "fail",
+        );
+        spent["error_code"] = json!("request_budget_spent");
+        assert_eq!(observations(&summary), [dispatched, spent]);
     }
 
     /// No cell starts at or after the run's deadline.
@@ -2727,10 +3184,13 @@ mod tests {
         let summary = drive(&run, &cells).await;
         assert_eq!(summary.pass, 1, "{:?}", summary.lines);
         assert!(
-            summary.lines[0].contains(" PASS route=copilot/responses model=<redacted> "),
+            human(&summary)[0].contains(" PASS route=copilot/responses model=<redacted> "),
             "{:?}",
             summary.lines
         );
+        let cells = observations(&summary);
+        assert_eq!(cells.len(), 2, "{cells:?}");
+        assert!(cells.iter().all(|cell| cell["model"] == REDACTED));
         assert!(summary.lines.iter().all(|line| !line.contains(&private)));
     }
 }

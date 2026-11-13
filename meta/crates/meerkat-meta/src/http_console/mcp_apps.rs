@@ -1355,6 +1355,86 @@ mcp_apps_sandbox_url = " "
         Ok(())
     }
 
+    /// The record of who a runtime's members are private to, unreadable:
+    /// every read of it fails.
+    struct UnreadableRecord;
+
+    #[async_trait::async_trait]
+    impl crate::private_owners::MemberSpawnLog for UnreadableRecord {
+        async fn spawns_after(
+            &self,
+            _cursor: u64,
+            _limit: usize,
+        ) -> Result<Option<crate::private_owners::MemberSpawnPage>, String> {
+            Err("the mob's event log cannot be read".to_string())
+        }
+    }
+
+    /// The app route of a console with no runtime of its own reads a runtime
+    /// that the console's aggregator serves. While that runtime has not read
+    /// who its members are private to, the one operator of a console that
+    /// identifies nobody is kept apart; once the console no longer serves
+    /// the runtime, the operator is kept apart no longer.
+    #[tokio::test]
+    async fn the_app_route_counts_a_served_runtime_only_while_its_console_serves_it()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use super::super::tests::{
+            build_empty_console_test_runtime, spawn_identity_control_test_member,
+        };
+        let (_directory, built) =
+            build_empty_console_test_runtime("mcp-app-served-runtime").await?;
+        let member = "rt:review:apps:0";
+        spawn_identity_control_test_member(&built, member, "review:apps").await?;
+        let session = built
+            .handle()
+            .resolve_bridge_session_id_observation(&crate::member_comms_id::mob_member_id(member))
+            .await
+            .expect("native member session");
+        // The same mob, read through a runtime whose first read has failed.
+        let runtime = MobRuntime::from_handle(built.handle());
+        assert!(
+            !runtime
+                .private_owners()
+                .seeded(&UnreadableRecord)
+                .await
+                .landed()
+        );
+        let aggregator = MetaConsoleAggregator::in_memory();
+        aggregator.register_runtime_handles_with_policy(
+            "runtime",
+            "project",
+            runtime.clone(),
+            None,
+            ConsoleEventStore::new(),
+            Arc::new(crate::console_aggregator::AllowAllConsoleVisibilityPolicy),
+        );
+        let controller = AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec!["admin@example.test".into()],
+            ..Default::default()
+        })?;
+        let operator = controller.view_for_subject(None).on_console(false);
+        let before = operator.kept_apart_from_other_people();
+        let mut state = state(None);
+        state.console_aggregator = Some(aggregator.clone());
+        state.access = Some(controller.clone());
+        let mut request = request(&session);
+        request.identity = "project/review:apps".into();
+        // The app route reads the served runtime, whatever it then answers.
+        let routed = route(state, request, Operation::CallTool).await.is_ok();
+        let after_the_app_route = operator.kept_apart_from_other_people();
+        aggregator.unregister_runtime("runtime");
+        super::super::prime_access_cache_from_aggregator(&aggregator, &controller).await;
+        let once_no_longer_served = operator.kept_apart_from_other_people();
+        assert_eq!(
+            (before, after_the_app_route, once_no_longer_served),
+            (false, true, false),
+            "kept apart while the console serves the runtime that owes its read, and no longer \
+             after (the route answered: {routed})"
+        );
+        Ok(())
+    }
+
     /// A candidate launch calls no member's tool: its call-tool answers 409
     /// `candidate_launch` before anything is resolved, while resolving an app
     /// stays open. An authoritative launch's call-tool is not refused so: it

@@ -36394,10 +36394,14 @@ mod tests {
         /// request is judged on the origin's route, whose account does not
         /// state the preferred level.
         ///
-        /// Also today's outcome, pinned as it is: the attempt's report is
-        /// published on the agent's event tap (and its default event channel,
-        /// when one is set), not on the channel the run was started with,
-        /// which carries the origin's report only.
+        /// Also pinned as it is, for one shape of embedding only: this agent
+        /// is run with a channel it was not built with
+        /// (`run_with_events(tx)` on an agent with no default event channel).
+        /// The attempt's report is published on the agent's event tap and
+        /// its build-time default channel, so here it reaches the tap and
+        /// not the run's channel, which carries the origin's report only. A
+        /// session surface builds its agent with the channel it runs it on,
+        /// so its stream carries both reports.
         ///
         /// A change that carries the target's route into the fallback switch,
         /// so that the attempt is judged like every other request of the

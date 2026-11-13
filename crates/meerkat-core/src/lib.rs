@@ -781,10 +781,11 @@ pub use types::{
     ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity, ToolName, ToolNameSet,
     ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind, TranscriptMessageIdentity,
     TranscriptSource, TranscriptUserRole, TurnRequester, TurnUsage, TurnUsageAccountingMissing,
-    Usage, UserMessage, VideoData, assistant_blocks_have_visible_or_actionable_output, has_images,
-    has_non_text_content, has_video, is_supported_video_media_type,
-    materialize_latest_system_prompt_versions, superseded_system_prompt_offsets,
-    validate_inline_video_blocks, validate_system_prompt_version_order,
+    UnknownRequesterOrigin, Usage, UserMessage, VideoData,
+    assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
+    has_video, is_supported_video_media_type, materialize_latest_system_prompt_versions,
+    superseded_system_prompt_offsets, validate_inline_video_blocks,
+    validate_system_prompt_version_order,
 };
 pub use web_search::*;
 

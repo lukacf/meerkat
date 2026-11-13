@@ -30,6 +30,11 @@ const HOST_ATTESTED_TOKENS: &[&str] = &[
     "RequesterOrigin::ConsoleSignedIn",
     "with_requester_origin",
     "requester_origin =",
+    // The attested wire spellings: the only texts the origin decoder turns
+    // into an attested origin, so a source that holds one could build one by
+    // decoding.
+    "\"console_signed_in\"",
+    "\"host_attested\"",
 ];
 
 /// Whether `text` names an attested-origin token, the forwarding setters
@@ -293,8 +298,18 @@ fn only_the_host_route_names_a_host_attested_requester() {
         "meta/crates/meerkat-meta/src/mob_handle_runtime.rs",
         // The Distiller's rule 3 reads the recorded origin (never sets it).
         "meta/crates/meerkat-meta/src/memory/distiller.rs",
+        // Core defines the origin, its wire spellings and its decoder.
+        "crates/meerkat-core/src/types.rs",
     ]
     .map(|relative| root.join(relative).canonicalize().expect("allowed path"));
+    // One unrelated use of an attested spelling, allowed by its exact line:
+    // a mob announcement source's own principal kind, which never builds a
+    // requester origin.
+    let announcement_kind = root
+        .join("meta/crates/meerkat-meta/src/mob_announcements/sources.rs")
+        .canonicalize()
+        .expect("announcement sources path");
+    const ANNOUNCEMENT_KIND_LINE: &str = "Self::HostAttested { .. } => \"host_attested\",";
     let mut read = 0;
     for workspace in ["crates", "meta/crates", "connect/crates"] {
         let crates =
@@ -309,9 +324,17 @@ fn only_the_host_route_names_a_host_attested_requester() {
                 if allowed.contains(&canonical) {
                     continue;
                 }
-                let text = without_inline_test_modules(
+                let mut text = without_inline_test_modules(
                     &std::fs::read_to_string(&file).expect("read source"),
                 );
+                if canonical == announcement_kind {
+                    assert_eq!(
+                        text.matches(ANNOUNCEMENT_KIND_LINE).count(),
+                        1,
+                        "the announcement kind line is the one allowed spelling"
+                    );
+                    text = text.replace(ANNOUNCEMENT_KIND_LINE, "");
+                }
                 read += 1;
                 if let Some(token) = names_a_forwarding_setter(&text) {
                     panic!("{} names {token}; only the host route may", file.display());
@@ -371,6 +394,14 @@ fn the_workspace_scan_skips_inline_tests_and_matches_whole_tokens() {
             "{set}"
         );
     }
+    assert_eq!(
+        names_a_forwarding_setter("let o: RequesterOrigin = from_value(json!(\"host_attested\"));"),
+        Some("\"host_attested\"")
+    );
+    assert_eq!(
+        names_a_forwarding_setter("decode(\"console_signed_in\")"),
+        Some("\"console_signed_in\"")
+    );
     for unset in [
         "Header { requester_origin: None, x }",
         "pub requester_origin: Option<meerkat_core::RequesterOrigin>,",

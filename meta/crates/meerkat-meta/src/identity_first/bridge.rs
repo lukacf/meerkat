@@ -16530,7 +16530,12 @@ mod requester_lane_tests {
     fn row_bridge_requester_lane_check_every_combination() {
         let console = Some(RequesterOrigin::ConsoleSignedIn);
         let host = Some(RequesterOrigin::HostAttested);
-        let unknown = Some(RequesterOrigin::from_wire("a_door_from_a_newer_host"));
+        let unknown = Some(
+            serde_json::from_value::<RequesterOrigin>(serde_json::json!(
+                "a_door_from_a_newer_host"
+            ))
+            .expect("an unknown origin decodes"),
+        );
         // (has_requester, origin, host_human_lane) -> refusal
         let cases = [
             // No requester, no origin: admissible on either lane.

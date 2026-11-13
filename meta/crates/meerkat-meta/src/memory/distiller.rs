@@ -579,11 +579,12 @@ pub struct TranscriptMessage {
     pub role: &'static str,
     pub text: String,
     /// Evidence-scoped taint (§10.1): whether this row is PROVEN clean from
-    /// typed, persisted facts. Only a person's own typed input is: a
-    /// conversational user row whose turn input is typed text and whose
-    /// host-stamped direct requester names a person (render class absent or
-    /// a user prompt). Every other row is unknown or tainted, and an
-    /// extraction call that reads it produces quarantined records.
+    /// recorded, persisted facts ([`proven_clean_row`]). Only a person's own
+    /// input admitted through an attested door is: a conversational user row
+    /// whose direct requester is a person with a recorded origin
+    /// `console_signed_in` or `host_attested` (render class absent or a user
+    /// prompt). Every other row is unknown or tainted, and an extraction call
+    /// that reads it produces quarantined records.
     pub proven_clean: bool,
     /// Evidence-scoped taint (§10.1): whether this row's PERSISTED facts
     /// declare it tainted ([`declared_tainted_row`]). An extraction call that

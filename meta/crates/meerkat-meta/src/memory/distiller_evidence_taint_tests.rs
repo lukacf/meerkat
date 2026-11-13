@@ -3,8 +3,9 @@
 //!
 //! The rule under test: a distilled record is quarantined when the extraction
 //! call that produced it READ a tainted or derived row; a record from a call
-//! whose input held only a person's own typed input (attested by the host
-//! surface, not by the text) is clean, whatever the session saw before. The
+//! whose input held only a person's own input with an attested requester
+//! origin (recorded by the admitting door, not read from the text) is clean,
+//! whatever the session saw before. The
 //! cited range is provenance only. Unknown or unreadable evidence keeps the
 //! session-sticky fallback.
 //!
@@ -151,8 +152,8 @@ impl DistillerClientHandle for RouterHandle {
 
 // -- transcript rows ---------------------------------------------------------
 
-/// A person's own typed input: conversational, typed text, and a direct
-/// requester the host stamped at admission naming a person.
+/// A person's own input through an attested door: conversational, with a
+/// direct person requester whose recorded origin is `console_signed_in`.
 fn person_typed(text: &str) -> Message {
     let mut user = UserMessage::text(text);
     user.identity.requester = Some(
@@ -958,7 +959,10 @@ fn rule_iii_each_condition_is_required() {
     use meerkat_core::types::{RenderClass, RenderMetadata, TranscriptUserRole};
 
     let base = person_typed("I take the early train.");
-    assert!(proven_clean_row(&base), "a person's own typed row is clean");
+    assert!(
+        proven_clean_row(&base),
+        "a person's own row with an attested origin is clean"
+    );
     let edit = |change: &dyn Fn(&mut UserMessage)| {
         let Message::User(mut user) = base.clone() else {
             unreachable!()
@@ -1359,7 +1363,8 @@ async fn row_both_calls_complete_before_any_write() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-/// The review readers bound each quarantine class on its own: more than
+/// The span hard block and the dream's review window bound each quarantine
+/// class on its own: more than
 /// 256 records quarantined for unproven input, written after a record that
 /// carries a taint signal, leave that record hard-blocking its span and in
 /// the dream's review window.
@@ -1723,13 +1728,13 @@ async fn row_persisted_taint_declaration_classes_tainted_after_a_restart()
 // The rows below have exactly the shapes the real surfaces commit, as the
 // end-to-end rows assert them (no typed-text stamp on either door; the
 // recorded origin is the fact):
-// - a signed-in person's console send (console_human_input_tests TR-S1):
+// - a signed-in person's console send (console_human_input_tests, the redispatch-after-restart row):
 //   no turn-input stamp, direct Human requester, origin console_signed_in;
 // - a host meta/send with a requester (host_human_input
 //   a_host_attested_requester_reaches_ordinary_work_with_its_recorded_origin):
 //   no turn-input stamp, direct Human requester in the host-attested domain,
 //   origin host_attested;
-// - a schedule fire (console_schedule_tests TR-S1b): no turn-input stamp,
+// - a schedule fire (console_schedule_tests, the schedule-fire row): no turn-input stamp,
 //   the schedule's person as direct requester, no origin.
 
 fn console_signed_in_send(text: &str) -> Message {
@@ -1881,10 +1886,20 @@ async fn row_unknown_origin_loads_the_row_but_its_content_is_not_trusted()
             .requester
             .as_ref()
             .and_then(meerkat_core::TurnRequester::origin),
-        Some(meerkat_core::RequesterOrigin::from_wire(
-            "a_door_from_a_newer_host"
-        )),
+        Some(serde_json::from_value::<meerkat_core::RequesterOrigin>(
+            serde_json::json!("a_door_from_a_newer_host")
+        )?),
         "an unknown origin loads as Unknown with its own text"
+    );
+    assert!(
+        matches!(
+            user.identity
+                .requester
+                .as_ref()
+                .and_then(meerkat_core::TurnRequester::origin),
+            Some(meerkat_core::RequesterOrigin::Unknown(_))
+        ),
+        "the newer value is Unknown, not an attested origin"
     );
     assert_eq!(
         serde_json::to_value(&row)?["identity"]["requester"]["origin"],

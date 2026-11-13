@@ -104,8 +104,34 @@ pub enum RequesterOrigin {
     HostAttested,
     /// An origin this build does not know, with the exact wire text it was
     /// read from (kept so it is written back unchanged). It is never an
-    /// attestation: a reader acts as if the requester had none.
-    Unknown(String),
+    /// attestation: a reader acts as if the requester had none. Only the
+    /// decoder builds one (its payload has no public constructor), and the
+    /// decoder never builds one from an attested spelling.
+    Unknown(UnknownRequesterOrigin),
+}
+
+/// The wire text of a [`RequesterOrigin`] this build does not know.
+///
+/// Its field is private and its only constructor is crate-private, used by
+/// the decoder alone, so code outside Core cannot build an `Unknown` origin,
+/// and the decoder never builds one holding an attested spelling
+/// (`console_signed_in`, `host_attested`): those decode to their attested
+/// variants.
+///
+/// ```compile_fail
+/// // No public constructor and no public field: an Unknown origin cannot
+/// // be built outside Core, attested spelling or not.
+/// let _ = meerkat_core::types::UnknownRequesterOrigin("host_attested".to_string());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnknownRequesterOrigin(String);
+
+impl UnknownRequesterOrigin {
+    /// The exact wire text it was read from.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl RequesterOrigin {
@@ -120,14 +146,16 @@ impl RequesterOrigin {
         }
     }
 
-    /// The origin a wire text names; any text this build does not know is
-    /// [`Self::Unknown`] with that text.
+    /// The origin a wire text names (the decoder's only constructor): an
+    /// attested spelling is its attested variant, never `Unknown`; any other
+    /// text is [`Self::Unknown`] with that text. Crate-private: code outside
+    /// Core gets an origin only from its variants or by decoding.
     #[must_use]
-    pub fn from_wire(raw: &str) -> Self {
+    pub(crate) fn from_wire(raw: &str) -> Self {
         match raw {
             "console_signed_in" => Self::ConsoleSignedIn,
             "host_attested" => Self::HostAttested,
-            other => Self::Unknown(other.to_string()),
+            other => Self::Unknown(UnknownRequesterOrigin(other.to_string())),
         }
     }
 }

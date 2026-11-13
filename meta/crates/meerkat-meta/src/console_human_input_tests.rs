@@ -398,10 +398,7 @@ comms = true
                             && user.text_content() == content)
                 })
                 .count();
-            assert_eq!(
-                rows, 1,
-                "CROSS-CHECK (d): a replay of a delivered send adds no row"
-            );
+            assert_eq!(rows, 1, "REPLAY: a replay of a delivered send adds no row");
         }
     }
 
@@ -1662,7 +1659,7 @@ async fn console_human_redispatch_carries_the_requester_its_frame_recorded() {
         "the redispatched turn names the requester the frame recorded, as the \
          signed-in person who sent it"
     );
-    // TR-S1: a signed-in person's console send is conversational, names that
+    // A signed-in person's console send is conversational, names that
     // person as its direct requester with origin console_signed_in (asserted
     // above), so the distiller's rule 3 holds for it. It carries no typed-text
     // stamp, so the voice mirror keeps its behaviour.
@@ -1672,11 +1669,11 @@ async fn console_human_redispatch_carries_the_requester_its_frame_recorded() {
             .as_ref()
             .and_then(meerkat_core::TurnRequester::direct_principal)
             .is_some_and(|principal| principal.kind == meerkat_core::PrincipalKind::Human),
-        "TR-S1: the row has a direct person requester"
+        "SIGNED-IN SEND: the row has a direct person requester"
     );
     assert_eq!(
         row.identity.turn_input, None,
-        "TR-S1: a console person's send carries no typed-text stamp"
+        "SIGNED-IN SEND: a console person's send carries no typed-text stamp"
     );
     // This is the first delivery, after a restart,
     // of a recorded console send the person made (its origin comes from what
@@ -1684,7 +1681,7 @@ async fn console_human_redispatch_carries_the_requester_its_frame_recorded() {
     // clean, and its fact after a tainted peer message is stored ACTIVE.
     assert!(
         crate::memory::distiller::proven_clean_row(&history[position]),
-        "CROSS-CHECK (a)/(d): the console person's row is rule-3 clean"
+        "SIGNED-IN SEND: the console person's row is rule-3 clean"
     );
     let statuses = crate::memory::distiller::evidence_taint_tests::status_after_tainted_peer(
         history[position].clone(),
@@ -1696,7 +1693,7 @@ async fn console_human_redispatch_carries_the_requester_its_frame_recorded() {
         statuses
             .iter()
             .any(crate::memory::distiller::evidence_taint_tests::status_is_active),
-        "CROSS-CHECK (a): CLEAN, the fact is stored active: {statuses:?}"
+        "SIGNED-IN SEND: CLEAN, the fact is stored active: {statuses:?}"
     );
     let label = position
         .checked_sub(1)
@@ -2970,7 +2967,7 @@ async fn e2e_a_live_console_person_send_is_rule3_clean_probe_and_anonymous_are_n
     .await;
     let typed = e2e_row_holding(&h, TYPED).await;
     let Message::User(row) = &typed else {
-        panic!("E2E-A: the typed send is a user row: {typed:?}");
+        panic!("E2E-A: the signed-in send is a user row: {typed:?}");
     };
     assert_eq!(
         row.identity.requester,
@@ -3112,7 +3109,7 @@ async fn e2e_c_a_selected_skill_body_stays_out_of_the_clean_extraction() {
             block,
             meerkat_core::types::ContentBlock::SkillContext { .. }
         )),
-        "E2E-C: the typed row holds a SkillContext block: {row:?}"
+        "E2E-C: the person's row holds a SkillContext block: {row:?}"
     );
     assert!(
         proven_clean_row(&message),

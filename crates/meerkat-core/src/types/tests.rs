@@ -3428,3 +3428,41 @@ fn mcp_notice_block_derives_settled_from_its_phase_on_decode() {
         }
     }
 }
+
+/// Only the exact attested spellings decode to the attested origins, never to
+/// `Unknown`; every other text (another case, padding, a newer value) decodes
+/// to `Unknown` holding that text and is written back unchanged. `Unknown`
+/// itself has no constructor outside Core (see the `compile_fail` doc test on
+/// `UnknownRequesterOrigin`).
+#[test]
+fn requester_origin_attested_spellings_decode_attested_and_nothing_else_does() {
+    let decode = |text: &str| -> RequesterOrigin { serde_json::from_value(json!(text)).unwrap() };
+    assert_eq!(
+        decode("console_signed_in"),
+        RequesterOrigin::ConsoleSignedIn
+    );
+    assert_eq!(decode("host_attested"), RequesterOrigin::HostAttested);
+    for (text, attested) in [
+        ("console_signed_in", true),
+        ("host_attested", true),
+        ("Host_Attested", false),
+        (" host_attested", false),
+        ("host_attested ", false),
+        ("CONSOLE_SIGNED_IN", false),
+        ("a_door_from_a_newer_host", false),
+        ("", false),
+    ] {
+        let origin = decode(text);
+        assert_eq!(
+            !matches!(origin, RequesterOrigin::Unknown(_)),
+            attested,
+            "{text:?} decodes to {origin:?}"
+        );
+        assert_eq!(origin.as_str(), text, "{text:?} keeps its text");
+        assert_eq!(
+            serde_json::to_value(&origin).unwrap(),
+            json!(text),
+            "{text:?} is written back unchanged"
+        );
+    }
+}

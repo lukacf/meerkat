@@ -1576,17 +1576,17 @@ async fn turn_requester(
                 .expect("history read");
             if let Some((requester, fired)) = page.messages.iter().find_map(|message| match message {
                 meerkat_core::Message::User(user) if user.text_content() == content => {
-                    // TR-S1b, kept as a regression: a schedule's fire
+                    // A schedule's fire
                     // names the schedule's person as requester but is no
-                    // person's typed input. Its conversational row carries no
+                    // person's own input. Its conversational row carries no
                     // typed-text stamp and no attestation origin.
                     assert!(
                         user.transcript_role.is_conversational(),
-                        "TR-S1b: the fired row is conversational"
+                        "SCHEDULE FIRE: the fired row is conversational"
                     );
                     assert_eq!(
                         user.identity.turn_input, None,
-                        "TR-S1b: a scheduled fire carries no typed-text stamp"
+                        "SCHEDULE FIRE: a scheduled fire carries no typed-text stamp"
                     );
                     assert_eq!(
                         user.identity
@@ -1594,7 +1594,7 @@ async fn turn_requester(
                             .as_ref()
                             .and_then(meerkat_core::TurnRequester::origin),
                         None,
-                        "TR-S1b: a scheduled fire names no attestation origin"
+                        "SCHEDULE FIRE: a scheduled fire names no attestation origin"
                     );
                     Some((user.identity.requester.clone(), message.clone()))
                 }
@@ -1605,7 +1605,7 @@ async fn turn_requester(
                 // and its fact after a tainted peer message QUARANTINES.
                 assert!(
                     !crate::memory::distiller::proven_clean_row(&fired),
-                    "CROSS-CHECK (c): a scheduled fire is not rule-3 clean"
+                    "SCHEDULE FIRE: a scheduled fire is not rule-3 clean"
                 );
                 if requester.is_some() {
                     let when: &'static str = Box::leak(content.to_string().into_boxed_str());
@@ -1620,7 +1620,7 @@ async fn turn_requester(
                             && statuses.iter().all(
                                 crate::memory::distiller::evidence_taint_tests::status_is_quarantined
                             ),
-                        "CROSS-CHECK (c): QUARANTINED: {statuses:?}"
+                        "SCHEDULE FIRE: QUARANTINED: {statuses:?}"
                     );
                 }
                 return requester;

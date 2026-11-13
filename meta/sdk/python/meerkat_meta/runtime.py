@@ -1444,9 +1444,10 @@ class MetaRuntime:
         origin ``host_attested``; the turn is not marked as typed text, so a
         live voice channel treats it as before. Reading a turn's requester
         back, its ``origin`` is an open string (``"console_signed_in"`` and
-        ``"host_attested"`` today): treat any other value, ``"unknown"``
-        included, as not attested; a later third value is not a breaking
-        change. Only the host
+        ``"host_attested"`` today): treat any other value as not attested. A
+        value the gateway does not know is passed through with the exact text
+        a newer host wrote, never rewritten, so a later third value is not a
+        breaking change. Only the host
         route accepts it. It does not combine with ``idempotency_key``, so an
         unkeyed retry is a second send. A gateway that does not advertise the
         ``send_host_attested_requester`` feature capability would ignore it, so

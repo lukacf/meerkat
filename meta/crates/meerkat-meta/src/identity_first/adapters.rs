@@ -4075,7 +4075,10 @@ mod tests {
             .and_then(meerkat_core::TurnRequester::origin);
         assert_eq!(
             origin,
-            Some(meerkat_core::RequesterOrigin::from_wire(NEWER)),
+            Some(
+                serde_json::from_value::<meerkat_core::RequesterOrigin>(serde_json::json!(NEWER))
+                    .expect("decode the newer origin")
+            ),
             "the unknown origin keeps its own text"
         );
         assert_eq!(

@@ -564,7 +564,7 @@ export interface MobMemberBinding {
 
 export type ModelApi = "responses" | "chat_completions" | "messages" | "generate_content" | "realtime";
 
-export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable" | "reasoning_effort_unsupported" | "tool_choice_unsupported";
+export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable" | "tool_choice_unsupported" | "reasoning_effort_unsupported";
 
 export type ModelFallbackSkippedTarget = {
   context?: ContextBudgetFact | null;
@@ -774,13 +774,13 @@ export type ReasoningEffortDecidedBy = "request" | "preference";
 export type ReasoningEffortRefusal = {
   conflicting_level?: EffortLevel | null;
   conflicting_param?: string | null;
-  facts?: ReasoningFactsSource | null;
+  facts: ReasoningFactsSource | null;
   model: string;
   provider: Provider;
   reason: ReasoningEffortRefusalReason;
   requested: EffortLevel;
-  route?: ReasoningRoute | null;
-  supported?: EffortLevel[] | null;
+  route: ReasoningRoute | null;
+  supported: EffortLevel[] | null;
 };
 
 export type ReasoningEffortRefusalReason = "unsupported_level" | "supported_levels_unknown" | "supported_levels_unavailable" | "conflicting_provider_effort" | "conflicting_thinking_budget" | "conflicting_thinking_type" | "conflicting_reasoning_body" | "conflicting_reasoning_mode";

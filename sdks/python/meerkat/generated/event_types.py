@@ -215,7 +215,7 @@ LlmProviderErrorKind = Literal['invalid_request', 'content_filtered', 'server_er
 LlmProviderErrorRetryability = Literal['retryable', 'non_retryable']
 
 
-ModelFallbackSkipReason = Literal['provider_boundary', 'auth_unavailable', 'context_fit', 'context_unknown', 'output_budget', 'tool_parity', 'modality_parity', 'request_unsupported', 'admission_unavailable', 'reasoning_effort_unsupported'] | Literal['tool_choice_unsupported']
+ModelFallbackSkipReason = Literal['provider_boundary', 'auth_unavailable', 'context_fit', 'context_unknown', 'output_budget', 'tool_parity', 'modality_parity', 'request_unsupported', 'admission_unavailable'] | Literal['tool_choice_unsupported'] | Literal['reasoning_effort_unsupported']
 
 
 # Where Gemini blocked a response.
@@ -309,16 +309,20 @@ class ReasoningEffortRefusal(TypedDict, total=False):
     absent (`facts` is absent exactly when `supported` is). The two
     `conflicting_*` fields are serialized only when present. The `Display`
     text is for people and is not a contract; read the fields.
+
+    Non-exhaustive: a later release can add a field, so code outside this
+    crate reads the fields and does not build the value with a struct
+    literal (a value is read from its wire form).
     """
     conflicting_level: NotRequired[Optional[EffortLevel]]
     conflicting_param: NotRequired[Optional[str]]
-    facts: NotRequired[Optional[ReasoningFactsSource]]
+    facts: Required[Optional[ReasoningFactsSource]]
     model: Required[str]
     provider: Required[Provider]
     reason: Required[ReasoningEffortRefusalReason]
     requested: Required[EffortLevel]
-    route: NotRequired[Optional[ReasoningRoute]]
-    supported: NotRequired[Optional[list[EffortLevel]]]
+    route: Required[Optional[ReasoningRoute]]
+    supported: Required[Optional[list[EffortLevel]]]
 
 
 # Closed machine-owned classifier for why a turn reached a terminal failure.
@@ -1571,6 +1575,10 @@ ReasoningEffortDecidedBy = Literal['request', 'preference']
 class ReasoningEffortResolution(TypedDict, total=False):
     """A resolved `reasoning_effort` level: what one provider request is sent
     with, for which model and route.
+
+    Non-exhaustive: a later release can add a field, so code outside this
+    crate reads the fields and does not build the value with a struct
+    literal (a value is read from its wire form).
     """
     decided_by: Required[ReasoningEffortDecidedBy]
     facts: Required[ReasoningFactsSource]
@@ -2810,8 +2818,9 @@ class AgentEventHookLaunchRefused(TypedDict, total=False):
 class AgentEventRequestReasoningLowered(TypedDict, total=False):
     """One provider attempt of a turn that carries a reasoning-effort
     preference: what the batch requested, what the attempt's baseline
-    request already said, and what the attempt actually sent. Emitted per
-    prepared request (and again for a model-fallback attempt), so a turn
+    request already said, and the level judged for the attempt. Emitted
+    per prepared request (and again for a model-fallback attempt, also
+    one that is then skipped before any request is sent), so a turn
     whose attempts differ reports each one; never a turn-level claim. For
     a model-fallback attempt the preference is judged on the direct route
     of the target's provider and the target model's catalog row;

@@ -3143,14 +3143,18 @@
               "tool_parity",
               "modality_parity",
               "request_unsupported",
-              "admission_unavailable",
-              "reasoning_effort_unsupported"
+              "admission_unavailable"
             ],
             "type": "string"
           },
           {
             "const": "tool_choice_unsupported",
             "description": "The target cannot honour the failed request's forced tool choice (the\ntarget adapter's own typed refusal), so it is skipped before any\nprovider call instead of being switched to and refused.",
+            "type": "string"
+          },
+          {
+            "const": "reasoning_effort_unsupported",
+            "description": "The target's route does not accept the session's provider-neutral\nreasoning effort level (unsupported, unknown, unavailable, or in\nconflict with the target's own params), so it is skipped before any\nswitch: a fallback never changes the effort silently.",
             "type": "string"
           }
         ]
@@ -4359,7 +4363,7 @@
         ]
       },
       "ReasoningEffortRefusal": {
-        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.",
+        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.\n\nNon-exhaustive: a later release can add a field, so code outside this\ncrate reads the fields and does not build the value with a struct\nliteral (a value is read from its wire form).",
         "properties": {
           "conflicting_level": {
             "anyOf": [
@@ -4432,7 +4436,10 @@
           "requested",
           "provider",
           "model",
-          "reason"
+          "route",
+          "reason",
+          "supported",
+          "facts"
         ],
         "type": "object"
       },
@@ -4482,7 +4489,7 @@
         ]
       },
       "ReasoningEffortResolution": {
-        "description": "A resolved `reasoning_effort` level: what one provider request is sent\nwith, for which model and route.",
+        "description": "A resolved `reasoning_effort` level: what one provider request is sent\nwith, for which model and route.\n\nNon-exhaustive: a later release can add a field, so code outside this\ncrate reads the fields and does not build the value with a struct\nliteral (a value is read from its wire form).",
         "properties": {
           "decided_by": {
             "$ref": "#/$defs/ReasoningEffortDecidedBy",
@@ -8602,7 +8609,7 @@
         "type": "object"
       },
       {
-        "description": "One provider attempt of a turn that carries a reasoning-effort\npreference: what the batch requested, what the attempt's baseline\nrequest already said, and what the attempt actually sent. Emitted per\nprepared request (and again for a model-fallback attempt), so a turn\nwhose attempts differ reports each one; never a turn-level claim. For\na model-fallback attempt the preference is judged on the direct route\nof the target's provider and the target model's catalog row;\n`RequestReasoningEffortResolved` is the authoritative record of what\na request was sent with.",
+        "description": "One provider attempt of a turn that carries a reasoning-effort\npreference: what the batch requested, what the attempt's baseline\nrequest already said, and the level judged for the attempt. Emitted\nper prepared request (and again for a model-fallback attempt, also\none that is then skipped before any request is sent), so a turn\nwhose attempts differ reports each one; never a turn-level claim. For\na model-fallback attempt the preference is judged on the direct route\nof the target's provider and the target model's catalog row;\n`RequestReasoningEffortResolved` is the authoritative record of what\na request was sent with.",
         "properties": {
           "baseline": {
             "$ref": "#/$defs/ReasoningLoweringBaseline",
@@ -10829,7 +10836,7 @@
             "type": "object"
           },
           {
-            "description": "One provider attempt of a turn that carries a reasoning-effort\npreference: what the batch requested, what the attempt's baseline\nrequest already said, and what the attempt actually sent. Emitted per\nprepared request (and again for a model-fallback attempt), so a turn\nwhose attempts differ reports each one; never a turn-level claim. For\na model-fallback attempt the preference is judged on the direct route\nof the target's provider and the target model's catalog row;\n`RequestReasoningEffortResolved` is the authoritative record of what\na request was sent with.",
+            "description": "One provider attempt of a turn that carries a reasoning-effort\npreference: what the batch requested, what the attempt's baseline\nrequest already said, and the level judged for the attempt. Emitted\nper prepared request (and again for a model-fallback attempt, also\none that is then skipped before any request is sent), so a turn\nwhose attempts differ reports each one; never a turn-level claim. For\na model-fallback attempt the preference is judged on the direct route\nof the target's provider and the target model's catalog row;\n`RequestReasoningEffortResolved` is the authoritative record of what\na request was sent with.",
             "properties": {
               "baseline": {
                 "$ref": "#/$defs/ReasoningLoweringBaseline",
@@ -13741,14 +13748,18 @@
               "tool_parity",
               "modality_parity",
               "request_unsupported",
-              "admission_unavailable",
-              "reasoning_effort_unsupported"
+              "admission_unavailable"
             ],
             "type": "string"
           },
           {
             "const": "tool_choice_unsupported",
             "description": "The target cannot honour the failed request's forced tool choice (the\ntarget adapter's own typed refusal), so it is skipped before any\nprovider call instead of being switched to and refused.",
+            "type": "string"
+          },
+          {
+            "const": "reasoning_effort_unsupported",
+            "description": "The target's route does not accept the session's provider-neutral\nreasoning effort level (unsupported, unknown, unavailable, or in\nconflict with the target's own params), so it is skipped before any\nswitch: a fallback never changes the effort silently.",
             "type": "string"
           }
         ]
@@ -14957,7 +14968,7 @@
         ]
       },
       "ReasoningEffortRefusal": {
-        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.",
+        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.\n\nNon-exhaustive: a later release can add a field, so code outside this\ncrate reads the fields and does not build the value with a struct\nliteral (a value is read from its wire form).",
         "properties": {
           "conflicting_level": {
             "anyOf": [
@@ -15030,7 +15041,10 @@
           "requested",
           "provider",
           "model",
-          "reason"
+          "route",
+          "reason",
+          "supported",
+          "facts"
         ],
         "type": "object"
       },
@@ -15080,7 +15094,7 @@
         ]
       },
       "ReasoningEffortResolution": {
-        "description": "A resolved `reasoning_effort` level: what one provider request is sent\nwith, for which model and route.",
+        "description": "A resolved `reasoning_effort` level: what one provider request is sent\nwith, for which model and route.\n\nNon-exhaustive: a later release can add a field, so code outside this\ncrate reads the fields and does not build the value with a struct\nliteral (a value is read from its wire form).",
         "properties": {
           "decided_by": {
             "$ref": "#/$defs/ReasoningEffortDecidedBy",

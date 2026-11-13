@@ -127,6 +127,10 @@ impl AgentToolDispatcher for RegisteredToolBundleDispatcher {
         self.inner.tool_catalog_capabilities()
     }
 
+    fn tool_catalog_control_plane(&self) -> crate::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
+    }
+
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
         self.inner.tool_catalog()
     }

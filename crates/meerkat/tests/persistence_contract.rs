@@ -201,11 +201,16 @@ mod tests {
         }
     }
 
+    /// A deferrable tool whose description alone is over the catalog's byte
+    /// budget, so a session with it defers its deferrable tools.
     fn deferred_tool(name: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
             audience: Default::default(),
             name: name.into(),
-            description: format!("Deferred test tool {name}"),
+            description: format!(
+                "Deferred test tool {name} {}",
+                "x".repeat(meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD)
+            ),
             input_schema: json!({ "type": "object" }),
             provenance: Some(deferred_catalog_provenance()),
         })

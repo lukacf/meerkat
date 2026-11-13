@@ -174,15 +174,18 @@ fn model_facts(account: &str) -> ModelAuthorizationFacts {
 // ---------------------------------------------------------------------------
 
 /// A stdio MCP server listing two read operations and a delete. It answers every
-/// `tools/call` with the record and appends each request line to `log`.
+/// `tools/call` with the record and appends each request line to `log`. The
+/// listing is over the deferred catalog's byte budget (the padded
+/// description), so a session defers the operations until it loads them.
 fn records_server(log: &Path) -> McpServerConfig {
+    let pad = "x".repeat(meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD);
     let script = format!(
         r#"while IFS= read -r line; do
   printf '%s\n' "$line" >> '{log}'
   id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
     *'"method":"initialize"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":"2025-03-26","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"records","version":"0"}}}}}}\n' "$id" ;;
-    *'"method":"tools/list"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"tools":[{{"name":"read_record","description":"Read one record","inputSchema":{{"type":"object","properties":{{"record":{{"type":"string"}}}},"required":["record"],"additionalProperties":false}}}},{{"name":"list_records","description":"List record ids","inputSchema":{{"type":"object","properties":{{}},"additionalProperties":false}}}},{{"name":"delete_record","description":"Delete one record","inputSchema":{{"type":"object","properties":{{"record":{{"type":"string"}}}},"required":["record"],"additionalProperties":false}}}}]}}}}\n' "$id" ;;
+    *'"method":"tools/list"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"tools":[{{"name":"read_record","description":"Read one record","inputSchema":{{"type":"object","properties":{{"record":{{"type":"string"}}}},"required":["record"],"additionalProperties":false}}}},{{"name":"list_records","description":"List record ids {pad}","inputSchema":{{"type":"object","properties":{{}},"additionalProperties":false}}}},{{"name":"delete_record","description":"Delete one record","inputSchema":{{"type":"object","properties":{{"record":{{"type":"string"}}}},"required":["record"],"additionalProperties":false}}}}]}}}}\n' "$id" ;;
     *'"method":"tools/call"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"content":[{{"type":"text","text":"record-7 value"}}]}}}}\n' "$id" ;;
   esac
 done

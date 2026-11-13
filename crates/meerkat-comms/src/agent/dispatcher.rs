@@ -435,6 +435,13 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
         }
     }
 
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner
+            .as_ref()
+            .map(|dispatcher| dispatcher.tool_catalog_control_plane())
+            .unwrap_or_default()
+    }
+
     fn pending_catalog_sources(&self) -> Arc<[String]> {
         self.inner
             .as_ref()
@@ -704,6 +711,10 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
             exact_catalog: inner.exact_catalog,
             may_require_catalog_control_plane: inner.may_require_catalog_control_plane,
         }
+    }
+
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
     }
 
     fn pending_catalog_sources(&self) -> Arc<[String]> {

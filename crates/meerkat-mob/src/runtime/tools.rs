@@ -91,6 +91,10 @@ impl AgentToolDispatcher for NameFilteredDispatcher {
         self.inner.tool_catalog_capabilities()
     }
 
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
+    }
+
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
         self.inner
             .tool_catalog()
@@ -279,6 +283,10 @@ impl AgentToolDispatcher for NameOrderedDispatcher {
 
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
         self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
     }
 
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
@@ -511,6 +519,10 @@ impl AgentToolDispatcher for BundleProvenanceDispatcher {
 
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
         self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
     }
 
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
@@ -760,6 +772,10 @@ impl AgentToolDispatcher for McpProvenanceFilter {
 
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
         self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
     }
 
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {

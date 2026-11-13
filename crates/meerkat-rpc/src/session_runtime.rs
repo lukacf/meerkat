@@ -15176,7 +15176,10 @@ impl SessionRuntime {
             }
             None => router,
         };
-        let adapter = Arc::new(McpRouterAdapter::new(router));
+        // Every session gets this router so that a server can be added to it
+        // later. Its catalog control tools are mounted and stay out of the
+        // requests until a server's tools wait behind the catalog.
+        let adapter = Arc::new(McpRouterAdapter::new(router).with_control_plane_on_demand());
         let adapter_dispatcher: Arc<dyn AgentToolDispatcher> = adapter.clone();
         let combined = match build_config.external_tools.clone() {
             Some(existing) => Arc::new(
@@ -23755,9 +23758,9 @@ mod tests {
     /// The help launch policy is the second line: a session that carries it
     /// but no help marker, as a help session saved before the marker existed
     /// would, is rebuilt under the restored policy. The model is offered no
-    /// composed tool but the catalog control plane; a call to the client's
-    /// tool is refused and never runs, and a catalog load is refused and
-    /// attaches nothing.
+    /// composed tool, and no catalog control tool either, since nothing can
+    /// be loaded; a call to the client's tool is refused and never runs,
+    /// and a catalog load is refused and attaches nothing.
     #[tokio::test]
     async fn a_cold_rebuild_under_the_help_launch_policy_offers_and_runs_no_composed_tool() {
         let temp = tempfile::tempdir().unwrap();
@@ -23783,19 +23786,17 @@ mod tests {
                 serde_json::json!({"type": "object", "properties": {}}),
             )])
             .unwrap();
-        let control_plane: std::collections::BTreeSet<String> =
-            ["tool_catalog_search", "tool_catalog_load"]
-                .into_iter()
-                .map(String::from)
-                .collect();
+        // Nothing waits behind the catalog (the policy hides the one
+        // registered tool), so the control tools are left out too.
+        let nothing = std::collections::BTreeSet::<String>::new();
 
         run_rpc_turn(&runtime, &session, "hello again")
             .await
             .expect("the session resumes");
         assert_eq!(
             llm.last_offered(),
-            control_plane,
-            "the restored policy hides every composed tool but the control plane"
+            nothing,
+            "the restored policy hides every composed tool"
         );
         llm.arm_call("client_tool", serde_json::json!({}));
         run_rpc_turn(&runtime, &session, "Call the client tool.")
@@ -23822,7 +23823,7 @@ mod tests {
         assert_refused_as_access_denied(saved.messages(), "call_tool_catalog_load");
         assert_eq!(
             llm.last_offered(),
-            control_plane,
+            nothing,
             "the refused load attaches no tool"
         );
         assert!(

@@ -240,10 +240,39 @@ the internal `dispatch_context` field.
 ## Deferred tool catalog control plane
 
 An exact dispatcher can keep eligible session tools out of the LLM's inline
-schema set and expose two always-inline control tools instead. The adaptive
-selector enters deferred mode when a source is still pending, at least two
-eligible tools exist, or their combined name, description, and schema volume
-reaches 160 bytes. These tools are not part of the general builtins gate.
+schema set and expose two control tools instead. The selector
+enters deferred mode when a source is still pending, or when the combined
+name, description and schema text of the eligible tools reaches 8,192 bytes
+(`DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD`). The budget counts every
+deferred-eligible tool whatever its source: MCP server tools, tools a client
+registered over RPC, and a host's own deferred-eligible tools. Below it the
+tools stay in every request: the mode costs about 1.2 KB per request and two
+extra model requests on a tool's first use, so a few small tools are cheaper
+to send than to defer. The number of tools alone never starts the mode. These
+tools are not part of the general builtins gate.
+
+The two control tools are mounted for a session with an exact catalog that
+has an eligible tool, a pending source, or a source that may need them (an
+MCP router does). They are in a model request only while an eligible tool
+waits behind the catalog, while a source is still pending, or when a source
+asks for them always (`ToolCatalogControlPlane::Always`, which a router asks
+unless its host says otherwise); otherwise they are left out and a call of
+one is refused with `access_denied`. The RPC server gives every session a
+router that asks for them on demand, and the tools a client registers ask
+the same way, so a session or mob member there with a few small tools sends
+neither, and gets both once a later registration or a server added with
+`mcp/add` takes it over the budget. A session with no such source
+and nothing to defer when it starts mounts no control tools and keeps tools
+that arrive later in every request for its lifetime.
+
+A session that grows past the budget, or whose source starts connecting,
+keeps the tools its model already had: they stay in the request and are
+called with no load. Only tools that arrive with or after that change wait
+behind the catalog. A tool kept this way stays in the request for the rest
+of the session, so what a session keeps is bounded by its catalog, not by
+the budget: a session whose tool sources leave and return can end up sending
+more than the budget in every request. A resumed session starts in the mode
+its tools select at that moment.
 
 A Rust host can read this projection for a live session without a model
 request: `EphemeralSessionService::tool_catalog_view` and

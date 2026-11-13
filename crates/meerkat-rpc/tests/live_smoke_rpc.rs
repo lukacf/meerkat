@@ -26,6 +26,20 @@ use tokio::time::{Duration, timeout};
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// A tool description long enough to put the registered tools over the
+/// deferred catalog's byte budget, so the session these smokes drive defers
+/// them and the model has to search and load. A few small tools stay in the
+/// request and never start the deferred catalog.
+fn over_catalog_budget_description(lead: &str) -> String {
+    let filler = " This audit reads the stored record for the key, checks that it was \
+written by the expected owner, and reports what it found without returning the code.";
+    let mut text = lead.to_owned();
+    while text.len() < meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD {
+        text.push_str(filler);
+    }
+    text
+}
+
 /// Set up a server with duplex streams using the given LLM client.
 fn spawn_test_server(
     client: Arc<dyn LlmClient>,
@@ -1085,7 +1099,7 @@ async fn e2e_scenario_21_mob_callback_tools() {
                     }
                 }, {
                     "name": "secret_audit",
-                    "description": "Audit a secret value without returning the final code directly.",
+                    "description": over_catalog_budget_description("Audit a secret value without returning the final code directly."),
                     "input_schema": {
                         "type": "object",
                         "properties": {
@@ -1771,7 +1785,7 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
                     }
                 }, {
                     "name": "secret_audit",
-                    "description": "Audit a secret value without returning the final code directly.",
+                    "description": over_catalog_budget_description("Audit a secret value without returning the final code directly."),
                     "input_schema": {
                         "type": "object",
                         "properties": {
@@ -1918,7 +1932,7 @@ async fn e2e_direct_session_deferred_callback_tool_flow() {
                     }
                 }, {
                     "name": "secret_audit",
-                    "description": "Audit a secret value. This second deferred tool keeps the smoke session in catalog mode.",
+                    "description": over_catalog_budget_description("Audit a secret value. This second tool is long enough to put the smoke session over the deferred catalog's byte budget."),
                     "input_schema": {
                         "type": "object",
                         "properties": {

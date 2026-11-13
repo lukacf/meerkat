@@ -50,6 +50,33 @@ them.
   `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
   read the binding file. See Security and the Upgrade notes.
 
+- `meerkat-core`: the constant `DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD` is
+  removed (`meerkat_core::tool_catalog::DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD`):
+  the number of deferred-eligible tools no longer starts the deferred tool
+  catalog. See Changed.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`: the deferred
+  tool catalog starts at a byte budget instead of at two deferrable tools.
+  `select_catalog_mode_from_snapshot` keeps its signature and selects the
+  deferred mode only while a tool source is connecting or from 8,192 bytes
+  of deferrable names, descriptions and schemas
+  (`DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD`, which keeps its name and
+  type and changes from 160 to 8,192). A session with a few small MCP or
+  registered tools therefore sends them in every request and no longer
+  defers them. See Changed and the Upgrade notes.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`,
+  `meerkat-tools`, `meerkat-mcp`, `meerkat-rpc`, `meerkat-workgraph`:
+  `tool_catalog_search` and `tool_catalog_load` are in a model request only
+  while a deferrable tool waits behind the catalog, while a tool source is
+  connecting, or when a tool source asks for them always; a call of one
+  outside that is refused with `access_denied`. A session on the RPC server
+  (`rkat-rpc`, `rkat rpc`) with nothing to defer carries neither, and a
+  session whose only deferrable tools are WorkGraph's two attention tools
+  carries those two and no control tool. The WorkGraph tool surface no
+  longer sets `ToolCatalogCapabilities::may_require_catalog_control_plane`.
+  See Changed and the Upgrade notes.
+
 ### Added
 
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
@@ -75,6 +102,21 @@ them.
   the `ErrorCode` of a failed turn's typed terminal cause. JSON-RPC and the
   `rkat run` failure document read a failed turn's code from that one
   mapping; the JSON-RPC codes are unchanged.
+
+- `meerkat-core`, `meerkat-mcp`, `meerkat-tools`: for Rust tool sources and
+  hosts, how a source needs the deferred catalog's control tools shown (see
+  Changed). `AgentToolDispatcher::tool_catalog_control_plane` is a new
+  defaulted method that answers with the new enum
+  `meerkat_core::ToolCatalogControlPlane`: `Always`, `OnDemand` or `Never`.
+  The enum is `#[non_exhaustive]`, so a match on it outside `meerkat-core`
+  needs a wildcard arm. The default answers `Always` for a source that sets
+  `ToolCatalogCapabilities::may_require_catalog_control_plane` and `Never`
+  otherwise, so existing sources behave as before; the flag keeps meaning
+  "mount the control tools for this source".
+  `McpRouterAdapter::with_control_plane_on_demand` (`meerkat-mcp`) makes a
+  router ask on demand.
+  `CatalogControlDispatcher::should_announce_for` (`meerkat-tools`) says
+  whether a session's system prompt explains the control tools.
 
 ### Changed
 
@@ -124,6 +166,87 @@ them.
   text and HTML output print no document, an argument the parser refuses
   prints none, and no other command prints one. See "JSON failure
   document" in `docs/cli/configuration.mdx`.
+
+- `meerkat-core`: the deferred tool catalog now starts at a byte budget. A
+  session with an exact tool catalog leaves its deferrable tools out of the
+  model request (and sends `tool_catalog_search` and `tool_catalog_load`
+  instead) while a tool source is still connecting, as before, or when the
+  names, descriptions and schemas of those tools together reach 8,192 bytes.
+  Until now two such tools, or one of 160 bytes, were enough. The budget
+  counts every deferrable tool whatever its source: MCP server tools, tools
+  a client registered over RPC with `tools/register` and a host's own
+  deferred-eligible tools. The `external_tools` of an RPC session are not
+  deferrable: they are in every request whatever their size, as before, and
+  the budget does not count them.
+  - Who changes: a session whose deferrable tools are under the budget (a
+    few small MCP or registered tools) now gets them in every request and
+    calls them directly, where before the model had to search and load them
+    first. Measured in the test rows: two small tools (294 bytes) and ten
+    medium ones (4,260 bytes) stay in the request; twenty medium ones (8,530
+    bytes) are deferred. The same holds for a session whose only deferrable
+    tools are WorkGraph's `workgraph_attention_reassign` and
+    `workgraph_policy_escalate`: both are in every request now, and their
+    calls are still refused outside an attention turn.
+  - Who does not change: a session over the budget, a session with a source
+    still connecting, and a session whose tool sources do not report an
+    exact catalog. No session is moved to the deferred catalog by this
+    change.
+  - Why: the mode adds about 1.2 KB to every request and two model requests
+    to a tool's first use, so below the budget it cost more than it saved.
+  - The number is a constant, not a setting.
+
+- `meerkat-core`, `meerkat-tools`, `meerkat-mcp`, `meerkat-rpc`,
+  `meerkat-workgraph`: the catalog control tools are in a model request
+  only when they are useful.
+  `tool_catalog_search` and `tool_catalog_load` are mounted by the same rule
+  as before (an exact catalog with a deferrable tool, a tool source that is
+  still connecting, or a tool source that declares them). They are now sent
+  only while a deferrable tool waits behind the catalog, while a tool source
+  is still connecting, or when a tool source declares that it needs them.
+  Otherwise they are left out, together with the system prompt line about
+  them, and a call of one is refused like a call of any tool the session
+  does not show (`access_denied`).
+  - Unchanged: a session with an MCP server that the build configured keeps
+    both control tools in every request (a router asks for them always
+    unless its host says otherwise), and so does every host that composes
+    its own router.
+  - Changed on the RPC server (`rkat-rpc`, `rkat rpc`): a session's
+    requests carry no catalog control tools until something can be
+    deferred. The server gives every session a router so that a server can
+    be added later (`mcp/add`), and that router now asks for the control
+    tools on demand, as the tools a client registers do. A session with no
+    server and a few small registered tools (`tools/register`,
+    `external_tools`) sends neither control tool and no prompt line about
+    them. When a later registration or a server added later takes the
+    session over the byte budget, the next request carries both control
+    tools, the tools that arrived wait behind the catalog, and the notice
+    that names them says how to load them. A mob member that runs on the
+    server follows the same rule for the tools its connection registers,
+    whether they were registered before or after the member was spawned.
+  - Changed everywhere: once every deferred tool of a session is loaded,
+    the control tools leave its requests (unless a source asks for them
+    always), and a session whose only deferrable tools are WorkGraph's two
+    sends neither control tool.
+  - A session with no source that asks for the control tools and nothing to
+    defer when it starts mounts none, as before. Tools that arrive later
+    stay in every request for its lifetime, whatever their size; the next
+    session defers them.
+  - For Rust embedders (the new API is under Added): a wrapper forwards
+    its inner dispatcher's `tool_catalog_control_plane` answer and a
+    composition takes the strongest; a wrapper that forwards only the
+    capabilities turns an inner `OnDemand` into `Always`. The RPC callback
+    dispatcher keeps the flag
+    `ToolCatalogCapabilities::may_require_catalog_control_plane` and asks
+    on demand; the WorkGraph tool surface no longer sets the flag.
+
+- `meerkat-core`: a session whose catalog starts to defer keeps the tools
+  its model already had. When registered or MCP tools take a running session
+  over the byte budget, or a tool source starts connecting, the tools that
+  were in its requests stay there and are called with no load; only tools
+  that arrive with or after the change wait behind the catalog. Until now
+  every deferrable tool left the next request, and a call of one was refused
+  until the model loaded it. Crossing the budget up and down again never
+  hides a tool the model had.
 
 ### Fixed
 
@@ -373,6 +496,36 @@ them.
   the document's top-level key: `error` is a failure, `status`
   (`"pending_tool_call"`) a run waiting for an external tool result, and
   anything else the run result. Text and HTML output are unchanged.
+
+- Deferred tool catalog (see Changed and Breaking):
+  - Sessions with a few small MCP or registered tools: the tools are in
+    every request and are called directly. A prompt or client that tells
+    the model to call `tool_catalog_search` or `tool_catalog_load` first
+    should stop doing so for such a session: the control tools are not in
+    its requests (unless its build configured an MCP server, or a host
+    composed its own router), and a call of one returns an `access_denied`
+    error result. A load of a tool that is already in the request, where
+    the control tools are present, still answers as a no-op.
+  - RPC clients: a session's requests carry no catalog control tools until
+    something can be deferred. They appear, with one notice that says how
+    to use them, when a registration or a server added with `mcp/add` takes
+    the session over 8,192 bytes of deferrable tools, or while a server is
+    connecting.
+  - A resumed session is built in the mode its tools select at that
+    moment. If its deferrable tools are over the budget then, a tool its
+    earlier turns called directly and never loaded waits behind the
+    catalog: its first request names the deferred tools in a notice, and a
+    call before a load returns `access_denied`, once. The same happens,
+    whatever the size of its tools, when one of its tool sources is still
+    connecting at that moment. Within a running session this does not
+    happen: the tools it had stay.
+  - Rust code that names `DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD` no longer
+    compiles; there is no replacement, the count rule is gone.
+  - Rust tool sources and wrappers: a wrapper around another dispatcher
+    should forward `tool_catalog_control_plane` beside
+    `tool_catalog_capabilities`. One that does not keeps today's behaviour
+    for its inner source (control tools always shown when the flag is
+    set).
 
 ### Known limitations
 

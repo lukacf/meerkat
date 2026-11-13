@@ -610,6 +610,14 @@ impl AgentToolDispatcher for ToolGateway {
         }
     }
 
+    fn tool_catalog_control_plane(&self) -> crate::ToolCatalogControlPlane {
+        self.entries
+            .iter()
+            .map(|entry| entry.dispatcher.tool_catalog_control_plane())
+            .max()
+            .unwrap_or_default()
+    }
+
     fn pending_catalog_sources(&self) -> Arc<[String]> {
         let mut pending = std::collections::BTreeSet::new();
         for entry in &self.entries {
@@ -1156,6 +1164,14 @@ impl AgentToolDispatcher for DynamicToolComposite {
                     .may_require_catalog_control_plane
             }),
         }
+    }
+
+    fn tool_catalog_control_plane(&self) -> crate::ToolCatalogControlPlane {
+        self.dispatchers
+            .iter()
+            .map(|dispatcher| dispatcher.tool_catalog_control_plane())
+            .max()
+            .unwrap_or_default()
     }
 
     fn pending_catalog_sources(&self) -> Arc<[String]> {

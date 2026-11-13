@@ -8126,11 +8126,14 @@ where
             // The same projection a host's catalog view previews.
             let crate::tool_catalog::CatalogBoundaryProjection {
                 control_tool_names,
+                control_tools_always_visible,
                 deferred_tool_names,
                 ..
             } = crate::tool_catalog::catalog_boundary_projection(
                 catalog_capabilities,
+                self.tools.tool_catalog_control_plane(),
                 current_catalog.as_deref(),
+                current_pending_catalog_sources.as_ref(),
                 catalog_mode,
             );
             let previous_visibility_state = self.tool_scope.visibility_state().ok();
@@ -8142,23 +8145,31 @@ where
                 self.apply_tool_grant_open_set_at_boundary(ctx, &gate, &dispatcher_tools)
                     .await;
             }
-            let apply_result = match self.tool_scope.promote_staged_visibility() {
+            // A boundary that starts to defer keeps the tools the model
+            // already had: they are requested like loaded tools before the
+            // staged visibility promotes.
+            let apply_result = match self
+                .tool_scope
+                .adopt_visible_tools_before_deferral(&dispatcher_tools, &deferred_tool_names)
+                .and_then(|()| self.tool_scope.promote_staged_visibility())
+            {
                 Ok(visibility_state) => {
-                    if let Some(previous_visibility_state) = previous_visibility_state.as_ref() {
-                        self.tool_scope.apply_staged_projection_with_previous(
-                            dispatcher_tools.clone(),
-                            control_tool_names.into_iter().collect(),
-                            deferred_tool_names.into_iter().collect(),
-                            previous_visibility_state,
-                            &visibility_state,
-                        )
-                    } else {
-                        self.tool_scope.apply_staged_projection(
-                            dispatcher_tools.clone(),
-                            control_tool_names,
-                            deferred_tool_names,
-                            &visibility_state,
-                        )
+                    // Without the state read before the promotion, read the
+                    // promoted one as the previous state too.
+                    match previous_visibility_state
+                        .map_or_else(|| self.tool_scope.visibility_state(), Ok)
+                    {
+                        Ok(previous_visibility_state) => {
+                            self.tool_scope.apply_staged_catalog_projection(
+                                dispatcher_tools.clone(),
+                                control_tool_names.into_iter().collect(),
+                                control_tools_always_visible,
+                                deferred_tool_names.into_iter().collect(),
+                                &previous_visibility_state,
+                                &visibility_state,
+                            )
+                        }
+                        Err(err) => Err(err),
                     }
                 }
                 Err(err) => Err(err),
@@ -8333,6 +8344,31 @@ where
                             notice_parts.push(format!(
                                 "sources still connecting: {}",
                                 pending_sources.join(", ")
+                            ));
+                        }
+                        // A session whose control tools enter its requests at
+                        // this boundary was built while they were left out,
+                        // so its system prompt never explained them. Say it
+                        // here, appended, where the notice names what waits.
+                        let control_tools_entered =
+                            current_catalog.as_ref().is_some_and(|catalog| {
+                                catalog
+                                    .iter()
+                                    .filter(|entry| {
+                                        entry.plane == crate::tool_catalog::ToolPlaneClass::Control
+                                    })
+                                    .any(|entry| {
+                                        visible_names_set.contains(&entry.tool.name)
+                                            && !applied
+                                                .previous_visible_names
+                                                .contains(&entry.tool.name)
+                                    })
+                            });
+                        if control_tools_entered && !notice_parts.is_empty() {
+                            notice_parts.push(format!(
+                                "use `{}` to find deferred tools and `{}` to load the ones you need",
+                                crate::tool_catalog::TOOL_CATALOG_SEARCH_NAME,
+                                crate::tool_catalog::TOOL_CATALOG_LOAD_NAME
                             ));
                         }
                         if !notice_parts.is_empty() {
@@ -16562,6 +16598,16 @@ mod tests {
         }
     }
 
+    /// A description that alone puts a deferred-eligible tool over the
+    /// deferred catalog's byte budget, so a fixture with it selects the
+    /// deferred mode.
+    fn over_catalog_budget(text: &str) -> String {
+        format!(
+            "{text} {}",
+            "x".repeat(crate::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD)
+        )
+    }
+
     struct DeferredLoadDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
         catalog: Arc<[crate::ToolCatalogEntry]>,
@@ -16585,9 +16631,9 @@ mod tests {
             let deferred_two = Arc::new(ToolDef {
                 audience: Default::default(),
                 name: "deferred_tool_two".into(),
-                description:
-                    "second deferred tool used only to keep the test dispatcher above the adaptive catalog threshold."
-                        .to_string(),
+                description: over_catalog_budget(
+                    "second deferred tool used only to keep the test dispatcher above the deferred catalog's byte budget.",
+                ),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: Some(crate::ToolProvenance {
                     kind: crate::ToolSourceKind::Callback,
@@ -16705,9 +16751,9 @@ mod tests {
             let deferred_two = Arc::new(ToolDef {
                 audience: Default::default(),
                 name: "deferred_tool_two".into(),
-                description:
-                    "second deferred tool used only to keep the direct builder dispatcher above the adaptive threshold."
-                        .to_string(),
+                description: over_catalog_budget(
+                    "second deferred tool used only to keep the direct builder dispatcher above the deferred catalog's byte budget.",
+                ),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: Some(crate::ToolProvenance {
                     kind: crate::ToolSourceKind::Callback,
@@ -29620,11 +29666,14 @@ mod tests {
 
         let result = agent.run("prompt".to_string().into()).await.unwrap();
         assert_eq!(result.text, "done");
+        // Once `deferred_tool` is loaded, the only tool still behind the
+        // catalog is the one its closed gate hides. Nothing can be loaded,
+        // so the control tool leaves the request with it.
         assert_eq!(
             client.seen_tools(),
             vec![
                 vec!["tool_catalog_load".to_string()],
-                vec!["deferred_tool".to_string(), "tool_catalog_load".to_string()],
+                vec!["deferred_tool".to_string()],
             ]
         );
 

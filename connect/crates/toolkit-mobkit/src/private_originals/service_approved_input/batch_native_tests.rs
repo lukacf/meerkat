@@ -95,7 +95,9 @@ async fn prepare_batch(
     };
     let mut configurations = Vec::new();
     for (index, name) in [ALPHA, BETA].into_iter().enumerate() {
-        let mut config = endpoints[index].config(&fixture.scope.realm, true);
+        // Over the native deferred catalog budget: both reads wait behind
+        // the catalog until the Original model loads them.
+        let mut config = endpoints[index].config(&fixture.scope.realm, Listing::OverBudget);
         config.name = name.into();
         config.connector = None;
         config.access = Some(meerkat_core::McpServerAccess::allowing(["read"]));

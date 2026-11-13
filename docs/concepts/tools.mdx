@@ -395,9 +395,13 @@ and confinement all still apply to every call it opens.
 - **Limits.** The dispatch gate is the authority; what the model is shown
   follows it at the next model-request boundary. A live session keeps the
   tool surface its live bridge opened with, so a name a grant opened stays
-  visible there after the grant ends, and the dispatch gate refuses each call. A control-plane
-  tool, such as the deferred catalog's search and load tools, is never hidden
-  by a gate; a gated one is refused at dispatch until a grant opens it. A
+  visible there after the grant ends, and the dispatch gate refuses each call. A gate
+  never hides a control-plane tool it names; a gated one is refused at
+  dispatch until a grant opens it. The deferred catalog's search and load
+  tools follow the catalog's own rule: unless a tool source asks for them
+  always or is still connecting, they are in a request only while a tool
+  waits behind the catalog, and a tool closed by a gate does not count as
+  waiting. A
   grant row this binary cannot read (written by a newer binary, or damaged)
   opens nothing and blocks none of its subject's other grants; a list reports
   it, and an audit read reports an audit row it cannot read and serves the

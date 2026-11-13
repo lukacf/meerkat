@@ -184,6 +184,22 @@ impl CatalogControlDispatcher {
         should_compose_tool_catalog_control_plane(session_dispatcher)
     }
 
+    /// Whether a session built on `session_dispatcher` starts with the
+    /// control tools in its model requests, so its system prompt should say
+    /// how to use them: the control plane is composed for it, and a source
+    /// needs the control tools in every request
+    /// ([`meerkat_core::ToolCatalogControlPlane::Always`]) or the catalog
+    /// starts deferred (a source is connecting, or its deferrable tools are
+    /// over the byte budget). A session that starts inline gets no such
+    /// line; when it later defers, the notice that names its deferred tools
+    /// says how to load them.
+    pub fn should_announce_for(session_dispatcher: &dyn AgentToolDispatcher) -> bool {
+        Self::should_compose_for(session_dispatcher)
+            && (session_dispatcher.tool_catalog_control_plane()
+                == meerkat_core::ToolCatalogControlPlane::Always
+                || Self::should_enable_for(session_dispatcher))
+    }
+
     pub fn new(
         session_dispatcher: Arc<dyn AgentToolDispatcher>,
         visibility_provider: Arc<CatalogControlVisibilityProvider>,
@@ -1191,6 +1207,16 @@ mod tests {
         })
     }
 
+    /// A description that alone puts a deferred-eligible tool over the
+    /// deferred catalog's byte budget, so a fixture with it selects the
+    /// deferred mode.
+    fn over_catalog_budget(text: &str) -> String {
+        format!(
+            "{text} {}",
+            "x".repeat(meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD)
+        )
+    }
+
     fn session_tool_without_provenance(name: &str, description: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
             audience: Default::default(),
@@ -1522,7 +1548,9 @@ mod tests {
         );
         let deferred_two = session_tool(
             "deferred_mcp_tool_two",
-            "Another deferred MCP tool so the exact catalog crosses the adaptive threshold.",
+            &over_catalog_budget(
+                "Another deferred MCP tool so the exact catalog crosses the byte budget.",
+            ),
         );
         let exact_with_deferred = ExactCatalogDispatcher {
             tools: vec![Arc::clone(&deferred), Arc::clone(&deferred_two)].into(),
@@ -1590,7 +1618,10 @@ mod tests {
     #[test]
     fn should_compose_for_is_idempotent_when_control_plane_is_already_present() {
         let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
-        let deferred_two = session_tool("deferred_mcp_tool_two", "Second deferred MCP tool");
+        let deferred_two = session_tool(
+            "deferred_mcp_tool_two",
+            &over_catalog_budget("Second deferred MCP tool"),
+        );
         let search = Arc::new(search_tool_def());
         let load = Arc::new(load_tool_def());
         let already_composed = ExactCatalogDispatcher {

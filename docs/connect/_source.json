@@ -37,8 +37,8 @@
     },
     {
       "path": "availability.mdx",
-      "source_sha256": "53b6aa9d02c4897afe36ff9ec7ffeaee82d15beadfa5387e1eaf7f0c8ea5eafb",
-      "rendered_sha256": "b9a2921f6177d061715d65dac21082cb413a6b38f55cfa501b282ddc589433b7"
+      "source_sha256": "baaedeb8fc283bf3d550b8948fd9f342f090fcb46eb59a7830577ba058a6e24e",
+      "rendered_sha256": "e21521ec0e1b918fd1b8d723afe5c71295d5c92e1bbae0c2eefefbc84f9b2543"
     },
     {
       "path": "concepts/acquisition.mdx",

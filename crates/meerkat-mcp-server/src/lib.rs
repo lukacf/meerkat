@@ -9779,7 +9779,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             ToolCallError,
         >| match result {
             Ok(params) => params.and_then(|params| params.reasoning_effort),
-            Err(_) => panic!("the resume input asks for one outcome"),
+            Err(error) => panic!("the resume input asks for one outcome: {error:?}"),
         };
         assert_eq!(
             level_of(resume(Some(json!("medium")), None)),

@@ -17192,7 +17192,9 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 serde_json::from_value(body).expect("continue request");
             match continue_session_build_provider_params(&request) {
                 Ok((params, claims)) => (params.and_then(|params| params.reasoning_effort), claims),
-                Err(_) => panic!("a continue request's level is never contradictory"),
+                Err(error) => {
+                    panic!("a continue request's level is never contradictory: {error:?}")
+                }
             }
         };
         assert_eq!(

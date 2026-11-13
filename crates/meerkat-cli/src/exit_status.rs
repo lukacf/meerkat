@@ -119,7 +119,7 @@ pub(crate) fn reasoning_effort_refused_turn(
     match error.reason.as_ref()? {
         meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { refusal } => {
             Some(meerkat_core::SessionError::Agent(
-                meerkat_core::AgentError::ReasoningEffortRefused(Box::new(refusal.clone())),
+                meerkat_core::AgentError::ReasoningEffortRefused(refusal.clone()),
             ))
         }
         _ => None,
@@ -808,8 +808,11 @@ mod tests {
             meerkat_core::TurnTerminalOutcome::Failed,
             "reasoning effort refused",
         );
-        turn_error.reason =
-            Some(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { refusal: typed });
+        turn_error.reason = Some(
+            meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+                refusal: Box::new(typed),
+            },
+        );
         let in_turn = match crate::completion_outcome_to_cli_runtime_turn_result(
             meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
                 reason: "reasoning effort refused".to_string(),

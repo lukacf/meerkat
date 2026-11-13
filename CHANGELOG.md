@@ -1193,12 +1193,16 @@ them.
   pages pre-fill their key fields from `VITE_`-prefixed variables
   (`VITE_ANTHROPIC_API_KEY`, `VITE_OPENAI_API_KEY`, `VITE_GEMINI_API_KEY`;
   033 also `VITE_RKAT_ANTHROPIC_API_KEY`, `VITE_RKAT_OPENAI_API_KEY` and
-  `VITE_RKAT_GEMINI_API_KEY`), and `npm run build` wrote their values, in
-  plain text, into `web/dist/assets/`: 031 wrote every variable with the
-  `VITE_` prefix that was set, 033 the six key variables it reads. The
-  READMEs did not mention these variables, so only a build made with them
-  set on purpose is affected. The `VITE_` prefix is now exposed only to the
-  local dev server; a build exposes only variables whose names start with
+  `VITE_RKAT_GEMINI_API_KEY`), and `npm run build` (or
+  `make -C examples web`) wrote their values, in plain text, into
+  `web/dist/assets/`: 031 wrote every variable with the `VITE_` prefix that
+  was set, 033 the six key variables it reads. The READMEs did not mention
+  these variables, so a build is affected only if they were set in its
+  environment. In 0.4.4 only, the build of 033 also wrote
+  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `GEMINI_API_KEY`, or their
+  `RKAT_`-prefixed forms where those were set (confirmed by a build of the
+  0.4.4 source). The `VITE_` prefix is now exposed only to the local dev
+  server; a build exposes only variables whose names start with
   `VITE_BUILD_PUBLIC_`, so any other `VITE_` variable a build of these two
   examples relied on is now empty in the built page. Affects every release
   that ships the examples: 031 from 0.4.1 and 033 from 0.4.4, through

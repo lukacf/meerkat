@@ -4057,6 +4057,16 @@ identity's managed edges (the roster's and the topology controller's) again
 once the member is woken, bounded; a re-wire that fails is logged and the
 next reconcile retries it.
 
+<Warning>
+Known issue, noted 2026-11-13, read from the source and not yet confirmed by
+a test: on Meta releases through 0.9.14, `meta/compact_member` on a gateway
+or embedding host that keeps its state on disk rebuilds the identity as a
+respawn does, and can destroy the mobs the identity created and its delegates
+in the same way. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases, how it happens and what to do.
+</Warning>
+
 Params: `identity` (required), `floor_tokens` (default `1024`), `timeout_ms`
 (default `60000`, budget for the maintenance turn).
 

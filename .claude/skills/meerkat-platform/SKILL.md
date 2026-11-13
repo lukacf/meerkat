@@ -1246,13 +1246,13 @@ tools.
 
 ```toml
 # Default: three providers + Copilot backend; no persistent realm/comms/MCP/skills/memory/live activation
-meerkat = "=0.9.14"
+meerkat = "=0.9.15"
 
 # Single provider, minimal
-meerkat = { version = "=0.9.14", default-features = false, features = ["anthropic"] }
+meerkat = { version = "=0.9.15", default-features = false, features = ["anthropic"] }
 
 # Add persistence + memory + comms + live channels
-meerkat = { version = "=0.9.14", features = [
+meerkat = { version = "=0.9.15", features = [
     "jsonl-store", "session-store", "session-compaction",
     "memory-store-session", "comms", "mcp", "skills",
     "openai-realtime", "live", "live-webrtc"
@@ -1283,7 +1283,7 @@ surfaces. The default `rkat` feature set includes `memory-store` and
 builds:
 
 ```bash
-cargo install rkat --version "=0.9.14" --no-default-features --features "anthropic,openai,session-store,mcp"
+cargo install rkat --version "=0.9.15" --no-default-features --features "anthropic,openai,session-store,mcp"
 ```
 
 Disabled features return typed errors (e.g. `SessionError::PersistenceDisabled`) — no panics.

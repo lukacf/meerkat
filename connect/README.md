@@ -16,9 +16,11 @@ From 2026-11-13 until Connect 0.9.15 is published, the Connect release to
 use with Core 0.9.15 and Meta 0.9.15 is Connect 0.9.14. A Python environment
 with the `native-host` extra of Connect 0.9.14's `meerkat-toolkit` cannot
 take `meerkat-meta` 0.9.15 until Connect 0.9.15 is published: the extra
-requires `meerkat-meta==0.9.14`. Connect 0.9.14's archives are built with
-Core 0.9.14 and Meta 0.9.14; see the
-[upgrade guide](../docs/guides/upgrading.mdx) for the limits of that pairing.
+requires `meerkat-meta==0.9.14`. That pairing was not run as a whole, in
+either direction: it rests on the version requirements Connect 0.9.14
+published. Connect 0.9.14's archives are built with Core 0.9.14 and Meta
+0.9.14; see the [upgrade guide](../docs/guides/upgrading.mdx) for the limits
+of that pairing.
 
 Download the complete Connect CLI archive and verify its checksum:
 
@@ -65,8 +67,8 @@ the original task in the same conversation. The application supplies login and
 a persistent host. The gateway archive and Rust, JSON-RPC, Python and TypeScript
 interfaces support this composition; the gateway alone does not install an app.
 
-The [0.9.10 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.10)
-includes ordinary CLI and Console setup. Connect 0.9.10 does not support
+The [0.9.14 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.14)
+includes ordinary CLI and Console setup. Connect 0.9.14 does not support
 in-place updates that change an application's tool policy, definition,
 instructions or runtime; Forge's Stage refuses them, so keep the existing
 installation and state. Shared multi-caller setup is an unqualified opt-in,

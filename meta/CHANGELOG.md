@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.15] - 2026-11-13
+
+Meta 0.9.15 is part of Meerkat 0.9.15 and pins Core `=0.9.15`. Core 0.9.15
+and Meta 0.9.15 are published together; Connect 0.9.15 follows them.
+
 A console that can identify a person shows a timeline frame stored without
 member attributes, the memory steward's conflict signals and the system
 page's records that speak of an agent, to an administrator only. See
@@ -191,15 +196,17 @@ Security, Upgrade and Changed.
 
 - The published 0.9.14 Meta Python and TypeScript SDKs (the source of tag
   `meta-v0.9.14`) were run against a development build of this release's
-  gateway with no provider key: every row of their own suites that starts a
-  real gateway without a key passed (5 Python rows and 1 TypeScript row:
-  gateway init and its startup callbacks, lazy seating, agent memory, mob
-  announcement sources), the three Python rows that need a provider key
-  failed only on the missing key, and no wire incompatibility was found.
-  That coverage is thin: only the rows that start a gateway without a
-  provider key ran. No row that needs a model turn and none of the live
-  methods was exercised, and no control run was made against a 0.9.14
-  gateway.
+  gateway with no provider key, repeated at commit `b26783df04`, whose Meta
+  code differs from the released commit only by the release commit and one
+  test-only change: every row of their own suites that starts a real gateway
+  without a key passed (5 Python rows and 1 TypeScript row: gateway init and
+  its startup callbacks, lazy seating, agent memory, mob announcement
+  sources), the three Python rows that need a provider key failed only on
+  the missing key, and no wire incompatibility was found. That coverage is
+  thin: only the rows that start a gateway without a provider key ran. No
+  row that needs a model turn and none of the live methods was exercised.
+  The same Python rows against a gateway built at the 0.9.14 commit gave the
+  same result.
 
 - Meta records an agent's changed instructions itself, as one operator
   instruction record for the agent and its forks (`include_forks`), keyed
@@ -263,6 +270,23 @@ Security, Upgrade and Changed.
   caller is answered "access denied: the session has no established owner"
   where access rules are enforced, and as for a session that does not
   exist otherwise.
+
+- A 0.9.15 client against a 0.9.14 gateway was exercised in one keyless run
+  only (the Meta Python SDK's own tests that start a real gateway without a
+  provider key, against a gateway built at the 0.9.14 commit); no other
+  client and no 0.9.14 runtime was exercised. Of the tests in that run that
+  start a real gateway, the five that existed at 0.9.14 and need no provider
+  key passed; the failures were in tests new in 0.9.15 (the identity methods
+  and cross-mob delivery between gateways) or in tests that need a provider
+  key. The methods for agents created at run time (meta/identity) need a
+  0.9.15 gateway: upgrade the gateway before the SDKs that call them.
+
+- A 0.9.14 gateway does not start with a launch whose
+  `runtime_options.identity_creation` names a change kind that is new in
+  0.9.15 (`archive`, `adopt`), in the `change` list of an approval rule or
+  as a key of `approval.timeouts_ms`: it refuses the unknown kind at start.
+  Before rolling a gateway back to 0.9.14, remove these kinds from the
+  launch's approval rules and timeouts.
 
 ### Added
 
@@ -1681,6 +1705,11 @@ Security, Upgrade and Changed.
   rule.
 - Gating: an audit entry or pending request is decided by the agent that
   holds the name of its origin now. Only a host supplies an entry's origin.
+
+- Until Connect 0.9.15 is published, Connect 0.9.14 is the Connect release
+  for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in
+  either direction: it rests on the version requirements Connect 0.9.14
+  published.
 
 ## [0.9.14] - 2026-11-11
 

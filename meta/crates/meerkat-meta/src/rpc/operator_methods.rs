@@ -2981,6 +2981,13 @@ comms = true
         for turn in 0..8 {
             harness.run_turn(format!("turn {turn}: {fat}")).await;
         }
+        // The seed's turns have ended in the runtime before the count is read:
+        // the completion cursor `run_turn` waits on can advance before a turn's
+        // last transcript row is durable, and under a loaded suite the settled
+        // read's stability window is no bound on that.
+        harness
+            .wait_for_runtime_settled("the seed turns before the transcript count")
+            .await;
         // Settled: this is a LOWER BOUND on a durable surface that lags the
         // completion cursor, so an unsettled read fails at `>= 16` for a
         // transcript that is merely still landing rather than one that is short.
@@ -3088,6 +3095,13 @@ comms = true
         for turn in 0..8 {
             harness.run_turn(format!("turn {turn}: {fat}")).await;
         }
+        // The seed's turns have ended in the runtime before the count is read:
+        // the completion cursor `run_turn` waits on can advance before a turn's
+        // last transcript row is durable, and under a loaded suite the settled
+        // read's stability window is no bound on that.
+        harness
+            .wait_for_runtime_settled("the seed turns before the transcript count")
+            .await;
         let messages_before = harness.settled_transcript_count().await;
         assert!(
             messages_before >= 16,

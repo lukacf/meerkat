@@ -35,6 +35,38 @@ them.
 
 ## [Unreleased]
 
+## [0.9.15] - 2026-11-13
+
+### Highlights
+
+- Long-term agents can be created, changed, archived and removed while a
+  system runs, on every surface: host methods, the Python and TypeScript
+  SDKs, the agents' own tools and the Console. A created agent keeps its
+  identity, instructions, memory, schedules and grants across restarts.
+  The mob runtime carries the seats and their recovery; Meta carries the
+  methods, the tools and the Console. No change is carried out without the
+  launch's identity policy (`runtime_options.identity_creation`). See Added
+  and Upgrade notes here, and Added, Upgrade and Known limitations in Meta's
+  notes.
+
+- Console: a timeline frame is read by the people its own member is visible
+  to, and a frame stored without member attributes by an administrator
+  only. See Security and Upgrade in Meta's notes.
+
+- Peer messages between members of two mobs are delivered when they are
+  wired with the SDK helper `wire_cross_mob` (Python
+  `MobHandle.wire_cross_mob`, TypeScript `MobHandle.wireCrossMob`), which
+  wired nothing through 0.9.14, and a peer message builds and wakes a
+  member of another mob of the same process. Two limits apply: see Known
+  limitations in Meta's notes.
+
+- A member that is being woken can be wired and messaged from its recorded
+  endpoint, and kickoff notices no longer hold the mob's actor while a peer
+  wakes. See Fixed.
+
+- A second member on a comms key that another member holds is refused
+  cleanly, and its mob starts again. See Fixed and Known limitations.
+
 ### Breaking
 
 - Behaviour-only (not measured by the gate): `meerkat-core`, `rkat`: on Unix
@@ -1327,7 +1359,7 @@ them.
   mob and every flow run (an internal error that says the state could not
   be recovered). With more than 64 records it also refuses every member's
   operator instruction delivery in the member's session
-  (`slot_limit_exceeded`, retried without end; the status read shows the
+  (`slot_limit_exceeded`; the status read shows the
   member `owed` with that failure) and fails to build a member that needs a
   new session. Before a rollback run `rkat storage doctor`, which lists
   each such mob (`operator-instruction-mob-totals`, with both totals), and
@@ -1360,9 +1392,8 @@ them.
   select the forks. Nothing is refused. What the return to this release
   restores depends on the mob's store. On the SQLite store no stored row is
   rewritten: the lineage of every fork seated on this release is restored
-  from its spawn row and the records select those forks again; write each
-  such record at a new revision after the return, which delivers it to
-  every fork it selects. On a host store (a realm kept in the host's own
+  from its spawn row and the records select those forks again. On a host
+  store (a realm kept in the host's own
   database through the host store SPI) the earlier release writes the
   mob's journal again at its next checkpoint, from what it read: without
   the fork scope of the records and without the lineage roots. They do not
@@ -1370,6 +1401,16 @@ them.
   the forks seated before have no lineage. Write the records again, at a
   new revision, with `include_forks`; they then select the forks seated
   from then on.
+
+- A 0.9.15 client against a 0.9.14 gateway was exercised in one keyless run
+  only (the Meta Python SDK's own tests that start a real gateway without a
+  provider key, against a gateway built at the 0.9.14 commit); no other
+  client and no 0.9.14 runtime was exercised. Of the tests in that run that
+  start a real gateway, the five that existed at 0.9.14 and need no provider
+  key passed; the failures were in tests new in 0.9.15 (the identity methods
+  and cross-mob delivery between gateways) or in tests that need a provider
+  key. The methods for agents created at run time (meta/identity) need a
+  0.9.15 gateway: upgrade the gateway before the SDKs that call them.
 
 ### Known limitations
 
@@ -1432,6 +1473,27 @@ them.
   completes the retirement, and the next start is clean. A host that lifts a
   stopped mob when it starts (the Meta gateways do) always meets this: retire
   the member, then restart the host.
+
+- Release binaries: a live channel over WebRTC is expected to fail in the
+  Linux and macOS downloads of `rkat-rpc` (`rkat-rpc --live-webrtc`,
+  `live/webrtc/answer`): the binary cannot create its peer connection and
+  the call returns an error; the process does not crash and other features
+  are unaffected. Those binaries are built with Bazel, which links the
+  WebRTC stack against a second copy of the async runtime that is never
+  started. The Python and TypeScript SDKs download and start the same binary
+  on Linux and macOS, so a WebRTC live channel opened through them is
+  affected in the same way. The Windows download and a `cargo install` with
+  default features do not include the WebRTC live channel, so the defect
+  does not arise there; a build from source with Cargo that enables the
+  `live-webrtc` feature is not affected. This was established by a
+  build-system test and by reading the source and the linked binaries, not
+  by a live run against a shipped binary. A fix is prepared and follows in a
+  later release.
+
+- Until Connect 0.9.15 is published, Connect 0.9.14 is the Connect release
+  for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in
+  either direction: it rests on the version requirements Connect 0.9.14
+  published.
 
 ## [0.9.14] - 2026-11-11
 
@@ -49557,7 +49619,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.14...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.15...HEAD
+[0.9.15]: https://github.com/lukacf/meerkat/compare/v0.9.14...v0.9.15
 [0.9.14]: https://github.com/lukacf/meerkat/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/lukacf/meerkat/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/lukacf/meerkat/compare/v0.9.11...v0.9.12

@@ -198,7 +198,23 @@ type NoticeObservationCache =
 type StatusUnknownRedrives =
     BTreeMap<(uuid::Uuid, String, String, String), tokio::sync::oneshot::Sender<()>>;
 
+/// Which console aggregator a value names among the aggregators of this
+/// process: one per registry of served runtimes (a policy view has its own).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ConsoleAggregatorId(u64);
+
+impl ConsoleAggregatorId {
+    /// The id of a new aggregator: each call answers one no aggregator
+    /// holds.
+    pub(crate) fn mint() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 struct AggregatorInner {
+    /// Which aggregator this is ([`MetaConsoleAggregator::id`]).
+    id: ConsoleAggregatorId,
     /// Policy views share one canonical projector and publish to its broadcaster.
     projection_owner: Option<Arc<AggregatorInner>>,
     store: Arc<dyn ConsoleLogStore>,
@@ -1160,6 +1176,7 @@ impl MetaConsoleAggregator {
         let (event_tx, _) = broadcast::channel(TIMELINE_CHANNEL_CAP);
         Self {
             inner: Arc::new(AggregatorInner {
+                id: ConsoleAggregatorId::mint(),
                 projection_owner: None,
                 store,
                 runtimes: RwLock::new(BTreeMap::new()),
@@ -1253,6 +1270,7 @@ impl MetaConsoleAggregator {
             .collect();
         let view = Self {
             inner: Arc::new(AggregatorInner {
+                id: ConsoleAggregatorId::mint(),
                 projection_owner: Some(owner.clone()),
                 store: owner.store.clone(),
                 runtimes: RwLock::new(runtimes),
@@ -1438,6 +1456,12 @@ impl MetaConsoleAggregator {
             console_events,
             visibility_policy,
         });
+    }
+
+    /// Which aggregator this is: what a console's reading of the runtimes
+    /// this aggregator serves is recorded under.
+    pub(crate) fn id(&self) -> ConsoleAggregatorId {
+        self.inner.id
     }
 
     pub(crate) fn panel_runtimes(&self) -> ConsoleLogResult<Vec<ConsolePanelRuntime>> {

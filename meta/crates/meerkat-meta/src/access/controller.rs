@@ -16,6 +16,7 @@ use super::model::{
     ACTION_AGENT_VIEW, AccessConfigError, AccessControlConfig, AccessGroup, AccessRule,
     check_declared_ingresses, private_owner, validate_access_config,
 };
+use crate::console_aggregator::ConsoleAggregatorId;
 use crate::private_owners::PrivateOwnerRecordId;
 
 /// Cached resource attributes for one agent, keyed by console identity.
@@ -152,9 +153,42 @@ pub(crate) enum PrivateOwnerRecordReader {
     /// A route that holds the runtime itself: its console's own runtime,
     /// which the console reads for as long as it runs.
     OwnRuntime,
-    /// The reading of the runtimes a console's aggregator serves: it reads
-    /// a runtime only while the console serves it.
-    ServedRuntime,
+    /// The reading of the runtimes one console aggregator serves, named by
+    /// that aggregator: it reads a runtime only while the aggregator serves
+    /// it.
+    ServedRuntime(ConsoleAggregatorId),
+}
+
+/// The readings that found a runtime owing the first read of who its
+/// members are private to.
+#[derive(Debug, Default)]
+struct OwedReadFinders {
+    /// A route that holds the runtime itself found the read owed.
+    own_route: bool,
+    /// The aggregators whose reading of their served runtimes found it owed.
+    served_by: BTreeSet<ConsoleAggregatorId>,
+}
+
+impl OwedReadFinders {
+    /// Whether `reader` is one of these readings.
+    fn holds(&self, reader: PrivateOwnerRecordReader) -> bool {
+        match reader {
+            PrivateOwnerRecordReader::OwnRuntime => self.own_route,
+            PrivateOwnerRecordReader::ServedRuntime(aggregator) => {
+                self.served_by.contains(&aggregator)
+            }
+        }
+    }
+
+    /// Add `reader` to these readings.
+    fn add(&mut self, reader: PrivateOwnerRecordReader) {
+        match reader {
+            PrivateOwnerRecordReader::OwnRuntime => self.own_route = true,
+            PrivateOwnerRecordReader::ServedRuntime(aggregator) => {
+                self.served_by.insert(aggregator);
+            }
+        }
+    }
 }
 
 struct AccessControllerInner {
@@ -166,12 +200,13 @@ struct AccessControllerInner {
     attributes: RwLock<BTreeMap<String, Arc<AgentResourceAttributes>>>,
     /// The runtimes that still owe the first read of who their members are
     /// private to, each by its record, as the last priming of each found it
-    /// ([`AccessController::record_private_owner_record`]). The value says
-    /// whether a route that holds the runtime itself found the read owed;
-    /// where only the reading of served runtimes did, the entry lasts while
-    /// the console serves the runtime
+    /// ([`AccessController::record_private_owner_record`]), with the
+    /// readings that found the read owed. What a route that holds the
+    /// runtime found lasts until a reading finds the read done; what an
+    /// aggregator's reading of its served runtimes found lasts while that
+    /// aggregator serves the runtime
     /// ([`AccessController::keep_served_private_owner_records`]).
-    unread_private_owner_records: RwLock<BTreeMap<PrivateOwnerRecordId, bool>>,
+    unread_private_owner_records: RwLock<BTreeMap<PrivateOwnerRecordId, OwedReadFinders>>,
     /// The runtime alias of each durable identity's current incarnation,
     /// keyed like `attributes` (console namespace included).
     current_runtime_aliases: RwLock<BTreeMap<String, String>>,
@@ -750,18 +785,16 @@ impl AccessController {
         reader: PrivateOwnerRecordReader,
         first_read_pending: bool,
     ) {
-        let by_own_route = reader == PrivateOwnerRecordReader::OwnRuntime;
+        // Whether the runtime is recorded, and whether by this reading.
         let recorded = self
             .inner
             .unread_private_owner_records
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&record)
-            .copied();
+            .map(|finders| finders.holds(reader));
         let unchanged = match recorded {
-            Some(recorded_by_own_route) => {
-                first_read_pending && (recorded_by_own_route || !by_own_route)
-            }
+            Some(by_this_reading) => first_read_pending && by_this_reading,
             None => !first_read_pending,
         };
         if unchanged {
@@ -777,23 +810,26 @@ impl AccessController {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if first_read_pending {
-            *unread.entry(record).or_insert(false) |= by_own_route;
+            unread.entry(record).or_default().add(reader);
         } else {
             unread.remove(&record);
         }
     }
 
-    /// Count no longer the owed first reads of runtimes a console serves no
-    /// longer. `served` lists the records of the runtimes the console's
-    /// aggregator serves now, or `None` when they cannot be listed, which
-    /// changes nothing. A runtime that only the reading of served runtimes
-    /// found owing ([`PrivateOwnerRecordReader::ServedRuntime`]) and that is
-    /// not listed is dropped: no later reading reaches it, so none would
-    /// find its read done. A runtime that a route which holds it found
-    /// owing stays, whatever is served. The list is taken again under the
-    /// write, so a runtime registered and read meanwhile is kept.
+    /// Count no longer, for one aggregator, the owed first reads of the
+    /// runtimes it serves no longer. `served` lists the records of the
+    /// runtimes `aggregator` serves now, or `None` when they cannot be
+    /// listed, which changes nothing. What that aggregator's reading found
+    /// owing ([`PrivateOwnerRecordReader::ServedRuntime`]) is taken back
+    /// for every runtime it does not list: none of its later readings
+    /// reaches that runtime, so none would find its read done. A runtime
+    /// stays counted while any other reading that found it owing stands: a
+    /// route that holds the runtime, or another aggregator that serves it.
+    /// The list is taken again under the write, so a runtime registered and
+    /// read meanwhile is kept.
     pub(crate) fn keep_served_private_owner_records(
         &self,
+        aggregator: ConsoleAggregatorId,
         served: impl Fn() -> Option<BTreeSet<PrivateOwnerRecordId>>,
     ) {
         let drops = {
@@ -802,11 +838,13 @@ impl AccessController {
                 .unread_private_owner_records
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            unread.values().any(|by_own_route| !by_own_route)
+            unread
+                .values()
+                .any(|finders| finders.served_by.contains(&aggregator))
                 && served().is_some_and(|served| {
-                    unread
-                        .iter()
-                        .any(|(record, by_own_route)| !by_own_route && !served.contains(record))
+                    unread.iter().any(|(record, finders)| {
+                        finders.served_by.contains(&aggregator) && !served.contains(record)
+                    })
                 })
         };
         if !drops {
@@ -821,7 +859,12 @@ impl AccessController {
         let Some(served) = served() else {
             return;
         };
-        unread.retain(|record, by_own_route| *by_own_route || served.contains(record));
+        unread.retain(|record, finders| {
+            if !served.contains(record) {
+                finders.served_by.remove(&aggregator);
+            }
+            finders.own_route || !finders.served_by.is_empty()
+        });
     }
 
     /// Record which runtime alias is each durable identity's current
@@ -2950,7 +2993,8 @@ mod tests {
         assert!(operator.can_view_uncaptured_member("anyone"));
 
         let by_route = PrivateOwnerRecordReader::OwnRuntime;
-        let by_serving = PrivateOwnerRecordReader::ServedRuntime;
+        let (console, another_console) = (ConsoleAggregatorId::mint(), ConsoleAggregatorId::mint());
+        let by_serving = PrivateOwnerRecordReader::ServedRuntime(console);
         let record = || crate::private_owners::PrivateOwners::default().record_id();
         let (own, team) = (record(), record());
         controller.record_private_owner_record(own, by_route, true);
@@ -2971,33 +3015,45 @@ mod tests {
         assert!(operator.can_view_uncaptured_member("anyone"));
         assert!(!operator.withholds_unknown_member("anyone"));
 
-        // A runtime the console serves no longer is counted no longer. One
-        // that a route which holds it found owing stays counted, whatever
-        // the console serves, until a reading finds its read done.
-        controller.record_private_owner_record(team, by_serving, true);
+        // A runtime that a route which holds it found owing stays counted,
+        // whatever its console's aggregator serves, until a reading finds
+        // its read done, whichever reading that is.
         controller.record_private_owner_record(own, by_serving, true);
         controller.record_private_owner_record(own, by_route, true);
-        controller.keep_served_private_owner_records(|| Some(BTreeSet::from([team])));
-        controller.record_private_owner_record(own, by_serving, false);
-        assert!(
-            operator.kept_apart_from_other_people(),
-            "a served runtime still owes its read"
-        );
-        controller.keep_served_private_owner_records(|| None);
-        assert!(
-            operator.kept_apart_from_other_people(),
-            "served runtimes that cannot be listed change nothing"
-        );
-        controller.record_private_owner_record(own, by_route, true);
-        controller.keep_served_private_owner_records(|| Some(BTreeSet::new()));
+        controller.keep_served_private_owner_records(console, || Some(BTreeSet::new()));
         assert!(
             operator.kept_apart_from_other_people(),
             "the console's own runtime owes its read, whatever the console serves"
         );
-        controller.record_private_owner_record(own, by_route, false);
+        controller.record_private_owner_record(own, by_serving, false);
         assert!(
             !operator.kept_apart_from_other_people(),
-            "the runtime the console no longer serves is counted no longer"
+            "a read found done ends the wait, whichever reading found it owed"
+        );
+
+        // A runtime an aggregator serves is counted while that aggregator
+        // serves it: another aggregator's reading does not count it out,
+        // and a listing that cannot be read changes nothing.
+        controller.record_private_owner_record(team, by_serving, true);
+        controller.keep_served_private_owner_records(another_console, || Some(BTreeSet::new()));
+        assert!(
+            operator.kept_apart_from_other_people(),
+            "another aggregator's reading counts no runtime out"
+        );
+        controller.keep_served_private_owner_records(console, || None);
+        assert!(
+            operator.kept_apart_from_other_people(),
+            "served runtimes that cannot be listed change nothing"
+        );
+        controller.keep_served_private_owner_records(console, || Some(BTreeSet::from([team])));
+        assert!(
+            operator.kept_apart_from_other_people(),
+            "a served runtime still owes its read"
+        );
+        controller.keep_served_private_owner_records(console, || Some(BTreeSet::new()));
+        assert!(
+            !operator.kept_apart_from_other_people(),
+            "the runtime its aggregator no longer serves is counted no longer"
         );
 
         let configured = AccessController::new(enabled_config()).expect("controller");

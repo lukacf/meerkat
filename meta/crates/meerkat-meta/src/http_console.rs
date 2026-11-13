@@ -3395,13 +3395,14 @@ async fn prime_access_cache_from_aggregator(
             &runtime.runtime,
             access,
             &runtime.namespace,
-            PrivateOwnerRecordReader::ServedRuntime,
+            PrivateOwnerRecordReader::ServedRuntime(aggregator.id()),
         )
         .await;
     }
-    // No later reading reaches a runtime this Console serves no longer, so
-    // none would find its first read done: it is counted no longer.
-    access.keep_served_private_owner_records(|| {
+    // No later reading of this aggregator's runtimes reaches a runtime it
+    // serves no longer, so none would find its first read done: this
+    // aggregator counts it no longer.
+    access.keep_served_private_owner_records(aggregator.id(), || {
         let served = aggregator.panel_runtimes().ok()?;
         Some(
             served

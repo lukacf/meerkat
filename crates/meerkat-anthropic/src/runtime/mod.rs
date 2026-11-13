@@ -131,6 +131,9 @@ struct ClaudeAiOAuthAuthorizer {
     metadata: AuthMetadata,
     runtime: oauth::AnthropicOAuthRuntime,
     cached: std::sync::Mutex<Option<ManagedClaudeAiCredential>>,
+    /// The access tokens requests were signed with, a refreshed-out one
+    /// included.
+    signed_tokens: meerkat_core::auth::SignedCredentials,
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
@@ -161,6 +164,7 @@ impl ClaudeAiOAuthAuthorizer {
             metadata: metadata.clone(),
             runtime,
             cached: std::sync::Mutex::new(None),
+            signed_tokens: meerkat_core::auth::SignedCredentials::new(),
         };
         let lease = authorizer.lease_key();
         // Unattended setup never waits behind an operating-system credential
@@ -371,6 +375,7 @@ impl HttpAuthorizer for ClaudeAiOAuthAuthorizer {
         req: &mut meerkat_core::HttpAuthorizationRequest<'_>,
     ) -> Result<(), AuthError> {
         let (_guard, access_token) = self.current_credential().await?;
+        self.signed_tokens.record(&access_token);
         req.headers
             .push(("Authorization".into(), format!("Bearer {access_token}")));
         req.headers.push((
@@ -379,6 +384,10 @@ impl HttpAuthorizer for ClaudeAiOAuthAuthorizer {
         ));
         req.headers.push(("x-app".to_string(), "cli".to_string()));
         Ok(())
+    }
+
+    fn visit_signed_credentials(&self, visit: &mut dyn FnMut(&str)) {
+        self.signed_tokens.visit(visit);
     }
 
     fn label(&self) -> &'static str {
@@ -1531,6 +1540,50 @@ mod tests {
             assert!(headers.is_empty());
             assert_eq!(fixture.store.calls.load(Ordering::SeqCst), calls);
             assert_eq!(fixture.owner.snapshot(&fixture.lease), released);
+        }
+
+        #[tokio::test]
+        async fn redacts_the_access_token_it_signed_with() {
+            use meerkat_core::HttpAuthorizer as _;
+            let fixture = fixture("echo", None).await;
+            let mut headers = Vec::new();
+            let mut request = meerkat_core::HttpAuthorizationRequest {
+                method: "POST",
+                url: "http://127.0.0.1:9/model",
+                headers: &mut headers,
+            };
+            fixture.authorizer.authorize(&mut request).await.unwrap();
+            let bearer = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value.clone())
+                .unwrap();
+            let token = bearer.strip_prefix("Bearer ").unwrap();
+            assert!(!token.is_empty());
+            // A response that repeats the access token (its header as sent,
+            // the bare value, a URL carrying it) loses it in the
+            // authorizer's redaction.
+            for echo in [
+                format!("upstream echo: rejected request with header authorization: {bearer}"),
+                format!("upstream echo: value {bearer} was refused"),
+                format!("upstream echo: credential {token} was refused"),
+                format!(
+                    "upstream echo: GET http://upstream.invalid/v1/models?session={token}&page=2"
+                ),
+            ] {
+                let mut diagnostic = echo;
+                fixture
+                    .authorizer
+                    .redact_response_diagnostic(&mut diagnostic);
+                assert!(
+                    !diagnostic.contains(token),
+                    "a credential is left in: {diagnostic}"
+                );
+                assert!(
+                    diagnostic.contains("upstream echo"),
+                    "the text around the credential is kept: {diagnostic}"
+                );
+            }
         }
 
         #[tokio::test]

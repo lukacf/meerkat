@@ -1694,7 +1694,13 @@ returns `SESSION_CREATED_WITH_TURN_FAILURE` with resumable session identity in
 policy; when that policy is exhausted, `details.error.kind` is
 `retry_exhausted` rather than `llm_failure`. Clients that branch on this nested
 kind should accept the new value. Known non-retryable LLM failures can still use
-`llm_failure`.
+`llm_failure`. Both kinds carry the provider facts in `details.error`:
+`provider`, `retryable` and the typed `reason`. A `retry_exhausted` error has
+`retryable: true` (the class of the failure can succeed on a later attempt;
+it is no promise that it will) and the reason of the last failed attempt (a
+rate limit, a timeout, or a provider error such as `server_overloaded`); the
+fields and their values are those of the JSON-RPC
+[turn error](/api/rpc#turn-methods).
 
 <CodeGroup>
 ```json Session not found

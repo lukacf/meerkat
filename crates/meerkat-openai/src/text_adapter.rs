@@ -126,6 +126,18 @@ impl OpenAiRealtimeTextAdapter {
             api_key: api_key.into(),
         }
     }
+
+    /// `turn`, the events of a websocket opened with this adapter's API
+    /// key, as the adapter hands it out: the error it ends with (an `Err`
+    /// item, or a `Done` whose outcome is an error) carries neither that key
+    /// nor a credential shape. The endpoint, or a gateway in front of it,
+    /// can repeat the connection's headers in an error event, in an API
+    /// error at connect or in a failed response.
+    fn redacted_stream<'a>(&'a self, turn: LlmStream<'a>) -> LlmStream<'a> {
+        meerkat_llm_core::streaming::redact_stream_errors(turn, move |message: &mut String| {
+            meerkat_core::redact::redact_credentials(message, |visit| visit(&self.api_key));
+        })
+    }
 }
 
 #[async_trait]
@@ -159,7 +171,7 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
 
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let api_key = self.api_key.clone();
-        Box::pin(try_stream! {
+        self.redacted_stream(Box::pin(try_stream! {
             // The realtime text session is opened without a tool-choice
             // control; a non-Auto choice is refused, never dropped.
             if !request.tool_choice.is_auto() {
@@ -333,7 +345,7 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
                     }
                 }
             }
-        })
+        }))
     }
 
     fn provider(&self) -> meerkat_core::Provider {
@@ -710,6 +722,91 @@ mod tests {
             audio: None,
             metadata: None,
             usage: None,
+        }
+    }
+
+    /// The stream `adapter` hands out over `turn`, a scripted stand-in for
+    /// the events of a websocket it opened with its API key.
+    fn adapter_stream_over<'a>(
+        adapter: &'a OpenAiRealtimeTextAdapter,
+        turn: LlmStream<'a>,
+    ) -> LlmStream<'a> {
+        adapter.redacted_stream(turn)
+    }
+
+    /// A realtime endpoint, or a gateway in front of one, that repeats the
+    /// connection's API key in an `error` event, in an API error at connect
+    /// or in the error of a failed response puts no key in the error the
+    /// text turn ends with. The server's answer still arrives, and each
+    /// error keeps its class.
+    #[tokio::test]
+    async fn echoed_api_key_stays_out_of_realtime_text_errors() {
+        use futures::StreamExt as _;
+        use oai_rt_rs::error::{ApiErrorType, ServerError};
+
+        let key = format!("realtime-{}", "madeupcredential".repeat(3));
+        let adapter = OpenAiRealtimeTextAdapter::new(key.clone());
+        let server_error = |error_type| ServerError {
+            error_type,
+            code: None,
+            message: format!(
+                "upstream echo: rejected request with header authorization: Bearer {key}; \
+                 credential {key} was refused"
+            ),
+            param: None,
+            event_id: None,
+        };
+        let mut failed = done_response(ResponseStatus::Failed, None);
+        failed.status_details = Some(oai_rt_rs::protocol::models::ResponseStatusDetails {
+            reason: None,
+            error: Some(server_error(ApiErrorType::ServerError)),
+        });
+        for (surface, failure, class) in [
+            (
+                "error event",
+                Err(map_server_error(server_error(
+                    ApiErrorType::InvalidRequestError,
+                ))),
+                "InvalidRequest",
+            ),
+            (
+                "API error at connect",
+                Err(map_oai_error(oai_rt_rs::Error::Api(server_error(
+                    ApiErrorType::AuthenticationError,
+                )))),
+                "AuthenticationFailed",
+            ),
+            (
+                "failed response",
+                Ok(LlmEvent::Done {
+                    outcome: text_turn_done_outcome(&failed, StopReason::EndTurn),
+                }),
+                "IncompleteResponse",
+            ),
+        ] {
+            let turn: LlmStream<'_> = Box::pin(futures::stream::iter([failure]));
+            let events = adapter_stream_over(&adapter, turn)
+                .collect::<Vec<_>>()
+                .await;
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{surface}: the turn ends in an error"));
+            let rendered = format!("{error} {error:?}");
+            assert!(
+                !rendered.contains(&key),
+                "the {surface} leaked the API key: {rendered}"
+            );
+            assert!(
+                rendered.contains("upstream echo") && rendered.contains(class),
+                "the {surface} keeps the server's answer and its class: {rendered}"
+            );
         }
     }
 

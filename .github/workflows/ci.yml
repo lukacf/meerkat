@@ -1781,6 +1781,22 @@ jobs:
             export MEERKAT_MCP_TEST_SERVER="${fixture}"
             echo "mcp-test-server fixture: ${MEERKAT_MCP_TEST_SERVER}"
           fi
+          # A row of this lane can run the same Connect tests as a unit row: a
+          # reader row runs a Connect package's lib target (meerkat-toolkit's
+          # when the reader inventory changes), and those tests refuse to
+          # guess an interpreter. So this step selects the Python exactly as
+          # the unit lanes do: python3 for every row, and for a row of a
+          # package whose tests read the selection the interpreter
+          # scripts/connect-test-python prepares (it prints nothing for any
+          # other row), also as TOOLKIT_D5_TEST_PYTHON.
+          TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
+          export TOOLKIT_SHARED_TEST_PYTHON
+          # shellcheck disable=SC2086
+          connect_python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
+          if [[ -n "${connect_python}" ]]; then
+            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}" TOOLKIT_D5_TEST_PYTHON="${connect_python}"
+            echo "Connect test Python: ${connect_python}"
+          fi
           # shellcheck disable=SC2086
           # Status level slow: the suites hold known heavy tests with exact-case
           # timeout overrides in .config/nextest.toml; their durations stay visible.

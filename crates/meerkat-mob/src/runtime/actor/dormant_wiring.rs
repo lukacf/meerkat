@@ -1,7 +1,8 @@
 //! Wiring with a member that is not materialized in this process.
 //!
-//! A seated local member that is Dormant (or Waking before its comms runtime
-//! exists) resolves to [`WiringEndpoint::LocalDormant`]: its peer material is
+//! A seated local member that is Dormant (or Waking before its wake has
+//! bound it, whether or not that wake has built its comms runtime yet)
+//! resolves to [`WiringEndpoint::LocalDormant`]: its peer material is
 //! MobMachine's durable endpoint. Wire, unwire and the idempotent repair
 //! commit the machine edge and its durable event exactly as for a live
 //! member. Trust is installed or removed only on a side that has a comms

@@ -26,6 +26,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the default would report no route for the members it decorates, whatever
   the provider client states.
 
+### Fixed
+
+- On Linux, a runtime that starts in a process whose previous runtime on the
+  same state directory is still alive (shut down, its handles still in
+  scope) could miss another process that holds the directory's runtime
+  custody, and start beside it. For such a start the custody check reads
+  the kernel's lock table (`/proc/locks`) to see whether anyone but this
+  process holds `runtime.sqlite.execution-custody`, and it decided from one
+  read. The kernel hands that table out at most a page per read call and
+  resumes by position, so when the table takes more than one read call and
+  a lock elsewhere on the host is released between two calls, one entry
+  drops out of the read; when that entry was the other holder's, the check
+  answered that there was none. It took both at once: such a same-process
+  start, and a holder that does not run this check itself (a release before
+  0.9.4, or a Core-only tool on the directory). Under heavy file-lock churn
+  on the host a read could miss a held lock; on a quiet host it did not.
+  Meta 0.9.4 through 0.9.14. The check now reads the table up to three
+  times, each read split at other entries, and refuses the start as soon as
+  any read names another holder; it admits the start only when no read
+  does. That makes a miss far less likely, not impossible: after a read
+  that missed, the next read named the holder in every measured case. Where
+  the table names no holder at all (macOS, Windows, and on Linux btrfs
+  subvolumes and overlayfs, the 0.9.4 known limitation), nothing changes.
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

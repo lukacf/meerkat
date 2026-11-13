@@ -801,7 +801,7 @@ profiles](/concepts/roster#ensure_member-gateway-profiles)).
 | `agent_identity` | `string` | yes | Public member alias; encoded into a comms-safe roster id by the `mk--` codec when it contains `:` |
 | `labels` | `object` | no | String labels; `agent_identity` is runtime-authoritative and may not be supplied here, and neither may the labels only Meta writes (`side_chat_of`, `side_chat_of_session`, `side_chat_creator`, `console.private_to`): each is refused as invalid params (`-32602`) naming it |
 | `context` | any | no | Host context attached to the spawn |
-| `resume_session_id` | `string` | no | Resume this bridge session instead of minting one |
+| `resume_session_id` | `string` | no | Resume this bridge session instead of minting one. Known issue, noted 2026-11-13: on Meta releases through 0.9.14, attaching an existing session to a mob can archive that session if the mob is stopped or the gateway or host process shuts down while the attach is still in progress. Read from the source and not yet confirmed by a test: the mobs that session owns are then destroyed at the next start. See the [known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14) for the affected releases, how it happens and what to do. |
 | `additional_instructions` | `string[]` | no | Standing instructions appended to the member's prompt |
 | `runtime_mode` | `string` | no | `autonomous_host` or `turn_driven`; per-spawn override of the profile's runtime mode |
 | `backend` / `binding` | `string` / `object` | no | Backend kind and runtime binding overrides |

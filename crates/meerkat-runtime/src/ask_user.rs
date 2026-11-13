@@ -8,15 +8,17 @@
 //!   a replayed call answers the decision it held), the fixed approver id
 //!   [`ASK_USER_APPROVER_ID`], the requester the host names, a plain-text
 //!   rendering of the questions, and the deadline the call's timeout gives.
-//! - A person answers by approving the decision with an answer document
-//!   ([`attest_ask_user_answers`]), or dismisses the questions by rejecting
-//!   it. The decision's machine binds the answers through the digest of the
-//!   human evidence that carries them. [`ask_user_answers_of`] reads them
-//!   back and validates them against the held set again: an answer that is
-//!   not valid for the set is an error, never an answer.
+//! - A person answers by approving the decision with typed answers
+//!   ([`attest_ask_user_answers`]: a [`DecisionAnswer::AskUser`] in the
+//!   decision's human evidence, never text), or dismisses the questions by
+//!   rejecting it. The decision's machine binds the answers through the
+//!   digest of the evidence that carries them. [`ask_user_answers_of`]
+//!   reads them back and validates them against the held set again: an
+//!   answer that is not valid for the set is an error, never an answer,
+//!   and a reason is never read as one.
 //! - [`AskUserExecutor`] executes an answered decision: it commits nothing
 //!   beyond the decision itself. It refuses a decision no person decided
-//!   (`not_a_human_decision`), one without a valid answer document
+//!   (`not_a_human_decision`), one without valid answers
 //!   (`invalid_answer`) and a body this version cannot read
 //!   (`unreadable_request`).
 //! - Every end of a decision owes its asker one notice, which the executor
@@ -40,14 +42,14 @@ use meerkat_core::approval::consent::{
     ConsentEligibility, ConsentEligibilityAnswer, ConsentIneligible,
 };
 use meerkat_core::approval::decision::{
-    ApproverId, AttestedDecision, ConsentProvenance, DecisionContractError, DecisionEvidence,
-    DecisionHoldRequest, DecisionId, DecisionKind, DecisionOperationId, DecisionPhase,
-    DecisionPrincipalKey, DecisionReference, DecisionRenderer, DecisionRendering,
+    ApproverId, AttestedDecision, ConsentProvenance, DecisionAnswer, DecisionContractError,
+    DecisionEvidence, DecisionHoldRequest, DecisionId, DecisionKind, DecisionOperationId,
+    DecisionPhase, DecisionPrincipalKey, DecisionReference, DecisionRenderer, DecisionRendering,
     DecisionRequestBody, DecisionSubjectKey, DecisionTier, Sha256Digest, StoredDecision,
 };
 use meerkat_core::ask_user::{
     ASK_USER_TIMEOUT_MAX_SECONDS, ASK_USER_TIMEOUT_MIN_SECONDS, AskUserAnswers, AskUserInvalid,
-    AskUserOutcome, AskUserQuestionAnswer, AskUserQuestionSet, AskUserResult, ask_user_unanswered,
+    AskUserOutcome, AskUserQuestionSet, AskUserResult, ask_user_unanswered,
 };
 use serde::{Deserialize, Serialize};
 
@@ -267,45 +269,32 @@ pub fn hold_ask_user(
     Ok(decisions.hold(request, true)?)
 }
 
-/// The answer document an approving decision carries.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AnswerDocument {
-    answers: Vec<AskUserQuestionAnswer>,
-}
-
-/// `decision`, an approving human decision, carrying `answers` as its
-/// answer document. With [`ask_user_answers_of`] this is the only code that
-/// writes or reads where a decision carries its answers.
+/// `decision`, an approving human decision, carrying `answers` as its typed
+/// answer ([`DecisionAnswer::AskUser`]): data in the decision's human
+/// evidence, never text. With [`ask_user_answers_of`] this is the only code
+/// that writes or reads where a decision carries its answers.
 ///
 /// # Errors
 /// [`AskUserError::Invalid`] for a rejecting decision (a dismissal carries
-/// no answers) and for a document larger than a decision's evidence takes.
+/// no answers) and for answers larger than a decision's evidence takes.
 pub fn attest_ask_user_answers(
     decision: AttestedDecision,
     answers: &AskUserAnswers,
 ) -> Result<AttestedDecision, AskUserError> {
-    if !decision.approves() {
-        return Err(AskUserError::Invalid(
-            "a rejecting decision carries no answers".to_owned(),
-        ));
-    }
-    let document = serde_json::to_string(&AnswerDocument {
+    Ok(decision.with_answer(DecisionAnswer::AskUser {
         answers: answers.answers().to_vec(),
-    })
-    .map_err(|error| AskUserError::Invalid(error.to_string()))?;
-    Ok(decision.with_reason(document)?)
+    })?)
 }
 
 /// The answers the person who approved `decision` gave to the question set
 /// `body` holds: `None` when the decision is not approved by a person or
-/// carries no answer document. The document is validated against the held
-/// set again.
+/// its evidence carries no typed answer (a reason is never read as one).
+/// The answers are validated against the held set again.
 ///
 /// # Errors
-/// [`AskUserError::InvalidAnswer`] when the decision carries something that
-/// is not an answer document valid for the set: it never reads as an
-/// answer.
+/// [`AskUserError::InvalidAnswer`] when the evidence carries a typed answer
+/// that is not valid for the set, or one of another kind: it never reads as
+/// an answer.
 pub fn ask_user_answers_of(
     decision: &StoredDecision,
     body: &AskUserBody,
@@ -315,21 +304,24 @@ pub fn ask_user_answers_of(
     };
     let DecisionEvidence::Human {
         approve: true,
-        reason,
+        answer,
         ..
     } = &outcome.evidence
     else {
         return Ok(None);
     };
-    let Some(reason) = reason else {
+    let Some(answer) = answer else {
         return Ok(None);
     };
     let invalid = |why: String| {
         AskUserError::InvalidAnswer(format!("decision {}: {why}", decision.decision_id))
     };
-    let document: AnswerDocument =
-        serde_json::from_str(reason).map_err(|error| invalid(error.to_string()))?;
-    AskUserAnswers::for_set(&body.questions, document.answers)
+    let DecisionAnswer::AskUser { answers } = answer else {
+        return Err(invalid(
+            "its answer is not an answer to a question set".to_owned(),
+        ));
+    };
+    AskUserAnswers::for_set(&body.questions, answers.clone())
         .map(Some)
         .map_err(|error| invalid(error.to_string()))
 }

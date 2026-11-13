@@ -12,6 +12,7 @@ use super::parts::part_ranges;
 use super::*;
 use crate::approval::consent::{AuthenticatedApprover, HostAuthenticationScope};
 use crate::approval::{ApprovalAssurance, ApprovalStoreError};
+use crate::ask_user::{AskUserAnswer, AskUserQuestionAnswer};
 use crate::{PrincipalKind, PrincipalRef, SessionId, TrustDomainId};
 
 fn domain(value: &str) -> TrustDomainId {
@@ -407,7 +408,7 @@ fn evidence_digest_changes_with_any_evidence_field() {
         assert_ne!(evidence, human, "the change must change the evidence");
         evidence.digest().expect("digest")
     };
-    let changes: [(&str, &dyn Fn(&mut DecisionEvidence)); 15] = [
+    let changes: [(&str, &dyn Fn(&mut DecisionEvidence)); 16] = [
         ("decider", &|evidence| {
             if let DecisionEvidence::Human { decider, .. } = evidence {
                 *decider = key(PrincipalKind::Human, "bob");
@@ -497,6 +498,13 @@ fn evidence_digest_changes_with_any_evidence_field() {
         ("reason", &|evidence| {
             if let DecisionEvidence::Human { reason, .. } = evidence {
                 *reason = Some("looks wrong".to_owned());
+            }
+        }),
+        ("answer", &|evidence| {
+            if let DecisionEvidence::Human { answer, .. } = evidence {
+                *answer = Some(DecisionAnswer::AskUser {
+                    answers: Vec::new(),
+                });
             }
         }),
     ];
@@ -882,6 +890,7 @@ fn the_evidence_encoding_and_its_digest_are_pinned() {
         )),
         approve: true,
         reason: Some("looks right".to_owned()),
+        answer: None,
     };
     let mut human_observed = human.clone();
     if let DecisionEvidence::Human { observed_at_ms, .. } = &mut human_observed {
@@ -985,6 +994,154 @@ fn the_evidence_records_the_observed_time_and_older_evidence_keeps_its_digest() 
             "the evidence keeps its pinned digest"
         );
     }
+}
+
+/// The pinned digest of [`HUMAN_OBSERVED_EVIDENCE_JSON`] with the typed
+/// answer of `the_evidence_carries_a_typed_answer_and_evidence_without_one_keeps_its_digest`
+/// appended as its last field.
+const HUMAN_ANSWERED_EVIDENCE_DIGEST: &str =
+    "sha256:6fdbd6cfca0fc036c51eec0d0439abffefcc58f6c922e7fbbc773c9a307bf395";
+
+/// A human decision's evidence can carry the typed answer the person gave,
+/// under the same evidence domain, as its last field. Evidence without one
+/// (every decision that asks none, and all evidence recorded before
+/// decisions carried answers) decodes without it and keeps its bytes and
+/// its digest: the fixture and the digest literal here are the ones pinned
+/// before the field existed, so the machine's evidence digest still binds
+/// every stored decision.
+#[test]
+fn the_evidence_carries_a_typed_answer_and_evidence_without_one_keeps_its_digest() {
+    let without: DecisionEvidence =
+        serde_json::from_str(HUMAN_OBSERVED_EVIDENCE_JSON).expect("the pinned bytes decode");
+    assert!(
+        matches!(&without, DecisionEvidence::Human { answer: None, .. }),
+        "evidence recorded without an answer has none"
+    );
+    assert_eq!(
+        serde_json::to_string(&without).expect("encode"),
+        HUMAN_OBSERVED_EVIDENCE_JSON,
+        "and writes no answer field"
+    );
+    assert_eq!(
+        without.digest().expect("digest").as_str(),
+        "sha256:17355bf023b24670e47d692b6103f4456397ad2aa8d561921a4dd8c84c0020b2",
+        "its digest is the one pinned before evidence could carry an answer"
+    );
+
+    let mut with = without;
+    if let DecisionEvidence::Human { answer, .. } = &mut with {
+        *answer = Some(DecisionAnswer::AskUser {
+            answers: vec![
+                AskUserQuestionAnswer {
+                    question_id: "channel".to_owned(),
+                    answer: AskUserAnswer::Choice {
+                        choice_id: "beta".to_owned(),
+                    },
+                },
+                AskUserQuestionAnswer {
+                    question_id: "notes".to_owned(),
+                    answer: AskUserAnswer::FreeText {
+                        text: "Nightly first".to_owned(),
+                    },
+                },
+            ],
+        });
+    }
+    let encoded = serde_json::to_string(&with).expect("encode");
+    let expected = format!(
+        "{},{}}}",
+        HUMAN_OBSERVED_EVIDENCE_JSON
+            .strip_suffix('}')
+            .expect("a JSON object"),
+        concat!(
+            r#""answer":{"kind":"ask_user","answers":["#,
+            r#"{"question_id":"channel","answer":{"kind":"choice","choice_id":"beta"}},"#,
+            r#"{"question_id":"notes","answer":{"kind":"free_text","text":"Nightly first"}}]}"#,
+        )
+    );
+    assert_eq!(encoded, expected, "the answer is the evidence's last field");
+    assert_eq!(
+        with.digest().expect("digest").as_str(),
+        HUMAN_ANSWERED_EVIDENCE_DIGEST,
+        "the digest binds the answer"
+    );
+    assert_eq!(
+        serde_json::from_str::<DecisionEvidence>(&encoded).expect("decodes"),
+        with
+    );
+
+    // An answer of a kind this version does not know makes the evidence
+    // undecodable here: its row is kept unreadable, never read as another
+    // answer or as none.
+    let unknown = encoded.replace(
+        r#""answer":{"kind":"ask_user","#,
+        r#""answer":{"kind":"survey","#,
+    );
+    assert_ne!(unknown, encoded);
+    assert!(serde_json::from_str::<DecisionEvidence>(&unknown).is_err());
+}
+
+/// An attested decision carries a typed answer only when it approves, and
+/// only within the evidence bound; the answer is part of its evidence.
+#[test]
+fn an_attested_decision_carries_its_answer_into_the_evidence() {
+    let login = HostAuthenticationScope::new("login-1");
+    let answer = |text: &str| DecisionAnswer::AskUser {
+        answers: vec![AskUserQuestionAnswer {
+            question_id: "notes".to_owned(),
+            answer: AskUserAnswer::FreeText {
+                text: text.to_owned(),
+            },
+        }],
+    };
+
+    let bare = attested_in(&login, true);
+    assert_eq!(bare.answer(), None);
+    assert!(matches!(
+        bare.evidence(),
+        DecisionEvidence::Human { answer: None, .. }
+    ));
+
+    let answered = attested_in(&login, true)
+        .with_answer(answer("Nightly first"))
+        .expect("an approving decision takes an answer");
+    assert_eq!(answered.answer(), Some(&answer("Nightly first")));
+    let evidence = answered.evidence();
+    assert!(
+        matches!(&evidence, DecisionEvidence::Human { answer: Some(carried), .. } if *carried == answer("Nightly first"))
+    );
+    assert_ne!(
+        evidence.digest().expect("digest"),
+        bare.evidence().digest().expect("digest"),
+        "the answer is bound by the evidence digest"
+    );
+
+    assert_eq!(
+        attested_in(&login, false)
+            .with_answer(answer("Nightly first"))
+            .map(|_| ())
+            .expect_err("a rejection answers nothing"),
+        DecisionContractError::Invalid {
+            what: "answer of a rejecting decision"
+        }
+    );
+
+    // The bound is on the answer's JSON: one byte past it is refused.
+    let overhead = serde_json::to_vec(&answer("")).expect("encode").len();
+    let at_the_bound = "a".repeat(DECISION_REASON_MAX_BYTES - overhead);
+    attested_in(&login, true)
+        .with_answer(answer(&at_the_bound))
+        .expect("an answer of exactly the bound");
+    assert_eq!(
+        attested_in(&login, true)
+            .with_answer(answer(&format!("{at_the_bound}a")))
+            .map(|_| ())
+            .expect_err("an answer past the bound"),
+        DecisionContractError::TooLarge {
+            what: "answer",
+            max_bytes: DECISION_REASON_MAX_BYTES,
+        }
+    );
 }
 
 #[test]

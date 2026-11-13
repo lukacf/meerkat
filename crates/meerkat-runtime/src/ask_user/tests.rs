@@ -615,6 +615,29 @@ async fn an_answered_decision_reads_answered_and_owes_then_settles_exactly_one_n
         ),
         "the machine binds the evidence that carries the answers"
     );
+    // The answers are typed data of the evidence, and no text carries them.
+    let evidence = serde_json::to_value(&approved.outcome.as_ref().expect("the outcome").evidence)
+        .expect("encode the evidence");
+    assert_eq!(
+        evidence["answer"],
+        serde_json::json!({
+            "kind": "ask_user",
+            "answers": [
+                {"question_id": "notify", "answer": {"kind": "choice", "choice_id": "no"}},
+                {
+                    "question_id": "channel",
+                    "answer": {"kind": "free_text", "text": "Nightly, then beta"}
+                }
+            ]
+        })
+    );
+    assert!(evidence.get("reason").is_none(), "{evidence}");
+    // Every surface that projects the decision projects the typed answer.
+    let projected = crate::decision::wire::wire_decision(&approved, false);
+    assert_eq!(
+        serde_json::to_value(&projected).expect("encode")["outcome"]["evidence"]["answer"],
+        evidence["answer"]
+    );
 
     let first = executor.pass().await;
     assert_eq!(
@@ -930,8 +953,9 @@ async fn a_reason_that_is_not_an_answer_document_never_reads_as_an_answer_and_is
     let notices = Arc::new(RecordingNotices::default());
     let mut executor = executor_loop(&service, &notices);
 
-    // Three approvals that carry no valid answer document: a reason in a
-    // person's words, no reason at all, and answers that are valid for
+    // Four approvals that carry no valid answers: a reason in a person's
+    // words, a reason that is the text of valid answers (text is never the
+    // answer), no reason at all, and typed answers that are valid for
     // another set.
     let in_words = held(&service);
     present(&service, &in_words);
@@ -940,6 +964,17 @@ async fn a_reason_that_is_not_an_answer_document_never_reads_as_an_answer_and_is
         .expect("a reason");
     service
         .decide(&in_words.decision_id, &approval, &MayAnswer)
+        .expect("the approval is recorded");
+
+    let as_text = held(&service);
+    present(&service, &as_text);
+    let approval = person_decides(&as_text, true)
+        .with_reason(
+            r#"{"kind":"ask_user","answers":[{"question_id":"notify","answer":{"kind":"choice","choice_id":"yes"}}]}"#,
+        )
+        .expect("a reason");
+    service
+        .decide(&as_text.decision_id, &approval, &MayAnswer)
         .expect("the approval is recorded");
 
     let bare = held(&service);
@@ -958,7 +993,7 @@ async fn a_reason_that_is_not_an_answer_document_never_reads_as_an_answer_and_is
         .decide(&for_another_set.decision_id, &approval, &MayAnswer)
         .expect("the approval is recorded");
 
-    for decision in [&in_words, &bare, &for_another_set] {
+    for decision in [&in_words, &as_text, &bare, &for_another_set] {
         let approved = service.get(&decision.decision_id).expect("read");
         assert_eq!(approved.state.phase, DecisionPhase::Approved);
         let body = AskUserBody::of(&approved).expect("the held body");
@@ -966,6 +1001,12 @@ async fn a_reason_that_is_not_an_answer_document_never_reads_as_an_answer_and_is
             !matches!(ask_user_answers_of(&approved, &body), Ok(Some(_))),
             "never an answer"
         );
+    }
+    // A reason is never read as an answer, whatever its text says.
+    for decision in [&in_words, &as_text, &bare] {
+        let approved = service.get(&decision.decision_id).expect("read");
+        let body = AskUserBody::of(&approved).expect("the held body");
+        assert_eq!(ask_user_answers_of(&approved, &body), Ok(None));
     }
     let approved = service.get(&for_another_set.decision_id).expect("read");
     let body = AskUserBody::of(&approved).expect("the held body");
@@ -978,7 +1019,7 @@ async fn a_reason_that_is_not_an_answer_document_never_reads_as_an_answer_and_is
     );
 
     let pass = executor.pass().await;
-    for decision in [&in_words, &bare, &for_another_set] {
+    for decision in [&in_words, &as_text, &bare, &for_another_set] {
         let decision_id = &decision.decision_id;
         assert_eq!(
             outcomes_of(&pass).get(decision_id),
@@ -1005,7 +1046,7 @@ async fn a_reason_that_is_not_an_answer_document_never_reads_as_an_answer_and_is
     }
     settle(&mut executor, &bare.decision_id).await;
     let delivered = notices.delivered();
-    assert_eq!(delivered.len(), 3, "each refused set owes its one notice");
+    assert_eq!(delivered.len(), 4, "each refused set owes its one notice");
     assert!(
         delivered
             .iter()

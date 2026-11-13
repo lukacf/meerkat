@@ -2643,6 +2643,10 @@ pub struct StartTurnRuntimeSemantics {
     /// adapters stamp it onto `InputHeader`; direct session backends, which
     /// keep no admitted input to carry it, reject it.
     pub requester: Option<crate::PrincipalRef>,
+    /// How the host's ingress attested [`Self::requester`], when it said so.
+    /// Runtime adapters stamp it onto `InputHeader` with the requester; it is
+    /// meaningless without one.
+    pub requester_origin: Option<crate::types::RequesterOrigin>,
     /// Handling mode for this turn's ordinary content-bearing work.
     ///
     /// This is a **runtime-owned semantic**: the runtime routes Queue/Steer
@@ -2674,6 +2678,7 @@ impl Default for StartTurnRuntimeSemantics {
             work_authorization: None,
             input_identity: None,
             requester: None,
+            requester_origin: None,
             handling_mode: HandlingMode::Queue,
             turn_tool_overlay: None,
             typed_turn_appends: Vec::new(),
@@ -2693,6 +2698,7 @@ impl StartTurnRuntimeSemantics {
             work_authorization: None,
             input_identity: None,
             requester: None,
+            requester_origin: None,
             handling_mode,
             turn_tool_overlay,
             typed_turn_appends: Vec::new(),
@@ -2725,6 +2731,14 @@ impl StartTurnRuntimeSemantics {
     #[must_use]
     pub fn with_requester(mut self, requester: crate::PrincipalRef) -> Self {
         self.requester = Some(requester);
+        self
+    }
+
+    /// Record how the host's ingress attested the requester (see
+    /// [`Self::requester_origin`]).
+    #[must_use]
+    pub fn with_requester_origin(mut self, origin: Option<crate::types::RequesterOrigin>) -> Self {
+        self.requester_origin = origin;
         self
     }
 

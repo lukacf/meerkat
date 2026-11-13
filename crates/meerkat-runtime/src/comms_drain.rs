@@ -1970,6 +1970,7 @@ fn peer_input_from_delivery_payload(
         // lane retains its own minting semantics.
         correlation_id,
         requester: None,
+        requester_origin: None,
     };
     if let Some(context) = payload.transient_turn_context {
         if !payload.injected_context.is_empty() {
@@ -13319,6 +13320,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: Some(crate::CorrelationId::from_uuid(interaction_id.0)),
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: "poke".to_string().into(),

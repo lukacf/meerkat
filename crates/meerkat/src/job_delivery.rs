@@ -1013,6 +1013,7 @@ pub fn job_delivery_event_input(
             ingress_context: None,
             retained_resume: None,
             requester: None,
+            requester_origin: None,
         },
         event_type: event_type.to_string(),
         payload,

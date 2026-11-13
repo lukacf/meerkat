@@ -242,6 +242,8 @@ _IDENTITY_BOOTSTRAP_WAIT_TRANSPORT_HEADROOM_SECONDS = 5.0
 _JSONRPC_METHOD_NOT_FOUND = -32601
 # The feature capability of a keyed ``meta/send`` that takes ``handling_mode``.
 _KEYED_SEND_HANDLING_MODE = "keyed_send_handling_mode"
+# The feature capability of a ``meta/send`` that takes ``requester``.
+_SEND_HOST_ATTESTED_REQUESTER = "send_host_attested_requester"
 # The mob announcement methods a Meta without sources serves. Any other
 # ``meta/mob_announcements/*`` method came with sources, so method-not-found
 # on it means the gateway's Meta does not support sources.
@@ -1852,8 +1854,27 @@ class MetaRuntime:
         expected_spec_digest: str | None = None,
         idempotency_key: str | None = None,
         handling_mode: str | None = None,
+        requester: "dict | None" = None,
     ) -> Any:
         """Send conversational content to an addressable identity.
+
+        ``requester`` names the person this host attests, under its own host
+        authority, as the original requester of ``content`` (content that
+        person sent through the host):
+        ``{"kind": "person", "id": "<opaque host-scoped stable id>"}``.
+        The member's turn records that person as its direct requester with
+        origin ``host_attested``; the turn is not marked as typed text, so a
+        live voice channel treats it as before. Reading a turn's requester
+        back, its ``origin`` is an open string (``"console_signed_in"`` and
+        ``"host_attested"`` today): treat any other value as not attested. A
+        value the gateway does not know is passed through with the exact text
+        a newer host wrote, never rewritten, so a later third value is not a
+        breaking change. Only the host
+        route accepts it. It does not combine with ``idempotency_key``, so an
+        unkeyed retry is a second send. A gateway that does not advertise the
+        ``send_host_attested_requester`` feature capability would ignore it, so
+        it is refused with :class:`CapabilityUnavailableError` before anything
+        is sent.
 
         With ``track_turn=True`` the admitted turn is tracked by ticket: the
         result's ``turn_ticket`` names THIS turn (see :meth:`turn_result`),
@@ -1892,9 +1913,28 @@ class MetaRuntime:
         :class:`CapabilityUnavailableError` before anything is sent.
         """
         from .identity_first_models import KeyedSendResult, SendResult
-        if idempotency_key is not None and (track_turn or expected_spec_digest is not None):
-            combined = "track_turn" if track_turn else "expected_spec_digest"
+        if idempotency_key is not None and (
+            track_turn or expected_spec_digest is not None or requester is not None
+        ):
+            combined = (
+                "track_turn"
+                if track_turn
+                else "expected_spec_digest"
+                if expected_spec_digest is not None
+                else "requester"
+            )
             raise ValueError(f"idempotency_key does not combine with {combined}")
+        if requester is not None:
+            if (
+                not isinstance(requester, dict)
+                or set(requester) != {"kind", "id"}
+                or requester.get("kind") != "person"
+                or not isinstance(requester.get("id"), str)
+                or not requester["id"]
+            ):
+                raise ValueError(
+                    'requester must be {"kind": "person", "id": "<non-empty id>"}'
+                )
         if handling_mode is not None:
             if handling_mode not in ("queue", "steer"):
                 raise ValueError('handling_mode must be "queue" or "steer"')
@@ -1920,8 +1960,24 @@ class MetaRuntime:
             params["track_turn"] = True
         if expected_spec_digest is not None:
             params["expected_spec_digest"] = expected_spec_digest
+        if requester is not None:
+            await self._require_host_attested_requester()
+            params["requester"] = {"kind": "person", "id": requester["id"]}
         raw = await self._rpc("meta/send", params)
         return SendResult.from_dict(raw) if isinstance(raw, dict) else raw
+
+    async def _require_host_attested_requester(self) -> None:
+        """Refuse a ``requester``, typed, on a gateway that does not serve it:
+        such a gateway ignores the field and sends without a requester."""
+        raw = await self._rpc("meta/capabilities")
+        features = raw.get("feature_capabilities") if isinstance(raw, dict) else None
+        if not isinstance(features, list) or _SEND_HOST_ATTESTED_REQUESTER not in features:
+            raise CapabilityUnavailableError(
+                "this gateway does not serve a host-attested requester: it would "
+                "ignore requester and send without one",
+                method="meta/send",
+                data={"capability": _SEND_HOST_ATTESTED_REQUESTER},
+            )
 
     async def _require_keyed_send(self, *, steer: bool = False) -> None:
         """Refuse a keyed send, typed, on a gateway that does not serve it:

@@ -72,6 +72,128 @@ pub struct TurnRequester {
     /// own ingress admitted every input.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     carried: bool,
+    /// How the host's ingress attested this requester, when it said so:
+    /// recorded with the requester so a policy can say which attestations
+    /// count. Absent for requesters whose ingress names no attestation (and
+    /// for every row written before the field existed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<RequesterOrigin>,
+}
+
+/// How a turn's requester was attested at the ingress that admitted it.
+///
+/// Core carries the value and never interprets it: it names which host door
+/// vouched for the principal, not who the principal is or what it may do.
+///
+/// The value is open for readers. A value this build does not know (one a
+/// newer host wrote) still loads, as [`Self::Unknown`] carrying the exact
+/// text it was read from, and is written back as that same text, so a stored
+/// row (and any digest over it) round-trips byte for byte. No reader may
+/// treat `Unknown` as an attestation: the row loads and its content is not
+/// trusted. The wire schema is an open string for the same reason, and the
+/// SDKs type the field as a string. A later variant is therefore not a
+/// breaking change for readers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RequesterOrigin {
+    /// A person signed in to the host's console sent the input themselves
+    /// (wire `console_signed_in`).
+    ConsoleSignedIn,
+    /// The host relayed the input under its own host authority and attested
+    /// the person it acts for (wire `host_attested`).
+    HostAttested,
+    /// An origin this build does not know, with the exact wire text it was
+    /// read from (kept so it is written back unchanged). It is never an
+    /// attestation: a reader acts as if the requester had none. Only the
+    /// decoder builds one (its payload has no public constructor), and the
+    /// decoder never builds one from an attested spelling.
+    Unknown(UnknownRequesterOrigin),
+}
+
+/// The wire text of a [`RequesterOrigin`] this build does not know.
+///
+/// Its field is private and its only constructor is crate-private, used by
+/// the decoder alone, so code outside Core cannot build an `Unknown` origin,
+/// and the decoder never builds one holding an attested spelling
+/// (`console_signed_in`, `host_attested`): those decode to their attested
+/// variants.
+///
+/// ```compile_fail
+/// // No public constructor and no public field: an Unknown origin cannot
+/// // be built outside Core, attested spelling or not.
+/// let _ = meerkat_core::types::UnknownRequesterOrigin("host_attested".to_string());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnknownRequesterOrigin(String);
+
+impl UnknownRequesterOrigin {
+    /// The exact wire text it was read from.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl RequesterOrigin {
+    /// The wire text of this origin: the known values' names, or the exact
+    /// text an unknown value was read from.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::ConsoleSignedIn => "console_signed_in",
+            Self::HostAttested => "host_attested",
+            Self::Unknown(raw) => raw.as_str(),
+        }
+    }
+
+    /// The origin a wire text names (the decoder's only constructor): an
+    /// attested spelling is its attested variant, never `Unknown`; any other
+    /// text is [`Self::Unknown`] with that text. Crate-private: code outside
+    /// Core gets an origin only from its variants or by decoding.
+    #[must_use]
+    pub(crate) fn from_wire(raw: &str) -> Self {
+        match raw {
+            "console_signed_in" => Self::ConsoleSignedIn,
+            "host_attested" => Self::HostAttested,
+            other => Self::Unknown(UnknownRequesterOrigin(other.to_string())),
+        }
+    }
+}
+
+impl Serialize for RequesterOrigin {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RequesterOrigin {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::from_wire(&raw))
+    }
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for RequesterOrigin {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "RequesterOrigin".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "How a turn's requester was attested at the ingress that admitted it: \
+                `console_signed_in` (a person signed in to the host's console sent the input) \
+                or `host_attested` (the host relayed the input and attested the person). \
+                Open: treat any other value as not attested; it is kept and written back as read."
+        })
+    }
 }
 
 impl TurnRequester {
@@ -81,6 +203,7 @@ impl TurnRequester {
         Self {
             principal,
             carried: false,
+            origin: None,
         }
     }
 
@@ -90,7 +213,25 @@ impl TurnRequester {
         Self {
             principal,
             carried: true,
+            origin: None,
         }
+    }
+
+    /// The same requester, recording how its ingress attested it.
+    ///
+    /// The embedding host is trusted for this fact: an in-process caller is
+    /// host authority by convention. No wire door reaches this setter; the
+    /// doors that record an origin are the host's own.
+    #[must_use]
+    pub fn with_origin(mut self, origin: Option<RequesterOrigin>) -> Self {
+        self.origin = origin;
+        self
+    }
+
+    /// How the requester's ingress attested it, when it said so.
+    #[must_use]
+    pub fn origin(&self) -> Option<RequesterOrigin> {
+        self.origin.clone()
     }
 
     /// The requester's principal, whether direct or carried.

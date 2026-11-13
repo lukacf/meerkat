@@ -49,6 +49,7 @@ fn peer_message_input(handling_mode: Option<HandlingMode>) -> Input {
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         },
         convention: Some(PeerConvention::Message),
         content: "hello".into(),

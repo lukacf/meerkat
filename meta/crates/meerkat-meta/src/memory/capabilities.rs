@@ -44,7 +44,7 @@ use crate::memory::distiller::TombstoneSource;
 use crate::memory::events::MemoryEventSink;
 use crate::memory::records::{
     InjectionLogEntry, MemoryAuthor, MemoryId, MemoryRecord, MemoryScope, NewMemoryRecord,
-    ProposalId,
+    ProposalId, QuarantineClass,
 };
 use crate::memory::review::{
     QuarantineReviewError, QuarantineReviewOutcome, QuarantineReviewRequest,
@@ -225,12 +225,17 @@ pub trait StewardStore: StagedMemoryStore + TombstoneSource {
         status: &str,
     ) -> Result<(), AgentMemoryError>;
 
-    /// Quarantined records, newest first — the dream's review queue (§8.5).
-    /// The steward is the one stage that reads these bodies wholesale; the
-    /// caller renders them defanged.
+    /// Quarantined records of one [`QuarantineClass`], newest first, at
+    /// most `limit` (§8.5 review queue, §10.1). Records quarantined before
+    /// the class existed read as [`QuarantineClass::Tainted`]. Readers bound
+    /// each class on its own ([`quarantine_review_window`]), so a volume of
+    /// one class never pushes the other out of view. The steward is the one
+    /// stage that reads these bodies wholesale; the caller renders them
+    /// defanged.
     async fn quarantined_records(
         &self,
         realm: &str,
+        class: QuarantineClass,
         limit: usize,
     ) -> Result<Vec<MemoryRecord>, AgentMemoryError>;
 
@@ -569,4 +574,32 @@ pub trait MemoryPanelStore: StewardStore {
     ) -> Result<Vec<(String, MemoryScope)>, AgentMemoryError> {
         Ok(Vec::new())
     }
+}
+
+/// A bounded review window over the realm's quarantine (§8.5, §10.1): up to
+/// `limit` records, at most half of them (rounded up) per
+/// [`QuarantineClass`] while the other class has records to fill its half,
+/// newest first within each class, [`QuarantineClass::Tainted`] first. A
+/// class with fewer records leaves its slots to the other. Records
+/// quarantined for unproven input therefore cannot starve the records that
+/// carry a detected taint signal, nor the reverse.
+pub async fn quarantine_review_window<S: StewardStore + ?Sized>(
+    store: &S,
+    realm: &str,
+    limit: usize,
+) -> Result<Vec<MemoryRecord>, AgentMemoryError> {
+    let tainted = store
+        .quarantined_records(realm, QuarantineClass::Tainted, limit)
+        .await?;
+    let unproven = store
+        .quarantined_records(realm, QuarantineClass::Unproven, limit)
+        .await?;
+    // Tainted gets its half, or more when Unproven cannot fill the rest.
+    let take_tainted = tainted
+        .len()
+        .min(limit.div_ceil(2).max(limit.saturating_sub(unproven.len())));
+    let mut window: Vec<MemoryRecord> = tainted.into_iter().take(take_tainted).collect();
+    let room = limit.saturating_sub(window.len());
+    window.extend(unproven.into_iter().take(room));
+    Ok(window)
 }

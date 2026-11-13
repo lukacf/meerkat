@@ -951,6 +951,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             content: meerkat_core::types::ContentInput::Text(text.to_string()),
             typed_turn_appends: Vec::new(),

@@ -1939,6 +1939,10 @@ class PrincipalRef(TypedDict, total=False):
     qualification: NotRequired[PrincipalQualification]
 
 
+# How a turn's requester was attested at the ingress that admitted it: `console_signed_in` (a person signed in to the host's console sent the input) or `host_attested` (the host relayed the input and attested the person). Open: treat any other value as not attested; it is kept and written back as read.
+RequesterOrigin = str
+
+
 class TurnRequester(TypedDict, total=False):
     """The original requester of a turn: the principal its inputs share, and
     whether it reached them directly.
@@ -1949,6 +1953,7 @@ class TurnRequester(TypedDict, total=False):
     person, account or assurance concept for it.
     """
     carried: NotRequired[bool]
+    origin: NotRequired[Optional[RequesterOrigin]]
     principal: Required[PrincipalRef]
 
 

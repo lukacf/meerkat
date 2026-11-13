@@ -784,6 +784,8 @@ export type ReasoningNotAppliedReason = "no_catalog_fact" | "unsupported_level" 
 
 export type RequestedCompactionSkipReason = "first_model_request" | "nothing_to_fold";
 
+export type RequesterOrigin = string;
+
 export type RevisedPromptDisposition = {
   disposition: "not_requested";
 } | {
@@ -1228,10 +1230,11 @@ export type TranscriptTurnInput = "runtime_authored" | "typed_text";
 
 export type TrustDomainId = string;
 
-export interface TurnRequester {
+export type TurnRequester = {
   carried?: boolean;
+  origin?: RequesterOrigin | null;
   principal: PrincipalRef;
-}
+};
 
 export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
 

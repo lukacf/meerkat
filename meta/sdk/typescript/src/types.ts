@@ -6167,3 +6167,20 @@ export function supportsFlowRunIdempotencyKey(
     : (capabilities as CapabilitiesResult).featureCapabilities;
   return features.includes(FLOW_RUN_IDEMPOTENCY_KEY);
 }
+
+/**
+ * A person a host attests, under its own host authority, as the original
+ * requester of a `meta/send` (`requester`): one kind, `person`, with the
+ * host's opaque, stable id for that person.
+ *
+ * Reading a turn's requester back (events, tool callbacks), its `origin` is
+ * an open string (`RequesterOrigin` is `string`): `"console_signed_in"` and
+ * `"host_attested"` today. Treat any other value as "not attested". A value
+ * the gateway does not know is passed through with the exact text a newer
+ * host wrote, never rewritten, so a later third value is not a breaking
+ * change.
+ */
+export interface HostAttestedRequester {
+  kind: "person";
+  id: string;
+}

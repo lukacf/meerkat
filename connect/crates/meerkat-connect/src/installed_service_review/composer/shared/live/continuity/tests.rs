@@ -383,6 +383,7 @@ fn input() -> Input {
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         },
         event_type: "closed-cohort-control".into(),
         payload: serde_json::json!({}),

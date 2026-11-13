@@ -1574,12 +1574,55 @@ async fn turn_requester(
                 .read_session_history(&session, 0, None)
                 .await
                 .expect("history read");
-            if let Some(requester) = page.messages.iter().find_map(|message| match message {
+            if let Some((requester, fired)) = page.messages.iter().find_map(|message| match message {
                 meerkat_core::Message::User(user) if user.text_content() == content => {
-                    Some(user.identity.requester.clone())
+                    // A schedule's fire
+                    // names the schedule's person as requester but is no
+                    // person's own input. Its conversational row carries no
+                    // typed-text stamp and no attestation origin.
+                    assert!(
+                        user.transcript_role.is_conversational(),
+                        "SCHEDULE FIRE: the fired row is conversational"
+                    );
+                    assert_eq!(
+                        user.identity.turn_input, None,
+                        "SCHEDULE FIRE: a scheduled fire carries no typed-text stamp"
+                    );
+                    assert_eq!(
+                        user.identity
+                            .requester
+                            .as_ref()
+                            .and_then(meerkat_core::TurnRequester::origin),
+                        None,
+                        "SCHEDULE FIRE: a scheduled fire names no attestation origin"
+                    );
+                    Some((user.identity.requester.clone(), message.clone()))
                 }
                 _ => None,
             }) {
+                // The real fired row carries the same facts as a live person's
+                // send except the attested origin, so it is not rule-3 clean
+                // and its fact after a tainted peer message QUARANTINES.
+                assert!(
+                    !crate::memory::distiller::proven_clean_row(&fired),
+                    "SCHEDULE FIRE: a scheduled fire is not rule-3 clean"
+                );
+                if requester.is_some() {
+                    let when: &'static str = Box::leak(content.to_string().into_boxed_str());
+                    let statuses =
+                        crate::memory::distiller::evidence_taint_tests::status_after_tainted_peer(
+                            fired, when,
+                        )
+                        .await
+                        .expect("distillation of the real fired row");
+                    assert!(
+                        !statuses.is_empty()
+                            && statuses.iter().all(
+                                crate::memory::distiller::evidence_taint_tests::status_is_quarantined
+                            ),
+                        "SCHEDULE FIRE: QUARANTINED: {statuses:?}"
+                    );
+                }
                 return requester;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;

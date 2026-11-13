@@ -1954,21 +1954,26 @@ impl StewardStore for SqliteAgentMemoryStore {
     async fn quarantined_records(
         &self,
         realm: &str,
+        class: super::records::QuarantineClass,
         limit: usize,
     ) -> Result<Vec<super::records::MemoryRecord>, AgentMemoryError> {
         let store = self.clone();
         let realm = realm.to_string();
         run_blocking(move || {
             store.with_realm_conn(&realm, |conn| {
+                // The class rides in the provenance JSON (§10.1); a record
+                // quarantined before the class existed reads as tainted.
                 let mut stmt = conn
                     .prepare(&format!(
                         "SELECT {RECORD_COLUMNS} FROM records \
                          WHERE status_kind = 'quarantined' \
+                         AND COALESCE(json_extract(provenance, '$.quarantine_class'), \
+                         'tainted') = ?2 \
                          ORDER BY created_at_ms DESC LIMIT ?1"
                     ))
                     .map_err(sql_err)?;
                 let rows = stmt
-                    .query_map(params![limit as i64], row_to_record_row)
+                    .query_map(params![limit as i64, class.as_str()], row_to_record_row)
                     .map_err(sql_err)?;
                 let mut records = Vec::new();
                 for row in rows {
@@ -3188,7 +3193,7 @@ fn apply_batch_tx(
 ) -> Result<CommitReceipt, AgentMemoryError> {
     let quarantine = batch_quarantine_reason(batch, gate, events);
     let tx = conn.transaction().map_err(sql_err)?;
-    let receipt = apply_batch_in_tx(&tx, batch, quarantine.as_deref(), token, now, None)?;
+    let receipt = apply_batch_in_tx(&tx, batch, quarantine.as_ref(), token, now, None)?;
     tx.commit().map_err(sql_err)?;
     Ok(receipt)
 }
@@ -3199,7 +3204,7 @@ fn batch_quarantine_reason(
     batch: &StagedMutationBatch,
     gate: Option<&dyn LlmWriteGate>,
     events: Option<&dyn crate::memory::events::MemoryEventSink>,
-) -> Option<String> {
+) -> Option<crate::memory::records::QuarantineVerdict> {
     let evidence: Vec<crate::memory::records::EvidenceRef> = batch
         .ops
         .iter()
@@ -3211,8 +3216,8 @@ fn batch_quarantine_reason(
         })
         .collect();
     let quarantine =
-        gate.and_then(|gate| gate.quarantine_reason(&batch.author, batch.kind, &evidence));
-    if let Some(reason) = quarantine.as_deref() {
+        gate.and_then(|gate| gate.quarantine_verdict(&batch.author, batch.kind, &evidence));
+    if let Some(reason) = quarantine.as_ref().map(|verdict| verdict.reason.as_str()) {
         tracing::warn!(
             realm = %batch.realm,
             author = ?batch.author,
@@ -3239,7 +3244,7 @@ fn batch_quarantine_reason(
 fn apply_batch_in_tx(
     conn: &Connection,
     batch: &StagedMutationBatch,
-    quarantine: Option<&str>,
+    quarantine: Option<&crate::memory::records::QuarantineVerdict>,
     token: &str,
     now: u64,
     review: Option<&ReviewAudit>,
@@ -3263,7 +3268,7 @@ fn apply_batch_in_tx(
             "op": op.kind_str(),
             "author": batch.author,
             "rationale": op_rationale(op),
-            "quarantined": quarantine,
+            "quarantined": quarantine.map(|verdict| verdict.reason.as_str()),
         });
         if let (Some(review), Some(object)) = (&review, detail.as_object_mut()) {
             object.insert("review".to_string(), review.clone());
@@ -3425,7 +3430,7 @@ fn review_in_tx(
     apply_batch_in_tx(
         conn,
         &batch,
-        quarantine.as_deref(),
+        quarantine.as_ref(),
         &token,
         now,
         Some(&review),
@@ -3686,7 +3691,7 @@ fn apply_op(
     conn: &Connection,
     batch: &StagedMutationBatch,
     op: &StagedOp,
-    quarantine: Option<&str>,
+    quarantine: Option<&crate::memory::records::QuarantineVerdict>,
     now: u64,
 ) -> Result<MemoryId, AgentMemoryError> {
     match op {
@@ -3826,7 +3831,7 @@ fn insert_record(
     supersedes: Option<MemoryId>,
     working_set_rank: Option<i64>,
     rank_set_at_ms: Option<i64>,
-    quarantine: Option<&str>,
+    quarantine: Option<&crate::memory::records::QuarantineVerdict>,
     created_at_ms: u64,
     updated_at_ms: u64,
 ) -> Result<(), AgentMemoryError> {
@@ -3836,11 +3841,14 @@ fn insert_record(
         author: author.clone(),
         profile: None,
         verification: record.verification.clone(),
+        // §10.1: the verdict's durable class rides with the record, so the
+        // review readers can bound each class on its own.
+        quarantine_class: quarantine.map(|verdict| verdict.class),
     };
     // §10.1: the gate's verdict lands as row status. Quarantined records are
-    // write-only — every read surface filters on status_kind = 'active'.
+    // write-only; every read surface filters on status_kind = 'active'.
     let (status_kind, status_detail) = match quarantine {
-        Some(reason) => ("quarantined", Some(reason)),
+        Some(verdict) => ("quarantined", Some(verdict.reason.as_str())),
         None => ("active", None),
     };
     // §10.2 durable taint: set when landing quarantined, inherited from any
@@ -5692,6 +5700,8 @@ mod tests {
             generation: 0,
             revision: None,
             range: None,
+            clean_input: None,
+            declared_tainted_input: false,
         }]
     }
 
@@ -6332,15 +6342,44 @@ mod tests {
                 generation: 1,
                 revision: None,
                 range: Some((0, 3)),
+                clean_input: None,
+                declared_tainted_input: false,
             }],
             ..payload(title, "Distilled body")
         };
+        // Evidence-scoped taint: the distiller stamps the proven-clean input
+        // of the call that produced the record.
+        let with_clean_input = |title: &str, session: &str| {
+            let mut record = with_evidence(title, session);
+            record.evidence[0].clean_input = Some(crate::memory::records::CleanExtractionInput {
+                rows: vec![0, 3],
+                digest: crate::memory::records::CleanExtractionInput::digest_rows([
+                    (0, "user", "first"),
+                    (3, "user", "second"),
+                ]),
+            });
+            record
+        };
 
-        // Clean evidence: lands Active, tier-ceilinged at AgentObserved.
+        // Unknown evidence (no proven-clean input) quarantines even when no
+        // session fact matches: a missing trust fact is never clean.
         let receipt = store
             .remember_authored(
                 &scope,
-                with_evidence("Clean fact", "sess-clean"),
+                with_evidence("Unknown fact", "sess-clean"),
+                author.clone(),
+            )
+            .await?;
+        let RecordStatus::Quarantined { reason } = &receipt.status else {
+            return Err(format!("expected quarantine, got {:?}", receipt.status).into());
+        };
+        assert!(reason.contains("not proven clean"), "{reason}");
+
+        // Proven-clean input: lands Active, tier-ceilinged at AgentObserved.
+        let receipt = store
+            .remember_authored(
+                &scope,
+                with_clean_input("Clean fact", "sess-clean"),
                 author.clone(),
             )
             .await?;
@@ -6749,6 +6788,8 @@ mod tests {
                 generation: 1,
                 revision: None,
                 range: Some((4, 7)),
+                clean_input: None,
+                declared_tainted_input: false,
             }],
             ..payload(title, body)
         }

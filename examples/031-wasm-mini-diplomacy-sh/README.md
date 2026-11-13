@@ -84,7 +84,7 @@ checkout names into a scratch directory, so nothing is left in the checkout:
 ```bash
 WEB_VERSION="$(node -p "require('./sdks/web/package.json').version")"
 SCRATCH="$(mktemp -d)"
-PACKED="$(cd "$SCRATCH" && npm pack --silent "@rkat/web@$WEB_VERSION")"
+PACKED="$(cd "$SCRATCH" && npm pack --loglevel=error "@rkat/web@$WEB_VERSION")"
 tar -xzf "$SCRATCH/$PACKED" -C "$SCRATCH" package/wasm
 export MEERKAT_WASM="$SCRATCH/package/wasm/meerkat_web_runtime_bg.wasm"
 ```

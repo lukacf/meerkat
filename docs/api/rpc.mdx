@@ -240,7 +240,7 @@ of this full catalog.
 | `mob/claim_callback_route` | Mob | `MobClaimCallbackRouteParams` | `MobClaimCallbackRouteResult` | Bind a mob's member callback route to this connection with the mob's claim token (mob feature) |
 | `mob/submit_work` | Mob | `MobSubmitWorkParams` | `MobSubmitWorkResult` | Submit a unit of work to a mob member through the work lane (mob feature) |
 | `mob/conclude_objective` | Mob | `MobConcludeObjectiveParams` | `MobConcludeObjectiveResult` | Explicitly conclude a durable kickoff objective (mob feature) |
-| `mob/cancel_work` | Mob | `MobCancelWorkParams` | `MobCancelWorkResult` | Cancel a previously submitted unit of work (mob feature) |
+| `mob/cancel_work` | Mob | `MobCancelWorkParams` | `MobCancelWorkResult` | Always refused: per-unit cancellation is unsupported and nothing is cancelled; see [Cancel work](/guides/mobs#cancel-work) (mob feature) |
 | `mob/cancel_all_work` | Mob | `MobCancelAllWorkParams` | `MobCancelAllWorkResult` | Cancel all in-flight work for a mob member (mob feature) |
 | `mob/wait_kickoff` | Mob | `MobWaitParams` | `MobWaitMembersResult` | Wait for kickoff completion for a member (mob feature) |
 | `mob/wait_ready` | Mob | `MobWaitParams` | `MobWaitMembersResult` | Wait for mob startup readiness (members bound but kickoff not required, mob feature) |

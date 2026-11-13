@@ -52,6 +52,8 @@ mod seat_comms_key;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod seat_declared_wiring;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod shared_transport_key_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod startup_binding_release;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod store_owned_identity_rows;
@@ -15368,6 +15370,50 @@ struct PersistentMockAgent {
     session: Session,
     llm_identity: SessionLlmIdentity,
     transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
+    /// The comms runtime of a session a row gave a key seed
+    /// ([`set_persistent_mock_comms_seed`]); no other session has one.
+    comms: Option<Arc<MockCommsRuntime>>,
+}
+
+/// What a row asked [`PersistentMockBuilder`] to build one session with.
+struct PersistentMockComms {
+    /// The seed of the key the session's comms runtime loads.
+    seed: String,
+    /// How often the session was built since it was given a seed.
+    builds: u64,
+}
+
+/// The sessions [`PersistentMockBuilder`] builds with a comms runtime. Keyed
+/// by session id, which no two rows share.
+fn persistent_mock_comms() -> &'static Mutex<HashMap<SessionId, PersistentMockComms>> {
+    static COMMS: OnceLock<Mutex<HashMap<SessionId, PersistentMockComms>>> = OnceLock::new();
+    COMMS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// From its next build on, [`PersistentMockBuilder`] builds `session` with a
+/// comms runtime that loads the key of `seed`: two sessions given one seed
+/// come up on one transport key. A session never given a seed is built
+/// without a comms runtime.
+fn set_persistent_mock_comms_seed(session: &SessionId, seed: &str) {
+    persistent_mock_comms()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(session.clone())
+        .and_modify(|comms| comms.seed = seed.to_string())
+        .or_insert_with(|| PersistentMockComms {
+            seed: seed.to_string(),
+            builds: 0,
+        });
+}
+
+/// How often [`PersistentMockBuilder`] built `session` since the session was
+/// given a key seed.
+fn persistent_mock_comms_builds(session: &SessionId) -> u64 {
+    persistent_mock_comms()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(session)
+        .map_or(0, |comms| comms.builds)
 }
 
 #[async_trait]
@@ -15466,6 +15512,12 @@ impl SessionAgent for PersistentMockAgent {
     fn transient_turn_context_state(&self) -> meerkat_core::TransientTurnContextStateHandle {
         self.transient_turn_context_state.clone()
     }
+
+    fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        self.comms
+            .clone()
+            .map(|comms| comms as Arc<dyn meerkat_core::agent::CommsRuntime>)
+    }
 }
 
 struct PersistentMockBuilder;
@@ -15525,10 +15577,38 @@ impl SessionAgentBuilder for PersistentMockBuilder {
                 )))
             })?;
         }
+        // A session a row gave a key seed is built with a comms runtime on
+        // that key, and the build is counted.
+        let seed = persistent_mock_comms()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(session.id())
+            .map(|comms| {
+                comms.builds += 1;
+                comms.seed.clone()
+            });
+        let comms = seed.map(|seed| {
+            let mut comms = MockCommsRuntime::new(
+                &seed,
+                MockCommsBehavior::default(),
+                session.id().clone(),
+                None,
+            );
+            if let Some(name) = req
+                .build
+                .as_ref()
+                .and_then(|build| build.comms_name.clone())
+            {
+                comms.default_address = format!("inproc://{name}");
+                comms.default_name = name;
+            }
+            Arc::new(comms)
+        });
         Ok(PersistentMockAgent {
             session,
             llm_identity: test_llm_identity(req.model.clone()),
             transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
+            comms,
         })
     }
 }

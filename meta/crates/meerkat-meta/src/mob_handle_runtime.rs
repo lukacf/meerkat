@@ -1151,9 +1151,45 @@ struct PreBuildMobSessionService {
     /// false and Meerkat refuses a durable profile's spawn
     /// (`MobError::NonDurableService`). Every other layer forwards.
     member_sessions_in_memory: bool,
+    /// The one member place of a composition whose members run on socket
+    /// comms ([`crate::member_socket_place`]), on the layer
+    /// [`with_member_socket_place`] adds and on no other: every member
+    /// create and every durable fork through that layer claims it before
+    /// anything is built or copied.
+    member_socket_place: Option<Arc<crate::member_socket_place::MemberSocketPlace>>,
 }
 
 impl PreBuildMobSessionService {
+    /// The claim of the member socket place for the member `req` builds,
+    /// taken before the request is prepared. `None` on a layer without a
+    /// place and for a request without a mob member binding (a plain
+    /// session), which pass.
+    async fn claim_member_socket_place(
+        &self,
+        req: &CreateSessionRequest,
+    ) -> Result<Option<crate::member_socket_place::MemberSocketClaim>, SessionError> {
+        match req
+            .build
+            .as_ref()
+            .and_then(|build| build.mob_member_binding.as_ref())
+        {
+            Some(binding) => self.claim_member_socket_place_for(binding).await,
+            None => Ok(None),
+        }
+    }
+
+    /// As [`Self::claim_member_socket_place`], for the member a durable fork
+    /// seats.
+    async fn claim_member_socket_place_for(
+        &self,
+        binding: &meerkat_core::MobMemberBinding,
+    ) -> Result<Option<crate::member_socket_place::MemberSocketClaim>, SessionError> {
+        match self.member_socket_place.as_ref() {
+            Some(place) => place.claim(self.inner.as_ref(), binding).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// Project the RuntimeStore-owned archived terminal onto a revivable
     /// resume read (see `archived_terminal_authority`). Read-side only: the
     /// returned document copy carries the store-owned fact; nothing is
@@ -1374,6 +1410,26 @@ fn with_pre_build_hook(
         runtime_adapter_override: None,
         archived_terminal_authority: None,
         member_sessions_in_memory: false,
+        member_socket_place: None,
+    })
+}
+
+/// `inner` behind one more layer that claims `place` for every member create
+/// and every durable fork, before anything is built or copied, and forwards
+/// everything else.
+fn with_member_socket_place(
+    inner: Arc<dyn MobSessionService>,
+    place: Arc<crate::member_socket_place::MemberSocketPlace>,
+) -> Arc<dyn MobSessionService> {
+    Arc::new(PreBuildMobSessionService {
+        inner,
+        hook: no_op_pre_build_hook(),
+        dispatch_taint: None,
+        after_create_hook: None,
+        runtime_adapter_override: None,
+        archived_terminal_authority: None,
+        member_sessions_in_memory: false,
+        member_socket_place: Some(place),
     })
 }
 
@@ -3685,6 +3741,10 @@ pub(crate) struct AgentMobToolsInstall {
     /// A host job source was composed after the state was bound: bootstrap
     /// rebuilds and rebinds it even when nothing else changed.
     host_job_source_changed: bool,
+    /// The session service took the member socket place's layer after the
+    /// state was built on it: bootstrap rebuilds the state on the layered
+    /// service even when nothing else changed.
+    member_socket_place_added: bool,
     /// How the installed state's mobs restore their members.
     restore: AgentMobRestore,
 }
@@ -3809,6 +3869,7 @@ fn install_agent_mob_tools(
         delivery,
         child_mob_root: None,
         host_job_source_changed: false,
+        member_socket_place_added: false,
         restore,
     };
     Ok((
@@ -4378,9 +4439,13 @@ macro_rules! delegate_mob_session_service {
                 &self,
                 req: CreateSessionRequest,
             ) -> Result<meerkat_core::types::RunResult, SessionError> {
+                let member_socket_claim = self.claim_member_socket_place(&req).await?;
                 let (req, context, capability_context) =
                     self.prepare_create_request(req).await?;
                 let result = self.inner.create_session(req).await?;
+                if let Some(claim) = member_socket_claim {
+                    claim.built(&result.session_id);
+                }
                 Ok(self
                     .complete_create(result, context, capability_context)
                     .await)
@@ -5027,12 +5092,16 @@ macro_rules! delegate_mob_session_service {
                 &self,
                 req: meerkat_core::service::CreateSessionRequest,
             ) -> Result<meerkat_core::RunResult, SessionError> {
+                let member_socket_claim = self.claim_member_socket_place(&req).await?;
                 let (req, context, capability_context) =
                     self.prepare_create_request(req).await?;
                 let result = self
                     .inner
                     .create_session_under_runtime_turn_boundary(req)
                     .await?;
+                if let Some(claim) = member_socket_claim {
+                    claim.built(&result.session_id);
+                }
                 Ok(self
                     .complete_create(result, context, capability_context)
                     .await)
@@ -5047,6 +5116,7 @@ macro_rules! delegate_mob_session_service {
                 resume_preparation: Option<meerkat_mob::SessionResumePreparationReceipt>,
                 actor_witness_slot: &meerkat_session::LiveSessionActorWitnessSlot,
             ) -> Result<meerkat_core::RunResult, SessionError> {
+                let member_socket_claim = self.claim_member_socket_place(&req).await?;
                 let (req, context, capability_context) =
                     self.prepare_create_request(req).await?;
                 let result = self
@@ -5057,6 +5127,9 @@ macro_rules! delegate_mob_session_service {
                         actor_witness_slot,
                     )
                     .await?;
+                if let Some(claim) = member_socket_claim {
+                    claim.built(&result.session_id);
+                }
                 Ok(self
                     .complete_create(result, context, capability_context)
                     .await)
@@ -5066,6 +5139,7 @@ macro_rules! delegate_mob_session_service {
                 req: meerkat_core::service::CreateSessionRequest,
                 authorization: meerkat_runtime::ArchivedSessionActorMaterializationAuthorization,
             ) -> Result<meerkat_core::RunResult, SessionError> {
+                let member_socket_claim = self.claim_member_socket_place(&req).await?;
                 let (req, context, capability_context) =
                     self.prepare_create_request(req).await?;
                 let result = self
@@ -5075,6 +5149,9 @@ macro_rules! delegate_mob_session_service {
                         authorization,
                     )
                     .await?;
+                if let Some(claim) = member_socket_claim {
+                    claim.built(&result.session_id);
+                }
                 Ok(self
                     .complete_create(result, context, capability_context)
                     .await)
@@ -5089,6 +5166,7 @@ macro_rules! delegate_mob_session_service {
                 resume_preparation: meerkat_mob::SessionResumePreparationReceipt,
                 actor_witness_slot: &meerkat_session::LiveSessionActorWitnessSlot,
             ) -> Result<meerkat_core::RunResult, SessionError> {
+                let member_socket_claim = self.claim_member_socket_place(&req).await?;
                 let (req, context, capability_context) =
                     self.prepare_create_request(req).await?;
                 let result = self
@@ -5100,6 +5178,9 @@ macro_rules! delegate_mob_session_service {
                         actor_witness_slot,
                     )
                     .await?;
+                if let Some(claim) = member_socket_claim {
+                    claim.built(&result.session_id);
+                }
                 Ok(self
                     .complete_create(result, context, capability_context)
                     .await)
@@ -5299,14 +5380,23 @@ macro_rules! delegate_mob_session_service {
                 target: meerkat_core::DurableSessionForkTarget,
             ) -> Result<meerkat_core::SessionForkResult, SessionError> {
                 refuse_runtime_plane_fork(&target)?;
-                self.inner
+                // Before the transcript is copied: the child is a member.
+                let member_socket_claim = self
+                    .claim_member_socket_place_for(&target.member_binding)
+                    .await?;
+                let forked = self
+                    .inner
                     .fork_persisted_session(
                         source_session_id,
                         message_count,
                         tool_access_policy,
                         target,
                     )
-                    .await
+                    .await?;
+                if let Some(claim) = member_socket_claim {
+                    claim.built(&forked.session_id);
+                }
+                Ok(forked)
             }
 
             // meerkat 0.8.41 made `fork_persisted_session_at_turn_boundary` REQUIRED so
@@ -5365,7 +5455,12 @@ macro_rules! delegate_mob_session_service {
                 bound: std::time::Duration,
             ) -> Result<meerkat_core::DurableForkAtTurnBoundary, SessionError> {
                 refuse_runtime_plane_fork(&target)?;
-                self.inner
+                // Before the transcript is copied: the child is a member.
+                let member_socket_claim = self
+                    .claim_member_socket_place_for(&target.member_binding)
+                    .await?;
+                let outcome = self
+                    .inner
                     .fork_persisted_session_at_turn_boundary(
                         source_session_id,
                         message_count,
@@ -5373,7 +5468,14 @@ macro_rules! delegate_mob_session_service {
                         target,
                         bound,
                     )
-                    .await
+                    .await?;
+                // A busy source forked nothing: the claim is dropped.
+                if let (Some(claim), meerkat_core::DurableForkAtTurnBoundary::Forked(forked)) =
+                    (member_socket_claim, &outcome)
+                {
+                    claim.built(&forked.session_id);
+                }
+                Ok(outcome)
             }
             async fn load_persisted_session_metadata(
                 &self,
@@ -5443,12 +5545,16 @@ macro_rules! delegate_mob_session_service {
                 req: meerkat_core::service::CreateSessionRequest,
                 authorization: meerkat_runtime::ArchivedSessionActorMaterializationAuthorization,
             ) -> Result<meerkat_core::RunResult, SessionError> {
+                let member_socket_claim = self.claim_member_socket_place(&req).await?;
                 let (req, context, capability_context) =
                     self.prepare_create_request(req).await?;
                 let result = self
                     .inner
                     .create_session_with_machine_archived_resume_authority(req, authorization)
                     .await?;
+                if let Some(claim) = member_socket_claim {
+                    claim.built(&result.session_id);
+                }
                 Ok(self
                     .complete_create(result, context, capability_context)
                     .await)
@@ -7638,6 +7744,7 @@ impl MobBootstrapSpec {
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         }) as Arc<dyn MobSessionService>;
         Self {
             definition,
@@ -8169,6 +8276,37 @@ impl MobBootstrapSpec {
         }
     }
 
+    /// Whether the members run on socket comms (tcp or uds), by the host
+    /// config their builder was given: their transport key then belongs to
+    /// the realm rather than to a member's session.
+    fn members_run_on_socket_comms(&self) -> bool {
+        self.member_model_config.as_ref().is_some_and(|config| {
+            !matches!(config.comms.mode, meerkat_core::CommsRuntimeMode::Inproc)
+        })
+    }
+
+    /// One member for a composition whose members run on socket comms
+    /// ([`crate::member_socket_place`]): the root mob's session service and
+    /// the one the agent mob tools build child mobs with each get a layer
+    /// that claims one shared place for every member create and every
+    /// durable fork, before anything is built or copied. Bootstrap adds it
+    /// once, outside every layer the constructors and the host added, and
+    /// before the agent mob-tool state is rebuilt on its service. Nothing
+    /// changes for members on in-process comms.
+    fn install_member_socket_place(&mut self) {
+        if !self.members_run_on_socket_comms() {
+            return;
+        }
+        let place = crate::member_socket_place::MemberSocketPlace::new();
+        self.session_service =
+            with_member_socket_place(Arc::clone(&self.session_service), Arc::clone(&place));
+        if let Some(install) = self.agent_mob_tools_install.as_mut() {
+            install.session_service =
+                with_member_socket_place(Arc::clone(&install.session_service), place);
+            install.member_socket_place_added = true;
+        }
+    }
+
     /// Reinstall the agent mob tools with the final child policy. The
     /// constructors install them before a host can set the registry, the
     /// child policy or a child-available bundle, so bootstrap applies those
@@ -8213,6 +8351,7 @@ impl MobBootstrapSpec {
             && same_child_root
             && install.restore == restore
             && !install.host_job_source_changed
+            && !install.member_socket_place_added
         {
             return Ok(());
         }
@@ -8279,6 +8418,7 @@ impl MobBootstrapSpec {
             install.forked_participant_store = forked_participant_store;
             install.child_mob_root = child_mob_root;
             install.host_job_source_changed = false;
+            install.member_socket_place_added = false;
             install.restore = restore;
         }
         if durable.is_none() {
@@ -8698,6 +8838,7 @@ impl MobBootstrapSpec {
             runtime_adapter_override: acquired.clone(),
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         });
         self.runtime_adapter = acquired;
         Ok(self)
@@ -8754,6 +8895,7 @@ impl MobBootstrapSpec {
             runtime_adapter_override: None,
             archived_terminal_authority: Some(runtime_store),
             member_sessions_in_memory: false,
+            member_socket_place: None,
         });
         self
     }
@@ -8937,6 +9079,7 @@ impl MobBootstrapSpec {
             runtime_adapter_override: effective_runtime_adapter.clone(),
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         }) as Arc<dyn MobSessionService>;
         // Wrap first and install the agent mob tools on the spec's final
         // service: child mobs are built on the tools' session service, so
@@ -9582,6 +9725,7 @@ impl MobBootstrapSpec {
             runtime_adapter_override: Some(Arc::clone(&runtime_adapter)),
             archived_terminal_authority: Some(archived_terminal_authority),
             member_sessions_in_memory: false,
+            member_socket_place: None,
         }) as Arc<dyn MobSessionService>;
         // Wrap first and install the agent mob tools on the spec's final
         // service: child mobs are built on the tools' session service, so
@@ -10016,6 +10160,7 @@ impl MobBootstrapSpec {
             // process-local memory: the member sessions do not outlive the
             // process, so a durable profile is refused here.
             member_sessions_in_memory: !has_provider_session_store,
+            member_socket_place: None,
         }) as Arc<dyn MobSessionService>;
         // Wrap first and install the agent mob tools on the spec's final
         // service: child mobs are built on the tools' session service, so
@@ -11152,6 +11297,9 @@ impl MobRuntime {
                 .map_err(MobRuntimeError::Delivery)?;
             delivery.preflight().map_err(MobRuntimeError::Delivery)?;
         }
+        // Before the agent mob-tool state is rebuilt and before the mob is
+        // built: both then hold the layered services.
+        spec.install_member_socket_place();
         spec.apply_agent_mob_child_policy()?;
         #[cfg(feature = "extension-state")]
         if let Some(servers) = spec.child_mcp_servers.take() {
@@ -14880,6 +15028,378 @@ mod tests {
         );
     }
 
+    /// A member build request for `member` of `mob`.
+    fn socket_member_request(mob: &str, member: &str) -> CreateSessionRequest {
+        CreateSessionRequest {
+            model: "gpt-5.5".to_string(),
+            prompt: meerkat_core::ContentInput::Text("go".to_string()),
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                    mob_id: mob.to_string(),
+                    role: "worker".to_string(),
+                    member: member.to_string(),
+                }),
+                ..Default::default()
+            }),
+            labels: None,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::default(),
+            injected_context: Vec::new(),
+        }
+    }
+
+    /// The durable fork target that seats `member` of `mob`.
+    fn socket_fork_target(mob: &str, member: &str) -> meerkat_core::DurableSessionForkTarget {
+        meerkat_core::DurableSessionForkTarget {
+            member_binding: meerkat_core::MobMemberBinding {
+                mob_id: mob.to_string(),
+                role: "worker".to_string(),
+                member: member.to_string(),
+            },
+            cache_identity: None,
+            source_admission: meerkat_core::DurableForkSourceAdmission::default(),
+            inherited_instructions: meerkat_core::ForkInstructionPolicy::default(),
+            declared_instructions: meerkat_core::ForkInstructionPolicy::default(),
+        }
+    }
+
+    /// A spec over `probe` whose members run on socket comms, with the
+    /// member socket place bootstrap installs.
+    fn socket_member_spec(probe: &Arc<ForwardingProbe>) -> MobBootstrapSpec {
+        let definition = MobDefinition::from_toml(
+            "[mob]\nid = \"socket\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n",
+        )
+        .expect("definition");
+        let mut config = meerkat::Config::default();
+        config.comms.mode = meerkat_core::CommsRuntimeMode::Tcp;
+        config.comms.address = Some("127.0.0.1:0".to_string());
+        let mut spec = MobBootstrapSpec::new(
+            definition,
+            MobStorage::in_memory(),
+            Arc::clone(probe) as Arc<dyn MobSessionService>,
+        )
+        .with_member_model_config(Arc::new(config));
+        spec.install_member_socket_place();
+        spec
+    }
+
+    /// Whether the probe answers that a session is live. It keeps no durable
+    /// record, so this is what the place reads for a holder's session.
+    fn set_probe_sessions_live(probe: &ForwardingProbe, live: bool) {
+        *probe.failed_snapshot.lock().expect("failed snapshot") = Some(FailedSnapshot {
+            live: Some(live),
+            persisted: false,
+        });
+    }
+
+    /// The refusal of `member`: it names the refused member only.
+    fn socket_place_refusal(member: &str) -> String {
+        format!(
+            "member '{member}' cannot be created: this gateway's members run on socket comms \
+             (member_comms_address, or [comms] mode tcp or uds), which serve one member per \
+             gateway, and another member of this gateway already holds its comms key. Retire \
+             that member first, or run the members on in-process comms."
+        )
+    }
+
+    /// `refused` is exactly the refusal of `member`, with no data: so it
+    /// carries nothing of the member that holds the place.
+    fn assert_socket_place_refusal(refused: &SessionError, member: &str) {
+        assert_eq!(refused.to_string(), socket_place_refusal(member));
+        let SessionError::FailedWithData { data, .. } = refused else {
+            panic!("the refusal is a plain session error: {refused:?}");
+        };
+        assert!(data.is_null(), "the refusal carries no data: {data}");
+    }
+
+    /// With socket comms the composition serves one member. While the first
+    /// member's session exists, another member's create is refused before
+    /// the inner service sees it, with the text that names the refused member
+    /// only; the holder's own rebuild and a plain session pass; once the
+    /// holder's session is gone (a retired member) the next member takes the
+    /// place.
+    #[tokio::test]
+    async fn a_second_socket_member_is_refused_before_its_build_while_the_first_holds_the_place() {
+        let probe = Arc::new(ForwardingProbe::default());
+        probe
+            .accept_creates
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        set_probe_sessions_live(&probe, true);
+        let spec = socket_member_spec(&probe);
+        let service = spec.session_service.as_ref();
+        let create =
+            |request| meerkat_core::service::SessionService::create_session(service, request);
+        let creates = || {
+            probe
+                .calls()
+                .into_iter()
+                .filter(|call| *call == "create_session")
+                .count()
+        };
+
+        create(socket_member_request("socket", "alice"))
+            .await
+            .expect("the first member is built");
+        let refused = create(socket_member_request("socket", "carol"))
+            .await
+            .expect_err("a second member while the first holds the place");
+        assert_socket_place_refusal(&refused, "carol");
+        let refused = create(socket_member_request("another-mob", "dave"))
+            .await
+            .expect_err("a member of another mob of the composition");
+        assert_socket_place_refusal(&refused, "dave");
+        assert_eq!(creates(), 1, "a refused member reaches no build");
+
+        create(socket_member_request("socket", "alice"))
+            .await
+            .expect("the holder's own rebuild");
+        let mut plain = socket_member_request("socket", "nobody");
+        plain.build = None;
+        create(plain)
+            .await
+            .expect("a plain session is not a member");
+        assert_eq!(creates(), 3);
+
+        // The holder's session is gone: archived with its member.
+        set_probe_sessions_live(&probe, false);
+        create(socket_member_request("socket", "carol"))
+            .await
+            .expect("the next member takes the freed place");
+        set_probe_sessions_live(&probe, true);
+        let refused = create(socket_member_request("socket", "alice"))
+            .await
+            .expect_err("the earlier member while the next one holds the place");
+        assert_socket_place_refusal(&refused, "alice");
+    }
+
+    /// A create that fails gives the place back at once, and a create that
+    /// is still running holds it.
+    #[tokio::test]
+    async fn a_failed_socket_member_create_gives_the_place_back_and_a_running_one_holds_it() {
+        let probe = Arc::new(ForwardingProbe::default());
+        set_probe_sessions_live(&probe, true);
+        let spec = socket_member_spec(&probe);
+        let service = spec.session_service.as_ref();
+        let create =
+            |request| meerkat_core::service::SessionService::create_session(service, request);
+
+        create(socket_member_request("socket", "alice"))
+            .await
+            .expect_err("the probe refuses every create for now");
+        probe
+            .accept_creates
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        create(socket_member_request("socket", "carol"))
+            .await
+            .expect("the place was given back, so the next member is built");
+
+        // A claim that has not ended holds the place whatever the session
+        // read says.
+        let place = crate::member_socket_place::MemberSocketPlace::new();
+        let erin = meerkat_core::MobMemberBinding {
+            mob_id: "socket".to_string(),
+            role: "worker".to_string(),
+            member: "erin".to_string(),
+        };
+        let frank = meerkat_core::MobMemberBinding {
+            member: "frank".to_string(),
+            ..erin.clone()
+        };
+        set_probe_sessions_live(&probe, false);
+        let running = place
+            .claim(probe.as_ref(), &erin)
+            .await
+            .expect("the first claim");
+        let refused = place
+            .claim(probe.as_ref(), &frank)
+            .await
+            .err()
+            .expect("a second member while the first one's create runs");
+        assert_socket_place_refusal(&refused, "frank");
+        drop(running);
+        let _frank = place
+            .claim(probe.as_ref(), &frank)
+            .await
+            .expect("the dropped claim gave the place back");
+    }
+
+    /// A durable fork seats a member: it is refused before the inner
+    /// service forks the transcript.
+    #[tokio::test]
+    async fn a_durable_fork_is_refused_before_its_transcript_is_copied_while_another_member_holds_the_place()
+     {
+        let probe = Arc::new(ForwardingProbe::default());
+        probe
+            .accept_creates
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        set_probe_sessions_live(&probe, true);
+        let spec = socket_member_spec(&probe);
+        let service = spec.session_service.as_ref();
+        meerkat_core::service::SessionService::create_session(
+            service,
+            socket_member_request("socket", "alice"),
+        )
+        .await
+        .expect("the first member is built");
+        let source = meerkat_core::types::SessionId::new();
+
+        let refused = service
+            .fork_persisted_session(&source, None, None, socket_fork_target("socket", "fork"))
+            .await
+            .expect_err("a durable fork while another member holds the place");
+        assert_socket_place_refusal(&refused, "fork");
+        let refused = service
+            .fork_persisted_session_at_turn_boundary(
+                &source,
+                None,
+                None,
+                socket_fork_target("socket", "fork"),
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect_err("a durable fork at the turn boundary");
+        assert_socket_place_refusal(&refused, "fork");
+        let forks: Vec<_> = probe
+            .calls()
+            .into_iter()
+            .filter(|call| call.contains("fork"))
+            .collect();
+        assert!(
+            forks.is_empty(),
+            "the refusal precedes the transcript copy: {forks:?}"
+        );
+
+        // The holder's own fork target reaches the inner service.
+        let _ = service
+            .fork_persisted_session_at_turn_boundary(
+                &source,
+                None,
+                None,
+                socket_fork_target("socket", "alice"),
+                std::time::Duration::from_secs(1),
+            )
+            .await;
+        assert!(
+            probe
+                .calls()
+                .contains(&"fork_persisted_session_at_turn_boundary"),
+            "{:?}",
+            probe.calls()
+        );
+    }
+
+    /// The member that holds the place may be private to a person. A
+    /// refusal carries nothing of it for a caller who is not that person:
+    /// the same sentence as for any holder, and no data.
+    #[tokio::test]
+    async fn a_socket_place_refusal_carries_nothing_of_a_private_holder() {
+        let probe = Arc::new(ForwardingProbe::default());
+        probe
+            .accept_creates
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        set_probe_sessions_live(&probe, true);
+        let spec = socket_member_spec(&probe);
+        let service = spec.session_service.as_ref();
+        let private_to = |person: &str| {
+            Some(BTreeMap::from([(
+                crate::access::PRIVATE_TO_LABEL.to_string(),
+                person.to_string(),
+            )]))
+        };
+
+        let mut holder = socket_member_request("holders-mob", "private-notes");
+        holder.labels = private_to("person-a");
+        let built = meerkat_core::service::SessionService::create_session(service, holder)
+            .await
+            .expect("the private member is built");
+        let mut other = socket_member_request("socket", "carol");
+        other.labels = private_to("person-b");
+        let refused = meerkat_core::service::SessionService::create_session(service, other)
+            .await
+            .expect_err("another person's member while the private member holds the place");
+        assert_socket_place_refusal(&refused, "carol");
+        let shown = format!("{refused} {refused:?}");
+        for fact in [
+            "private-notes",
+            "holders-mob",
+            "person-a",
+            &built.session_id.to_string(),
+        ] {
+            assert!(
+                !shown.contains(fact),
+                "the refusal carries {fact:?} of the member that holds the place: {shown}"
+            );
+        }
+    }
+
+    /// A member whose mob refused it after the session service built it,
+    /// and archived its session in the unwind, no longer holds the place:
+    /// the next member is not refused for a claim nothing stands behind.
+    #[tokio::test]
+    async fn a_socket_member_its_mob_rolled_back_after_the_build_no_longer_holds_the_place() {
+        let probe = Arc::new(ForwardingProbe::default());
+        probe
+            .accept_creates
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        set_probe_sessions_live(&probe, true);
+        let spec = socket_member_spec(&probe);
+        let service = spec.session_service.as_ref();
+        let create =
+            |request| meerkat_core::service::SessionService::create_session(service, request);
+
+        let built = create(socket_member_request("socket", "alice"))
+            .await
+            .expect("the session service builds the member");
+        let refused = create(socket_member_request("socket", "carol"))
+            .await
+            .expect_err("another member while the built one holds the place");
+        assert_socket_place_refusal(&refused, "carol");
+
+        // The mob refuses the member it asked for and rolls its session
+        // back; the layer is told nothing but the archive itself.
+        service
+            .archive_with_mob_lifecycle_authority(&built.session_id)
+            .await
+            .expect("the unwind archives the session");
+        set_probe_sessions_live(&probe, false);
+        create(socket_member_request("socket", "carol"))
+            .await
+            .expect("no claim stands behind the rolled-back member");
+    }
+
+    /// Members on in-process comms keep their own keys: bootstrap adds no
+    /// place, and every member is built.
+    #[tokio::test]
+    async fn members_on_in_process_comms_get_no_socket_place() {
+        let probe = Arc::new(ForwardingProbe::default());
+        probe
+            .accept_creates
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        set_probe_sessions_live(&probe, true);
+        let definition = MobDefinition::from_toml(
+            "[mob]\nid = \"socket\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n",
+        )
+        .expect("definition");
+        let mut spec = MobBootstrapSpec::new(
+            definition,
+            MobStorage::in_memory(),
+            Arc::clone(&probe) as Arc<dyn MobSessionService>,
+        )
+        .with_member_model_config(Arc::new(meerkat::Config::default()));
+        spec.install_member_socket_place();
+        for member in ["alice", "carol"] {
+            meerkat_core::service::SessionService::create_session(
+                spec.session_service.as_ref(),
+                socket_member_request("socket", member),
+            )
+            .await
+            .expect("every member on in-process comms is built");
+        }
+    }
+
     /// Under a member auth binding every member build through the spec's
     /// session service is refused typed when it would make provider calls off
     /// the binding. A member rebuilt on a session whose recorded tooling
@@ -17178,6 +17698,7 @@ shell = true
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         };
 
         let (prepared, _, _) = wrapped
@@ -17230,6 +17751,7 @@ shell = true
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         };
 
         let (prepared, _, _) = wrapped
@@ -17275,6 +17797,7 @@ shell = true
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         };
 
         let (prepared, _, _) = wrapped
@@ -18481,6 +19004,7 @@ realm_profile = "worker-v2"
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         };
 
         let req = CreateSessionRequest {
@@ -20348,6 +20872,7 @@ comms = true
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         };
         let named = launch_binding_b();
         let recorded = MobSessionService::recorded_auth_binding(&wrapper, &named)
@@ -20521,6 +21046,7 @@ comms = true
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         };
 
         let created = meerkat_core::service::SessionService::create_session(&wrapper, req)
@@ -20594,6 +21120,7 @@ comms = true
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory,
+            member_socket_place: None,
         };
         let in_memory = layer(true);
         assert!(in_memory.supports_persistent_sessions());
@@ -20625,6 +21152,7 @@ comms = true
                         runtime_adapter_override: None,
                         archived_terminal_authority: None,
                         member_sessions_in_memory: false,
+                        member_socket_place: None,
                     })
                 };
                 let session_id = meerkat_core::types::SessionId::new();
@@ -20729,6 +21257,7 @@ comms = true
             runtime_adapter_override: Some(Arc::clone(&machine)),
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         };
         assert_eq!(
             MobSessionService::enqueue_committed_parent_session_boundary_after_runtime_turn(
@@ -20780,6 +21309,7 @@ comms = true
                 runtime_adapter_override: None,
                 archived_terminal_authority: None,
                 member_sessions_in_memory: false,
+                member_socket_place: None,
             })
         };
         let after_create = |inner: Arc<dyn MobSessionService>| -> Arc<dyn MobSessionService> {
@@ -21449,6 +21979,7 @@ comms = true
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         });
         let after_create: Arc<dyn MobSessionService> = Arc::new(AfterCreateMobSessionService {
             inner: probe.clone(),
@@ -21530,6 +22061,7 @@ comms = true
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         });
         let after_create: Arc<dyn MobSessionService> = Arc::new(AfterCreateMobSessionService {
             inner: Arc::clone(&inner),
@@ -21578,6 +22110,7 @@ comms = true
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         });
         let after_create: Arc<dyn MobSessionService> = Arc::new(AfterCreateMobSessionService {
             inner: Arc::clone(&inner),
@@ -21667,6 +22200,7 @@ comms = true
                         runtime_adapter_override: None,
                         archived_terminal_authority: None,
                         member_sessions_in_memory: false,
+                        member_socket_place: None,
                     })
                 };
                 let actual = wrapper.load_retained_session_metadata(&session_id).await;
@@ -21728,6 +22262,7 @@ comms = true
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         });
         let after_create: Arc<dyn MobSessionService> = Arc::new(AfterCreateMobSessionService {
             inner: Arc::clone(&inner),
@@ -21760,6 +22295,7 @@ comms = true
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         });
         let after_create: Arc<dyn MobSessionService> = Arc::new(AfterCreateMobSessionService {
             inner: Arc::clone(&inner),
@@ -21803,6 +22339,7 @@ comms = true
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         });
         let after_create: Arc<dyn MobSessionService> = Arc::new(AfterCreateMobSessionService {
             inner: Arc::clone(&inner),
@@ -21847,6 +22384,7 @@ comms = true
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         });
         let after_create: Arc<dyn MobSessionService> = Arc::new(AfterCreateMobSessionService {
             inner: probe.clone(),
@@ -22020,6 +22558,7 @@ comms = true
             runtime_adapter_override: None,
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         };
         let after_create = AfterCreateMobSessionService {
             inner: probe.clone(),
@@ -22077,6 +22616,7 @@ comms = true
             runtime_adapter_override: Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral())),
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         };
         let session_id = meerkat_core::types::SessionId::new();
         let run_id = meerkat_core::lifecycle::RunId::new();
@@ -22258,6 +22798,7 @@ comms = true
             runtime_adapter_override: Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral())),
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         };
         let session_id = meerkat_core::types::SessionId::new();
         let run_id = meerkat_core::lifecycle::RunId::new();
@@ -25035,6 +25576,7 @@ image_generation = true
                     runtime_adapter_override: Some(default.clone()),
                     archived_terminal_authority: None,
                     member_sessions_in_memory: false,
+                    member_socket_place: None,
                 }),
                 after_hook: Arc::new(|_, _| Box::pin(async {})),
             });

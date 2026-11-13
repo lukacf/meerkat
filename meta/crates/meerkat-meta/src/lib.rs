@@ -71,6 +71,7 @@ pub mod member_comms_id;
 mod member_identity_guard_tests;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod member_mcp_custody;
+pub(crate) mod member_socket_place;
 pub(crate) mod member_status_observation;
 pub mod member_tool_policy;
 pub mod memory;

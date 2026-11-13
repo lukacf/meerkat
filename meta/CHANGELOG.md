@@ -1187,6 +1187,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `meta/access/preview` on a Console that serves other runtimes reads
   those runtimes' agents before it decides, as the call it previews does.
 
+- A gateway started with `runtime_options.member_comms_address` (the
+  TypeScript builder's `memberCommsTcp`) serves one member, and now refuses
+  every other member before anything is built: `meta/ensure_member`, a
+  helper or a fork helper, a durable fork, an agent's spawn tool or
+  `delegate`, a member of a child mob, a declared roster member at its first
+  build. The members of such a gateway load one comms key, and a mob admits a
+  comms key for one member; the gateway holds that across every mob it hosts
+  (its own mob and the child mobs its members create), and the same holds
+  when the members' own `[comms]` table sets `mode = "tcp"` or `"uds"`. The
+  refusal is a session error that
+  names the refused member only ("member '<name>' cannot be created: this
+  gateway's members run on socket comms (member_comms_address, or [comms]
+  mode tcp or uds), which serve one member per gateway, and another member of
+  this gateway already holds its comms key. Retire that member first, or run
+  the members on in-process comms."). The refused member is not built, binds
+  no socket and is not recorded; the member that holds the place keeps its
+  endpoint; nothing in this fails a gateway start, and the gateway warns once
+  at its start when the option is set and the roster declares more than one
+  member. Retiring the holder frees the place, and an ensured member, a
+  helper or a fork is then built by asking
+  again. A declared roster member that was refused is listed broken with that
+  text and stays so: once the place is free, `meta/delete_identity` starts it
+  over (it never ran, so nothing is lost). A member built in an earlier start
+  and refused at its restore keeps its session and history and runs again at
+  the next start where it can. Through 0.9.14 such a member was refused only
+  after it was built. `docs/reference/configuration.mdx` ("Member socket
+  option") has the rule and what brings each kind of member back.
+
 ### Known limitations
 
 - An update cannot hand an agent's runtime mode back to its profile: to
@@ -1260,6 +1288,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   schedule whose target is the agent itself, as a member or by its
   identity, is a delivery) runs on the
   instructions the agent's conversation holds.
+
+- `meta_gateway`, `rpc_gateway`: retiring a member that the socket rule
+  refused at a start, or that a start lists broken because the gateway's
+  records hold it on a comms key another member holds, answers an error; the
+  member shows retiring and its name stays taken until the gateway restarts,
+  and the restart completes the retirement. A gateway lifts its mob at every
+  start, and the retire of such a member after a lift ends this way. Retire
+  the member, then restart the gateway.
 
 ## [0.9.14] - 2026-11-11
 

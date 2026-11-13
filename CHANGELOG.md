@@ -944,6 +944,32 @@ them.
   materialized when a rollback began and was woken during it could be left
   with such a trust entry in the same releases.)
 
+- `meerkat-mob`: a member whose comms key another member of its mob already
+  holds is refused before anything of it is recorded. The refusal is a wiring
+  error that names the refused member alone, two members spawned at the same
+  moment cannot both pass, and nothing of the refused member is left behind.
+  Through 0.9.14 such a member was left half admitted, its callers read an
+  internal error, and its mob did not start again. The member that holds the
+  key is named in one warning line of the log, not in any text a caller
+  reads.
+- `meerkat-mob`: a mob whose records already hold such a member starts,
+  whether it was running or stopped when its host went away. The member is
+  listed broken with a reason that says to retire it, holds no endpoint and
+  is never woken; the member that holds the key is untouched. Retiring the
+  broken member is enough, and the next start is clean, as long as the mob
+  has not been lifted with the member in it: for a mob that was running,
+  retire it before any stop and lift of the mob; for a mob that was stopped,
+  retire it before the mob is lifted. After a lift see Known limitations. On
+  records written before this fix, the member that is kept is the one
+  recorded first. A member whose session comes up, at a start, on a key
+  another member holds is listed broken alone in the same way, and the start
+  goes on.
+- `meerkat-mob`: a declared member that is refused because another member
+  holds its comms key is built once, not again after every retry period. It
+  is built again when its declaration changes, when a member of the mob is
+  retired, or when a spawn in the mob is rolled back. Its convergence status
+  carries the refusal.
+
 ### Security
 
 - `meerkat-core`, `rkat`: the configuration documents the engine writes are
@@ -1324,6 +1350,23 @@ them.
   succeeds and the member is removed; and a mob that is restarted from its
   storage before the rollback has recorded its start has the member seated
   with part of its edges and does not remove it by itself.
+
+- `meerkat-mob`, `meerkat-comms`: when a member is refused because another
+  member holds its comms key, that member's comms runtime has already been
+  built: the member that holds the key loses its in-process comms route, and
+  under Unix-socket comms its socket, until its own comms runtime is next
+  built (a wake after it was released, a respawn, or a restart of the
+  process). Work sent to it through the mob is not affected. Under TCP comms
+  with a fixed port, the refused member's build fails when it binds its
+  listener, before its key is judged: that is an ordinary build failure, and
+  a declared member is built again on the reconciler's retry periods.
+- `meerkat-mob`: a broken member of this kind cannot be retired cleanly once
+  its mob has been lifted with the member in it (started stopped, or stopped
+  and lifted later): the retire answers an error, the member stays retiring
+  and its name cannot be used again until the host restarts. The restart
+  completes the retirement, and the next start is clean. A host that lifts a
+  stopped mob when it starts (the Meta gateways do) always meets this: retire
+  the member, then restart the host.
 
 ## [0.9.14] - 2026-11-11
 

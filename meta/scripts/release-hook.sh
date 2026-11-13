@@ -33,7 +33,8 @@ if [ -f "$SENTINEL" ] && [ "$(cat "$SENTINEL")" = "$VERSION" ]; then
 fi
 
 echo "release-hook: bumping SDK versions to $VERSION"
-"$ROOT/scripts/bump-sdk-versions.sh" "$VERSION"
+BUMP_REPORT="$("$ROOT/scripts/bump-sdk-versions.sh" "$VERSION")"
+printf '%s\n' "$BUMP_REPORT"
 
 echo "release-hook: verifying version parity"
 "$ROOT/scripts/verify-version-parity.sh"
@@ -59,6 +60,16 @@ for forge_file in "$ROOT/installer/launchkit/guide_sdk.py" "$ROOT/installer/pypr
     git add "$forge_file"
   fi
 done
+# The other products' manifests whose pins on Meta's packages the bump moved.
+# The pin check's --write names each one, relative to the repository's top
+# level, so the hook stages exactly the files that run changed.
+moved_pin_files=()
+while IFS= read -r moved; do
+    moved_pin_files+=("$moved")
+done < <(printf '%s\n' "$BUMP_REPORT" | sed -n 's/^moved in-repo pins in //p')
+if [ ${#moved_pin_files[@]} -gt 0 ]; then
+    git -C "$(git -C "$ROOT" rev-parse --show-toplevel)" add -- "${moved_pin_files[@]}"
+fi
 # Collect the tracked BUILD.bazel paths first. A literal or glob pathspec that
 # matches nothing is FATAL to `git add`, and the release-script test fixture is
 # a synthetic repo that may carry none, so passing the pattern straight to git

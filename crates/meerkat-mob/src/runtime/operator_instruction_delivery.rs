@@ -2933,8 +2933,8 @@ mod tests {
     /// A member's failure is warned once: at its first failure, and again
     /// only when the failure's class changes or after a record landed. A
     /// retry that fails the same way keeps the last failure for the status
-    /// read and does not warn, so a failure that never clears (a service
-    /// that keeps no durable document) is one warning, not one per retry.
+    /// read and does not warn, so a failure that lasts (a session store
+    /// that stays unavailable) is one warning, not one per retry.
     /// The warning names the mob, the member and the class; the class is
     /// the closed code as hosts read it.
     #[test]

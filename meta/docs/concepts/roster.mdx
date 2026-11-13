@@ -343,6 +343,207 @@ or the member tool `spawn_member`) or into a child mob it creates
     their completion baselines, turn tickets and keyed sends, address
     identities only.
 
+## Changing an agent's instructions
+
+An agent's instructions (`additional_instructions` in its spec) are part of
+the first prompt of its conversation, and a restart resumes that
+conversation as it stands. When the text changes afterwards, the change
+reaches the agent at its next run; a run that starts within moments of the
+change may still use the earlier instructions; earlier instructions are never
+rewritten. The agent keeps its conversation: the whole current text arrives
+as one appended system entry that says it replaces the earlier version of
+the agent's standing instructions and that the rest of its system prompt is
+unchanged. The first prompt and every earlier entry stay as they are, and an
+agent that is not loaded is not woken for the change.
+
+This holds for every agent, whatever declares it:
+
+- **A configured agent.** Edit its instructions in the host's configuration.
+  A roster refresh (`meta/reconcile_identity`, or the refresh your host
+  runs) picks the edit up while the gateway runs.
+- **An agent created at run time.** Update it with
+  [`meta/identity/update`](/api/rpc#metaidentityupdate); the update records
+  the change after its commit and answers when it applies.
+
+How it works. The gateway keeps one operator instruction record per agent
+whose instructions changed, in the namespace `meerkat.identity.instructions`,
+keyed by the agent's name and written for that agent and its forks (a member
+target with Meerkat's `include_forks`; see
+[Operator instructions](/api/rpc#operator-instructions)). Meerkat's mob owns
+the delivery: the record is durable in the mob's journal, each change is the
+record's next revision, and the agent applies it at its next run start. A
+restart neither loses nor repeats it. `meta/instruction_status` shows these
+records like any other, with `"include_forks": true` on their target. The
+namespaces that start with `meerkat.identity.`
+are the platform's: `meta/set_instruction` and `meta/revoke_instruction`
+refuse them (`invalid_request`).
+
+What to know:
+
+- **A run in flight is not touched.** The entry is appended at a run start,
+  never inside a run.
+- **A fresh conversation starts from the current text.** A new agent, and
+  an agent after `meta/reset` or `meta/delete_identity`, build their first
+  prompt from the current, complete text. A reset or a delete keeps the
+  agent's record: the agent goes on with the same instructions, and its
+  forks, which keep their conversations, go on running on them. So after an
+  edit, a fresh conversation of that agent carries the instruction text in
+  its first prompt and once more as the one standing entry of the record; a
+  later change reaches it as one more entry. A record that holds another
+  text than the current one when the fresh life starts is brought up to the
+  current text first. One that cannot hold the current text (a change too
+  large to record, for one) is revoked instead, so that nothing presents an
+  earlier text to the fresh conversation as the current one. An agent whose
+  instructions never changed has no record, and nothing is appended to its
+  fresh conversation.
+- **Removing an agent** revokes its record. A removal the gateway stopped
+  right after, before the record was revoked, is completed after the next
+  start, when the gateway first compares an agent (at the start when its
+  roster lists one, else at the first delivery or change of one): the
+  record of every removed agent is revoked then. Archiving an
+  agent keeps the record. An archive, like a removal, owes the agent's last
+  conversation its harvest and distillation and an exit interview, as
+  leaving the roster does for a configured agent (they start right after
+  the agent's member retired, in no promised order against the change's
+  answer); the conversation itself stays, and the agent comes back on it
+  with its instructions as they were. A change made while the agent is archived is
+  recorded, and so is a change of an agent the host's configuration dropped
+  and lists again with other instructions; when it reaches the agent is the
+  next point.
+- **An agent seated again on its conversation** (after an unarchive, or
+  when the configuration lists it again) may be owed a record that was
+  written while no member held it. A record owed to a local member seated
+  dormant on a conversation it already has is tried at every wake a
+  delivery causes, after the conversation is loaded and before the member
+  is Live. When the member's session takes the write then (it answers
+  within 5 seconds, the mob's journal answers the read of the member's own
+  records within 5 seconds, and no other delivery to the member is in
+  flight past 5 seconds), the record is in that conversation before the run
+  that woke the member starts, and that run carries the entry once. A write
+  that fails or is not answered in time leaves the member owed: the mob
+  tries again at once when the member is Live again and then on its own
+  retry, at most 30 seconds after its previous attempt ended, and the entry
+  reaches the first run that starts after a write succeeded. A write an
+  owner refuses, or a session service that keeps no durable session
+  document, blocks the member: the record is not tried again until a write
+  selects the member again, the member is seated again, or the mob
+  restarts. Three limits: a member the mob brings up itself at a start or a
+  lift with work already queued may start that run before the write is
+  tried; a lift, a start, a warm reload and a placed member do not pass
+  this step; and the wake only tries the write, it does not guarantee it.
+- **Models that take a system instruction only ahead of the conversation**
+  apply the change once a compaction at a run's first request carries it,
+  or with a fresh conversation. The update's result says
+  `applies_after_compaction`, and `meta/instruction_status` reports such a
+  member's slot with `leading_prefix_only_lowering`. A model whose wire
+  carries no system row besides its prompt applies it only with a fresh
+  conversation.
+- **A change made while the gateway was down** (the usual way to edit a
+  configuration) is recorded after the gateway starts. For a configured
+  agent: when the gateway registers it, at its start for the agents its
+  roster lists, and later for one listed again after it was dropped. For an
+  agent created at run time: at the agent's first use after the start,
+  which is its first delivery through the gateway (a send, a dispatch, or
+  the fire of a schedule whose target is the agent itself, as a member or
+  by its identity)
+  or its first change through `meta/identity/*`, before that delivery is
+  submitted. A start reads no conversation on behalf of an agent created at
+  run time, however many there are, and a read records nothing: until that
+  first use `meta/instruction_status` shows the records written so far.
+  One limit: a run the mob starts itself with no delivery through the
+  gateway before it (a member it brings up at a start with work already
+  queued, work admitted through Meerkat's own handle, the fire of a
+  schedule whose target is the agent's session) runs on the
+  instructions the agent's conversation holds; the change is recorded by
+  the agent's first delivery or change after it. The gateway compares
+  the agent's current text with its record, or, for an agent with no record
+  yet, with the sections its conversation was built with. A conversation
+  built through 0.9.14 may not record those sections: for it nothing is
+  written then, and it keeps its first prompt's text, as through 0.9.14,
+  until the running gateway observes a change (a roster refresh, an update)
+  or the conversation is rebuilt.
+- **One edit made while the gateway was down is not seen** in this release:
+  an edit that only removes sections from the end of the text, or removes
+  all of them, for an agent with no record yet. The sections a conversation
+  was built with also hold what the host's build customizer and the agent's
+  memory added after the agent's own, so a text those sections start with
+  reads as unchanged. Make such an edit while the gateway runs (a roster
+  refresh or an update records it), or reset the agent.
+
+What an update's result says. An update that names `set.instructions`
+answers, for its agent, the member `instructions`: `{"kind": ...}`, with a
+`reason` beside `applies_at_next_session`. It is on the update's first
+answer; a retry of the same request states none. The kinds:
+
+- `applies_at_next_run`: the change is recorded and reaches the agent at
+  its next run (a run that starts within moments may still use the earlier
+  instructions). For an agent no build has created a conversation for,
+  nothing is recorded: its first build takes the current text.
+- `applies_after_compaction`: the change is recorded; the agent's model
+  takes a system instruction only ahead of the conversation.
+- `applies_at_next_session`, with a `reason`: the change is not recorded,
+  or cannot reach this conversation, and applies from the agent's next
+  fresh conversation. The reasons are `prepared_authorization_required`,
+  `slot_limit_exceeded`, `active_set_budget_exceeded`, `body_too_large`,
+  `lowering_unavailable` and `record_unavailable` (the mob's record could
+  not be read or written now; the change is recorded by the agent's next
+  update of its instructions, or at its first delivery or change after
+  the gateway's next start).
+- `unchanged`: the update left the instructions as they were.
+
+The update of the spec itself always stands.
+
+Limits of this release, each reported by `meta/instruction_status` or by the
+update's result:
+
+- A mob keeps a record for each of any number of agents. What is bounded is
+  one agent's own set: the operator instructions that select it (those for
+  every member or for its profile, and its own) hold at most 64 records and
+  1 MiB of text. An agent's record is also its forks', and any member may be
+  seated as a fork of an agent, so Meerkat counts in each agent's set, beside
+  those, the records one other agent passes to its forks (the agent that
+  passes the most): with these records alone, one record of the 64 and, of
+  the 1 MiB, the longest instruction record of another agent (not the
+  records of every other agent). The instruction records of the two agents
+  with the longest texts therefore fit in 1 MiB together with the records
+  for every member or a profile; one record holds at most 256 KiB, so two
+  agents' records alone never reach the limit, and the bound is met only
+  with such shared records beside them.
+  The change of an agent whose set would be full is not recorded
+  (`slot_limit_exceeded`, `active_set_budget_exceeded`); it applies from the
+  agent's next fresh conversation.
+- A governed runtime (one with a native work authorization host) takes no
+  operator instruction record (`prepared_authorization_required`): there, a
+  change applies from the agent's next fresh conversation.
+- Forks follow the agent's record by Meerkat's rule for a record written for
+  a member and its forks (see
+  [Operator instructions](https://docs.rkat.ai/guides/mobs#operator-instructions)
+  in the Meerkat guide), forks of forks included:
+  - A fork that is live when the change is recorded gets the entry with the
+    whole current text appended at its next run, once, as the agent does.
+  - A fork taken after the change was recorded has the agent's record in its
+    own snapshot. A durable fork (a `fork_off` child, `meta/fork_member`, a
+    console side chat) has that snapshot recorded in its session before it
+    is seated. It copies the agent's conversation, so it also reads the
+    agent's own earlier entry as one header row without the text, which is
+    history; its own entry, behind that row, carries the text. A helper
+    fork is a fresh member on its own profile's prompt with the agent's
+    conversation as context, and is born with the record: it holds its own
+    entry with the text, and not the agent's first prompt.
+  - A seated fork then follows the record as the agent does: a later change
+    reaches the fork as one more entry at its next run. A reset or a delete
+    of the agent keeps the record, so the fork goes on running on the
+    agent's current text. A removal of the agent revokes the record (the
+    agent has no instructions any more): a fork that holds the entry is
+    told so by one revoke entry at its next run, and what its conversation
+    held up to then stays as it was.
+  - A fork's first prompt stays the copy it was taken with: a change reaches
+    a fork as an entry, never as a rewritten prompt.
+  - Not reached: the participants of a temporary council (they are seated in
+    the council's own mob), a session forked outside the mob and seated
+    later as a member, and a fork seated by a release before 0.9.15 (it has
+    no fork family on record).
+
 ## Deep member status
 
 `meta/member_status` serializes Meerkat's `MobMemberSnapshot`. It is a deep

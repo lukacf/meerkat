@@ -6000,6 +6000,16 @@ pub trait SessionBridge: Send + Sync {
         None
     }
 
+    /// The session service of this bridge's mob, for the read of how a
+    /// member session's model takes an appended system instruction
+    /// (`MobSessionService::read_member_instructions`); owned by the
+    /// identity runtime's instruction append. `None`, the default: the
+    /// bridge has no mob session service. A bridge that wraps another
+    /// forwards it.
+    fn member_session_service(&self) -> Option<Arc<dyn MobSessionService>> {
+        None
+    }
+
     /// One page of Core's member lifecycle journal of this bridge's mob
     /// (`MobHandle::member_lifecycle_events`): the facts of the journal
     /// events after `after`, reading at most `limit` events. A store read; it
@@ -10836,6 +10846,10 @@ impl SessionBridge for MobSessionBridge {
         Some(self.handle.incarnation().to_string())
     }
 
+    fn member_session_service(&self) -> Option<Arc<dyn MobSessionService>> {
+        self.session_service.clone()
+    }
+
     async fn member_lifecycle_journal_page(
         &self,
         after: u64,
@@ -12338,6 +12352,10 @@ impl SessionBridge for super::PublicSessionBridge {
 
     fn mob_incarnation(&self) -> Option<String> {
         self.bridge.mob_incarnation()
+    }
+
+    fn member_session_service(&self) -> Option<Arc<dyn MobSessionService>> {
+        self.bridge.member_session_service()
     }
 
     async fn member_lifecycle_journal_page(

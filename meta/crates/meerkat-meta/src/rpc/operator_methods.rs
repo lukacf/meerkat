@@ -751,6 +751,29 @@ fn operator_instruction_error_response(
     }
 }
 
+/// The refusal of a host write or revoke in a namespace the platform keeps
+/// for itself (`meerkat.identity.`, where an agent's own instructions are
+/// recorded): `-32602` with Meerkat's closed code `invalid_request`, and
+/// nothing is written. `None` for every other namespace.
+fn reserved_instruction_namespace_refusal(
+    response_id: &Value,
+    namespace: &meerkat_core::InstructionNamespace,
+) -> Option<JsonRpcResponse> {
+    if !crate::identity_first::runtime::is_reserved_instruction_namespace(namespace.as_str()) {
+        return None;
+    }
+    Some(operator_instruction_error_response(
+        response_id.clone(),
+        &meerkat_mob::OperatorInstructionError::Refused(
+            meerkat_core::InstructionWriteError::InvalidRequest(format!(
+                "the instruction namespace {namespace} is reserved: namespaces that start with \
+                 {} hold each agent's own instructions, which change with the agent's spec",
+                crate::identity_first::runtime::RESERVED_INSTRUCTION_NAMESPACE_PREFIX
+            )),
+        ),
+    ))
+}
+
 /// The answer of a committed or repeated write: Meerkat's receipt, which
 /// names no member.
 fn operator_instruction_receipt_response(
@@ -788,6 +811,9 @@ pub(super) async fn handle_set_instruction(
         Ok(params) => params,
         Err(response) => return *response,
     };
+    if let Some(refusal) = reserved_instruction_namespace_refusal(&response_id, &params.namespace) {
+        return refusal;
+    }
     let target = match params.target {
         InstructionTargetParams::Mob {} => meerkat_mob::OperatorInstructionTarget::Mob,
         InstructionTargetParams::Profile { profile } => {
@@ -873,6 +899,9 @@ pub(super) async fn handle_revoke_instruction(
         Ok(params) => params,
         Err(response) => return *response,
     };
+    if let Some(refusal) = reserved_instruction_namespace_refusal(&response_id, &params.namespace) {
+        return refusal;
+    }
     let slot = meerkat_core::InstructionSlot {
         namespace: params.namespace,
         key: params.key,

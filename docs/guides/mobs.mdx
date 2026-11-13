@@ -531,6 +531,40 @@ appended after the skills text and baked once at materialization, and an
 A host that keeps its own per-profile prompt key (for example a `role_summary` key)
 parses that key itself and lowers it to `additional_instructions`.
 
+A member's session records the instruction sections it was built with in its
+durable build state, and keeps them through every rebuild: a restart, a wake
+and a fork child's seating resume the session, name no sections and write no
+prompt, so they leave the record alone (a fork child records its source's
+sections). A Rust host reads them with
+`MobSessionService::recorded_build_instructions(session_id)` on the mob's
+session service, for the member's session
+(`MobHandle::resolve_bridge_session_id`). The read comes from the session's
+committed state, without waking the member or decoding its transcript:
+
+| Answer | Meaning |
+| --- | --- |
+| `Some(sections)` | The sections the session's build was given, in order. |
+| `Some(vec![])` | The session was built with no sections. |
+| `None` | Not known: the service holds no committed session under that id, or the session's record does not say (it was built by 0.9.14 or an earlier release, or such a release's resume erased the record). |
+
+A seat no build has created yet has no session, so the read answers `None`
+for it: its sections are still its seat's spec. Its first build may append
+the sections the host's spawn customizer adds, so afterwards the session
+records the spec's sections followed by those.
+
+The read has limits. It answers for the service's own sessions, so a session
+another host keeps answers `None`. It takes no caller principal: a surface
+that serves it admits its caller first. On a persistent session service it
+still answers an archived session's record.
+
+`PersistentSessionService` answers from the session's committed metadata
+(the committed head on a HeadCanonical store; on a WholeBlob store the
+committed body is fetched and verified, and its rows are skipped), and Core's
+RPC and CLI hosts forward the read to it. A host whose session service is
+its own decorator forwards the method to the service it wraps: the trait
+default answers the same for a session that is not archived, from the
+persisted session, which loads its transcript.
+
 There is no `system_prompt` key on a profile. Loading a TOML definition whose
 `[profiles.<name>]` table carries `system_prompt` (or its aliases `prompt` and
 `instructions`) fails with `MobError::UnsupportedProfileKey`, whose message
@@ -1656,27 +1690,28 @@ whole snapshot in the member's session, through the session while it is
 live and store-only while it is dormant. Nothing wakes or materializes a
 member to deliver. A member born on a new session (a spawn, a rotation, an
 unborn seat's first wake) carries the snapshot from its first build. A
-dormant member that is still owed its snapshot when a delivery wakes it has
-it recorded during the wake, after its conversation is loaded and before its
-run starts. So a record owed to a member seated dormant on a conversation it
-already has is in effect at the first run after the seat when the member's
-session takes the write then. A write that fails stays owed: the mob tries
-again at every wake of the member and on its own retry, at most 30 seconds
-apart, and the entry reaches the first run that starts after a write
-succeeded. A write the session refuses because its target or a slot belongs
-to another owner (`owned_by_session`, `owned_by_other_mob`,
-`slot_managed_by_activation`) is blocked: the status shows it with its kind,
-and it is not tried again until a write selects the member again, the member
-is seated again, or the mob restarts. The wake does not wait long for the
-write: a session that does not answer it within 5 seconds leaves the member
-live and owed. Only the wake a delivery causes orders the record before the
-member's run: a member seated eagerly on a conversation (a spawn with a
-Resume launch), and a member the mob materializes itself at a start or a
-lift, are recorded by the mob's own delivery, tried at once when the member
-is live; and a member that stays live between runs is not tried at each run
-start. A member the mob brings up itself at a start or a lift with work
-already queued may start that run before the write is tried; the entry then
-reaches the first run that starts after the write. Each
+record owed to a local member seated dormant on a conversation it already
+has is tried at every wake a delivery causes, after the conversation is
+loaded and before the member is Live. When the member's session takes the
+write then (it answers within 5 seconds, the mob's journal answers the read
+of the member's own records within 5 seconds, and no other delivery to the
+member is in flight past 5 seconds), the record is in that conversation
+before the run that woke the member starts, and that run carries the entry
+once. A write that fails or is not answered in time leaves the member owed:
+the mob tries again at once when the member is Live again and then on its
+own retry, at most 30 seconds after its previous attempt ended, and the
+entry reaches the first run that starts after a write succeeded. A write an
+owner refuses, or a session service that keeps no durable session document,
+blocks the member: the record is not tried again until a write selects the
+member again, the member is seated again, or the mob restarts. A lift, a
+start, a warm reload and a placed member do not pass the wake step: a
+member seated eagerly on a conversation (a spawn with a Resume launch), and
+a member the mob brings up itself, are recorded by the mob's own delivery,
+tried at once when the member is Live and not ordered before a run of it. A
+member the mob brings up itself at a start or a lift with work already
+queued may start that run before the write is tried; the entry then reaches
+the first run that starts after the write. A member that stays Live between
+runs is not tried at each run start. Each
 session applies its target at its next fresh run start, never inside a run.
 Dormant members are recorded at most 16 at a time by default
 (`MobBuilder::with_member_instruction_delivery_concurrency`); deliveries

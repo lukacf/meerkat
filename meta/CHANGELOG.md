@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Rust API of `meerkat-meta`, `identity_creation`: `ChangeClass` gains the
   variants `Archive` (an archive and an unarchive) and `Adopt`. A match on it
   needs both arms.
+
 - Rust API of `meerkat-meta`, `identity_creation`: `NameTakenBy` loses the
   variants `Declared` and `Created` and gains `Identity`. A `name_taken`
   refusal names its holder as `identity`, `removed`, `worker` or `unreadable`.
@@ -20,16 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and 3 (they were 2, 3 and 4), and their places in the derived order
   (`PartialOrd`, `Ord`) moved with them. The order among the three is
   unchanged; `Identity` sorts first, where `Declared` did.
+
 - Rust API of `meerkat-meta`: `IdentityStatus` gains the member `record`
   (`IdentityRecordFacts`), so a struct literal of it needs the member
   (`record: Default::default()`). The status of a seated agent is written
   on the wire as before.
+
 - Rust API of `meerkat-meta`: `IdentityStatus` gains the member
   `roster_listing_superseded` and `RestoreFlowResult` gains the member
   `roster_listings_superseded`, so a struct literal of either needs its new
   member (`roster_listing_superseded: false`,
   `roster_listings_superseded: Default::default()`). The status as written
   on the wire is unchanged while the member is `false`.
+
 - `runtime_options.identity_creation` (and the Rust form a native host
   returns): a policy that names the approval outcome `notify` or `review`, or
   the preparation mode `constructed`, is refused at init, with the policy
@@ -38,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   reviewer decides for `review` yet, and no method holds or activates a
   construction yet: write `allow` or `require_approval`, and the preparation
   mode `required`.
+
 - Rust, source only: `CustomizerToolsSpawnCustomizer` no longer implements
   the auto traits `UnwindSafe` and `RefUnwindSafe`. It now holds a
   late-bound reference to the session bridge, through which it asks whether
@@ -101,6 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   an agent: the roster's entry for that name is not applied. The member is
   written only when it is so. Rust: `identity_creation::AgentSummary`,
   `DirectoryPeer` and `ChangePlan` gain it.
+
 - `meta/identity/create` and `meta/identity/update` take `addressability`
   (`addressable` or `internal_only`) and `runtime_mode_override`
   (`autonomous_host` or `turn_driven`): on an agent of a create, and in
@@ -113,6 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   it is not the default (`addressability` only as `internal_only`). Rust:
   `identity_creation::AgentSpec`, `AgentSet` and `AgentSummary` gain the two
   members.
+
 - The schedules that target an agent follow its archive, its unarchive and
   its removal (`meta/identity/archive`, `unarchive`, `remove`, and the
   agents' tools over them): an archive pauses the Active schedules that
@@ -145,6 +152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   by `schedule_wiring::MobAgentSchedules`), and a launch that gives none
   changes no schedule. Rust: `identity_creation::AgentOutcome` and
   `ChangePlan` gain `schedules`.
+
 - No schedule is pointed at an archived agent through Meta: an agent's
   `meerkat_schedule_create` or `meerkat_schedule_update` whose schedule
   would target an archived agent (a member target or an identity target) is
@@ -155,11 +163,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   schedule to another agent. A Console schedule whose create read the agent
   just before its archive is paused for the agent once it is written. See
   the known limitations under "Agent changes" in the RPC reference.
+
 - `meta/schedule/list` and every Console schedule write answer
   `paused_for_target: true` on a schedule that is paused because its agent
   is archived (absent otherwise), and the Console's schedule row and the
   Schedules panel say so in words: "Paused because its agent is archived.
   It resumes when the agent is unarchived."
+
 - `meta/identity/*`: host methods that change a mob's long-term agents while
   it runs, on the stdio gateway and on `POST /console/rpc`: `create` (1 to
   256 agents, all or nothing), `update`, `archive`, `unarchive`, `remove`,
@@ -172,6 +182,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   limits nothing. A create seats its agents dormant and wakes nothing (an
   agent of a profile its host prepares waits for its host first, below), and
   a read never wakes an agent. See "Agent changes" in the RPC reference.
+
 - Every launch whose mob has long-term agents serves the methods and lists
   them in `meta/capabilities`. Their changes need the launch's identity
   policy (`runtime_options.identity_creation`, which until now was checked
@@ -182,6 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sentence that says the launch gives no identity creation policy; its
   agents are unchanged. See the new policy reference,
   `docs/reference/identity-policy.mdx`.
+
 - A change whose rule says `require_approval` answers `pending_decision`
   and is held as a durable decision; once a person approved it through
   `meta/decisions/decide`, the launch carries it out by itself and
@@ -191,13 +203,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   over the policy: when the approved change is carried out, the policy the
   launch has then is asked again, and a change it denies now is not
   executed (`meta/identity/operation` says it was denied).
+
 - `GET /console/experience`: `affordances.can_change_identity` and
   `affordances.can_remove_identity` are false for an agent the host's
   configuration declares, so a client offers no control that could only be
   refused `owner_read_only`.
+
 - A change names as peers only agents its caller may see: on the Console a
   peer the caller may not view is answered `peer_unknown`, as a name no
   agent holds, and never `peer_not_allowed`.
+
 - An agent is shown no agent that is private to one person (one whose
   labels carry `console.private_to`): its list and its directory leave
   such an agent out, and a get, a plan or a change of it answers
@@ -215,23 +230,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   itself (`private_requester`). Who asked for an agent is left out of
   what an agent reads once the asker's record can no longer be read (a
   removed agent); the host reads it as before.
+
 - Every refusal of the family is one JSON-RPC error, code `-32058`
   (`meerkat_meta::rpc::IDENTITY_REFUSED_CODE`), whose `data` is `{kind,
   field?, retryable, detail}` and the kind's own members; `kind` is a closed
   vocabulary. Params that are not what a method takes are that error too
   (`invalid_request`).
+
 - A change names its operation with `request_id`: the same requester and
   request answer the same state again and write nothing twice, another
   request under the id is `operation_reused`, and two requesters that choose
   the same id name two operations.
+
 - One spec digest names an agent on every surface: `list`, `get`, an outcome
   and `stale_spec.current_digest` agree, before and after an adoption.
+
 - A create whose first message did not start answers `seat: "owed"` for
   that agent; the mob seats it at the next change of the family or at its
   next start, without a restart, and its first message runs once then. A mob
   whose runtime is governed refuses a create that gives a first message
   (`unsupported`, `first_message_in_governed_realm`) before anything is
   written.
+
 - A host prepares an agent created at run time before its first use. A
   launch's identity policy names `preparation.<profile>.mode: "required"`;
   a create of an agent of that profile, at once or after a person approved
@@ -261,12 +281,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `IdentityChangeExecutor::settle_preparation` (with a refusing default)
   and `identity_creation::{SettlePreparation, SettlePreparationCall,
   PreparationSettle, MOVE_INTO_PREPARED_PROFILE}`.
+
 - Console access actions `agent.identity.create`, `agent.identity.manage`
   (update, archive, unarchive and adopt, on the named agent) and
   `agent.identity.remove` (on the named agent). `GET /console/experience`
   carries `identity_changes: {available, can_create, can_change,
   can_remove}` and, per listed agent, `affordances.can_change_identity` and
   `affordances.can_remove_identity`.
+
 - Rust: `UnifiedRuntime::attach_identity_policy` attaches a launch's
   policy; `UnifiedRuntime::identity_family` reads the family, attached
   whenever the runtime has an identity runtime, and
@@ -281,6 +303,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `IdentityFamilyOptions::with_decision_notices`,
   `UnifiedRuntime::identity_family_seen_by` and `rpc::{HOST_RPC_SURFACE,
   IDENTITY_REFUSED_CODE}`.
+
 - On the Console: `meta/identity/plan` needs what the change it plans
   needs, on the agent it names; `meta/identity/operation` answers the
   caller's own operations, and another requester's only to a caller with
@@ -288,14 +311,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   signed-in person with `runtime.admin` holds and releases the mob's
   changes; a `get` names only the peers its caller may view, and no page's
   `next` names an agent the caller may not view.
+
 - `proposer` and `source_evidence` are the host's to state: a person and
   an agent that send one are refused `invalid_request` at the member.
+
 - One `request_id` names one change and one held decision: another change
   under the id of a held one, of whatever kind, is `operation_reused`.
+
 - `name_taken` names the agent of the request that asked for the name
   (`field: "agents[i].name"`), also when an existing agent holds it.
-- An update answers an `instructions` member only where the launch has an
-  instruction step for updates and the update names `set.instructions`.
+
+- An update that names `set.instructions` answers an `instructions` member
+  for its agent, on its first answer: when the changed instructions reach
+  the agent (`applies_at_next_run`, `applies_after_compaction`,
+  `applies_at_next_session` with a `reason`, or `unchanged`). Every launch
+  answers it: the launch records the change for the agent itself, and a
+  removal revokes that record. See
+  [Changing an agent's instructions](docs/concepts/roster.mdx#changing-an-agents-instructions).
+  A native host may give the family a step of its own
+  (`IdentityFamilyOptions::with_instruction_step`), which is then asked
+  instead.
+
 - An agent's change is refused `invalid_request` when the identity its
   surface attributed to the call is not the member of the session the call
   ran in (`ChangeRequester::agent_session`): the policy judges the first and
@@ -321,6 +357,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   its `proposer` by their principal key. A request a host asks with no such
   proposer is the host's, whoever the application carried it for. The
   requester or the host withdraws a change that is still held.
+
 - The rendering a person approves shows, ahead of anything the requester
   wrote, the host's consequence lines and what the mob declares for every
   profile an agent of the request runs on: its model, auth binding, skill
@@ -339,15 +376,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and keeps the approval. Consequence lines come from a Rust host
   composition (`GatewayHostComposition::identity_consequences`); a host
   behind an SDK supplies none in this release.
+
 - An approved change is carried out once: a gateway that stops between the
   commit and the decision's settlement settles it executed at its next
   start and commits nothing twice. An agent that asked is told the outcome
   by a message to its own name once its decision ended; a host surface or a
   person that asked reads the operation's state. A decision is carried out
   only by a gateway whose launch enables the identity policy.
+
 - On the Console, the requester of a change of an agent reads its own
   request whole (`meta/decisions/get`, `rendering`), as the requester of a
   tool grant does.
+
 - Rust: `identity_creation::IdentityDecisions` (the holder of these
   decisions: `hold`, `held`, `withdraw`, `render`, `executors`,
   `spawn_driver`), `HeldChangeHost`, `IdentityDecisionNotices`,
@@ -359,11 +399,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   makes no further pass, and a pass with nothing owed reads decision records
   only. `HeldChangeHost::realm_profile` is the read of a realm profile a
   host gives the holder.
+
 - Behaviour of `identity_creation::render_v1`: the rendering of an update and
   of a removal no longer has the line `Expected spec digest`, so the subject
   digest of such a request differs from the one 0.9.13 computed for it. No
   rendering shows that digest; the request digest still covers it. Nothing
   stored a rendering before this release.
+
 - Behaviour of `identity_creation::normalize_create`, `normalize_update` and
   `normalize_remove`: a refusal's `field` is a path into the request as every
   surface writes it. `identities[i].spec.identity` is `agents[i].name`,
@@ -374,7 +416,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `identities[i].peers[j]` is `agents[i].peers[j]`, `identities` is `agents`,
   `identity` is `name`, `set.descriptive_labels` and `set.authority_fields`
   are `set.labels`, and `set.peers_add[j]` is `peers_add[j]`.
-
 
 - Rust API of `meerkat-meta`, `identity_creation`: the interface of the
   identity family, with nothing reachable by a caller of the gateways yet.
@@ -407,6 +448,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     (which is `non_exhaustive`) are declared after every earlier one, so no
     earlier variant's implicit discriminant moves. A refusal carries a
     detail sentence (`IdentityRefusal::detail`, `to_refused`).
+
 - `meta/status_identity` on the stdio gateway (Rust: `IdentityStatus`, as
   `IdentityRuntime::status` and `statuses` answer it)
   says when no member holds an agent and why: `archived: true` for an
@@ -422,6 +464,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `meta/identity/list` answer them. The Console's own status answer
   carries the two members the same way (see the Console's
   `meta/status_identity` entry below).
+
 - `meta/identity/get` and `meta/identity/list` name the operations open
   for an agent in `open_operations`: the create of an agent that waits for
   its host's preparation, until the host settles it, and each change of
@@ -595,6 +638,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   of every other agent is unchanged. Before, the Console's answer carried
   none of the three.
 
+- A change of an agent's instructions reaches the agent with its
+  conversation kept. When the instructions of an agent created at run time
+  are updated, or a configured agent's instructions are edited in the host's
+  configuration, the gateway records the whole current text as one operator
+  instruction for that agent and its forks (namespace
+  `meerkat.identity.instructions`, keyed by the agent's name, a member target
+  with Meerkat's `include_forks`), and Meerkat's mob delivers it: the change
+  reaches the agent at its next run; a run that starts within moments of the
+  change may still use the earlier instructions; earlier instructions are
+  never rewritten. An agent that is not loaded is not woken, a restart
+  neither loses nor repeats the change, and the removal of an agent revokes
+  its record (after the next start when the gateway stopped right after the
+  removal). A reset or a delete of the agent keeps the record, brought up
+  to the current text when it holds another one: the agent goes on with the
+  same instructions, and its forks go on running on them. The fresh
+  conversation's first prompt is the current text, and it carries that text
+  once more as the one standing entry of the record. A removal still
+  revokes the record, and a fork that holds the entry is told so at its
+  next run. A model that takes a system instruction only ahead of the
+  conversation applies the change after a compaction or with a fresh
+  conversation. A fork of the agent follows the record by Meerkat's rule for
+  a member and its forks: a fork that is live when the change is recorded
+  gets the entry at its next run, once; a fork taken afterwards has the
+  record in its own snapshot, which a durable fork has recorded in its
+  session before it is seated and a helper fork is born with. See
+  [Changing an agent's instructions](docs/concepts/roster.mdx#changing-an-agents-instructions),
+  with this release's limits (one agent's set of operator instructions,
+  which also counts the longest instruction record of another agent;
+  governed runtimes; the forks the record does not reach).
+
+- Rust: `IdentityRuntime` implements the identity change interface's
+  `identity_creation::InstructionStep`: `after_update` answers an
+  `InstructionOutcome` (with an `InstructionNextSessionReason` where the
+  change waits for a fresh conversation) for an `InstructionsChanged`, and
+  `after_removal` revokes the agent's record. A launch's family asks it
+  after its commits. In `meerkat_meta::identity_first::runtime`:
+  `INSTRUCTIONS_NAMESPACE`, `RESERVED_INSTRUCTION_NAMESPACE_PREFIX` and
+  `is_reserved_instruction_namespace`. `SessionBridge` gains
+  `member_session_service`, with a default that answers none.
+
 ### Changed
 
 - A host that labels its members in its customizer must put those labels
@@ -645,12 +728,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   that denies viewing the agent answered `access_denied` (`-32030`) before.
   An agent the caller may view and may not change still answers
   `access_denied`.
+
 - The rendering of a change of an agent, which a plan answers and a held
   change's decision shows and binds, names a person by the id their
   principal key carries: the person who asked, and a person a host names as
   the `proposer`. It showed the key. The subject digest of a rendering that
   names a person is therefore not the one a build before this change gave
   it; the request digest is unchanged and binds the keys.
+
 - An access rule with the pattern `agent.*` or `*` covers the three new
   `agent.identity.*` actions, as it covers every action a release adds to a
   family. They only open the methods: the identity policy still judges every
@@ -707,6 +792,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   The kind `identity_store_owned`, `IdentityRuntimeError::IdentityStoreOwned`
   and `IdentityResetRefusal::IdentityStoreOwned` stay defined and are no
   longer produced.
+
+- A configuration edit of a configured agent's instructions now reaches the
+  agent's live conversation as one appended system instruction, at the
+  agent's next run after a roster refresh picks the edit up. Before, the
+  agent kept the text of its first prompt until its conversation was
+  rebuilt (a reset).
+
+- `meta/set_instruction` and `meta/revoke_instruction` refuse a namespace
+  that starts with `meerkat.identity.` (`-32602`, `instruction_set_code`
+  `invalid_request`): those namespaces hold each agent's own instructions.
+  `meta/instruction_status` still reads them. Upgrade: a host that wrote a
+  record under `meerkat.identity.` in an earlier release can no longer
+  change or revoke it through these verbs.
 
 - `IdentityStatus.intent_managed` (`meta/status_identity`, the status
   lists, both SDKs) reads `false` for an identity whose record is its row
@@ -943,6 +1041,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   boundary for agent memory, and a retirement's hooks name the member.
   They were skipped, because the member carried no mark of an
   identity-first spawn.
+
 - The memory steward's mob context lists an agent created at run time
   while it is a member of the mob (not archived, not removed), by its name
   and its profile only; it listed none. Nothing else of such an agent
@@ -1031,6 +1130,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `_with_access` forms) decide on the agent attributes the host records in
   the access controller it passes: they read no roster and no agent
   record.
+
+- An agent whose instructions were edited while the gateway was down, whose
+  conversation was built through 0.9.14 and that has no instruction record
+  yet, may keep the text of its first prompt until the running gateway
+  observes a change of it (a roster refresh with other text, an update) or
+  its conversation is rebuilt: such a conversation may not record the
+  sections it was built with. A conversation built after 0.9.14
+  does, and the change is recorded after the gateway's next start (for a
+  configured agent when the gateway registers it; for an agent created at
+  run time at its first delivery or change), with one exception: an edit
+  that only removes sections from the
+  end of the text, or removes all of them, is not seen then for an agent
+  with no instruction record yet (the sections a conversation was built
+  with also hold what the host's build customizer and the agent's memory
+  added after the agent's own, so a text they start with reads as
+  unchanged). Make such an edit while the gateway runs, or reset the
+  agent.
+
+- A change of the instructions of an agent created at run time that was
+  made while the gateway was down is recorded at the agent's first delivery
+  through the gateway or first change after the start, not by the start: a
+  run the mob starts itself with no such delivery before it (the fire of a
+  schedule whose target is the agent's session is one; the fire of a
+  schedule whose target is the agent itself, as a member or by its
+  identity, is a delivery) runs on the
+  instructions the agent's conversation holds.
+
+## [0.9.14] - 2026-11-11
+
+Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect
+0.9.14, released together) and pins Core `=0.9.14`.
+
+A mob that a member private to a person creates itself stays private to
+that person after a restart. See Security.
+
+### Security
+
+- A mob that a member private to a person creates with its own `mob_create`
+  stays private to that person after a restart, so every member spawned into
+  it after the restart is private to that person too, as the members spawned
+  before it are. The restart reads who each such mob is private to from the
+  mob's creation record, and in 0.9.11 through 0.9.13 (0.9.11 is the first
+  release with members private to a person) it read the creating member
+  only from the record of a create a host makes for a member's session
+  (`MobProvenance::Member`):
+  a member's own `mob_create` (`MobProvenance::OperatorMember`) came back
+  private to no one, so a member spawned into that mob after the restart
+  carried no private owner, the label that hides it from other people. Both
+  records now name the creating member, and the mob is private to whoever
+  that member is private to. A mob whose record names no member (a host's
+  create, a session that is no member's) stays private to no one, as does a
+  mob a shared member creates. A mob whose record says that several rosters
+  named the session that created it, and picks none
+  (`MobProvenance::Ambiguous`), no longer comes back private to no one: the
+  restart cannot read who it is private to, so a spawn into it is refused
+  from then on, and the members already seated in it keep the owner their
+  own spawn gave them.
+
+### Known limitations
+
+- `rustix` 1.1.5 in Cargo.lock is named by RUSTSEC-2026-0486, as in 0.9.12
+  and 0.9.13: the `getxattr` and `listxattr` functions of `rustix::fs` (with
+  their `l` and `f` forms) mark bytes they never wrote as initialized when
+  they are given a zero-length buffer. `meerkat-meta` depends on `rustix`
+  directly, and it is also taken through Meerkat Core, `tempfile`, and
+  `xattr` through `tar`. No Meta crate calls those functions. Of the crates
+  Meta builds with only `xattr` does, and `tar`, the one crate that uses
+  `xattr`, calls it only to set attributes while unpacking, so Meta's own
+  use is not known to be affected. `rustix` 1.1.6 has the fix; this release
+  still builds with 1.1.5.
 
 ## [0.9.13] - 2026-11-11
 

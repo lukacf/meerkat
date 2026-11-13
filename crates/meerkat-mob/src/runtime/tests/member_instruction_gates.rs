@@ -1851,6 +1851,40 @@ async fn a_decorator_that_does_not_forward_the_controller_pin_is_refused_unsuppo
     fixture.finish().await;
 }
 
+/// A session-service decorator that does not forward the build sections
+/// read still answers the session's record, through the trait default: it
+/// derives the answer from the persisted session. The member's session was
+/// first built with no sections, so it records an empty list, and the
+/// decorator answers exactly what the service it wraps answers. A forward
+/// only spares the load of the transcript.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decorator_that_does_not_forward_the_build_sections_read_still_answers_the_record() {
+    let fixture = Fixture::restored_member_through(true, None).await;
+    let session_id = fixture
+        .handle
+        .resolve_bridge_session_id(&fixture.identity)
+        .await
+        .expect("the member's session");
+    let through_the_decorator = fixture
+        .mob_service
+        .recorded_build_instructions(&session_id)
+        .await
+        .expect("read through the non-forwarding decorator");
+    assert_eq!(
+        through_the_decorator,
+        Some(Vec::new()),
+        "the trait default answers the session's record"
+    );
+    assert_eq!(
+        MobSessionService::recorded_build_instructions(&*fixture.service, &session_id)
+            .await
+            .expect("read from the wrapped service"),
+        through_the_decorator,
+        "the wrapped service's metadata-only read answers the same"
+    );
+    fixture.finish().await;
+}
+
 /// A member without a session binding is refused typed before any boundary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unknown_member_is_refused_not_materialized() {

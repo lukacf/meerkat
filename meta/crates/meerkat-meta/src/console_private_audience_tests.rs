@@ -742,6 +742,307 @@ async fn members_a_private_side_chat_creates_in_child_mobs_are_private() -> Test
     Ok(())
 }
 
+/// `member`'s own `mob_create` of the mob `mob_id`, made by the agent mob
+/// tools of its session as its turn makes one: the mob's creation record
+/// names the member as its creator (`MobProvenance::OperatorMember`).
+async fn own_mob_create(
+    runtime: &MobRuntime,
+    member: &str,
+    mob_id: &str,
+) -> Result<meerkat_mob::MobHandle, Box<dyn std::error::Error + Send + Sync>> {
+    let tools = runtime.agent_mob_mcp_state().ok_or("agent mob tools")?;
+    let surface: Arc<dyn meerkat_core::AgentToolDispatcher> =
+        Arc::new(meerkat_mob_mcp::AgentMobToolSurface::new(
+            Arc::clone(&tools),
+            None,
+            meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()?,
+            "gpt-5.5".to_string(),
+            member_session(runtime, member).await?,
+            None,
+            None,
+            None,
+        ));
+    agent_tool_call(
+        &surface,
+        "mob_create",
+        json!({ "definition": {
+            "id": mob_id,
+            "profiles": { "worker": {
+                "model": "gpt-5.5",
+                "runtime_mode": "turn_driven",
+                "tools": { "comms": true },
+            } },
+        } }),
+    )
+    .await?;
+    let handle = tools.handle_for(&meerkat_mob::MobId::from(mob_id)).await?;
+    let provenance = handle.provenance().await?;
+    assert!(
+        matches!(
+            &provenance,
+            meerkat_mob::MobProvenance::OperatorMember { creator_identity, .. }
+                if creator_identity.as_str() == member
+        ),
+        "the create is recorded as {member}'s own: {provenance:?}"
+    );
+    Ok(handle)
+}
+
+/// The private owner on the roster row of `member`, seated in `mob` for
+/// `owner_session` as the agent mob tools seat a member.
+async fn seated_private_owner(
+    mob: &meerkat_mob::MobHandle,
+    member: &str,
+    owner_session: meerkat_core::types::SessionId,
+) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    Box::pin(
+        mob.spawn_spec_with_generated_owner_context(
+            SpawnMemberSpec::new("worker", AgentIdentity::from(member))
+                .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven),
+            owner_session,
+        ),
+    )
+    .await?;
+    Ok(roster_labels(mob, member).await?.remove(PRIVATE_TO))
+}
+
+/// `runtime` stopped and composed again over its state directory `state`,
+/// as a gateway restart composes it, once its record of who its members are
+/// private to has read every durable record.
+async fn restarted(
+    runtime: MobRuntime,
+    state: &std::path::Path,
+    mob: &str,
+) -> Result<MobRuntime, Box<dyn std::error::Error + Send + Sync>> {
+    runtime.handle().shutdown().await?;
+    let _ = runtime
+        .stand_down_child_mobs(std::time::Instant::now() + std::time::Duration::from_secs(90))
+        .await;
+    drop(runtime);
+    let runtime = persistent_gateway_runtime_in(state, mob, "", "").await?;
+    let handle = runtime.handle();
+    assert!(
+        runtime.private_owners().seeded(&handle).await.landed(),
+        "the restarted runtime reads who its members are private to"
+    );
+    Ok(runtime)
+}
+
+/// A mob a private side chat creates with its own `mob_create` (the agent
+/// mob tools' create, whose record names the side chat as the creator)
+/// stays private to the side chat's owner after the gateway restarts: who
+/// the mob is private to is read again from its creation record, so a
+/// member seated in it after the restart is private to that person, as one
+/// seated before the restart is, and another person does not see it.
+#[tokio::test]
+async fn a_mob_a_private_side_chat_creates_itself_stays_private_after_a_restart() -> TestResult {
+    const MOB: &str = "private-own-child-mob";
+    const CREW: &str = "alpha-side-crew";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let alice = bearer(alice_claims());
+    let alice_scope = caller_scope(&app, &alice).await;
+    let forked = fork_on_console(&app, Some(&alice), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let crew = own_mob_create(&runtime, "alpha-side", CREW).await?;
+    assert_eq!(
+        seated_private_owner(
+            &crew,
+            "crew-before",
+            member_session(&runtime, "alpha-side").await?
+        )
+        .await?,
+        Some(alice_scope.clone()),
+        "before the restart the mob is private to the side chat's owner"
+    );
+    drop(crew);
+    drop(app);
+
+    let runtime = restarted(runtime, state.path(), MOB).await?;
+    let crew = runtime
+        .agent_mob_mcp_state()
+        .ok_or("agent mob tools")?
+        .handle_for(&meerkat_mob::MobId::from(CREW))
+        .await?;
+    assert_eq!(
+        seated_private_owner(
+            &crew,
+            "crew-after",
+            member_session(&runtime, "alpha-side").await?
+        )
+        .await?,
+        Some(alice_scope),
+        "after the restart the mob is still private to the side chat's owner"
+    );
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    assert!(
+        row(
+            &sidebar(&app, Some(&bearer(bob_claims()))).await,
+            "crew-after"
+        )
+        .is_none(),
+        "another person does not see a member seated in it after the restart"
+    );
+    assert!(
+        row(&sidebar(&app, Some(&alice)).await, "crew-after").is_some(),
+        "its owner sees it"
+    );
+    Ok(())
+}
+
+/// A mob a shared member creates with its own `mob_create` is private to no
+/// one, before and after the gateway restarts: its creation record names a
+/// member that is private to no one, so a member seated in it carries no
+/// private owner and every person sees it. A member of the same name that is
+/// private to a person, seated in another mob, changes nothing: the creator
+/// is read in the mob the record names.
+#[tokio::test]
+async fn a_mob_a_shared_member_creates_itself_stays_shared_after_a_restart() -> TestResult {
+    const MOB: &str = "shared-own-child-mob";
+    const CREW: &str = "alpha-crew";
+    const SIDE_CREW: &str = "alpha-side-crew";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    // The creator's namesake: a private side chat's own mob seats a member
+    // called `alpha`, private to the side chat's owner.
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let alice = bearer(alice_claims());
+    let alice_scope = caller_scope(&app, &alice).await;
+    let forked = fork_on_console(&app, Some(&alice), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let side_crew = own_mob_create(&runtime, "alpha-side", SIDE_CREW).await?;
+    assert_eq!(
+        seated_private_owner(
+            &side_crew,
+            "alpha",
+            member_session(&runtime, "alpha-side").await?
+        )
+        .await?,
+        Some(alice_scope),
+        "the namesake in the side chat's mob is private to the side chat's owner"
+    );
+    drop(side_crew);
+    drop(app);
+    let crew = own_mob_create(&runtime, "alpha", CREW).await?;
+    assert_eq!(
+        seated_private_owner(
+            &crew,
+            "shared-crew-before",
+            member_session(&runtime, "alpha").await?
+        )
+        .await?,
+        None,
+        "before the restart the mob is private to no one"
+    );
+    drop(crew);
+
+    let runtime = restarted(runtime, state.path(), MOB).await?;
+    let crew = runtime
+        .agent_mob_mcp_state()
+        .ok_or("agent mob tools")?
+        .handle_for(&meerkat_mob::MobId::from(CREW))
+        .await?;
+    assert_eq!(
+        seated_private_owner(
+            &crew,
+            "shared-crew-after",
+            member_session(&runtime, "alpha").await?
+        )
+        .await?,
+        None,
+        "after the restart the mob is still private to no one"
+    );
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    for person in [bearer(alice_claims()), bearer(bob_claims())] {
+        assert!(
+            row(&sidebar(&app, Some(&person)).await, "shared-crew-after").is_some(),
+            "every person sees a member seated in it after the restart"
+        );
+    }
+    Ok(())
+}
+
+/// A mob whose creation record cannot say which member created it (several
+/// rosters named the session that created it, and the record picks none) is
+/// not taken to be private to no one when its record is read again, as it is
+/// after a restart: who it is private to cannot be read, so a spawn into it
+/// is refused, and the refusal asks for no retry. A mob the host created is
+/// read by the same seed as private to no one, and a spawn into it is left as
+/// it is.
+#[tokio::test]
+async fn a_spawn_into_a_mob_whose_record_names_several_rosters_is_refused() -> TestResult {
+    const SEVERAL: &str = "several-rosters-mob";
+    const HOSTS: &str = "host-created-mob";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), "undecided-creator", "", "").await?;
+    let tools = runtime.agent_mob_mcp_state().ok_or("agent mob tools")?;
+    let sessions = runtime
+        .session_service()
+        .ok_or("the runtime's session service")?
+        .clone();
+    for (mob_id, provenance) in [
+        (
+            SEVERAL,
+            Some(meerkat_mob::MobProvenance::Ambiguous {
+                matching_rosters: 2,
+            }),
+        ),
+        (HOSTS, None),
+    ] {
+        let definition: meerkat_mob::MobDefinition = serde_json::from_value(json!({
+            "id": mob_id,
+            "profiles": { "worker": {
+                "model": "gpt-5.5",
+                "runtime_mode": "turn_driven",
+                "tools": { "comms": true }
+            } }
+        }))?;
+        let mut builder =
+            meerkat_mob::MobBuilder::new(definition, meerkat_mob::MobStorage::in_memory())
+                .with_session_service(Arc::clone(&sessions))
+                .with_default_llm_client(Arc::new(meerkat_client::TestClient::default()));
+        if let Some(provenance) = provenance {
+            builder = builder.with_provenance(provenance);
+        }
+        let mob = builder.create().await?;
+        tools
+            .try_mob_insert_handle(meerkat_mob::MobId::from(mob_id), mob)
+            .await?;
+    }
+    // The record as a restart builds it: a new one, read from the durable
+    // records of the same mobs.
+    let owners = crate::private_owners::PrivateOwners::default();
+    owners.bind_child_mobs(&tools);
+    assert!(
+        owners.seeded(&runtime.handle()).await.landed(),
+        "the record reads every mob's durable records"
+    );
+
+    let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("late"));
+    let refusal = owners
+        .apply_child(SEVERAL, None, &mut spec)
+        .expect_err("a spawn into a mob whose creator its record cannot name is refused")
+        .to_string();
+    assert!(
+        refusal.contains(SEVERAL) && !refusal.contains("retry"),
+        "the refusal names the mob and asks for no retry: {refusal}"
+    );
+
+    let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("late"));
+    owners.apply_child(HOSTS, None, &mut spec)?;
+    assert_eq!(
+        spec.labels
+            .as_ref()
+            .and_then(|labels| labels.get(PRIVATE_TO)),
+        None,
+        "a spawn into a mob the host created is private to no one"
+    );
+    Ok(())
+}
+
 /// Another person's `meta/reset_all` neither closes a private side chat nor
 /// names it.
 #[tokio::test]

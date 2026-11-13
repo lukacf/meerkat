@@ -5153,6 +5153,16 @@ macro_rules! delegate_mob_session_service {
             ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
                 self.inner.load_retained_session_metadata(session_id).await
             }
+            // The instruction sections a session's build state records. The
+            // trait default loads the persisted session with its transcript;
+            // forwarded, the persistent service answers from the session's
+            // committed metadata alone.
+            async fn recorded_build_instructions(
+                &self,
+                session_id: &meerkat_core::types::SessionId,
+            ) -> Result<Option<Vec<String>>, SessionError> {
+                self.inner.recorded_build_instructions(session_id).await
+            }
             // meerkat 0.9.7: the recorded (realm-stamped) form of a named auth
             // binding. The trait default answers `Ok(None)`, so unforwarded the
             // live-actor binding check matches the named form alone and refuses
@@ -6576,6 +6586,14 @@ impl MobSessionService for AfterCreateMobSessionService {
         session_id: &meerkat_core::types::SessionId,
     ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
         self.inner.load_retained_session_metadata(session_id).await
+    }
+    // Forwarded, as in `delegate_mob_session_service!`: the trait default
+    // loads the persisted session with its transcript.
+    async fn recorded_build_instructions(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<Option<Vec<String>>, SessionError> {
+        self.inner.recorded_build_instructions(session_id).await
     }
     // Forwarded, as in `delegate_mob_session_service!`: the trait default
     // answers `Ok(None)`, so the live-actor binding check would refuse a live
@@ -19326,6 +19344,14 @@ comms = true
             Ok(None)
         }
 
+        async fn recorded_build_instructions(
+            &self,
+            _session_id: &meerkat_core::SessionId,
+        ) -> Result<Option<Vec<String>>, SessionError> {
+            self.record("recorded_build_instructions");
+            Ok(Some(vec!["a recorded section".to_string()]))
+        }
+
         async fn load_persisted_session_tolerating_tail(
             &self,
             _session_id: &meerkat_core::SessionId,
@@ -20191,6 +20217,33 @@ comms = true
                 probe.calls(),
                 vec!["load_persisted_session_tolerating_tail"],
                 "{shape}: the inner service reads once, never through the strict read"
+            );
+        }
+    }
+
+    /// The read of the instruction sections a session's build state records
+    /// reaches the wrapped service through each of Meta's decorated shapes:
+    /// the trait default would load the persisted session with its
+    /// transcript, once per member whose instructions are compared at start.
+    #[tokio::test]
+    async fn mob_session_wrappers_forward_the_recorded_build_instructions_read() {
+        let session_id = meerkat_core::types::SessionId::new();
+        let probe = Arc::new(ForwardingProbe::default());
+        for (shape, wrapper) in decorated_shapes(&probe) {
+            probe.calls.lock().expect("probe calls").clear();
+            let read =
+                MobSessionService::recorded_build_instructions(wrapper.as_ref(), &session_id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{shape}: the wrapped service reads: {error}"));
+            assert_eq!(
+                read,
+                Some(vec!["a recorded section".to_string()]),
+                "{shape}: the inner service's answer comes back"
+            );
+            assert_eq!(
+                probe.calls(),
+                vec!["recorded_build_instructions"],
+                "{shape}: the inner service reads once, and no transcript is loaded"
             );
         }
     }

@@ -50,6 +50,10 @@ All notable changes to the Python SDK are documented here.
   `True` while the agent is archived, and while it waits for its host's
   preparation. The gateway writes each only when it is so.
 
+## 0.9.14
+
+No SDK API changes; released with Meta 0.9.14.
+
 ## 0.9.13
 
 No SDK API changes; released with Meta 0.9.13.

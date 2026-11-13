@@ -30,7 +30,11 @@
 //! whose owner is not known is refused as retryable (a member already seated
 //! there is restored and woken as before: its rebuild repeats its seating),
 //! and a console with sign-in withholds a member it does not know from
-//! everyone but an admin.
+//! everyone but an admin. A mob whose creation record does not say which
+//! member created it (several rosters named the session that created it, and
+//! the record picks none) gets no owner from the seed: who it is private to
+//! cannot be read, so a spawn into it is refused, and the members already
+//! seated there keep the owner their own spawn gave them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, PoisonError, RwLock, Weak};
@@ -103,6 +107,17 @@ pub(crate) struct PrivateOwners {
     inner: Arc<Inner>,
 }
 
+/// Who a mob a member created is private to, as far as its records say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MobOwner {
+    /// The creating member's owner, or `None` for a mob private to no one (a
+    /// host's mob, a shared member's).
+    Known(Option<String>),
+    /// The mob's creation record does not say which member created it, so
+    /// who the mob is private to cannot be read from it.
+    Undecidable,
+}
+
 #[derive(Default)]
 struct Inner {
     /// What each member build recorded: the member's owner, or `None` for a
@@ -115,10 +130,9 @@ struct Inner {
     /// the memory store recorded as private: private to a person, though
     /// not to whom when no record above names the owner.
     retired: RwLock<BTreeSet<String>>,
-    /// The owner of each mob a member created: the creating member's owner,
-    /// or `None` for a mob private to no one (a host's mob, a shared
-    /// member's).
-    mob_owners: RwLock<BTreeMap<String, Option<String>>>,
+    /// What is known of who each mob a member created is private to
+    /// ([`MobOwner`]).
+    mob_owners: RwLock<BTreeMap<String, MobOwner>>,
     /// Set once the seed landed: every event log and creation record read.
     seeded: tokio::sync::OnceCell<()>,
     /// The agent mob tool state of the runtime, whose mobs the seed reads.
@@ -142,6 +156,17 @@ fn unknown_mob_owner(mob_id: &str) -> MobError {
     ))
 }
 
+/// The refusal of a spawn into a mob whose creation record does not say
+/// which member created it. The record never changes, so the refusal stands
+/// for as long as the mob does.
+fn undecidable_mob_owner(mob_id: &str) -> MobError {
+    MobError::WiringError(format!(
+        "who mob '{mob_id}' is private to cannot be read: its creation record does not say \
+         which member created it (several rosters named the session that created it, or the \
+         record is of a kind this release does not know), so no member can be spawned into it"
+    ))
+}
+
 /// The refusal of a spawn that would make a member private to one person
 /// private to another.
 fn crossed_owners(source: &str) -> MobError {
@@ -149,6 +174,53 @@ fn crossed_owners(source: &str) -> MobError {
         "'{source}' is private to a person; a member private to another person may not take it \
          over"
     ))
+}
+
+/// What a mob's creation record says about the member that created it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreatingMember<'a> {
+    /// The record names the member, with the mob that member is seated in:
+    /// the mob is private to whoever that member is private to.
+    Named(&'a meerkat_mob::MobId, &'a meerkat_mob::AgentIdentity),
+    /// The record names no member: the mob is private to no one.
+    NoMember,
+    /// The record does not say which member created the mob: several rosters
+    /// named the session that created it and the record picks none, or the
+    /// record is of a kind this release does not know. Who the mob is
+    /// private to cannot be read from it.
+    Undecidable,
+}
+
+/// What a mob's creation record says about its creating member: a create a
+/// host made for a member's session (`Member`) and a member's own
+/// `mob_create` (`OperatorMember`) both name one. The host, a session no
+/// roster named and a store from before creations were recorded name none.
+/// A session several rosters named (`Ambiguous`) is not decidable: one of
+/// those members created the mob, and the record does not say which. A
+/// record of a kind this release does not know is not decidable either: it
+/// may name a member.
+fn creating_member(provenance: &meerkat_mob::MobProvenance) -> CreatingMember<'_> {
+    use meerkat_mob::MobProvenance;
+    match provenance {
+        MobProvenance::Member {
+            parent_mob_id,
+            creator_identity,
+            ..
+        }
+        | MobProvenance::OperatorMember {
+            parent_mob_id,
+            creator_identity,
+            ..
+        } => CreatingMember::Named(parent_mob_id, creator_identity),
+        MobProvenance::Host
+        | MobProvenance::Session { .. }
+        | MobProvenance::OperatorSession { .. }
+        | MobProvenance::Unrecorded => CreatingMember::NoMember,
+        MobProvenance::Ambiguous { .. } => CreatingMember::Undecidable,
+        // `MobProvenance` is open to new variants: one this release does
+        // not know may name a member, so it is not taken to name none.
+        _ => CreatingMember::Undecidable,
+    }
 }
 
 /// The wait before the next try of a durable read that failed, growing to
@@ -257,21 +329,27 @@ impl PrivateOwners {
 
     /// The owner of mob `mob_id`, which a member created: `None` for a mob
     /// private to no one. A mob this record does not know yet is refused as
-    /// retryable ([`unknown_mob_owner`]).
+    /// retryable ([`unknown_mob_owner`]); one whose creation record does not
+    /// say which member created it is refused for good
+    /// ([`undecidable_mob_owner`]).
     fn mob_owner(&self, mob_id: &str) -> Result<Option<String>, MobError> {
-        self.inner
+        let recorded = self
+            .inner
             .mob_owners
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(mob_id)
-            .cloned()
-            .ok_or_else(|| unknown_mob_owner(mob_id))
+            .cloned();
+        match recorded {
+            Some(MobOwner::Known(owner)) => Ok(owner),
+            Some(MobOwner::Undecidable) => Err(undecidable_mob_owner(mob_id)),
+            None => Err(unknown_mob_owner(mob_id)),
+        }
     }
 
-    /// Record that mob `mob_id` is private to `owner` (`None`: to no one).
-    /// The first record of a mob stands: its creator's owner does not
-    /// change.
-    fn record_mob(&self, mob_id: &str, owner: Option<String>) {
+    /// Record who mob `mob_id` is private to. The first record of a mob
+    /// stands: its creator's owner does not change.
+    fn record_mob(&self, mob_id: &str, owner: MobOwner) {
         self.inner
             .mob_owners
             .write()
@@ -405,13 +483,12 @@ impl PrivateOwners {
             creations.push((mob_id, provenance));
         }
         for (mob_id, provenance) in creations {
-            let owner = match provenance {
-                meerkat_mob::MobProvenance::Member {
-                    parent_mob_id,
-                    creator_identity,
-                    ..
-                } => self.owner_of(parent_mob_id.as_str(), creator_identity.as_str()),
-                _ => None,
+            let owner = match creating_member(&provenance) {
+                CreatingMember::Named(parent, creator) => {
+                    MobOwner::Known(self.owner_of(parent.as_str(), creator.as_str()))
+                }
+                CreatingMember::NoMember => MobOwner::Known(None),
+                CreatingMember::Undecidable => MobOwner::Undecidable,
             };
             self.record_mob(mob_id.as_str(), owner);
         }
@@ -517,7 +594,7 @@ impl PrivateOwners {
                     }
                     _ => None,
                 };
-                owners.record_mob(request.mob_id.as_str(), owner);
+                owners.record_mob(request.mob_id.as_str(), MobOwner::Known(owner));
                 Ok(())
             })
         })
@@ -617,8 +694,10 @@ impl PrivateOwners {
     /// (its creator's), else the owner [`Self::requested_owner`] names. A
     /// mob this record does not know refuses the spawn as retryable: until
     /// the seed lands, a mob restored from before a restart is not known. A
-    /// rebuild of a member already seated there is not a spawn, and is not
-    /// asked (see the customizer's `customize_resume`).
+    /// mob whose creation record does not say which member created it
+    /// refuses the spawn for good. A rebuild of a member already seated
+    /// there is not a spawn, and is not asked (see the customizer's
+    /// `customize_resume`).
     pub(crate) fn apply_child(
         &self,
         mob_id: &str,
@@ -774,6 +853,70 @@ mod tests {
             crate::access::PRIVATE_TO_LABEL.to_string(),
             OWNER.to_string(),
         )])
+    }
+
+    /// A creation record names its creating member exactly when one
+    /// member's session made the create: the create a host made for it
+    /// (`Member`) and the member's own `mob_create` (`OperatorMember`) both
+    /// answer the member and the mob it is seated in. A record of the host,
+    /// of a session no roster named (a host's create for it, or its own), or
+    /// of a store from before creations were recorded names none. A record
+    /// of a session several rosters named is not decidable.
+    #[test]
+    fn a_creation_record_names_its_creating_member() {
+        use meerkat_mob::{AgentIdentity, Generation, MobId, MobProvenance};
+
+        let parent = MobId::from("parent-mob");
+        let creator = AgentIdentity::from("creator");
+        let session = meerkat_core::SessionId::new();
+        let incarnation = meerkat_core::service::MobIncarnationId::mint();
+        let names_the_creator = [
+            MobProvenance::Member {
+                parent_mob_id: parent.clone(),
+                parent_incarnation: incarnation,
+                creator_identity: creator.clone(),
+                creator_generation: Generation::INITIAL,
+                owner_session: session.clone(),
+            },
+            MobProvenance::OperatorMember {
+                parent_mob_id: parent.clone(),
+                parent_incarnation: incarnation,
+                creator_identity: creator.clone(),
+                creator_generation: Generation::INITIAL,
+                owner_session: session.clone(),
+            },
+        ];
+        for provenance in &names_the_creator {
+            assert_eq!(
+                creating_member(provenance),
+                CreatingMember::Named(&parent, &creator),
+                "{provenance:?}"
+            );
+        }
+        let names_no_member = [
+            MobProvenance::Host,
+            MobProvenance::Session {
+                session_id: session.clone(),
+            },
+            MobProvenance::OperatorSession {
+                session_id: session,
+            },
+            MobProvenance::Unrecorded,
+        ];
+        for provenance in &names_no_member {
+            assert_eq!(
+                creating_member(provenance),
+                CreatingMember::NoMember,
+                "{provenance:?}"
+            );
+        }
+        assert_eq!(
+            creating_member(&MobProvenance::Ambiguous {
+                matching_rosters: 2,
+            }),
+            CreatingMember::Undecidable,
+            "a record of several rosters does not say which member created the mob"
+        );
     }
 
     /// The audience of the members' own operator tools reads whom a member

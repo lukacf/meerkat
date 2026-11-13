@@ -784,6 +784,12 @@ impl IdentityRuntime {
             // Core holds the name for no identity this runtime serves (the
             // change removed it): the registration is gone, as asked.
             Err(IdentityRuntimeError::UnknownIdentity(_)) => Ok(false),
+            Ok(true) => {
+                // A change of an agent is a use of it: one this process has
+                // not compared yet has its instructions compared now.
+                self.append_owed_instructions_before_delivery(name).await;
+                Ok(true)
+            }
             followed => followed,
         }
     }
@@ -840,6 +846,10 @@ impl IdentityRuntime {
         match created {
             Some(true) => self.refresh_created_registration(name).await,
             Some(false) => Ok(true),
+            // Registered now, from its row. Its instructions are not
+            // compared here: this funnel also serves reads. A delivery or a
+            // change compares an agent this process has not compared yet
+            // (`append_owed_instructions_before_delivery`).
             None => self.admit_unregistered_name(name).await,
         }
     }
@@ -981,6 +991,8 @@ impl IdentityRuntime {
     /// now (an adoption between two roster passes), and a row's own
     /// registration keeps the mark the last roster read gave it.
     pub(super) async fn register_created_locked(&self, spec: DurableAgentSpec) {
+        self.append_changed_instructions_on_registration(&spec)
+            .await;
         let identity = spec.identity.clone();
         let bootstrap_generation = self.identity_bootstrap_status_with_generation().0;
         {

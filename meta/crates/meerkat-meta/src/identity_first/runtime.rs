@@ -67,6 +67,7 @@ mod created;
 mod declare;
 mod identity_family;
 pub(crate) use identity_family::UNSEATED_RECORD_MAX_AGE;
+mod instruction_append;
 mod lifecycle_projection;
 mod records;
 #[cfg(test)]
@@ -76,6 +77,10 @@ mod seat_tests;
 mod tool_grant_seat;
 use build_preparation::{admission_door_refusal_of, door_refusal_of};
 pub(crate) use declare::HostedIdentities;
+pub use instruction_append::{
+    INSTRUCTIONS_NAMESPACE, RESERVED_INSTRUCTION_NAMESPACE_PREFIX,
+    is_reserved_instruction_namespace,
+};
 pub(crate) use records::host_pending_members_before_build;
 
 const MANAGED_PEER_RECONCILE_CONCURRENCY: usize = 64;
@@ -3734,6 +3739,9 @@ pub struct IdentityRuntime {
     has_runtime_store: bool,
     bridge: Option<Arc<dyn SessionBridge>>,
     reset_roster_source: StdRwLock<Option<ResetRosterSource>>,
+    /// The mob's instruction records as this process first read them
+    /// ([`instruction_append::InstructionRecordsAtStart`]).
+    instruction_records_at_start: instruction_append::InstructionRecordsAtStart,
     runtime_services: AgentRuntimeServices,
     managed_peer_edges: RwLock<BTreeSet<(AgentIdentity, AgentIdentity)>>,
     /// Who owns the live edges between this runtime's identities; see
@@ -4798,6 +4806,7 @@ impl IdentityRuntime {
             has_runtime_store: config.has_runtime_store,
             bridge: config.bridge,
             reset_roster_source: StdRwLock::new(None),
+            instruction_records_at_start: Default::default(),
             runtime_services: AgentRuntimeServices::empty(),
             managed_peer_edges: RwLock::new(BTreeSet::new()),
             identity_edge_ownership: StdRwLock::new(IdentityEdgeOwnership::WiredByThisProcess),
@@ -7797,6 +7806,8 @@ impl IdentityRuntime {
         spec: DurableAgentSpec,
         declaration_refused: Option<bool>,
     ) {
+        self.append_changed_instructions_on_registration(&spec)
+            .await;
         let identity = spec.identity.clone();
         let bootstrap_generation = self.identity_bootstrap_status_with_generation().0;
         {
@@ -10332,6 +10343,8 @@ impl IdentityRuntime {
         spec: DurableAgentSpec,
         declaration_refused: Option<bool>,
     ) -> Result<(), IdentityRuntimeError> {
+        self.append_changed_instructions_on_registration(&spec)
+            .await;
         let identity = spec.identity.clone();
         let mut entries = self.entries.write().await;
         let entry = entries
@@ -10887,6 +10900,10 @@ impl IdentityRuntime {
         idempotency_key: &str,
     ) -> Result<meerkat_contracts::WireContinuationReceipt, IdentityRuntimeError> {
         self.refuse_unless_addressable(identity).await?;
+        // A delivery is a use of the agent: one this process has not
+        // compared yet has its instructions compared before it is submitted.
+        self.append_owed_instructions_before_delivery(identity)
+            .await;
         let member = crate::member_comms_id::roster_member_id_for_identity(identity.as_str());
         let refused = |refusal: meerkat_mob::MemberSendIdempotencyRefusal| {
             IdentityRuntimeError::KeyedSendRefused {
@@ -11315,6 +11332,10 @@ impl IdentityRuntime {
         // yet is registered from its row, and one it registered is read again
         // from its row, as at the other delivery doors.
         self.ensure_current_registration(identity).await?;
+        // A delivery is a use of the agent: one this process has not
+        // compared yet has its instructions compared before it is submitted.
+        self.append_owed_instructions_before_delivery(identity)
+            .await;
         // One deadline and one set of free rebinds for the whole send, armed
         // by its first wait and never re-armed (Core's owner-change churn),
         // taken at the send's first "not now".
@@ -12256,6 +12277,10 @@ impl IdentityRuntime {
             sender,
         } = request;
         self.refuse_unless_addressable(identity).await?;
+        // A delivery is a use of the agent: one this process has not
+        // compared yet has its instructions compared before it is submitted.
+        self.append_owed_instructions_before_delivery(identity)
+            .await;
         // A target Core does not hold yet (or whose first-boot row is still
         // to carry out) is seated first; Core's dispatch materializes it.
         self.seat_for_admission(identity, expected_alias, expected_spec_digest)
@@ -13526,6 +13551,10 @@ impl IdentityRuntime {
         // the door's typed refusal (a read Core could not serve, retryable),
         // or unknown here.
         self.ensure_current_registration(identity).await?;
+        // A delivery is a use of the agent: one this process has not
+        // compared yet has its instructions compared before it is submitted.
+        self.append_owed_instructions_before_delivery(identity)
+            .await;
         // A target Core does not hold yet (or whose first-boot row is still
         // to carry out) is seated first; Core's dispatch materializes it. A
         // maintenance dispatch bound to a captured incarnation seats nothing.
@@ -15485,6 +15514,11 @@ impl IdentityRuntime {
         // a compaction projection it still owes is settled before Core is
         // asked, and its batch waits for the retirement's side effects.
         self.settle_owed_compaction_for_retirement(identity, retiring.as_ref())
+            .await;
+        // The agent goes on with the same instructions: its instruction
+        // record is kept for the fresh life (and for its forks), brought up
+        // to the current text first when it holds another one.
+        self.keep_instruction_record_for_fresh_life(identity, &spec.additional_instructions)
             .await;
         let session_id = match bridge.rotate_member(identity, &spec, &draft).await {
             Ok(session_id) => session_id,

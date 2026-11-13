@@ -18,6 +18,8 @@ use crate::runtime::{
     MemberBuildPreparer, MemberBuildReport,
 };
 
+mod waking_endpoint_rows;
+
 const WAIT: Duration = Duration::from_secs(30);
 /// How long a test waits for a step the row says must happen soon (a stop
 /// landing while a wake is held).
@@ -469,6 +471,27 @@ impl WakeFixture {
         member_seats: bool,
         wake_retry_backoff: Option<(Duration, Duration)>,
     ) -> Self {
+        Self::build_with_storage(
+            label,
+            configure,
+            edit,
+            member_seats,
+            wake_retry_backoff,
+            MobStorage::in_memory(),
+        )
+        .await
+    }
+
+    /// [`Self::build_with_backoff`], over `storage` (a row that injects a
+    /// journal fault brings its own event store).
+    async fn build_with_storage(
+        label: &str,
+        configure: impl FnOnce(&mut meerkat::Config),
+        edit: impl FnOnce(&mut MobDefinition),
+        member_seats: bool,
+        wake_retry_backoff: Option<(Duration, Duration)>,
+        storage: MobStorage,
+    ) -> Self {
         let root = tempfile::Builder::new()
             .prefix("meerkat-member-wake-")
             .tempdir()
@@ -512,7 +535,7 @@ impl WakeFixture {
         let customizer = Arc::new(VersionedCustomizer::new());
         let mut definition = wake_rows_definition(label);
         edit(&mut definition);
-        let mut mob = MobBuilder::new(definition, MobStorage::in_memory())
+        let mut mob = MobBuilder::new(definition, storage)
             .with_session_service(service.clone())
             .with_default_llm_client(Arc::new(client.clone()))
             .with_member_build_preparer(preparer.clone())
@@ -3816,6 +3839,1422 @@ async fn kickoff_notices_to_a_dormant_peer_wake_it_once() {
     fixture.finish().await;
 }
 
+/// How long an actor command may wait while a kickoff notice is being
+/// delivered to a peer that is not live. The actor's own inline step budget
+/// is 2 s; a notice awaited on the actor held it for the sender's whole send
+/// budget (30 s).
+const ACTOR_ANSWER_BOUND: Duration = Duration::from_secs(5);
+/// The longest a row waits for one actor command before it reports the
+/// actor as held.
+const ACTOR_HELD_CAP: Duration = Duration::from_mins(2);
+
+/// A mob whose workers are wired to each other by role at their spawn, so a
+/// new worker's kickoff notices go to every worker seated before it.
+async fn kickoff_notice_fixture(label: &str) -> WakeFixture {
+    WakeFixture::new_with(
+        label,
+        |_| {},
+        |definition| {
+            definition.wiring.role_wiring = vec![RoleWiringRule {
+                a: ProfileName::from("worker"),
+                b: ProfileName::from("worker"),
+            }];
+        },
+    )
+    .await
+}
+
+/// Spawn an autonomous worker: its first message is its kickoff, and its
+/// kickoff run starts at its spawn.
+async fn spawn_kickoff_member(fixture: &WakeFixture, label: &str) -> AgentIdentity {
+    let member = AgentIdentity::from(format!("{label}-{}", Uuid::new_v4().simple()));
+    let mut spec = SpawnMemberSpec::new("worker", member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
+    tokio::time::timeout(WAIT, fixture.handle.spawn_spec(spec))
+        .await
+        .expect("the spawn answers")
+        .expect("spawn the kickoff member");
+    member
+}
+
+/// A released (Dormant) worker whose next wake holds between its applied
+/// plan and its readiness until the returned sender sends `true`: Waking,
+/// its comms runtime built, its readiness owed.
+async fn peer_held_at_wake_readiness(
+    fixture: &WakeFixture,
+    label: &str,
+) -> (AgentIdentity, tokio::sync::watch::Sender<bool>) {
+    let peer = fixture.spawn(label).await;
+    fixture.release(&peer).await;
+    let readiness = crate::runtime::actor::member_wake_turn::hold_wake_readiness_for_test(&peer);
+    (peer, readiness)
+}
+
+/// Wait until `peer`'s wake applied its plan (Bound).
+async fn wait_wake_bound(fixture: &WakeFixture, peer: &AgentIdentity) {
+    let key = mob_dsl::AgentIdentity::from_domain(peer);
+    let mut state = fixture.handle.machine_state_watch_rx.clone();
+    tokio::time::timeout(
+        WAIT,
+        state.wait_for(|state| state.member_wake_bound.contains(&key)),
+    )
+    .await
+    .expect("the peer's wake reaches its Bound step")
+    .expect("the machine state stays published");
+}
+
+/// Wait until MobMachine holds `member`'s kickoff Started: the transition is
+/// committed and published, and its notice is the actor's next act.
+async fn wait_kickoff_started(fixture: &WakeFixture, member: &AgentIdentity) {
+    let key = mob_dsl::AgentIdentity::from_domain(member);
+    let mut state = fixture.handle.machine_state_watch_rx.clone();
+    tokio::time::timeout(
+        ACTOR_HELD_CAP,
+        state.wait_for(|state| state.member_kickoff_started.contains(&key)),
+    )
+    .await
+    .expect("the member's kickoff resolves Started")
+    .expect("the machine state stays published");
+}
+
+/// How long one cheap actor command (the mob's phase read) takes to answer;
+/// [`ACTOR_HELD_CAP`] when it has not answered by then.
+async fn actor_answer_time(fixture: &WakeFixture) -> Duration {
+    let asked = Instant::now();
+    match tokio::time::timeout(ACTOR_HELD_CAP, fixture.handle.status()).await {
+        Ok(_) => asked.elapsed(),
+        Err(_) => ACTOR_HELD_CAP,
+    }
+}
+
+/// The kickoff notices of `from` that `peer`'s transcript holds, by kind and
+/// in transcript order, as the visible lifecycle notices its runtime
+/// appended.
+async fn kickoff_notice_kinds(
+    fixture: &WakeFixture,
+    peer: &AgentIdentity,
+    from: &AgentIdentity,
+) -> Vec<String> {
+    let session = fixture.session(peer).await;
+    let transcript = fixture.transcript(&session).await;
+    transcript
+        .split("Peer lifecycle notice from ")
+        .skip(1)
+        .filter_map(|notice| {
+            let (sender, rest) = notice.split_once("Kind: ")?;
+            if !sender.contains(from.as_str()) {
+                return None;
+            }
+            let kind = rest
+                .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '_'))
+                .next()?;
+            kind.starts_with("mob.kickoff_").then(|| kind.to_string())
+        })
+        .collect()
+}
+
+/// The starting and started kickoff notices of `from` that `peer`'s
+/// transcript holds, in transcript order.
+async fn kickoff_notices_received(
+    fixture: &WakeFixture,
+    peer: &AgentIdentity,
+    from: &AgentIdentity,
+) -> Vec<String> {
+    kickoff_notice_kinds(fixture, peer, from)
+        .await
+        .into_iter()
+        .filter(|kind| {
+            matches!(
+                kind.as_str(),
+                "mob.kickoff_starting" | "mob.kickoff_started"
+            )
+        })
+        .collect()
+}
+
+/// The notices every pair of `peers` and `members` holds, once each pair
+/// holds its started notice or `wait` ended.
+async fn kickoff_notices_settled(
+    fixture: &WakeFixture,
+    peers: &[AgentIdentity],
+    members: &[AgentIdentity],
+    wait: Duration,
+) -> Vec<Vec<String>> {
+    let read = || async {
+        let mut received = Vec::new();
+        for peer in peers {
+            for member in members {
+                received.push(kickoff_notices_received(fixture, peer, member).await);
+            }
+        }
+        received
+    };
+    let _ = tokio::time::timeout(wait, async {
+        loop {
+            let received = read().await;
+            if received
+                .iter()
+                .all(|notices| notices.iter().any(|kind| kind == "mob.kickoff_started"))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    // A second copy, if one were sent, lands with the first.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    read().await
+}
+
+/// What a peer holds when it received a member's kickoff notices once each,
+/// in the order the member's kickoff went through them.
+fn starting_then_started() -> Vec<String> {
+    vec![
+        "mob.kickoff_starting".to_string(),
+        "mob.kickoff_started".to_string(),
+    ]
+}
+
+/// A kickoff notice to a wired peer that is being woken never holds the
+/// actor: the member's kickoff resolves while the peer's wake is between its
+/// applied plan and its readiness (Waking, its comms runtime built), the
+/// notice of the resolution joins that wake, and the wake's next step needs
+/// the actor. The actor answers its next command within its bound, the wake
+/// finishes, and the peer receives the member's notices once each, in order.
+///
+/// RED before the fix: the Started notice was sent on the actor's own step,
+/// the send joined the peer's wake through the mob's wake route, and the
+/// wake's readiness commit queued behind that step, so the step ended only
+/// when the send's budget did (30 s, `wake_timed_out`); every command of the
+/// mob waited for it, and the peer was woken with no notice delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kickoff_notice_to_a_waking_peer_leaves_the_actor_free() {
+    let fixture = kickoff_notice_fixture("kickoff-notice-waking-peer").await;
+    let (peer, readiness) = peer_held_at_wake_readiness(&fixture, "notice-waking-peer").await;
+
+    // The member's kickoff run holds at its model request; its first notices
+    // go to the dormant peer and start the peer's wake, which holds Bound.
+    fixture.client.block();
+    let member = spawn_kickoff_member(&fixture, "notice-kickoff-member").await;
+    wait_wake_bound(&fixture, &peer).await;
+
+    // The kickoff resolves: its Started notice is owed to the waking peer.
+    // The peer's readiness is let go at the same time, so its wake's next
+    // step is a command to the actor, as in an ordinary wake.
+    fixture.client.release();
+    wait_kickoff_started(&fixture, &member).await;
+    let _ = readiness.send(true);
+    let answered_after = actor_answer_time(&fixture).await;
+
+    fixture
+        .wait_residency(&peer, Some(mob_dsl::MemberMaterializationPhase::Live))
+        .await;
+    let received = kickoff_notices_settled(
+        &fixture,
+        std::slice::from_ref(&peer),
+        std::slice::from_ref(&member),
+        STEP,
+    )
+    .await;
+    assert!(
+        answered_after < ACTOR_ANSWER_BOUND && received == [starting_then_started()],
+        "a kickoff notice to a waking peer held the actor or was lost: the next actor command \
+         answered after {answered_after:?} (bound {ACTOR_ANSWER_BOUND:?}); the woken peer holds \
+         the member's notices {received:?} (starting, then started, once each expected)"
+    );
+    fixture.finish().await;
+}
+
+/// Kickoffs that resolve close together, each owing its notice to the same
+/// waking peers: no actor command waits behind a notice, and once the peers
+/// are woken each holds every member's started notice once.
+///
+/// RED before the fix: each Started notice to a waking peer was awaited on
+/// the actor for the send's whole budget, one kickoff resolution after the
+/// other, and the notices were lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kickoffs_resolving_together_notify_waking_peers_once_without_holding_the_actor() {
+    const MEMBERS: usize = 3;
+    let fixture = WakeFixture::new("kickoff-notice-together").await;
+    let mut peers = Vec::new();
+    let mut readiness = Vec::new();
+    for label in ["notice-peer-a", "notice-peer-b"] {
+        let (peer, release) = peer_held_at_wake_readiness(&fixture, label).await;
+        peers.push(peer);
+        readiness.push(release);
+    }
+
+    // Each member's kickoff run holds at its model request. A member is
+    // wired to the dormant peers once its kickoff is running, so its earlier
+    // notices went to no peer and nothing has woken one yet.
+    fixture.client.block();
+    let mut members = Vec::new();
+    for index in 0..MEMBERS {
+        let member = spawn_kickoff_member(&fixture, &format!("notice-member-{index}")).await;
+        fixture.client.wait_started(index + 1).await;
+        for peer in &peers {
+            fixture.wire(&member, peer).await;
+        }
+        members.push(member);
+    }
+    // A host delivery wakes each peer; each wake holds Bound.
+    let mut wakes = Vec::new();
+    for peer in &peers {
+        let handle = fixture.handle.clone();
+        let woken = peer.clone();
+        wakes.push(tokio::spawn(async move {
+            handle.ensure_member_live(&woken).await
+        }));
+    }
+    for peer in &peers {
+        wait_wake_bound(&fixture, peer).await;
+    }
+
+    // Every kickoff resolves at once; the peers' wakes go on at the same
+    // time, each needing the actor for its next step.
+    fixture.client.release();
+    wait_kickoff_started(&fixture, members.first().expect("a kickoff member")).await;
+    for release in &readiness {
+        let _ = release.send(true);
+    }
+    let mut slowest_answer = Duration::ZERO;
+    for _ in 0..10 {
+        slowest_answer = slowest_answer.max(actor_answer_time(&fixture).await);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    for member in &members {
+        wait_kickoff_started(&fixture, member).await;
+    }
+
+    for wake in wakes {
+        let woken = tokio::time::timeout(ACTOR_HELD_CAP, wake).await;
+        assert!(
+            matches!(woken, Ok(Ok(Ok(())))),
+            "a peer's own wake did not finish: {woken:?}"
+        );
+    }
+    let received = kickoff_notices_settled(&fixture, &peers, &members, STEP * 2).await;
+    let started_once = vec!["mob.kickoff_started".to_string()];
+    assert!(
+        slowest_answer < ACTOR_ANSWER_BOUND
+            && received.len() == peers.len() * MEMBERS
+            && received.iter().all(|notices| *notices == started_once),
+        "kickoff notices to waking peers held the actor or were lost: the slowest actor command \
+         answered after {slowest_answer:?} (bound {ACTOR_ANSWER_BOUND:?}); per peer and member \
+         the peers hold {received:?} (the started notice, once, expected)"
+    );
+    fixture.finish().await;
+}
+
+/// How many captured records say `member`'s started notice to `peer`, a peer
+/// that was not live, was not confirmed, with `refusal` in its error.
+fn undelivered_started_notices(
+    warnings: &CapturedWarnings,
+    member: &AgentIdentity,
+    peer: &AgentIdentity,
+    refusal: &str,
+) -> usize {
+    warnings
+        .lock()
+        .expect("captured warnings lock")
+        .iter()
+        .filter(|fields| {
+            field(fields, "message")
+                == Some("a kickoff notice to a peer that was not materialized was not confirmed")
+                && field(fields, "from") == Some(member.as_str())
+                && field(fields, "to") == Some(peer.as_str())
+                && field(fields, "intent") == Some("mob.kickoff_started")
+                && field(fields, "error").is_some_and(|error| error.contains(refusal))
+        })
+        .count()
+}
+
+/// A kickoff notice to a peer that cannot be woken inside the send's budget
+/// is recorded as not delivered, and nothing waits behind it: the peer's
+/// wake holds between its applied plan and its readiness for longer than
+/// the sender's whole send budget (30 s). The actor answers its commands
+/// throughout, and when the budget ends the notice's failure is recorded
+/// with the member, the peer, the notice and `wake_timed_out`. The mob keeps
+/// serving, and the peer is woken once its readiness is let go.
+///
+/// RED before the fix: the notice's send held the actor for that budget.
+///
+/// A current-thread runtime, so the actor's and the delivery's warnings
+/// reach this thread's capture.
+#[tokio::test]
+async fn a_kickoff_notice_to_a_peer_that_cannot_be_woken_is_recorded_and_holds_nothing() {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = WakeFixture::new("kickoff-notice-unwakeable").await;
+    let (peer, readiness) = peer_held_at_wake_readiness(&fixture, "notice-unwakeable-peer").await;
+
+    // The member is wired to the dormant peer once its kickoff is running,
+    // so the started notice is the first one owed to the peer. A host
+    // delivery wakes the peer; its wake holds Bound and does not finish.
+    fixture.client.block();
+    let member = spawn_kickoff_member(&fixture, "notice-unwakeable-member").await;
+    fixture.client.wait_started(1).await;
+    fixture.wire(&member, &peer).await;
+    let wake = {
+        let handle = fixture.handle.clone();
+        let woken = peer.clone();
+        tokio::spawn(async move { handle.ensure_member_live(&woken).await })
+    };
+    wait_wake_bound(&fixture, &peer).await;
+    fixture.client.release();
+    wait_kickoff_started(&fixture, &member).await;
+
+    // The peer's wake does not finish; the actor answers all the same.
+    let answered_after = actor_answer_time(&fixture).await;
+
+    // The send's budget ends: the Started notice is recorded as not
+    // delivered, naming the member, the peer, the notice and the refusal.
+    let _ = tokio::time::timeout(WAIT + STEP, async {
+        while undelivered_started_notices(&warnings, &member, &peer, "wake_timed_out") == 0 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    let records = undelivered_started_notices(&warnings, &member, &peer, "wake_timed_out");
+    let answered_after_failure = actor_answer_time(&fixture).await;
+
+    // The mob keeps serving: the peer is woken once its readiness is let go.
+    let _ = readiness.send(true);
+    let woken = tokio::time::timeout(WAIT, wake).await;
+    assert!(
+        matches!(woken, Ok(Ok(Ok(())))),
+        "the peer's own wake did not finish: {woken:?}"
+    );
+    assert!(
+        answered_after < ACTOR_ANSWER_BOUND
+            && answered_after_failure < ACTOR_ANSWER_BOUND
+            && records == 1,
+        "a kickoff notice to a peer that could not be woken held the actor or left no record: \
+         the actor answered after {answered_after:?} while the notice was pending and after \
+         {answered_after_failure:?} once it had failed (bound {ACTOR_ANSWER_BOUND:?}); \
+         {records} record(s) of the undelivered started notice (1 expected)"
+    );
+    fixture.finish().await;
+}
+
+/// A stop while a kickoff notice is pending on a waking peer answers at once:
+/// the delivery is cancelled with the mob's other pending peer deliveries
+/// and recorded as not delivered, and the shutdown after it finds nothing
+/// to wait for.
+///
+/// RED before the fix: the stop queued behind the notice's send on the actor
+/// for the send's budget.
+///
+/// A current-thread runtime, so the delivery's warning reaches this thread's
+/// capture.
+#[tokio::test]
+async fn a_stop_with_a_kickoff_notice_pending_cancels_it_and_answers_at_once() {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = kickoff_notice_fixture("kickoff-notice-stop").await;
+    let (peer, readiness) = peer_held_at_wake_readiness(&fixture, "notice-stop-peer").await;
+
+    fixture.client.block();
+    let member = spawn_kickoff_member(&fixture, "notice-stop-member").await;
+    wait_wake_bound(&fixture, &peer).await;
+    fixture.client.release();
+    wait_kickoff_started(&fixture, &member).await;
+
+    let asked = Instant::now();
+    let stopped = tokio::time::timeout(ACTOR_HELD_CAP, fixture.handle.stop())
+        .await
+        .map(|stopped| stopped.map(|_| ()));
+    let stop_answered_after = asked.elapsed();
+    let cancelled = undelivered_started_notices(&warnings, &member, &peer, "canceled");
+    let _ = readiness.send(true);
+    let asked = Instant::now();
+    let shut_down = tokio::time::timeout(ACTOR_HELD_CAP, fixture.handle.shutdown()).await;
+    let shutdown_answered_after = asked.elapsed();
+    assert!(
+        matches!(stopped, Ok(Ok(())))
+            && stop_answered_after < ACTOR_ANSWER_BOUND
+            && cancelled == 1
+            && matches!(shut_down, Ok(Ok(())))
+            && shutdown_answered_after < ACTOR_ANSWER_BOUND,
+        "a stop or a shutdown waited for a pending kickoff notice, or the stop did not cancel \
+         it: the stop answered {stopped:?} after {stop_answered_after:?} with {cancelled} \
+         record(s) of the cancelled started notice (1 expected), and the shutdown {shut_down:?} \
+         after {shutdown_answered_after:?} (bound {ACTOR_ANSWER_BOUND:?} each)"
+    );
+}
+
+/// A shutdown asked while a kickoff notice is pending on a waking peer does
+/// not wait for the notice: the peer's wake goes on at the same time, as in
+/// an ordinary wake, and the shutdown answers within the actor's bound.
+///
+/// RED before the fix: the shutdown queued behind the notice's send on the
+/// actor for the send's budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shutdown_with_a_kickoff_notice_pending_answers_without_waiting_for_it() {
+    let fixture = kickoff_notice_fixture("kickoff-notice-shutdown").await;
+    let (peer, readiness) = peer_held_at_wake_readiness(&fixture, "notice-shutdown-peer").await;
+
+    fixture.client.block();
+    let member = spawn_kickoff_member(&fixture, "notice-shutdown-member").await;
+    wait_wake_bound(&fixture, &peer).await;
+    fixture.client.release();
+    wait_kickoff_started(&fixture, &member).await;
+
+    let _ = readiness.send(true);
+    let asked = Instant::now();
+    let shut_down = tokio::time::timeout(ACTOR_HELD_CAP, fixture.handle.shutdown()).await;
+    let answered_after = asked.elapsed();
+    assert!(
+        matches!(shut_down, Ok(Ok(()))) && answered_after < ACTOR_ANSWER_BOUND,
+        "a shutdown waited for a pending kickoff notice: it answered {shut_down:?} after \
+         {answered_after:?} (bound {ACTOR_ANSWER_BOUND:?})"
+    );
+}
+
+/// The kickoff notices of one member that are pending for one peer are
+/// bounded, and the notice being sent is never the one dropped. With the
+/// bound at one, the first notice owed to a waking peer is being sent
+/// (pending on the peer's wake); the started notice, owed meanwhile, has no
+/// queued notice to replace, so it is the one dropped, on the actor's own
+/// step, and recorded as not delivered; nothing waits behind it. The notice
+/// being sent is delivered once the peer is woken.
+///
+/// A current-thread runtime, so the actor's warning reaches this thread's
+/// capture.
+#[tokio::test]
+async fn a_kickoff_notice_beyond_the_pending_bound_of_its_peer_is_refused_and_recorded() {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = kickoff_notice_fixture("kickoff-notice-bound").await;
+    crate::runtime::actor::kickoff_notice::set_kickoff_notice_pending_limit_for_test(
+        fixture.handle.mob_id(),
+        1,
+    );
+    let (peer, readiness) = peer_held_at_wake_readiness(&fixture, "notice-bound-peer").await;
+
+    fixture.client.block();
+    let member = spawn_kickoff_member(&fixture, "notice-bound-member").await;
+    wait_wake_bound(&fixture, &peer).await;
+    fixture.client.release();
+    wait_kickoff_started(&fixture, &member).await;
+    let answered_after = actor_answer_time(&fixture).await;
+    let refused = undelivered_started_notices(&warnings, &member, &peer, "limit=1");
+
+    let _ = readiness.send(true);
+    fixture
+        .wait_residency(&peer, Some(mob_dsl::MemberMaterializationPhase::Live))
+        .await;
+    let _ = tokio::time::timeout(WAIT, async {
+        while kickoff_notice_kinds(&fixture, &peer, &member)
+            .await
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    // A refused notice, if it were sent after all, lands with the first.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let delivered = kickoff_notice_kinds(&fixture, &peer, &member).await;
+    assert!(
+        answered_after < ACTOR_ANSWER_BOUND
+            && refused == 1
+            && delivered.len() == 1
+            && !delivered.iter().any(|kind| kind == "mob.kickoff_started"),
+        "the pending bound did not hold: the actor answered after {answered_after:?} (bound \
+         {ACTOR_ANSWER_BOUND:?}); {refused} record(s) of the refused started notice (1 \
+         expected); the woken peer holds the member's notices {delivered:?} (the one that was \
+         pending, and no started notice, expected)"
+    );
+    fixture.finish().await;
+}
+
+/// Two notices of one member to one peer arrive in the order the member's
+/// kickoff went through them, through the whole path: the actor's hand-off,
+/// the delivery lane, the member's own comms send and the peer's transcript.
+/// While the send of the member's starting notice is held, its started
+/// notice, owed meanwhile, is not sent; once the starting notice is let go
+/// the peer holds starting, then started, once each.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_members_later_kickoff_notice_waits_for_its_earlier_one_to_the_same_peer() {
+    let fixture = kickoff_notice_fixture("kickoff-notice-order").await;
+    let starting = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_starting",
+    );
+    // A live peer: nothing but the held send keeps a notice from it.
+    let peer = fixture.spawn("notice-order-peer").await;
+    let member = spawn_kickoff_member(&fixture, "notice-order-member").await;
+    wait_kickoff_started(&fixture, &member).await;
+    // The actor's step that owed the started notice is over once its next
+    // command answers: the notice was handed off.
+    let answered_after = actor_answer_time(&fixture).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let while_held = kickoff_notices_received(&fixture, &peer, &member).await;
+
+    starting.release();
+    let received = kickoff_notices_settled(
+        &fixture,
+        std::slice::from_ref(&peer),
+        std::slice::from_ref(&member),
+        STEP,
+    )
+    .await;
+    assert!(
+        answered_after < ACTOR_ANSWER_BOUND
+            && while_held.is_empty()
+            && received == [starting_then_started()],
+        "a member's later kickoff notice did not wait for its earlier one: the actor answered \
+         after {answered_after:?} (bound {ACTOR_ANSWER_BOUND:?}); while the starting notice was \
+         held the peer held {while_held:?} (nothing expected), and afterwards {received:?} \
+         (starting, then started, once each expected)"
+    );
+    fixture.finish().await;
+}
+
+/// An unwire of an edge to a peer that is being woken waits for that wake,
+/// and the actor answers meanwhile: the unwire is parked while the peer's
+/// wake step runs and proceeds once the peer is live. The unwire's lane
+/// therefore never meets a Waking peer, neither in its notices nor in the
+/// compensating notices its rollback still awaits on the actor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unwire_of_an_edge_to_a_waking_peer_waits_for_its_wake_and_holds_nothing() {
+    let fixture = WakeFixture::new("unwire-waking-peer").await;
+    let (peer, readiness) = peer_held_at_wake_readiness(&fixture, "unwire-waking-peer").await;
+    let member = fixture.spawn("unwire-waking-member").await;
+    fixture.wire(&member, &peer).await;
+    let wake = {
+        let handle = fixture.handle.clone();
+        let woken = peer.clone();
+        tokio::spawn(async move { handle.ensure_member_live(&woken).await })
+    };
+    wait_wake_bound(&fixture, &peer).await;
+
+    let unwire = {
+        let handle = fixture.handle.clone();
+        let (local, target) = (member.clone(), peer.clone());
+        tokio::spawn(async move { handle.unwire(local, target).await })
+    };
+    let answered_after = actor_answer_time(&fixture).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let parked = !unwire.is_finished();
+    let answered_while_parked = actor_answer_time(&fixture).await;
+
+    let _ = readiness.send(true);
+    let unwired = tokio::time::timeout(WAIT, unwire).await;
+    let woken = tokio::time::timeout(WAIT, wake).await;
+    assert!(
+        parked
+            && answered_after < ACTOR_ANSWER_BOUND
+            && answered_while_parked < ACTOR_ANSWER_BOUND
+            && matches!(unwired, Ok(Ok(Ok(()))))
+            && matches!(woken, Ok(Ok(Ok(())))),
+        "an unwire of an edge to a waking peer did not wait for the wake, or held the actor: \
+         parked while the wake was held: {parked}; the actor answered after {answered_after:?} \
+         and {answered_while_parked:?} (bound {ACTOR_ANSWER_BOUND:?}); after the wake the unwire \
+         answered {unwired:?} and the wake {woken:?}"
+    );
+    fixture.finish().await;
+}
+
+/// Realize one kickoff notice of `member` through the actor, as the actor
+/// does for MobMachine's `EmitKickoffLifecycleNotice`: the member's wired
+/// peers, MobMachine's verdict on each, the recipient's endpoint and the
+/// hand-off to the lane are the real ones. It stands in for kickoff phases
+/// this fixture's model double cannot reach (a callback pending, a failure).
+async fn emit_kickoff_notice(fixture: &WakeFixture, member: &AgentIdentity, intent: &'static str) {
+    fixture
+        .handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::EmitKickoffNoticeForTest {
+            agent_identity: member.clone(),
+            intent,
+            reply_tx,
+        })
+        .await
+        .expect("the notice command is queued")
+        .await
+        .expect("the actor answers")
+        .expect("the actor realizes the notice");
+}
+
+/// The captured records of `member`'s `intent` notice to `peer` that was not
+/// delivered.
+fn kickoff_notice_records(
+    warnings: &CapturedWarnings,
+    member: &AgentIdentity,
+    peer: &AgentIdentity,
+    intent: &str,
+) -> Vec<CapturedFields> {
+    warnings
+        .lock()
+        .expect("captured warnings lock")
+        .iter()
+        .filter(|fields| {
+            field(fields, "from") == Some(member.as_str())
+                && field(fields, "to") == Some(peer.as_str())
+                && field(fields, "intent") == Some(intent)
+                && field(fields, "message").is_some_and(|message| message.contains("kickoff"))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Wait (up to [`STEP`]) until `done` holds; whether it did.
+async fn reached(done: impl Fn() -> bool) -> bool {
+    tokio::time::timeout(STEP, async {
+        while !done() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// The kickoff notices of `from` in `peer`'s transcript once it holds
+/// `count` of them or [`STEP`] ended, read again after a pause in which a
+/// further copy would land.
+async fn kickoff_notice_kinds_settled(
+    fixture: &WakeFixture,
+    peer: &AgentIdentity,
+    from: &AgentIdentity,
+    count: usize,
+) -> Vec<String> {
+    let _ = tokio::time::timeout(STEP, async {
+        while kickoff_notice_kinds(fixture, peer, from).await.len() < count {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    kickoff_notice_kinds(fixture, peer, from).await
+}
+
+fn kinds(kinds: &[&str]) -> Vec<String> {
+    kinds.iter().map(ToString::to_string).collect()
+}
+
+/// The order and the bound of a member's kickoff notices are per peer: a
+/// member wired to one peer that cannot be woken and one live peer delivers
+/// its notices to the live peer while its notices to the other are still
+/// pending on that peer's wake. The peer whose wake is held is not live and
+/// holds none of them yet; once its wake is let go it receives its own, in
+/// order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kickoff_notice_to_a_live_peer_does_not_wait_for_the_members_notice_to_an_unwakeable_peer()
+ {
+    let fixture = kickoff_notice_fixture("kickoff-notice-two-peers").await;
+    let (held, readiness) = peer_held_at_wake_readiness(&fixture, "notice-held-peer").await;
+    let live = fixture.spawn("notice-live-peer").await;
+
+    // The member's first notices go to both peers: they start the dormant
+    // peer's wake, which holds Bound, and reach the live one.
+    fixture.client.block();
+    let member = spawn_kickoff_member(&fixture, "notice-two-peers-member").await;
+    wait_wake_bound(&fixture, &held).await;
+    fixture.client.release();
+    wait_kickoff_started(&fixture, &member).await;
+
+    // The held peer's wake does not finish. The live peer has the member's
+    // notices all the same.
+    let live_received = kickoff_notices_settled(
+        &fixture,
+        std::slice::from_ref(&live),
+        std::slice::from_ref(&member),
+        STEP,
+    )
+    .await;
+    let held_residency = fixture.residency(&held);
+    let held_received_meanwhile = kickoff_notices_received(&fixture, &held, &member).await;
+
+    let _ = readiness.send(true);
+    fixture
+        .wait_residency(&held, Some(mob_dsl::MemberMaterializationPhase::Live))
+        .await;
+    let held_received = kickoff_notices_settled(
+        &fixture,
+        std::slice::from_ref(&held),
+        std::slice::from_ref(&member),
+        STEP,
+    )
+    .await;
+    assert!(
+        live_received == [starting_then_started()]
+            && held_residency == Some(mob_dsl::MemberMaterializationPhase::Waking)
+            && held_received_meanwhile.is_empty()
+            && held_received == [starting_then_started()],
+        "a member's notices to a live peer waited for its notices to a peer that could not be \
+         woken: while that peer was held ({held_residency:?}, holding {held_received_meanwhile:?}) \
+         the live peer held {live_received:?} (starting, then started expected); once woken the \
+         held peer held {held_received:?} (starting, then started expected)"
+    );
+    fixture.finish().await;
+}
+
+/// Three notices of one member pending for one peer arrive in the order the
+/// member's kickoff went through them (starting, callback pending, failed):
+/// one is sent at a time. While the send of the first is held nothing else
+/// is sent; while the send of the second is held the third is not sent,
+/// though the first has arrived; then the peer holds all three in order,
+/// once each.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_kickoff_notices_of_one_member_to_one_peer_arrive_in_order() {
+    let fixture = WakeFixture::new("kickoff-notice-three").await;
+    let starting = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_starting",
+    );
+    let callback_pending = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_callback_pending",
+    );
+    let peer = fixture.spawn("notice-three-peer").await;
+    let member = fixture.spawn("notice-three-member").await;
+    fixture.wire(&member, &peer).await;
+
+    for intent in [
+        "mob.kickoff_starting",
+        "mob.kickoff_callback_pending",
+        "mob.kickoff_failed",
+    ] {
+        emit_kickoff_notice(&fixture, &member, intent).await;
+    }
+    let answered_after = actor_answer_time(&fixture).await;
+    let first_in_flight = reached(|| starting.arrived() == 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let second_sent_early = callback_pending.arrived();
+    let while_first_held = kickoff_notice_kinds(&fixture, &peer, &member).await;
+
+    starting.release();
+    let second_in_flight = reached(|| callback_pending.arrived() == 1).await;
+    let while_second_held = kickoff_notice_kinds_settled(&fixture, &peer, &member, 1).await;
+
+    callback_pending.release();
+    let received = kickoff_notice_kinds_settled(&fixture, &peer, &member, 3).await;
+    assert!(
+        answered_after < ACTOR_ANSWER_BOUND
+            && first_in_flight
+            && second_sent_early == 0
+            && while_first_held.is_empty()
+            && second_in_flight
+            && while_second_held == kinds(&["mob.kickoff_starting"])
+            && received
+                == kinds(&[
+                    "mob.kickoff_starting",
+                    "mob.kickoff_callback_pending",
+                    "mob.kickoff_failed"
+                ]),
+        "three pending notices of one member to one peer were not sent one at a time in order: \
+         the actor answered after {answered_after:?} (bound {ACTOR_ANSWER_BOUND:?}); the first \
+         send started: {first_in_flight}; while it was held {second_sent_early} send(s) of the \
+         second started (0 expected) and the peer held {while_first_held:?} (nothing expected); \
+         the second send started once the first was let go: {second_in_flight}; while it was \
+         held the peer held {while_second_held:?} (starting only expected); afterwards \
+         {received:?} (starting, callback pending, failed expected)"
+    );
+    fixture.finish().await;
+}
+
+/// At the pending bound of a member and a peer the notice dropped is the
+/// oldest one still queued, never the one being sent, so the latest phase
+/// reaches the peer. With the bound at two: the starting notice is being
+/// sent (held), the callback pending notice is queued behind it, and the
+/// failed notice, owed while both are pending, takes the queued one's place.
+/// The dropped notice is recorded with the member, the peer, its kind and
+/// its class; the peer receives starting, then failed.
+///
+/// A current-thread runtime, so the actor's warning reaches this thread's
+/// capture.
+#[tokio::test]
+async fn at_the_pending_bound_the_oldest_queued_kickoff_notice_is_dropped_and_the_terminal_one_arrives()
+ {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = WakeFixture::new("kickoff-notice-drop-oldest").await;
+    crate::runtime::actor::kickoff_notice::set_kickoff_notice_pending_limit_for_test(
+        fixture.handle.mob_id(),
+        2,
+    );
+    let starting = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_starting",
+    );
+    let peer = fixture.spawn("notice-drop-peer").await;
+    let member = fixture.spawn("notice-drop-member").await;
+    fixture.wire(&member, &peer).await;
+
+    for intent in [
+        "mob.kickoff_starting",
+        "mob.kickoff_callback_pending",
+        "mob.kickoff_failed",
+    ] {
+        emit_kickoff_notice(&fixture, &member, intent).await;
+    }
+    let answered_after = actor_answer_time(&fixture).await;
+    let dropped = kickoff_notice_records(&warnings, &member, &peer, "mob.kickoff_callback_pending");
+    let terminal_refused = kickoff_notice_records(&warnings, &member, &peer, "mob.kickoff_failed");
+
+    starting.release();
+    let received = kickoff_notice_kinds_settled(&fixture, &peer, &member, 2).await;
+    assert!(
+        answered_after < ACTOR_ANSWER_BOUND
+            && terminal_refused.is_empty()
+            && received == kinds(&["mob.kickoff_starting", "mob.kickoff_failed"]),
+        "at the pending bound the latest notice did not survive: the actor answered after \
+         {answered_after:?} (bound {ACTOR_ANSWER_BOUND:?}); records of the failed notice: \
+         {terminal_refused:?} (none expected); the peer holds {received:?} (starting, then \
+         failed expected)"
+    );
+    assert!(
+        dropped.len() == 1
+            && dropped.iter().all(|record| {
+                field(record, "class") == Some("pending_bound")
+                    && field(record, "error").is_some_and(|error| error.contains("limit=2"))
+                    && field(record, "tracing.level") == Some("WARN")
+            }),
+        "the dropped notice is recorded once at WARN with its class and the bound: {dropped:?}"
+    );
+    fixture.finish().await;
+}
+
+/// The pending bound of a member and a peer is eight, with no test override:
+/// one notice being sent (held) and seven queued behind it are all kept; the
+/// ninth, a terminal one, drops the oldest queued notice and is delivered
+/// last. The peer receives the first, the six that stayed queued in their
+/// order, and the terminal one; the one dropped is recorded with the bound.
+///
+/// A current-thread runtime, so the actor's warning reaches this thread's
+/// capture.
+#[tokio::test]
+async fn the_ninth_pending_kickoff_notice_of_a_member_for_a_peer_drops_the_oldest_queued_one() {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = WakeFixture::new("kickoff-notice-eight").await;
+    let starting = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_starting",
+    );
+    let peer = fixture.spawn("notice-eight-peer").await;
+    let member = fixture.spawn("notice-eight-member").await;
+    fixture.wire(&member, &peer).await;
+
+    let eight = [
+        "mob.kickoff_starting",
+        "mob.kickoff_pending",
+        "mob.kickoff_started",
+        "mob.kickoff_callback_pending",
+        "mob.kickoff_cancelled",
+        "mob.kickoff_pending",
+        "mob.kickoff_started",
+        "mob.kickoff_callback_pending",
+    ];
+    for intent in eight {
+        emit_kickoff_notice(&fixture, &member, intent).await;
+    }
+    let records_at_eight = warnings
+        .lock()
+        .expect("captured warnings lock")
+        .iter()
+        .filter(|fields| field(fields, "from") == Some(member.as_str()))
+        .count();
+    emit_kickoff_notice(&fixture, &member, "mob.kickoff_failed").await;
+    let dropped = kickoff_notice_records(&warnings, &member, &peer, "mob.kickoff_pending");
+    let records_at_nine = warnings
+        .lock()
+        .expect("captured warnings lock")
+        .iter()
+        .filter(|fields| field(fields, "from") == Some(member.as_str()))
+        .count();
+
+    starting.release();
+    let received = kickoff_notice_kinds_settled(&fixture, &peer, &member, 8).await;
+    let expected = kinds(&[
+        "mob.kickoff_starting",
+        "mob.kickoff_started",
+        "mob.kickoff_callback_pending",
+        "mob.kickoff_cancelled",
+        "mob.kickoff_pending",
+        "mob.kickoff_started",
+        "mob.kickoff_callback_pending",
+        "mob.kickoff_failed",
+    ]);
+    assert!(
+        records_at_eight == 0 && records_at_nine == 1 && received == expected,
+        "the pending bound of a member and a peer is not eight, or the ninth notice did not \
+         take the oldest queued one's place: {records_at_eight} record(s) with eight pending (0 \
+         expected), {records_at_nine} with the ninth (1 expected); the peer holds {received:?} \
+         ({expected:?} expected)"
+    );
+    assert!(
+        dropped.len() == 1
+            && dropped.iter().all(|record| {
+                field(record, "class") == Some("pending_bound")
+                    && field(record, "error").is_some_and(|error| error.contains("limit=8"))
+            }),
+        "the dropped notice (the first pending one) is recorded with its class and the bound: \
+         {dropped:?}"
+    );
+    fixture.finish().await;
+}
+
+/// A kickoff notice whose preparation fails for one peer (here where the
+/// recipient's endpoint is resolved) is recorded as not delivered, and the
+/// member's other peers are still served: the rule a failed send follows.
+/// The member is wired to three live peers and the fault is armed for the
+/// middle one of their order, so a peer follows it whichever way the actor
+/// walks them.
+///
+/// RED before the fix: the first failed preparation ended the whole notice,
+/// and every peer after it in the member's list got nothing.
+///
+/// A current-thread runtime, so the actor's warning reaches this thread's
+/// capture.
+#[tokio::test]
+async fn a_kickoff_notice_whose_preparation_fails_for_one_peer_is_recorded_and_the_other_peers_are_served()
+ {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = kickoff_notice_fixture("kickoff-notice-preparation").await;
+    let first = fixture.spawn("notice-prep-a").await;
+    let failing = fixture.spawn("notice-prep-b").await;
+    let last = fixture.spawn("notice-prep-c").await;
+    crate::runtime::actor::kickoff_notice::fail_kickoff_notice_preparation_for_test(
+        fixture.handle.mob_id(),
+        &failing,
+    );
+
+    let member = spawn_kickoff_member(&fixture, "notice-prep-member").await;
+    wait_kickoff_started(&fixture, &member).await;
+    let served = [first, last];
+    let received =
+        kickoff_notices_settled(&fixture, &served, std::slice::from_ref(&member), STEP).await;
+    let failing_received = kickoff_notices_received(&fixture, &failing, &member).await;
+    let records: Vec<CapturedFields> = ["mob.kickoff_starting", "mob.kickoff_started"]
+        .into_iter()
+        .flat_map(|intent| kickoff_notice_records(&warnings, &member, &failing, intent))
+        .collect();
+    assert!(
+        received == [starting_then_started(), starting_then_started()]
+            && failing_received.is_empty(),
+        "a failed preparation for one peer kept the member's notices from its other peers: the \
+         two served peers hold {received:?} (starting, then started, each expected); the peer \
+         whose preparation fails holds {failing_received:?} (nothing expected)"
+    );
+    assert!(
+        records.len() == 2
+            && records.iter().all(|record| {
+                field(record, "class") == Some("preparation_failed")
+                    && field(record, "error")
+                        .is_some_and(|error| error.contains("fault-injected endpoint resolution"))
+            }),
+        "each notice that could not be prepared is recorded with the member, the peer, its kind \
+         and its class: {records:?} (the starting and the started notice expected)"
+    );
+    fixture.finish().await;
+}
+
+/// A kickoff notice whose send to a live peer fails is recorded as not
+/// delivered, with the member, the peer, the notice's kind, its class and
+/// the send's error, under a message of its own; the member's other peers
+/// are still served. The member is wired to three live peers and the send
+/// to the middle one of their order fails.
+///
+/// A current-thread runtime, so the delivery's warning reaches this thread's
+/// capture.
+#[tokio::test]
+async fn a_kickoff_notice_whose_send_to_a_live_peer_fails_is_recorded_and_the_other_peers_are_served()
+ {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = kickoff_notice_fixture("kickoff-notice-send-fails").await;
+    let first = fixture.spawn("notice-send-a").await;
+    let failing = fixture.spawn("notice-send-b").await;
+    let last = fixture.spawn("notice-send-c").await;
+    crate::runtime::actor::kickoff_notice::fail_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        &failing,
+    );
+
+    let member = spawn_kickoff_member(&fixture, "notice-send-member").await;
+    wait_kickoff_started(&fixture, &member).await;
+    let served = [first, last];
+    let received =
+        kickoff_notices_settled(&fixture, &served, std::slice::from_ref(&member), STEP).await;
+    let failing_received = kickoff_notices_received(&fixture, &failing, &member).await;
+    let records: Vec<CapturedFields> = ["mob.kickoff_starting", "mob.kickoff_started"]
+        .into_iter()
+        .flat_map(|intent| kickoff_notice_records(&warnings, &member, &failing, intent))
+        .collect();
+    assert!(
+        received == [starting_then_started(), starting_then_started()]
+            && failing_received.is_empty(),
+        "a failed send to one live peer kept the member's notices from its other peers: the two \
+         served peers hold {received:?} (starting, then started, each expected); the peer whose \
+         send fails holds {failing_received:?} (nothing expected)"
+    );
+    assert!(
+        records.len() == 2
+            && records.iter().all(|record| {
+                field(record, "message")
+                    == Some("a kickoff notice to a live peer was not confirmed")
+                    && field(record, "class") == Some("send_failed")
+                    && field(record, "error").is_some_and(|error| error.contains("peer offline"))
+            }),
+        "each notice whose send to a live peer failed is recorded under its own message with \
+         the member, the peer, its kind, its class and the send's error: {records:?} (the \
+         starting and the started notice expected)"
+    );
+    fixture.finish().await;
+}
+
+/// An unwire of the edge cancels the member's kickoff notice that is pending
+/// for the peer: the unwire answers, the notice is recorded as cancelled, and
+/// nothing of it is sent afterwards. The started notice's send is held when
+/// the edge is unwired.
+///
+/// A current-thread runtime, so the delivery's warning reaches this thread's
+/// capture.
+#[tokio::test]
+async fn an_unwire_cancels_the_pending_kickoff_notice_of_its_edge() {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = kickoff_notice_fixture("kickoff-notice-unwire").await;
+    let started = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_started",
+    );
+    let peer = fixture.spawn("notice-unwire-peer").await;
+    let member = spawn_kickoff_member(&fixture, "notice-unwire-member").await;
+    wait_kickoff_started(&fixture, &member).await;
+    let pending = reached(|| started.arrived() == 1).await;
+
+    let unwired = tokio::time::timeout(
+        ACTOR_HELD_CAP,
+        fixture.handle.unwire(member.clone(), peer.clone()),
+    )
+    .await;
+    let cancelled = kickoff_notice_records(&warnings, &member, &peer, "mob.kickoff_started");
+    started.release();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sent_after = started.passed();
+    let received = kickoff_notices_received(&fixture, &peer, &member).await;
+    assert!(
+        pending
+            && matches!(unwired, Ok(Ok(())))
+            && cancelled.len() == 1
+            && cancelled.iter().all(
+                |record| field(record, "error").is_some_and(|error| error.contains("canceled"))
+            )
+            && sent_after == 0
+            && !received.iter().any(|kind| kind == "mob.kickoff_started"),
+        "an unwire did not cancel the pending kickoff notice of its edge: the started notice \
+         was pending: {pending}; the unwire answered {unwired:?}; records of the cancelled \
+         notice: {cancelled:?} (1 expected); {sent_after} send(s) of it went on after the \
+         unwire (0 expected); the peer holds {received:?} (no started notice expected)"
+    );
+    fixture.finish().await;
+}
+
+/// A retirement of the member cancels its kickoff notice that is pending for
+/// a peer: the notice is recorded as cancelled and nothing of it is sent
+/// once the member is retired. The started notice's send is held when the
+/// member is retired.
+///
+/// A current-thread runtime, so the delivery's warning reaches this thread's
+/// capture.
+#[tokio::test]
+async fn a_retirement_cancels_the_members_pending_kickoff_notice() {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = kickoff_notice_fixture("kickoff-notice-retire").await;
+    let started = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_started",
+    );
+    let peer = fixture.spawn("notice-retire-peer").await;
+    let member = spawn_kickoff_member(&fixture, "notice-retire-member").await;
+    wait_kickoff_started(&fixture, &member).await;
+    let pending = reached(|| started.arrived() == 1).await;
+
+    let retired = tokio::time::timeout(ACTOR_HELD_CAP, fixture.handle.retire(member.clone())).await;
+    let seated_after = tokio::time::timeout(WAIT, async {
+        loop {
+            match fixture.handle.get_member(&member).await {
+                Ok(None) => return false,
+                _ => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+    })
+    .await
+    .unwrap_or(true);
+    let cancelled = kickoff_notice_records(&warnings, &member, &peer, "mob.kickoff_started");
+    started.release();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sent_after = started.passed();
+    let received = kickoff_notices_received(&fixture, &peer, &member).await;
+    assert!(
+        pending
+            && !seated_after
+            && cancelled.len() == 1
+            && cancelled.iter().all(
+                |record| field(record, "error").is_some_and(|error| error.contains("canceled"))
+            )
+            && sent_after == 0
+            && !received.iter().any(|kind| kind == "mob.kickoff_started"),
+        "a retirement did not cancel the member's pending kickoff notice: the started notice \
+         was pending: {pending}; the retire answered {retired:?} and the member stayed seated: \
+         {seated_after}; records of the cancelled notice: {cancelled:?} (1 expected); \
+         {sent_after} send(s) of it went on after the retirement (0 expected); the peer holds \
+         {received:?} (no started notice expected)"
+    );
+    fixture.finish().await;
+}
+
+/// A spawn that is rolled back after the member's starting notice was handed
+/// to the lane sends nothing for that member afterwards: the rollback
+/// cancels the member's pending notices, and the cancelled notice is
+/// recorded. The spawn fails where it prepares its kickoff input, after
+/// MobMachine marked the kickoff starting; the starting notice's send is
+/// held meanwhile.
+///
+/// RED before the fix: the rollback retired the member and left its notice
+/// on the lane, so the peer received a starting notice from a member that
+/// was never seated.
+///
+/// A current-thread runtime, so the delivery's warning reaches this thread's
+/// capture.
+#[tokio::test]
+async fn a_spawn_rolled_back_after_its_starting_notice_sends_nothing_for_the_member() {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = kickoff_notice_fixture("kickoff-notice-rollback").await;
+    let starting = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_starting",
+    );
+    let peer = fixture.spawn("notice-rollback-peer").await;
+    let member = AgentIdentity::from(format!(
+        "notice-rollback-member-{}",
+        Uuid::new_v4().simple()
+    ));
+    crate::runtime::actor::kickoff_notice::fail_autonomous_kickoff_start_for_test(&member);
+    let mut spec = SpawnMemberSpec::new("worker", member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
+    let spawned = tokio::time::timeout(ACTOR_HELD_CAP, fixture.handle.spawn_spec(spec))
+        .await
+        .map(|spawned| spawned.map(|_| ()));
+    let handed_off = starting.arrived();
+    let seated_after = tokio::time::timeout(WAIT, async {
+        loop {
+            match fixture.handle.get_member(&member).await {
+                Ok(None) => return false,
+                _ => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+    })
+    .await
+    .unwrap_or(true);
+    let cancelled = kickoff_notice_records(&warnings, &member, &peer, "mob.kickoff_starting");
+
+    starting.release();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sent_after = starting.passed();
+    let received = kickoff_notice_kinds(&fixture, &peer, &member).await;
+    assert!(
+        matches!(spawned, Ok(Err(_)))
+            && handed_off == 1
+            && !seated_after
+            && sent_after == 0
+            && received.is_empty(),
+        "a rolled-back spawn left its member's kickoff notice to be delivered: the spawn \
+         answered {spawned:?} (the injected failure expected) with {handed_off} starting \
+         notice(s) handed to the lane (1 expected); the member stayed seated: {seated_after}; \
+         {sent_after} send(s) of the notice went on after the rollback (0 expected); the peer \
+         holds {received:?} (nothing expected)"
+    );
+    assert!(
+        cancelled.len() == 1
+            && cancelled.iter().all(
+                |record| field(record, "error").is_some_and(|error| error.contains("canceled"))
+            ),
+        "the notice the rollback cancelled is recorded: {cancelled:?} (1 expected)"
+    );
+    fixture.finish().await;
+}
+
+/// A member released to Dormant while one of its kickoff notices is pending
+/// keeps that notice: the member is still seated in the same incarnation
+/// and the notice is still true of it, so no cancel covers a release. The
+/// notice is delivered once, from the comms runtime the delivery holds, and
+/// its send wakes nothing: the member stays Dormant and is not built again.
+/// The started notice's send is held while the member is released.
+///
+/// A current-thread runtime, so a record of the notice would reach this
+/// thread's capture.
+#[tokio::test]
+async fn a_kickoff_notice_of_a_member_released_to_dormant_is_still_delivered_and_wakes_nothing() {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = WakeFixture::new("kickoff-notice-released-sender").await;
+    let started = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_started",
+    );
+    let peer = fixture.spawn("notice-released-peer").await;
+    let member = fixture.spawn("notice-released-member").await;
+    fixture.wire(&member, &peer).await;
+    emit_kickoff_notice(&fixture, &member, "mob.kickoff_started").await;
+    let pending = reached(|| started.arrived() == 1).await;
+    let builds_before = fixture
+        .preparer
+        .prepared()
+        .into_iter()
+        .filter(|build| build.identity == member)
+        .count();
+
+    // The release answers and the member is Dormant; the notice is still
+    // held, not cancelled.
+    fixture.release(&member).await;
+    let cancelled_by_release =
+        kickoff_notice_records(&warnings, &member, &peer, "mob.kickoff_started");
+    let sent_while_held = started.passed();
+
+    started.release();
+    let received = kickoff_notice_kinds_settled(&fixture, &peer, &member, 1).await;
+    let records = kickoff_notice_records(&warnings, &member, &peer, "mob.kickoff_started");
+    let builds_after = fixture
+        .preparer
+        .prepared()
+        .into_iter()
+        .filter(|build| build.identity == member)
+        .count();
+    let residency = fixture.residency(&member);
+    assert!(
+        pending
+            && cancelled_by_release.is_empty()
+            && sent_while_held == 0
+            && started.passed() == 1
+            && received == kinds(&["mob.kickoff_started"])
+            && records.is_empty()
+            && residency == Some(mob_dsl::MemberMaterializationPhase::Dormant)
+            && builds_after == builds_before,
+        "a release to Dormant did not keep the member's pending kickoff notice, or the notice \
+         woke the member: the notice was pending: {pending}; records at the release: \
+         {cancelled_by_release:?} (none expected); {sent_while_held} send(s) while held, {} \
+         afterwards (0, then 1 expected); the peer holds {received:?} (the started notice, once, \
+         expected); records afterwards: {records:?} (none expected); the member is \
+         {residency:?} (Dormant expected) after {builds_after} build(s), {builds_before} before \
+         the release",
+        started.passed()
+    );
+    fixture.finish().await;
+}
+
+/// A stop cancels the kickoff notices that are pending when it starts, not
+/// the ones it emits itself: a stop of a mob whose member's kickoff is in
+/// flight closes that kickoff, and MobMachine's cancelled notice for it is
+/// handed to the lane after the stop's own cancel. The stop does not wait
+/// for that notice (here its send is held): it answers within the actor's
+/// bound once the member's run has ended. A destroy then cancels the notice,
+/// which is recorded, and nothing of it is sent after the mob is destroyed.
+///
+/// The member's kickoff run is held at its model request, so the stop finds
+/// the kickoff in flight; the run is let go once the stop has handed the
+/// notice off, because a stop waits for the run it interrupts.
+///
+/// A current-thread runtime, so the delivery's warning reaches this thread's
+/// capture.
+#[tokio::test]
+async fn a_stop_with_a_kickoff_in_flight_does_not_wait_for_the_notice_it_emits_and_a_destroy_cancels_it()
+ {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = kickoff_notice_fixture("kickoff-notice-stop-emits").await;
+    let cancelled = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_cancelled",
+    );
+    let peer = fixture.spawn("notice-stop-emits-peer").await;
+
+    fixture.client.block();
+    let member = spawn_kickoff_member(&fixture, "notice-stop-emits-member").await;
+    fixture.client.wait_started(1).await;
+    let pending_before_stop = cancelled.arrived();
+
+    let mut stop = {
+        let handle = fixture.handle.clone();
+        tokio::spawn(async move { handle.stop().await.map(|_| ()) })
+    };
+    // The stop closes the kickoff: its cancelled notice reaches the lane
+    // while the stop is still running.
+    let handed_off = tokio::time::timeout(WAIT, async {
+        while cancelled.arrived() == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let stop_still_running = !stop.is_finished();
+    fixture.client.release();
+    let asked = Instant::now();
+    let stopped = tokio::time::timeout(ACTOR_HELD_CAP, &mut stop).await;
+    let stop_answered_after = asked.elapsed();
+    let held_at_stop = (cancelled.arrived(), cancelled.passed());
+    let recorded_at_stop =
+        kickoff_notice_records(&warnings, &member, &peer, "mob.kickoff_cancelled").len();
+
+    let asked = Instant::now();
+    let destroyed = tokio::time::timeout(ACTOR_HELD_CAP, fixture.handle.destroy())
+        .await
+        .map(|destroyed| destroyed.is_ok());
+    let destroy_answered_after = asked.elapsed();
+    let records = kickoff_notice_records(&warnings, &member, &peer, "mob.kickoff_cancelled");
+    cancelled.release();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let sent_after_destroy = cancelled.passed();
+    assert!(
+        pending_before_stop == 0
+            && handed_off
+            && stop_still_running
+            && matches!(stopped, Ok(Ok(Ok(()))))
+            && stop_answered_after < ACTOR_ANSWER_BOUND
+            && held_at_stop == (1, 0)
+            && recorded_at_stop == 0
+            && destroyed == Ok(true)
+            && destroy_answered_after < ACTOR_ANSWER_BOUND
+            && sent_after_destroy == 0,
+        "a stop with a kickoff in flight waited for the notice it emitted, or the notice \
+         outlived a destroy: {pending_before_stop} cancelled notice(s) before the stop (0 \
+         expected); the stop handed its cancelled notice to the lane while it ran: {handed_off} \
+         (still running then: {stop_still_running}); it answered {stopped:?} \
+         {stop_answered_after:?} after the member's run ended (bound {ACTOR_ANSWER_BOUND:?}) \
+         with the notice (arrived, sent) {held_at_stop:?} ((1, 0) expected) and \
+         {recorded_at_stop} record(s) of it (0 expected); the destroy answered {destroyed:?} \
+         after {destroy_answered_after:?}; {sent_after_destroy} send(s) of the notice went on \
+         after the destroy (0 expected)"
+    );
+    assert!(
+        records.len() == 1
+            && records.iter().all(|record| {
+                field(record, "class") == Some("cancelled")
+                    && field(record, "error").is_some_and(|error| error.contains("canceled"))
+            }),
+        "the notice the destroy cancelled is recorded once with its class: {records:?}"
+    );
+}
+
 /// The declared apply on a durable store: an identity a complete roster
 /// unlisted, then lists again, comes back as the same identity with its
 /// history. The unlisted retirement archives the member's session and
@@ -4471,5 +5910,95 @@ async fn a_held_live_member_finishes_its_run_and_is_released_when_idle() {
         .ensure_live(&identity)
         .await
         .expect("the member wakes once its role is restored");
+    fixture.finish().await;
+}
+
+/// A spawn rollback that failed once and is then driven by a caller (a retire
+/// of the half-seated member joins the owed rollback) cancels the member's
+/// pending notices as its first attempt did: a notice handed to the lane
+/// between the two attempts is not sent once the member has left its seat.
+///
+/// The spawn fails where it prepares its kickoff input, and the rollback's
+/// first attempt cannot journal its start, so the rollback stays owed. A
+/// failed notice of the member is then handed to the lane with its send
+/// held, and the member is retired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spawn_rollback_driven_by_a_retire_sends_no_kickoff_notice_for_the_member() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let fixture = WakeFixture::build_with_storage(
+        "kickoff-notice-rollback-retire",
+        |_| {},
+        |definition| {
+            definition.wiring.role_wiring = vec![RoleWiringRule {
+                a: ProfileName::from("worker"),
+                b: ProfileName::from("worker"),
+            }];
+        },
+        false,
+        None,
+        MobStorage::with_events(events.clone()),
+    )
+    .await;
+    let failed = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_failed",
+    );
+    let peer = fixture.spawn("notice-retire-peer").await;
+    let member = AgentIdentity::from(format!("notice-retire-member-{}", Uuid::new_v4().simple()));
+    crate::runtime::actor::kickoff_notice::fail_autonomous_kickoff_start_for_test(&member);
+    events.fail_appends_for("MemberRetirementStarted").await;
+    let mut spec = SpawnMemberSpec::new("worker", member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
+    let spawned = tokio::time::timeout(ACTOR_HELD_CAP, fixture.handle.spawn_spec(spec))
+        .await
+        .expect("the spawn answers")
+        .map(|_| ());
+    events.allow_appends_for("MemberRetirementStarted").await;
+    let refused = spawned.expect_err("the injected kickoff failure refuses the spawn");
+    assert!(
+        refused
+            .to_string()
+            .contains("rollback remains owned for retry"),
+        "the rollback's first attempt failed and the rollback stays owed: {refused:?}"
+    );
+
+    // A notice of the half-seated member, handed to the lane between the
+    // rollback's first attempt and the retire that drives its next one.
+    emit_kickoff_notice(&fixture, &member, "mob.kickoff_failed").await;
+    let handed_off = tokio::time::timeout(STEP, async {
+        loop {
+            if failed.arrived() >= 1 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let retired = tokio::time::timeout(WAIT, fixture.handle.retire(member.clone()))
+        .await
+        .expect("the retire answers");
+    let seated_after = fixture
+        .handle
+        .get_member(&member)
+        .await
+        .expect("roster read")
+        .is_some();
+
+    failed.release();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sent_after = failed.passed();
+    let received = kickoff_notice_kinds(&fixture, &peer, &member).await;
+    assert!(
+        handed_off
+            && retired.is_ok()
+            && !seated_after
+            && sent_after == 0
+            && !received.iter().any(|kind| kind == "mob.kickoff_failed"),
+        "a rollback driven by a retire left the member's kickoff notice to be delivered: the \
+         notice reached its held send: {handed_off}; the retire answered {retired:?}; the member \
+         stayed seated: {seated_after}; {sent_after} send(s) of the notice went on after the \
+         rollback (0 expected); the peer holds {received:?}"
+    );
     fixture.finish().await;
 }

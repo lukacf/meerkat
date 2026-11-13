@@ -1776,6 +1776,25 @@ mod tests {
         assert_quota_exhausted_is_terminal(&err, "gemini");
     }
 
+    /// A provider client redacts an error's code before it classifies on
+    /// it (a realtime error's `code` is provider text). Every code this
+    /// crate decides on must come through that redaction unchanged, with
+    /// and without a credential named, or an exhausted quota would stop
+    /// being one. A code added to the list is covered here.
+    #[test]
+    fn quota_codes_pass_credential_redaction_unchanged() {
+        let key = format!("realtime-{}", "madeupcredential".repeat(3));
+        assert!(!QUOTA_EXHAUSTED_ERROR_CODES.is_empty());
+        for code in QUOTA_EXHAUSTED_ERROR_CODES {
+            let mut redacted = (*code).to_string();
+            meerkat_core::redact::redact_credentials(&mut redacted, |visit| visit(&key));
+            assert_eq!(&redacted, code, "a named credential");
+            meerkat_core::redact::redact_credentials(&mut redacted, |_| {});
+            assert_eq!(&redacted, code, "no named credential");
+            assert!(LlmError::code_signals_quota_exhausted(&redacted));
+        }
+    }
+
     #[test]
     fn gemini_resource_exhausted_daily_or_zero_quota_terminalizes_but_per_minute_retries() {
         fn body(quota_id: &str, quota_value: &str, extra_detail: &str) -> String {

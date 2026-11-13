@@ -148,6 +148,9 @@ pub struct GoogleAuthAuthorizer {
     http: Result<reqwest::Client, crate::auth_oauth::CredentialHttpClientUnavailable>,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
     label: String,
+    /// The access tokens requests were signed with, a refreshed-out one
+    /// included.
+    signed_tokens: meerkat_core::auth::SignedCredentials,
     token_url_override: Option<String>,
     metadata_url_override: Option<String>,
     lease_observer: Option<LeaseFreshnessObserver>,
@@ -178,6 +181,7 @@ impl GoogleAuthAuthorizer {
             http: crate::auth_oauth::credential_http_client(),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             label,
+            signed_tokens: meerkat_core::auth::SignedCredentials::new(),
             token_url_override: None,
             metadata_url_override: None,
             lease_observer: None,
@@ -533,9 +537,14 @@ impl HttpAuthorizer for GoogleAuthAuthorizer {
 
     async fn authorize(&self, req: &mut HttpAuthorizationRequest<'_>) -> Result<(), AuthError> {
         let token = self.get_token(LeaseRefreshMode::AcquireOrRefresh).await?;
+        self.signed_tokens.record(&token);
         req.headers
             .push(("Authorization".into(), format!("Bearer {token}")));
         Ok(())
+    }
+
+    fn visit_signed_credentials(&self, visit: &mut dyn FnMut(&str)) {
+        self.signed_tokens.visit(visit);
     }
 
     fn label(&self) -> &str {

@@ -37,6 +37,19 @@ them.
 
 ### Breaking
 
+- Behaviour-only (not measured by the gate): `meerkat-core`, `rkat`: on Unix
+  a config document the engine writes is readable by its owner only, so an
+  account that read one through group permissions loses that access at the
+  document's next write unless its directory has the setgid bit. See
+  Security and the Upgrade notes.
+
+- Behaviour-only (not measured by the gate): `rkat`: `--comms-binding-out`
+  replaces what is at its path with a new owner-only file instead of writing
+  into it. A named pipe, a socket, a device or a directory at the path, a
+  symbolic link to one of them, and any path in `/proc` or in `/dev` outside
+  `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
+  read the binding file. See Security and the Upgrade notes.
+
 - `meerkat-core`: `OpenAiProviderTag` gains the public field
   `reasoning_effort_resolved: bool`, a request-local marker for the
   provider-neutral `reasoning_effort` option (see Added). Code that builds
@@ -90,20 +103,6 @@ them.
   `reasoning_effort: Option<TurnMetadataOverride<EffortLevel>>` (see Added).
   Code that builds it with a struct literal sets the new field; `None` keeps
   the earlier behaviour.
-- `meerkat-core`: `AgentEvent::RunStarted` and `AgentEvent::RunResumed` gain
-  the field `reasoning_effort: Option<ReasoningEffortResolution>`, `RunResult`
-  gains the public field `reasoning_effort: Option<ReasoningEffortReport>`,
-  and `ProviderParamsOverride` gains the public request-local field
-  `reasoning_route_witness: Option<ReasoningRouteObservation>` (see Added).
-  Code that builds these values with a struct literal, or matches the two
-  event variants without `..`, must add the member; `None` keeps the earlier
-  behaviour. `AgentEvent` gains the variant `RequestReasoningEffortResolved`
-  (the enum is non-exhaustive, so a match outside the crate already has a
-  wildcard arm).
-- `meerkat-contracts`: `WireRunResult` gains the public field
-  `reasoning_effort: Option<ReasoningEffortReport>` (see Added). Code that
-  builds it with a struct literal must add the member; `None` keeps the
-  earlier behaviour.
 
 - `meerkat-core`: `event::AgentErrorReason` gains the variant
   `ReasoningEffortRefused { refusal: Box<ReasoningEffortRefusal> }`,
@@ -122,7 +121,47 @@ them.
   Added). A match over the enum without a wildcard arm handles the new
   variant.
 
+- `meerkat-core`: `AgentEvent::RunStarted` and `AgentEvent::RunResumed` gain
+  the field `reasoning_effort: Option<ReasoningEffortResolution>`, `RunResult`
+  gains the public field `reasoning_effort: Option<ReasoningEffortReport>`,
+  and `ProviderParamsOverride` gains the public request-local field
+  `reasoning_route_witness: Option<ReasoningRouteObservation>` (see Added).
+  Code that builds these values with a struct literal, or matches the two
+  event variants without `..`, must add the member; `None` keeps the earlier
+  behaviour. `AgentEvent` gains the variant `RequestReasoningEffortResolved`
+  (the enum is non-exhaustive, so a match outside the crate already has a
+  wildcard arm).
+
+- `meerkat-contracts`: `WireRunResult` gains the public field
+  `reasoning_effort: Option<ReasoningEffortReport>` (see Added). Code that
+  builds it with a struct literal must add the member; `None` keeps the
+  earlier behaviour.
+
 ### Added
+
+- `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
+  requests themselves (see Security).
+  `meerkat_core::redact::redact_credentials` removes credentials from text
+  read from a response: the values it is given, by exact match (as sent and
+  as an encoder rewrites them), then values that look like credentials in
+  known positions;
+  `redact::MIN_REDACTED_CREDENTIAL_BYTES` is the shortest value it replaces
+  by exact match. `HttpAuthorizer::visit_signed_credentials` is a provided
+  method through which an authorizer names the secret values it signs with;
+  the default `redact_response_diagnostic` now removes them, and an
+  authorizer that overrides `redact_response_diagnostic` behaves as before.
+  `meerkat_core::auth::SignedCredentials` keeps the last values an
+  authorizer with a rotating token signed with.
+  `meerkat_llm_core::streaming::redact_stream_errors` redacts the error a
+  stream ends with through any redaction, for a client that signs with a
+  key of its own.
+
+- `meerkat-contracts`: `WireRunFailure`, the failure document
+  `rkat run --output json` writes (`{"error": WireError}`, emitted in
+  `artifacts/schemas/errors.json`), and `error::turn_failure_error_code`,
+  the `ErrorCode` of a failed turn's typed terminal cause. JSON-RPC and the
+  `rkat run` failure document read a failed turn's code from that one
+  mapping; the JSON-RPC codes are unchanged.
 
 - `meerkat-core`, `meerkat-llm-core`: the vocabulary of a provider-neutral
   `reasoning_effort` option, as types only. Nothing reads them yet: no
@@ -146,6 +185,25 @@ them.
   `AgentLlmClient::reasoning_route()` and `LlmClient::reasoning_route()`
   are a request-free accessor with a `None` default, so existing clients
   compile unchanged; `LlmClientAdapter` forwards its client's answer.
+
+- `meerkat-copilot`: Meerkat reads the reasoning effort levels a GitHub
+  Copilot account's model list states per model
+  (`capabilities.supports.reasoning_effort`). `CopilotModelSupports` keeps
+  the statement in `reasoning_effort` in one stored form (each word once,
+  the level words from `none` to `max`, then the words that name no level
+  in ascending order), and
+  `CopilotModelSupports::stated_effort_levels` returns it as `EffortLevel`s:
+  `None` when the entry states none, otherwise the stated levels, each once,
+  from `none` to `max`; a word that names no level is left out. The read is
+  tolerant: a value that is not an array states no levels, array elements
+  that are not strings are skipped, and neither fails the model list. No
+  request changes: nothing Meerkat sends to Copilot reads the levels yet,
+  and the account capability gate does not check them. The levels are part
+  of what a Copilot route compares, so when a refreshed list states other
+  levels for a session's model, the session's prepared route is rebuilt, as
+  it already is when the list changes another capability of the model. A
+  list that only writes the same levels in another order, or writes one
+  twice, states nothing new and changes no route.
 
 - `meerkat-core`: the resolver of the provider-neutral `reasoning_effort`
   option. No request, wire form or schema names the option yet, so no
@@ -193,25 +251,6 @@ them.
     a client that reports no route is still resolved as unknown. A refusal
     raised with no observation names no route (`route: null`): the route
     of a client that reports none is never guessed.
-
-- `meerkat-copilot`: Meerkat reads the reasoning effort levels a GitHub
-  Copilot account's model list states per model
-  (`capabilities.supports.reasoning_effort`). `CopilotModelSupports` keeps
-  the statement in `reasoning_effort` in one stored form (each word once,
-  the level words from `none` to `max`, then the words that name no level
-  in ascending order), and
-  `CopilotModelSupports::stated_effort_levels` returns it as `EffortLevel`s:
-  `None` when the entry states none, otherwise the stated levels, each once,
-  from `none` to `max`; a word that names no level is left out. The read is
-  tolerant: a value that is not an array states no levels, array elements
-  that are not strings are skipped, and neither fails the model list. No
-  request changes: nothing Meerkat sends to Copilot reads the levels yet,
-  and the account capability gate does not check them. The levels are part
-  of what a Copilot route compares, so when a refreshed list states other
-  levels for a session's model, the session's prepared route is rebuilt, as
-  it already is when the list changes another capability of the model. A
-  list that only writes the same levels in another order, or writes one
-  twice, states nothing new and changes no route.
 
 - `meerkat-openai`, `meerkat-anthropic`, `meerkat-gemini`,
   `meerkat-copilot`, `meerkat-llm-core`, `meerkat`: every LLM client a
@@ -292,6 +331,140 @@ them.
 - `meerkat-core`, `meerkat-contracts`, `meerkat-runtime`, `meerkat-session`,
   `meerkat-mob`, `meerkat-rpc`, `meerkat-llm-core`: a session can store a
   provider-neutral reasoning effort level, `reasoning_effort`, and a turn
+  can set or clear it. It is stored and carried here; nothing resolves it
+  for a provider route yet, so a request that carries it is refused, never
+  sent (see the last paragraph).
+
+  The level is one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`
+  and `max` (`EffortLevel`), with one spelling each: `x_high` is refused
+  with the list of levels. It lives in the provider params, as
+  `provider_params.reasoning_effort` (`ProviderParamsOverride`,
+  `WireProviderParamsOverride`), so it is part of the session's LLM identity
+  and of every stored form of it. Wherever provider params are accepted as
+  an object (RPC `session/create` and `turn/start`, REST session requests,
+  MCP `meerkat_run` and `meerkat_resume`, mob profiles, the CLI's `--param`
+  and `--provider-params-json`), the nested key is accepted too. No request
+  has a top-level `reasoning_effort` parameter yet.
+
+  A turn carries the level as a field of its own beside `provider_params`,
+  with the same three states: a level sets it, `{"action":"clear"}` removes
+  it, and an absent field keeps it (`RuntimeTurnMetadata.reasoning_effort`,
+  `WireRuntimeTurnMetadata.reasoning_effort`,
+  `SessionLlmReconfigureRequest.reasoning_effort`,
+  `SessionLlmIdentityOverride.reasoning_effort`). The setting is sticky and
+  independent of the other params: a turn that replaces or clears
+  `provider_params` keeps the session's level, unless it also sets or clears
+  `reasoning_effort` or its new params name the nested key. A turn that
+  names the level in both places must ask for one outcome: two different
+  levels are refused, and so is a turn that clears `reasoning_effort` while
+  its new `provider_params` name a level, whatever level that is
+  (`SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree`,
+  whose `top_level` is the level the field sets, or `None` when the field
+  clears it). The same level in both places is accepted, and a clear beside
+  new params that name no level is a clear. One
+  function decides this, `resolve_session_provider_params`, for all three
+  ways a session's identity changes: a live session's turn override, the
+  recovered build of a session that is not live
+  (`SurfaceSessionRecoveryOverrides.reasoning_effort`), and a resumed
+  build's merge, where a build that claims `provider_params` keeps the
+  stored level unless its params name one and a build that claims the level
+  (`ResumeOverrideMask.reasoning_effort`) seats the level its params name,
+  or none. Two different turn levels in one batch are a merge conflict, an
+  input that carries the level takes its own turn instead of joining a
+  running one, and a batch contributor that carries it counts as an explicit
+  reasoning setting. A mob member turn whose delivery path carries no turn
+  metadata (a remotely hosted or peer-only member, an autonomous inbox)
+  refuses the field by name, and a running Steer refuses it like any other
+  per-turn model setting.
+
+  The level is applied by the executor that runs the turn, through an LLM
+  reconfigure before the turn: the JSON-RPC session runtime and the mob
+  member executor do that. The session service checks it. A turn whose
+  metadata names a level starts only on a session that is already there
+  (the session's level is that level, or it has none for a clear);
+  otherwise the caller is answered with the configuration error `the turn's
+  reasoning_effort was not applied to the session before the turn` and
+  nothing is sent to a provider. So an executor that applies no per-turn
+  reconfigure refuses such a turn instead of running it without the level.
+  The refusal comes before the run starts, so the runtime replays the input
+  as it replays any start that failed, refuses it again each time, and ends
+  it abandoned at its retry cap: the stored input's reason is
+  `max_attempts_exhausted`, not the refusal.
+
+  Until the level can be resolved for the route that serves a request, a
+  request whose params carry it reaches no provider. The turn fails with the
+  configuration error `reasoning_effort cannot be resolved by this build`
+  before any client is called, a compaction summary request included, and
+  the provider adapter independently refuses a request that still carries
+  the level (`reasoning_effort reached the provider adapter unresolved`).
+  The level stays on the session, so its later turns are refused too until a
+  turn clears it. Provider-specific effort settings (`provider_tag`) are
+  unchanged. The LayerDecision schema that adaptive mob packs bundle does
+  not carry the level, so the schema stays the released one.
+
+- `meerkat-core`, `meerkat-contracts`, `meerkat`, `meerkat-runtime`,
+  `meerkat-rpc`, `meerkat-rest`, `meerkat-mob`: a reasoning effort level the
+  model's route does not accept is refused when the agent is built or a
+  caller reconfigures it, with one typed answer on every surface.
+
+  A session's level (`provider_params.reasoning_effort`) is judged against
+  the route of the client its build made and the model's catalog row, next
+  to the other build-time request checks: at a fresh build, at a resumed
+  build (which keeps the stored level through the resume merge, a mob
+  member's included), at the build that recovers a session that is not
+  live, and when a caller reconfigures a live session (a turn's model,
+  provider params or level override; the JSON-RPC session runtime and the
+  mob member executor apply those). A level the route does not accept is
+  refused before anything is published: no session is created, no provider
+  request is made, a refused resume or recovery leaves the stored identity
+  as it was, and a refused reconfiguration leaves the live session's
+  identity, client and stored params as they were. The stored params are
+  never rewritten: the level stays in the neutral field. A build or a
+  target that carries no level is not judged. A supported level passes this
+  check and is still refused at its first request until the level is
+  resolved for requests (see the entry above this one).
+
+  The refusal is `ReasoningEffortRefusal`, raised as
+  `AgentError::ReasoningEffortRefused` (from a build:
+  `BuildAgentError::ReasoningEffortRefused`; from a live reconfiguration:
+  `RuntimeDriverError::ReasoningEffortRefused`, with
+  `RuntimeDriverError::reasoning_effort_refused_session_error()` giving the
+  session error). Its error class is `config`, its turn failure source is
+  `ConfigError`, the agent loop never retries it and it is never a model
+  fallback trigger (for the stored record of a turn refused before its run
+  starts, see Known limitations).
+  Surfaces answer it as `INVALID_PARAMS` (JSON-RPC `-32602`, HTTP `400`)
+  with the data
+  `{"kind": "reasoning_effort_refused", "retryable": <bool>, "reasoning_effort_refusal": {...}}`
+  (`SessionError::REASONING_EFFORT_REFUSED_KIND`, read back by
+  `SessionError::reasoning_effort_refusal_from_data`). `retryable` is `true`
+  only for the reason `supported_levels_unavailable`
+  (`ReasoningEffortRefusalReason::is_transient()`): the account's model
+  list is not loaded, and the same request can succeed later with no
+  change. Meerkat does not retry it for the caller. A turn that fails for the
+  refusal carries it as its typed reason
+  (`AgentErrorReason::ReasoningEffortRefused`, in `run_failed` as
+  `{"reason_type": "reasoning_effort_refused", "refusal": {...}}`), and
+  JSON-RPC and REST answer such a turn exactly as they answer a refused
+  build, so a caller sees one shape whichever checkpoint refused. On REST,
+  a refused turn of the request that created its session also names the
+  created session in `details` (`session_id`, `session_ref`,
+  `session_created`, `resumable`).
+
+  `SessionLlmReconfigureHost` (`meerkat-runtime`) gains the defaulted method
+  `judge_requested_target_session_llm_identity`: the host's judgement of a
+  target a caller asked for, called by
+  `reconfigure_session_llm_identity` after the target is resolved and
+  before anything is staged. It decides nothing about a committed
+  model-routing handoff, whose lifecycle the routing machine owns: a
+  `brain_swap` handoff and a switch-turn request are applied as before and
+  keep the session's level, and a level their target's route does not
+  accept is then refused at each request until it is changed or cleared.
+  The default accepts every target; the facade's host judges the level.
+
+- `meerkat-core`, `meerkat-contracts`, `meerkat-runtime`, `meerkat-session`,
+  `meerkat-mob`, `meerkat-rpc`, `meerkat-llm-core`: a session can store a
+  provider-neutral reasoning effort level, `reasoning_effort`, and a turn
   can set or clear it. It is stored and carried here; it is resolved for
   the provider route right before each request (see the last paragraph).
 
@@ -358,6 +531,7 @@ them.
   unresolved`). Provider-specific effort settings (`provider_tag`) are
   unchanged. The LayerDecision schema that adaptive mob packs bundle does
   not carry the level, so the schema stays the released one.
+
 - `meerkat-core`, `meerkat-llm-core`, `meerkat-copilot`: a request that
   carries the provider-neutral `reasoning_effort` level is now resolved and
   sent. Right before every provider request (a turn's request, an extraction
@@ -486,6 +660,53 @@ them.
 
 ### Changed
 
+- Provider error text (see Security): in the errors of the OpenAI
+  Responses, OpenAI-compatible, Anthropic and Gemini clients, of the OpenAI
+  realtime clients (the text client for realtime-capable models and live
+  sessions) and of the Google Code Assist setup requests (GitHub Copilot
+  routes keep their error text as before), a value that looks like a
+  credential (at least 8 credential characters with a digit among them, or
+  at least 32) is now replaced by `[REDACTED]` where it follows `Bearer` or
+  `Basic`, is the value of an `authorization` header, or is assigned to a
+  secret-looking key (`api_key=`, `x-api-key:`, `token:`); so are tokens
+  with a well-known prefix (`sk-`, `ghp_`, `AKIA` and similar), JSON web
+  tokens, URL userinfo and PEM private-key blocks. A JSON web token is
+  replaced where it ends at a separator; one directly followed by `.`, `/`,
+  `+` or `=` (the full stop of a sentence, a path) is not, which is how the
+  rule already read a process's stderr.
+  The value is replaced and the text around it is kept, with two
+  exceptions: a private-key block goes with its lines, so a block inside a
+  one-line body takes that line, and in a SigV4 `Authorization` value the
+  scheme word (`AWS4-HMAC-SHA256`) is replaced along with the `Credential=`
+  scope. The rules read positions, not meaning, so a value in such a
+  position that is no secret is replaced too: a cache or idempotency key
+  (`prompt_cache_key: <value>`), a model id written after `key:`, a word
+  that begins with a token prefix (`sk-learn-compatible`). Text outside
+  those positions is unchanged. A rejection is classified from the body as
+  received and then redacted, so the rules do not change an error's class.
+
+- `rkat run --output json` (and `--json`, with or without `--resume`): a
+  failed run now writes a JSON failure document to stdout (stdout was empty
+  before). The document is `{"error": {code, category, message, details}}`,
+  the error envelope the other surfaces use, and it is the last document on
+  stdout, after any `--stream` text. `code` is the failure's public error
+  code and `message` the text of stderr's `Error:` line. For a turn that
+  ended in failure, `details.error` is the typed turn error (`kind`,
+  `retryable`, `provider`, `model`, `reason`), and `code` follows its
+  `kind` as on JSON-RPC (`PROVIDER_ERROR`, `BUDGET_EXHAUSTED`, `HOOK_DENIED`
+  or `INTERNAL_ERROR`), so a caller can tell a transient provider failure
+  (`retryable` `true`, which a turn that outlasted the retries, `kind`
+  `retry_exhausted`, carries) from a permanent one without reading text.
+  One turn's code differs from JSON-RPC: a turn abandoned on a refused
+  scoped tool grant gate stays a failed turn (`INTERNAL_ERROR`, exit status
+  1, the typed refusal inside the turn error), where JSON-RPC answers
+  invalid params. A typed error before the turn prints its own code
+  and data; a check made by the CLI itself prints `INTERNAL_ERROR`. Exit
+  statuses and the stderr text are unchanged (a failed turn still exits 1),
+  text and HTML output print no document, an argument the parser refuses
+  prints none, and no other command prints one. See "JSON failure
+  document" in `docs/cli/configuration.mdx`.
+
 - `meerkat-core`: a turn's reasoning-effort preference is judged by the
   route of the client that serves the request, where the client reports
   one. On a GitHub Copilot route that is the account's model list: the
@@ -500,11 +721,137 @@ them.
   preferred level the route takes is sent in its place for that turn and
   reported with `decided_by: preference`; otherwise the session's level is
   sent.
+
 - `meerkat-core`: a compaction summary request of a session that sets the
   provider-neutral `reasoning_effort` level is sent with that level,
   resolved for the summary client's route.
 
 ### Fixed
+
+- `meerkat-core`: a turn that fails because a provider failure outlasted the
+  retries now says what failed. Its typed turn error (`error.data.error` of
+  a JSON-RPC turn, `details.error` of REST, the `error=` JSON of the CLI's
+  `turn abandoned` line, and the error of a runtime completion) kept
+  `kind: "retry_exhausted"` and its detail text but left out `provider`,
+  `retryable` and `reason`, the fields a provider failure that is not
+  retried (`kind: "llm_failure"`, a 400 for example) fills, so a caller
+  could tell a rate limit from an overloaded or unreachable provider only by
+  reading the detail text. It now carries `provider`, `reason` and
+  `retryable: true`. `reason` is the typed reason of the last failed
+  attempt: `llm_rate_limited` (with `retry_after_ms` when the provider sent
+  a hint), `llm_network_timeout`, `llm_call_timeout` (a call timeout or a
+  stalled stream), or `llm_provider_error` with the provider's error kind,
+  such as `server_overloaded`, `server_error` or `connection_reset`. After a
+  model fallback, `provider` and `reason` are those of the fallback target's
+  last failure. `retryable: true` names the class of the failure: one
+  Meerkat retries, which ended the turn after the retries its policy
+  allowed. A failure of that class can succeed on a later attempt; the field
+  does not say that this one will, least of all for the `unknown` and
+  `connection_reset` provider error kinds and for `llm_call_timeout`. It is
+  advice for the caller, and the number and timing of Meerkat's own retries
+  are unchanged. `kind`, `detail`, the JSON-RPC code and the `run_failed`
+  event are unchanged, and no field is new: a stored turn error without the
+  three fields still reads, and an earlier release reads one that has them.
+  Affects 0.8.0 through 0.9.14.
+
+- `meerkat-core`: a configuration write that failed at the write itself was
+  reported as saved and replaced the document with an empty file. When the
+  filesystem refused the bytes of a config document or of its
+  `config_state.json` (a full disk on a filesystem that allocates at write
+  time, a quota, a file size limit, an I/O error), the store synced and
+  renamed its temporary file without the write's result, so the empty file
+  took the document's place and the caller (`rkat config set` and `patch`,
+  JSON-RPC `config/set` and `config/patch`, the REST and MCP config writes)
+  saw success. The write now fails with the filesystem's error, publishes
+  nothing and removes its temporary file: the document it could not replace
+  stays as it was, the contract the credential, realm, blob, task and
+  trajectory file writes have since 0.9.14. A write that fails at
+  its sync or its rename removes its temporary file too, where it left a
+  `.config.tmp.<id>` or `.config_state.tmp.<id>` file behind on every
+  attempt, and so does a failed `mcp.toml` write. Affects 0.3.3 through
+  0.9.14.
+
+- `meerkat-mob`: a kickoff notice to a wired peer that was being woken held
+  the whole mob for 30 seconds (0.9.7 through 0.9.14: since a send to a member
+  that is not live began to wake it). When a member's kickoff changed phase,
+  for example resolved, while a wired peer's wake was between its applied
+  plan and its readiness, the mob's actor sent the notice on its own step.
+  The send joined the peer's wake, the wake's next step needed the actor, and
+  the step ended only when the send's budget did (`wake_timed_out`). Until
+  then every other command of the mob waited: a spawn, a wire, an identity
+  change, a status read, a stop. The notice was not delivered, and the peer
+  was woken without it. The actor now prepares each kickoff notice and hands
+  its send to a task it owns on the peer delivery lane, for live recipients
+  and recipients that are not live alike, so the peer's wake is served while
+  the notice waits for it. A kickoff notice still wakes a peer that is not
+  live. What holds for the notices now:
+  - Order: the notices of one member to one peer are sent one at a time, in
+    the order the kickoff went through its phases. Notices to different
+    peers, and of different members, are independent, so a peer that cannot
+    be reached delays only the notices owed to it. A notice behind one that
+    cannot be delivered is attempted when that one's send budget has ended.
+    The budget is the sending member's comms ack timeout (30 seconds by
+    default), not a constant of the lane.
+  - Bound: at most eight notices of one member are pending for one peer, the
+    one being sent included. A notice owed beyond that takes the place of the
+    oldest one still queued, never of the one being sent, so the latest phase
+    (a failure or a cancellation included) reaches the peer and the notices
+    that stay keep their order. There is no bound across peers or members:
+    the lane holds at most eight notices for every wired pair of members.
+  - A notice the lane cannot confirm is logged at WARN with the member
+    (`from`), the peer (`to`), the notice's kind (`intent`) and a `class`
+    (`preparation_failed`, `send_failed`, `pending_bound` or `cancelled`),
+    and is not sent again. The messages are `a kickoff notice to a peer that
+    was not materialized was not confirmed`, `a kickoff notice to a live peer
+    was not confirmed` (before: `failed to emit kickoff lifecycle notice`,
+    without the peer) and `a kickoff notice could not be prepared for a peer
+    and was not sent`. A notice whose preparation or send fails for one peer
+    no longer skips the member's remaining peers. Not confirmed is not the
+    same as not delivered: a notice whose send budget ended, or that was
+    cancelled, after its recipient had admitted it can still arrive, once.
+    Three cases have no such record: a sending member with no comms runtime
+    (nothing is prepared), a placed sending member (logged without the peer
+    and the class), and notices still pending when the mob's actor exits.
+  - Cancel: a stop, a complete, a reset, a destroy or a shutdown of the mob,
+    an unwire of the edge, a retirement of either member and the rollback of
+    a failed spawn cancel the notices that are pending when they start, as
+    they cancel a pending peer message. A notice such a command emits itself
+    (the cancellation of a kickoff that a stop closes) is handed to the lane
+    after that cancel and ends within its send budget; the stop does not
+    wait for it, and nothing is delivered after a destroy. A member released
+    to Dormant keeps its pending notices: they are still true of it, and
+    their send wakes nothing.
+
+- `meerkat-mob`: a member that was being woken could not be wired, messaged
+  or notified for a short span of its wake (0.9.7 through 0.9.14: since
+  members are woken on demand). A wake creates the member's session, and
+  with it its comms runtime, before it binds the member's operation record.
+  To find a member's peer endpoint the mob read its recorded endpoint first
+  for a member that is not materialized, but for a member that is being woken
+  only after a lookup of its comms runtime had found nothing. In that span
+  the lookup found the runtime, and the call was refused with `missing
+  generated owner operation binding`. A spawn wired to the member by the
+  definition's wiring rules was refused; when the refused spawn's rollback
+  met the same member, the spawn answered `rollback remains owned for retry`
+  and the new member stayed seated with part of its edges until the
+  rollback's next attempt, seconds later. A kickoff notice owed to the member
+  was dropped with a log record. A host peer message to it was refused. A
+  member woken at the same time recorded its edge to it as owing a repair.
+  The mob now reads the recorded endpoint, without looking the comms runtime
+  up, for a member that is not materialized and for one whose wake has not
+  yet applied its plan and whose endpoint is recorded: when it wires,
+  messages or notifies the member, and when a retirement or the rollback of
+  a refused spawn removes an edge to it. Such a member takes the edge on its
+  own side when its wake restores its wiring. A member whose wake has applied
+  its plan, and one being woken with no recorded endpoint yet, are wired
+  through their comms runtime, as before. A rollback that read a peer's
+  recorded endpoint and finds, when it removes its edges, that the peer's
+  wake has applied its plan meanwhile ends that attempt, so that the peer is
+  not left trusting a member that is gone: the spawn then still answers
+  `rollback remains owned for retry`, and the rollback's next attempt,
+  seconds later, removes the edge on both sides. (A peer that was not
+  materialized when a rollback began and was woken during it could be left
+  with such a trust entry in the same releases.)
 
 - `meerkat-copilot` (GitHub Copilot device sign-in): an account no longer
   keeps the model list and the API base of an earlier sign-in after a new
@@ -522,7 +869,209 @@ them.
   account also no longer holds the earlier sign-in's token in that window
   (it was refused there and served no request).
 
+### Security
+
+- `meerkat-core`, `rkat`: the configuration documents the engine writes are
+  owner-only on Unix, whatever the process umask. They are a config document
+  (`~/.rkat/config.toml`, a project's `.rkat/config.toml`, a realm's own
+  `config.toml`), the `config_state.json` beside it, and `mcp.toml`
+  (`~/.rkat/mcp.toml`, a project's `.rkat/mcp.toml`). Every write gave them
+  the umask's mode (0644 under the common 022, 0664 under 002), and so did
+  the temporary file of the write before it was renamed into place, so every
+  local user could read them. A document can hold credential material by
+  documented configuration: an auth profile's
+  `source = { kind = "inline_secret", ... }`, the `env` values of a
+  `command` source, and the literal `args`, `env` and `headers` of an MCP
+  server (a realm's `[[tools.mcp_servers]]`, or `mcp.toml`). One rule now
+  decides the mode, and the file has it from its creation, before any byte
+  is written: 0640, readable by the directory's group, when the document's
+  directory has the setgid bit (a directory shared through its group on
+  purpose), and 0600 in every other directory. A document is never
+  group-writable and never readable by others, and a rewrite never adds a
+  permission the file lacked: a document its owner made 0400 stays 0400.
+  `rkat init` writes the project document it copies from the user document
+  by the same rule, and only into a file it creates: a symbolic link at the
+  document's path now fails the command, where a link to nothing was
+  followed. The engine changes the mode of no directory. The
+  documents have had the umask's mode since 0.3.0, and the inline secret
+  source since 0.6.0. Affects 0.3.0 through 0.9.14.
+
+- `rkat`: `--comms-binding-out` wrote its binding file, which carries the
+  comms runtime's bootstrap token, with the umask's mode (0644 under the
+  common 022) and into whatever was at its path: a file already there kept
+  its own mode, and a symbolic link was followed. The binding file is now a
+  new file that takes the place of the one at its path, with three limits:
+  - The path is replaced, never written through. A regular file at the path
+    is removed. A symbolic link at the path is never followed: a link to a
+    regular file or to nothing is replaced by the binding file (the file it
+    pointed to stays as it was, and nothing is created where it pointed),
+    and a link to a named pipe, a socket, a device or a directory is
+    refused, as those things themselves are. A path in `/proc`, or in `/dev`
+    other than under `/dev/shm` (a memory file system for ordinary files),
+    is refused whatever it holds: `/dev/stdout`, for one, also when standard
+    output is redirected to a file. A refusal comes before anything is
+    removed or created, with an error that names what is there. The
+    directory of the path must allow the removal and the creation of a file.
+  - On Unix the file is 0600 from its creation, whatever the umask and
+    whatever mode the file before it had.
+  - A supervisor that runs under another account than `rkat` cannot read
+    it.
+
+  Affects 0.6.33 through 0.9.14.
+
+- `meerkat-comms`: `Keypair::save` created `identity.key` with the umask's
+  mode and made it 0600 only after it had written the key, so the secret
+  key was readable by every local user for a moment, and stayed so when the
+  save failed in between. The file is now 0600 on Unix from its creation,
+  and a key file that already exists is made 0600 before the key is written
+  to it. `Keypair::load_or_generate`, which the stock hosts use, already
+  created the file 0600. Affects 0.3.0 through 0.9.14.
+
+- `meerkat-openai`, `meerkat-anthropic`, `meerkat-gemini`,
+  `meerkat-auth-core`, `meerkat-core`: when a provider, or a proxy or
+  gateway in front of one, answered a request with an error that repeated
+  the request's credential (its `Authorization` or API-key header, or the
+  bare value), the credential stayed in the error text. It reached the turn
+  failure message (`rkat run` prints it on stderr), the typed turn error's
+  `detail` and `reason.provider_error.message` in RPC error data and events,
+  retry events, and whatever stores or shows them. Since 0.9.9 the clients
+  ask the route's authorizer to remove it, but only the GitHub Copilot
+  authorizers did; a route whose client signs with a key of its own (an API
+  key, a self-hosted server's static bearer) asked no one, and the Gemini
+  client had no such step.
+
+  What is removed now: the credential a request was signed with, by exact
+  value, from the error text of that request. That covers the API-key and
+  static-bearer routes of the OpenAI, OpenAI-compatible (self-hosted),
+  Anthropic and Gemini clients; routes signed by the static-bearer,
+  static-header, AWS, Azure AD, Google and managed OAuth authorizers (with
+  the last four values of a token that refreshes); the failure of an
+  OpenAI or Gemini image request, the Gemini Files API registration
+  included; the Google Code Assist setup requests; and the OpenAI realtime
+  clients: the errors of the text client for realtime-capable models and,
+  for a live session, an error's message, code and param, a failed
+  response's reason and error, and the opt-in frame trace. The value is
+  matched as sent, without its `Bearer` or `Basic` scheme, and as an
+  encoder rewrites it: `/` as `\/`, a character as its JSON `\u00XX`
+  escape, or percent-encoded (`%XX`), alone or mixed. A second step then
+  replaces values that look like credentials in known positions (see
+  Changed).
+
+  What is not removed:
+
+  - A value shorter than 8 bytes (a placeholder such as `none`) is not
+    matched by value. A placeholder of 8 bytes or more (`not-needed`,
+    `lm-studio`) is the route's credential: the word is replaced wherever
+    an error uses it.
+  - A value the response repeats in another form: base64 of it, the
+    decoded user and password of a `Basic` pair, a copy cut short or
+    masked, an HTML entity, a doubly escaped copy.
+  - Two named values that overlap without one containing the other (the
+    end of one is the start of the other) are replaced independently,
+    longest first: where a response runs them together, what the second
+    holds beyond the overlap stays.
+  - The second step is a second line only. It leaves a secret no route
+    names when the secret stands outside the positions listed under
+    Changed, is made of letters only and shorter than 32 bytes, is a JSON
+    web token directly followed by `.`, `/`, `+` or `=`, stands in a
+    quoted header dump without a `Bearer` or `Basic` scheme
+    (`{"authorization":"<value>"}`, `"authorization":"Token <value>"`), or
+    stands in JSON nested inside a JSON string (`{\"api_key\":\"<value>\"}`).
+  - URL userinfo is replaced up to the `@` of its URL. Text that quotes a
+    URL closes it, so in a response the second step reads a quoting byte
+    (`'`, `"`, `\`, `<` or `>`) as the end of a URL when what stands before
+    it is a bare host (not empty, and no `:` or a `:` followed by one or
+    more digits and nothing else) and a second quoting byte follows before
+    the `@`. Userinfo of that shape is left: one that starts like a host
+    with a port (`app:1234're'st@db`), or one with no `:` before its first
+    quoting byte (`o'bri'en:pass@db`). A password or a user name wrapped
+    in quotes (`app:'pass'@db`, `'root':'pass'@db`) is replaced.
+  - The same rule replaces some text that is no userinfo, which costs
+    readability only: a bare host followed by one quoting byte and a later
+    `@` (`'https://host',help@host`), and a bracketed IPv6 host followed
+    by a later `@`.
+  - A static-header route names the value of `authorization`,
+    `proxy-authorization` and `cookie`, and of a header whose name contains
+    `key`, `token`, `secret`, `auth`, `password`, `credential`, `signature`
+    or `session`. A secret under any other header name is left to the
+    second step.
+  - SigV4: the session token and the signed `Authorization` value and
+    signature of the two most recent requests are removed. With more
+    requests in flight, the `Signature=` of an older one can stay; it is
+    bound to its request and expires in minutes.
+  - GitHub Copilot routes keep their own redaction, as before: the last
+    four bearers by exact value as sent, shown as `<redacted>`, without the
+    encoded forms and without the second step.
+  - Requests that obtain a credential are not covered: a refused token,
+    device-code, cloud identity or API-key provisioning request reports the
+    body as received at sign-in and when a route resolves.
+
+  Affects 0.3.0 through 0.9.14.
+
 ### Upgrade notes
+
+- A configuration document an earlier release wrote keeps its mode until
+  the engine next rewrites it. To make the existing ones owner-only now, run
+  `chmod 600` on each that exists: `~/.rkat/config.toml`,
+  `~/.rkat/config_state.json` and `~/.rkat/mcp.toml`; a project's
+  `.rkat/config.toml` and `.rkat/mcp.toml`; and each realm's `config.toml`
+  and `config_state.json` in its realm directory
+  (`<project-root>/.rkat/realms/<realm>/` for the CLI, or
+  `<state-root>/<realm>/`). A binding file `--comms-binding-out` wrote
+  earlier keeps its mode until it is written again: `chmod 600` it, or
+  delete it once the supervisor has read it.
+
+- A configuration document that several local accounts read through group
+  permissions (a project checkout or a realm directory shared by a group,
+  or an install that runs a helper or a verifier under another account) is
+  no longer readable by the group after a rewrite, unless its directory has
+  the setgid bit. Set it once on each shared directory, `chmod g+s <dir>`
+  (the `.rkat` directory of a shared project, a shared realm directory),
+  and the documents written there are 0640 with the directory's group. A
+  document the engine already rewrote as 0600 stays 0600: `chmod g+r` it
+  once. An install that cannot set the bit grants the read itself after each
+  write, with `chmod g+r` or an ACL on the document: a write replaces the
+  file, so a grant on the file before it does not carry over, and a default
+  ACL on the directory does not reach a file that is created 0600. Other
+  accounts never get write access through the document's mode, and nothing
+  is readable by others. The admission fence file keeps its own rule:
+  `admission.lock` is 0640 with its directory's group in every directory.
+
+- `rkat run --comms-binding-out <PATH>` no longer writes into what is
+  already at the path: it removes the file there and creates a new one that
+  only its owner can read (0600 on Unix), whatever the umask and whatever
+  mode the older file had. What changes for an install that relied on the
+  old write:
+  - A symbolic link at the path is replaced by a regular file, whether it
+    pointed to a regular file or to nothing. Before, the binding was written
+    through the link into the file it named; now that file is left as it
+    was, or not created, and does not receive the binding. Give the flag
+    the path of the file itself.
+  - A named pipe, a socket, a device or a directory at the path, and a
+    symbolic link to one of them, is refused and left untouched. So is any
+    path in `/proc` or in `/dev`, whatever it holds; `/dev/shm`, a memory
+    file system for ordinary files, is the one exception.
+    `--comms-binding-out /dev/stdout`, or a named pipe a
+    supervisor reads the binding from, worked before and is now an error:
+    write the binding to a regular file (one under `/dev/shm` will do) and
+    have the supervisor read that.
+  - The directory of the path must let `rkat` remove and create a file in
+    it. A binding file that was created for `rkat` in a directory it cannot
+    write could be rewritten in place before, and now fails.
+  - A supervisor that runs under another account than `rkat` can no longer
+    read the binding file (under the common umask 022 it could). Run the
+    supervisor under the same account, or grant it the read after each
+    write (`chmod`, or an ACL on the file): the file is a new one every
+    time, so a grant on the older file does not carry over. The descriptor
+    file of `rkat mob host --descriptor-out` is owner-only in the same way.
+
+- A script that runs `rkat run --output json` (or `--json`) must not read
+  non-empty stdout as success, nor parse the last stdout document as a run
+  result without looking at it: a failed run now ends stdout with
+  `{"error": {...}}`. Decide by the exit status, which is unchanged, or by
+  the document's top-level key: `error` is a failure, `status`
+  (`"pending_tool_call"`) a run waiting for an external tool result, and
+  anything else the run result. Text and HTML output are unchanged.
 
 - Before rolling back to 0.9.13 or earlier, clear the reasoning effort level
   from every session that set it, and let accepted turns that carry it
@@ -543,6 +1092,25 @@ them.
   either release.
 
 ### Known limitations
+
+- The owner-only rule of this release (see Security) covers the
+  configuration documents, the comms binding file and `identity.key`. Two
+  other files that can hold a token still take their mode from the umask
+  alone: the mob store's database file, which stores the bootstrap token of
+  an external member's binding, and Meta's composition manifest beside a
+  persistent mob's storage, which records the mob definition with its MCP
+  servers' arguments, environment and headers (also when the adoption of
+  pre-0.9 state rewrites it: that second writer gives the file the
+  permissions the manifest had). Keep the directories that hold them closed
+  to other accounts, or run under a umask of 077.
+
+- `meerkat-mob`: a spawn rollback that is still owed when the mob is
+  stopped (the refused spawn answered `rollback remains owned for retry`)
+  is finished by a later resume, and it can take more than one, because a
+  resume can answer `LifecycleOperationProgressStalled` before a later one
+  succeeds and the member is removed; and a mob that is restarted from its
+  storage before the rollback has recorded its start has the member seated
+  with part of its edges and does not remove it by itself.
 
 - A turn that asks for a reasoning effort level its session's route refuses
   is answered with the typed refusal and makes no provider request, but its

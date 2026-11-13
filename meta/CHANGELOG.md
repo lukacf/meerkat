@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.15] - 2026-11-13
+
 Meta 0.9.15 is part of Meerkat 0.9.15 and pins Core `=0.9.15`. Core 0.9.15
 and Meta 0.9.15 are published together; Connect 0.9.15 follows them.
 

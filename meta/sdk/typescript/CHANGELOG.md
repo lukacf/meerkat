@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.15
+
 - `MetaRuntime.identities` (`IdentitiesHandle`) calls the long-term agent
   host methods (`meta/identity/*`): `create`, `update`, `archive`,
   `unarchive`, `remove`, `adopt`, `withdraw`, `changesHold`, `list`, `get`,

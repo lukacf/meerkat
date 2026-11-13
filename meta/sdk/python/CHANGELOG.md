@@ -4,6 +4,8 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.15
+
 - `MetaRuntime.identities` (`IdentitiesHandle`) calls the long-term agent
   host methods (`meta/identity/*`): `create`, `update`, `archive`,
   `unarchive`, `remove`, `adopt`, `withdraw`, `changes_hold`, `list`, `get`,

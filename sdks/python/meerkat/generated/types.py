@@ -56,6 +56,7 @@ class WireRunResult:
     extraction_error: Optional[dict[str, Any]] = None
     schema_warnings: Optional[list[Any]] = None
     skill_diagnostics: Optional[dict] = None
+    reasoning_effort: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -1880,6 +1881,7 @@ class HelpResponse:
     turns: int
     usage: WireUsage
     extraction_error: Optional[dict[str, Any]] = None
+    reasoning_effort: Optional[dict[str, Any]] = None
     request_usage: Optional[list[dict[str, Any]]] = None
     run_usage: Optional[WireUsage] = None
     schema_warnings: Optional[list[dict[str, Any]]] = None

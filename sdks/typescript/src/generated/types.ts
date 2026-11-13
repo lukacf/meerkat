@@ -117,6 +117,7 @@ export interface WireRunResult {
   structured_output?: unknown;
   extraction_error?: { last_output: string; attempts: number; reason: string };
   schema_warnings?: Array<{ provider: string; path: string; message: string }>;
+  reasoning_effort?: { requested: string; sent: Array<{ level: string; provider: string; model: string; route: { backend: string; api: string }; fields: string[]; facts: string; decided_by: string; requests: number }> };
 }
 
 export interface WireToolResult {
@@ -1554,6 +1555,7 @@ export interface HelpRequest {
 
 export interface HelpResponse {
   extraction_error?: Record<string, unknown> | null;
+  reasoning_effort?: Record<string, unknown> | null;
   request_usage?: Record<string, unknown>[];
   run_usage?: WireUsage | null;
   schema_warnings?: Record<string, unknown>[] | null;

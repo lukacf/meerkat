@@ -459,8 +459,10 @@ them.
     its own route; a custom wrapper must do the same, or the level is
     resolved without the wrapped client's default tag and compared with the
     wrong route.
-  The schema artifacts and the generated SDK types do not carry the new
-  members yet.
+  The schema artifacts and the generated SDK types (Python, TypeScript, Web)
+  carry the new event, the resolution and report types and the
+  `reasoning_effort` members of `run_started`, `run_resumed` and the run
+  result.
 
 - `meerkat`, `meerkat-core`: a model fallback keeps a session's
   `reasoning_effort` level. Each chain target carries the level, and before
@@ -610,6 +612,13 @@ them.
   `decided_by` and `fields` are advisory and kept as strings. Report
   parsers read the run result's block and the run-start and per-request
   resolutions.
+
+  The generated TypeScript and Web SDK types gain the new union members:
+  the event `request_reasoning_effort_resolved`, the run-failure reason
+  `reasoning_effort_refused` and the model fallback skip reason
+  `reasoning_effort_unsupported`. An exhaustive `switch` without a default
+  over one of these unions needs the new case; nothing changes at run time
+  (an SDK that does not know the event or the value keeps the raw data).
 
 - `meerkat-core`: `resolve_build_provider_params`, the one rule by which a
   build folds a request's own `reasoning_effort` parameter into its provider

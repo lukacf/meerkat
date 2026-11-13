@@ -432,7 +432,7 @@ describe("reasoning effort reports", () => {
     assert.equal("reasoningEffort" in plain.lastResult, false);
   });
 
-  it("run_started carries the run-start resolution", () => {
+  it("run_started and the per-request event are typed", () => {
     const started = parseCoreEvent({
       type: "run_started",
       session_id: "s1",
@@ -446,6 +446,26 @@ describe("reasoning effort reports", () => {
       input: { kind: "content", content: "yo" },
     });
     assert.equal("reasoningEffort" in plain, false);
+
+    const resolved = parseCoreEvent({
+      type: "request_reasoning_effort_resolved",
+      turn_number: 2,
+      fallback_attempt: 1,
+      resolution: { ...RESOLUTION, facts: "new_source", decided_by: "new_decider" },
+    });
+    assert.equal(resolved.type, "request_reasoning_effort_resolved");
+    assert.equal(resolved.turnNumber, 2);
+    assert.equal(resolved.fallbackAttempt, 1);
+    assert.equal(resolved.resolution.level, "high");
+    // Advisory values this SDK does not know are kept as sent.
+    assert.equal(resolved.resolution.facts, "new_source");
+    assert.equal(resolved.resolution.decidedBy, "new_decider");
+    const bare = parseCoreEvent({
+      type: "request_reasoning_effort_resolved",
+      resolution: RESOLUTION,
+    });
+    assert.equal("turnNumber" in bare, false);
+    assert.equal("fallbackAttempt" in bare, false);
   });
 
   const runFailed = (reason) =>

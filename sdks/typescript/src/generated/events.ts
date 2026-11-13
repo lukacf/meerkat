@@ -60,7 +60,8 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "run_resumed",
   "tool_results_bounded_for_request",
   "requested_compaction_skipped",
-  "operator_instructions_applied"
+  "operator_instructions_applied",
+  "request_reasoning_effort_resolved"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];

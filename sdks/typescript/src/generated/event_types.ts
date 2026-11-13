@@ -169,7 +169,7 @@ export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "ser
 
 export type LlmProviderErrorRetryability = "retryable" | "non_retryable";
 
-export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable" | "tool_choice_unsupported";
+export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable" | "reasoning_effort_unsupported" | "tool_choice_unsupported";
 
 /**
  * Where Gemini blocked a response.
@@ -201,6 +201,73 @@ export type ProviderStopDetail = {
   provider: "gemini";
   reason: string;
   stage: GeminiStopStage;
+};
+
+/**
+ * Reasoning/effort control level, the shared typed vocabulary behind both
+ * Anthropic `output_config.effort` and OpenAI `reasoning.effort`.
+ *
+ * The two providers expose effort in different request shapes but draw from
+ * the same level vocabulary; modeling it as a typed enum keeps the catalog
+ * value-domain compiler-checked instead of relying on raw string literals.
+ * Each catalog row declares its accepted subset via `effort_levels`.
+ */
+export type EffortLevel = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/**
+ * Why a requested `reasoning_effort` level is refused.
+ *
+ * A closed set: every reader matches it exhaustively, so adding a variant
+ * is a breaking change. The variants serialize as the snake_case strings
+ * below and keep this order.
+ */
+export type ReasoningEffortRefusalReason = "unsupported_level" | "supported_levels_unknown" | "supported_levels_unavailable" | "conflicting_provider_effort" | "conflicting_thinking_budget" | "conflicting_thinking_type" | "conflicting_reasoning_body" | "conflicting_reasoning_mode";
+
+/**
+ * The source of the effort levels a route accepts for a model. Each
+ * backend kind names its own (`reasoning_levels_source()` on the
+ * provider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal
+ * and a resolution report it as `facts`.
+ */
+export type ReasoningFactsSource = "catalog" | "account" | "operator";
+
+/**
+ * The provider API a request is sent on.
+ */
+export type ModelApi = "responses" | "chat_completions" | "messages" | "generate_content" | "realtime";
+
+/**
+ * The route a request is served on, in its reported form:
+ * `{"backend": "<provider-matrix string>", "api": "<snake_case API>"}`.
+ *
+ * Built by [`ReasoningRoute::new`] from a typed backend, or read from that
+ * form, which refuses a backend that is not a provider-matrix backend
+ * string. Either way `backend` is always one. Displays as `backend/api`.
+ */
+export interface ReasoningRoute {
+  api: ModelApi;
+  backend: string;
+}
+
+/**
+ * A refused `reasoning_effort` level: what was requested, for which model
+ * and route, and why. Raised before any provider request is sent.
+ *
+ * `route`, `supported` and `facts` are always serialized, as `null` when
+ * absent (`facts` is absent exactly when `supported` is). The two
+ * `conflicting_*` fields are serialized only when present. The `Display`
+ * text is for people and is not a contract; read the fields.
+ */
+export type ReasoningEffortRefusal = {
+  conflicting_level?: EffortLevel | null;
+  conflicting_param?: string | null;
+  facts?: ReasoningFactsSource | null;
+  model: string;
+  provider: Provider;
+  reason: ReasoningEffortRefusalReason;
+  requested: EffortLevel;
+  route?: ReasoningRoute | null;
+  supported?: EffortLevel[] | null;
 };
 
 /**
@@ -288,6 +355,9 @@ export type AgentErrorReason = {
 } | {
   reason_type: "tool_grant_gate_refused";
   refusal: GrantGateRefusal;
+} | {
+  reason_type: "reasoning_effort_refused";
+  refusal: ReasoningEffortRefusal;
 };
 
 export type AgentErrorReport = {
@@ -848,17 +918,6 @@ export type ContextBudgetFact = {
 export type BindingOrigin = "configured" | "synthetic_env_default";
 
 /**
- * Reasoning/effort control level, the shared typed vocabulary behind both
- * Anthropic `output_config.effort` and OpenAI `reasoning.effort`.
- *
- * The two providers expose effort in different request shapes but draw from
- * the same level vocabulary; modeling it as a typed enum keeps the catalog
- * value-domain compiler-checked instead of relying on raw string literals.
- * Each catalog row declares its accepted subset via `effort_levels`.
- */
-export type EffortLevel = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-
-/**
  * Typed shape of Anthropic's prompt-cache breakpoint policy.
  */
 export type AnthropicCacheControlPolicy = "disabled" | "automatic" | "system_prefix" | "system_and_conversation";
@@ -1152,6 +1211,26 @@ export type ReasoningBatchDisposition = {
 } | {
   disposition: "mixed_with_unpreferred";
 };
+
+/**
+ * Who decided the level a request was sent with.
+ */
+export type ReasoningEffortDecidedBy = "request" | "preference";
+
+/**
+ * A resolved `reasoning_effort` level: what one provider request is sent
+ * with, for which model and route.
+ */
+export interface ReasoningEffortResolution {
+  decided_by: ReasoningEffortDecidedBy;
+  facts: ReasoningFactsSource;
+  fields: string[];
+  level: EffortLevel;
+  model: string;
+  provider: Provider;
+  requested: EffortLevel;
+  route: ReasoningRoute;
+}
 
 /**
  * What one provider attempt's baseline request already said about effort,
@@ -1546,6 +1625,7 @@ export interface UnmeasuredTurnUsageAccounting {
 export type AgentEvent = {
   identity?: TranscriptMessageIdentity;
   input: RunInput;
+  reasoning_effort?: ReasoningEffortResolution | null;
   request_reasoning?: ReasoningBatchDisposition | null;
   session_id: SessionId;
   type: "run_started";
@@ -1808,6 +1888,7 @@ export type AgentEvent = {
   turn_number?: number | null;
   type: "request_reasoning_lowered";
 } | {
+  reasoning_effort?: ReasoningEffortResolution | null;
   resume_point: RunResumePointKind;
   round: number;
   run_id: RunId;
@@ -1830,6 +1911,11 @@ export type AgentEvent = {
   run_id?: RunId | null;
   session_id: SessionId;
   type: "operator_instructions_applied";
+} | {
+  fallback_attempt?: number | null;
+  resolution: ReasoningEffortResolution;
+  turn_number?: number | null;
+  type: "request_reasoning_effort_resolved";
 };
 
 /**

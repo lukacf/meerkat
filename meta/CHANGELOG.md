@@ -190,17 +190,17 @@ Security, Upgrade and Changed.
   mob the runtime holds is treated the same, so those frames stay unserved
   on a host that does not keep council records across a restart. Limits: an
   ordinary mob whose id has that form is treated as a council's where the
-  console cannot tell the two apart, so with no runtime registered its
-  stored frames are not served unless it is the primary mob of the runtime
-  that recorded them, under the id of a council that settled a
-  member named like one of that council's seats is listed while its stored
-  frames are not served, under that id every frame dated up to the time
-  the council settled stays unserved, whoever wrote it (the frames of a
-  later mob created under the id before the settling was recorded, and its
-  frames dated before the settling or without a real time, included), and
-  under the id of a council that still owes cleanup its members stay
+  console cannot tell the two apart, so under the id of a council that
+  settled a member named like one of that council's seats is listed while
+  its stored frames are not served, under that id every frame dated up to
+  the time the council settled stays unserved, whoever wrote it (the frames
+  of a later mob created under the id before the settling was recorded, and
+  its frames dated before the settling or without a real time, included),
+  and under the id of a council that still owes cleanup its members stay
   unlisted and their frames unserved until the council settles. Other
-  nested members are listed and served as before.
+  nested members are listed and served as before while a runtime is
+  registered; with none registered no nested mob's stored frames are
+  served (see above).
   Frames a console stored
   for participants before this release stay in its console store, unserved.
   Affected: 0.8.27 through 0.9.14. The 0.9.13 notes said the next release

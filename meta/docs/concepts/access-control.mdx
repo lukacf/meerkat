@@ -83,7 +83,7 @@ The participants of a temporary council (the `council` tool) are not Console mem
 
 A council's mob is known from the council's own record. Where the Console cannot tell an ordinary mob from a council's, it treats the mob as a council's. For an ordinary mob whose id has a council mob's form (`council--...`) that means:
 
-- with no runtime registered, its stored frames are not served, unless it is the primary mob of the runtime that recorded them;
+- with no runtime registered, its stored frames are not served. That is not particular to the id's form: in that state the Console serves no stored frame of a nested mob's member, and serves those of the runtime's own mob;
 - once the runtime no longer holds it, its stored frames are not served, with or without a council record for the id. This keeps a past council's frames unserved on a host that does not keep council records across a restart;
 - under the id of a council that still owes cleanup, its members are not listed and their frames are not served until the council settles;
 - under the id of a council that settled, a member named like one of that council's seats is listed while its stored frames are not served;

@@ -230,6 +230,10 @@ struct SpawnRollbackState {
     peer_description: String,
     sender: Option<Arc<dyn CoreCommsRuntime>>,
     unsettled: bool,
+    /// An attempt ended at its Retire step because a peer it had observed
+    /// from its recorded endpoint alone was bound meanwhile: the next attempt
+    /// observes the endpoints again and goes on at its Trust steps.
+    reobserving: bool,
 }
 
 #[derive(Clone)]
@@ -237,6 +241,12 @@ struct SpawnRollbackEndpoint {
     spec: TrustedPeerDescriptor,
     comms: Option<Arc<dyn CoreCommsRuntime>>,
     binding: Option<crate::RuntimeBinding>,
+    /// The rollback observed this member from MobMachine's recorded endpoint
+    /// alone (`WiringEndpoint::LocalDormant`: Dormant, or Waking and not
+    /// Bound): it had no comms runtime whose trust the rollback could clean.
+    /// A placed or a peer-only member has no comms here either and is not
+    /// marked: it has no residency phase to read again.
+    recorded_only: bool,
 }
 
 struct SpawnRollbackRetirePlan {
@@ -385,6 +395,10 @@ enum RetirementEndpointPlan {
         entry: RosterEntry,
         member_ref: MemberRef,
         comms_name: String,
+        /// MobMachine's recorded endpoint of a Waking member whose comms
+        /// runtime is read first (`MemberEndpointSource::RuntimeThenRecorded`):
+        /// the endpoint it is observed from when it has no comms runtime.
+        recorded: Option<TrustedPeerDescriptor>,
     },
     Refused(MobError),
 }
@@ -1762,13 +1776,20 @@ impl MobActor {
                         spec,
                     }));
                 }
-                // A member that is not materialized is observed from its
-                // durable endpoint: no comms runtime of it is looked up.
-                if crate::runtime::boot_plan::domain_member_is_dormant(
+                // MobMachine decides where the member's endpoint is read
+                // from, as for every wiring verb: a member that is not
+                // materialized, or whose wake has not bound it, is observed
+                // from its durable endpoint, and no comms runtime of it is
+                // looked up.
+                let endpoint_source = crate::runtime::boot_plan::domain_member_endpoint_source(
                     self.dsl_authority.state(),
                     &identity,
-                ) && let Some(spec) =
-                    self.machine_member_peer_spec_for(&identity, "retirement endpoint observation")?
+                );
+                if endpoint_source == crate::runtime::boot_plan::MemberEndpointSource::Recorded
+                    && let Some(spec) = self.machine_member_peer_spec_for(
+                        &identity,
+                        "retirement endpoint observation",
+                    )?
                 {
                     return Ok(RetirementEndpointPlan::Ready(
                         WiringEndpoint::LocalDormant {
@@ -1777,10 +1798,18 @@ impl MobActor {
                         },
                     ));
                 }
+                let recorded = if endpoint_source
+                    == crate::runtime::boot_plan::MemberEndpointSource::RuntimeThenRecorded
+                {
+                    self.machine_member_peer_spec_for(&identity, "retirement endpoint observation")?
+                } else {
+                    None
+                };
                 Ok(RetirementEndpointPlan::Local {
                     entry: entry.clone(),
                     member_ref,
                     comms_name,
+                    recorded,
                 })
             })()
             .unwrap_or_else(RetirementEndpointPlan::Refused);
@@ -1816,7 +1845,7 @@ impl MobActor {
                 let endpoint = match plan {
                     RetirementEndpointPlan::Ready(endpoint) => Ok(endpoint),
                     RetirementEndpointPlan::Refused(error) => Err(error),
-                    RetirementEndpointPlan::Local { entry, member_ref, comms_name } => async {
+                    RetirementEndpointPlan::Local { entry, member_ref, comms_name, recorded } => async {
                         if let Some(comms) = provisioner.comms_runtime(&member_ref).await {
                             let public_key = comms.public_key().ok_or_else(|| MobError::WiringError(format!(
                                 "retirement endpoint requires public key for '{}'", entry.agent_identity,
@@ -1827,6 +1856,11 @@ impl MobActor {
                                     .map_err(|error| MobError::WiringError(error.to_string()))?;
                             }
                             return Ok(WiringEndpoint::Local { entry: Box::new(entry), comms, spec, comms_name });
+                        }
+                        // A Waking member with no comms runtime to read: its
+                        // recorded endpoint, as every wiring verb answers.
+                        if let Some(spec) = recorded {
+                            return Ok(WiringEndpoint::LocalDormant { entry: Box::new(entry), spec });
                         }
                         let binding = Self::runtime_binding_for_member_ref(&member_ref).ok_or_else(|| {
                             MobError::WiringError(format!("retirement requires comms runtime for '{}'", entry.agent_identity))
@@ -6097,12 +6131,57 @@ impl MobActor {
 }
 
 impl MobActor {
+    /// A cleanup peer of `rollback` that it observed from the recorded
+    /// endpoint alone and whose wake has bound it since: MobMachine holds it
+    /// Waking and Bound, or Live. A peer whose wake failed meanwhile has no
+    /// residency phase and is not one: its wake realized nothing that
+    /// survives it. A placed or a
+    /// peer-only peer is never one (it is not observed so), and neither is a
+    /// peer whose edge the placed cleanup already removed.
+    fn spawn_rollback_peer_bound_since_observed(
+        &self,
+        rollback: &SpawnRollbackState,
+    ) -> Option<AgentIdentity> {
+        let state = self.dsl_authority.state();
+        rollback
+            .cleanup_peers
+            .iter()
+            .filter(|peer| !rollback.placed_edges_cleaned.contains(*peer))
+            .find(|peer| {
+                rollback
+                    .endpoints
+                    .get(*peer)
+                    .is_some_and(|endpoint| endpoint.recorded_only)
+                    && crate::runtime::boot_plan::domain_member_bound_since_recorded(state, peer)
+            })
+            .cloned()
+    }
+
     pub(super) async fn start_spawn_rollback(
         &mut self,
         custody: spawn_activation::SpawnActivationCustody,
         material: spawn_activation::FailedSpawnRollbackMaterial,
         retained: Option<RetirementContinuation>,
     ) -> Result<(), MobError> {
+        // The member leaves its seat: nothing it still owes a peer on the
+        // delivery lane (a kickoff notice handed off before the spawn
+        // failed, or between two attempts of this rollback) is sent for it,
+        // and nothing still owed to it is sent either. A retirement by
+        // command cancels these in a stage of its own; the rollback's
+        // retirement skips that stage, so the cancel is the first step of
+        // every attempt, whoever starts it: the spawn's own unwind, the
+        // actor's retry of an owed rollback, or a caller that joins it.
+        if let Err(error) = self
+            .cancel_peer_deliveries_for_member(
+                &custody.agent_identity,
+                "member spawn is rolling back",
+            )
+            .await
+        {
+            self.finish_spawn_rollback_attempt(&custody, retained, Err(error))
+                .await;
+            return Ok(());
+        }
         if self.retirements.contains_key(&custody.agent_identity) {
             let error = MobError::LifecycleOperationPending {
                 intent: format!("spawn rollback for {}", custody.agent_identity),
@@ -6235,6 +6314,7 @@ impl MobActor {
                 peer_description: String::new(),
                 sender: None,
                 unsettled: false,
+                reobserving: false,
             })),
         });
         self.drive_spawn_rollback(continuation).await;
@@ -6682,6 +6762,29 @@ impl MobActor {
                     rollback.trust_index += 1;
                 }
                 SpawnRollbackPhase::Retire => {
+                    // A peer this rollback observed from its recorded
+                    // endpoint alone had no comms runtime whose trust the
+                    // Trust steps could clean. If its wake has bound it since
+                    // (it is no longer read from the recorded endpoint), its
+                    // topology step may have realized the edge MobMachine
+                    // still holds, and the peer would be left trusting a
+                    // member that is gone. This attempt then ends here: the
+                    // edges stay, the rollback stays owned, and its next
+                    // attempt observes the peers again (the retained state is
+                    // set back to its endpoint observation), now through the
+                    // peer's comms runtime, and removes trust on both sides
+                    // before it comes back to this step. Its journal start
+                    // and its notices are not repeated. The read is taken
+                    // once, in the step that removes the edges and before
+                    // the first one goes: a wake that binds a peer after
+                    // this step finds no edge to realize.
+                    if let Some(bound) = self.spawn_rollback_peer_bound_since_observed(rollback) {
+                        rollback.phase = SpawnRollbackPhase::Endpoints;
+                        rollback.reobserving = true;
+                        return Err(MobError::WiringError(format!(
+                            "spawn rollback of '{identity}' observed peer '{bound}' before its wake bound it; the rollback is attempted again through the peer's comms runtime"
+                        )));
+                    }
                     for peer in &rollback.cleanup_peers {
                         if rollback.placed_edges_cleaned.contains(peer) {
                             continue;
@@ -6857,6 +6960,13 @@ impl MobActor {
                 description,
             } => {
                 rollback.peer_description = description;
+                if rollback.reobserving {
+                    // A second observation replaces the first one whole: an
+                    // entry it does not write again (a planned peer whose
+                    // observation now fails is passed over below) must not
+                    // keep its mark from the first.
+                    rollback.endpoints.clear();
+                }
                 let mut error = None;
                 for (identity, endpoint) in observed.endpoints {
                     match endpoint {
@@ -6870,6 +6980,7 @@ impl MobActor {
                                     spec,
                                     comms: Some(comms),
                                     binding: None,
+                                    recorded_only: false,
                                 },
                             );
                         }
@@ -6891,19 +7002,29 @@ impl MobActor {
                                     spec,
                                     comms: None,
                                     binding: Some(binding),
+                                    recorded_only: false,
                                 },
                             );
                         }
-                        Ok(
-                            WiringEndpoint::Placed { spec, .. }
-                            | WiringEndpoint::LocalDormant { spec, .. },
-                        ) => {
+                        Ok(WiringEndpoint::Placed { spec, .. }) => {
                             rollback.endpoints.insert(
                                 identity,
                                 SpawnRollbackEndpoint {
                                     spec,
                                     comms: None,
                                     binding: None,
+                                    recorded_only: false,
+                                },
+                            );
+                        }
+                        Ok(WiringEndpoint::LocalDormant { spec, .. }) => {
+                            rollback.endpoints.insert(
+                                identity,
+                                SpawnRollbackEndpoint {
+                                    spec,
+                                    comms: None,
+                                    binding: None,
+                                    recorded_only: true,
                                 },
                             );
                         }
@@ -6921,7 +7042,18 @@ impl MobActor {
                     }
                 }
                 if error.is_none() {
-                    rollback.phase = SpawnRollbackPhase::Journal;
+                    if rollback.reobserving {
+                        // A later attempt's second observation (see the
+                        // Retire step): the journal start and the notices
+                        // are done; trust is removed again on every side,
+                        // through the comms runtimes observed now.
+                        rollback.reobserving = false;
+                        rollback.trust_index = 0;
+                        rollback.trust_retry = false;
+                        rollback.phase = SpawnRollbackPhase::Trust;
+                    } else {
+                        rollback.phase = SpawnRollbackPhase::Journal;
+                    }
                 }
                 error.map_or(Ok(()), Err)
             }

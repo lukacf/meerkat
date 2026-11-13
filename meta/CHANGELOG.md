@@ -678,6 +678,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `is_reserved_instruction_namespace`. `SessionBridge` gains
   `member_session_service`, with a default that answers none.
 
+- Agents can create and change long-term agents. On a launch that has an
+  identity policy (`runtime_options.identity_creation` with `enabled: true`),
+  an agent whose profile has mob tools (`tools.mob = true`, its spawn grant)
+  gets eight tools: `identity_create`, `identity_update`, `identity_archive`,
+  `identity_unarchive`, `identity_remove`, and the reads `identity_list`,
+  `identity_get` and `identity_directory`. They take the same requests as `meta/identity/*`
+  (`agents: [{name, profile, display_name?, instructions?, context?, labels?,
+  first_message?, peers?}]` for a create; `name` and `expected_spec_digest`
+  for a change of one agent) and answer the same typed outcome (`done`,
+  `pending_decision`, `pending_preparation`, `refused` with `kind`, `field`,
+  `retryable` and `detail`), without its `operation_id`: an operation id is
+  the host's handle on a change, an agent names its request with its own
+  `request_id`, and neither a tool's answer nor the notice an agent gets of
+  a decided change names one. An agent created this way is an ordinary agent
+  of its profile: the agent that asked is recorded and owns nothing. See
+  [Agents that create agents](docs/guides/agents-create-agents.mdx).
+  - Without a policy, or for an agent without mob tools, the tools are absent
+    from the tool list. A member private to a person (a console side chat, a
+    member it created, a fork of one) is offered none, and a call of one is
+    refused `private_requester`.
+  - Who asks is the member whose session made the call, never an argument: a
+    tool's arguments are closed, and a member a tool does not name is refused
+    `invalid_request` with the member as `field`.
+  - A call with no `request_id` is keyed by where it ran (session, run, round
+    and call id), so a call the runtime dispatches again reads the state of
+    the first. A call dispatched outside a run must give a `request_id`.
+  - `identity_list` lists every long-term agent of the mob that is not
+    private to a person, of any profile: also an agent of a profile the
+    calling agent may create no agent of. It shows an agent no provenance:
+    who asked for another agent, when and under which consent stay with the
+    host's read, and so do another requester's open operations and whether
+    the host's roster lists the agent's name as well. A change
+    that names a member private to a person answers `identity_unknown`, as
+    for a name no agent holds.
+  - `identity_get` reads one agent's record by name: the list entry's
+    members and the agent's instructions, context, labels and peers, the
+    fields of `meta/identity/get` without who asked for the agent and
+    without another requester's open operations. A name the calling agent
+    is shown no agent under answers `identity_unknown`, whether no agent
+    holds it or its member is private to a person.
+  - `identity_list` and `identity_get` read an agent's `addressability`
+    (written as `internal_only`) and `runtime_mode_override` back when it
+    has them. An agent does not set them: `identity_create` and
+    `identity_update` do not take them, and the host does
+    (`meta/identity/create`, `meta/identity/update`).
+  - An agent the host prepares is told so in plain words. `identity_create`
+    says what `pending_preparation` is: the agent has no member, takes no
+    message and runs nothing until its host settles it, and its first
+    message runs once then. `identity_list` and `identity_get` say what
+    `readiness: "preparation_pending"` is, and `identity_update` says that
+    a move into a profile the host prepares is refused `unsupported` at
+    `set.profile` and that an update of an agent that waits changes its
+    record only. There is no tool for the settle: it stays the host's
+    (`meta/identity/settle_preparation`).
+  - `identity_archive` and `identity_remove` say that the agent's last
+    conversation is harvested as for any agent that leaves: an archive and
+    a removal owe an agent created at run time the retirement side effects
+    a configured agent is owed.
+  - `identity_archive`, `identity_unarchive` and `identity_remove` say what
+    becomes of the schedules that target the agent (an archive pauses the
+    active ones, an unarchive resumes exactly those, a removal ends every
+    one) and that the first answer tells the effect and the count in
+    `agents[0].schedules`. An agent is never given the list of the
+    schedules: which they are is the host's to read.
+  - `identity_update` says what becomes of a label the host reserves: it
+    stays as it is, and an update that would give it another value or
+    remove it is refused `reserved_key` (at `set.labels` or
+    `set.labels_remove`).
+  - The eight tools may wait behind the deferred tool catalog: in a session
+    whose catalog is exact, their definitions are loaded on demand.
+  - Rust API: `identity_creation::{IdentityAgentTools, IdentityToolCaller,
+    IdentityToolCallSite, IdentityToolAnswer, IdentityToolFault,
+    identity_tool_defs, identity_tool_catalog, identity_tool_provenance,
+    is_identity_tool, IDENTITY_TOOLS}` and the eight tool name constants.
+
 ### Changed
 
 - A host that labels its members in its customizer must put those labels

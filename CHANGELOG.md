@@ -656,6 +656,15 @@ them.
   answers member not found, where it answered that the call needs two
   different members.
 
+- `meerkat-mob-mcp`: the text of the agent mob tools `delegate` and
+  `mob_create` no longer sends a model to `mob_create` and `mob_spawn_member`
+  for "long-lived collaborators" and "long-lived teams". They say that those
+  tools make workers the calling agent manages and retires, and that a
+  long-term agent (a durable, named member with its own conversation and
+  memory) is made with `identity_create` when the agent's tool list has it.
+  Meerkat Meta mounts that tool where the host's identity policy enables it.
+  No tool's behavior or schema changes.
+
 ### Fixed
 
 - `meerkat-core`: a turn that fails because a provider failure outlasted the

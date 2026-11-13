@@ -2989,12 +2989,18 @@ fn build_tool_defs_with_profile_support(
              Each helper gets its own session that exists only for the delegated task. Helpers \
              do not persist between your turns. Once a helper completes or is retired, its session \
              is archived. Use delegate for work you want done and reported back, not for \
-             long-lived collaborators (use mob_create + mob_spawn_member for those).\n\n\
+             an agent that should stay. A long-term agent (a durable, named member with its \
+             own conversation and memory) is made with identity_create, when your tool list \
+             has it; mob_create + mob_spawn_member make workers that you manage and retire \
+             yourself.\n\n\
              WHEN TO USE DELEGATE vs MOB_*:\n\
              - delegate: Quick one-off tasks with an exact bounded result returned by the call.\n\
-             - mob_create + mob_spawn_member: Multi-member teams, custom wiring/flows, reusable \
-               profiles, long-lived collaborators, or when you need fine-grained control over \
-               backend, runtime_mode, and topology.\n\n\
+             - mob_create + mob_spawn_member: Multi-member teams of workers, custom \
+               wiring/flows, reusable profiles, or when you need fine-grained control over \
+               backend, runtime_mode, and topology.\n\
+             - identity_create (when your tool list has it): a long-term agent that stays \
+               after your work: durable, named, with its own conversation and memory. The \
+               worker tools do not make one.\n\n\
              TOOLING OPTIONS:\n\
              By default, the helper inherits your current tool set (inherit_parent mode). \
              Override via the tooling parameter:\n\
@@ -3036,7 +3042,10 @@ fn build_tool_defs_with_profile_support(
              - Use delegate for quick one-off helpers that run a single task and are discarded.\n\
              - Use mob_create when you need: multiple coordinated members, custom communication \
                wiring, flow-based execution (repeat_until loops), named profiles for role-based \
-               spawning, or long-lived teams that persist across interactions.\n\n\
+               spawning, or a team of workers that persists across your interactions.\n\
+             - Use identity_create (when your tool list has it) for a long-term agent: a \
+               durable, named member with its own conversation and memory that stays after \
+               your work. A mob you create holds workers you manage and retire.\n\n\
              KEY DEFINITION FIELDS:\n\
              - id: Unique mob identifier (string).\n\
              - profiles: Named role templates (inline or realm profile references) that members \
@@ -4501,6 +4510,40 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+
+    /// The worker tools make workers. No worker tool's text sends a model to
+    /// them for an agent that should stay: `delegate` and `mob_create` name
+    /// `identity_create` for a long-term agent, as a tool a host may offer.
+    #[test]
+    fn the_worker_tools_text_keeps_workers_for_workers() {
+        let tools = build_tool_defs();
+        for tool in tools.iter() {
+            let text = tool.description.to_lowercase();
+            for sent_here in ["long-lived collaborator", "long-lived team"] {
+                assert!(
+                    !text.contains(sent_here),
+                    "{} still says `{sent_here}`",
+                    tool.name
+                );
+            }
+        }
+        for name in [TOOL_DELEGATE, TOOL_MOB_CREATE] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} is a worker tool"));
+            assert!(
+                tool.description
+                    .contains("identity_create (when your tool list has it)"),
+                "{name} names identity_create for a long-term agent, as a tool that may be \
+                 absent"
+            );
+            assert!(
+                tool.description.contains("long-term agent"),
+                "{name} says what identity_create is for"
+            );
+        }
+    }
 
     /// The `mob_check_member` note is chosen from typed fields. Each preview
     /// marker says why the preview is missing and whether checking again

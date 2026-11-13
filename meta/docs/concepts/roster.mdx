@@ -16,8 +16,11 @@ the members agents create at runtime: helpers reaped by an idle-retire policy,
 and long-lived members spawned from a `durable = true` profile, which survive
 a restart (see
 [Long-lived members an agent creates](#long-lived-members-an-agent-creates)).
-An agent never creates an identity. The gateway profile changes the default
-behavior of `meta/ensure_member`; see the profile-specific contract below.
+An agent creates an identity (a long-term agent) only where the host's
+identity policy lets it, with the identity tools: see
+[Agents that create agents](/guides/agents-create-agents). The gateway profile
+changes the default behavior of `meta/ensure_member`; see the
+profile-specific contract below.
 </Warning>
 
 ## Profiles are templates and members are declared
@@ -303,10 +306,14 @@ durable workers continue unchecked.
 
 ### Long-lived members an agent creates
 
-An agent creates a long-lived agent as a mob member, never as an identity.
-Identities are declared by the host alone: a roster provider, the
+This section is about a long-lived worker: a mob member an agent spawns with
+the worker tools. It is not an identity. An agent creates an identity (a
+long-term agent, with everything an identity has) only with the identity
+tools, where the host's identity policy enables them: see
+[Agents that create agents](/guides/agents-create-agents). On a host without
+that policy, identities are declared by the host alone: a roster provider, the
 `identity_roster` init param, or `meta/ensure_member`. The agent spawns the
-member from a `durable = true` profile, into its own mob (`mob_spawn_member`,
+worker from a `durable = true` profile, into its own mob (`mob_spawn_member`,
 or the member tool `spawn_member`) or into a child mob it creates
 (`mob_create`, then `mob_spawn_member`).
 

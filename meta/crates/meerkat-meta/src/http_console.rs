@@ -44,7 +44,7 @@ use crate::access::{
     ACTION_MOB_MEMORY_READ, ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ,
     ACTION_OPERATOR_MEMORY_READ_ANY, ACTION_RUNTIME_ADMIN, ACTION_SCHEDULE_MANAGE,
     ACTION_WORKGRAPH_MANAGE, ACTION_WORKGRAPH_VIEW, AccessController, AccessResource, AccessView,
-    AgentResourceAttributes, LiveAccessView,
+    AgentResourceAttributes, LiveAccessView, PrivateOwnerRecordReader,
 };
 // The test modules build access rules and groups through `use super::*`.
 #[cfg(test)]
@@ -3372,7 +3372,10 @@ async fn console_send_gate(
 /// Record the access attributes of every runtime `aggregator` serves, each
 /// in its identity namespace, as every route that holds those runtimes
 /// records them ([`prime_access_cache_from_runtime_in_namespace`]): the
-/// priming of a Console route with no local runtime.
+/// priming of a Console route with no local runtime. Whether a runtime
+/// still owes the first read of who its members are private to is counted
+/// for that runtime (two runtimes under one namespace are two), and only
+/// while the Console serves it.
 async fn prime_access_cache_from_aggregator(
     aggregator: &MetaConsoleAggregator,
     access: &AccessController,
@@ -3388,9 +3391,25 @@ async fn prime_access_cache_from_aggregator(
         }
     };
     for runtime in runtimes {
-        prime_access_cache_from_runtime_in_namespace(&runtime.runtime, access, &runtime.namespace)
-            .await;
+        prime_access_cache_from_runtime_in_namespace(
+            &runtime.runtime,
+            access,
+            &runtime.namespace,
+            PrivateOwnerRecordReader::ServedRuntime,
+        )
+        .await;
     }
+    // No later reading reaches a runtime this Console serves no longer, so
+    // none would find its first read done: it is counted no longer.
+    access.keep_served_private_owner_records(|| {
+        let served = aggregator.panel_runtimes().ok()?;
+        Some(
+            served
+                .iter()
+                .map(|runtime| runtime.runtime.private_owners().record_id())
+                .collect(),
+        )
+    });
 }
 
 /// Whether the aggregator's identity record of `identity` (by identity or
@@ -19617,7 +19636,13 @@ pub(crate) async fn prime_access_cache_from_runtime(
     runtime: &MobRuntime,
     access: &AccessController,
 ) {
-    prime_access_cache_from_runtime_in_namespace(runtime, access, "").await;
+    prime_access_cache_from_runtime_in_namespace(
+        runtime,
+        access,
+        "",
+        PrivateOwnerRecordReader::OwnRuntime,
+    )
+    .await;
     if let Some(identity_runtime) = runtime.installed_identity_runtime() {
         prime_current_runtime_aliases(&identity_runtime, access).await;
     }
@@ -19704,11 +19729,15 @@ fn namespace_console_attributes(
 /// spawn registry's attributes for each registered identity no live member
 /// names. The members of agent-created sub-mobs count as live members,
 /// found and labelled as the console's snapshot finds and labels them.
-/// Returns the recorded live identities, namespaced.
+/// `first_read_reader` says which reading of the runtime this is, for the
+/// first read of who its members are private to
+/// ([`AccessController::record_private_owner_record`]). Returns the
+/// recorded live identities, namespaced.
 async fn prime_access_cache_from_runtime_in_namespace(
     runtime: &MobRuntime,
     access: &AccessController,
     namespace: &str,
+    first_read_reader: PrivateOwnerRecordReader,
 ) -> BTreeSet<String> {
     let registered = runtime.console_identity_labels().await;
     let mut roster_identities = BTreeSet::new();
@@ -19753,7 +19782,11 @@ async fn prime_access_cache_from_runtime_in_namespace(
     owners
         .first_attempts_settled(crate::private_owners::FIRST_READ_WAIT)
         .await;
-    access.record_private_owner_record(namespace, owners.first_read_pending());
+    access.record_private_owner_record(
+        owners.record_id(),
+        first_read_reader,
+        owners.first_read_pending(),
+    );
     let mut known_members = owners.memory_members();
     known_members.retain(|identity, _| !live_rows.contains(identity));
     record_live_and_registered_attributes(

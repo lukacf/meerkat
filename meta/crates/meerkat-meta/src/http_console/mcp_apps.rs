@@ -190,6 +190,7 @@ impl Ingress {
                 self.registration
                     .as_ref()
                     .map_or("", |registration| registration.namespace()),
+                PrivateOwnerRecordReader::OwnRuntime,
             )
             .await;
         }
@@ -223,7 +224,13 @@ async fn authorize_session_in_namespace(
         .filter(|controller| controller.enabled())
     {
         Some(controller) => {
-            prime_access_cache_from_runtime_in_namespace(runtime, controller, namespace).await
+            prime_access_cache_from_runtime_in_namespace(
+                runtime,
+                controller,
+                namespace,
+                PrivateOwnerRecordReader::OwnRuntime,
+            )
+            .await
         }
         None => BTreeSet::new(),
     };

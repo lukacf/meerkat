@@ -137,6 +137,20 @@ impl MemberSpawnLog for meerkat_mob::MobHandle {
     }
 }
 
+/// Which private-owner record of this process a value names: one per
+/// runtime, the same through every clone of it, never the same for two
+/// records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct PrivateOwnerRecordId(u64);
+
+impl Default for PrivateOwnerRecordId {
+    /// The id of a new record: each call answers one no record holds.
+    fn default() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 /// The owner of each member of one runtime's mobs (see the module docs).
 /// Cheap to clone; clones share the record.
 #[derive(Clone, Default)]
@@ -157,6 +171,8 @@ enum MobOwner {
 
 #[derive(Default)]
 struct Inner {
+    /// Which record this is among the records of the process.
+    id: PrivateOwnerRecordId,
     /// What each member build recorded: the member's owner, or `None` for a
     /// member private to no one. The newest truth about a member.
     built: RwLock<BTreeMap<MemberKey, Option<String>>>,
@@ -431,6 +447,12 @@ impl PrivateOwners {
     /// Whether the seed has landed: every durable record it reads was read.
     pub(crate) fn landed(&self) -> bool {
         self.inner.seeded.initialized()
+    }
+
+    /// Which record this is: what a console counts this record's owed
+    /// first read under, the same through every clone of its runtime.
+    pub(crate) fn record_id(&self) -> PrivateOwnerRecordId {
+        self.inner.id
     }
 
     /// Whether a first read this record owes has not succeeded yet: the

@@ -371,10 +371,12 @@ ci-lanes-selftest:
 # leg of scripts/reasoning-effort-receipt-rows.json, written by the script's
 # `record` command), into OUT. The version, the row manifest and the test
 # sources are read from COMMIT (default HEAD), not from the working tree.
+# CHECK=1 then judges the receipt it wrote (the script's --check): it fails
+# on a failed entry and on a gap of the in-process and built-binary legs.
 .PHONY: reasoning-effort-receipt
 reasoning-effort-receipt:
-	@test -n "$(RESULTS)" && test -n "$(OUT)" || { echo "usage: make reasoning-effort-receipt RESULTS=<leg results directory> OUT=<output directory> [COMMIT=<revision>]"; exit 2; }
-	@node scripts/reasoning-effort-receipt.mjs generate --results "$(RESULTS)" --output-dir "$(OUT)" --commit "$(or $(COMMIT),HEAD)"
+	@test -n "$(RESULTS)" && test -n "$(OUT)" || { echo "usage: make reasoning-effort-receipt RESULTS=<leg results directory> OUT=<output directory> [COMMIT=<revision>] [CHECK=1]"; exit 2; }
+	@node scripts/reasoning-effort-receipt.mjs generate --results "$(RESULTS)" --output-dir "$(OUT)" --commit "$(or $(COMMIT),HEAD)" $(if $(CHECK),--check)
 
 .PHONY: native-cost-analysis-selftest
 native-cost-analysis-selftest:
@@ -1211,7 +1213,7 @@ help:
 	@echo "  $(GREEN)verify-sdk-event-inventory$(NC)- Check generated SDK event inventories cover schema event types"
 	@echo "  $(GREEN)verify-machine-poster-coverage$(NC)- Check posters cover every canonical machine and advertise only canonical states/triggers"
 	@echo "  $(GREEN)path-classifier-selftest$(NC)- Check the shell path classifiers still route gate inputs"
-	@echo "  $(GREEN)reasoning-effort-receipt$(NC)- Write the reasoning effort execution receipt from recorded leg results (RESULTS=, OUT=)"
+	@echo "  $(GREEN)reasoning-effort-receipt$(NC)- Write the reasoning effort execution receipt from recorded leg results (RESULTS=, OUT=; CHECK=1 judges it)"
 	@echo "  $(GREEN)check-rust-release-config$(NC)- Verify release Rust crate list and binary metadata"
 	@echo "  $(GREEN)check-crate-license-files$(NC)- Verify every release crate packages exactly the license texts its license field names"
 	@echo "  $(GREEN)verify-lock-consistency$(NC)- Verify Cargo.lock resolves under --locked (merge danglers)"

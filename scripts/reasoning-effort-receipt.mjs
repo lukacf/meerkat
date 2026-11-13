@@ -33,12 +33,22 @@
 //     test a row names is defined in the file the row names.
 //   - It writes no free text from a run: a leg result holds counts, test
 //     names, typed cells and a digest of the runner's output, never the
-//     output. Any string that looks like a credential, an e-mail address, a
+//     output. Of what a test prints it reads only the cell lines: a row says
+//     which model and level it picked for a cell on a line of its own, the
+//     prefix `reasoning-effort-receipt-cell ` and one JSON object of exactly
+//     test, cell, model, level and route. A failed live cell may carry the
+//     HTTP status and the provider's error code as typed fields, never a
+//     message. Any string that looks like a credential, an e-mail address, a
 //     URL, an absolute path, or this host's name or home directory is
 //     refused, in a leg result and again in the finished receipt.
 //   - The same inputs give the same bytes: no clock, no environment, fixed
 //     key and entry order. The Markdown file is rendered from the parsed
 //     JSON text and from nothing else.
+//   - It judges nothing on its own: a receipt with failed entries and gaps
+//     is written like any other. `--check` judges it: it fails on any failed
+//     entry and on any gap of the in-process and built-binary legs, which
+//     need no credential and can always run. Gaps of the live legs are
+//     listed and never fail it.
 //
 // Usage:
 //   reasoning-effort-receipt.mjs record --leg ID --commit SHA --command TEXT
@@ -46,14 +56,18 @@
 //       [--observations FILE] --output FILE
 //     FILE is the run's output: `cargo nextest run --message-format
 //     libtest-json-plus` (stdout; every test is named), or the human log (the
-//     summary line's counts, and the tests whose status lines it shows).
+//     summary line's counts, and the tests whose status lines it shows). The
+//     rows' cell lines are in the JSON output of a run with `--no-capture`,
+//     and in the log of a run with `--success-output final`.
 //   reasoning-effort-receipt.mjs record --leg ID --not-run REASON --output FILE
 //   reasoning-effort-receipt.mjs generate --results DIR --output-dir DIR
-//       [--commit REV] [--manifest FILE] [--repo DIR]
+//       [--commit REV] [--manifest FILE] [--repo DIR] [--check]
 //     writes reasoning-effort-receipt.json and reasoning-effort-receipt.md.
 //   reasoning-effort-receipt.mjs render RECEIPT.json
-//   reasoning-effort-receipt.mjs verify RECEIPT.json [--markdown FILE] [--results DIR]
-//   Exit 0 done, 1 refused (the reason is printed), 2 usage.
+//   reasoning-effort-receipt.mjs verify RECEIPT.json [--markdown FILE]
+//       [--results DIR] [--check]
+//   Exit 0 done, 1 refused (the reason is printed), 2 usage, 3 the check
+//   holds something against the receipt (which is written all the same).
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -68,6 +82,12 @@ export const MANIFEST_PATH = "scripts/reasoning-effort-receipt-rows.json";
 export const RECEIPT_JSON_NAME = "reasoning-effort-receipt.json";
 export const RECEIPT_MARKDOWN_NAME = "reasoning-effort-receipt.md";
 export const MODES = ["in_process", "built_binary", "live"];
+// What a row prints before the JSON object that says which model and level
+// it picked for a cell (the `cell_line` of the inputs schema).
+export const CELL_LINE_PREFIX = "reasoning-effort-receipt-cell ";
+// The legs that need no credential and no network: they can always run, so
+// `--check` takes a gap there for a defect of the run.
+export const OFFLINE_MODES = ["in_process", "built_binary"];
 
 /// A refusal: an input the generator will not read a result from.
 export class ReceiptError extends Error {}
@@ -296,17 +316,62 @@ function countsOf(tests, skipped) {
   return { run: passed + failed, passed, failed, skipped };
 }
 
+function byCellLine(a, b) {
+  return compare(a.test, b.test) || compare(a.cell, b.cell);
+}
+
+/// The cell lines of a run's output, each once. A line is the prefix and one
+/// JSON object of exactly the `cell_line` members; a line with the prefix
+/// and anything else is refused, and so are two lines that say different
+/// things of one cell of one test.
+function cellLines() {
+  const lines = new Map();
+  return {
+    /// Takes `text` when it is a cell line; says whether it was one.
+    take(text, place) {
+      const line = text.trim();
+      if (!line.startsWith(CELL_LINE_PREFIX)) return false;
+      const item = parseJson(line.slice(CELL_LINE_PREFIX.length), `the cell line at ${place}`);
+      assertValid(schemas().inputs, "cell_line", item, `the cell line at ${place}`);
+      const picked = { test: item.test, cell: item.cell, model: item.model, level: item.level, route: item.route };
+      const key = `${picked.test}\n${picked.cell}`;
+      const earlier = lines.get(key);
+      if (earlier !== undefined && JSON.stringify(earlier) !== JSON.stringify(picked)) {
+        throw new ReceiptError(`the cell line at ${place} says another thing of ${picked.test}, cell ${picked.cell}, than an earlier line`);
+      }
+      lines.set(key, picked);
+      return true;
+    },
+    list: () => [...lines.values()].sort(byCellLine),
+  };
+}
+
+// How nextest opens the line of an event in its `libtest-json` output.
+const EVENT_OPENINGS = ['{"type":"suite",', '{"type":"test",'];
+
 /// `cargo nextest run --message-format libtest-json-plus`: one JSON event a
 /// line. Reads the outcome event of every test and the suite events that
-/// say which target a test binary is; never a test's captured output.
+/// say which target a test binary is. Of what the tests print it reads the
+/// cell lines and nothing else: as whole lines of the output (a run with
+/// `--no-capture`, where the tests' own output shares the stream with the
+/// events), and inside a failed test's captured output. An event is a line
+/// that opens as nextest writes one (`{"type":"suite",` or `{"type":"test",`);
+/// every other line is a test's output and is not read, whatever it holds.
+/// An event that does not parse, or that follows other text on its line, is
+/// refused.
 export function parseNextestJson(text) {
   const targets = new Map();
   const finished = [];
+  const cells = cellLines();
   text.split("\n").forEach((line, index) => {
     if (line.trim() === "") return;
     const place = `line ${index + 1} of the nextest JSON output`;
+    if (cells.take(line, place)) return;
+    if (!EVENT_OPENINGS.some((opening) => line.trimStart().startsWith(opening))) {
+      if (EVENT_OPENINGS.some((opening) => line.includes(opening))) throw new ReceiptError(`${place} holds an event after other text`);
+      return;
+    }
     const event = parseJson(line, place);
-    if (!isObject(event)) throw new ReceiptError(`${place} is not an event`);
     if (event.type === "suite") {
       const meta = event.nextest;
       if (!isObject(meta) || [meta.crate, meta.test_binary, meta.kind].some((item) => typeof item !== "string")) {
@@ -316,12 +381,14 @@ export function parseNextestJson(text) {
       targets.set(`${meta.crate}::${meta.test_binary}`, { package: meta.crate, target });
       return;
     }
-    if (event.type !== "test") throw new ReceiptError(`${place} is an event of an unknown type`);
     if (event.event === "started") return;
     const outcome = { ok: "pass", failed: "fail", ignored: "skip" }[event.event];
     if (outcome === undefined) throw new ReceiptError(`${place} is a test event this reader does not know`);
     const name = /^([^$#]+)\$([^$#]+?)(?:#([1-9][0-9]*))?$/u.exec(typeof event.name === "string" ? event.name : "");
     if (name === null) throw new ReceiptError(`${place} names its test in a form this reader does not know`);
+    if (typeof event.stdout === "string") {
+      for (const printed of event.stdout.split("\n")) cells.take(printed, `${place} (the test's output)`);
+    }
     finished.push({ binary: name[1], name: name[2], outcome, tries: name[3] === undefined ? 1 : Number(name[3]), place });
   });
   if (targets.size === 0) throw new ReceiptError("the nextest JSON output holds no suite event");
@@ -339,6 +406,7 @@ export function parseNextestJson(text) {
     counts: countsOf(list, list.filter((test) => test.outcome === "skip").length),
     tests_complete: true,
     tests: list,
+    cell_lines: cells.list(),
   };
 }
 
@@ -346,17 +414,21 @@ const LOG_SUMMARY = /^\s*Summary \[\s*[0-9]+\.[0-9]+s\] ([0-9]+) tests? run: ([0
 const LOG_STATUS = /^ {8}(PASS|FAIL) \[\s*[0-9]+\.[0-9]{3}s\] \(\s*[0-9]+\/[0-9]+\) (\S+) (\S+)$/u;
 const LOG_ANY_STATUS = /^\s*([A-Z][A-Z0-9 /]*?) \[[^\]]*\] \((?:\s*[0-9]+\/[0-9]+|─+)\) \S+ \S+$/u;
 
-/// nextest's human log: the counts of its one summary line, and the tests
-/// whose PASS or FAIL status lines it shows (a run with `--status-level
-/// fail` shows none of the passes). A summary or a status line of another
-/// shape (a retried, timed out or leaked test) is refused: record such a
-/// run from the JSON output, which names every test.
+/// nextest's human log: the counts of its one summary line, the tests whose
+/// PASS or FAIL status lines it shows (a run with `--status-level fail`
+/// shows none of the passes), and the cell lines it shows (a run with
+/// `--success-output final` or `--no-capture` shows a passing test's). A
+/// summary or a status line of another shape (a retried, timed out or
+/// leaked test) is refused: record such a run from the JSON output, which
+/// names every test.
 export function parseNextestLog(text) {
   let summary = null;
   const tests = new Map();
+  const cells = cellLines();
   text.split("\n").forEach((raw, index) => {
     const line = raw.replace(/\r$/u, "");
     const place = `line ${index + 1} of the nextest log`;
+    if (cells.take(line, place)) return;
     if (/^\s*Summary \[/u.test(line)) {
       const match = LOG_SUMMARY.exec(line);
       if (match === null) throw new ReceiptError(`${place} is a summary this reader does not know`);
@@ -388,6 +460,7 @@ export function parseNextestLog(text) {
     counts: summary,
     tests_complete: list.length === summary.run,
     tests: list,
+    cell_lines: cells.list(),
   };
 }
 
@@ -406,6 +479,13 @@ function checkLegResult(result, what) {
   if (result.exit_status === 0 && counts.failed > 0) throw new ReceiptError(`${what} has exit status 0 and ${counts.failed} failed tests`);
   const cells = new Set(result.observations.map((item) => observationKey(item)));
   if (cells.size !== result.observations.length) throw new ReceiptError(`${what} holds one observation twice`);
+  for (const item of result.observations) {
+    if (item.result !== "fail" && (item.http_status !== undefined || item.error_code !== undefined)) {
+      throw new ReceiptError(`${what} holds an HTTP status or an error code on an observation that did not fail`);
+    }
+  }
+  const lines = new Set(result.cell_lines.map((item) => `${item.test}\n${item.cell}`));
+  if (lines.size !== result.cell_lines.length) throw new ReceiptError(`${what} holds two cell lines of one cell of one test`);
 }
 
 function observationKey(item) {
@@ -429,6 +509,7 @@ export function buildLegResult({ leg, commit, command, exitStatus, format, outpu
     counts: parsed.counts,
     tests_complete: parsed.tests_complete,
     tests: parsed.tests,
+    cell_lines: parsed.cell_lines,
     observations: [...observations].sort((a, b) => compare(observationKey(a), observationKey(b))),
   };
   const what = `the result of leg ${leg}`;
@@ -541,7 +622,19 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
       if (row.test === null) throw new ReceiptError(`the result file ${name} holds an observation for ${item.row}, and the manifest names no test for that row`);
     }
     const ran = result.status === "run";
-    states.set(leg.id, { result, ran, atCommit: ran && result.commit === commit, file: { name, sha256: sha256(bytes) } });
+    const atCommit = ran && result.commit === commit;
+    // What the rows printed of their cells, by entry. Only a run at the
+    // product commit is held to the manifest: every line must be of a cell
+    // the manifest lists, or the manifest is behind the rows.
+    const picked = new Map();
+    for (const line of atCommit ? result.cell_lines : []) {
+      const owners = manifest.rows.filter((row) => row.leg === leg.id && row.cells !== "observed" && row.test?.name === line.test);
+      if (owners.length !== 1 || !owners[0].cells.some((item) => item.cell === line.cell)) {
+        throw new ReceiptError(`the result file ${name} holds a cell line of ${line.test}, cell ${line.cell}, which is not a cell of exactly one row of this leg in the manifest`);
+      }
+      picked.set(`${owners[0].id}/${line.cell}`, line);
+    }
+    states.set(leg.id, { result, ran, atCommit, picked, file: { name, sha256: sha256(bytes) } });
   }
 
   const sources = new Map();
@@ -585,10 +678,12 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
       requested_level: fields.requested_level,
       outcome: fields.outcome,
       outcome_basis: fields.outcome_basis,
+      values_basis: fields.values_basis ?? null,
       status: fields.status,
       mode: leg.mode,
       result: fields.result ?? null,
       tries: fields.tries ?? null,
+      failure: fields.failure ?? null,
       leg: leg.id,
       result_file: fields.status === "executed" ? state.file : null,
       test,
@@ -629,9 +724,16 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
               requested_level: { level: item.requested_level },
               outcome: item.outcome.kind === "sent" ? { kind: "sent", level: { level: item.outcome.level } } : { kind: "refused", reason: item.outcome.reason },
               outcome_basis: "observation",
+              values_basis: "observation",
               status: executed ? "executed" : "not_run",
               result: item.result,
               tries: executed ? 1 : null,
+              // Typed fields the row emitted, and only on a failure. A leg
+              // result has no member a message could arrive in.
+              failure:
+                item.result === "fail" && (item.http_status !== undefined || item.error_code !== undefined)
+                  ? { http_status: item.http_status ?? null, error_code: item.error_code ?? null }
+                  : null,
               gap: executed ? null : "cell_skipped",
             }),
           );
@@ -652,18 +754,35 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
     }
     for (const item of row.cells) {
       const cell = cells.get(item.cell);
-      const level = item.requested_level ?? row.requested_level;
+      const route = `${cell.backend}/${cell.api}`;
+      let model = item.model ?? row.model;
+      let level = item.requested_level ?? row.requested_level;
+      let valuesBasis = model === null ? null : "manifest";
+      // The row's own line for this cell, when the row ran here: the values
+      // it picked replace the manifest's rule, and must agree with whatever
+      // the manifest fixes.
+      const line = own.status === "executed" ? state.picked.get(`${row.id}/${cell.id}`) : undefined;
+      if (line !== undefined) {
+        const differs = (what, said, fixed) => new ReceiptError(`row ${row.id} reports the ${what} ${said} for the cell ${cell.id}, and the manifest says ${fixed}`);
+        if (line.route !== route) throw differs("route", line.route, route);
+        if (model.id !== undefined && model.id !== line.model) throw differs("model", line.model, model.id);
+        if (level.level !== undefined && level.level !== line.level) throw differs("level", line.level, level.level);
+        model = { id: line.model };
+        level = { level: line.level };
+        valuesBasis = "row_output";
+      }
       entries.push(
         entry({
           id: `${row.id}/${cell.id}`,
           cell: cell.id,
           provider_family: cell.provider_family,
-          model: item.model ?? row.model,
+          model,
           api: cell.api,
-          route: `${cell.backend}/${cell.api}`,
+          route,
           requested_level: level,
           outcome: row.outcome.kind === "sent" ? { kind: "sent", level } : { kind: "refused", reason: row.outcome.reason },
           outcome_basis: "test_assertion",
+          values_basis: valuesBasis,
           ...own,
         }),
       );
@@ -780,6 +899,31 @@ function stateText(entry) {
   return `${entry.status === "source_only" ? "source only" : "not run"}: ${GAP_TEXT[entry.gap]}`;
 }
 
+function resultText(entry) {
+  if (entry.result === null) return "-";
+  const typed = [];
+  if (entry.tries > 1) typed.push(`try ${entry.tries}`);
+  if (entry.failure?.http_status != null) typed.push(`HTTP ${entry.failure.http_status}`);
+  if (entry.failure?.error_code != null) typed.push(`code ${code(entry.failure.error_code)}`);
+  return typed.length === 0 ? entry.result : `${entry.result} (${typed.join(", ")})`;
+}
+
+/// What `--check` holds against a receipt: every failed entry, and every
+/// gap of the legs that can always run (in process and built binary: no
+/// credential, no network). A gap of a live leg is listed in the receipt
+/// and never fails the check.
+export function checkReceipt(receipt) {
+  const offlineLegs = new Set(receipt.legs.filter((leg) => OFFLINE_MODES.includes(leg.mode)).map((leg) => leg.id));
+  const entries = new Map(receipt.entries.map((entry) => [entry.id, entry]));
+  const problems = receipt.entries.filter((entry) => entry.result === "fail").map((entry) => `entry ${entry.id} failed`);
+  for (const gap of receipt.gaps) {
+    const leg = gap.scope === "leg" ? gap.id : entries.get(gap.id)?.leg;
+    if (leg === undefined) problems.push(`the gap of ${gap.scope} ${gap.id} names no entry of the receipt`);
+    else if (offlineLegs.has(leg)) problems.push(`${gap.scope} ${gap.id} is a gap of the offline legs: ${gap.reason}`);
+  }
+  return problems;
+}
+
 /// The Markdown rendering of a receipt document, from that document alone.
 export function renderMarkdown(receipt) {
   const { product, totals } = receipt;
@@ -816,7 +960,8 @@ export function renderMarkdown(receipt) {
       receipt.legs.map((leg) => {
         const file = `${code(leg.result_file.name)} ${code(leg.result_file.sha256.slice(0, 12))}`;
         if (leg.status === "not_run") {
-          return [code(leg.id), MODE_TEXT[leg.mode], `not run: ${GAP_TEXT[leg.reason]}`, "-", "-", "-", "-", "-", "-", "-", file];
+          const state = leg.reason === "ran_at_another_commit" ? "not run here: it ran at another commit" : `not run: ${GAP_TEXT[leg.reason]}`;
+          return [code(leg.id), MODE_TEXT[leg.mode], state, "-", "-", "-", "-", "-", "-", "-", file];
         }
         return [
           code(leg.id),
@@ -861,9 +1006,13 @@ export function renderMarkdown(receipt) {
         levelText(entry.requested_level),
         outcomeText(entry.outcome),
         stateText(entry),
-        entry.result === null ? "-" : entry.tries > 1 ? `${entry.result} (try ${entry.tries})` : entry.result,
+        resultText(entry),
       ]),
     ),
+    "",
+    "A model or a level shown as a value is fixed by the row's fixture or was printed by the row",
+    "when it ran here; one shown as a rule is picked by the row when it runs, and no line of that",
+    "pick was recorded.",
     "",
     "## Gaps",
     "",
@@ -974,20 +1123,36 @@ export function readResults(directory) {
   return results;
 }
 
-function options(args, known) {
+function options(args, known, flags = []) {
   const values = new Map();
   const positional = [];
+  const set = new Set();
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg.startsWith("--")) {
       positional.push(arg);
+    } else if (flags.includes(arg) && !set.has(arg)) {
+      set.add(arg);
     } else if (!known.includes(arg) || index + 1 >= args.length || values.has(arg)) {
       return null;
     } else {
       values.set(arg, args[(index += 1)]);
     }
   }
-  return { values, positional };
+  return { values, positional, flags: set };
+}
+
+/// Runs `--check` over a receipt and prints what it found. Exit status 3
+/// when it holds something against the receipt.
+function checkCommand(receipt) {
+  const problems = checkReceipt(receipt);
+  for (const problem of problems) console.log(`check: ${problem}`);
+  if (problems.length === 0) {
+    console.log("check passed: no failed entry and no gap in the offline legs");
+    return 0;
+  }
+  console.log(`check failed: ${problems.length} failed entries or gaps of the offline legs`);
+  return 3;
 }
 
 function usage() {
@@ -996,9 +1161,9 @@ function usage() {
       "usage: reasoning-effort-receipt.mjs record --leg ID --commit SHA --command TEXT --exit-status N",
       "           (--nextest-json FILE | --nextest-log FILE) [--observations FILE] --output FILE",
       "       reasoning-effort-receipt.mjs record --leg ID --not-run REASON --output FILE",
-      "       reasoning-effort-receipt.mjs generate --results DIR --output-dir DIR [--commit REV] [--manifest FILE] [--repo DIR]",
+      "       reasoning-effort-receipt.mjs generate --results DIR --output-dir DIR [--commit REV] [--manifest FILE] [--repo DIR] [--check]",
       "       reasoning-effort-receipt.mjs render RECEIPT.json",
-      "       reasoning-effort-receipt.mjs verify RECEIPT.json [--markdown FILE] [--results DIR]",
+      "       reasoning-effort-receipt.mjs verify RECEIPT.json [--markdown FILE] [--results DIR] [--check]",
     ].join("\n"),
   );
   return 2;
@@ -1035,12 +1200,12 @@ function record(args) {
     });
   }
   writeFileSync(output, serialize(result));
-  console.log(`recorded leg ${leg}: ${result.status === "run" ? `${result.counts.run} run, ${result.counts.passed} passed, ${result.counts.failed} failed, ${result.counts.skipped} skipped, ${result.tests.length} named` : `not run (${result.reason})`}`);
+  console.log(`recorded leg ${leg}: ${result.status === "run" ? `${result.counts.run} run, ${result.counts.passed} passed, ${result.counts.failed} failed, ${result.counts.skipped} skipped, ${result.tests.length} named, ${result.cell_lines.length} cell lines` : `not run (${result.reason})`}`);
   return 0;
 }
 
 function generateCommand(args) {
-  const parsed = options(args, ["--results", "--output-dir", "--commit", "--manifest", "--repo"]);
+  const parsed = options(args, ["--results", "--output-dir", "--commit", "--manifest", "--repo"], ["--check"]);
   if (parsed === null || parsed.positional.length > 0) return usage();
   const resultsDirectory = parsed.values.get("--results");
   const outputDirectory = parsed.values.get("--output-dir");
@@ -1067,11 +1232,14 @@ function generateCommand(args) {
   mkdirSync(outputDirectory, { recursive: true });
   writeFileSync(join(outputDirectory, RECEIPT_JSON_NAME), json);
   writeFileSync(join(outputDirectory, RECEIPT_MARKDOWN_NAME), markdown);
-  const totals = JSON.parse(json).totals;
+  const receipt = JSON.parse(json);
+  const { totals } = receipt;
   console.log(
     `wrote ${RECEIPT_JSON_NAME} and ${RECEIPT_MARKDOWN_NAME}: ${totals.entries.total} entries, ${totals.entries.executed} executed (${totals.entries.passed} passed, ${totals.entries.failed} failed), ${totals.entries.source_only} source only, ${totals.entries.not_run} not run, ${totals.gaps} gaps`,
   );
-  return 0;
+  // The receipt is written whatever the check says: it is the same truthful
+  // document, and the check only judges it.
+  return parsed.flags.has("--check") ? checkCommand(receipt) : 0;
 }
 
 function renderCommand(args) {
@@ -1083,19 +1251,21 @@ function renderCommand(args) {
 }
 
 function verifyCommand(args) {
-  const parsed = options(args, ["--markdown", "--results"]);
+  const parsed = options(args, ["--markdown", "--results"], ["--check"]);
   if (parsed === null || parsed.positional.length !== 1) return usage();
   const markdown = parsed.values.get("--markdown");
   const results = parsed.values.get("--results");
+  const jsonText = readFile(parsed.positional[0], "the receipt").toString("utf8");
   const problems = verifyReceipt({
-    jsonText: readFile(parsed.positional[0], "the receipt").toString("utf8"),
+    jsonText,
     markdownText: markdown === undefined ? undefined : readFile(markdown, "the Markdown file").toString("utf8"),
     results: results === undefined ? undefined : readResults(results),
     host: hostFacts(),
   });
   for (const problem of problems) console.log(`refused: ${problem}`);
-  if (problems.length === 0) console.log("the receipt holds");
-  return problems.length === 0 ? 0 : 1;
+  if (problems.length > 0) return 1;
+  console.log("the receipt holds");
+  return parsed.flags.has("--check") ? checkCommand(JSON.parse(jsonText)) : 0;
 }
 
 export function main(args) {

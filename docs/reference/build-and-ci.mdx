@@ -697,14 +697,24 @@ attaches its output to a release yet.
 
 - The row manifest `scripts/reasoning-effort-receipt-rows.json` lists the
   cells (provider family, backend, provider API), the legs (in process,
-  built binary, live) and the rows with the test that covers each. A row
-  whose model or level is picked when it runs names the rule, not a value.
+  built binary, live) and the rows with the test that covers each. Where a
+  row picks its model or level when it runs, the manifest names the rule.
 - Each leg has one result file, `<leg>.json`: `record` writes it from the
   run's output (`cargo nextest run --message-format libtest-json-plus`, which
   names every test, or the human log, which gives the summary's counts and
   the tests whose status lines it shows), or records that the leg did not run
   and why. A leg result holds counts, test names and typed cells, never the
   run's text.
+- The route rows print what they picked: one line per cell, the prefix
+  `reasoning-effort-receipt-cell ` and one JSON object of the row's name, the
+  cell, the model, the level and the route. `record` reads those lines and
+  nothing else a test prints: in the JSON output of a run with
+  `--no-capture`, or in the log of a run with `--success-output final`. On
+  an executed entry the printed model and level replace the manifest's
+  rule; a line of a cell the manifest does not list, or one that disagrees
+  with a value the manifest fixes, is an error. A failed live cell may carry
+  the HTTP status and the provider's error code as typed fields, never a
+  message.
 - `make reasoning-effort-receipt RESULTS=<directory> OUT=<directory>` (or
   the script's `generate`) reads the version, the manifest and the test
   sources from the commit and writes both files. An entry is `executed` only
@@ -718,10 +728,16 @@ attaches its output to a release yet.
   name, URL, credential or e-mail address: such a string in an input is
   refused. `verify` checks a written receipt against its schema, its
   Markdown file and its result files' digests.
+- A receipt is written whatever it holds. `--check` (on `generate` and
+  `verify`; `CHECK=1` on the make target) judges it and exits 3 on any
+  failed entry and on any gap of the in-process and built-binary legs, which
+  need no credential and can always run. Gaps of the live legs are listed
+  with their reason and never fail it.
 
 `make ci-lanes-selftest` runs `scripts/reasoning-effort-receipt-selftest.mjs`,
 which also fails when the committed manifest names a test the tree does not
-define.
+define, or when the cell and row names the route rows print are not the
+manifest's.
 
 ## Doctor
 

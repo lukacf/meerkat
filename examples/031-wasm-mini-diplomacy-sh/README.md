@@ -146,8 +146,9 @@ The key fields can be pre-filled for local work: the dev server (`npm --prefix w
 on 127.0.0.1) fills them from `VITE_ANTHROPIC_API_KEY`, `VITE_OPENAI_API_KEY` and
 `VITE_GEMINI_API_KEY` when they are set. A build never does: these variables are not
 exposed to `vite build`, so none of them is written into `web/dist` and a built page
-starts with empty key fields. Keys typed into the page stay in the browser and go to
-the providers from there.
+starts with empty key fields. A build exposes only variables whose names start with
+`VITE_BUILD_PUBLIC_`; any other `VITE_` variable is empty in a built page. Keys typed
+into the page stay in the browser and go to the providers from there.
 
 1. Click **Enter the War Room**, open settings (gear icon), and enter at least one provider API key
 2. Select models for France, Prussia, Russia and the narrator (available models depend on your keys)

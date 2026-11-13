@@ -13072,6 +13072,10 @@ mod tests {
         }
     }
 
+    /// The text of the store failure [`MockSessionSvc::fail_persisted_loads`]
+    /// answers: the cause a deferred custody restore carries.
+    const STORE_CANNOT_SERVE: &str = "the session store cannot serve now";
+
     struct MockSessionActor {
         comms: Arc<MockComms>,
         witness: meerkat_session::LiveSessionActorWitness,
@@ -13124,6 +13128,10 @@ mod tests {
         /// store that cannot serve now gives
         /// ([`MockSessionSvc::fail_next_lists`]).
         list_unavailable: AtomicU64,
+        /// Every persisted read of these sessions answers the typed store
+        /// failure of a store that cannot serve now
+        /// ([`MockSessionSvc::fail_persisted_loads`]).
+        persisted_load_unavailable: std::sync::Mutex<std::collections::HashSet<SessionId>>,
     }
 
     /// Holds each session activation (each member a restore materializes)
@@ -13217,6 +13225,7 @@ mod tests {
                 archive_holds: std::sync::Mutex::default(),
                 activation_gate: std::sync::Mutex::default(),
                 list_unavailable: AtomicU64::new(0),
+                persisted_load_unavailable: std::sync::Mutex::default(),
             }
         }
 
@@ -13225,6 +13234,29 @@ mod tests {
         /// store-failure split classes unavailable).
         fn fail_next_lists(&self, count: u64) {
             self.list_unavailable.store(count, Ordering::SeqCst);
+        }
+
+        /// Every persisted read of `id` answers the typed store failure of a
+        /// store that cannot serve now (a session store error the
+        /// store-failure split classes unavailable), until the process ends.
+        fn fail_persisted_loads(&self, id: SessionId) {
+            self.persisted_load_unavailable
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(id);
+        }
+
+        /// The failure [`Self::fail_persisted_loads`] set for `id`, if any.
+        fn persisted_load_failure(&self, id: &SessionId) -> Option<SessionError> {
+            self.persisted_load_unavailable
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(id)
+                .then(|| {
+                    SessionError::Store(Box::new(meerkat_core::SessionStoreError::Internal(
+                        format!("{STORE_CANNOT_SERVE}: session {id}"),
+                    )))
+                })
         }
 
         /// Park every archive of `id` until the returned hold is released.
@@ -13323,6 +13355,7 @@ mod tests {
                 archive_holds: std::sync::Mutex::default(),
                 activation_gate: std::sync::Mutex::default(),
                 list_unavailable: AtomicU64::new(0),
+                persisted_load_unavailable: std::sync::Mutex::default(),
             }
         }
 
@@ -14187,6 +14220,9 @@ mod tests {
             session_id: &SessionId,
         ) -> Result<Option<Session>, SessionError> {
             self.persisted_full_loads.fetch_add(1, Ordering::Relaxed);
+            if let Some(failure) = self.persisted_load_failure(session_id) {
+                return Err(failure);
+            }
             Ok(self
                 .persisted_sessions
                 .read()
@@ -14201,6 +14237,9 @@ mod tests {
         ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
             self.persisted_metadata_loads
                 .fetch_add(1, Ordering::Relaxed);
+            if let Some(failure) = self.persisted_load_failure(session_id) {
+                return Err(failure);
+            }
             let Some(session) = self
                 .persisted_sessions
                 .read()
@@ -23144,6 +23183,415 @@ mod tests {
             "the canonical report carries no stale cleanup error: {body}"
         );
         assert!(existing_storage_files(&storage_path).is_empty());
+    }
+
+    /// A host's member tool audience that decides on the roster labels
+    /// alone: a member whose row carries the label `kept_for` is hidden from
+    /// every caller whose own row does not carry the same value.
+    struct HideKeptMembers;
+
+    impl meerkat_mob::MemberToolAudience for HideKeptMembers {
+        fn hides(
+            &self,
+            _mob_id: &MobId,
+            _caller: Option<&AgentIdentity>,
+            caller_labels: Option<&BTreeMap<String, String>>,
+            _target: &AgentIdentity,
+            target_labels: Option<&BTreeMap<String, String>>,
+        ) -> bool {
+            let kept_for = |labels: Option<&BTreeMap<String, String>>| {
+                labels.and_then(|labels| labels.get("kept_for")).cloned()
+            };
+            match kept_for(target_labels) {
+                Some(keeper) => kept_for(caller_labels) != Some(keeper),
+                None => false,
+            }
+        }
+    }
+
+    /// A mob its host restarted with one member's custody restore deferred,
+    /// registered with the mob tools' state.
+    struct MobWithDeferredCustody {
+        state: Arc<MobMcpState>,
+        handle: MobHandle,
+        mob_id: MobId,
+        /// The member whose custody restore is deferred.
+        member: AgentIdentity,
+        /// That member's session.
+        session: SessionId,
+    }
+
+    /// Restart a mob whose member `member` is Retiring (its retirement's
+    /// archive failed before the restart) while the store cannot serve that
+    /// member's session: the start defers the member's cleanup delivery
+    /// custody and runs, and the store keeps failing, so every re-attempt
+    /// leaves it deferred. The host's member tool audience is
+    /// [`HideKeptMembers`], and the member's row names `keeper` as the one
+    /// it is kept for, if any.
+    async fn restart_with_a_members_custody_deferred(
+        mob_id: &str,
+        member: &str,
+        keeper: Option<&str>,
+    ) -> MobWithDeferredCustody {
+        const STEP: Duration = Duration::from_secs(10);
+        let identity = AgentIdentity::from(member);
+        let mut spec = SpawnMemberSpec::new("worker", identity.clone())
+            .with_runtime_mode(MobRuntimeMode::TurnDriven);
+        if let Some(keeper) = keeper {
+            spec = spec.with_labels(BTreeMap::from([(
+                "kept_for".to_string(),
+                keeper.to_string(),
+            )]));
+        }
+        let svc = Arc::new(MockSessionSvc::new());
+        let storage = MobStorage::in_memory();
+        let first = tokio::time::timeout(
+            STEP,
+            MobBuilder::new(explicit_definition(mob_id), storage.clone())
+                .with_session_service(svc.clone())
+                .allow_ephemeral_sessions(true)
+                .with_network_member_comms()
+                .with_member_tool_audience(Arc::new(HideKeptMembers))
+                .create(),
+        )
+        .await
+        .expect("the create answers")
+        .expect("create the mob");
+        tokio::time::timeout(STEP, first.spawn_spec(spec))
+            .await
+            .expect("the spawn answers")
+            .expect("spawn the member");
+        let session = first
+            .resolve_bridge_session_id(&identity)
+            .await
+            .expect("the member's session");
+        // The member's retirement durably starts and its archive fails: the
+        // member stays Retiring.
+        svc.fail_archive(session.clone(), "forced member archive failure")
+            .await;
+        tokio::time::timeout(STEP, first.retire(identity.clone()))
+            .await
+            .expect("the retire answers")
+            .expect_err("the retirement's archive fails");
+        tokio::time::timeout(STEP, first.shutdown())
+            .await
+            .expect("the shutdown answers")
+            .expect("shut the mob down");
+        drop(first);
+
+        let restarted = Arc::new(svc.cold_restart().await);
+        restarted.fail_persisted_loads(session.clone());
+        let handle = tokio::time::timeout(
+            STEP,
+            Box::pin(
+                MobBuilder::for_resume(storage)
+                    .with_session_service(restarted.clone())
+                    .allow_ephemeral_sessions(true)
+                    .with_network_member_comms()
+                    .with_member_tool_audience(Arc::new(HideKeptMembers))
+                    .notify_orchestrator_on_resume(false)
+                    .resume(),
+            ),
+        )
+        .await
+        .expect("the restart answers")
+        .expect("the restart defers the member's custody and runs");
+        // The actor answers a command only after its startup restore ran,
+        // so the member's deferral is recorded by then.
+        let running = tokio::time::timeout(STEP, handle.status())
+            .await
+            .expect("the mob's status answers");
+        assert!(
+            matches!(running, Ok(meerkat_mob::MobState::Running)),
+            "a start that defers one member's custody runs: {running:?}"
+        );
+        let status = tokio::time::timeout(STEP, handle.member_status(&identity))
+            .await
+            .expect("the member status answers")
+            .expect("the deferred member's status");
+        assert_eq!(
+            status.custody_deferred.map(|deferral| deferral.restore),
+            Some(meerkat_mob::MemberCustodyRestore::CleanupDelivery),
+            "the start deferred the member's cleanup delivery custody"
+        );
+        let state = Arc::new(
+            MobMcpState::new(restarted, MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
+        state
+            .mob_insert_handle(handle.mob_id().clone(), handle.clone())
+            .await;
+        // The host has registered every mob it hosts.
+        state.declare_mob_set_restored();
+        MobWithDeferredCustody {
+            state,
+            mob_id: handle.mob_id().clone(),
+            handle,
+            member: identity,
+            session,
+        }
+    }
+
+    impl MobWithDeferredCustody {
+        /// The refusal of `mob_destroy` called on the agent mob tools of a
+        /// session that is bound to no member of the mob and manages it.
+        async fn agent_tool_refusal(&self) -> ToolError {
+            let surface = destroy_surface(
+                &self.state,
+                SessionId::new(),
+                managing_authority(&self.mob_id, self.handle.live_incarnation()),
+            );
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                dispatch_destroy(&surface, &self.mob_id),
+            )
+            .await
+            .expect("the agent's destroy answers")
+            .expect_err("a destroy refuses while a member's custody restore stays deferred")
+        }
+
+        /// The typed refusal of the same destroy, as the state answers such
+        /// an agent caller before a surface renders it.
+        async fn agent_refusal(&self) -> MobMcpDestroyError {
+            let authority = managing_authority(&self.mob_id, self.handle.live_incarnation());
+            let caller = MobDestroyCaller::Agent {
+                control_principal: MobControlPrincipal::Owner,
+                owner_bridge_session_id: SessionId::new(),
+                principal_token: authority.principal_token().clone(),
+            };
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                self.state
+                    .mob_destroy_for(&self.mob_id, caller, Some(self.handle.incarnation())),
+            )
+            .await
+            .expect("the agent's destroy answers")
+            .expect_err("a destroy refuses while a member's custody restore stays deferred")
+        }
+
+        /// The typed refusal of the host's own destroy.
+        async fn host_refusal(&self) -> MobMcpDestroyError {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                self.state.mob_destroy(&self.mob_id),
+            )
+            .await
+            .expect("the host's destroy answers")
+            .expect_err("a destroy refuses while a member's custody restore stays deferred")
+        }
+
+        /// What `surfaces` tell of the deferred member: every surface that
+        /// carries its name, its session id or the cause its restore met.
+        fn told_of_the_member(&self, surfaces: &[(&'static str, String)]) -> Vec<String> {
+            let session = self.session.to_string();
+            let facts = [
+                ("the member's name", self.member.as_str()),
+                ("the member's session id", session.as_str()),
+                ("the cause of its deferral", STORE_CANNOT_SERVE),
+            ];
+            surfaces
+                .iter()
+                .flat_map(|(surface, text)| {
+                    facts
+                        .iter()
+                        .filter(|(_, fact)| text.contains(fact))
+                        .map(move |(what, _)| format!("{surface} carries {what}: {text}"))
+                })
+                .collect()
+        }
+    }
+
+    /// Every form in which a tool error reaches the agent that made the
+    /// call: its message, its debug form, its structured data and the
+    /// payload the model is given.
+    fn tool_error_surfaces(error: &ToolError) -> Vec<(&'static str, String)> {
+        vec![
+            ("the tool error's message", error.to_string()),
+            ("the tool error's debug form", format!("{error:?}")),
+            (
+                "the tool error's structured data",
+                error
+                    .structured_data()
+                    .map(|data| data.to_string())
+                    .unwrap_or_default(),
+            ),
+            (
+                "the tool error's model payload",
+                error.to_error_payload().to_string(),
+            ),
+        ]
+    }
+
+    /// Every form a surface can project a destroy's typed refusal into: its
+    /// message, its debug form, its wire detail and code, its error data
+    /// and the structured data of the mob error it carries.
+    fn destroy_error_surfaces(error: &MobMcpDestroyError) -> Vec<(&'static str, String)> {
+        let mut surfaces = vec![
+            ("the refusal's message", error.to_string()),
+            ("the refusal's debug form", format!("{error:?}")),
+            (
+                "the refusal's wire detail",
+                error
+                    .wire_detail()
+                    .map(|detail| format!("{detail:?}"))
+                    .unwrap_or_default(),
+            ),
+            (
+                "the refusal's wire error code",
+                error
+                    .wire_error_code()
+                    .map(|code| format!("{code:?}"))
+                    .unwrap_or_default(),
+            ),
+            (
+                "the refusal's error data",
+                error
+                    .error_data()
+                    .map(|data| data.to_string())
+                    .unwrap_or_default(),
+            ),
+        ];
+        if let MobMcpDestroyError::Mob(inner) = error {
+            surfaces.push((
+                "the refusal's structured data",
+                inner
+                    .structured_data()
+                    .map(|data| data.to_string())
+                    .unwrap_or_default(),
+            ));
+        }
+        surfaces
+    }
+
+    /// A destroy refused because a member's custody restore stays deferred
+    /// tells an agent caller nothing of a member the host's member tool
+    /// audience hides from it: not its name, not its session id and not the
+    /// cause its restore met, in the refusal's text or in its data. The
+    /// destroy is still refused, the caller is told that a member's state
+    /// could not be restored, and the mob is untouched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_agent_destroy_refused_for_a_hidden_members_deferred_custody_names_nothing_of_it() {
+        let mob =
+            restart_with_a_members_custody_deferred("deferred-hidden", "kept-worker", Some("ann"))
+                .await;
+
+        let tool_error = mob.agent_tool_refusal().await;
+        let told = mob.told_of_the_member(&tool_error_surfaces(&tool_error));
+        assert!(
+            told.is_empty(),
+            "the agent's tool error tells nothing of the hidden member:\n{}",
+            told.join("\n")
+        );
+        let refusal = mob.agent_refusal().await;
+        let told = mob.told_of_the_member(&destroy_error_surfaces(&refusal));
+        assert!(
+            told.is_empty(),
+            "the typed refusal an agent caller is answered tells nothing of the hidden \
+             member:\n{}",
+            told.join("\n")
+        );
+
+        assert!(
+            matches!(refusal, MobMcpDestroyError::Mob(_)),
+            "the destroy is still refused before it starts: {refusal:?}"
+        );
+        for text in [tool_error.to_string(), refusal.to_string()] {
+            assert!(
+                text.contains("a member's state could not be restored"),
+                "the caller is told why the destroy was refused: {text}"
+            );
+        }
+        assert!(
+            mob.state.handle_for(&mob.mob_id).await.is_ok(),
+            "a refused destroy leaves the mob managed"
+        );
+        assert!(
+            mob.handle
+                .list_members_including_retiring()
+                .await
+                .iter()
+                .any(|entry| entry.agent_identity == mob.member),
+            "a refused destroy leaves the member seated"
+        );
+    }
+
+    /// The same refusal names a member the caller is shown as before: an
+    /// agent caller is told the member, its session and the cause, typed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_agent_destroy_refused_for_a_shown_members_deferred_custody_names_it() {
+        let mob =
+            restart_with_a_members_custody_deferred("deferred-shown", "shown-worker", None).await;
+
+        let tool_error = mob.agent_tool_refusal().await;
+        let data = tool_error
+            .structured_data()
+            .expect("the deferral's structured data");
+        assert_eq!(
+            data["kind"], "mob_member_custody_deferred",
+            "{tool_error:?}"
+        );
+        assert_eq!(data["member_id"], mob.member.as_str(), "{tool_error:?}");
+        assert_eq!(
+            data["session_id"],
+            mob.session.to_string(),
+            "{tool_error:?}"
+        );
+        let message = tool_error.to_string();
+        assert!(
+            message.contains(mob.member.as_str())
+                && message.contains(&mob.session.to_string())
+                && message.contains(STORE_CANNOT_SERVE),
+            "the tool error names the member, its session and the cause: {message}"
+        );
+
+        let refusal = mob.agent_refusal().await;
+        assert!(
+            matches!(
+                &refusal,
+                MobMcpDestroyError::Mob(MobError::MemberCustodyDeferred {
+                    member_id,
+                    session_id,
+                    ..
+                }) if member_id == &mob.member && session_id == &mob.session
+            ),
+            "an agent caller shown the member is answered the typed deferral: {refusal:?}"
+        );
+    }
+
+    /// The host's own destroy is answered the whole refusal, also for a
+    /// member its member tool audience hides from agent callers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_host_destroy_refused_for_a_deferred_custody_names_a_member_hidden_from_agents() {
+        let mob =
+            restart_with_a_members_custody_deferred("deferred-host", "kept-worker", Some("ann"))
+                .await;
+
+        let refusal = mob.host_refusal().await;
+        let MobMcpDestroyError::Mob(MobError::MemberCustodyDeferred {
+            member_id,
+            session_id,
+            restore,
+            cause,
+        }) = &refusal
+        else {
+            panic!("the host's destroy is answered the typed deferral: {refusal:?}");
+        };
+        assert_eq!(member_id, &mob.member);
+        assert_eq!(session_id, &mob.session);
+        assert_eq!(*restore, meerkat_mob::MemberCustodyRestore::CleanupDelivery);
+        assert!(
+            cause.to_string().contains(STORE_CANNOT_SERVE),
+            "the host is told the cause: {cause}"
+        );
+        let told = mob.told_of_the_member(&destroy_error_surfaces(&refusal));
+        assert!(
+            told.iter().any(|line| line.contains("the member's name"))
+                && told
+                    .iter()
+                    .any(|line| line.contains("the member's session id")),
+            "the host's refusal names the member and its session:\n{}",
+            told.join("\n")
+        );
     }
 
     /// One session's agent mob tool surface over a shared state, with the

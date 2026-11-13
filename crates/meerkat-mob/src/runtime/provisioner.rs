@@ -15023,6 +15023,8 @@ impl ProvisionFinish {
         let mut installed_generated_binding = None;
         let binding_session_id = created_bridge_session_id.clone();
         let finalize_result = async {
+        #[cfg(test)]
+        provision_finish_test_hooks::wait_before_bind(&created_bridge_session_id).await;
         // Runtime-backed paths retain the exact prepared materialization for
         // the subsequent attachment transaction.
         if pre_registered {
@@ -15309,6 +15311,51 @@ pub(crate) mod provision_finish_test_hooks {
                 true
             }
             None => false,
+        }
+    }
+
+    /// A provision held before it binds its operation owner: its session and
+    /// its comms runtime exist, its operation record is not bound.
+    pub(crate) struct BindHold {
+        /// Turns `true` once a provision of the session reached its bind.
+        pub(crate) entered: tokio::sync::watch::Receiver<bool>,
+        /// Sending `true` lets the held provision bind.
+        pub(crate) release: tokio::sync::watch::Sender<bool>,
+    }
+
+    type ArmedBindHold = (
+        SessionId,
+        tokio::sync::watch::Sender<bool>,
+        tokio::sync::watch::Receiver<bool>,
+    );
+
+    static BIND_HOLDS: Mutex<Vec<ArmedBindHold>> = Mutex::new(Vec::new());
+
+    /// Hold every provision of `session` before it binds its operation
+    /// owner, until the returned hold releases it.
+    pub(crate) fn hold_before_bind(session: &SessionId) -> BindHold {
+        let (entered_tx, entered_rx) = tokio::sync::watch::channel(false);
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        BIND_HOLDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((session.clone(), entered_tx, release_rx));
+        BindHold {
+            entered: entered_rx,
+            release: release_tx,
+        }
+    }
+
+    pub(super) async fn wait_before_bind(session: &SessionId) {
+        let held = BIND_HOLDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|(armed, _, _)| armed == session)
+            .map(|(_, entered, released)| (entered.clone(), released.clone()));
+        if let Some((entered, mut released)) = held {
+            entered.send_replace(true);
+            let _ = released.wait_for(|released| *released).await;
         }
     }
 }

@@ -265,15 +265,16 @@ it is truncated with a warning log.
 The following skills are embedded in component crates:
 
 <Warning>
-Known issue, noted 2026-11-13. The Linux x86_64 release archives of `rkat`,
-`rkat-rpc`, `rkat-rest` and `rkat-mcp` contain none of the built-in skills
-below and report an empty capability list, with no error: `rkat skill list`
+Known issue, noted 2026-11-13. The four binaries in the Linux x86_64 release
+archives (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) start without the
+built-in skills below and report an empty capability list, with no error: `rkat skill list`
 reports 0 skills, and a built-in slug given to `rkat run --skill` is accepted
 and has no effect. A skill of your own (`.rkat/skills/`) still loads on them
 unless it declares `requires_capabilities`: one that does is dropped without
-a message. Members of a Meta gateway are not affected. See the
+a message. Members of a mob run by the published Meta `rpc_gateway` are not
+affected. See the
 [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
-for the releases and platforms that were checked.
+for the releases and platforms that were checked and for a workaround.
 </Warning>
 
 | ID | Name | Crate | Required capabilities |

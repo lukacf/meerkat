@@ -299,6 +299,19 @@ crate.spec(package = "opus", repositories = ["meerkat_live_crates"], version = "
 crate.spec(package = "rubato", repositories = ["meerkat_live_crates"], version = "=2.0.0")
 crate.spec(package = "webrtc", repositories = ["meerkat_live_crates"], version = "=0.14.0")
 crate.spec(package = "webrtc-media", repositories = ["meerkat_live_crates"], version = "=0.11.0")
+# One Tokio per binary. That repository resolves its own copy of every crate
+# the live stack needs, tokio among them, and a second tokio is a second
+# runtime context: the process enters the main hub's tokio, so the stack's
+# spawns, timers and sockets found no runtime and the first peer connection
+# panicked ("there is no reactor running"). Its crates link the main hub's
+# tokio instead, the one every workspace crate links.
+# scripts/check-bazel-one-tokio.sh holds every release binary and the
+# meerkat-live test to exactly one tokio library.
+crate.annotation(
+    crate = "tokio",
+    override_target_lib = "@crates//:tokio",
+    repositories = ["meerkat_live_crates"],
+)
 crate.annotation_select(
     crate = "audiopus_sys",
     build_script_data = ["@@+http_archive+cmake_macos_universal//:runtime"],

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+A console that can identify a person shows a timeline frame stored without
+member attributes, the memory steward's conflict signals and the system
+page's records that speak of an agent, to an administrator only. See
+Security, Upgrade and Changed.
+
 ### Breaking
 
 - Distilled memory taint is now decided by what each extraction call read,
@@ -95,6 +100,256 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   loads, its content is not trusted, and a later third value is not a
   breaking change.
 
+- Rust API of `meerkat-meta`, `identity_creation`: `ChangeClass` gains the
+  variants `Archive` (an archive and an unarchive) and `Adopt`. A match on it
+  needs both arms.
+
+- Rust API of `meerkat-meta`, `identity_creation`: `NameTakenBy` loses the
+  variants `Declared` and `Created` and gains `Identity`. A `name_taken`
+  refusal names its holder as `identity`, `removed`, `worker` or `unreadable`.
+  With two variants gone the three that stay each moved up one place:
+  the implicit discriminants of `Removed`, `Worker` and `Unreadable` are 1, 2
+  and 3 (they were 2, 3 and 4), and their places in the derived order
+  (`PartialOrd`, `Ord`) moved with them. The order among the three is
+  unchanged; `Identity` sorts first, where `Declared` did.
+
+- Rust API of `meerkat-meta`: `IdentityStatus` gains the member `record`
+  (`IdentityRecordFacts`), so a struct literal of it needs the member
+  (`record: Default::default()`). The status of a seated agent is written
+  on the wire as before.
+
+- Rust API of `meerkat-meta`: `IdentityStatus` gains the member
+  `roster_listing_superseded` and `RestoreFlowResult` gains the member
+  `roster_listings_superseded`, so a struct literal of either needs its new
+  member (`roster_listing_superseded: false`,
+  `roster_listings_superseded: Default::default()`). The status as written
+  on the wire is unchanged while the member is `false`.
+
+- `runtime_options.identity_creation` (and the Rust form a native host
+  returns): an enabled policy that names the approval outcome `notify` or
+  `review`, or the preparation mode `constructed`, is refused at init, with
+  the policy path and what to write instead. A disabled policy
+  (`enabled: false`) that names one of them is not refused for it. Before,
+  such a policy was accepted and nothing acted on it, with one exception:
+  0.9.14 already refused the preparation mode `constructed` on a launch
+  without a native host composition. No notice reaches an approver for
+  `notify` yet, no reviewer decides for `review` yet, and no method holds or
+  activates a construction yet: write `allow` or `require_approval`, and the
+  preparation mode `required`.
+
+- Rust, source only: `CustomizerToolsSpawnCustomizer` no longer implements
+  the auto traits `UnwindSafe` and `RefUnwindSafe`. It now holds a
+  late-bound reference to the session bridge, through which it asks whether
+  Core holds a member as an identity entry, and a session bridge has
+  neither trait. No Meerkat code relied on them.
+
+### Security
+
+- The Console decides an agent for which no member is seated on the
+  agent's own record (its profile as its role, and its labels) wherever a
+  call or a stream names it: the reads of one agent by name
+  (`meta/console/inspect_identity`, `meta/identity/resolved_tools`,
+  `meta/identity/routing_status`) and every other check that names an
+  agent. Through 0.9.14, an agent its host configures that had no member
+  yet was not decided by an access rule scoped by role or by label, nor by
+  the rule about an agent private to a person (`console.private_to`), on
+  these calls. The same now holds for an agent of the identity store that
+  is owed its seat or archived. An agent whose record cannot be read is
+  shown to an access administrator only.
+- A deny by role also applies to the list entry of an agent that has no
+  live member (`GET /console/identities`, `meta/console/list_identities`
+  and, on a Console that serves other runtimes, the agent rows of
+  `GET /console/experience`). In 0.9.10 through 0.9.14 such an entry was
+  decided without the agent's role.
+- An open Console or event stream reads the roster and the agents' records
+  again before it decides its next item once its last read is 20 seconds
+  old, so a stream opened before an agent's record changed decides on the
+  record as it is.
+- `SameProcessTopologyCoordinator` reads both runtimes' agents before it
+  decides what a principal is shown under an enforcing access controller,
+  and shows an endpoint of a runtime that none of its agents holds to an
+  access administrator only.
+
+- Console timeline: a frame stored without the attributes of the member it
+  is about is shown to an administrator only, whatever the access rules say
+  and whoever holds the member's name now. In 0.9.11 through 0.9.14 such a
+  frame was decided by its member's name. Records of a member that is
+  private to one person could therefore be shown to other people who had
+  signed in and, on a console where sign-in is optional, to a caller who
+  sent no token, when that name was, or later became, the name of a shared
+  member, or while the console did not know the ended member. The records
+  stored without attributes were a member's memory events, the initial
+  message of a spawn, a console send to a member with no session, lifecycle
+  and failure records, and live image records. The initial message, the
+  send, the failure record of a send and the image record carry content; the
+  others carry status and memory metadata. An administrator, here and
+  below, is a person listed under `admins` in the access configuration; a
+  subject that a rule grants the `access.admin` action is not one for this
+  rule. Only a console that can identify nobody is exempt: one that does
+  not require sign-in and has no access controller, or no trusted OIDC
+  configuration to verify a token against. It has one anonymous operator
+  and nobody to keep apart, and that operator reads such frames as before.
+  On every other console only an administrator reads them, and a caller who
+  sends no token is treated like any person who is not an administrator
+  (see Upgrade).
+- A frame's member attributes are now those of the exact member its record
+  names, and never those of whoever holds the member's name: the member of
+  the session the record names; for a console send to a member that has no
+  session yet, the member the send was made to, captured at the send, and
+  never another member listed under the same name; and for the failure
+  record of such a send, the attributes stored with the send. This also
+  holds when the console projects retained records again (when it starts
+  to read a runtime, or catches up after a lag). A record that names none
+  of these is stored without attributes and is shown to an administrator
+  only (see Changed for the kinds).
+- The initial message of a spawn is no longer copied from the spawning
+  agent's session history under the name the call gave, which in 0.9.11
+  through 0.9.14 could put the text of a private member's call on another
+  member's timeline. A spawn's kickoff record is written only when the
+  spawn tool's own outcome names the session of the member it made
+  (`fork_off`, `delegate`), and a refused call leaves nothing under the name
+  it gave.
+- The memory steward's conflict signals (`memory.conflict.signal` on the
+  system page) are shown to an administrator only. Their text is written by
+  the steward from the records it compared, and could quote a quarantined
+  record or a record of an agent that an access rule keeps from the person
+  reading. Affects 0.9.14 and earlier. On a console that can identify
+  nobody the signal is read as a member's record with no attributes is, so
+  an access deny that matches the anonymous caller also refuses it.
+- The system page's records that speak of an agent without being that
+  agent's own (a memory write that landed quarantined, a session's taint
+  transition, a promoted record and a promotion that awaits approval) are
+  shown to an administrator only as well. They name the author, session or
+  scope of the agent they are about and carry no message content. Affects
+  releases through 0.9.14.
+- On a console that can identify a person, gating audit entries served by
+  the Console no longer carry a memory conflict's reason text, nor the error
+  text of a failed conflict lookup, for a caller who is not an
+  administrator. The one operator of a console that can identify nobody
+  receives both as before.
+- On a console that can identify a person, a gating audit entry or pending
+  request whose origin is an agent the console does not know is shown to an
+  administrator only, like every other record the console cannot attribute.
+- In 0.9.11 through 0.9.14, on a console that does not require sign-in and
+  whose access rules are off, a caller who sent no token could read the
+  conversation of a private side chat after that side chat had ended.
+- A deny rule naming an agent's memory now also withholds the realm's dream
+  history when the console does not know that agent (for example after it
+  was retired); before, such a rule was not consulted for signed-in people
+  who are not administrators.
+- With no runtime registered, a console serves no stored frame whose member
+  sat in a nested mob (a mob other than its runtime's own).
+
+- `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486. Releases
+  through 0.9.14 build with 1.1.5. `meerkat-meta` depends on `rustix`
+  directly and now requires rustix 1.1.6 or later (it accepted 1.1.4 and
+  later), so a build that resolves it with a lock of its own moves too.
+  `rustix` is also taken through Meerkat Core, `tempfile`, and `xattr`
+  through `tar`. The advisory is about the `getxattr` and `listxattr`
+  functions of `rustix::fs` (with their `l` and `f` forms), which mark
+  bytes they never wrote as initialized when they are given a zero-length
+  buffer. No Meta crate calls them. Of the crates Meta builds with only
+  `xattr` does, and `tar`, the one crate that uses `xattr`, calls it only
+  to set attributes while unpacking, so Meta's own use is not known to be
+  affected.
+
+### Upgrade
+
+- A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
+  or the `bootstrap_with_*` family must complete the bootstrap before an
+  agent created at run time can be built: an identity bootstrap
+  (`install_and_bootstrap_identity_first_context`, or
+  `bootstrap_installed_identity_first_context` and its held variants) or
+  `activate_without_identity_context`. Until one of them returns, every
+  build of such an agent is refused for now with a reason that names both
+  calls, and one warning is logged per process. An agent that starts at
+  its creation (it was given a first message, or its profile runs as an
+  autonomous host, the default) and one the mob's start owes its seat stay
+  owed their seat, and the call that completes the bootstrap seats them. A
+  delivery to an agent seated dormant is refused retryable
+  (`host_preparation_pending`), nothing is delivered, and the sender sends
+  it again once the bootstrap is complete; work the agent already owes is
+  retried by the mob. Creating an agent that builds
+  nothing (no first message, a turn-driven profile) is unchanged. Through
+  0.9.14 such an agent was built from its record at once.
+  `UnifiedRuntimeBuilder` and both gateway binaries complete the bootstrap
+  themselves.
+
+- The published 0.9.14 Meta Python and TypeScript SDKs (the source of tag
+  `meta-v0.9.14`) were run against a development build of this release's
+  gateway with no provider key: every row of their own suites that starts a
+  real gateway without a key passed (5 Python rows and 1 TypeScript row:
+  gateway init and its startup callbacks, lazy seating, agent memory, mob
+  announcement sources), the three Python rows that need a provider key
+  failed only on the missing key, and no wire incompatibility was found.
+  That coverage is thin: only the rows that start a gateway without a
+  provider key ran. No row that needs a model turn and none of the live
+  methods was exercised, and no control run was made against a 0.9.14
+  gateway.
+
+- Meta records an agent's changed instructions itself, as one operator
+  instruction record for the agent and its forks (`include_forks`), keyed
+  by the agent's name. So what "Operator instructions for a member and its
+  forks" and "Rolling back to 0.9.14" in `docs/guides/upgrading.mdx` say of
+  such records applies to every mob Meta serves from the first change of an
+  agent's instructions, with no operator write. A client that decodes
+  `mob/instruction_status` with an earlier `meerkat-contracts` refuses a
+  page that lists such a record: upgrade such clients together with the
+  gateway. After a rollback an earlier release reads each such record as
+  its agent's alone, and a host store loses the fork scope at the earlier
+  release's next checkpoint. A mob in which these records, with its other
+  records, are more than 64, or hold more than 1 MiB of Active bodies, is
+  past what an earlier release holds in one mob.
+
+- Between two mobs of one process, an edge that `meta/cross_mob/wire`
+  recorded in an earlier release delivered nothing there (through 0.9.14
+  every send over it was refused). Such edges become live at the upgrade:
+  the first send over one is delivered, and builds the recipient when it
+  is not built. Before upgrading, unwire the ones you do not want
+  (`meta/cross_mob/unwire`).
+
+- No backfill is done. A timeline frame stored without member attributes is
+  shown to administrators only, whichever release through 0.9.14 stored it
+  and whatever its kind: member memory events, spawn initial messages,
+  sends to a member with no session, lifecycle and failure records, live
+  image records, and every frame of a release that stored no member
+  attributes at all. No setting or migration returns them
+  to the view of a person who is not an administrator, the member's owner
+  included. Nothing is removed from the console log, and an administrator
+  reads them as before.
+- The memory steward's conflict signals stored by earlier releases, and the
+  system page's records of quarantined writes, taint transitions and
+  promotions, are shown to an administrator only as well.
+- A console that can identify a person and has no access configuration has
+  no administrator: it shows these frames to nobody. A console that can
+  identify nobody is unchanged: its one anonymous operator reads them as
+  before.
+- A console where sign-in is optional, an access controller is installed
+  and tokens are verified changes for a caller who sends no token. That
+  caller no longer reads timeline frames stored without member attributes
+  (the frames 0.9.11 through 0.9.14 stored among them), is no longer shown
+  the memory scopes and memory panel rows of a member the console does not
+  know, and no longer attaches a session whose owner the console does not
+  know or that has no established owner (it is answered as a session that
+  does not exist). An administrator signs in to read them. With the access
+  configuration on, a caller with no token is granted only by an allow rule
+  that names no subject and no group (`subjects: ["*"]` does not grant it),
+  so the visible change is on such consoles whose access configuration is
+  off, or on with such a rule. A console that requires sign-in has no
+  anonymous caller and is unchanged in this respect, and so is the stock
+  console gateway: launched with an auth configuration it requires sign-in,
+  and without one it can identify nobody.
+- Frames written from this release on carry their member's attributes when
+  their record names its session or the console send it belongs to. The
+  kinds listed under Changed are still stored without attributes and stay
+  administrator-only.
+- A host that builds its runtime from a bare mob handle
+  (`MobRuntime::from_handle`): the Console of such a runtime attaches an
+  ended session that no agent holds for an administrator only. Every other
+  caller is answered "access denied: the session has no established owner"
+  where access rules are enforced, and as for a session that does not
+  exist otherwise.
+
 ### Added
 
 - `meta/send` takes an optional `requester`: a person the host attests, under
@@ -125,6 +380,1308 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   exactly as before. "Typed" in these entries means only that the person
   authored the content, which the door vouches for.
 
+- `meta/identity/list`, `get` and `directory` say `roster_listing_superseded:
+  true` on an agent the host's roster lists while it is served from its
+  record, and `meta/identity/plan` says it on the plan of a change of such
+  an agent: the roster's entry for that name is not applied. The member is
+  written only when it is so. Rust: `identity_creation::AgentSummary`,
+  `DirectoryPeer` and `ChangePlan` gain it.
+
+- `meta/identity/create` and `meta/identity/update` take `addressability`
+  (`addressable` or `internal_only`) and `runtime_mode_override`
+  (`autonomous_host` or `turn_driven`): on an agent of a create, and in
+  `set` of an update. They say who reaches the agent and how it runs, with
+  the members and the values of a roster row. An update that sets either is
+  of the change class `capability` of the identity policy, which no request
+  touched before. An update sets a runtime mode and cannot return the agent
+  to its profile's. `meta/identity/get` and each agent of
+  `meta/identity/list` read both back under the same names, each only when
+  it is not the default (`addressability` only as `internal_only`). Rust:
+  `identity_creation::AgentSpec`, `AgentSet` and `AgentSummary` gain the two
+  members.
+
+- The schedules that target an agent follow its archive, its unarchive and
+  its removal (`meta/identity/archive`, `unarchive`, `remove`, and the
+  agents' tools over them): an archive pauses the Active schedules that
+  target the agent, an unarchive resumes exactly the ones that archive
+  paused, and a removal ends every one. Before, such a schedule kept firing
+  and each fire ended as a delivery failure or a missing target. An archive
+  pauses the agent's Console schedules too, the schedules that name its
+  session, and the ones that name it by a name no member id spells as it
+  is. A schedule
+  somebody paused by name stays paused through the unarchive, and a pause or
+  a resume by name of a schedule the archive paused takes it over. The
+  agent's entry of the change's first answer says how the agent's schedules
+  stand after it (`schedules: {effect, count, schedules, incomplete?}`,
+  `effect` one of `paused`, `resumed`, `ended`: the schedules paused for the
+  agent, the agent's schedules that are active after an unarchive, the
+  ended ones), and a plan of the change carries the same member with what
+  the change would answer. The list (`schedules`) is the host's: it is
+  written for the stdio gateway's caller and for a Console caller with
+  `runtime.admin`; an agent that asks for the change and a Console caller
+  without `runtime.admin` are answered `effect` and `count` and no list,
+  since a schedule that targets an agent may be anybody's. From Rust, the
+  family (`IdentityFamily`) withholds the list only for an agent requester:
+  a host that serves any caller other than its operator through the family
+  withholds the list itself. Whose pause a
+  pause is, the schedule's own
+  lifecycle records (Core: `ScheduleService::pause_for_target`,
+  `resume_for_target`). The stdio gateway gives the family its schedules; a
+  Rust host does with `IdentityFamilyOptions::with_schedules`
+  (`identity_creation::AgentSchedules`, implemented over a schedule service
+  by `schedule_wiring::MobAgentSchedules`), and a launch that gives none
+  changes no schedule. Rust: `identity_creation::AgentOutcome` and
+  `ChangePlan` gain `schedules`.
+
+- No schedule is pointed at an archived agent through Meta: an agent's
+  `meerkat_schedule_create` or `meerkat_schedule_update` whose schedule
+  would target an archived agent (a member target or an identity target) is
+  refused as a policy denial with the code `identity_archived`, and the
+  Console's `meta/schedule/create` and `meta/schedule/update` answer
+  `-32603` `identity_archived`, as a send to the agent does. A pause, a
+  resume and a delete by name stay, and so does an update that moves a
+  schedule to another agent. A Console schedule whose create read the agent
+  just before its archive is paused for the agent once it is written. See
+  the known limitations under "Agent changes" in the RPC reference.
+
+- `meta/schedule/list` and every Console schedule write answer
+  `paused_for_target: true` on a schedule that is paused because its agent
+  is archived (absent otherwise), and the Console's schedule row and the
+  Schedules panel say so in words: "Paused because its agent is archived.
+  It resumes when the agent is unarchived."
+
+- `meta/identity/*`: host methods that change a mob's long-term agents while
+  it runs, on the stdio gateway and on `POST /console/rpc`: `create` (1 to
+  256 agents, all or nothing), `update`, `archive`, `unarchive`, `remove`,
+  `adopt` (release a configured agent from configuration: it keeps its
+  member, session and history, and is changed at run time from then on),
+  `withdraw` and `changes_hold`, and the reads `list`, `get`, `operation`,
+  `directory` and `plan`; on the stdio gateway also `settle_preparation`,
+  the host operator's (below). An agent created this way is the same kind of
+  agent as a configured one; who asked for it is recorded and grants or
+  limits nothing. A create seats its agents dormant and wakes nothing (an
+  agent of a profile its host prepares waits for its host first, below), and
+  a read never wakes an agent. See "Agent changes" in the RPC reference.
+
+- Every launch whose mob has long-term agents serves the methods and lists
+  them in `meta/capabilities`. Their changes need the launch's identity
+  policy (`runtime_options.identity_creation`, which until now was checked
+  and then dropped). The policy is default deny: each change class of a
+  request is judged by its own rules and the strictest outcome applies. A
+  launch without a policy, or with one whose `enabled` is false, serves the
+  reads and refuses every change and every `plan` `change_denied`, with a
+  sentence that says the launch gives no identity creation policy; its
+  agents are unchanged. See the new policy reference,
+  `docs/reference/identity-policy.mdx`.
+
+- A change whose rule says `require_approval` answers `pending_decision`
+  and is held as a durable decision; once a person approved it through
+  `meta/decisions/decide`, the launch carries it out by itself and
+  `meta/identity/operation` reads `done`. `meta/identity/withdraw` ends a
+  change that is still held. An agent that asked is told the outcome by a
+  keyed message to itself. A person's approval is evidence, never authority
+  over the policy: when the approved change is carried out, the policy the
+  launch has then is asked again, and a change it denies now is not
+  executed (`meta/identity/operation` says it was denied).
+
+- `GET /console/experience`: `affordances.can_change_identity` and
+  `affordances.can_remove_identity` are false for an agent the host's
+  configuration declares, so a client offers no control that could only be
+  refused `owner_read_only`.
+
+- A change names as peers only agents its caller may see: on the Console a
+  peer the caller may not view is answered `peer_unknown`, as a name no
+  agent holds, and never `peer_not_allowed`.
+
+- An agent is shown no agent that is private to one person (one whose
+  labels carry `console.private_to`): its list and its directory leave
+  such an agent out, and a get, a plan or a change of it answers
+  `identity_unknown`, as a name no agent holds. A create under its name
+  is refused `name_taken`, as under any taken name (one namespace holds
+  every name, so a taken name cannot be created); to a caller that is
+  not shown every agent (an agent, a Console caller that does not
+  administer the runtime) `name_taken` reads `by: identity` whatever
+  holds the name, and only the host and an administrator read `removed`,
+  `worker` or `unreadable`. Every read of the family
+  and every peer a change names goes through this one rule; what a
+  person's view of the mob shows is unchanged. Who is private is read
+  from the agent's own record, so the rule holds for an agent that has
+  not run since its host started, and such an agent asks for no change
+  itself (`private_requester`). Who asked for an agent is left out of
+  what an agent reads once the asker's record can no longer be read (a
+  removed agent); the host reads it as before.
+
+- Every refusal of the family is one JSON-RPC error, code `-32058`
+  (`meerkat_meta::rpc::IDENTITY_REFUSED_CODE`), whose `data` is `{kind,
+  field?, retryable, detail}` and the kind's own members; `kind` is a closed
+  vocabulary. Params that are not what a method takes are that error too
+  (`invalid_request`).
+
+- A change names its operation with `request_id`: the same requester and
+  request answer the same state again and write nothing twice, another
+  request under the id is `operation_reused`, and two requesters that choose
+  the same id name two operations.
+
+- One spec digest names an agent on every surface: `list`, `get`, an outcome
+  and `stale_spec.current_digest` agree, before and after an adoption.
+
+- A create whose first message did not start answers `seat: "owed"` for
+  that agent; the mob seats it at the next change of the family or at its
+  next start, without a restart, and its first message runs once then. A mob
+  whose runtime is governed refuses a create that gives a first message
+  (`unsupported`, `first_message_in_governed_realm`) before anything is
+  written.
+
+- A host prepares an agent created at run time before its first use. A
+  launch's identity policy names `preparation.<profile>.mode: "required"`;
+  a create of an agent of that profile, at once or after a person approved
+  it, commits it pending its preparation (`pending_preparation`): it reads
+  `readiness: "preparation_pending"`, has no member, takes no message, and
+  nothing is built, run or woken for it, its first message included. The
+  host's operator settles it with the new method
+  `meta/identity/settle_preparation` (`{name, request_id}`), which answers a
+  change's outcome with the agent `committed` and its `seat`: the agent is
+  seated dormant and its first message runs once. A restart keeps a waiting
+  agent waiting. The operation of the agent's create reads where the agent
+  stands: `done` with the agent `committed` once it is settled, and `done`
+  with the agent `removed` once the agent has been removed with
+  `meta/identity/remove`, whether a host that gave up on it removed it
+  while it waited or it was settled first and removed later (the name is
+  then retired like any removed name). An update asks no
+  preparation, and an update that would move an agent into a prepared
+  profile is refused `unsupported` (`move_into_prepared_profile`, at
+  `set.profile`): create the agent in that profile. The move is refused
+  when it is asked, so a rule that has a person decide a profile change
+  holds nothing and asks nobody for it, and a plan of it answers the
+  refusal. A reset of an agent
+  that waits is refused retryable before the host composes a build for it.
+  The method is the 14th of the family, for the host's operator only: the
+  Console does not list it and refuses it for every caller. Rust:
+  `IdentityFamily::settle_preparation` (with a refusing default),
+  `IdentityChangeExecutor::settle_preparation` (with a refusing default)
+  and `identity_creation::{SettlePreparation, SettlePreparationCall,
+  PreparationSettle, MOVE_INTO_PREPARED_PROFILE}`.
+
+- Console access actions `agent.identity.create`, `agent.identity.manage`
+  (update, archive, unarchive and adopt, on the named agent) and
+  `agent.identity.remove` (on the named agent). `GET /console/experience`
+  carries `identity_changes: {available, can_create, can_change,
+  can_remove}` and, per listed agent, `affordances.can_change_identity` and
+  `affordances.can_remove_identity`.
+
+- Rust: `UnifiedRuntime::attach_identity_policy` attaches a launch's
+  policy; `UnifiedRuntime::identity_family` reads the family, attached
+  whenever the runtime has an identity runtime, and
+  `UnifiedRuntime::identity_changes_enabled` says whether its policy is
+  present and enabled; `identity_creation::{IdentityFamilyOptions,
+  IdentityFamilySlot, IdentityHostHooks}`;
+  `IdentityCreationPolicy::check_served`;
+  `IdentityRuntime::{attach_identity_family, attach_identity_reads,
+  identity_family, identity_family_seen_by, identity_changes_enabled}`;
+  `identity_creation::{PeerVisibility, AgentSpecs, AGENT_SPECS_NOT_GIVEN,
+  FIRST_MESSAGE_IN_GOVERNED_REALM}`, `CoreChangeExecutor::with_agent_specs`,
+  `IdentityFamilyOptions::with_decision_notices`,
+  `UnifiedRuntime::identity_family_seen_by` and `rpc::{HOST_RPC_SURFACE,
+  IDENTITY_REFUSED_CODE}`.
+
+- On the Console: `meta/identity/plan` needs what the change it plans
+  needs, on the agent it names; `meta/identity/operation` answers the
+  caller's own operations, and another requester's only to a caller with
+  `runtime.admin`; `meta/identity/withdraw` is the signed-in requester's; a
+  signed-in person with `runtime.admin` holds and releases the mob's
+  changes; a `get` names only the peers its caller may view, and no page's
+  `next` names an agent the caller may not view.
+
+- `proposer` and `source_evidence` are the host's to state: a person and
+  an agent that send one are refused `invalid_request` at the member.
+
+- One `request_id` names one change and one held decision: another change
+  under the id of a held one, of whatever kind, is `operation_reused`.
+
+- `name_taken` names the agent of the request that asked for the name
+  (`field: "agents[i].name"`), also when an existing agent holds it.
+
+- An update that names `set.instructions` answers an `instructions` member
+  for its agent, on its first answer: when the changed instructions reach
+  the agent (`applies_at_next_run`, `applies_after_compaction`,
+  `applies_at_next_session` with a `reason`, or `unchanged`). Every launch
+  answers it: the launch records the change for the agent itself, and a
+  removal revokes that record. See
+  [Changing an agent's instructions](docs/concepts/roster.mdx#changing-an-agents-instructions).
+  A native host may give the family a step of its own
+  (`IdentityFamilyOptions::with_instruction_step`), which is then asked
+  instead.
+
+- An agent's change is refused `invalid_request` when the identity its
+  surface attributed to the call is not the member of the session the call
+  ran in (`ChangeRequester::agent_session`): the policy judges the first and
+  Core reads the grant of the second, so the two are one agent. It is
+  refused when the change is asked for, before anything is held, so a
+  person is never asked to decide such a call; a plan of it is refused the
+  same.
+
+- Changes of agents that a person decides. A change whose outcome under the
+  host's identity policy is `require_approval` is held as one durable
+  decision of kind `identity.create`, `identity.update`, `identity.archive`,
+  `identity.unarchive`, `identity.remove` or `identity.adopt` and answers
+  `pending_decision`; the same request id answers the same state, any
+  other request under it is `operation_reused`, and nothing else is written,
+  built or woken while it is held. One decision covers the whole request: a
+  create of several agents is one decision. Its deadline is the policy's
+  timeout for the change, and a decision nobody decided by then ends
+  `expired`. A person decides it through `meta/decisions/decide` (the stdio
+  operator, or a person an application attests from its own channel); these
+  kinds are decided by people only. A person cannot approve a request the
+  decision records as theirs (`self_approval`): a request a signed-in
+  Console person asked, and a request a host asked that names the person as
+  its `proposer` by their principal key. A request a host asks with no such
+  proposer is the host's, whoever the application carried it for. The
+  requester or the host withdraws a change that is still held.
+
+- The rendering a person approves shows, ahead of anything the requester
+  wrote, the host's consequence lines and what the mob declares for every
+  profile an agent of the request runs on: its model, auth binding, skill
+  names and tool configuration, with one digest of the whole declaration
+  (the profile, the wiring rules that name it, the definitions of its
+  skills). An MCP server the profile configures is shown by its name and its
+  configuration is never rendered; a profile that names no server of the
+  host is shown to reach every server the host offers. A profile bound to a
+  realm profile is read from the realm, and the change is refused
+  `unsupported` where the host cannot read it. When the approved change is
+  carried out the request is rendered again: a declaration or host lines
+  that differ, or an agent that moved to another profile, refuse it
+  `subject_widened` and close the decision, and an agent that changed
+  otherwise is refused `stale_spec`. A refusal the same request may outlive
+  releases the attempt
+  and keeps the approval. Consequence lines come from a Rust host
+  composition (`GatewayHostComposition::identity_consequences`); a host
+  behind an SDK supplies none in this release.
+
+- An approved change is carried out once: a gateway that stops between the
+  commit and the decision's settlement settles it executed at its next
+  start and commits nothing twice. An agent that asked is told the outcome
+  by a message to its own name once its decision ended; a host surface or a
+  person that asked reads the operation's state. A decision is carried out
+  only by a gateway whose launch enables the identity policy.
+
+- On the Console, the requester of a change of an agent reads its own
+  request whole (`meta/decisions/get`, `rendering`), as the requester of a
+  tool grant does.
+
+- Rust: `identity_creation::IdentityDecisions` (the holder of these
+  decisions: `hold`, `held`, `withdraw`, `render`, `executors`,
+  `spawn_driver`), `HeldChangeHost`, `IdentityDecisionNotices`,
+  `KeyedSendNotices`, `HostConsequences`, `render_held_v1` with
+  `ToolConfigurations`, and `durable_decisions::DecisionExecutorDriver`,
+  which drives a runtime's decision executors: one pass at start, one after
+  each change of a decision (`RuntimeDecisions::notify_work`), and a tick
+  only while a decision of its kinds waits. A host with no such decision
+  makes no further pass, and a pass with nothing owed reads decision records
+  only. `HeldChangeHost::realm_profile` is the read of a realm profile a
+  host gives the holder.
+
+- Behaviour of `identity_creation::render_v1`: the rendering of an update and
+  of a removal no longer has the line `Expected spec digest`, so the subject
+  digest of such a request differs from the one 0.9.13 computed for it. No
+  rendering shows that digest; the request digest still covers it. Nothing
+  stored a rendering before this release.
+
+- Behaviour of `identity_creation::normalize_create`, `normalize_update` and
+  `normalize_remove`: a refusal's `field` is a path into the request as every
+  surface writes it. `identities[i].spec.identity` is `agents[i].name`,
+  `identities[i].spec.profile`, `.labels` and `.context` are
+  `agents[i].profile`, `agents[i].labels` and `agents[i].context`,
+  `identities[i].spec.binding` (a bootstrap token, which no request as
+  written can carry) is the agent itself, `agents[i]`,
+  `identities[i].peers[j]` is `agents[i].peers[j]`, `identities` is `agents`,
+  `identity` is `name`, `set.descriptive_labels` and `set.authority_fields`
+  are `set.labels`, and `set.peers_add[j]` is `peers_add[j]`.
+
+- Rust API of `meerkat-meta`, `identity_creation`: the interface of the
+  identity family, with nothing reachable by a caller of the gateways yet.
+  - The family and its wire types: the trait `IdentityFamily` and the
+    requests every surface writes (`CreateAgents`, `AgentSpec`,
+    `UpdateAgent`, `AgentSet`, `AgentRef`, `OperationRef`, `ListAgents`,
+    `GetAgent`, `ReadDirectory`, `ChangesHoldRequest`), with their answers
+    (`AgentPage`, `AgentSummary`, `AgentRecord`, `DirectoryPage`,
+    `ChangePlan` and the types they hold).
+  - The typed outcome `IdentityOutcome` (`done`, `pending_decision`,
+    `pending_preparation`, `refused`), with `AgentOutcome`, `AgentSeat`,
+    `AgentChangeState`, `InstructionOutcome` and
+    `InstructionNextSessionReason`.
+  - `OperationId`, the one way a caller's request id becomes an operation
+    id, namespaced by the requester, and `ToolCallOrigin` for a tool call
+    that gives none.
+  - The executor seam: `IdentityChangeExecutor`, `CoreChangeExecutor`,
+    `ChangeCommit`, `ChangeCommitted`, `ChangeRequester`, `ChangeConsent`,
+    `ExecutorError`, `InstructionStep`, `committed_outcome`,
+    `refusal_of_core`, `refusal_of_error`. It commits a create, an archive,
+    an unarchive and a removal through Core; an update and an adoption
+    answer `unsupported`.
+  - Request actions and normalization for an archive, an unarchive and an
+    adoption (`ArchiveIdentitySpec`, `UnarchiveIdentitySpec`,
+    `AdoptIdentitySpec`, `normalize_archive`, `normalize_unarchive`,
+    `normalize_adopt`), and ten refusal kinds: `privileged_field`,
+    `grant_revoked`, `private_requester`, `owner_read_only`,
+    `not_adoptable`, `not_archived`, `declared_apply_open`, `purge_refused`,
+    `mob_not_running`, `purged`. Their variants of `IdentityRefusalKind`
+    (which is `non_exhaustive`) are declared after every earlier one, so no
+    earlier variant's implicit discriminant moves. A refusal carries a
+    detail sentence (`IdentityRefusal::detail`, `to_refused`).
+
+- `meta/status_identity` on the stdio gateway (Rust: `IdentityStatus`, as
+  `IdentityRuntime::status` and `statuses` answer it)
+  says when no member holds an agent and why: `archived: true` for an
+  archived agent and `preparation_pending: true` for an agent that waits
+  for its host's preparation. Each is written only when `true`, so the
+  status of a seated agent is unchanged, and each is read from Core's entry
+  of the agent's name on the read the status already makes: nothing is
+  built, loaded or woken. Rust API of `meerkat-meta`: `IdentityRecordFacts`
+  with the members `archived` and `preparation_pending`, and
+  `CoreIdentityEntry::is_archived` and `awaits_host_preparation`. An
+  agent's spec digest and revision, who asked for it and its open
+  operations are not on its status: `meta/identity/get` and
+  `meta/identity/list` answer them. The Console's own status answer
+  carries the two members the same way (see the Console's
+  `meta/status_identity` entry below).
+
+- `meta/identity/get` and `meta/identity/list` name the operations open
+  for an agent in `open_operations`: the create of an agent that waits for
+  its host's preparation, until the host settles it, and each change of
+  the agent that is held for a person's decision or approved and not yet
+  carried out. The member is absent when nothing is open. An operation id
+  is answered as `meta/identity/operation` answers the operation: the stdio
+  host reads every one, a Console caller its own and, with
+  `runtime.admin`, every one, and an agent none. A read that cannot read
+  the mob's held changes is refused `approval_unavailable` with a detail
+  that says to read again. Rust API: `IdentityDecisions::open_operations`.
+- Python SDK (`meerkat-meta`) and TypeScript SDK (`@rkat/meta-sdk`):
+  `runtime.identities`, the calls of the long-term agent host methods
+  (`meta/identity/*`): `create`, `update`, `archive`, `unarchive`, `remove`,
+  `adopt`, `withdraw`, `changes_hold` (`changesHold`), and the reads `list`,
+  `get`, `operation`, `directory` and `plan`. A change needs the caller's
+  `request_id` and answers a typed outcome (`done`, `pending_decision`,
+  `pending_preparation`); a held decision is a normal answer, and `operation`
+  reads what became of it. Every refusal raises one error,
+  `IdentityRefusedError` (`-32058`), with the typed `kind`, `field`, `detail`,
+  `retryable` and the kind's own members. `IDENTITY_REFUSAL_KINDS` is the
+  closed vocabulary of 57 kinds: adding a kind is a breaking change of the
+  SDKs. Instruction outcomes and seats are closed vocabularies too; advisory
+  values are kept as the gateway sent them. See the guide "Create and change
+  long-term agents from host code".
+- Python SDK and TypeScript SDK: `MetaBuilder.identity_creation(policy)`
+  (`identityCreation`) sends the host's policy for changes of long-term
+  agents as `runtime_options.identity_creation`, unchanged. Without it every
+  change of `runtime.identities` is refused `change_denied`.
+- Python SDK and TypeScript SDK: the long-term agent calls carry the host
+  methods' newer members. A create's agent and an update's `set` take
+  `addressability` and `runtime_mode_override` (`runtimeModeOverride`), and
+  `get` and `list` read both back. An agent of an archive's, an unarchive's
+  and a removal's first answer, and a plan of those changes, carry
+  `schedules` (`SchedulesFollowed`): the schedules that target the agent
+  and what was done to them; a replay of the request states none.
+  `runtime.identities.settle_preparation(name, request_id)`
+  (`settlePreparation`) calls `meta/identity/settle_preparation`. The
+  identity status type reads `roster_listing_superseded`
+  (`rosterListingSuperseded`), `archived` and `preparation_pending`
+  (`preparationPending`), each false when the gateway leaves it out.
+- Console: a person creates, edits, archives, unarchives and removes a
+  long-term agent from the Roster, where the launch offers such changes (its
+  identity creation policy is enabled and the console is not read-only).
+  - New agent takes a profile, a name, a display name, instructions, peers
+    and a first message. Each profile and peer is shown with what the host's
+    rules give a new agent of it: allowed, needs a decision (with the
+    decision's lines) or not allowed (with the rule's reason; it cannot be
+    picked).
+  - New agent and Edit list who reaches an agent (Reachability: it can
+    receive messages, or it is internal only) and how it runs (as its
+    profile says, on its own, or turn by turn), each choice in words with
+    what it means. A create writes `addressability` and
+    `runtime_mode_override` only where they are not the default, an edit
+    only where they changed, and a refusal that names one shows at its
+    field. An edit cannot hand the way an agent runs back to its profile,
+    so that choice is listed only for an agent whose record names no way.
+  - An agent's drawer and its details pane offer Edit (display name,
+    instructions, context, labels, profile, peers, reachability and how it
+    runs), Archive and Remove. Edit
+    sends only what changed, against the agent as it was read; an agent that
+    changed in the meantime is refused and read again on request, never
+    resent on its own. A profile change is judged by the gateway: the form
+    asks what the change would get (`meta/identity/plan`) and shows the
+    answer at the field.
+  - Remove asks first and says that the name can never be used again and
+    that archive is the reversible choice. The confirmation of an archive,
+    an unarchive and a removal is a dialog: it takes focus on Cancel, and
+    Escape or a click outside cancels it. The confirmation of an archive
+    and of a removal says that the agent's last conversation is harvested
+    and distilled, as for any agent that leaves the team, and the result
+    of an archive says it too, beside what the agent keeps. The removal of
+    an agent that is archived already says instead that its last
+    conversation was harvested and distilled when it was archived, and
+    names no archive as a choice.
+  - The confirmation of an archive, an unarchive and a removal says what
+    the change will do to the schedules that target the agent: how many
+    will be paused, will run again or will be ended, and which by name,
+    with a schedule the plan counts and does not list counted as one more.
+    The dialog reads the agent's record when it opens, asks the plan of the
+    change (`meta/identity/plan`, its `schedules`) and sends the change at
+    the record it read. A plan that lists no schedule, is refused or cannot
+    be read leaves the confirmation without a word of schedules; the change
+    is made all the same. A viewer without `runtime.admin` is given what
+    becomes of the schedules and how many, without the list: the
+    confirmation and the result then say the count and no name.
+  - The result of an archive, an unarchive and a removal says what became
+    of the schedules that target the agent, where the answer states it
+    (`schedules`): how many were paused, run again or were ended, and which
+    by name; a schedule without a name is counted, and ids are among the
+    technical details. An answer that counts schedules it does not list
+    reads by its count: the listed ones by name, the others as more. An
+    answer that is `incomplete` says so and offers
+    Try again, which sends the same request. Only a first answer states the
+    schedules, so the Console takes no later answer of the same request in
+    place of the first: what the first answer said stays.
+  - An agent whose record says `roster_listing_superseded`
+    (`meta/identity/get`) reads a note at its status in the details pane:
+    the host's configuration lists its name too, that entry is not applied,
+    and a change made in the Console changes the agent's record. The note
+    is read from the details answer too, where that says it.
+  - Archived agents are listed under the roster with Unarchive and Remove.
+    The same list ("Archived and waiting agents") shows an agent whose host
+    still prepares it, which has no member and so no row of the roster: by
+    name, with the state "Waiting for its host". Such an agent can be given
+    up: where the launch offers removals the row has Remove, whose
+    confirmation says that the agent never started (nothing is harvested,
+    and an archive is no choice for it). It has no other control. The list is
+    read when it is opened. Only the host settles an agent's preparation
+    (`meta/identity/settle_preparation`, which the Console neither lists nor
+    offers). A read that is refused because the team's open requests cannot
+    be read just then says so and to try again, in a sentence of its own.
+  - A move into a profile whose agents the host prepares before their
+    first use is refused by the gateway when it is asked; Edit says so at
+    the profile, in a sentence of its own, before anything is sent.
+  - The Record of an agent's details says how many requests wait for the
+    agent; their operation ids (`open_operations`) are among its technical
+    details.
+  - An outcome reads in words; an instructions change says when it reaches
+    the agent. A refusal reads in the console's own sentence for its kind,
+    at the form field it names when the form has one; the gateway's
+    sentence is under Details. Only a lost answer reads as no answer.
+  - A change that waits for a person's decision shows until when it is open
+    and offers its withdrawal. A request is withdrawn from the page that made
+    it (in the form, in the roster and on its decision card), or by the host
+    with its request id. After a reload the request stays visible to its
+    approvers in the decisions view, and its card keeps its words without the
+    withdrawal. A decision card of such a change says that a person cannot
+    approve their own request.
+  - Each action is sent under one request id, so trying again after a lost
+    answer makes nothing twice.
+  - The controls follow the experience read's `identity_changes` section
+    (`available`, `can_create`, `can_change`, `can_remove`) and each agent's
+    `affordances.can_change_identity` and `can_remove_identity`. The details
+    pane shows how an agent runs, and who asked for it and when, as its
+    record says (a person
+    by name, never by key), and the archived agents can be listed, wherever
+    the gateway serves those reads, with or without a control. Every agent
+    looks the same in the roster, whoever asked for it.
+- Console access: the permissions `agent.identity.create`,
+  `agent.identity.manage` and `agent.identity.remove` read in words and sit
+  with the lifecycle permissions in the Access panel.
+- Console command surface (`@console-core` and the stock console): the
+  commands `createAgent`, `updateAgent`, `archiveAgent`, `unarchiveAgent`,
+  `removeAgent`, `withdrawAgentChange`, `getAgentRecord`, `listAgentRecords`,
+  `getAgentChange`, `listAgentDirectory` and `planAgentChange` carry
+  `meta/identity/create`, `update`, `archive`, `unarchive`, `remove`,
+  `withdraw`, `get`, `list`, `operation`, `directory` and `plan` from the
+  roster and an agent's panes. The console contract
+  (`docs/rct/console-rest-sse-contract-v0.5.0.json`) documents the family's
+  fourteen methods, `adopt`, `changes_hold` and `settle_preparation`
+  included (the last is its host's operator's: the Console RPC refuses it
+  for every caller), and what a launch
+  without an identity policy answers: its reads are served, and a change or
+  a plan is refused `change_denied`. It names `addressability` and
+  `runtime_mode_override` on a create, an update and the reads, `schedules`
+  on the first answer and on the plan of an archive, an unarchive and a
+  removal, and the answer for an agent the caller may not view
+  (`identity_unknown`, as for a name no agent holds). It says what a create
+  that answers `pending_preparation` means and who settles it, what the
+  operation read says of an agent that waited, the refusal of a move into a
+  profile the host prepares, and `open_operations` on a get and a list with
+  the refusal of a read that cannot see the team's held changes. It names
+  `roster_listing_superseded` on a get and a list, `paused_for_target` on a
+  console schedule, and the refusal of a schedule for an archived agent
+  (`-32603`, `identity_archived`). The
+  console guide has a section on long-term agents.
+- The Console's `meta/status_identity` (`POST /console/rpc`) says what the
+  stdio gateway's answer says of an agent no member holds and of one the
+  host's roster also lists: `archived`, `preparation_pending` and
+  `roster_listing_superseded`, each written only when `true`, so the answer
+  of every other agent is unchanged. Before, the Console's answer carried
+  none of the three.
+
+- A change of an agent's instructions reaches the agent with its
+  conversation kept. When the instructions of an agent created at run time
+  are updated, or a configured agent's instructions are edited in the host's
+  configuration, the gateway records the whole current text as one operator
+  instruction for that agent and its forks (namespace
+  `meerkat.identity.instructions`, keyed by the agent's name, a member target
+  with Meerkat's `include_forks`), and Meerkat's mob delivers it: the change
+  reaches the agent at its next run; a run that starts within moments of the
+  change may still use the earlier instructions; earlier instructions are
+  never rewritten. An agent that is not loaded is not woken, a restart
+  neither loses nor repeats the change, and the removal of an agent revokes
+  its record (after the next start when the gateway stopped right after the
+  removal). A reset or a delete of the agent keeps the record, brought up
+  to the current text when it holds another one: the agent goes on with the
+  same instructions, and its forks go on running on them. The fresh
+  conversation's first prompt is the current text, and it carries that text
+  once more as the one standing entry of the record. A removal still
+  revokes the record, and a fork that holds the entry is told so at its
+  next run. A model that takes a system instruction only ahead of the
+  conversation applies the change after a compaction or with a fresh
+  conversation. A fork of the agent follows the record by Meerkat's rule for
+  a member and its forks: a fork that is live when the change is recorded
+  gets the entry at its next run, once; a fork taken afterwards has the
+  record in its own snapshot, which a durable fork has recorded in its
+  session before it is seated and a helper fork is born with. See
+  [Changing an agent's instructions](docs/concepts/roster.mdx#changing-an-agents-instructions),
+  with this release's limits (one agent's set of operator instructions,
+  which also counts the longest instruction record of another agent;
+  governed runtimes; the forks the record does not reach).
+
+- Rust: `IdentityRuntime` implements the identity change interface's
+  `identity_creation::InstructionStep`: `after_update` answers an
+  `InstructionOutcome` (with an `InstructionNextSessionReason` where the
+  change waits for a fresh conversation) for an `InstructionsChanged`, and
+  `after_removal` revokes the agent's record. A launch's family asks it
+  after its commits. In `meerkat_meta::identity_first::runtime`:
+  `INSTRUCTIONS_NAMESPACE`, `RESERVED_INSTRUCTION_NAMESPACE_PREFIX` and
+  `is_reserved_instruction_namespace`. `SessionBridge` gains
+  `member_session_service`, with a default that answers none.
+
+- Agents can create and change long-term agents. On a launch that has an
+  identity policy (`runtime_options.identity_creation` with `enabled: true`),
+  an agent whose profile has mob tools (`tools.mob = true`, its spawn grant)
+  gets eight tools: `identity_create`, `identity_update`, `identity_archive`,
+  `identity_unarchive`, `identity_remove`, and the reads `identity_list`,
+  `identity_get` and `identity_directory`. They take the same requests as `meta/identity/*`
+  (`agents: [{name, profile, display_name?, instructions?, context?, labels?,
+  first_message?, peers?}]` for a create; `name` and `expected_spec_digest`
+  for a change of one agent) and answer the same typed outcome (`done`,
+  `pending_decision`, `pending_preparation`, `refused` with `kind`, `field`,
+  `retryable` and `detail`), without its `operation_id`: an operation id is
+  the host's handle on a change, an agent names its request with its own
+  `request_id`, and neither a tool's answer nor the notice an agent gets of
+  a decided change names one. An agent created this way is an ordinary agent
+  of its profile: the agent that asked is recorded and owns nothing. See
+  [Agents that create agents](docs/guides/agents-create-agents.mdx).
+  - Without a policy, or for an agent without mob tools, the tools are absent
+    from the tool list. A member private to a person (a console side chat, a
+    member it created, a fork of one) is offered none, and a call of one is
+    refused `private_requester`.
+  - Who asks is the member whose session made the call, never an argument: a
+    tool's arguments are closed, and a member a tool does not name is refused
+    `invalid_request` with the member as `field`.
+  - A call with no `request_id` is keyed by where it ran (session, run, round
+    and call id), so a call the runtime dispatches again reads the state of
+    the first. A call dispatched outside a run must give a `request_id`.
+  - `identity_list` lists every long-term agent of the mob that is not
+    private to a person, of any profile: also an agent of a profile the
+    calling agent may create no agent of. It shows an agent no provenance:
+    who asked for another agent, when and under which consent stay with the
+    host's read, and so do another requester's open operations and whether
+    the host's roster lists the agent's name as well. A change
+    that names a member private to a person answers `identity_unknown`, as
+    for a name no agent holds.
+  - `identity_get` reads one agent's record by name: the list entry's
+    members and the agent's instructions, context, labels and peers, the
+    fields of `meta/identity/get` without who asked for the agent and
+    without another requester's open operations. A name the calling agent
+    is shown no agent under answers `identity_unknown`, whether no agent
+    holds it or its member is private to a person.
+  - `identity_list` and `identity_get` read an agent's `addressability`
+    (written as `internal_only`) and `runtime_mode_override` back when it
+    has them. An agent does not set them: `identity_create` and
+    `identity_update` do not take them, and the host does
+    (`meta/identity/create`, `meta/identity/update`).
+  - An agent the host prepares is told so in plain words. `identity_create`
+    says what `pending_preparation` is: the agent has no member, takes no
+    message and runs nothing until its host settles it, and its first
+    message runs once then. `identity_list` and `identity_get` say what
+    `readiness: "preparation_pending"` is, and `identity_update` says that
+    a move into a profile the host prepares is refused `unsupported` at
+    `set.profile` and that an update of an agent that waits changes its
+    record only. There is no tool for the settle: it stays the host's
+    (`meta/identity/settle_preparation`).
+  - `identity_archive` and `identity_remove` say that the agent's last
+    conversation is harvested as for any agent that leaves: an archive and
+    a removal owe an agent created at run time the retirement side effects
+    a configured agent is owed.
+  - `identity_archive`, `identity_unarchive` and `identity_remove` say what
+    becomes of the schedules that target the agent (an archive pauses the
+    active ones, an unarchive resumes exactly those, a removal ends every
+    one) and that the first answer tells the effect and the count in
+    `agents[0].schedules`. An agent is never given the list of the
+    schedules: which they are is the host's to read.
+  - `identity_update` says what becomes of a label the host reserves: it
+    stays as it is, and an update that would give it another value or
+    remove it is refused `reserved_key` (at `set.labels` or
+    `set.labels_remove`).
+  - The eight tools may wait behind the deferred tool catalog: in a session
+    whose catalog is exact, their definitions are loaded on demand.
+  - Rust API: `identity_creation::{IdentityAgentTools, IdentityToolCaller,
+    IdentityToolCallSite, IdentityToolAnswer, IdentityToolFault,
+    identity_tool_defs, identity_tool_catalog, identity_tool_provenance,
+    is_identity_tool, IDENTITY_TOOLS}` and the eight tool name constants.
+
+- `meta/cross_mob/peer_info` answers two more fields for a local member:
+  `pubkey_b64`, the member's own transport key (standard base64), and
+  `dialable_address`, the member's socket endpoint, only when it has one
+  (`runtime_options.member_comms_address`). `dialable_address` is left out,
+  never null, for a member with in-process comms only. Python
+  `MobHandle.peer_info` and TypeScript `MobHandle.peerInfo` return them as
+  they come.
+- Python `MetaBuilder.member_comms_tcp(address="127.0.0.1:0")` gives the
+  locally hosted mob members signed TCP comms endpoints
+  (`runtime_options.member_comms_address`), as TypeScript `memberCommsTcp`
+  does: what a member of another gateway needs to reach them.
+
+### Changed
+
+- A host that labels its members in its customizer must put those labels
+  in the row of an agent created at run time (an identity whose record is
+  its row). Such an agent's member carries its row's labels and no others,
+  and what decides on a member's labels (an access rule's `match_labels`,
+  an audience) reads its seat. So when the labels the customizer's draft
+  holds are not exactly the seat's (a key added, a key dropped, a key given
+  another value), the agent is refused its seat for good and nothing is
+  built or run: it is never seated without a label its host requires, so a
+  deny rule keyed on a host label cannot miss it. The refusal is Core's
+  `MemberBuildPreparationRefusal::store_owned_seat_labels`. Its reason names
+  the label keys, never a value, and the remedy; the refused send answers
+  it, and `meta/status_identity` shows it under `customizer_tools_pending`,
+  with the state `broken` for an agent refused at its first wake. To seat
+  the agent, put the label in its row: at its create, or by an update. An
+  update seats an agent that is owed its seat (one created with a first
+  message) at once; an agent Core already holds a member of is refused
+  until its row carries the label, takes its row's labels at the update
+  itself while its member is idle, and is served at its next send, with
+  no respawn or reset (a member that held work then takes them at a
+  retry of the update, at its next update, or at a respawn or a reset).
+  The same holds after a later label change of a row. A customizer that
+  sets no labels refuses nothing. An archive and a removal of a refused
+  agent are served.
+
+- A declared definition update (`runtime_options.declare_spec_update` on
+  the stdio gateway, `spec_update_ceremony` from Rust) that drops a profile
+  agents were created on, or renames it, is refused: Meerkat answers the
+  diagnostic `profile_held_by_identity` at `profiles.<name>`, naming the
+  agents, and the gateway's init fails with `declared mob spec update
+  refused: ...`. Nothing is written, and a launch without the declaration
+  that carries the definition the mob had starts as before (one that
+  carries the edited definition is refused, as any undeclared edit is).
+  Keep the profile, or update those agents to another
+  profile or remove them, then declare the update. While this release
+  cannot read the record of one of the mob's created agents (one a later
+  release wrote, after a rollback), such an update is refused the same
+  way, at `profiles`, naming those agents, since that record may name the
+  profile: keep the profile, or declare the update on the release that
+  reads the records. It was accepted before,
+  and such an agent then failed each restore with a profile-not-found
+  reason.
+- On the Console, a read, a plan and a change of one agent
+  (`meta/identity/get`, `plan`, `update`, `archive`, `unarchive`, `remove`
+  and `adopt`) answer an agent the caller may not view exactly as a name no
+  agent holds: `identity_unknown` at `name`, and nothing is changed. A rule
+  that denies viewing the agent answered `access_denied` (`-32030`) before.
+  An agent the caller may view and may not change still answers
+  `access_denied`.
+
+- The rendering of a change of an agent, which a plan answers and a held
+  change's decision shows and binds, names a person by the id their
+  principal key carries: the person who asked, and a person a host names as
+  the `proposer`. It showed the key. The subject digest of a rendering that
+  names a person is therefore not the one a build before this change gave
+  it; the request digest is unchanged and binds the keys.
+
+- An access rule with the pattern `agent.*` or `*` covers the three new
+  `agent.identity.*` actions, as it covers every action a release adds to a
+  family. They only open the methods: the identity policy still judges every
+  change, and without a policy every change is refused.
+
+- `runtime_options.identity_creation`: an approval rule may name the change
+  classes `archive` (an archive and an unarchive) and `adopt`, and
+  `approval.timeouts_ms` takes `archive` and `adopt` (4 hours each by
+  default). A launch that names them was refused at init before.
+
+- `identity_creation::normalize_create` refuses a name in a reserved
+  namespace `invalid_name` at the agent's `name`: a name that starts with
+  `mk--` (the encoded member-id namespace) or with `rt:` (the namespace of
+  generated runtime aliases). It admitted such names before.
+
+- `identity_creation::IdentityRefusalKind::AdmissionUnsettled` is retryable
+  (`is_retryable`), as Core's refusal of the same name is.
+
+- Meta serves an identity whose record is its row in the mob's identity
+  store (one created at run time, or one a host adopted into the store) as
+  any identity. The lifecycle verbs act on it with the effect they have on a
+  configured identity, and no longer answer `-32603` with kind
+  `identity_store_owned`:
+  - `meta/retire`, `meta/retire_member` and a scoped retire release the
+    member's live materialization; it stays seated on the same session at
+    the same generation;
+  - `meta/reload_member` reloads the member's registration on the same
+    session;
+  - `meta/identity/warm` and a materialization wake the member;
+  - `meta/respawn` replaces the member by its successor on the same session
+    at the next generation, seated with the row's current profile, runtime
+    mode and labels;
+  - `meta/reset` and `meta/respawn_member` seat a fresh session at the next
+    generation with the row's current spec. The name, the row and the peer
+    edges the row declares stay;
+  - `meta/delete_identity` gives the same fresh life, with the old session's
+    memory scope dropped and its exit interview owed, as for a configured
+    identity. The agent keeps its name, its row and its listing: the verb
+    removes no agent of either kind;
+  - `meta/reset_all` resets it with the others. Its `store_owned` list stays
+    in the result, always empty; an archived identity is left archived and
+    fails nothing.
+
+  A verb on an archived identity answers `identity_archived`. Nothing
+  answers `identity_store_owned` any more:
+  - `meta/compact_member` with a compaction floor rebuilds the member with
+    the floor on its own session, and again without it afterwards, as for a
+    configured identity;
+  - the offline `meta_gateway identity-reset` takes it, and the next
+    start's roster pass gives it its fresh life: a fresh session, nothing
+    built, its name and its row unchanged. A delivery that reaches it
+    before a pass carried the reset out carries it out first.
+
+  The kind `identity_store_owned`, `IdentityRuntimeError::IdentityStoreOwned`
+  and `IdentityResetRefusal::IdentityStoreOwned` stay defined and are no
+  longer produced.
+
+- A configuration edit of a configured agent's instructions now reaches the
+  agent's live conversation as one appended system instruction, at the
+  agent's next run after a roster refresh picks the edit up. Before, the
+  agent kept the text of its first prompt until its conversation was
+  rebuilt (a reset).
+
+- `meta/set_instruction` and `meta/revoke_instruction` refuse a namespace
+  that starts with `meerkat.identity.` (`-32602`, `instruction_set_code`
+  `invalid_request`): those namespaces hold each agent's own instructions.
+  `meta/instruction_status` still reads them. Upgrade: a host that wrote a
+  record under `meerkat.identity.` in an earlier release can no longer
+  change or revoke it through these verbs.
+
+- `IdentityStatus.intent_managed` (`meta/status_identity`, the status
+  lists, both SDKs) reads `false` for an identity whose record is its row
+  in the mob's identity store. It read `true` through 0.9.13, when the
+  host's verbs refused it. It still reads `true` for an identity a host
+  adopted through an identity intent row.
+
+- `meta/tool_grants/grant` issues a scoped tool grant to an identity
+  whose record is its row in the mob's identity store, and no longer
+  answers `subject_unknown` for it. A grant to one Core holds no member of
+  (it is archived, or awaits its host's preparation or its seat) answers
+  the door's typed refusal (`identity_archived`, or `-32052`).
+
+- A topology provider is asked about every identity the runtime serves:
+  `target_identities` and `TopologyContext.roster` hold the roster's
+  identities and the ones whose record is their row, and an edge the
+  provider answers to one of them is wired. Under a topology provider, a
+  live edge between two identities that no owner declares (not the
+  provider, not the mob definition's wiring, not a row's owned edges) is
+  pruned whichever record holds the identities' specs; through 0.9.13 no
+  edge of an identity created at run time was pruned. An edge a row
+  declares as its identity's owned edge is never pruned.
+
+- The bootstrap status (`meta/status_identity_bootstrap`,
+  `meta/wait_identity_bootstrap`) tracks the identities whose record is
+  their row beside the roster's, and a background warm
+  (`lazy_with_background_warm`) materializes them alike. One Core holds no
+  member of, because it awaits its host's preparation, its held creation or
+  its seat, reads `broken` with that cause; an archived one is not tracked.
+  `IdentityRuntime::materialize_all` covers them too and skips an archived
+  one.
+
+- A roster pass reads no row of an identity it serves already: it reads
+  the names from Core's identity entries and the rows of the names it has
+  not registered yet in pages (one store read per page of names, through
+  Core's `MobHandle::identity_records`), so a cold start makes no store
+  read per identity. Through 0.9.13 every pass read every row, one read
+  each. A row Core changed is read again at the identity's next delivery,
+  as before, and status and list reads answer the same before any door of
+  the identity opened.
+
+- Rust: `SessionBridge` has five new methods, each with a default:
+  `created_identity_names` (the names of the identities whose record is
+  their row; default `BridgeError::Unsupported`), `created_identities_of`
+  (the rows of many such identities at once; the default asks
+  `created_identity` for each), `owned_peers` (the peer
+  edges an identity's row declares; default none), `holds_identity_entry`
+  (whether Core holds a member id as an identity entry; default `false`)
+  and `respawn_member_on_own_session` (Core's same-session successor;
+  default a refusal). A host's own wrapper of a session bridge forwards
+  them to the bridge it wraps. The identity runtime no longer calls
+  `created_identities`.
+
+- A held add (`IdentityFirstRuntimeContext::add_member_held`) of a name an
+  identity holds through its row answers
+  `HeldBootstrapRefusal::ExistingContinuity`, as the add of a configured
+  identity that has continuity does. It answered `IdentityStoreOwned`.
+- The list record of an agent with no live member
+  (`GET /console/identities`, `meta/console/list_identities`) carries the
+  label `role` with the agent's profile, unless the agent's declared
+  labels name a role, as the record of a live member carries its role.
+
+- Console: the line of a broken agent, in the roster and in its details,
+  reads "Broken: it may need a respawn or a reset". It said that the agent
+  needs one of the two. An agent created at run time that was refused its
+  seat for a label its host requires needs neither: it runs again once an
+  edit puts the label in its record.
+
+- `meta/instruction_status` shows the fork scope of a record: a member
+  target written for the member and the forks of its fork family (Meerkat's
+  `include_forks`, new in Core 0.9.15) reads `{"kind": "member",
+  "identity": ..., "include_forks": true}`. A record for the member alone
+  reads as before, without the member.
+
+- People who are not administrators no longer see these records on the
+  console timeline, whether this release or an earlier one wrote them:
+  retire, reset, respawn and delete markers of an agent; memory harvest
+  records; the memory steward's conflict signals; the system page's records
+  of quarantined writes, taint transitions and promotions; the failure
+  record of a send that the console's log does not hold (a send made
+  through the SDK, or one made before the console log was replaced); a send
+  to an identity that has no member yet; and an image or memory record that
+  names no session. An administrator sees them all.
+- A spawn's kickoff record (`user_input` with
+  `source_event_type: spawn_initial_message`) is written for `fork_off` and
+  `delegate` only, and carries the child's session as `session_id`.
+  `mob_spawn_member`, `spawn_member` and `spawn_many_members` write none:
+  the new member's first message appears on its timeline from its own
+  session history, as a `user_input` frame of its session. The copy derived
+  from the spawning agent's session history
+  (`session_history_spawn_initial_message`) is no longer written. The call,
+  its arguments and its result stay on the spawning agent's own timeline.
+- A member's memory event that names its session (`session_key`) and a live
+  image record carry that session as `session_id` on their timeline frame.
+- For a person who is not an administrator, a realm's dream history is
+  listed only when access rules allow that person to read the memory of
+  every agent the realm holds memory for. An agent the console no longer
+  knows (for example one retired before a restart) has no role or labels,
+  so an allow rule scoped by role or label does not cover it and the
+  history is withheld while such memory exists; before, that agent was left
+  out of the check. An allow rule with no agent selector, with agents `*`,
+  or naming the agent keeps the history listed.
+- Until a console has read who its runtime's agents are private to (the
+  read runs in the background from the start), and for as long as that read
+  fails, it keeps every caller who is not an administrator apart, a console
+  that can identify nobody included: such a caller is shown no timeline
+  frame stored without member attributes and no memory scope of an agent
+  the console does not know, and attaches no session whose owner the
+  console does not know or that has none. A request made while the first
+  attempt of that read is running waits for it, at most five seconds. A
+  console that serves several runtimes waits for the read of each runtime
+  it serves, while it serves it. Once the read has succeeded, a console
+  that can identify nobody serves its one operator as before, except for
+  what belongs to an agent it now knows as private to a person.
+- The session of an agent that was private to a person is answered as a
+  session that does not exist to everyone but that person and an
+  administrator, also after the agent has ended and also on a console that
+  can identify nobody: the console takes the owner from the labels the
+  session was created with, read through the runtime's session service. A
+  session no agent holds whose owner the console cannot establish (the
+  read fails, or the runtime has no session service, as one made with
+  `MobRuntime::from_handle`) is attached for an administrator only: every
+  other caller is answered "access denied: the session has no established
+  owner" where access rules are enforced, and as for a session that does
+  not exist otherwise. The session of an ordinary agent that ended is
+  attached as before.
+- Three things this release gives up on purpose. The owner of a private
+  side chat no longer sees its lifecycle markers, memory harvest records and
+  the failure records of sends the console's log does not hold.
+  `mob_spawn_member`, `spawn_member` and `spawn_many_members` write no
+  kickoff record. A console that can identify nobody shows no frame stored
+  without member attributes until it has read who its agents are private
+  to.
+
+### Fixed
+
+- An agent created at run time that the mob's start seats before the
+  host's identity runtime is composed is not built from its row alone.
+  That is an agent created with a first message whose first spawn failed
+  or was refused, so it is owed its seat: the start embodies it before the
+  host's customizer can run. Meta's build preparer refuses that build for
+  now, as it does for a wake and a restore, and the composition asks Core
+  once to seat the agents owed their seat
+  (`MobHandle::seat_owed_store_owned_identities`, through the new
+  defaulted `SessionBridge::seat_created_identities_owed_their_seat`). The
+  host's build step then decides each as at any build: an agent whose row
+  lacks a label the customizer sets stays refused its seat and never runs,
+  and every other one is built from the host's inputs (its model, system
+  prompt, instructions, provider parameters, context and tools) as a
+  configured agent is, and its first message runs once. Until the runtime
+  is composed the agent stays owed its seat, and a send to it is refused.
+
+- The same holds on a runtime that learns only when its host completes the
+  bootstrap whether it composes an agent customizer
+  (`UnifiedRuntime::bootstrap` or the `bootstrap_with_*` family over a spec
+  that does not declare one). A mob a killed process left running starts
+  inside `bootstrap`, before the host can install anything, and embodied
+  the seats it owed there: an agent created at run time was built from its
+  row alone, with no comparison of the customizer's labels with its seat's,
+  and ran its first message; a delivery that reached a dormant one before
+  the identity bootstrap built it the same way. Until the host completes
+  the bootstrap the build preparer of such a runtime now refuses every
+  build of such an agent for now, as it does before the identity runtime
+  is composed: a seat stays owed, and a dormant agent stays dormant. An
+  identity bootstrap that finds a customizer has the runtime's first
+  composition seat the agents owed their seat, where the host's build step
+  and its label rule decide; an identity bootstrap that finds none, and
+  `activate_without_identity_context`, settle that the composition has no
+  customizer and ask Core once to seat them from their records (see
+  Upgrade).
+
+- A name an agent holds through its record in the mob's identity store
+  that the host's roster lists too (the host adopted the agent into the
+  store, or its configuration lists a name an agent was created under) is
+  served from the record, as before, and that is no longer silent. The
+  agent's status (`meta/status_identity` and the status lists) carries
+  `roster_listing_superseded: true`, absent for every other agent; the
+  roster pass's result names such agents
+  (`RestoreFlowResult::roster_listings_superseded`); and the gateway logs
+  one warning per name. The roster's entry for the name is still not
+  applied: change the agent through the identity methods, or remove the
+  entry from the roster, which drops the member at the next roster pass.
+
+- An agent created at run time (an identity whose record is its row) is
+  built from the same host inputs as a configured agent on its profile: the
+  model, the system prompt, the additional instructions, the provider
+  parameters and the context the host's customizer sets. Core seats such an
+  identity from its row, so Core now asks Meta's build preparer to compose
+  its seat at every build of its member
+  (`MemberBuildPreparer::prepare_store_owned_seat`), and Meta lowers the
+  customizer's draft onto that seat through the lowering a configured
+  identity's seat is composed with. Every build takes the model and the
+  provider parameters; the first build of the member's session takes the
+  system prompt, the instructions and the context, in the agent's first
+  life and in the fresh life a reset or a delete starts, so the two lives
+  are built from the same inputs. The customizer runs once per build.
+  No build relies on an earlier answer, so a restart changes nothing, and an
+  agent on a profile whose resume mask names the model keeps the host's
+  model after a restart, as a configured one does. Through 0.9.13 such an
+  agent got the customizer's tools only and ran on its profile's own model
+  and prompt. A customizer that fails, or a draft that does not lower,
+  refuses the build retryable, as a failed tool publication does.
+  `SessionBridge::lower_store_owned_seat_build` is the bridge's part of it
+  (defaulted; a bridge that wraps another forwards it).
+
+- An agent's `mob_check_member` and `mob_retire_member` naming a member
+  private to a person the agent does not act for, and the refusal of a
+  private member's `council`, read whom the member is private to from the
+  member's own roster row (its `console.private_to` label). They asked
+  only the running host's record of the members it had started, so
+  through 0.9.13 a private member the host had not started since its
+  launch (seated and never run, or any private member in the moments
+  after a restart) was checked and retired by another agent, and convened
+  a council. The host's record still adds what a roster row cannot say (a
+  member that left the roster).
+- Meerkat's member tools (`member_status`, `retire_member`,
+  `force_cancel_member`) naming a member private to a person the calling
+  agent does not act for read whom the member is private to from the
+  member's own roster row too, and the member lists an agent's tools answer
+  (`mob_list_members`, `list_members`) leave such a member out, with manage
+  scope over the mob too: Meerkat hands Meta's audience the labels the
+  caller and the target carry on their roster rows
+  (`MemberToolAudience::hides`, Breaking in the root changelog) and asks it
+  for every member a list would name. The caller's own person is its
+  roster row's; the host's record speaks for a caller only when it has no
+  row, and for a target whenever its row names nobody.
+- On the Console, the reads and changes of the mob's agents
+  (`meta/identity/get`, `list`, `directory`, `plan` and every change)
+  decide what the caller may view on the agent's own record: its profile
+  as its role, and its labels. A rule of the access configuration that
+  names a role or labels, and the rule about an agent private to a person,
+  hold for an agent no member is seated for (an archived agent, and one
+  whose seat is owed) as they hold for a seated one. The peers and the
+  asker a read names, and the peers a change names, are decided the same
+  way, and an agent whose record cannot be read is not shown.
+- An update of an agent's labels (`meta/identity/update`, `set.labels` and
+  `set.labels_remove`) lets a reserved label the agent carries stay when
+  the update does not name it. An agent that was adopted with a label its
+  configuration gave it (one of Meta's own, or one the identity policy
+  reserves) takes an update of its other labels; it was refused
+  `reserved_key`. An update that would change or remove a reserved label
+  is refused `reserved_key` at `set.labels`, and the removal of one of
+  Meta's own labels at `set.labels_remove`.
+
+- The first build of an identity created at run time carries the host
+  customizer's tools: the member Core starts at the create to run the
+  identity's first message, and the member Core wakes before a roster pass
+  or a door named the identity. Core asks Meta's build preparer before
+  both, Meta's spawn customizer attaches the identity's tool dispatcher to
+  each build of a member Core holds as an identity entry, and the build
+  preparer publishes the host customizer's tools into it. Through 0.9.13
+  such a build offered none of them until the member's next build.
+
+- A member of an identity whose record is its row is resolved to its
+  identity wherever Meta asks which identity a member is. Meta read the
+  `agent_identity` spawn label for that, which Core does not put on the
+  seat of such an identity (its seat carries its row's labels), so several
+  reads missed it: its deliveries ran but its completion cursor never
+  moved (`meta/wait_for_completion` ended `timed_out`), the console did not
+  attribute its member's records to it, and a side chat or a control
+  target on it resolved through the member alias only. One resolver now
+  answers all of them: the label when the member has one, else, for a
+  member Core holds as an identity entry, the identity its member id
+  encodes. A member with the label resolves exactly as before, and a plain
+  worker still resolves to no identity.
+
+- The console joins the live roster row of an agent whose record is its
+  row to its durable identity record. It took a live row for the record's
+  member only when the row carried the `agent_identity` label, which such
+  an agent's seat does not, so the console listed the agent twice in the
+  identities list, and inspecting it, retiring it or sending to it from
+  the console was refused with "stale durable identity alias" (since
+  0.9.13, for an agent a host created through Core or adopted into the
+  store). The row is now matched by Core's member id, which the durable
+  record carries, for every agent alike.
+
+- The console experience read labels an agent by its registration's
+  display name when it has one, else by its name: the roster, the sidebar
+  and the topology node read the same answer the identities listing gives.
+  An agent whose record is its row was labelled by its name even after its
+  row got a display name, because the label was read from its seat's
+  labels, which do not carry one. The label now follows an update of the
+  row as soon as the registration follows it, with no restart. A configured
+  agent's label is unchanged where its seat label and its registration
+  agree; where they differ, the registration's display name is shown.
+
+- A member of an identity whose record is its row acts as that identity
+  for the extension state (the `extension-state` feature): its session
+  resolves the agent principal of its name, as a configured identity's
+  member does. It resolved no principal.
+
+- The lifecycle side effects of an identity whose record is its row run as
+  a configured identity's: a reset and a delete note the old session's
+  boundary for agent memory, and a retirement's hooks name the member.
+  They were skipped, because the member carried no mark of an
+  identity-first spawn.
+
+- The memory steward's mob context lists an agent created at run time
+  while it is a member of the mob (not archived, not removed), by its name
+  and its profile only; it listed none. Nothing else of such an agent
+  enters a steward prompt (its labels, display name, context, instructions
+  and first message), and the mob's purpose is read from the host's roster
+  only, never from a created agent's `purpose` or `mob_purpose` label.
+
+- An archive or a removal of an agent whose record is its row in the mob's
+  identity store (one created at run time) owes that agent what leaving the
+  roster owes a configured agent: the harvest of the compactions its last
+  session holds, that session's distillation, an exit interview and the
+  host's retirement hook, which hears the cause `unlisted`. They run from
+  Core's member lifecycle journal, as every lifecycle side effect does:
+  right after the member's retirement ended, at least once, and at the next
+  start when the gateway stopped before they ran (over a durable metadata
+  store). Before, such an agent's last conversation was kept and never
+  harvested or distilled, no exit interview was queued and the hook never
+  heard of it. A removal of an archived agent retires no member and owes
+  nothing more. No order is promised between these side effects and the
+  answer of the change that owes them.
+
+- An agent whose record is its row in the mob's identity store (one created
+  at run time) is a durable identity to every check and copy the gateway
+  keeps for its long-term agents, on any profile. With this release's Core,
+  such an agent's seat is recorded durable whether or not its profile
+  declares `durable = true`, so, as for a configured agent: the start's
+  check of a state directory counts the agent once its conversation exists
+  and refuses a start whose `runtime.sqlite` no longer holds any session;
+  the storage census of the members' comms identities names it when it is
+  restored without its key pair; the continuity mirror
+  (`UnifiedRuntimeBuilder::continuity_mirror`) carries its record and its
+  session; `storage-migrate-native` lists it among a directory's
+  identities; and the launch's WorkGraph resume gate is asked before an
+  interrupted run of it resumes. Before, each of these covered such an
+  agent only on a `durable = true` profile. An agent seated by an earlier
+  build, or adopted into the store from a plain member, gets them from its
+  next seat: a reset, an unarchive, a seat a start owes, or a respawn
+  (`meta/respawn`), which keeps its conversation.
+- `meta/access/preview` on a Console that serves other runtimes reads
+  those runtimes' agents before it decides, as the call it previews does.
+
+- A gateway started with `runtime_options.member_comms_address` (the
+  TypeScript builder's `memberCommsTcp`) serves one member, and now refuses
+  every other member before anything is built: `meta/ensure_member`, a
+  helper or a fork helper, a durable fork, an agent's spawn tool or
+  `delegate`, a member of a child mob, a declared roster member at its first
+  build. The members of such a gateway load one comms key, and a mob admits a
+  comms key for one member; the gateway holds that across every mob it hosts
+  (its own mob and the child mobs its members create), and the same holds
+  when the members' own `[comms]` table sets `mode = "tcp"` or `"uds"`. The
+  refusal is a session error that
+  names the refused member only ("member '<name>' cannot be created: this
+  gateway's members run on socket comms (member_comms_address, or [comms]
+  mode tcp or uds), which serve one member per gateway, and another member of
+  this gateway already holds its comms key. Retire that member first, or run
+  the members on in-process comms."). The refused member is not built, binds
+  no socket and is not recorded; the member that holds the place keeps its
+  endpoint; nothing in this fails a gateway start, and the gateway warns once
+  at its start when the option is set and the roster declares more than one
+  member. Retiring the holder frees the place, and an ensured member, a
+  helper or a fork is then built by asking
+  again. A declared roster member that was refused is listed broken with that
+  text and stays so: once the place is free, `meta/delete_identity` starts it
+  over (it never ran, so nothing is lost). A member built in an earlier start
+  and refused at its restore keeps its session and history and runs again at
+  the next start where it can. Through 0.9.14 such a member was refused only
+  after it was built. `docs/reference/configuration.mdx` ("Member socket
+  option") has the rule and what brings each kind of member back.
+
+- The SDK helper `wire_cross_mob` (Python `MobHandle.wire_cross_mob`,
+  TypeScript `MobHandle.wireCrossMob`) wires two members of two mobs so
+  that each can send the other ordinary peer messages, between two gateways
+  (two processes: every SDK runtime starts its own) and between two mobs
+  one process hosts. Through 0.9.14 it wired nothing. Every Meta release
+  since 0.9.9 is affected; earlier releases were not checked. There were
+  two causes:
+  - The helper passed no key, and `meta/cross_mob/peer_info` reported none
+    and only an in-process address. The first `meta/cross_mob/wire_local`
+    was refused with `external peer descriptor is invalid:
+    TrustedPeerDescriptor.pubkey must be non-zero`. The helper now wires
+    each side by the other member's `dialable_address` and `pubkey_b64`
+    when both gateways report a dialable address (give the members of both
+    a socket endpoint: `member_comms_tcp()` / `memberCommsTcp()`).
+    Otherwise it wires by the in-process address with no key, and
+    `wire_local` takes the key of a live member of another mob in its own
+    process from that member's registration.
+  - Between two mobs of one process, a caller that did supply each member's
+    key got both wires accepted and every send refused with
+    `peer_not_found_or_not_trusted`: only the managed topology's wire
+    (`meta/topology/apply`) installed the route by which one mob's
+    namespace reaches a member of the other; `meta/cross_mob/wire_local`
+    and `meta/cross_mob/wire` installed none. `wire_local`
+    (`UnifiedRuntime::wire_local`, stdio and console
+    RPC) now installs that route with the trust, and `unwire_local` removes
+    both, the route once no member of the mob is still wired to that peer.
+    A failed wire takes back exactly the route it installed.
+
+  A mob that was not wired gets no route: sends between its members and
+  either wired mob are still refused. `wire_local` refuses, with nothing
+  changed, a peer id or key that the named live member of its process does
+  not have (`inproc alias error`), and refuses in plain words a keyless
+  in-process wire to a member that no mob of its process has (`peer spec
+  error: ... is not a live member of a mob in this process ...`), which is
+  what a helper call between two gateways without member socket endpoints
+  now answers. A keyed in-process wire to such a member is accepted as
+  before. The helper docstring and the SDK guides no longer tell a
+  cross-process caller to pass the gateway key of `peer_pubkey`: a
+  descriptor carries the member's key from `peer_info`.
+
+  Wiring a pair again is safe. The identical edge is accepted and changes
+  nothing; a same-process route that is already there is re-pointed at
+  the member's inbox of now. A wire is never replaced:
+  `wire_local` on a member that is already wired to that peer name with
+  another endpoint (another address, or another key after a respawn) is
+  refused in plain words before anything is installed (`peer spec error:
+  ... is already wired to ... with another endpoint ...: unwire both
+  sides first ...`). Through 0.9.14 that call answered `mob error:
+  invalid state transition: Running -> Running`. `unwire_local` removes
+  the same-process route with the trust also when the caller names the
+  peer id of another incarnation of the member, and also a route the
+  managed topology's wire installed, once no member of the mob is
+  still wired to that peer. A keyless in-process wire to a member of the
+  caller's own mob is refused in plain words, and a wire is refused when
+  the local mob already holds that key. The keyless refusal for a member
+  no mob of the process has live also says what to do when the process
+  hosts it and it is not running (pass its key from `peer_info`).
+
+  Between two mobs of one process, an edge both mobs hold keeps working
+  when a runtime is stopped and built again over its state, with no second
+  wire: a peer message to a member that is not built is handed to that
+  member's own mob, which builds it and delivers, or refuses with its own
+  typed answer (a mob stopped through its handle refuses, and builds
+  nobody; a mob its runtime stopped for teardown holds no edge any more,
+  and the send is answered `peer_not_found_or_not_trusted`). The route to
+  the member's inbox is installed once its mob answered ready. A member
+  released to rest while its runtime keeps running is reached the same
+  way: the other mob's route to its inbox goes when the member is
+  released, and the other mob's next peer message builds the member again
+  and is delivered. A member that is built when its mob is stopped through
+  its handle still accepts the other mob's peer message and is handed it
+  once, when the mob resumes; a peer send from inside the stopped mob's
+  own namespace is refused (`mob_not_running`), and so is any send that
+  would have to build a member of the stopped mob. A wake is
+  forwarded only for an edge BOTH mobs hold in their state, each naming
+  the other member by its key, and only for a send of the member that
+  holds it. An edge only one mob holds, an edge one side unwired, another
+  sender or another key wake nobody, and the sender gets
+  `peer_not_found_or_not_trusted`. Only ordinary peer messages and
+  requests wake a member this way: a silent lifecycle notice to a member
+  of another mob that is not built is answered as before (not found).
+
+  Sends over an in-process `meta/cross_mob/wire` edge
+  (`UnifiedRuntime::wire_cross_mob` between two mobs of one process) were
+  refused `peer_not_found_or_not_trusted` through 0.9.14: that wire
+  recorded the edge in both mobs' state and installed no route. Such an
+  edge now delivers from the wire on, and builds the recipient when it is
+  not built. This holds for an edge an earlier release recorded too: it
+  starts to deliver at the first send after the upgrade, with no new wire
+  (see Upgrade). An unwire of either kind takes the edge's routes with it:
+  after `meta/cross_mob/unwire` neither mob routes the other mob's member,
+  and a later one-sided wire reaches nobody. `meta/cross_mob/wire` and the
+  managed topology's wire refuse, with nothing changed, a member of the
+  other mob whose key a member of the wiring mob is seated under, as
+  `wire_local` does (`inproc alias error: ... already holds that key under
+  another name ...`, naming the mob that holds it).
+
+  The
+  in-process form with the member's key (`remote_pubkey_b64` from
+  `peer_info`) wires a member that is not built; that wire builds nobody.
+  A runtime that shuts down takes the routes of its edges to the other
+  mobs' members, and theirs to its members, with it; through
+  0.9.14 they stayed and led to inboxes that were gone (a send was
+  answered `peer_admission_dropped ... classification_rejected`). What a
+  runtime holds is read from its mob's state once when it starts (one
+  member listing, one row for each member wired to a member of another
+  mob; nobody is built).
+
+  On the Console, `meta/cross_mob/wire_local` resolves a member of
+  another mob of its process (the route, the member's key) only for an
+  access admin, a subject the access configuration's `admins` names (and
+  for every caller of a Console assembled with no access controller at
+  all). For any other caller (the action `runtime.admin` can be granted to
+  one) the wire reads nothing of another mob and installs no route: such
+  a member gets the answer of a name no mob has. An edge that caller
+  wires with the member's key is an edge of the mob's state like any
+  other: it delivers once the other mob holds it too, as above. On a
+  Console with an access controller and no admins configured, the
+  same-process route at wire time is available through the host RPC
+  only. The two new `peer_info` fields are answered on the stdio RPC;
+  the Console's `peer_info` is unchanged.
+
+- On Linux, a runtime that starts in a process whose previous runtime on the
+  same state directory is still alive (shut down, its handles still in
+  scope) could miss another process that holds the directory's runtime
+  custody, and start beside it. For such a start the custody check reads
+  the kernel's lock table (`/proc/locks`) to see whether anyone but this
+  process holds `runtime.sqlite.execution-custody`, and it decided from one
+  read. The kernel hands that table out at most a page per read call and
+  resumes by position, so when the table takes more than one read call and
+  a lock elsewhere on the host is released between two calls, one entry
+  drops out of the read; when that entry was the other holder's, the check
+  answered that there was none. It took both at once: such a same-process
+  start, and a holder that does not run this check itself (a release before
+  0.9.4, or a Core-only tool on the directory). Under heavy file-lock churn
+  on the host a read could miss a held lock; on a quiet host it did not.
+  Meta 0.9.4 through 0.9.14. The check now reads the table up to three
+  times, each read split at other entries, and refuses the start as soon as
+  any read names another holder; it admits the start only when no read
+  does. That makes a miss far less likely, not impossible: after a read
+  that missed, the next read named the holder in every measured case. Where
+  the table names no holder at all (macOS, Windows, and on Linux btrfs
+  subvolumes and overlayfs, the 0.9.4 known limitation), nothing changes.
+
 ### Known limitations
 
 - A `requester` does not combine with `idempotency_key` (a keyed send is a
@@ -143,6 +1700,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   setters and Core's `TurnRequester::with_origin`: the embedding host is
   trusted for them by convention. They are not reachable from any wire door
   other than `meta/send` on the host route.
+
+- An update cannot hand an agent's runtime mode back to its profile: to
+  change how such an agent runs, set the other explicit value
+  (`autonomous_host` or `turn_driven`); clearing an override is not offered
+  in this release.
+- Schedules of an archived agent: Meta's own doors (the agents' schedule
+  tools, the Console) point no schedule at an archived agent. Meerkat's own
+  schedule methods (`schedule/create`, `schedule/update`, REST) do not judge
+  the target, and neither does a schedule tool call for a target that names
+  only a session: such a schedule for an archived agent is active and each
+  of its fires is refused at the delivery (one that names only the session
+  ends each fire as a missing target instead: `misfired`, failure class
+  `target_missing`, under the default missing-target policy; `skipped` for
+  a schedule created with `skip`). A schedule that names only a
+  session and is created while the session's agent is archived is active
+  the same way; a later archive of the agent is followed. An agent's
+  schedule tool call
+  that reads its target just before the target's archive and writes just
+  after it can leave an active schedule the same way (the Console's create
+  closes that window). A change of a paused schedule's target through
+  Meerkat's own methods (its prompt, for one) makes its pause a pause by
+  name: the agent's unarchive does not resume it.
+- A schedule that names only the session of a removed agent is not ended
+  by the removal: it stays active, each of its fires is refused as a
+  missing target and no turn runs. End it by hand.
+- A hold of the agents' changes (`meta/identity/changes_hold`) does not
+  survive a restart of the host. After a restart, a deploy or a crash the
+  changes are carried out again until the hold is set again: a host that
+  means to keep them held sets the hold as soon as its start has answered,
+  before it serves callers. The start itself is not held: what a launch
+  carries out before the host's call (a held change that was approved, a
+  change asked by an agent a schedule wakes) is carried out.
+
+- `meta/set_instruction` cannot write a record for a member and its forks:
+  it writes for the member alone and refuses a target that carries
+  `include_forks`. `meta/instruction_status` shows the scope of a record
+  written elsewhere. A Rust host that embeds Meta sets the scope through
+  the mob handle's `set_operator_instruction`.
+- A change of the row of an agent no member is seated for that a host
+  writes through the runtime's own mob handle, past `meta/identity/*`, is
+  decided on by the Console at the latest 20 seconds after it.
+- The SSE routers a host builds itself without a runtime
+  (`agent_events_sse_router`, `mob_events_sse_router` and their
+  `_with_access` forms) decide on the agent attributes the host records in
+  the access controller it passes: they read no roster and no agent
+  record.
+
+- An agent whose instructions were edited while the gateway was down, whose
+  conversation was built through 0.9.14 and that has no instruction record
+  yet, may keep the text of its first prompt until the running gateway
+  observes a change of it (a roster refresh with other text, an update) or
+  its conversation is rebuilt: such a conversation may not record the
+  sections it was built with. A conversation built after 0.9.14
+  does, and the change is recorded after the gateway's next start (for a
+  configured agent when the gateway registers it; for an agent created at
+  run time at its first delivery or change), with one exception: an edit
+  that only removes sections from the
+  end of the text, or removes all of them, is not seen then for an agent
+  with no instruction record yet (the sections a conversation was built
+  with also hold what the host's build customizer and the agent's memory
+  added after the agent's own, so a text they start with reads as
+  unchanged). Make such an edit while the gateway runs, or reset the
+  agent.
+
+- A change of the instructions of an agent created at run time that was
+  made while the gateway was down is recorded at the agent's first delivery
+  through the gateway or first change after the start, not by the start: a
+  run the mob starts itself with no such delivery before it (the fire of a
+  schedule whose target is the agent's session is one; the fire of a
+  schedule whose target is the agent itself, as a member or by its
+  identity, is a delivery) runs on the
+  instructions the agent's conversation holds.
+
+- `meta_gateway`, `rpc_gateway`: retiring a member that the socket rule
+  refused at a start, or that a start lists broken because the gateway's
+  records hold it on a comms key another member holds, answers an error; the
+  member shows retiring and its name stays taken until the gateway restarts,
+  and the restart completes the retirement. A gateway lifts its mob at every
+  start, and the retire of such a member after a lift ends this way. Retire
+  the member, then restart the gateway.
+
+- A wire between members of two gateways survives a gateway restart on
+  persistent state only when each wired member's `dialable_address` is the
+  same after the restart. With the default member address (port `0`, a
+  port the system picks at each start: `member_comms_tcp()`,
+  `memberCommsTcp()`) a restarted member binds another port, is restored
+  `broken`, and its wires are dead; give a mob with persistent state a
+  fixed member address. To wire such a member again: `respawn_member` it
+  (it comes back active with its new address, on a fresh session),
+  `unwire_local` on both gateways, each with the other member's current
+  `peer_info`, then `wire_cross_mob` again.
+- With member socket endpoints, run one member per gateway today.
+- Between two mobs of one process, with the managed topology: after a
+  member is released to rest and built again by its own mob, a managed
+  connection from another mob to it reads as not active (the Console shows
+  it degraded and offers Reconnect, and a plain Connect answers that a
+  reconnect is required) until the other mob next sends to it or the
+  connection is applied again. A send from the other mob in that window
+  is delivered; a send by the rebuilt member's own mob does not change
+  the reading. If a Connect or Reconnect on that connection fails while
+  it reads as not active, both of its halves are unwired, and the two
+  members cannot message each other until the next apply that succeeds
+  (the connection stays desired).
+
+- Memory panel: for a realm's dream history, a deny scoped by role or label
+  that applies to the caller is treated as matching an agent the console
+  does not know.
+- Console: the last-activity time shown for an agent name is kept per name,
+  not per agent that held it. A later release decides it with the frame
+  rule.
+- Gating: an audit entry or pending request is decided by the agent that
+  holds the name of its origin now. Only a host supplies an entry's origin.
 
 ## [0.9.14] - 2026-11-11
 

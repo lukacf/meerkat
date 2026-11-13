@@ -6,6 +6,8 @@ mod tool_application_projection;
 
 #[cfg(test)]
 mod assistant_message_identity_tests;
+#[cfg(test)]
+mod conflict_signal_replay_tests;
 mod delta_compaction;
 #[cfg(test)]
 mod delta_compaction_tests;
@@ -196,7 +198,23 @@ type NoticeObservationCache =
 type StatusUnknownRedrives =
     BTreeMap<(uuid::Uuid, String, String, String), tokio::sync::oneshot::Sender<()>>;
 
+/// Which console aggregator a value names among the aggregators of this
+/// process: one per registry of served runtimes (a policy view has its own).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ConsoleAggregatorId(u64);
+
+impl ConsoleAggregatorId {
+    /// The id of a new aggregator: each call answers one no aggregator
+    /// holds.
+    pub(crate) fn mint() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 struct AggregatorInner {
+    /// Which aggregator this is ([`MetaConsoleAggregator::id`]).
+    id: ConsoleAggregatorId,
     /// Policy views share one canonical projector and publish to its broadcaster.
     projection_owner: Option<Arc<AggregatorInner>>,
     store: Arc<dyn ConsoleLogStore>,
@@ -711,11 +729,15 @@ async fn member_provenance_for_identity(
     if crate::console_contracts::is_runtime_plane_identity(identity) {
         return None;
     }
-    // A witness belongs to the incarnation that wrote the frame, and only the
-    // frame's session names it. A frame that names no session records none,
-    // and is decided as uncaptured: a member live under the identity now, a
-    // retained witness and the durable search could all be another member
-    // under the same identity than the one that wrote it.
+    // A witness belongs to the incarnation the frame is about, and only what
+    // the frame itself names can say which incarnation that is. A frame that
+    // names a session is witnessed by that session's member only: a member
+    // live under the identity now, a retained witness and the durable search
+    // could all be another member under the same identity. A frame that
+    // names no session is never witnessed through its identity: the member
+    // that holds the identity when the frame is written or projected (a
+    // first projection, a replay at a registration or after a lag) can be
+    // another member than the one the record is about.
     let session_id = session_id?;
     let key = (
         entry.runtime_key.clone(),
@@ -746,6 +768,163 @@ async fn member_provenance_for_identity(
     // A missing live member still needs its durable policy witness. Cache only
     // a verified log prefix, never the absence of the member itself.
     recover_member_provenance(inner, entry, identity, Some(session_id), key).await
+}
+
+/// The witness of the member a console send is addressed to, for a send to a
+/// member that has no session yet: the identity's own member, captured from
+/// its row on the roster of `entry`'s own mob while the send is reserved.
+/// That is the member the send path resolved and delivers to, the row whose
+/// member id is the identity ([`row_names_itself`]). Any other row is
+/// another member, also when it carries the identity as its
+/// `agent_identity` label, or sits under the same member id in a mob the
+/// runtime's agents made: it is never the witness. Only the send path reads
+/// it, inside the request that was authorized against that member. No
+/// projection of a retained or stored record does: by then another member
+/// can hold the identity. `None` when the identity holds no row of its own:
+/// the send is then stored with no member witness.
+async fn member_witness_at_send(
+    inner: &AggregatorInner,
+    entry: &RuntimeEntry,
+    identity: &str,
+) -> Option<ConsoleFrameMemberProvenance> {
+    for resolved in Box::pin(primary_member_sources(entry)).await {
+        if !row_names_itself(&resolved) {
+            continue;
+        }
+        let Some(record) = identity_record_for_resolved_member(&resolved).await else {
+            continue;
+        };
+        if record.identity == identity {
+            return Some(Box::pin(capture_member_provenance(inner, &resolved, &record)).await);
+        }
+    }
+    None
+}
+
+/// Whether a roster row is listed under its own member id: it carries no
+/// `agent_identity` label, or the label names the member id itself (as
+/// every identity-first spawn writes it). A row whose label names something
+/// else is listed under that name, and is not the member a send to that
+/// name is made to.
+fn row_names_itself(resolved: &ResolvedConsoleMember) -> bool {
+    crate::member_comms_id::durable_identity_label(&resolved.member.labels).is_none_or(|label| {
+        crate::member_comms_id::live_member_is_identity(
+            resolved.member.agent_identity.as_str(),
+            label,
+        )
+    })
+}
+
+/// The witness of a member frame, by what the frame itself names: the member
+/// of the session it names, or, for a frame that names no session and names
+/// a console send (its interaction), the witness stored on that send's own
+/// frame. A frame that names neither has none. `registry` holds the runtime
+/// entries and the per-session witnesses, `log` the frames; nothing here
+/// reads a member by its identity alone.
+async fn witness_named_by_frame(
+    registry: &AggregatorInner,
+    log: &dyn ConsoleLogStore,
+    entry: &RuntimeEntry,
+    frame: &NewConsoleFrame,
+    refresh: bool,
+) -> Option<ConsoleFrameMemberProvenance> {
+    if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
+        return None;
+    }
+    if let Some(session_id) = frame.session_id.as_deref() {
+        return member_provenance_for_identity(
+            registry,
+            entry,
+            &frame.identity,
+            Some(session_id),
+            refresh,
+        )
+        .await;
+    }
+    // A send's interaction id is its own (derived from its dedupe key), so
+    // the send's frame is the record of the member that send was made to.
+    let interaction_id = frame.interaction_id.as_deref()?;
+    let send = log.send_frame_by_interaction(interaction_id).await.ok()??;
+    if send.runtime_key != frame.runtime_key || send.identity != frame.identity {
+        return None;
+    }
+    send.source.member_provenance
+}
+
+/// What the writer of a frame says about the frame's member witness, at the
+/// frame store call ([`append_frame`]). A writer cannot leave it unsaid.
+pub(crate) enum FrameWitness {
+    /// The member's attributes, captured for this frame.
+    Member(Box<ConsoleFrameMemberProvenance>),
+    /// The frame is stored with no member witness. A member's frame stored
+    /// so is shown to an administrator only by every timeline surface
+    /// ([`crate::access::AccessView::can_view_uncaptured_member`]). A
+    /// runtime-plane frame ([`NoMemberReason::RuntimePlane`]) is no
+    /// member's: every caller who may view its runtime-plane identity reads
+    /// it, whatever its payload names, except a record that carries text
+    /// written from memory records
+    /// ([`crate::memory::events::carries_record_text_with_no_member`]),
+    /// which is decided as a member's frame with no witness.
+    NoMember(NoMemberReason),
+}
+
+/// Why a frame is stored with no member witness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoMemberReason {
+    /// The runtime's own frame, under one of its runtime-plane identities.
+    RuntimePlane,
+    /// No runtime is registered for the frame, so nothing can say whose it
+    /// is.
+    NoRuntimeRegistered,
+    /// Nothing the frame names leads to a member: it names no session and no
+    /// console send, or no member is live under the session it names and no
+    /// earlier frame of that session holds a witness, or the send it names
+    /// has no stored frame with one.
+    NoSuchMember,
+    /// The frame continues a stored frame that has no witness (its update
+    /// marker, a reply kept for it).
+    SourceFrameHasNone,
+}
+
+impl FrameWitness {
+    /// The witness of a frame that continues a stored one: the stored
+    /// frame's own.
+    pub(crate) fn of_source_frame(provenance: Option<&ConsoleFrameMemberProvenance>) -> Self {
+        match provenance {
+            Some(provenance) => Self::Member(Box::new(provenance.clone())),
+            None => Self::NoMember(NoMemberReason::SourceFrameHasNone),
+        }
+    }
+
+    /// The witness a capture for a member frame ended with.
+    fn of_capture(provenance: Option<ConsoleFrameMemberProvenance>) -> Self {
+        match provenance {
+            Some(provenance) => Self::Member(Box::new(provenance)),
+            None => Self::NoMember(NoMemberReason::NoSuchMember),
+        }
+    }
+}
+
+/// The one capture of a frame's witness, for every frame whose writer did
+/// not capture its member itself: the member the frame's session names, or
+/// the witness of the console send the frame names
+/// ([`witness_named_by_frame`]).
+async fn capture_frame_witness(inner: &AggregatorInner, frame: &NewConsoleFrame) -> FrameWitness {
+    if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
+        return FrameWitness::NoMember(NoMemberReason::RuntimePlane);
+    }
+    let owner = inner.projection_owner.as_deref().unwrap_or(inner);
+    let entry = owner
+        .runtimes
+        .read()
+        .ok()
+        .and_then(|entries| entries.get(&frame.runtime_key).cloned());
+    let Some(entry) = entry else {
+        return FrameWitness::NoMember(NoMemberReason::NoRuntimeRegistered);
+    };
+    FrameWitness::of_capture(
+        witness_named_by_frame(owner, inner.store.as_ref(), &entry, frame, false).await,
+    )
 }
 
 async fn recover_member_provenance(
@@ -997,6 +1176,7 @@ impl MetaConsoleAggregator {
         let (event_tx, _) = broadcast::channel(TIMELINE_CHANNEL_CAP);
         Self {
             inner: Arc::new(AggregatorInner {
+                id: ConsoleAggregatorId::mint(),
                 projection_owner: None,
                 store,
                 runtimes: RwLock::new(BTreeMap::new()),
@@ -1090,6 +1270,7 @@ impl MetaConsoleAggregator {
             .collect();
         let view = Self {
             inner: Arc::new(AggregatorInner {
+                id: ConsoleAggregatorId::mint(),
                 projection_owner: Some(owner.clone()),
                 store: owner.store.clone(),
                 runtimes: RwLock::new(runtimes),
@@ -1275,6 +1456,12 @@ impl MetaConsoleAggregator {
             console_events,
             visibility_policy,
         });
+    }
+
+    /// Which aggregator this is: what a console's reading of the runtimes
+    /// this aggregator serves is recorded under.
+    pub(crate) fn id(&self) -> ConsoleAggregatorId {
+        self.inner.id
     }
 
     pub(crate) fn panel_runtimes(&self) -> ConsoleLogResult<Vec<ConsolePanelRuntime>> {
@@ -3009,10 +3196,14 @@ impl MetaConsoleAggregator {
         // live completion event then keyed the `{identity}:{generation}`
         // conversation while the durable conversation - the one the console
         // UI renders - showed only this user_input frame.
-        let durable_identity =
-            crate::member_comms_id::durable_identity_label(&resolved.member.labels)
-                .unwrap_or(resolved.runtime_identity.as_str())
-                .to_string();
+        let durable_identity = crate::member_comms_id::resolve_member_identity(
+            &resolved.handle,
+            &resolved.member.agent_identity,
+            &resolved.member.labels,
+        )
+        .as_deref()
+        .unwrap_or(resolved.runtime_identity.as_str())
+        .to_string();
         resolved
             .entry
             .console_events
@@ -3074,7 +3265,8 @@ impl MetaConsoleAggregator {
         let _ = SendState::Requested
             .apply(SendTransition::PersistAccepted)
             .map_err(ConsoleSendError::State)?;
-        let outcome = append_frame(&self.inner, new_frame)
+        let witness = FrameWitness::of_capture(new_frame.source.member_provenance.take());
+        let outcome = append_frame(&self.inner, new_frame, witness)
             .await
             .map_err(ConsoleSendError::Log)?;
         if outcome.disposition == AppendDisposition::Existing {
@@ -3625,11 +3817,23 @@ impl MetaConsoleAggregator {
             .read()
             .ok()
             .and_then(|entries| entries.get(&runtime_key).cloned());
-        let provenance = if let Some(entry) = entry {
-            member_provenance_for_identity(owner, &entry, &request.identity, session_id, false)
+        let provenance = match (entry, session_id) {
+            (Some(entry), Some(session_id)) => {
+                member_provenance_for_identity(
+                    owner,
+                    &entry,
+                    &request.identity,
+                    Some(session_id),
+                    false,
+                )
                 .await
-        } else {
-            None
+            }
+            // A send to a member that has no session yet (seated and not
+            // woken): the member the send is made to is captured here, at
+            // the send, so the frame is never judged later by whoever holds
+            // the identity then.
+            (Some(entry), None) => member_witness_at_send(owner, &entry, &request.identity).await,
+            (None, _) => None,
         };
         let thread = scope
             .is_scoped()
@@ -3665,7 +3869,8 @@ impl MetaConsoleAggregator {
         if governed && let Some(payload) = new_frame.payload.as_object_mut() {
             payload.insert(GOVERNED_SEND_FIELD.to_string(), Value::Bool(true));
         }
-        let outcome = append_frame(&self.inner, new_frame)
+        let witness = FrameWitness::of_capture(new_frame.source.member_provenance.take());
+        let outcome = append_frame(&self.inner, new_frame, witness)
             .await
             .map_err(ConsoleSendError::Log)?;
         if outcome.disposition == AppendDisposition::Existing {
@@ -4540,16 +4745,21 @@ fn stale_durable_session_mismatch<'a>(
     })
 }
 
-/// Whether a live roster row is the bridge-authorized realization of a
-/// durable identity binding.
+/// Whether a live roster row is the realization of a durable identity
+/// binding.
 ///
-/// Session-backed identities use their generated `rt:<identity>:<generation>`
-/// alias directly. External peer bindings are intentionally different: the
-/// Meerkat bridge gives the peer a stable durable roster name and records the
-/// durable owner in the runtime-authoritative `agent_identity` label. Raw
-/// member creation cannot supply that label, so accepting this exact mapping
-/// preserves stale-generation fencing without mistaking the external member
-/// for an unrelated raw alias.
+/// The durable record names the generated binding
+/// (`rt:<identity>:<generation>`), and since the roster lowering the roster
+/// row of that binding is named by the bare identity. The row is the
+/// binding's when its roster id is Core's member id of the binding, which
+/// the durable record carries ([`ConsoleIdentityRecord::member_id`], from
+/// the identity runtime's status). No label is asked: a record has no mob to
+/// ask, a roster id names one member, and Core's own member id of the
+/// binding says which. So an identity whose record is its row in the mob's
+/// identity store, seated with no `agent_identity` label, is realized by its
+/// roster row as a labelled one is, and a row of another member is never
+/// the binding's, whatever label it carries: stale-generation fencing
+/// stands, and an unrelated raw alias is not mistaken for the member.
 fn live_record_realizes_durable_binding(
     durable: &ConsoleIdentityRecord,
     live: &ConsoleIdentityRecord,
@@ -4560,12 +4770,10 @@ fn live_record_realizes_durable_binding(
     if live.runtime_member_id == durable.runtime_member_id {
         return true;
     }
-    // The row named by the identity realizes the binding. This already intended
-    // that, but compared an ENCODED roster member id against a decoded label
-    // value, so it never matched once the roster row became the encoded durable
-    // identity. Decode before comparing.
-    crate::member_comms_id::durable_identity_label(&live.labels).is_some_and(|identity| {
-        crate::member_comms_id::live_member_is_identity(&live.runtime_member_id, identity)
+    // A live record carries the public alias of its roster id; Core's member
+    // id is the roster id itself.
+    durable.member_id.as_deref().is_some_and(|member_id| {
+        crate::member_comms_id::mob_member_id_str(&live.runtime_member_id) == member_id
     })
 }
 
@@ -4767,31 +4975,43 @@ fn explicit_identity_query_needs_session_history_backfill(frames: &[ConsoleFrame
 fn dedupe_identity_records(records: Vec<ConsoleIdentityRecord>) -> Vec<ConsoleIdentityRecord> {
     // Since the roster lowering a live roster row's member id is its bare
     // durable identity, while the identity's durable row names the generated
-    // binding `rt:{identity}:{generation}`. Decode before comparing, as
-    // `live_record_realizes_durable_binding` does: a roster row named by its
-    // identity realizes the one generated binding of that identity in the
-    // same runtime, source mob and session, and lists under that binding's
-    // public alias. Different generations never merge.
+    // binding `rt:{identity}:{generation}`. As
+    // `live_record_realizes_durable_binding` does, a roster row is joined to
+    // the binding by Core's member id of it, which the durable row carries:
+    // the roster row with that id realizes the one generated binding of its
+    // identity in the same runtime, source mob and session, and lists under
+    // that binding's public alias. No label is asked, so the roster row of
+    // an identity whose record is its row in the mob's identity store
+    // (seated with no `agent_identity` label) lists once too. Different
+    // generations never merge.
     let mut bindings: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for record in &records {
-        if let Some(identity) =
-            crate::member_comms_id::durable_identity_from_runtime_alias(&record.runtime_member_id)
+        if crate::member_comms_id::durable_identity_from_runtime_alias(&record.runtime_member_id)
+            .is_some()
+            && let Some(member_id) = record.member_id.as_deref()
         {
             bindings
-                .entry(identity_record_dedupe_key(record, &identity))
+                .entry(identity_record_dedupe_key(
+                    record,
+                    &crate::member_comms_id::runtime_alias_str(member_id),
+                ))
                 .or_default()
                 .insert(record.runtime_member_id.clone());
         }
     }
-    let mut by_identity: BTreeMap<String, ConsoleIdentityRecord> = BTreeMap::new();
+    // Each kept record, with whether it is a roster row that realizes its
+    // generated binding.
+    let mut by_identity: BTreeMap<String, (ConsoleIdentityRecord, bool)> = BTreeMap::new();
     for mut record in records {
-        let realized = crate::member_comms_id::durable_identity_label(&record.labels)
-            .filter(|identity| {
-                crate::member_comms_id::live_member_is_identity(&record.runtime_member_id, identity)
-            })
-            .and_then(|identity| bindings.get(&identity_record_dedupe_key(&record, identity)))
+        let realized = bindings
+            .get(&identity_record_dedupe_key(
+                &record,
+                &record.runtime_member_id,
+            ))
             .filter(|aliases| aliases.len() == 1)
-            .and_then(|aliases| aliases.first().cloned());
+            .and_then(|aliases| aliases.first().cloned())
+            .filter(|alias| *alias != record.runtime_member_id);
+        let realizes_binding = realized.is_some();
         if let Some(alias) = realized {
             record.runtime_member_id = alias;
         }
@@ -4800,13 +5020,19 @@ fn dedupe_identity_records(records: Vec<ConsoleIdentityRecord>) -> Vec<ConsoleId
                 &record,
                 &record.runtime_member_id,
             ))
-            .and_modify(|current| {
+            .and_modify(|(current, current_realizes_binding)| {
                 let member_id = current
                     .member_id
                     .clone()
                     .or_else(|| record.member_id.clone());
-                if identity_record_prefer(&record, current) {
+                if identity_record_prefer(
+                    &record,
+                    realizes_binding,
+                    current,
+                    *current_realizes_binding,
+                ) {
                     *current = record.clone();
+                    *current_realizes_binding = realizes_binding;
                 }
                 // Core's member id of the binding comes from the durable row;
                 // the live roster row of the same binding, which the list
@@ -4815,9 +5041,12 @@ fn dedupe_identity_records(records: Vec<ConsoleIdentityRecord>) -> Vec<ConsoleId
                     current.member_id = member_id;
                 }
             })
-            .or_insert(record);
+            .or_insert((record, realizes_binding));
     }
-    by_identity.into_values().collect()
+    by_identity
+        .into_values()
+        .map(|(record, _)| record)
+        .collect()
 }
 
 fn identity_record_dedupe_key(record: &ConsoleIdentityRecord, runtime_member_id: &str) -> String {
@@ -4835,20 +5064,32 @@ fn identity_record_dedupe_key(record: &ConsoleIdentityRecord, runtime_member_id:
     )
 }
 
+/// Whether `candidate` is listed in place of `current`, a record of the
+/// same identity, runtime, source mob, runtime member id and session. A
+/// live roster row wins over the durable row of its binding: a roster row
+/// that realizes its generated binding (`*_realizes_binding`, decided by
+/// Core's member id of the binding in [`dedupe_identity_records`]), labelled
+/// or not, or a row labelled as its identity's.
 fn identity_record_prefer(
     candidate: &ConsoleIdentityRecord,
+    candidate_realizes_binding: bool,
     current: &ConsoleIdentityRecord,
+    current_realizes_binding: bool,
 ) -> bool {
-    let candidate_is_live_label_projection =
-        crate::member_comms_id::durable_identity_label(&candidate.labels).is_some_and(|identity| {
-            identity == strip_namespace(&candidate.identity, "").unwrap_or_default()
-                || candidate.runtime_member_id != candidate.identity
-        });
-    let current_is_live_label_projection =
-        crate::member_comms_id::durable_identity_label(&current.labels).is_some_and(|identity| {
-            identity == strip_namespace(&current.identity, "").unwrap_or_default()
-                || current.runtime_member_id != current.identity
-        });
+    let candidate_is_live_label_projection = candidate_realizes_binding
+        || crate::member_comms_id::durable_identity_label(&candidate.labels).is_some_and(
+            |identity| {
+                identity == strip_namespace(&candidate.identity, "").unwrap_or_default()
+                    || candidate.runtime_member_id != candidate.identity
+            },
+        );
+    let current_is_live_label_projection = current_realizes_binding
+        || crate::member_comms_id::durable_identity_label(&current.labels).is_some_and(
+            |identity| {
+                identity == strip_namespace(&current.identity, "").unwrap_or_default()
+                    || current.runtime_member_id != current.identity
+            },
+        );
     if candidate_is_live_label_projection != current_is_live_label_projection {
         return candidate_is_live_label_projection;
     }
@@ -7629,17 +7870,16 @@ where
             );
             for mut frame in frames {
                 // One member's history can derive a frame under another
-                // identity: a spawn call's initial message is projected under
-                // the member the call names, whether the spawn ran or was
-                // refused. No member holds a runtime-plane identity: drop such
-                // a frame and go on with the rest of the history.
-                if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
-                    crate::console_contracts::warn_runtime_plane_member_drop(
-                        &record.runtime_member_id,
-                        None,
-                        &frame.identity,
-                        "session history",
-                    );
+                // identity: the initial message of a spawn call, under the
+                // name the call gives. That frame is not written from here.
+                // This history does not say which incarnation the call made,
+                // or that it made one: the call may have been refused, and
+                // the name may be held by another member. The spawn records
+                // its kickoff itself, under the member it made and with that
+                // member's witness, when it makes it, and that member's own
+                // history holds the message; the call, its arguments and its
+                // outcome stand in this member's own frames.
+                if frame.identity != record.identity {
                     continue;
                 }
                 let current_canonical = assistant_identity_history
@@ -7654,18 +7894,7 @@ where
                 {
                     continue;
                 }
-                frame.source.member_provenance = if frame.identity == record.identity {
-                    provenance.clone()
-                } else {
-                    member_provenance_for_identity(
-                        &inner,
-                        &entry,
-                        &frame.identity,
-                        frame.session_id.as_deref(),
-                        false,
-                    )
-                    .await
-                };
+                frame.source.member_provenance = provenance.clone();
                 if !current_canonical
                     && history_frame_has_existing_counterpart(&inner, &frame).await?
                 {
@@ -8455,8 +8684,12 @@ fn resolved_member_matches_raw_identities(
     mids: &[AgentIdentity],
 ) -> bool {
     mids.contains(&resolved.member.agent_identity)
-        || crate::member_comms_id::durable_identity_label(&resolved.member.labels)
-            .is_some_and(|agent_identity| raw_identities.iter().any(|raw| agent_identity == raw))
+        || crate::member_comms_id::resolve_member_identity(
+            &resolved.handle,
+            &resolved.member.agent_identity,
+            &resolved.member.labels,
+        )
+        .is_some_and(|agent_identity| raw_identities.iter().any(|raw| agent_identity == *raw))
 }
 
 async fn recover_lagged_source_events(
@@ -8621,14 +8854,28 @@ async fn project_console_event(
     };
     let mut frame = frame_from_console_event(&entry, envelope);
     retain_legacy_reasoning_replay_key(inner.store.as_ref(), &mut frame).await?;
-    frame.source.member_provenance = member_provenance_for_identity(
+    // A frame is witnessed by what the event itself names, never by its
+    // member's name: this projection also runs when the retained events are
+    // replayed (at a registration, after a lag), and by then another member
+    // can hold the name.
+    frame.source.member_provenance = witness_named_by_frame(
         &inner,
+        inner.store.as_ref(),
         &entry,
-        &frame.identity,
-        frame.session_id.as_deref(),
+        &frame,
         matches!(frame.kind.as_str(), "interaction_started" | "run_started"),
     )
     .await;
+    // A spawn's kickoff is the record of the member that spawn made: it is
+    // written only with the witness of the session it names. One that names
+    // no session, or a session whose member cannot be read, is not written.
+    let kickoff_without_witness = frame.source.member_provenance.is_none()
+        && frame.kind == "user_input"
+        && frame
+            .payload
+            .get("source_event_type")
+            .and_then(Value::as_str)
+            == Some("spawn_initial_message");
     let source_cursor = frame
         .source_event_id
         .clone()
@@ -8664,6 +8911,11 @@ async fn project_console_event(
             None,
             &frame.identity,
             "runtime console events",
+        );
+    } else if kickoff_without_witness {
+        tracing::debug!(
+            identity = %frame.identity,
+            "console log wrote no spawn kickoff: it names no session whose member can be read"
         );
     } else {
         append_member_console_event(&inner, &entry, frame).await?;
@@ -8870,26 +9122,14 @@ async fn append_and_emit_frame(
     mut frame: NewConsoleFrame,
     policy: Arc<dyn ConsoleVisibilityPolicy>,
 ) -> ConsoleLogResult<AppendOutcome> {
-    if frame.source.member_provenance.is_none() {
-        let owner = inner.projection_owner.as_deref().unwrap_or(inner);
-        let entry = owner
-            .runtimes
-            .read()
-            .ok()
-            .and_then(|entries| entries.get(&frame.runtime_key).cloned());
-        if let Some(entry) = entry {
-            frame.source.member_provenance = member_provenance_for_identity(
-                owner,
-                &entry,
-                &frame.identity,
-                frame.session_id.as_deref(),
-                false,
-            )
-            .await;
-        }
-    }
+    // A writer that captured its member itself hands the witness over with
+    // the frame; every other frame's witness is captured here.
+    let witness = match frame.source.member_provenance.take() {
+        Some(provenance) => FrameWitness::Member(Box::new(provenance)),
+        None => capture_frame_witness(inner, &frame).await,
+    };
     redact_frame(policy.as_ref(), &mut frame);
-    let outcome = append_frame(inner, frame).await?;
+    let outcome = append_frame(inner, frame, witness).await?;
     if outcome.disposition == AppendDisposition::Inserted {
         let _ = inner.event_tx.send(ConsoleTimelineEvent::ConsoleFrame {
             frame: outcome.frame.clone(),
@@ -8900,11 +9140,26 @@ async fn append_and_emit_frame(
 
 /// Append one frame to the console log. Every frame this aggregator writes
 /// goes through here, so the in-memory last activity ([`last_activity`])
-/// merges each acting frame the log stores.
+/// merges each acting frame the log stores. The writer says the frame's
+/// member witness (`witness`): the stored frame holds exactly it, whatever
+/// the frame was built with.
 async fn append_frame(
     inner: &AggregatorInner,
-    frame: NewConsoleFrame,
+    mut frame: NewConsoleFrame,
+    witness: FrameWitness,
 ) -> ConsoleLogResult<AppendOutcome> {
+    frame.source.member_provenance = match witness {
+        FrameWitness::Member(provenance) => Some(*provenance),
+        FrameWitness::NoMember(reason) => {
+            tracing::debug!(
+                identity = %frame.identity,
+                kind = %frame.kind,
+                ?reason,
+                "console log stores a frame with no member witness"
+            );
+            None
+        }
+    };
     inner
         .last_activity
         .append(inner.store.as_ref(), frame)
@@ -8950,7 +9205,8 @@ async fn emit_frame_updated(
         parent_frame_id: Some(updated.id.clone()),
         caused_by_frame_id: Some(updated.id.clone()),
     };
-    let outcome = append_frame(inner, update_marker).await?;
+    let witness = FrameWitness::of_source_frame(updated.source.member_provenance.as_ref());
+    let outcome = append_frame(inner, update_marker, witness).await?;
     if outcome.disposition == AppendDisposition::Inserted {
         let _ = inner.event_tx.send(ConsoleTimelineEvent::ConsoleFrame {
             frame: outcome.frame,
@@ -10183,8 +10439,10 @@ enum FrameProjection {
 /// - a member frame with captured provenance is decided by the captured
 ///   lineage, under the most restrictive rule
 ///   ([`crate::access::AccessView::can_view_captured_member`]);
-/// - a member frame without it fails closed under any applicable deny its
-///   bare identity cannot decide
+/// - a member frame without it is shown to no caller a console keeps apart
+///   from other people, whatever the rules say and whoever holds the name
+///   now: an admin reads it, and so does the anonymous caller of a console
+///   without sign-in, as the identity decides
 ///   ([`crate::access::AccessView::can_view_uncaptured_member`]).
 ///
 /// With the access configuration enabled or not: a member private to
@@ -10213,6 +10471,14 @@ pub(crate) fn timeline_frame_visible_to(
         }
     }
     if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
+        // A runtime-plane record names no member. One that carries text
+        // written from memory records, or that speaks of a member it does
+        // not name (a memory conflict signal, a quarantined write, a taint
+        // transition, a promotion), is decided as a record with no member
+        // witness: nothing says whose records or which member it speaks of.
+        if runtime_plane_record_text(frame) {
+            return view.can_view_uncaptured_member(&frame.identity);
+        }
         return view.can_view_agent(&frame.identity);
     }
     match frame
@@ -10283,17 +10549,34 @@ fn captured_lineage(
         .collect()
 }
 
+/// Whether `frame` is a runtime-plane record that carries text written from
+/// memory records or speaks of a member it does not name
+/// ([`crate::memory::events::carries_record_text_with_no_member`]): the one
+/// input of the decision
+/// ([`timeline_frame_visible_to`]) that is neither the frame's identity nor
+/// its witness. The decision branches on it and the decider's cache key
+/// holds it, both through this function, so the decision kept for one
+/// record of a runtime-plane identity is never the answer for a record of
+/// the other class under the same identity.
+fn runtime_plane_record_text(frame: &ConsoleFrame) -> bool {
+    crate::console_contracts::is_runtime_plane_identity(&frame.identity)
+        && crate::memory::events::carries_record_text_with_no_member(&frame.kind)
+}
+
 /// One caller's [`timeline_frame_visible_to`] over the frames of one
-/// request, cached per (runtime, identity, captured provenance): a restricted
-/// caller scanning many hidden frames decides each distinct member context
-/// once.
+/// request, cached per everything the decision reads of a frame (runtime,
+/// identity, captured provenance, and whether it is a runtime-plane record
+/// that carries text written from memory records): a restricted caller
+/// scanning many hidden frames decides each distinct member context once.
 pub(crate) struct TimelineFrameDecider {
     view: crate::access::AccessView,
     decisions: std::sync::Mutex<HashMap<FrameDecisionKey, bool>>,
 }
 
-/// (runtime key, frame identity, encoded captured provenance).
-type FrameDecisionKey = (String, String, Option<String>);
+/// (runtime key, frame identity, encoded captured provenance,
+/// [`runtime_plane_record_text`]): every input of the decision for a frame
+/// that is no update marker. An input added to the decision belongs here.
+type FrameDecisionKey = (String, String, Option<String>, bool);
 
 impl TimelineFrameDecider {
     pub(crate) fn new(view: crate::access::AccessView) -> Self {
@@ -10319,6 +10602,7 @@ impl TimelineFrameDecider {
             frame.runtime_key.clone(),
             frame.identity.clone(),
             provenance,
+            runtime_plane_record_text(frame),
         );
         if let Some(visible) = self
             .decisions
@@ -10399,7 +10683,15 @@ async fn frame_is_visible_cached(
             .read()
             .map_err(|_| runtime_registry_lock_error())?;
         if entries.is_empty() {
-            return Ok(true);
+            // No runtime is registered, so no policy says whether the
+            // members of nested mobs are shown here: a frame whose captured
+            // member sat in a mob other than its runtime's own is not
+            // served. Every other stored frame stays queryable.
+            return Ok(frame
+                .source
+                .member_provenance
+                .as_ref()
+                .is_none_or(|provenance| provenance.source_mob_id == provenance.primary_mob_id));
         }
         let Some(entry) = entries.get(&frame.runtime_key) else {
             return Ok(false);
@@ -10472,7 +10764,13 @@ async fn identity_record_for_member(
     // identity records carry the public alias.
     let runtime_member_id =
         crate::member_comms_id::runtime_alias_str(member.agent_identity.as_str()).into_owned();
-    let durable_identity = crate::member_comms_id::durable_identity_label(&member.labels)
+    let resolved_identity = crate::member_comms_id::resolve_member_identity(
+        handle,
+        &member.agent_identity,
+        &member.labels,
+    );
+    let durable_identity = resolved_identity
+        .as_deref()
         .unwrap_or(runtime_member_id.as_str());
     let identity = apply_namespace(durable_identity, &entry.identity_namespace);
     let addressable = member_is_addressable(member);
@@ -10611,6 +10909,14 @@ fn identity_record_for_status(
     // access decisions while the identity has no live member.
     let mut labels = status.labels.clone();
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
+    // The record's role is the identity's profile, as the record of a
+    // live member carries the member's role: a rule that names a role
+    // decides both. A `role` the declaration names stays.
+    if let Some(profile) = status.profile.as_ref() {
+        labels
+            .entry("role".to_string())
+            .or_insert_with(|| profile.to_string());
+    }
     ConsoleIdentityRecord {
         identity,
         display_name,
@@ -11047,7 +11353,7 @@ fn runtime_registry_lock_error() -> ConsoleLogError {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::large_futures, clippy::panic)]
-mod tests {
+pub(crate) mod tests {
     /// Golden values: an empty skill selection must keep the exact
     /// fingerprint recorded before skill selection existed, so replays of
     /// sends persisted by older gateways still match. A nonempty selection
@@ -11245,9 +11551,10 @@ mod tests {
     }
 
     #[derive(Clone)]
-    pub(super) struct DelayedHistorySessionService {
+    pub(crate) struct DelayedHistorySessionService {
         inner: Arc<dyn MobSessionService>,
         delay: Duration,
+        resume_loads_refused: Arc<std::sync::atomic::AtomicBool>,
         read_calls: Arc<AtomicUsize>,
         application_read_calls: Arc<AtomicUsize>,
         active_reads: Arc<AtomicUsize>,
@@ -11303,10 +11610,11 @@ mod tests {
     }
 
     impl DelayedHistorySessionService {
-        fn new(inner: Arc<dyn MobSessionService>, delay: Duration) -> Self {
+        pub(crate) fn new(inner: Arc<dyn MobSessionService>, delay: Duration) -> Self {
             Self {
                 inner,
                 delay,
+                resume_loads_refused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 read_calls: Arc::new(AtomicUsize::new(0)),
                 application_read_calls: Arc::new(AtomicUsize::new(0)),
                 active_reads: Arc::new(AtomicUsize::new(0)),
@@ -11328,6 +11636,13 @@ mod tests {
                 .lock()
                 .expect("refused event sessions lock")
                 .insert(session_id.to_string());
+        }
+
+        /// Fail every later read of a stored session for a resume
+        /// ([`MobSessionService::load_session_for_resume`]), as a service
+        /// whose store cannot be read fails it.
+        pub(crate) fn refuse_resume_loads(&self) {
+            self.resume_loads_refused.store(true, Ordering::SeqCst);
         }
 
         fn session_events_refused(&self, session_id: &SessionId) -> bool {
@@ -11807,6 +12122,13 @@ mod tests {
             &self,
             session_id: &meerkat_core::types::SessionId,
         ) -> Result<meerkat_mob::ResumeSessionLoad, SessionError> {
+            if self.resume_loads_refused.load(Ordering::SeqCst) {
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "session {session_id}: the stored session could not be read"
+                    )),
+                ));
+            }
             self.inner.load_session_for_resume(session_id).await
         }
 
@@ -13056,9 +13378,15 @@ comms = true
     #[test]
     fn dedupe_identity_records_merges_a_live_roster_row_into_its_generated_binding() {
         // Since the roster lowering, a live roster row's member id is the bare
-        // durable identity, while the durable row names the generated binding.
+        // durable identity, while the durable row names the generated binding
+        // and carries Core's member id of it.
         let mut durable = identity_record_for_test("test/review:singleton");
         durable.runtime_member_id = "rt:review:singleton:0".to_string();
+        durable.member_id = Some(
+            crate::member_comms_id::roster_member_id_for_identity("review:singleton")
+                .as_str()
+                .to_string(),
+        );
         let mut live = identity_record_for_test("test/review:singleton");
         live.runtime_member_id = "review:singleton".to_string();
         live.labels
@@ -13073,6 +13401,39 @@ comms = true
         assert_eq!(
             records[0].runtime_member_id, "rt:review:singleton:0",
             "the merged row keeps the binding's public runtime alias"
+        );
+
+        // The roster row of an identity whose record is its row in the
+        // mob's identity store carries no label, and realizes the binding
+        // all the same: the list keeps the live roster row, under the
+        // binding's alias and with Core's member id of it.
+        let mut unlabelled = live.clone();
+        unlabelled.labels.clear();
+        unlabelled
+            .labels
+            .insert("role".to_string(), "worker".to_string());
+        for records in [
+            vec![durable.clone(), unlabelled.clone()],
+            vec![unlabelled.clone(), durable.clone()],
+        ] {
+            let records = dedupe_identity_records(records);
+            assert_eq!(records.len(), 1, "{records:#?}");
+            assert_eq!(records[0].runtime_member_id, "rt:review:singleton:0");
+            assert_eq!(records[0].member_id, durable.member_id);
+            assert_eq!(
+                records[0].labels.get("role").map(String::as_str),
+                Some("worker"),
+                "the list prefers the live roster row, labelled or not: {records:#?}"
+            );
+        }
+        // A roster row under another member id is no row of the binding,
+        // whatever label it carries.
+        let mut other_member = live.clone();
+        other_member.runtime_member_id = "review:impostor".to_string();
+        assert_eq!(
+            dedupe_identity_records(vec![durable.clone(), other_member]).len(),
+            2,
+            "a labelled row of another member never merges into the binding"
         );
 
         let mut other_session = live.clone();
@@ -13158,32 +13519,69 @@ comms = true
         );
     }
 
+    /// A durable row of `identity` that names its generated binding
+    /// (`rt:{identity}:0`) and carries Core's member id of it, as a status
+    /// of an identity Core holds a member of does.
+    fn durable_binding_record_for_test(identity: &str) -> ConsoleIdentityRecord {
+        let mut durable = identity_record_for_test(identity);
+        durable.runtime_member_id = format!("rt:{identity}:0");
+        durable.member_id = Some(
+            crate::member_comms_id::roster_member_id_for_identity(identity)
+                .as_str()
+                .to_string(),
+        );
+        durable
+    }
+
     #[test]
     fn stable_external_member_alias_realizes_generated_durable_binding() {
-        let mut durable = identity_record_for_test("target-smoke");
-        durable.runtime_member_id = "rt:target-smoke:0".to_string();
+        let durable = durable_binding_record_for_test("target-smoke");
 
-        let mut live = durable.clone();
-        live.runtime_member_id = "target-smoke".to_string();
+        let mut live = identity_record_for_test("target-smoke");
         live.labels
             .insert("agent_identity".to_string(), "target-smoke".to_string());
 
         assert!(live_record_realizes_durable_binding(&durable, &live));
         assert_eq!(
-            stale_durable_record_error("target-smoke", &durable, &[live]),
+            stale_durable_record_error("target-smoke", &durable, std::slice::from_ref(&live)),
             None,
             "the bridge-owned stable alias must not be classified as a stale generated binding"
         );
+
+        // The roster row is the binding's by Core's member id of it, not by
+        // a label: an unlabelled row realizes it too (an identity whose
+        // record is its row in the mob's identity store), and a labelled
+        // row of another member does not.
+        let mut unlabelled = live.clone();
+        unlabelled.labels.clear();
+        assert!(live_record_realizes_durable_binding(&durable, &unlabelled));
+        assert_eq!(
+            stale_durable_record_error("target-smoke", &durable, &[unlabelled]),
+            None
+        );
+        let mut other_member = live.clone();
+        other_member.runtime_member_id = "target-impostor".to_string();
+        assert!(!live_record_realizes_durable_binding(
+            &durable,
+            &other_member
+        ));
+        assert!(
+            stale_durable_record_error("target-smoke", &durable, &[other_member]).is_some(),
+            "a labelled row of another member is no row of the binding"
+        );
+        // A durable row that carries no member id of Core's names no roster
+        // row but its own.
+        let mut no_member_id = durable;
+        no_member_id.member_id = None;
+        assert!(!live_record_realizes_durable_binding(&no_member_id, &live));
     }
 
     #[test]
     fn stable_external_member_alias_still_fences_session_split_brain() {
-        let mut durable = identity_record_for_test("target-smoke");
-        durable.runtime_member_id = "rt:target-smoke:0".to_string();
+        let mut durable = durable_binding_record_for_test("target-smoke");
         durable.session_id = Some("session-durable".to_string());
 
-        let mut live = durable.clone();
-        live.runtime_member_id = "target-smoke".to_string();
+        let mut live = identity_record_for_test("target-smoke");
         live.session_id = Some("session-live".to_string());
         live.labels
             .insert("agent_identity".to_string(), "target-smoke".to_string());
@@ -13898,13 +14296,16 @@ comms = true
             json!({"role": "user", "content": "Exact public content."}),
         )
         .expect("frame");
+        // The witness of a member of the runtime's own mob: with no runtime
+        // registered, as here, a console serves no stored frame of a member
+        // of a nested mob.
         frame.source.member_provenance = Some(serde_json::from_value(json!({
             "identity": {"identity":"member", "display_name":"Member", "runtime_key":"runtime-a",
                 "runtime_member_id":"member", "session_id":"session", "visibility":"addressable",
                 "addressable":true, "health":"ready", "labels":{"private-label":"private"}},
             "member": {"agent_identity":"member", "role":"delegate", "state":"running",
                 "session_id":"session", "wired_to":[], "labels":{"private-label":"private"}},
-            "primary_mob_id":"primary", "source_mob_id":"lower"
+            "primary_mob_id":"primary", "source_mob_id":"primary"
         }))?);
         let stored = append_and_emit(&aggregator.inner, frame.clone())
             .await?
@@ -14512,6 +14913,372 @@ comms = true
             .expect("durable label should resolve targeted session backfill");
         assert_eq!(target.record.identity, "review:singleton");
         assert_eq!(target.record.runtime_member_id, "rt:review:singleton:0");
+
+        let _ = runtime.mob_handle().stop().await;
+        Ok(())
+    }
+
+    /// The console attributes a store-owned agent's member to its identity,
+    /// as it does a configured agent's. Core seats a store-owned identity's
+    /// member with its row's labels, which carry no `agent_identity` label:
+    /// the member resolves through Core's identity entry of its member id
+    /// ([`crate::member_comms_id::resolve_member_identity`]). Its console
+    /// record, under which the frames of its turns are kept, names the
+    /// identity, and a send that names the identity selects it. A plain
+    /// worker is no identity's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_console_attributes_a_store_owned_agent_s_member_to_its_identity() {
+        let runtime = build_empty_runtime("store-owned-attribution-test").await;
+        let handle = runtime.mob_handle();
+        let created = handle
+            .create_store_owned_identities(
+                meerkat_mob::StoreOwnedIdentityCreate::new(
+                    meerkat_mob::IdentityOperation::new(
+                        "create-keeper",
+                        meerkat_core::approval::decision::Sha256Digest::of(b"create-keeper")
+                            .as_str(),
+                    ),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    vec![meerkat_mob::CreatedIdentityRequest::new(
+                        meerkat_mob::CreatedIdentitySpec::new("keeper", "worker"),
+                    )],
+                ),
+                meerkat_mob::IdentityChangeConsentInput::Policy(
+                    meerkat_mob::IdentityPolicyOutcome::Allow,
+                ),
+            )
+            .await
+            .map(|created| created.change);
+        assert!(
+            matches!(
+                created,
+                Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+            ),
+            "{created:?}"
+        );
+        // The configured twin, labelled as the identity runtime seats it,
+        // and a plain worker.
+        for (alias, labels) in [
+            (
+                "twin",
+                BTreeMap::from([("agent_identity".to_string(), "twin".to_string())]),
+            ),
+            ("helper", BTreeMap::new()),
+        ] {
+            spawn_trusted_identity_projected_member(
+                &runtime,
+                SpawnMemberSpec::from_wire(
+                    "worker".to_string(),
+                    alias.to_string(),
+                    Some("You are a test member.".into()),
+                    None,
+                    None,
+                )
+                .with_labels(labels),
+            )
+            .await;
+        }
+
+        let members = handle.list_members_including_retiring().await;
+        let resolved = |alias: &str| {
+            let member = members
+                .iter()
+                .find(|member| {
+                    member.agent_identity == crate::member_comms_id::mob_member_id(alias)
+                })
+                .unwrap_or_else(|| panic!("{alias} is on the roster"));
+            (
+                member.labels.contains_key("agent_identity"),
+                crate::member_comms_id::resolve_member_identity(
+                    &handle,
+                    &member.agent_identity,
+                    &member.labels,
+                )
+                .map(std::borrow::Cow::into_owned),
+            )
+        };
+        assert_eq!(
+            resolved("keeper"),
+            (false, Some("keeper".to_string())),
+            "a store-owned member carries no label and is its identity's by Core's entry"
+        );
+        assert_eq!(resolved("twin"), (true, Some("twin".to_string())));
+        assert_eq!(
+            resolved("helper"),
+            (false, None),
+            "a plain worker is no identity's"
+        );
+
+        let aggregator = MetaConsoleAggregator::in_memory();
+        aggregator.register_runtime_handles_with_policy(
+            "runtime-a",
+            "",
+            runtime.mob_runtime().clone(),
+            None,
+            runtime.console_events(),
+            Arc::new(AllowAllConsoleVisibilityPolicy),
+        );
+        for identity in ["keeper", "twin"] {
+            let matches = aggregator.resolve_visible_members(identity).await;
+            assert_eq!(matches.len(), 1, "{identity} resolves to its one member");
+            let record = identity_record_for_resolved_member(&matches[0])
+                .await
+                .expect("a member has a console record");
+            assert_eq!(record.identity, identity, "the record names the identity");
+            assert_eq!(record.runtime_member_id, identity);
+            // Selected by the identity it resolves to, not only by its
+            // member id (none is given here).
+            assert!(
+                resolved_member_matches_raw_identities(&matches[0], &[identity.to_string()], &[]),
+                "{identity}'s member is selected by its identity"
+            );
+        }
+        let helper = aggregator.resolve_visible_members("helper").await;
+        assert_eq!(helper.len(), 1);
+        assert!(
+            !resolved_member_matches_raw_identities(&helper[0], &["helper".to_string()], &[]),
+            "a plain worker is selected by its member id only"
+        );
+
+        let _ = runtime.mob_handle().stop().await;
+    }
+
+    /// What the console answers for one identity whose member Core holds,
+    /// read by [`binding_answers`]: a store-owned agent and a configured
+    /// one must answer alike.
+    #[derive(Debug, PartialEq, Eq)]
+    struct BindingAnswers {
+        /// The durable record names the generated binding
+        /// (`rt:{identity}:{generation}`), so the live roster row, named by
+        /// the bare identity, differs from it by id.
+        durable_names_a_generated_binding: bool,
+        /// The live roster row realizes the durable binding.
+        live_row_realizes_the_binding: bool,
+        /// The stale-binding check's answer for the live roster row.
+        stale_error: Option<String>,
+        /// A row of another member whose label names the identity, listed
+        /// under the identity, is accepted as realizing the binding.
+        labelled_row_of_another_member_accepted: bool,
+        /// The same row, listed under another identity, is accepted.
+        labelled_row_of_another_identity_accepted: bool,
+        /// The rows the identity lists as.
+        listed_rows: usize,
+        /// The listed row is the live roster row: it carries the role.
+        listed_row_is_the_live_roster_row: bool,
+        /// The listed row names the generated binding and Core's member id
+        /// of it.
+        listed_row_names_the_binding: bool,
+        /// Whether the inspection answers the identity, or its refusal.
+        inspected: Result<bool, String>,
+    }
+
+    /// [`BindingAnswers`] of `identity`, an identity `identity_runtime`
+    /// registered and Core holds a member of.
+    async fn binding_answers(
+        aggregator: &MetaConsoleAggregator,
+        entry: &RuntimeEntry,
+        identity_runtime: &crate::identity_first::IdentityRuntime,
+        identity: &str,
+    ) -> BindingAnswers {
+        let status = identity_runtime
+            .status(&crate::identity_first::AgentIdentity::parse(identity).expect("an identity"))
+            .await
+            .expect("the identity's status reads");
+        let durable = identity_record_for_status(entry, &status);
+        let live = aggregator.live_records_for_identity(identity).await;
+        assert_eq!(
+            live.len(),
+            1,
+            "{identity} has one live roster row: {live:#?}"
+        );
+        let live = live[0].clone();
+        let mut other_member = live.clone();
+        other_member.runtime_member_id = format!("{identity}-impostor");
+        other_member
+            .labels
+            .insert("agent_identity".to_string(), identity.to_string());
+        let mut other_identity = other_member.clone();
+        other_identity.identity = format!("{identity}-impostor");
+        let listed = aggregator
+            .list_identities_fresh()
+            .await
+            .expect("the identities list");
+        let rows = listed
+            .iter()
+            .filter(|record| record.identity == identity)
+            .collect::<Vec<_>>();
+        BindingAnswers {
+            durable_names_a_generated_binding: durable.runtime_member_id.starts_with("rt:")
+                && durable.runtime_member_id != live.runtime_member_id,
+            live_row_realizes_the_binding: live_record_realizes_durable_binding(&durable, &live),
+            stale_error: stale_durable_record_error(
+                identity,
+                &durable,
+                std::slice::from_ref(&live),
+            ),
+            labelled_row_of_another_member_accepted: live_record_realizes_durable_binding(
+                &durable,
+                &other_member,
+            ),
+            labelled_row_of_another_identity_accepted: live_record_realizes_durable_binding(
+                &durable,
+                &other_identity,
+            ),
+            listed_rows: rows.len(),
+            listed_row_is_the_live_roster_row: rows.len() == 1
+                && rows[0].labels.get("role").map(String::as_str) == Some("worker"),
+            listed_row_names_the_binding: rows.len() == 1
+                && rows[0].runtime_member_id == durable.runtime_member_id
+                && durable.member_id.is_some()
+                && rows[0].member_id == durable.member_id,
+            inspected: aggregator
+                .inspect_identity(identity)
+                .await
+                .map(|inspection| inspection.is_some())
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    /// The live roster row of an agent created at run time realizes its
+    /// durable binding, as a configured agent's does, and a row of another
+    /// member that only carries a label naming the identity never does.
+    /// Core seats a store-owned identity's member with its row's labels,
+    /// which carry no `agent_identity` label, while its durable record names
+    /// the generated binding: the roster row is the binding's because Core
+    /// holds the binding under its member id, whatever its labels. So the
+    /// console lists the agent once, as its live roster row under the
+    /// binding's alias, inspects it, and reports no stale binding.
+    #[tokio::test]
+    async fn a_store_owned_agent_s_live_row_realizes_its_durable_binding_as_a_configured_agent_s_does()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let runtime = build_empty_runtime("store-owned-binding-realized").await;
+        let handle = runtime.mob_handle();
+        let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()?
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: "store-owned-binding-realized".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(Arc::new(crate::identity_first::MobSessionBridge::new(
+                    runtime.mob_handle(),
+                ))),
+                default_timeout: None,
+            },
+        ));
+
+        // The configured twin: registered from a roster spec and seated by
+        // the identity runtime, labelled.
+        let twin = crate::identity_first::AgentIdentity::parse("twin")?;
+        identity_runtime
+            .register(crate::identity_first::DurableAgentSpec {
+                identity: twin.clone(),
+                profile: meerkat_mob::ProfileName::from("worker"),
+                addressability: crate::identity_first::AgentAddressability::Addressable,
+                display_name: None,
+                labels: BTreeMap::new(),
+                context: None,
+                additional_instructions: Vec::new(),
+                initial_message: None,
+                runtime_mode_override: None,
+                backend: None,
+                binding: None,
+                placement: None,
+            })
+            .await
+            .expect("the twin registers");
+        identity_runtime
+            .materialize(&twin)
+            .await?
+            .ok_or("Core holds the twin live after the wake")?;
+
+        // The agent created at run time: Core seats it from its row, and the
+        // change path registers the row.
+        let created = handle
+            .create_store_owned_identities(
+                meerkat_mob::StoreOwnedIdentityCreate::new(
+                    meerkat_mob::IdentityOperation::new(
+                        "create-keeper",
+                        meerkat_core::approval::decision::Sha256Digest::of(b"create-keeper")
+                            .as_str(),
+                    ),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    vec![meerkat_mob::CreatedIdentityRequest::new(
+                        meerkat_mob::CreatedIdentitySpec::new("keeper", "worker"),
+                    )],
+                ),
+                meerkat_mob::IdentityChangeConsentInput::Policy(
+                    meerkat_mob::IdentityPolicyOutcome::Allow,
+                ),
+            )
+            .await
+            .map(|created| created.change);
+        assert!(
+            matches!(
+                created,
+                Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+            ),
+            "{created:?}"
+        );
+        let keeper = crate::identity_first::AgentIdentity::parse("keeper")?;
+        assert!(
+            identity_runtime.register_from_row(&keeper).await?,
+            "the created row registers"
+        );
+        let labelled = |alias: &str, members: &[MobMemberListEntry]| {
+            members
+                .iter()
+                .find(|member| {
+                    member.agent_identity == crate::member_comms_id::mob_member_id(alias)
+                })
+                .map(|member| member.labels.contains_key("agent_identity"))
+        };
+        let members = handle.list_members_including_retiring().await;
+        assert_eq!(
+            (labelled("keeper", &members), labelled("twin", &members)),
+            (Some(false), Some(true)),
+            "the store-owned seat carries no identity label, the configured one does"
+        );
+
+        let aggregator = MetaConsoleAggregator::in_memory();
+        aggregator.register_runtime_handles_with_policy(
+            "identity-first",
+            "",
+            runtime.mob_runtime().clone(),
+            Some(identity_runtime.clone()),
+            runtime.console_events(),
+            Arc::new(AllowAllConsoleVisibilityPolicy),
+        );
+        let entry = aggregator
+            .inner
+            .runtimes
+            .read()
+            .expect("runtime registry")
+            .get("identity-first")
+            .cloned()
+            .ok_or("the runtime is registered")?;
+
+        let keeper_answers =
+            binding_answers(&aggregator, &entry, &identity_runtime, "keeper").await;
+        let twin_answers = binding_answers(&aggregator, &entry, &identity_runtime, "twin").await;
+        let expected = || BindingAnswers {
+            durable_names_a_generated_binding: true,
+            live_row_realizes_the_binding: true,
+            stale_error: None,
+            labelled_row_of_another_member_accepted: false,
+            labelled_row_of_another_identity_accepted: false,
+            listed_rows: 1,
+            listed_row_is_the_live_roster_row: true,
+            listed_row_names_the_binding: true,
+            inspected: Ok(true),
+        };
+        assert_eq!(
+            (keeper_answers, twin_answers),
+            (expected(), expected()),
+            "the store-owned agent (left) and the configured agent (right) answer alike"
+        );
 
         let _ = runtime.mob_handle().stop().await;
         Ok(())
@@ -22491,6 +23258,7 @@ comms = true
             labels: BTreeMap::new(),
             spawned_by: Some("ops-lead".to_string()),
             spawned_by_session: None,
+            session_id: None,
             via_tool: "mob_spawn_member".to_string(),
         })
         .await;
@@ -22655,6 +23423,16 @@ comms = true
             .await
             .expect("member spawns");
 
+        // A kickoff is the record of the member its spawn made: it names
+        // that member's session, as the outcomes of `fork_off` and
+        // `delegate` do, and is witnessed by it.
+        let member_session = runtime
+            .mob_handle()
+            .get_member(&AgentIdentity::from("worker-3"))
+            .await
+            .expect("roster read")
+            .and_then(|entry| entry.bridge_session_id().map(ToString::to_string))
+            .expect("the spawned member has a session");
         let seed = crate::console_spawn::ConsoleSpawnSeed {
             mob_id: Some("agent-spawn-console-test".to_string()),
             member_id: "worker-3".to_string(),
@@ -22663,7 +23441,8 @@ comms = true
             labels: BTreeMap::from([("group".to_string(), "workers".to_string())]),
             spawned_by: Some("ops-lead".to_string()),
             spawned_by_session: None,
-            via_tool: "mob_spawn_member".to_string(),
+            session_id: Some(member_session),
+            via_tool: "fork_off".to_string(),
         };
         sink.project_spawned_member(&seed).await;
         // Spawn retries must not fork or duplicate the chat.

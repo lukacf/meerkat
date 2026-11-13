@@ -3214,3 +3214,1456 @@ async fn a_fire_thread_names_the_schedule_sender() -> TestResult {
     fixture.stop().await;
     Ok(())
 }
+
+/// A gateway-shaped composition whose agents `scout` and `ledger` are created
+/// at run time, with the schedule service a gateway attaches, the registry
+/// its schedule tools judge targets with, and the family of changes of its
+/// agents, whose archive, unarchive and removal the launch's schedules
+/// follow.
+struct CreatedAgents {
+    fixture: Fixture,
+    registry: crate::schedule_wiring::ScheduleMobTargetRegistry,
+    family: Arc<dyn crate::identity_creation::IdentityFamily>,
+    mob: meerkat_mob::MobHandle,
+}
+
+/// The host's roster: one configured agent, and none a row creates.
+struct HostRoster;
+
+#[async_trait::async_trait]
+impl crate::identity_first::contracts::RosterProvider for HostRoster {
+    async fn roster(
+        &self,
+        _context: &crate::identity_first::RosterContext,
+    ) -> Result<Vec<crate::identity_first::DurableAgentSpec>, crate::identity_first::RosterError>
+    {
+        Ok(vec![crate::identity_first::DurableAgentSpec {
+            identity: crate::identity_first::AgentIdentity::parse("host-a")
+                .expect("a configured agent's name"),
+            profile: "worker".into(),
+            addressability: crate::identity_first::AgentAddressability::Addressable,
+            display_name: None,
+            labels: BTreeMap::new(),
+            context: None,
+            additional_instructions: Vec::new(),
+            initial_message: None,
+            runtime_mode_override: None,
+            backend: None,
+            binding: None,
+            placement: None,
+        }])
+    }
+}
+
+async fn created_agents(
+    mob_id: &str,
+) -> Result<CreatedAgents, Box<dyn std::error::Error + Send + Sync>> {
+    use crate::identity_creation::{
+        IdentityChangeSpec, IdentityCreationPolicy, IdentityFamilyOptions,
+    };
+    let temp_dir = tempfile::tempdir()?;
+    let owner = Box::pin(
+        crate::unified_runtime::UnifiedRuntimeBuilder::default()
+            .definition(meerkat_mob::MobDefinition::from_toml(&format!(
+                r#"
+[mob]
+id = "{mob_id}"
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+[profiles.worker.tools]
+comms = true
+"#
+            ))?)
+            .persistent_state(temp_dir.path())
+            .continuity_from_state_dir(temp_dir.path())
+            .await
+            .map_err(|error| error.to_string())?
+            .roster_provider(Arc::new(HostRoster))
+            .identity_runtime_instance_id("console-schedules-created-agents")
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let runtime = owner.mob_runtime().clone();
+    let identity_runtime = owner.identity_runtime_ref().cloned();
+    let fixture = fixture_over(
+        temp_dir,
+        Some(owner),
+        runtime,
+        identity_runtime,
+        Some(ScheduleFiringHostBinding::external_driver()),
+    );
+    let owner = fixture
+        .owner
+        .as_ref()
+        .ok_or("the fixture keeps its owner")?;
+    let registry = crate::schedule_wiring::ScheduleMobTargetRegistry::default();
+    registry.adopt_mob_runtime(&fixture.runtime);
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [{
+            "change": ["create", "descriptive", "capability", "peers", "profile", "archive",
+                       "remove", "adopt"],
+            "requester": {"kind": "host"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "allow"},
+        }]},
+    }))
+    .expect("the policy parses")
+    .ok_or("the policy is enabled")?;
+    let schedules =
+        crate::schedule_wiring::MobAgentSchedules::new(fixture.service.clone(), registry.clone());
+    assert!(
+        owner.attach_identity_policy(
+            Arc::new(policy),
+            IdentityFamilyOptions::new().with_schedules(Arc::new(schedules)),
+        ),
+        "the runtime serves identities and takes the policy"
+    );
+    let family = owner.identity_family().ok_or("the family is attached")?;
+    let mob = owner.mob_handle();
+    let agents = CreatedAgents {
+        fixture,
+        registry,
+        family,
+        mob,
+    };
+    agents
+        .change(
+            "create",
+            IdentityChangeSpec::Create(serde_json::from_value(json!({"agents": [
+                {"name": "scout", "profile": "worker"},
+                {"name": "ledger", "profile": "worker"},
+            ]}))?),
+        )
+        .await;
+    Ok(agents)
+}
+
+impl CreatedAgents {
+    /// One change of the family as the host's request `request`, which is
+    /// carried out: its outcome as a surface writes it.
+    async fn change(
+        &self,
+        request: &str,
+        change: crate::identity_creation::IdentityChangeSpec,
+    ) -> Value {
+        use crate::identity_creation::{ChangeRequester, IdentityChangeCall, OperationId};
+        let host = ChangeRequester::host("ops");
+        let operation = OperationId::for_request(&host.recorded(), request).expect("a request id");
+        let outcome = self
+            .family
+            .change(&self.mob, &host, IdentityChangeCall::new(operation, change))
+            .await;
+        assert_eq!(outcome.token(), "done", "{outcome:?}");
+        outcome.to_json()
+    }
+
+    /// The agent `name` at its current spec, as a change names it.
+    async fn named(&self, name: &str) -> crate::identity_creation::AgentRef {
+        use crate::identity_creation::{
+            ChangeRequester, GetAgent, IdentityRead, IdentityReadAnswer,
+        };
+        match self
+            .family
+            .read(
+                &self.mob,
+                &ChangeRequester::host("ops"),
+                IdentityRead::Get(GetAgent::new(name)),
+            )
+            .await
+        {
+            Ok(IdentityReadAnswer::Get(record)) => serde_json::from_value(json!({
+                "name": name,
+                "expected_spec_digest": record.agent.spec_digest.as_str(),
+            }))
+            .expect("a change of one agent as a surface writes it"),
+            other => panic!("a get answers one agent: {other:?}"),
+        }
+    }
+
+    /// Archive `name`: the `schedules` member of the answer.
+    async fn archive(&self, request: &str, name: &str) -> Value {
+        let agent = self.named(name).await;
+        self.change(
+            request,
+            crate::identity_creation::IdentityChangeSpec::Archive(agent),
+        )
+        .await["agents"][0]["schedules"]
+            .clone()
+    }
+
+    /// Unarchive `name`: the `schedules` member of the answer.
+    async fn unarchive(&self, request: &str, name: &str) -> Value {
+        let agent = self.named(name).await;
+        self.change(
+            request,
+            crate::identity_creation::IdentityChangeSpec::Unarchive(agent),
+        )
+        .await["agents"][0]["schedules"]
+            .clone()
+    }
+
+    /// The session Core's entry of `name` says its member is bound to.
+    fn session_of(&self, name: &str) -> meerkat_core::types::SessionId {
+        match self
+            .mob
+            .identity_entry(&AgentIdentity::from(name))
+            .expect("Core's entry of the name is read")
+        {
+            meerkat_mob::IdentityEntryRead::Entry(entry) => match entry.standing {
+                meerkat_mob::EntryStanding::Seated(member) => {
+                    member.session_id.expect("the seat has a session")
+                }
+                other => panic!("{name} is seated: {other:?}"),
+            },
+            other => panic!("{name} is an entry: {other:?}"),
+        }
+    }
+
+    async fn state(&self, schedule_id: &str) -> (meerkat::SchedulePhase, bool) {
+        let schedule = self
+            .fixture
+            .service
+            .get(&ScheduleId::parse(schedule_id).expect("a schedule id"))
+            .await
+            .expect("the schedule is read");
+        (schedule.phase, schedule.paused_for_target())
+    }
+
+    async fn stop(self) {
+        self.fixture.stop().await;
+    }
+}
+
+/// The id of the schedule a Console write answered.
+fn answered_id(answer: &Value) -> String {
+    assert!(answer["error"].is_null(), "{answer:#?}");
+    answer["result"]["schedule_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the schedule has an id: {answer:#?}"))
+        .to_string()
+}
+
+/// The schedules `meta/schedule/list` answers for `identity`.
+async fn listed_for(fixture: &Fixture, identity: &str) -> Vec<Value> {
+    let listed = call(
+        fixture,
+        Caller::open_console(),
+        "meta/schedule/list",
+        json!({ "identity": identity }),
+    )
+    .await;
+    listed["result"]["schedules"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a list of schedules: {listed:#?}"))
+        .clone()
+}
+
+/// A schedule's row says when its pause is its agent's: `paused_for_target`
+/// is true on a schedule Core paused because its agent takes no deliveries,
+/// and absent on an active schedule and on one somebody paused by name.
+#[tokio::test]
+async fn a_schedule_row_says_when_its_pause_is_its_agents() -> TestResult {
+    let fixture = fixture(
+        "console-schedules-whose-pause",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let create = || {
+        call(
+            &fixture,
+            Caller::human(ERIN),
+            "meta/schedule/create",
+            create_params("alpha"),
+        )
+    };
+    let for_agent = answered_id(&create().await);
+    let by_name = answered_id(&create().await);
+    let active = answered_id(&create().await);
+    fixture
+        .service
+        .pause_for_target(&ScheduleId::parse(&for_agent)?)
+        .await?;
+    fixture.service.pause(&ScheduleId::parse(&by_name)?).await?;
+
+    let row = |rows: &[Value], id: &str| {
+        rows.iter()
+            .find(|row| row["schedule_id"] == json!(id))
+            .cloned()
+            .unwrap_or_else(|| panic!("the schedule {id} is listed: {rows:#?}"))
+    };
+    let rows = listed_for(&fixture, "alpha").await;
+    let paused = row(&rows, &for_agent);
+    assert_eq!(paused["phase"], json!("paused"), "{paused:#?}");
+    assert_eq!(paused["paused_for_target"], json!(true), "{paused:#?}");
+    let held = row(&rows, &by_name);
+    assert_eq!(held["phase"], json!("paused"), "{held:#?}");
+    assert!(held.get("paused_for_target").is_none(), "{held:#?}");
+    let running = row(&rows, &active);
+    assert_eq!(running["phase"], json!("active"), "{running:#?}");
+    assert!(running.get("paused_for_target").is_none(), "{running:#?}");
+
+    // Resumed for its agent, the row no longer says so.
+    fixture
+        .service
+        .resume_for_target(&ScheduleId::parse(&for_agent)?)
+        .await?;
+    let resumed = row(&listed_for(&fixture, "alpha").await, &for_agent);
+    assert_eq!(resumed["phase"], json!("active"), "{resumed:#?}");
+    assert!(resumed.get("paused_for_target").is_none(), "{resumed:#?}");
+    fixture.stop().await;
+    Ok(())
+}
+
+/// An archive pauses the Console's schedules of its agent, as it pauses the
+/// agent's other schedules: the archive's answer lists them, their row says
+/// the pause is the agent's, and the unarchive resumes them. Another
+/// agent's Console schedule is left alone, and a pause by name is its
+/// caller's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_archive_pauses_an_agents_console_schedules_and_their_row_says_so() -> TestResult {
+    let agents = created_agents("console-schedules-archived-agent").await?;
+    let open = Caller::open_console();
+    let scouts = answered_id(
+        &call(
+            &agents.fixture,
+            open,
+            "meta/schedule/create",
+            create_params("scout"),
+        )
+        .await,
+    );
+    let ledgers = answered_id(
+        &call(
+            &agents.fixture,
+            open,
+            "meta/schedule/create",
+            create_params("ledger"),
+        )
+        .await,
+    );
+
+    let paused = agents.archive("archive-1", "scout").await;
+    assert_eq!(
+        (paused["effect"].clone(), paused["count"].clone()),
+        (json!("paused"), json!(1)),
+        "the archive pauses the agent's Console schedule: {paused:#?}"
+    );
+    assert_eq!(paused["schedules"][0]["schedule_id"], json!(scouts));
+    let rows = listed_for(&agents.fixture, "scout").await;
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert_eq!(rows[0]["phase"], json!("paused"), "{rows:#?}");
+    assert_eq!(rows[0]["paused_for_target"], json!(true), "{rows:#?}");
+    let others = listed_for(&agents.fixture, "ledger").await;
+    assert_eq!(others[0]["phase"], json!("active"), "{others:#?}");
+    assert!(others[0].get("paused_for_target").is_none(), "{others:#?}");
+
+    // A pause by name is its caller's own.
+    let by_name = call(
+        &agents.fixture,
+        open,
+        "meta/schedule/pause",
+        json!({ "identity": "ledger", "schedule_id": ledgers }),
+    )
+    .await;
+    assert_eq!(by_name["result"]["phase"], json!("paused"), "{by_name:#?}");
+    assert!(
+        by_name["result"].get("paused_for_target").is_none(),
+        "{by_name:#?}"
+    );
+
+    let resumed = agents.unarchive("unarchive-1", "scout").await;
+    assert_eq!(
+        (resumed["effect"].clone(), resumed["count"].clone()),
+        (json!("resumed"), json!(1)),
+        "{resumed:#?}"
+    );
+    let rows = listed_for(&agents.fixture, "scout").await;
+    assert_eq!(rows[0]["phase"], json!("active"), "{rows:#?}");
+    assert!(rows[0].get("paused_for_target").is_none(), "{rows:#?}");
+    assert_eq!(
+        agents.state(&ledgers).await,
+        (meerkat::SchedulePhase::Paused, false),
+        "another agent's pause by name stays"
+    );
+    agents.stop().await;
+    Ok(())
+}
+
+/// The Console creates and changes no schedule for an archived agent: both
+/// are refused as a send to it is (`identity_archived`), and nothing is
+/// written. A resume by name stays what it was, and takes the schedule
+/// over. Another agent's schedules are created as before, and so are the
+/// agent's own once it is unarchived.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_console_writes_no_schedule_for_an_archived_agent() -> TestResult {
+    let agents = created_agents("console-schedules-no-archived-target").await?;
+    let open = Caller::open_console();
+    let scouts = answered_id(
+        &call(
+            &agents.fixture,
+            open,
+            "meta/schedule/create",
+            create_params("scout"),
+        )
+        .await,
+    );
+    agents.archive("archive-1", "scout").await;
+    let archived = |answer: &Value| {
+        assert_eq!(
+            (
+                answer["error"]["code"].clone(),
+                answer["error"]["data"]["kind"].clone(),
+                answer["error"]["data"]["identity"].clone(),
+            ),
+            (json!(-32603), json!("identity_archived"), json!("scout")),
+            "{answer:#?}"
+        );
+    };
+
+    let created = call(
+        &agents.fixture,
+        open,
+        "meta/schedule/create",
+        create_params("scout"),
+    )
+    .await;
+    archived(&created);
+    assert_eq!(
+        listed_for(&agents.fixture, "scout").await.len(),
+        1,
+        "nothing was created"
+    );
+    let changed = call(
+        &agents.fixture,
+        open,
+        "meta/schedule/update",
+        json!({ "identity": "scout", "schedule_id": scouts, "content": "Changed meanwhile." }),
+    )
+    .await;
+    archived(&changed);
+    assert_eq!(
+        stored_send(&agents.fixture, &scouts).await?.content,
+        "Post the morning summary.",
+        "nothing was written"
+    );
+    assert_eq!(
+        agents.state(&scouts).await,
+        (meerkat::SchedulePhase::Paused, true),
+        "the pause is still the agent's"
+    );
+
+    // Another agent's schedule is created as before.
+    let ledgers = call(
+        &agents.fixture,
+        open,
+        "meta/schedule/create",
+        create_params("ledger"),
+    )
+    .await;
+    assert_eq!(ledgers["result"]["phase"], json!("active"), "{ledgers:#?}");
+
+    // A resume by name stays what it was: it takes the schedule over.
+    let resumed = call(
+        &agents.fixture,
+        open,
+        "meta/schedule/resume",
+        json!({ "identity": "scout", "schedule_id": scouts }),
+    )
+    .await;
+    assert!(resumed["error"].is_null(), "{resumed:#?}");
+    assert_eq!(resumed["result"]["phase"], json!("active"), "{resumed:#?}");
+    assert!(
+        resumed["result"].get("paused_for_target").is_none(),
+        "{resumed:#?}"
+    );
+
+    // Unarchived, the agent takes a new schedule and a change again.
+    agents.unarchive("unarchive-1", "scout").await;
+    let again = call(
+        &agents.fixture,
+        open,
+        "meta/schedule/create",
+        create_params("scout"),
+    )
+    .await;
+    assert_eq!(again["result"]["phase"], json!("active"), "{again:#?}");
+    let changed = call(
+        &agents.fixture,
+        open,
+        "meta/schedule/update",
+        json!({ "identity": "scout", "schedule_id": scouts, "content": "Changed after." }),
+    )
+    .await;
+    assert!(changed["error"].is_null(), "{changed:#?}");
+    agents.stop().await;
+    Ok(())
+}
+
+/// A Console schedule whose create read its agent before the agent's
+/// archive and wrote after the archive had listed the agent's schedules is
+/// paused for the agent all the same: the create reads the agent again
+/// after its write. Its answer shows the schedule as that left it, and the
+/// unarchive resumes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_console_schedule_created_across_its_agents_archive_is_paused_for_it() -> TestResult {
+    let agents = created_agents("console-schedules-create-across-archive").await?;
+    let hold = crate::console_schedules::ScheduleWriteHold::default();
+    agents
+        .fixture
+        .runtime
+        .console_schedules()
+        .attached()
+        .ok_or("the schedules are attached")?
+        .hold_writes(hold.clone());
+    let create = call(
+        &agents.fixture,
+        Caller::open_console(),
+        "meta/schedule/create",
+        create_params("scout"),
+    );
+    let archive = async {
+        tokio::time::timeout(Duration::from_secs(30), hold.reached())
+            .await
+            .expect("the create reached the hold");
+        let paused = agents.archive("archive-1", "scout").await;
+        hold.release();
+        paused
+    };
+    let (created, paused) = tokio::join!(create, archive);
+    assert_eq!(
+        paused["count"],
+        json!(0),
+        "the archive listed no schedule yet: {paused:#?}"
+    );
+    let scouts = answered_id(&created);
+    assert_eq!(created["result"]["phase"], json!("paused"), "{created:#?}");
+    assert_eq!(
+        created["result"]["paused_for_target"],
+        json!(true),
+        "{created:#?}"
+    );
+    assert_eq!(
+        agents.state(&scouts).await,
+        (meerkat::SchedulePhase::Paused, true)
+    );
+    let resumed = agents.unarchive("unarchive-1", "scout").await;
+    assert_eq!(resumed["count"], json!(1), "{resumed:#?}");
+    assert_eq!(
+        agents.state(&scouts).await,
+        (meerkat::SchedulePhase::Active, false)
+    );
+    agents.stop().await;
+    Ok(())
+}
+
+/// One agent schedule tool call `name` with `args` through `tools`: the
+/// JSON it answers, or its refusal.
+async fn schedule_tool_call(
+    tools: &Arc<dyn meerkat_core::AgentToolDispatcher>,
+    name: &str,
+    args: Value,
+) -> Result<Value, meerkat_core::ToolError> {
+    let args = serde_json::value::RawValue::from_string(args.to_string())
+        .map_err(|error| meerkat_core::ToolError::invalid_arguments(name, error.to_string()))?;
+    let outcome = tools
+        .dispatch_with_context(
+            meerkat_core::types::ToolCallView {
+                id: "schedule-tool-call",
+                name,
+                args: &args,
+            },
+            &meerkat_core::ToolDispatchContext::default(),
+        )
+        .await?;
+    let text = outcome
+        .result
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            meerkat_core::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
+}
+
+/// A daily schedule named `name` at `target`, as a schedule tool takes it.
+fn tool_schedule(name: &str, target: Value) -> Value {
+    json!({
+        "name": name,
+        "trigger": {
+            "type": "interval",
+            "start_at_utc": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            "every_seconds": 86400,
+        },
+        "target": target,
+    })
+}
+
+/// An identity target that names `agent`.
+fn identity_tool_target(agent: &str) -> Value {
+    json!({
+        "target_kind": "identity",
+        "type": "resumable_identity",
+        "identity": agent,
+        "action": { "type": "prompt", "prompt": "Check in." },
+    })
+}
+
+/// A member target that names `member` of the mob `mob`.
+fn member_tool_target(mob: &str, member: &str) -> Value {
+    json!({
+        "target_kind": "mob",
+        "type": "member",
+        "mob_id": mob,
+        "member_id": member,
+        "action": { "type": "send", "content": "Check in." },
+    })
+}
+
+/// An agent's schedule tools point no schedule at an archived agent: a
+/// create whose target names it, an update that retargets a schedule at it
+/// and an update of a schedule that already targets it are refused
+/// (`identity_archived`) and write nothing. A schedule for another agent,
+/// an update that moves a schedule away from the archived agent, and a
+/// schedule for the agent once it is unarchived are taken as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_schedule_tools_point_no_schedule_at_an_archived_agent() -> TestResult {
+    let agents = created_agents("schedule-tools-no-archived-target").await?;
+    let mob = agents.mob.mob_id().to_string();
+    let service = agents.fixture.service.clone();
+    let tools = crate::schedule_wiring::agent_schedule_tools_over_registry_for_test(
+        service.clone(),
+        agents.registry.clone(),
+    );
+    let id_of = |created: &Value| {
+        created["schedule_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the schedule has an id: {created:#?}"))
+            .to_string()
+    };
+    let scouts = id_of(
+        &schedule_tool_call(
+            &tools,
+            "meerkat_schedule_create",
+            tool_schedule("scouts", identity_tool_target("scout")),
+        )
+        .await?,
+    );
+    let ledgers = id_of(
+        &schedule_tool_call(
+            &tools,
+            "meerkat_schedule_create",
+            tool_schedule("ledgers", identity_tool_target("ledger")),
+        )
+        .await?,
+    );
+    agents.archive("archive-1", "scout").await;
+    let archived = |answer: &Result<Value, meerkat_core::ToolError>| {
+        assert!(
+            matches!(
+                answer,
+                Err(meerkat_core::ToolError::PolicyDenied { denial })
+                    if denial.code == "identity_archived" && denial.message.contains("scout")
+            ),
+            "refused because its agent is archived: {answer:?}"
+        );
+    };
+    let count = service.list().await?.len();
+
+    for target in [
+        identity_tool_target("scout"),
+        member_tool_target(&mob, "scout"),
+    ] {
+        let created = schedule_tool_call(
+            &tools,
+            "meerkat_schedule_create",
+            tool_schedule("late", target),
+        )
+        .await;
+        archived(&created);
+    }
+    assert_eq!(service.list().await?.len(), count, "nothing was created");
+
+    let before = service.get(&ScheduleId::parse(&ledgers)?).await?;
+    let retargeted = schedule_tool_call(
+        &tools,
+        "meerkat_schedule_update",
+        json!({ "schedule_id": ledgers, "target": identity_tool_target("scout") }),
+    )
+    .await;
+    archived(&retargeted);
+    let renamed = schedule_tool_call(
+        &tools,
+        "meerkat_schedule_update",
+        json!({ "schedule_id": scouts, "name": "renamed" }),
+    )
+    .await;
+    archived(&renamed);
+    assert_eq!(
+        service.get(&ScheduleId::parse(&ledgers)?).await?,
+        before,
+        "the other agent's schedule is as it was"
+    );
+    assert_eq!(
+        service
+            .get(&ScheduleId::parse(&scouts)?)
+            .await?
+            .config
+            .name
+            .as_deref(),
+        Some("scouts"),
+        "nothing was written"
+    );
+
+    // Another agent's schedule, and a move away from the archived agent.
+    schedule_tool_call(
+        &tools,
+        "meerkat_schedule_create",
+        tool_schedule("more", identity_tool_target("ledger")),
+    )
+    .await?;
+    schedule_tool_call(
+        &tools,
+        "meerkat_schedule_update",
+        json!({ "schedule_id": scouts, "target": identity_tool_target("ledger") }),
+    )
+    .await?;
+
+    agents.unarchive("unarchive-1", "scout").await;
+    schedule_tool_call(
+        &tools,
+        "meerkat_schedule_create",
+        tool_schedule("again", identity_tool_target("scout")),
+    )
+    .await?;
+    agents.stop().await;
+    Ok(())
+}
+
+/// A schedule that names an agent's session follows the agent's archive and
+/// unarchive as a schedule that names the agent does: Core's entry of the
+/// agent records the session its member was bound to, and its unarchive
+/// seats it on that session again. Another agent's session schedule is left
+/// alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_schedule_that_names_an_agents_session_follows_its_archive_and_unarchive() -> TestResult {
+    use meerkat::SchedulePhase::{Active, Paused};
+    let agents = created_agents("schedules-session-target-archived").await?;
+    let on_session = |name: &'static str, agent: &'static str| {
+        let session_id = agents.session_of(agent);
+        let service = agents.fixture.service.clone();
+        async move {
+            service
+                .create(meerkat::CreateScheduleRequest {
+                    name: Some(name.to_owned()),
+                    description: None,
+                    trigger: meerkat::TriggerSpec::Once {
+                        due_at_utc: chrono::Utc::now() + chrono::Duration::days(1),
+                    },
+                    target: meerkat::TargetBinding::session(
+                        meerkat::SessionTargetBinding::ExactSession {
+                            session_id,
+                            action: meerkat::ScheduledSessionAction::Prompt {
+                                prompt: meerkat_core::ContentInput::Text("Check in.".into()),
+                                system_prompt: None,
+                                render_metadata: None,
+                                skill_refs: Vec::new(),
+                                additional_instructions: Vec::new(),
+                            },
+                        },
+                    ),
+                    misfire_policy: meerkat::MisfirePolicy::default(),
+                    overlap_policy: meerkat::OverlapPolicy::default(),
+                    missing_target_policy: meerkat::MissingTargetPolicy::default(),
+                    labels: BTreeMap::new(),
+                    planning_horizon_days: Some(1),
+                    planning_horizon_occurrences: Some(1),
+                })
+                .await
+                .unwrap_or_else(|error| panic!("the schedule {name} is created: {error}"))
+                .schedule_id
+                .to_string()
+        }
+    };
+    let scouts = on_session("scouts", "scout").await;
+    let ledgers = on_session("ledgers", "ledger").await;
+
+    let paused = agents.archive("archive-1", "scout").await;
+    assert_eq!(
+        (paused["effect"].clone(), paused["count"].clone()),
+        (json!("paused"), json!(1)),
+        "the archive pauses the schedule on the agent's session: {paused:#?}"
+    );
+    assert_eq!(agents.state(&scouts).await, (Paused, true));
+    assert_eq!(agents.state(&ledgers).await, (Active, false));
+
+    let resumed = agents.unarchive("unarchive-1", "scout").await;
+    assert_eq!(
+        (resumed["effect"].clone(), resumed["count"].clone()),
+        (json!("resumed"), json!(1)),
+        "{resumed:#?}"
+    );
+    assert_eq!(agents.state(&scouts).await, (Active, false));
+    assert_eq!(agents.state(&ledgers).await, (Active, false));
+    agents.stop().await;
+    Ok(())
+}
+
+/// A model that counts the requests it is sent and answers each with one
+/// short turn.
+struct CountedModel {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl meerkat_client::LlmClient for CountedModel {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a meerkat_client::LlmRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, meerkat_client::LlmError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let [usage, done] = crate::mob_handle_runtime::test_llm_usage::usage_then_done(
+            request,
+            meerkat_core::Provider::OpenAI,
+            meerkat_core::types::StopReason::EndTurn,
+        );
+        Box::pin(futures::stream::iter(vec![
+            Ok(meerkat_client::LlmEvent::TextDelta {
+                delta: "done".to_string(),
+                meta: None,
+            }),
+            Ok(usage),
+            Ok(done),
+        ]))
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::OpenAI
+    }
+
+    fn health_check<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), meerkat_client::LlmError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// The agents of [`created_agents`] on a launch whose schedule firing host
+/// runs: the same composition, built over a session service the row holds
+/// (a firing host fires through it) and a model that counts its requests.
+struct FiringAgents {
+    agents: CreatedAgents,
+    live: crate::mob_handle_runtime::LiveComposeInputs,
+    model_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// What a launch holds of an agent's session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionReading {
+    /// The session's stored messages.
+    messages: String,
+    /// Whether a session actor lives for it.
+    actor: bool,
+    /// Whether an executor is attached to it.
+    executor: bool,
+    /// Where Core's entry says the agent stands.
+    standing: String,
+}
+
+/// How one occurrence ended: its phase and its failure class.
+type Ending = (
+    meerkat::OccurrencePhase,
+    Option<meerkat::OccurrenceFailureClass>,
+);
+
+async fn firing_agents(
+    mob_id: &str,
+) -> Result<FiringAgents, Box<dyn std::error::Error + Send + Sync>> {
+    use crate::identity_creation::{
+        IdentityChangeSpec, IdentityCreationPolicy, IdentityFamilyOptions,
+    };
+    let temp_dir = tempfile::tempdir()?;
+    let state = temp_dir.path().to_path_buf();
+    let model_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (mob_storage, provenance) = crate::mob_composition_manifest::persistent_mob_storage(
+        crate::storage_layout::MetaStorageLayout::with_injected_roots(state.clone(), None)
+            .event_log_db(),
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    let mut spec = crate::mob_handle_runtime::MobBootstrapSpec::persistent(
+        meerkat_mob::MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "{mob_id}"
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+[profiles.worker.tools]
+comms = true
+"#
+        ))?,
+        mob_storage,
+        provenance,
+        state.clone(),
+        16,
+    )
+    .await
+    .map_err(|error| format!("{error:?}"))?;
+    spec.options = crate::mob_handle_runtime::MobBootstrapOptions {
+        allow_ephemeral_sessions: true,
+        notify_orchestrator_on_resume: true,
+        default_llm_client: Some(Arc::new(CountedModel {
+            calls: Arc::clone(&model_calls),
+        })),
+    };
+    let live = spec
+        .live_compose_inputs
+        .clone()
+        .ok_or("a persistent composition keeps its session service")?;
+    let owner = Box::pin(
+        crate::unified_runtime::UnifiedRuntimeBuilder::default()
+            .mob_spec(spec)
+            .module_config(crate::MetaConfig {
+                modules: Vec::new(),
+                discovery: crate::DiscoverySpec {
+                    namespace: mob_id.to_string(),
+                    modules: Vec::new(),
+                },
+                pre_spawn: Vec::new(),
+            })
+            .timeout(Duration::from_secs(10))
+            .persistent_state(state.clone())
+            .continuity_from_state_dir(&state)
+            .await
+            .map_err(|error| error.to_string())?
+            .roster_provider(Arc::new(HostRoster))
+            .identity_runtime_instance_id("schedule-fires-created-agents")
+            .build(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let runtime = owner.mob_runtime().clone();
+    let identity_runtime = owner.identity_runtime_ref().cloned();
+    let fixture = fixture_over(
+        temp_dir,
+        Some(owner),
+        runtime,
+        identity_runtime,
+        Some(ScheduleFiringHostBinding::external_driver()),
+    );
+    let owner = fixture
+        .owner
+        .as_ref()
+        .ok_or("the fixture keeps its owner")?;
+    let registry = crate::schedule_wiring::ScheduleMobTargetRegistry::default();
+    registry.adopt_mob_runtime(&fixture.runtime);
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [{
+            "change": ["create", "descriptive", "capability", "peers", "profile", "archive",
+                       "remove", "adopt"],
+            "requester": {"kind": "host"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "allow"},
+        }]},
+    }))
+    .expect("the policy parses")
+    .ok_or("the policy is enabled")?;
+    let schedules =
+        crate::schedule_wiring::MobAgentSchedules::new(fixture.service.clone(), registry.clone());
+    assert!(
+        owner.attach_identity_policy(
+            Arc::new(policy),
+            IdentityFamilyOptions::new().with_schedules(Arc::new(schedules)),
+        ),
+        "the runtime serves identities and takes the policy"
+    );
+    let family = owner.identity_family().ok_or("the family is attached")?;
+    let mob = owner.mob_handle();
+    let agents = CreatedAgents {
+        fixture,
+        registry,
+        family,
+        mob,
+    };
+    agents
+        .change(
+            "create",
+            IdentityChangeSpec::Create(serde_json::from_value(json!({"agents": [
+                {"name": "scout", "profile": "worker"},
+                {"name": "ledger", "profile": "worker"},
+            ]}))?),
+        )
+        .await;
+    Ok(FiringAgents {
+        agents,
+        live,
+        model_calls,
+    })
+}
+
+impl FiringAgents {
+    /// The schedule firing host of the launch, over the composition's own
+    /// session service, runtime machine, mob and identity runtime.
+    fn start_firing(&self) -> impl Sized + use<> {
+        let owner = self
+            .agents
+            .fixture
+            .owner
+            .as_ref()
+            .expect("the fixture keeps its owner");
+        crate::schedule_wiring::spawn_schedule_host_with_identity_runtime(
+            Arc::clone(&self.live.service),
+            Arc::clone(&self.live.machine),
+            self.agents.fixture.service.clone(),
+            owner.mob_runtime().agent_mob_mcp_state(),
+            owner.mob_handle(),
+            owner.identity_runtime_ref().cloned(),
+            None,
+            None,
+            "schedule-fires-created-agents",
+        )
+        .expect("the schedule firing host starts")
+    }
+
+    /// A schedule that names `session` alone.
+    fn on_session(session: &meerkat_core::types::SessionId) -> meerkat::TargetBinding {
+        meerkat::TargetBinding::session(meerkat::SessionTargetBinding::ExactSession {
+            session_id: session.clone(),
+            action: meerkat::ScheduledSessionAction::Prompt {
+                prompt: meerkat_core::ContentInput::Text("Check in.".into()),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        })
+    }
+
+    /// A schedule that names the agent `name` as a member of its mob, as the
+    /// agents' schedule tools write one.
+    fn on_agent(&self, name: &str) -> meerkat::TargetBinding {
+        meerkat::TargetBinding::Mob(Box::new(meerkat::MobTargetBinding::Member {
+            mob_id: self.agents.mob.definition().id.as_str().to_string(),
+            member_id: name.to_string(),
+            action: meerkat::ScheduledMobAction::Send {
+                content: meerkat_core::ContentInput::Text("Say hello.".into()),
+                render_metadata: None,
+            },
+        }))
+    }
+
+    /// A schedule on `target`, written to the schedule service as a host
+    /// writes one.
+    async fn schedule(
+        &self,
+        name: &str,
+        target: meerkat::TargetBinding,
+        trigger: meerkat::TriggerSpec,
+    ) -> ScheduleId {
+        self.agents
+            .fixture
+            .service
+            .create(meerkat::CreateScheduleRequest {
+                name: Some(name.to_owned()),
+                description: None,
+                trigger,
+                target,
+                // A late tick of a busy host is not what a row reads.
+                misfire_policy: meerkat::MisfirePolicy::CatchUpWithin {
+                    window_seconds: 120,
+                },
+                overlap_policy: meerkat::OverlapPolicy::default(),
+                missing_target_policy: meerkat::MissingTargetPolicy::default(),
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(3),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("the schedule {name} is created: {error}"))
+            .schedule_id
+    }
+
+    /// What the launch holds of `name`'s session `session`.
+    async fn reading(
+        &self,
+        name: &str,
+        session: &meerkat_core::types::SessionId,
+    ) -> SessionReading {
+        let head = |text: String| {
+            text.split(|letter: char| !letter.is_alphanumeric())
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
+        SessionReading {
+            messages: match self.live.service.load_authoritative_session(session).await {
+                Ok(Some(stored)) => format!("{} messages", stored.messages().len()),
+                Ok(None) => "no session".to_string(),
+                Err(error) => format!("unreadable: {error}"),
+            },
+            actor: self
+                .live
+                .service
+                .live_session_actor_witness(session)
+                .await
+                .is_some(),
+            executor: self
+                .live
+                .machine
+                .current_executor_attachment_witness(session)
+                .await
+                .is_some(),
+            standing: match self.agents.mob.identity_entry(&AgentIdentity::from(name)) {
+                Ok(meerkat_mob::IdentityEntryRead::Entry(entry)) => {
+                    head(format!("{:?}", entry.standing))
+                }
+                Ok(other) => head(format!("{other:?}")),
+                Err(error) => format!("unreadable: {error:?}"),
+            },
+        }
+    }
+
+    /// The first `count` occurrences of `schedule` that came due and ended,
+    /// in due order: fewer when no more ended `within`.
+    async fn ended(
+        &self,
+        schedule: &ScheduleId,
+        count: usize,
+        within: Duration,
+    ) -> Vec<meerkat::Occurrence> {
+        use meerkat::OccurrencePhase::{Completed, DeliveryFailed, Misfired, Skipped};
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            let mut ended: Vec<_> = self
+                .agents
+                .fixture
+                .service
+                .list_occurrences(schedule)
+                .await
+                .expect("the occurrences are read")
+                .into_iter()
+                .filter(|occurrence| {
+                    matches!(
+                        occurrence.phase,
+                        Completed | DeliveryFailed | Misfired | Skipped
+                    )
+                })
+                .collect();
+            ended.sort_by_key(|occurrence| occurrence.due_at_utc);
+            if ended.len() >= count || tokio::time::Instant::now() >= deadline {
+                ended.truncate(count);
+                return ended;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+}
+
+/// How `scout` is taken away before the schedule on its session comes due.
+#[derive(Debug, Clone, Copy)]
+enum TakenAway {
+    /// The agent is removed. The removal finds no schedule on a session
+    /// Core's entry no longer records, so the schedule stays active.
+    Removed,
+    /// The agent is archived, which pauses the schedule for its target, and
+    /// the schedule is then resumed by name.
+    ArchivedAndResumedByName,
+}
+
+/// What a launch whose firing host runs did with two schedules: a one-shot
+/// on the session of `ledger`, which stays as it was created, and a
+/// repeating one on the session of `scout`, which came due after `scout`
+/// was taken away.
+struct Fired {
+    /// How each agent's first turn ended, the model requests they made, and
+    /// what the launch held of `scout`'s session after its own.
+    woken: Vec<Ending>,
+    woken_calls: usize,
+    scout_woken: SessionReading,
+    /// How the one-shot on `ledger`'s session ended.
+    control: Vec<Ending>,
+    /// The model requests made by the time it ended.
+    control_calls: usize,
+    /// Whether `ledger`'s session holds more than before it.
+    control_grew: bool,
+    /// How the first occurrences of the schedule on `scout`'s session ended.
+    ended: Vec<Ending>,
+    /// The model requests made by the time they ended.
+    calls: usize,
+    /// `scout`'s session before the schedule came due, and after.
+    before: SessionReading,
+    after: SessionReading,
+    /// The schedule on `scout`'s session afterwards: its phase, and whether
+    /// it is paused for its target.
+    schedule: (meerkat::SchedulePhase, bool),
+}
+
+async fn due_after(
+    mob_id: &str,
+    taken: TakenAway,
+) -> Result<Fired, Box<dyn std::error::Error + Send + Sync>> {
+    use meerkat::SchedulePhase::{Active, Paused};
+    use std::sync::atomic::Ordering::SeqCst;
+    let fired = firing_agents(mob_id).await?;
+    let host = fired.start_firing();
+    // An agent the create seated has no stored session before its first
+    // turn, and a schedule on a session that is not stored ends as a missing
+    // target. Each agent takes one turn first, through a schedule that names
+    // it as the agents' schedule tools name one.
+    let soon = chrono::Utc::now() + chrono::Duration::seconds(2);
+    let mut wakes = Vec::new();
+    for name in ["scout", "ledger"] {
+        wakes.push(
+            fired
+                .schedule(
+                    &format!("wake-{name}"),
+                    fired.on_agent(name),
+                    meerkat::TriggerSpec::Once { due_at_utc: soon },
+                )
+                .await,
+        );
+    }
+    let mut woken = Vec::new();
+    for wake in &wakes {
+        woken.extend(fired.ended(wake, 1, Duration::from_mins(1)).await);
+    }
+    let first_turns = tokio::time::Instant::now() + Duration::from_mins(1);
+    while fired.model_calls.load(SeqCst) < 2 && tokio::time::Instant::now() < first_turns {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // The first turns' writes land.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let woken_calls = fired.model_calls.load(SeqCst);
+    let scout = fired.agents.session_of("scout");
+    let ledger = fired.agents.session_of("ledger");
+    let scout_woken = fired.reading("scout", &scout).await;
+    let created = chrono::Utc::now();
+    let control_due = created + chrono::Duration::seconds(20);
+    let control = fired
+        .schedule(
+            "ledgers",
+            FiringAgents::on_session(&ledger),
+            meerkat::TriggerSpec::Once {
+                due_at_utc: control_due,
+            },
+        )
+        .await;
+    let scouts = fired
+        .schedule(
+            "scouts",
+            FiringAgents::on_session(&scout),
+            meerkat::TriggerSpec::Interval(meerkat::IntervalTriggerSpec {
+                start_at_utc: created + chrono::Duration::seconds(26),
+                every_seconds: 5,
+                end_at_utc: None,
+            }),
+        )
+        .await;
+    match taken {
+        TakenAway::Removed => {
+            let agent = fired.agents.named("scout").await;
+            fired
+                .agents
+                .change(
+                    "remove-1",
+                    crate::identity_creation::IdentityChangeSpec::Remove(agent),
+                )
+                .await;
+        }
+        TakenAway::ArchivedAndResumedByName => {
+            fired.agents.archive("archive-1", "scout").await;
+            assert_eq!(
+                fired.agents.state(&scouts.to_string()).await,
+                (Paused, true),
+                "the archive pauses the schedule on the agent's session"
+            );
+            fired
+                .agents
+                .fixture
+                .service
+                .resume(&scouts)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    assert_eq!(
+        fired.agents.state(&scouts.to_string()).await,
+        (Active, false),
+        "the schedule on the agent's session is active when it comes due"
+    );
+    assert!(
+        chrono::Utc::now() < control_due,
+        "the agent was taken away before any schedule came due"
+    );
+    assert_eq!(
+        fired.model_calls.load(SeqCst),
+        woken_calls,
+        "no turn ran between the first turns and a schedule coming due"
+    );
+    let before = fired.reading("scout", &scout).await;
+    let ledger_before = fired.reading("ledger", &ledger).await;
+
+    let control_ended = fired.ended(&control, 1, Duration::from_secs(80)).await;
+    let control_calls = fired.model_calls.load(SeqCst);
+    let ledger_after = fired.reading("ledger", &ledger).await;
+
+    let ended = fired.ended(&scouts, 2, Duration::from_mins(1)).await;
+    // Whatever a fire started has shown by now.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let calls = fired.model_calls.load(SeqCst);
+    let after = fired.reading("scout", &scout).await;
+    let schedule = fired.agents.state(&scouts.to_string()).await;
+    let endings = |occurrences: Vec<meerkat::Occurrence>| -> Vec<Ending> {
+        occurrences
+            .into_iter()
+            .map(|occurrence| (occurrence.phase, occurrence.failure_class))
+            .collect()
+    };
+    drop(host);
+    let seen = Fired {
+        woken: endings(woken),
+        woken_calls,
+        scout_woken,
+        control: endings(control_ended),
+        control_calls,
+        control_grew: ledger_after.messages != ledger_before.messages,
+        ended: endings(ended),
+        calls,
+        before,
+        after,
+        schedule,
+    };
+    fired.agents.stop().await;
+    Ok(seen)
+}
+
+/// A schedule that names only the session of an agent comes due after the
+/// agent's removal, on a launch whose firing host runs: nothing runs for
+/// it. A schedule on another agent's session fires its turn on the same
+/// host; the removed agent's takes no model request, its session holds
+/// what it held, no session actor or executor appears for it, and each of
+/// its occurrences ends without a delivery while the schedule stays active.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_schedule_that_comes_due_after_its_agents_removal_runs_nothing() -> TestResult {
+    use meerkat::OccurrenceFailureClass::TargetMissing;
+    use meerkat::OccurrencePhase::{Completed, Misfired};
+    let fired = due_after("schedule-fires-removed-agent", TakenAway::Removed).await?;
+    assert_eq!(
+        (fired.woken.as_slice(), fired.woken_calls),
+        ([(Completed, None), (Completed, None)].as_slice(), 2),
+        "each agent took its first turn: {:?}",
+        fired.scout_woken
+    );
+    assert_eq!(
+        fired.control,
+        [(Completed, None)],
+        "the firing host delivers to a session of the launch"
+    );
+    assert!(
+        fired.control_calls > fired.woken_calls && fired.control_grew,
+        "the delivery to the other agent's session ran its turn"
+    );
+    assert_eq!(
+        fired.calls, fired.control_calls,
+        "no model request is made for the removed agent's session"
+    );
+    assert_eq!(
+        fired.after, fired.before,
+        "the removed agent's session holds what it held, and nothing woke or was built for it"
+    );
+    assert_eq!(
+        fired.ended,
+        [
+            (Misfired, Some(TargetMissing)),
+            (Misfired, Some(TargetMissing))
+        ],
+        "each occurrence ends without a delivery"
+    );
+    assert_eq!(
+        fired.schedule,
+        (meerkat::SchedulePhase::Active, false),
+        "the schedule stays active"
+    );
+    Ok(())
+}
+
+/// A schedule that names only the session of an agent is paused by the
+/// agent's archive and resumed by name while the agent is archived; it then
+/// comes due on a launch whose firing host runs: nothing runs for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_schedule_resumed_by_name_for_an_archived_agent_runs_nothing() -> TestResult {
+    use meerkat::OccurrenceFailureClass::TargetMissing;
+    use meerkat::OccurrencePhase::{Completed, Misfired};
+    let fired = due_after(
+        "schedule-fires-archived-agent",
+        TakenAway::ArchivedAndResumedByName,
+    )
+    .await?;
+    assert_eq!(
+        (fired.woken.as_slice(), fired.woken_calls),
+        ([(Completed, None), (Completed, None)].as_slice(), 2),
+        "each agent took its first turn: {:?}",
+        fired.scout_woken
+    );
+    assert_eq!(
+        fired.control,
+        [(Completed, None)],
+        "the firing host delivers to a session of the launch"
+    );
+    assert!(
+        fired.control_calls > fired.woken_calls && fired.control_grew,
+        "the delivery to the other agent's session ran its turn"
+    );
+    assert_eq!(
+        fired.calls, fired.control_calls,
+        "no model request is made for the archived agent's session"
+    );
+    assert_eq!(
+        fired.after, fired.before,
+        "the archived agent's session holds what it held, and nothing woke or was built for it"
+    );
+    assert_eq!(
+        fired.ended,
+        [
+            (Misfired, Some(TargetMissing)),
+            (Misfired, Some(TargetMissing))
+        ],
+        "each occurrence ends without a delivery"
+    );
+    assert_eq!(
+        fired.schedule,
+        (meerkat::SchedulePhase::Active, false),
+        "the schedule stays active"
+    );
+    Ok(())
+}

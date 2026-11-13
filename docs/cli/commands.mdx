@@ -219,6 +219,16 @@ rkat --schema ./triage.schema.json "extract issues from this diff"
 
 `--json` is a convenience alias for `--output json`.
 
+With JSON output, stdout ends with exactly one JSON document: the run result
+when the run succeeds, the pending document (`"status": "pending_tool_call"`)
+when it stops to wait for an external tool result, or the
+[failure document](/cli/configuration#json-failure-document)
+(`{"error": {...}}`) when it fails. A script reads the document's top-level
+keys, not whether stdout is empty: a failed run writes to stdout too. Exit
+statuses are the same in every output mode, and stderr still carries the
+`Error:` line. With `--stream`, the streamed text comes first and the
+document last. `rkat` has no JSON-lines event output.
+
 HTML output asks the agent to make the final answer a standalone local HTML artifact:
 
 ```bash
@@ -609,7 +619,12 @@ operator-instruction events (`operator-instruction-mob-events`), which a
 release before 0.9.9 refuses, and the identity-store rows of schema version 2
 or later of each mob database that holds any (`identity-store-rows`, counts
 only), which a release before 0.9.9 does not read (see
-[Downgrading to 0.9.8](/guides/upgrading#downgrading-to-0-9-8)). Exit 0
+[Downgrading to 0.9.8](/guides/upgrading#downgrading-to-0-9-8)), and the mob
+databases whose journal holds more than 64 operator instruction records or
+more than 1 MiB of Active bodies in total
+(`operator-instruction-mob-totals`), which a release before 0.9.15 cannot
+serve (see
+[Rolling back to 0.9.14](/guides/upgrading#rolling-back-to-0-9-14)). Exit 0
 means no error-severity findings; exit 1 means errors were found.
 
 ```bash

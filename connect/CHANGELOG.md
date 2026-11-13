@@ -3,7 +3,58 @@
 All notable changes to Meerkat Connect are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## Documentation erratum - 2026-11-12
+
+This clarifies documentation for released Connect 0.9.14; it is not a new
+runtime change. The peer-delivery entries in the 0.9.11 **Known limitations**
+section, carried forward in the changelog distributed with 0.9.14, describe
+reply and Recorder refusals too categorically. Those historical entries and
+the released tags are unchanged.
+
+In Connect 0.9.14's selected member composition, the receiver's standing
+selection permits messages and replies to the actual sender (not requests),
+and writes to its own Recorder. Requests and sends to other peers are outside
+that selection. A same-process governed delivery also narrows each operation
+by the sending work's current grants for its target: an operation without that
+target coverage is refused. Coverage is necessary, not a guarantee of success.
+This does not assert that any particular governed reply or Recorder write has
+been qualified at runtime.
+
+A delivery without a governed origin still uses the receiver's standing
+selection; it does not gain unrestricted authority. A network delivery carries
+no governed origin, and Connect must resolve its sender in the receiving
+member's local mob roster or refuse it. This describes Connect's selected
+composition, not a general rule for all Core hosts or a qualification of
+cross-network deployment.
+
+The current [host composition](https://docs.rkat.ai/connect/guides/host-composition)
+and [access-control](https://docs.rkat.ai/connect/reference/access-control)
+guides give the conditional wording for Connect 0.9.14.
+
 ## [Unreleased]
+
+### Fixed
+
+- On macOS, a prompt whose input is a socket failed with "Operation not
+  supported on socket"; it now treats that answer like a pipe or socket with
+  nothing to discard.
+
+### Security
+
+- `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486. Releases
+  through 0.9.14 build with 1.1.5. `meerkat-connect` and `toolkit-package`
+  depend on `rustix` directly and now require exactly 1.1.6; it is also
+  taken through `cap-std`, `tempfile`, Meerkat Core and Meerkat Meta, and
+  `xattr` through `tar`. Meerkat Core and Meerkat Meta, which Connect
+  builds on, now require rustix 1.1.6 or later. The advisory is about the
+  `getxattr` and `listxattr` functions of `rustix::fs` (with their `l` and
+  `f` forms), which mark bytes they never wrote as initialized when they
+  are given a zero-length buffer. No Connect crate calls them. Of the
+  crates Connect builds with only `xattr` does, and `tar`, the one crate
+  that uses `xattr`, calls it only to set attributes while unpacking, so
+  Connect's own use is not known to be affected. The library kits built
+  through 0.9.14 hold tools built with `rustix` 1.1.5; the kits are rebuilt
+  at the next Connect release.
 
 ## [0.9.14] - 2026-11-11
 

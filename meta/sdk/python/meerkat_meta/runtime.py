@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import hmac
 import itertools
@@ -50,10 +51,14 @@ from .errors import (
     WORKGRAPH_UNAVAILABLE_CODE,
     IDENTITY_HISTORY_UNAVAILABLE_CODE,
     IDENTITY_HOST_ADOPTED_CODE,
+    IDENTITY_REFUSED_CODE,
     IDENTITY_UNRESUMABLE_CODE,
     IDENTITY_WAKE_HELD_KINDS,
+    IdentityRefusal,
+    IdentityRefusedError,
     CapabilityUnavailableError,
     CompositionProvenanceError,
+    ContractMismatchError,
     FlowRoleTargetsNotAppliedError,
     FlowRoleTargetsRefusedError,
     FlowRunIdempotencyConflictError,
@@ -89,6 +94,29 @@ from .errors import (
     announcement_error_from_rpc,
 )
 from .events import AgentEvent, MobEvent
+from .identities import (
+    AgentDirectoryPage,
+    AgentPage,
+    AgentRecord,
+    AgentRef,
+    AgentSet,
+    AgentSpec,
+    CreateAgents,
+    IdentityChangePlan,
+    IdentityChangeRequest,
+    IdentityChangeResult,
+    IdentityChangesHold,
+    IdentityOperation,
+    IdentityOperationUnknown,
+    IdentityRefused,
+    IdentityWithdrawn,
+    SourceEvidence,
+    UpdateAgent,
+    _operation_ref,
+    _plan_params,
+    _settle_preparation_params,
+    identity_outcome_from_dict,
+)
 from .identity_first_models import (
     CompletionCursor,
     CompletionProgress,
@@ -442,6 +470,16 @@ def _rpc_error_from_payload(
             method=method,
             data=data,
         )
+    if code == IDENTITY_REFUSED_CODE:
+        refusal = IdentityRefusal.from_dict(data)
+        if refusal is not None:
+            return IdentityRefusedError(
+                message,
+                refusal=refusal,
+                request_id=request_id,
+                method=method,
+                data=data,
+            )
     announcement_error = announcement_error_from_rpc(
         code, message, request_id=request_id, method=method, data=data
     )
@@ -687,6 +725,382 @@ class MonitorsHandle:
         return await self._runtime._rpc("monitors/start", params)
 
 
+class IdentitiesHandle:
+    """Long-term agents from host code: one call per ``meta/identity/*``
+    method (``runtime.identities``).
+
+    Every agent of the mob is read and changed here the same way, whoever
+    asked for it and by whatever route it came to exist. A change is named
+    by your ``request_id``: the same id and request return the same state
+    and commit at most once, so a retry after a lost answer is safe, and
+    another request under the same id is refused ``operation_reused``.
+
+    A change returns :class:`~meerkat_meta.identities.IdentityDone`,
+    :class:`~meerkat_meta.identities.IdentityPendingDecision` (a person must
+    decide: a normal answer, read it later with :meth:`operation`) or
+    :class:`~meerkat_meta.identities.IdentityPendingPreparation` (the host
+    prepares the agent, then :meth:`settle_preparation`). Every
+    refusal of every call raises
+    :class:`~meerkat_meta.errors.IdentityRefusedError` with the typed
+    ``kind``, ``field`` and ``detail``; nothing of a refused change was
+    written. Params the gateway cannot read are that error too
+    (``invalid_request``). A candidate launch refuses every write before the
+    family is reached, with the gateway-wide
+    :class:`~meerkat_meta.errors.AnnouncementRefusedError`
+    (``kind`` ``candidate_launch``). A read never wakes an agent.
+    """
+
+    def __init__(self, runtime: MetaRuntime) -> None:
+        self._runtime = runtime
+
+    async def _change(self, method: str, params: dict[str, Any]) -> IdentityChangeResult:
+        raw = await self._runtime._rpc(method, params)
+        outcome = identity_outcome_from_dict(raw)
+        if isinstance(outcome, IdentityRefused):
+            # One error for a refusal, however the gateway carried it.
+            refusal = outcome.refusal
+            raise IdentityRefusedError(
+                refusal.detail or f"identity change refused: {refusal.kind}",
+                refusal=refusal,
+                method=method,
+                data=raw,
+            )
+        return outcome
+
+    async def create(
+        self,
+        agents: Sequence[AgentSpec],
+        *,
+        request_id: str,
+        proposer: str | None = None,
+        source_evidence: SourceEvidence | None = None,
+    ) -> IdentityChangeResult:
+        """Create 1 to 256 long-term agents, all or nothing.
+
+        Each :class:`~meerkat_meta.identities.AgentSpec` names a unique
+        ``name`` and a ``profile`` of the mob; the agents may name each other
+        as ``peers``. A new agent is dormant: nothing is loaded and nothing
+        wakes until its first delivery or its ``first_message``. Each
+        agent's outcome carries its ``spec_digest`` and its ``seat``
+        (``owed`` when its first message did not start: the agent exists and
+        is seated without a restart at its next delivery). A removed
+        agent's name is never available again (``name_taken``). On a
+        governed runtime a create that gives a ``first_message`` is refused
+        before anything is written (``unsupported`` at
+        ``agents[i].first_message``).
+        """
+        request = CreateAgents(
+            agents=agents,
+            request_id=request_id,
+            proposer=proposer,
+            source_evidence=source_evidence,
+        )
+        return await self._change("meta/identity/create", request.to_dict())
+
+    async def update(
+        self,
+        name: str,
+        *,
+        expected_spec_digest: str,
+        request_id: str,
+        set: AgentSet | None = None,  # noqa: A002 - the request's own name
+        peers_add: Sequence[str] = (),
+        peers_remove: Sequence[str] = (),
+        proposer: str | None = None,
+        source_evidence: SourceEvidence | None = None,
+    ) -> IdentityChangeResult:
+        """Change one long-term agent.
+
+        ``expected_spec_digest`` is the agent's ``spec_digest`` as you read
+        it: an agent that changed meanwhile refuses ``stale_spec``, whose
+        ``details`` carry ``current_digest``. ``set`` is what changes
+        (:class:`~meerkat_meta.identities.AgentSet`). The agent's outcome
+        carries its new ``spec_digest`` and, for an instructions change,
+        ``instructions`` (:class:`~meerkat_meta.identities.InstructionOutcome`):
+        the new text is in the record at once and reaches the agent at its
+        next run; a run that starts within moments of the change may still
+        use the earlier instructions; earlier instructions are never
+        rewritten. A profile change moves the agent to that profile's model
+        and tools on the same conversation. An agent the host's
+        configuration declares refuses ``owner_read_only``: change it there,
+        or :meth:`adopt` it first.
+        """
+        request = UpdateAgent(
+            name=name,
+            expected_spec_digest=expected_spec_digest,
+            request_id=request_id,
+            set=set if set is not None else AgentSet(),
+            peers_add=peers_add,
+            peers_remove=peers_remove,
+            proposer=proposer,
+            source_evidence=source_evidence,
+        )
+        return await self._change("meta/identity/update", request.to_dict())
+
+    async def _change_one(
+        self,
+        change: str,
+        name: str,
+        expected_spec_digest: str,
+        request_id: str,
+        proposer: str | None,
+        source_evidence: SourceEvidence | None,
+    ) -> IdentityChangeResult:
+        request = AgentRef(
+            name=name,
+            expected_spec_digest=expected_spec_digest,
+            request_id=request_id,
+            proposer=proposer,
+            source_evidence=source_evidence,
+        )
+        return await self._change(f"meta/identity/{change}", request.to_dict())
+
+    async def archive(
+        self,
+        name: str,
+        *,
+        expected_spec_digest: str,
+        request_id: str,
+        proposer: str | None = None,
+        source_evidence: SourceEvidence | None = None,
+    ) -> IdentityChangeResult:
+        """Stop a long-term agent and keep it: its name, record,
+        conversation and memory stay, messages to it are refused, and
+        :meth:`unarchive` brings it back. Like any agent that leaves, it is
+        owed the harvest and distillation of its last conversation, an exit
+        interview and the retirement hook (cause ``unlisted``); no order is
+        promised between them and this answer. The schedules that target it
+        are paused with it: the first answer's agent names the schedules
+        that are paused for it (``schedules``); a replay states none. While
+        it is archived no schedule is pointed at it through Meta: the
+        agents' schedule tools and the Console refuse a create or an update
+        that would (``identity_archived``)."""
+        return await self._change_one(
+            "archive", name, expected_spec_digest, request_id, proposer, source_evidence
+        )
+
+    async def unarchive(
+        self,
+        name: str,
+        *,
+        expected_spec_digest: str,
+        request_id: str,
+        proposer: str | None = None,
+        source_evidence: SourceEvidence | None = None,
+    ) -> IdentityChangeResult:
+        """Bring an archived agent back, on its archived conversation and
+        its current instructions. Refused ``not_archived`` for an agent that
+        is not archived. The schedules its archive paused are resumed, and
+        the first answer's agent names the agent's schedules that are
+        active after the call (``schedules``), one somebody resumed by name
+        while it was archived included; a schedule somebody paused by name
+        stays paused."""
+        return await self._change_one(
+            "unarchive", name, expected_spec_digest, request_id, proposer, source_evidence
+        )
+
+    async def remove(
+        self,
+        name: str,
+        *,
+        expected_spec_digest: str,
+        request_id: str,
+        proposer: str | None = None,
+        source_evidence: SourceEvidence | None = None,
+    ) -> IdentityChangeResult:
+        """Remove a long-term agent for good. Its name can never be used
+        again; its conversation and memory are kept and no other agent can
+        reach them. It is owed what an archive owes (the harvest and
+        distillation of its last conversation, an exit interview, the
+        retirement hook); a removal of an archived agent owes nothing more.
+        Every schedule that targets it is ended (the first answer's agent
+        says which, ``schedules``). Use :meth:`archive` when it may be
+        needed later."""
+        return await self._change_one(
+            "remove", name, expected_spec_digest, request_id, proposer, source_evidence
+        )
+
+    async def adopt(
+        self,
+        name: str,
+        *,
+        expected_spec_digest: str,
+        request_id: str,
+        proposer: str | None = None,
+        source_evidence: SourceEvidence | None = None,
+    ) -> IdentityChangeResult:
+        """Release an agent from configuration: from now on it is changed
+        at run time and configuration no longer declares it.
+
+        The agent keeps its name, its conversation, its memory and the
+        peers it has. ``expected_spec_digest`` is its ``spec_digest`` as
+        :meth:`get` or :meth:`list` read it. The same ``request_id`` and
+        request return the same state, so a retry is safe. Refused
+        ``not_adoptable`` (``details["reason"]`` says why; an agent that is
+        changed at run time already answers ``nothing_to_adopt``) and the
+        retryable ``declared_apply_open`` while the host's configuration is
+        being applied. Stop declaring the agent in configuration once the
+        adoption committed.
+        """
+        return await self._change_one(
+            "adopt", name, expected_spec_digest, request_id, proposer, source_evidence
+        )
+
+    async def settle_preparation(
+        self, name: str, *, request_id: str
+    ) -> IdentityChangeResult:
+        """Say that the host has prepared an agent that awaited it.
+
+        A create of an agent of a profile whose preparation the launch's
+        policy names ``required`` answers ``pending_preparation``: the
+        agent reads ``readiness`` ``preparation_pending``, takes no
+        delivery and runs nothing. Prepare what it needs, then settle it:
+        the agent is seated dormant and its first message, if it has one,
+        runs once. The outcome's agent carries its ``seat``: ``owed`` when
+        its seat did not start (it is seated without a restart when the
+        mob drives its owed seats again). The same ``request_id`` and
+        ``name`` answer the same result and write nothing.
+
+        Only the host's operator settles a preparation. Refused
+        ``preparation_not_pending`` for an agent that awaits none (seated,
+        archived, settled before), ``identity_unknown`` for a name no agent
+        holds, ``owner_read_only`` for an agent the host's configuration
+        declares with a preparation (its declaration settles it), and
+        ``change_denied`` on a launch without an enabled policy. A host
+        that cannot prepare an agent leaves it pending or removes it
+        (:meth:`remove`).
+        """
+        return await self._change(
+            "meta/identity/settle_preparation",
+            _settle_preparation_params(name, request_id),
+        )
+
+    async def withdraw(
+        self, *, request_id: str | None = None, operation_id: str | None = None
+    ) -> IdentityWithdrawn:
+        """Withdraw a change whose decision is still held; nothing of it is
+        written. Name the change by your own ``request_id`` or by the
+        ``operation_id`` its outcome named: exactly one. Refused
+        ``decision_not_found`` when no decision is held for it."""
+        params = _operation_ref(request_id, operation_id)
+        return IdentityWithdrawn.from_dict(
+            await self._runtime._rpc("meta/identity/withdraw", params)
+        )
+
+    async def changes_hold(
+        self, held: bool, *, reason: str | None = None
+    ) -> IdentityChangesHold:
+        """Hold the mob's changes of agents (``held=True``) or release them.
+
+        While held, every change is refused the retryable ``changes_held``
+        and nothing of it is written. The hold does not survive a restart of
+        the host: a host that means to keep changes held sets the hold again
+        as soon as its start has answered, before it serves callers. The
+        start itself is not held: what a launch carries out before this call
+        (a held change that was approved, a change asked by an agent a
+        schedule wakes) is carried out. ``reason`` is for the host's own
+        record.
+        """
+        params: dict[str, Any] = {"held": held}
+        if reason is not None:
+            params["reason"] = reason
+        return IdentityChangesHold.from_dict(
+            await self._runtime._rpc("meta/identity/changes_hold", params)
+        )
+
+    async def list(
+        self,
+        *,
+        profile: str | None = None,
+        include_archived: bool = False,
+        after: str | None = None,
+    ) -> AgentPage:
+        """One page of the mob's agents, in one stable order.
+
+        Every agent is listed the same way, whoever asked for it and by
+        whatever route it came to exist. ``profile`` keeps only agents of
+        that profile; archived agents are listed only with
+        ``include_archived``; ``after`` is the previous page's ``next``.
+        Each :class:`~meerkat_meta.identities.AgentSummary` carries the
+        ``spec_digest`` a change names. Never wakes an agent.
+        """
+        params: dict[str, Any] = {"include_archived": include_archived}
+        if profile is not None:
+            params["profile"] = profile
+        if after is not None:
+            params["after"] = after
+        return AgentPage.from_dict(await self._runtime._rpc("meta/identity/list", params))
+
+    async def get(self, name: str) -> AgentRecord:
+        """One agent in full: what :meth:`list` says of it, and its
+        instructions, context, labels and peers. Refused
+        ``identity_unknown`` for a name no agent has. Never wakes the
+        agent."""
+        return AgentRecord.from_dict(
+            await self._runtime._rpc("meta/identity/get", {"name": name})
+        )
+
+    async def operation(
+        self, *, request_id: str | None = None, operation_id: str | None = None
+    ) -> IdentityOperation:
+        """The state of one change: read it after a lost answer, or to
+        learn what became of a held decision.
+
+        Name it by your own ``request_id`` or by the ``operation_id`` an
+        outcome named: exactly one. Answers the change's outcome
+        (:class:`~meerkat_meta.identities.IdentityDone`,
+        :class:`~meerkat_meta.identities.IdentityPendingDecision`,
+        :class:`~meerkat_meta.identities.IdentityPendingPreparation`, or
+        :class:`~meerkat_meta.identities.IdentityRefused` for an operation
+        that ended refused, as a value, not raised), or
+        :class:`~meerkat_meta.identities.IdentityOperationUnknown`: nothing
+        committed under it and no decision is held, so asking the change
+        commits it at most once. The SDK does not poll: call this when you
+        want the state.
+        """
+        params = _operation_ref(request_id, operation_id)
+        raw = await self._runtime._rpc("meta/identity/operation", params)
+        if isinstance(raw, dict) and raw.get("outcome") == IdentityOperationUnknown.outcome:
+            named = raw.get("operation_id")
+            if not isinstance(named, str):
+                raise ContractMismatchError("an unknown operation has no operation_id")
+            return IdentityOperationUnknown(operation_id=named)
+        return identity_outcome_from_dict(raw)
+
+    async def directory(
+        self, *, query: str | None = None, after: str | None = None
+    ) -> AgentDirectoryPage:
+        """One page of what may be named in a create or an update: the
+        mob's profiles, and the agents that may be listed as peers, each
+        with the verdict the host's rules give it. ``query`` keeps entries
+        whose name or display name contains it; ``after`` is the previous
+        page's ``next``. Never wakes an agent."""
+        params: dict[str, Any] = {}
+        if query is not None:
+            params["query"] = query
+        if after is not None:
+            params["after"] = after
+        return AgentDirectoryPage.from_dict(
+            await self._runtime._rpc("meta/identity/directory", params)
+        )
+
+    async def plan(self, change: str, request: IdentityChangeRequest) -> IdentityChangePlan:
+        """The outcome and the rendering a change would get; nothing is
+        held and nothing is written.
+
+        ``change`` is ``create`` (with a
+        :class:`~meerkat_meta.identities.CreateAgents`), ``update`` (an
+        :class:`~meerkat_meta.identities.UpdateAgent`), or ``archive``,
+        ``unarchive``, ``remove`` or ``adopt`` (an
+        :class:`~meerkat_meta.identities.AgentRef`). A change the host's
+        rules deny is refused, not planned.
+        """
+        params = _plan_params(change, request)
+        return IdentityChangePlan.from_dict(
+            await self._runtime._rpc("meta/identity/plan", params)
+        )
+
+
 class MetaRuntime:
     """Running Meta runtime instance.
 
@@ -732,6 +1146,8 @@ class MetaRuntime:
         self._last_gateway_transport: PersistentTransport | None = None
         self.jobs = JobsHandle(self)
         self.monitors = MonitorsHandle(self)
+        #: Long-term agents from host code (``meta/identity/*``).
+        self.identities = IdentitiesHandle(self)
 
     async def __aenter__(self) -> MetaRuntime:
         if not self._running:
@@ -1196,6 +1612,8 @@ class MetaRuntime:
             runtime_options["access_config_path"] = self._config.access_config_path
         if self._config.meerkat_config_path:
             runtime_options["meerkat_config_path"] = self._config.meerkat_config_path
+        if self._config.member_comms_address:
+            runtime_options["member_comms_address"] = self._config.member_comms_address
         if self._config.provider_credentials_root:
             runtime_options["provider_credentials_root"] = self._config.provider_credentials_root
         if self._config.native_realm is not None:
@@ -1212,6 +1630,10 @@ class MetaRuntime:
             runtime_options["decisions"] = {
                 "ingresses": [dict(entry) for entry in self._config.decision_ingresses]
             }
+        if self._config.identity_creation is not None:
+            runtime_options["identity_creation"] = copy.deepcopy(
+                self._config.identity_creation
+            )
         if self._config.routing_config_path:
             runtime_options["routing_config_path"] = self._config.routing_config_path
         if self._config.host_runnables:
@@ -1971,11 +2393,15 @@ class MetaRuntime:
 
         Host-only. ``target`` is ``{"kind": "mob"}`` (every member of the
         gateway's mob), ``{"kind": "profile", "profile": ...}`` or
-        ``{"kind": "member", "identity": ...}``. The slot is ``namespace``
-        (one your host owns) and ``key``; ``revision`` is at least 1 and
-        strictly increasing per slot; ``body`` is the exact text, at most
-        256 KiB. ``content_sha256`` (``"sha256:<hex>"`` of the body), when
-        given, must be the body's.
+        ``{"kind": "member", "identity": ...}``. A member target is for that
+        member alone: Meta's verb refuses a target that carries
+        ``include_forks``, and a record for a member and its forks is
+        written by a Rust host that embeds Meta, through the mob handle's
+        ``set_operator_instruction`` (:meth:`instruction_status` shows it).
+        The slot is ``namespace`` (one your host owns) and ``key``;
+        ``revision`` is at least 1 and strictly increasing per slot;
+        ``body`` is the exact text, at most 256 KiB. ``content_sha256``
+        (``"sha256:<hex>"`` of the body), when given, must be the body's.
 
         Returns Meerkat's write receipt once the record is durable:
         ``disposition`` (``"committed"``, or ``"duplicate"`` for an exact
@@ -2337,12 +2763,12 @@ class MetaRuntime:
         A live identity moves to a fresh session at once, without a wake. A
         retired identity stays retired and starts on a fresh session at its
         next wake. An identity with no history is left as it is, and an
-        unlisted or retired identity is never made live. An identity a host
+        unlisted or retired identity is never made live. The agent keeps its
+        name and its record: this never removes an agent. An identity a host
         intent declaration manages is refused with
-        :class:`~meerkat_meta.errors.IdentityHostAdoptedError` (-32053), and a
-        store-owned identity (created at runtime, or adopted into store
-        custody) with a plain :class:`~meerkat_meta.errors.RpcError`
-        (-32603, ``data["kind"] == "identity_store_owned"``).
+        :class:`~meerkat_meta.errors.IdentityHostAdoptedError` (-32053). An
+        identity created at run time, or adopted into the mob's identity
+        store, starts over as a configured one does.
         """
         return await self._rpc("meta/delete_identity", {"identity": identity})
 
@@ -6083,44 +6509,112 @@ class MobHandle:
         remote_member_id: str,
         remote_handle: "MobHandle",
     ) -> None:
-        """Wire a local member to a member on another mob handle.
+        """Wire a local member to a member on another mob handle, both ways.
 
-        Uses peer_info + wire_local on both sides.  Both mob handles must
-        live in the **same process** — ``peer_info()`` always returns an
-        ``inproc://`` address, which is only reachable within the same
-        process.  For cross-process peering, call ``wire_local()`` on each
-        handle directly, supplying the remote gateway's routable TCP or UDS
-        address in place of the inproc address from ``peer_info()``.
+        After it returns, the two members can send each other ordinary peer
+        messages with their comms ``send`` tool. It reads ``peer_info`` on
+        both sides and calls ``wire_local`` on each side:
+
+        - **Two gateways (two processes).** Every ``MetaRuntime`` starts its
+          own gateway process, so this is the usual case. Give the members
+          of BOTH gateways a socket endpoint (``member_comms_tcp()`` on each
+          builder). ``peer_info`` then reports each member's
+          ``dialable_address`` and ``pubkey_b64``, and each side is wired to
+          the other by that address and key.
+        - **One process.** When either answer has no ``dialable_address``,
+          each side is wired by the in-process address with no key. That
+          works when one process hosts both mobs (a host application that
+          composes both runtimes): the gateway takes the member's key from
+          its own registration and installs the route with the trust.
+          Otherwise the first ``wire_local`` is refused in plain words (the
+          member is not a live member of a mob in that process) and nothing
+          is wired.
+
+        When the second ``wire_local`` is refused, the first side is undone
+        with ``unwire_local`` and the refusal is raised. A side that was
+        already wired to that peer before the call is left as it was.
+
+        **Calling it again.** For a pair that is already wired with the same
+        endpoints the call succeeds and changes nothing. A wire is never
+        replaced: when a side is already wired to that peer name with
+        another endpoint (another address, or another key after a respawn),
+        its ``wire_local`` is refused in plain words and nothing changes.
+        Call ``unwire_local`` on both sides first, each with the other
+        member's current ``peer_info``, then wire again.
+
+        A member of a stopped mob still accepts a message through a wire;
+        it is handed the message when its mob resumes.
+
+        **What a wire survives.** Between two gateways, a wire survives a
+        gateway restart on persistent state only when each wired member's
+        ``dialable_address`` is the same after the restart. A member whose
+        address changed is restored ``broken``, and its wires are dead. To
+        recover:
+
+        1. ``respawn_member`` the broken member. It comes back active with
+           its new address, and on a fresh conversation: a respawn starts
+           the member on a new session.
+        2. ``unwire_local`` on the other gateway, with the respawned
+           member's current ``peer_info``.
+        3. ``unwire_local`` on the restarted gateway, with the other
+           member's current ``peer_info``.
+        4. ``wire_cross_mob`` again.
 
         Args:
             local_member_id: Member on this mob to wire.
             remote_member_id: Member on the remote mob to wire.
-            remote_handle: MobHandle for the remote mob (must be same-process).
+            remote_handle: MobHandle for the remote mob.
         """
         local_info = await self.peer_info(local_member_id)
         remote_info = await remote_handle.peer_info(remote_member_id)
+        by_socket = all(
+            info.get("dialable_address") and info.get("pubkey_b64")
+            for info in (local_info, remote_info)
+        )
+
+        def describe(info: dict[str, str]) -> tuple[str, str, str, str | None]:
+            if by_socket:
+                return (
+                    info["comms_name"],
+                    info["peer_id"],
+                    info["dialable_address"],
+                    info["pubkey_b64"],
+                )
+            return info["comms_name"], info["peer_id"], info["address"], None
+
+        remote_name, remote_peer_id, remote_address, remote_key = describe(remote_info)
+        local_name, local_peer_id, local_address, local_key = describe(local_info)
+        # A side that is wired to this peer already is not this call's to
+        # undo: a refused second side must leave it as it was.
+        wired_before = remote_name in (await self.get_member(local_member_id)).wired_to
         await self.wire_local(
             local_member_id,
-            remote_info["comms_name"],
-            remote_info["peer_id"],
-            remote_info["address"],
+            remote_name,
+            remote_peer_id,
+            remote_address,
+            remote_pubkey_b64=remote_key,
         )
         try:
             await remote_handle.wire_local(
                 remote_member_id,
-                local_info["comms_name"],
-                local_info["peer_id"],
-                local_info["address"],
+                local_name,
+                local_peer_id,
+                local_address,
+                remote_pubkey_b64=local_key,
             )
         except Exception:
-            # Best-effort rollback: undo the local wire using the same
-            # low-level API — no contact directory or peer handles needed.
+            if wired_before:
+                raise
+            # Best-effort rollback: undo the local wire with the parameters
+            # it was made with. The gateway removes the trust and the route
+            # it installed with it.
             try:
                 await self.unwire_local(
                     local_member_id,
-                    remote_info["comms_name"],
-                    remote_info["peer_id"],
-                    remote_info["address"],
+                    remote_name,
+                    remote_peer_id,
+                    remote_address,
+                    remote_pubkey_b64=remote_key,
                 )
             except Exception:
                 pass
@@ -6161,7 +6655,14 @@ class MobHandle:
     async def peer_info(self, member_id: str) -> dict[str, str]:
         """Get comms peer info for a local member.
 
-        Returns ``{"member_id", "mob_id", "comms_name", "peer_id", "address"}``.
+        Returns ``{"member_id", "mob_id", "comms_name", "peer_id", "address",
+        "pubkey_b64"}`` and, for a member with a socket endpoint
+        (``member_comms_tcp()`` on the builder), ``"dialable_address"``.
+        ``address`` is the in-process address, which reaches the member only
+        from the same process. ``pubkey_b64`` is the member's own transport
+        key (standard base64). ``dialable_address`` is left out, never null,
+        when the member has no socket endpoint. A gateway older than 0.9.15
+        answers neither ``pubkey_b64`` nor ``dialable_address``.
         Used to build peer specs for cross-mob wiring via ``wire_local``.
         """
         raw = await self._runtime._rpc(
@@ -6174,7 +6675,9 @@ class MobHandle:
         """Return the local gateway's Ed25519 signing pubkey, base64.
 
         Used to bootstrap trust before populating a peer meta's
-        contact directory with this gateway's pubkey. Raises
+        contact directory with this gateway's pubkey. It is the GATEWAY's
+        key, not a member's: a ``wire_local`` descriptor takes the member's
+        key from :meth:`peer_info`. Raises
         :class:`CapabilityUnavailableError` from the underlying
         transport if the local gateway is inproc-only and never
         configured a keypair.
@@ -6197,22 +6700,39 @@ class MobHandle:
     ) -> None:
         """Wire a local member to a remote peer (local side only).
 
-        For same-process (inproc) cross-mob wiring::
+        :meth:`wire_cross_mob` makes these calls for both sides; call this
+        directly only to wire one side yourself.
 
-            # Get peer info from each side
+        Two gateways (two processes), each member with a socket endpoint::
+
             a_info = await core.peer_info("research")
             b_info = await gw.peer_info("calendar")
 
-            # Wire each side to the other (inproc address from peer_info)
-            await core.wire_local("research", b_info["comms_name"], b_info["peer_id"], b_info["address"])
-            await gw.wire_local("calendar", a_info["comms_name"], a_info["peer_id"], a_info["address"])
+            # Each side names the other by its dialable address and its own key
+            await core.wire_local(
+                "research", b_info["comms_name"], b_info["peer_id"],
+                b_info["dialable_address"], remote_pubkey_b64=b_info["pubkey_b64"],
+            )
+            await gw.wire_local(
+                "calendar", a_info["comms_name"], a_info["peer_id"],
+                a_info["dialable_address"], remote_pubkey_b64=a_info["pubkey_b64"],
+            )
 
-        For cross-process (TCP/UDS), replace the address with the remote
-        gateway's transport endpoint — peer_info always returns inproc.
-        Pass ``remote_pubkey_b64`` (base64 of the peer gateway's Ed25519
-        verifying key, fetched via :meth:`peer_pubkey`) to stamp a real
-        signing pubkey on the descriptor; the gateway rejects non-inproc
-        wires without one.
+        ``remote_pubkey_b64`` is the MEMBER's transport key from
+        ``peer_info`` (the peer id is derived from it), never the gateway
+        key of :meth:`peer_pubkey`. The gateway refuses a socket address
+        without a key.
+
+        One process hosting both mobs: pass ``peer_info``'s ``address`` (the
+        in-process address) and no key. The gateway takes the key of a live
+        member of another mob in its own process from that member's
+        registration, and installs the route with the trust. A member that
+        process does not have is refused in plain words. When the member may
+        not be running (a mob built again over its state builds a member on
+        its first message), pass ``pubkey_b64`` from its ``peer_info`` as
+        well: the wire then needs no running member and starts none. Once
+        both mobs hold the edge, a peer message to a member that is not
+        running is handed to that member's own mob, which starts it.
         """
         params: dict[str, str] = {
             "local_member_id": local_member_id,

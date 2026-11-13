@@ -890,10 +890,17 @@ fn fake_fact(id: String, identity: &str, updated_at_ms: u64, body: String) -> Me
 /// `body_bytes` bytes, each newer than any of router's) and three of
 /// router's. Returns the listed record ids and the row count each store read
 /// of the listing asked for.
+///
+/// The mob seats no member, so the console knows neither name. With
+/// `verifies_tokens` the console keeps its trusted key set and can identify
+/// a person. Without it the key set holds no key: the console can identify
+/// nobody, and the caller is its one operator, restricted by the rules
+/// alone.
 async fn restricted_listing_reads(
     delivery: u64,
     body_bytes: usize,
     limit: usize,
+    verifies_tokens: bool,
 ) -> (Vec<String>, Vec<usize>) {
     let fake = FakeJudgmentStore::default();
     {
@@ -937,7 +944,11 @@ async fn restricted_listing_reads(
     )
     .await
     .expect("classic runtime over the fake provider must build");
-    let app = runtime.build_reference_app_router(decision_state());
+    let mut decisions = decision_state();
+    if !verifies_tokens {
+        decisions.trusted_oidc.jwks_json = r#"{"keys":[]}"#.to_string();
+    }
+    let app = runtime.build_reference_app_router(decisions);
 
     fake.state.records_page_reads.lock().unwrap().clear();
     let records = rpc(&app, "meta/memory/panel/records", json!({ "limit": limit })).await;
@@ -957,7 +968,7 @@ async fn restricted_listing_reads(
 /// cap.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restricted_records_page_doubles_its_store_reads_up_to_the_row_cap() {
-    let (ids, reads) = restricted_listing_reads(10_500, 64, 200).await;
+    let (ids, reads) = restricted_listing_reads(10_500, 64, 200, false).await;
     assert_eq!(ids, ["mem-router-2", "mem-router-1", "mem-router-0"]);
     assert_eq!(reads, [201, 402, 804, 1_608, 3_216, 4_096, 4_096]);
 }
@@ -968,9 +979,23 @@ async fn a_restricted_records_page_doubles_its_store_reads_up_to_the_row_cap() {
 /// doubling to 402.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restricted_records_page_of_large_bodies_reads_within_the_byte_budget() {
-    let (ids, reads) = restricted_listing_reads(500, 64 * 1024, 200).await;
+    let (ids, reads) = restricted_listing_reads(500, 64 * 1024, 200, false).await;
     assert_eq!(ids, ["mem-router-2", "mem-router-1", "mem-router-0"]);
     assert_eq!(reads, [201, 255, 255]);
+}
+
+/// A console that can identify a person shows the memory of a member it
+/// does not know to its administrator only: a caller who sends no token is
+/// listed no record of it, whatever the rules allow by name. On a console
+/// that can identify nobody the same listing holds router's records for its
+/// one operator.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restricted_records_page_holds_no_record_of_an_unknown_member_for_a_caller_with_no_token()
+{
+    let (ids, _) = restricted_listing_reads(3, 64, 200, true).await;
+    assert!(ids.is_empty(), "listed: {ids:?}");
+    let (ids, _) = restricted_listing_reads(3, 64, 200, false).await;
+    assert_eq!(ids, ["mem-router-2", "mem-router-1", "mem-router-0"]);
 }
 
 // ---------------------------------------------------------------------------

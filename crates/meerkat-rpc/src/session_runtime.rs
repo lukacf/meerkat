@@ -2656,6 +2656,21 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    // The instruction sections a session's build state records. Forwarded:
+    // the persistent service answers from the committed metadata alone,
+    // where the trait default loads the persisted session with its
+    // transcript.
+    async fn recorded_build_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Vec<String>>, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::recorded_build_instructions(
+            &self.service,
+            session_id,
+        )
+        .await
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     async fn controller_route_under_runtime_turn_boundary(
         &self,
@@ -16418,24 +16433,13 @@ fn rpc_error_to_session_error(err: RpcError, session_id: &SessionId) -> SessionE
     }
 }
 
-/// The JSON-RPC code of a failed turn's typed terminal cause: the code
-/// [`session_error_to_rpc`] gives the equivalent agent error, so a turn that
-/// fails through the runtime reports the same class as one that fails
-/// through the session service.
+/// The JSON-RPC code of a failed turn's typed terminal cause: the shared
+/// turn-failure code ([`meerkat_contracts::error::turn_failure_error_code`]),
+/// which is the code [`session_error_to_rpc`] gives the equivalent agent
+/// error, so a turn that fails through the runtime reports the same class as
+/// one that fails through the session service.
 fn turn_failure_rpc_code(turn_error: &meerkat_core::TurnErrorMetadata) -> i32 {
-    use meerkat_core::TurnTerminalCauseKind as Cause;
-    match turn_error.kind {
-        Cause::LlmFailure | Cause::RetryExhausted => error::PROVIDER_ERROR,
-        Cause::BudgetExhausted | Cause::TimeBudgetExceeded => error::BUDGET_EXHAUSTED,
-        Cause::HookDenied => error::HOOK_DENIED,
-        Cause::Unknown
-        | Cause::HookFailure
-        | Cause::ToolFailure
-        | Cause::StructuredOutputValidationFailed
-        | Cause::TurnLimitReached
-        | Cause::RuntimeApplyFailure
-        | Cause::FatalFailure => error::INTERNAL_ERROR,
-    }
+    meerkat_contracts::error::turn_failure_error_code(turn_error).jsonrpc_code()
 }
 
 /// The JSON-RPC answer of an abandoned turn. A turn whose session's build
@@ -45136,6 +45140,22 @@ mod owed_compaction_forward_guard {
         assert!(
             block.is_some_and(|block| block.contains("::settle_owed_compaction_projections(")),
             "the RPC wrapper forwards the owed compaction settle to the service it wraps"
+        );
+    }
+
+    /// The RPC wrapper forwards the read of the instruction sections a
+    /// session's build state records to the persistent service it wraps,
+    /// which answers from the committed metadata alone. The trait default
+    /// answers the same value by loading the persisted session with its
+    /// transcript, so a wrapper without the forward compiles and loads a
+    /// member's whole transcript on every read.
+    #[test]
+    fn the_rpc_wrapper_forwards_the_recorded_build_instructions_read() {
+        let block = wrapper_impl(include_str!("session_runtime.rs"), "RpcMobSessionService");
+        assert!(block.is_some(), "the RPC wrapper is in the source");
+        assert!(
+            block.is_some_and(|block| block.contains("::recorded_build_instructions(")),
+            "the RPC wrapper forwards the recorded build sections read to the service it wraps"
         );
     }
 }

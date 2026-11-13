@@ -6634,6 +6634,11 @@ pub struct MobHandle {
     /// The host's rule for the members a member's own operator tools may not
     /// know of ([`super::MobBuilder::with_member_tool_audience`]).
     pub(super) member_tool_audience: Option<Arc<dyn super::MemberToolAudience>>,
+    /// The host's preparer of member builds
+    /// ([`super::MobBuilder::with_member_build_preparer`]), the one the
+    /// actor asks: this handle asks it to compose the seat of a store-owned
+    /// identity before it sends that identity's fresh spawn.
+    pub(super) member_build_preparer: Option<Arc<dyn super::MemberBuildPreparer>>,
 }
 
 /// Per-member retained per-spawn tool overlays (`SpawnMemberSpec::external_tools`)
@@ -6698,6 +6703,19 @@ impl MobHandle {
         let mut handle = self.clone();
         handle.public_owner = None;
         handle
+    }
+
+    /// The read-only view the host's build preparer receives from this
+    /// handle: the mob under the owner's authority its launch minted,
+    /// whichever lane this handle's own commands travel on, the view a wake
+    /// and a boot restore hand it. The preparer is the host's callback, and
+    /// a read handle issues no actor command.
+    fn host_read_handle(&self) -> super::MobReadHandle {
+        self.non_owning()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(
+                crate::control_policy::MobControlPrincipal::Owner,
+            ))
+            .read_handle()
     }
 
     /// Give this handle the mob's root public-owner token. Called once, on
@@ -7101,14 +7119,42 @@ pub enum SpawnContinuityIntent {
 }
 
 impl SpawnContinuityIntent {
-    /// The intent a spawn of `profile` takes. An explicit durable intent on
-    /// the spawn wins. Otherwise a profile that declares `durable = true`
-    /// turns the default ephemeral intent into a durable identity keyed by
-    /// the member's identity, as identity convergence keys it.
+    /// The intent a seat of `profile` takes. An explicit durable intent on
+    /// the spawn wins. Otherwise the default ephemeral intent becomes a
+    /// durable identity keyed by the member's identity, as identity
+    /// convergence keys it, for a profile that declares `durable = true`,
+    /// and for a seat taken with created custody (`created_custody`): the
+    /// seat of an identity whose record is its row in the mob's identity
+    /// store, which is a long-term identity whatever its profile says of
+    /// durability. No other seat becomes durable here.
     #[must_use]
-    pub(crate) fn for_profile(self, profile: &crate::Profile, identity: &AgentIdentity) -> Self {
+    pub(crate) fn for_seat(
+        self,
+        profile: &crate::Profile,
+        identity: &AgentIdentity,
+        created_custody: bool,
+    ) -> Self {
+        self.durable_when(identity, profile.durable || created_custody)
+    }
+
+    /// The intent the same-session successor of a store-owned identity's
+    /// member takes: the rule of [`Self::for_seat`] for a seat of such an
+    /// identity, which the successor is, though it takes no custody of its
+    /// own (it keeps its member's session). A seat an earlier release
+    /// recorded ephemeral, and the seat an adoption kept as its worker's,
+    /// become a durable identity's at this successor, with the
+    /// conversation kept. An explicit durable intent stays as it is.
+    #[must_use]
+    pub(crate) fn for_store_owned_successor(self, identity: &AgentIdentity) -> Self {
+        self.durable_when(identity, true)
+    }
+
+    /// The one rule: the default ephemeral intent becomes a durable
+    /// identity keyed by `identity` when `durable` holds; any other intent
+    /// stays as it is.
+    fn durable_when(self, identity: &AgentIdentity, durable: bool) -> Self {
         match self {
-            Self::Ephemeral if profile.durable => Self::DurableIdentity {
+            Self::Ephemeral if durable => Self::DurableIdentity {
                 continuity_key: identity.as_str().to_string(),
             },
             other => other,
@@ -7582,6 +7628,28 @@ pub struct SpawnMemberSpec {
     /// refused. Set only by the fork seat's resolution; never taken from
     /// caller-supplied arguments.
     pub(crate) dispatch_admission_lineage: bool,
+    /// The fork lineage root this seat records in MobMachine, for operator
+    /// instructions: the first member of the fork family a durable fork's
+    /// child joins, as the actor read it from MobMachine's state when it
+    /// built the child's birth snapshot
+    /// ([`MobHandle::record_fork_member_instruction_birth`]). The seat's
+    /// membership commit records exactly this root, and the spawn row
+    /// persists it, so the child's snapshot and MobMachine's selection of
+    /// the child agree from the first generation its session records. Set
+    /// only by the runtime's durable fork routes; never taken from
+    /// caller-supplied arguments, and refused on any other spawn. (A helper
+    /// fork names its source in its launch mode, and its spawn admission
+    /// reads the root.)
+    pub(crate) instruction_lineage_root: Option<AgentIdentity>,
+    /// Whether the mob answers the source of this request's fork launch as
+    /// a member it does not hold. Set only by the member tools, for a source
+    /// the host's member tool audience hides from the calling member
+    /// ([`MobHandle::fork_source_answered_absent`]), so such a fork gets the
+    /// answer of a fork of a name the mob does not hold, at the place the
+    /// mob looks the source up. It lives on the request alone: nothing
+    /// records, logs or answers it, and a host's own requests never carry
+    /// it.
+    pub(crate) fork_source_answered_absent: bool,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -7646,6 +7714,7 @@ impl std::fmt::Debug for SpawnMemberSpec {
                 "dispatch_admission_lineage",
                 &self.dispatch_admission_lineage,
             )
+            .field("instruction_lineage_root", &self.instruction_lineage_root)
             .finish()
     }
 }
@@ -7664,6 +7733,20 @@ impl SpawnMemberSpec {
         }
         self.entry_custody = false;
         self.created_custody = false;
+    }
+
+    /// Whether the request is the fresh local spawn of a store-owned
+    /// identity's member, which Core seats from the identity's row (the
+    /// kickoff spawn of its create, and the spawn a start or a rotation
+    /// owes it): its host composes its seat before the spawn is sent, and
+    /// the labels it carries are compared with its seat's once the host's
+    /// spawn customizer ran. A placed or externally bound one is its host's
+    /// own spawn, whose spec its host wrote.
+    pub(crate) fn seats_store_owned_row(&self) -> bool {
+        self.created_custody
+            && matches!(self.launch_mode, crate::launch::MemberLaunchMode::Fresh)
+            && self.placement.is_none()
+            && matches!(self.binding, None | Some(crate::RuntimeBinding::Session))
     }
 
     /// Attach exact runtime-proven parent ancestry to a child launch.
@@ -7722,6 +7805,8 @@ impl SpawnMemberSpec {
             created_custody: false,
             approval_branch: None,
             dispatch_admission_lineage: false,
+            instruction_lineage_root: None,
+            fork_source_answered_absent: false,
         }
     }
 
@@ -10238,6 +10323,8 @@ impl MobHandle {
     pub async fn rotate_member(&self, mut spec: SpawnMemberSpec) -> Result<SessionId, MobError> {
         use super::dormant_seat::DormantSeatCommitEntry;
 
+        let rotated = spec.identity.clone();
+
         if matches!(
             self.command_authority_kind(),
             crate::control_policy::CommandAuthorityKind::AgentLane
@@ -10318,7 +10405,12 @@ impl MobHandle {
         match outcome {
             super::DormantSeatOutcome::Seated { session_id, .. }
             | super::DormantSeatOutcome::AlreadySeated { session_id, .. }
-            | super::DormantSeatOutcome::Embodied { session_id, .. } => Ok(session_id),
+            | super::DormantSeatOutcome::Embodied { session_id, .. } => {
+                // A store-owned identity's row lets go of what this seat
+                // row settles (an owed label restamp, say).
+                self.settle_store_owned_seat_row(&rotated).await;
+                Ok(session_id)
+            }
             other => Err(other.into_unseated_error()),
         }
     }
@@ -10936,6 +11028,35 @@ impl MobHandle {
             .await?)
     }
 
+    /// [`Self::identity_record`] for many identities at once: each named
+    /// identity's row in the mob's identity store, absent from the answer
+    /// when the store holds no row of the name. The names are read in pages
+    /// of at most [`super::IDENTITY_ENTRY_PAGE_MAX`], one store read per
+    /// page, so the number of store reads does not grow with the number of
+    /// names beyond pages: a host that serves many store-owned identities
+    /// reads their rows at a start without one read per identity. Under the
+    /// [`crate::ControlScope::List`] scope: no actor command, and it never
+    /// wakes a member.
+    pub async fn identity_records(
+        &self,
+        identities: &[AgentIdentity],
+    ) -> Result<BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation>, MobError>
+    {
+        self.read_published_machine_state(crate::ControlScope::List, |_| ())?;
+        let mut rows = BTreeMap::new();
+        let Some(store) = self.identity_member.as_ref() else {
+            return Ok(rows);
+        };
+        for page in identities.chunks(super::IDENTITY_ENTRY_PAGE_MAX) {
+            rows.extend(
+                store
+                    .observe_created_identities(self.mob_id(), page)
+                    .await?,
+            );
+        }
+        Ok(rows)
+    }
+
     /// The counts of the mob's records in its identity store and of what a
     /// downgrade cycle settles first ([`super::IdentityRecordCensus`]): the
     /// store's rows, read page by page, the published machine state, and,
@@ -10988,6 +11109,7 @@ impl MobHandle {
         census.archived = rows.archived;
         census.tombstones = rows.tombstones;
         census.unreadable = rows.unreadable;
+        census.label_restamps_owed = rows.label_restamps_owed;
         if !seats.is_empty() {
             let rows = self.last_spawn_rows().await?;
             census.seats_stale = seats
@@ -11360,6 +11482,221 @@ impl MobHandle {
                 Default::default()
             }
             Err(_) => Roster::new(),
+        }
+    }
+
+    /// The members among `targets` that the host's member tool audience
+    /// ([`MobBuilder::with_member_tool_audience`](super::MobBuilder::with_member_tool_audience))
+    /// hides from `caller`: the one place the audience is asked. The member
+    /// tools that name or list members ask through it: `member_status`,
+    /// `retire_member`, `force_cancel_member`, `wire_members`,
+    /// `unwire_members`, `list_members`, `spawn_member` and
+    /// `spawn_many_members` (the source of a fork launch, and the member a
+    /// resumed session is bound to), and the mob tools' `mob_check_member`,
+    /// `mob_retire_member`, `mob_wire`, `mob_unwire`, `mob_list_members`,
+    /// `council` and `mob_destroy` (the members its report names).
+    ///
+    /// A hidden member is one the caller's tools answer exactly as a member
+    /// the mob does not hold: a tool that names it answers member not
+    /// found, a resume of its session answers as a resume of a session
+    /// nobody holds, and a list or a destroy report leaves it out whole. `caller` is the member
+    /// the call was made for: the member bound to the session that made it,
+    /// or the placed member whose request the controlling side serves.
+    /// `None` is a call made by no member of this mob (a host's own
+    /// dispatch, a dispatch that carries no origin session, or, through the
+    /// mob tools, the session of a member of another mob), and what such a
+    /// call is shown is the audience's to say, like every other: an
+    /// audience that shows a member to `None` shows it to every such call.
+    /// The audience is asked once per target, with the labels the caller
+    /// and that target carry on their own roster rows, from one roster read.
+    /// A target the roster holds no row for is handed over without labels,
+    /// and the host decides from its own record.
+    /// Empty when the host installed no audience.
+    pub async fn members_hidden_from(
+        &self,
+        caller: Option<&AgentIdentity>,
+        targets: &[AgentIdentity],
+    ) -> BTreeSet<AgentIdentity> {
+        let Some(audience) = self.member_tool_audience.as_ref() else {
+            return BTreeSet::new();
+        };
+        let roster = self.roster().await;
+        let labels = |member: &AgentIdentity| roster.get(member).map(|entry| &entry.labels);
+        let caller_labels = caller.and_then(labels);
+        targets
+            .iter()
+            .filter(|target| {
+                audience.hides(
+                    &self.definition().id,
+                    caller,
+                    caller_labels,
+                    target,
+                    labels(target),
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// For the member tools that wire or unwire member `local` and member
+    /// `peer`: the end the tool answers `caller` as a member the mob does
+    /// not hold, when the host's member tool audience
+    /// ([`Self::members_hidden_from`]) hides one of the two from it.
+    ///
+    /// It is the first of the two, in the order the mob looks them up, that
+    /// is hidden or that the roster holds no row for, so the answer names
+    /// the end a name the mob does not hold would have named in the hidden
+    /// member's place. The mob's wire and unwire commands look both members
+    /// up, local first, before any refusal about either member; this order
+    /// follows theirs. `None` when neither end is hidden (the mob answers
+    /// the call itself). One name given as both ends is asked about like
+    /// any other, as the mob looks it up like any other. `peer` is `None`
+    /// for a peer that is no member of the mob.
+    #[doc(hidden)]
+    pub async fn wire_end_answered_absent(
+        &self,
+        caller: Option<&AgentIdentity>,
+        local: &AgentIdentity,
+        peer: Option<&AgentIdentity>,
+    ) -> Option<AgentIdentity> {
+        let ends: Vec<AgentIdentity> = std::iter::once(local).chain(peer).cloned().collect();
+        let hidden = self.members_hidden_from(caller, &ends).await;
+        if hidden.is_empty() {
+            return None;
+        }
+        let roster = self.roster().await;
+        ends.into_iter()
+            .find(|end| hidden.contains(end) || roster.get(end).is_none())
+    }
+
+    /// For the member tools that list members: `rows` as `caller`'s tools
+    /// show them. The rows of the members the host's member tool audience
+    /// ([`Self::members_hidden_from`]) hides from `caller` are left out
+    /// whole, and the wiring of every row that stays (its `wired_to` and its
+    /// external peer descriptors) names no member or external peer the
+    /// audience hides from it. The audience is asked once, about the listed
+    /// members and every peer a row names.
+    #[doc(hidden)]
+    pub async fn member_rows_shown_to(
+        &self,
+        caller: Option<&AgentIdentity>,
+        mut rows: Vec<MobMemberListEntry>,
+    ) -> Vec<MobMemberListEntry> {
+        if self.member_tool_audience.is_none() {
+            return rows;
+        }
+        let named: BTreeSet<AgentIdentity> = rows
+            .iter()
+            .flat_map(|row| {
+                std::iter::once(&row.agent_identity)
+                    .chain(&row.wired_to)
+                    .chain(row.external_peer_specs.keys())
+            })
+            .cloned()
+            .collect();
+        let named: Vec<AgentIdentity> = named.into_iter().collect();
+        let hidden = self.members_hidden_from(caller, &named).await;
+        if hidden.is_empty() {
+            return rows;
+        }
+        rows.retain(|row| !hidden.contains(&row.agent_identity));
+        for row in &mut rows {
+            row.wired_to.retain(|peer| !hidden.contains(peer));
+            row.external_peer_specs
+                .retain(|peer, _| !hidden.contains(peer));
+        }
+        rows
+    }
+
+    /// For the member tools that spawn: whether `launch_mode` forks a member
+    /// the host's member tool audience ([`Self::members_hidden_from`]) hides
+    /// from `caller`. The tool marks such a request
+    /// (`SpawnMemberSpec::fork_source_answered_absent`) and the mob answers
+    /// it as a fork of a name it does not hold. `false` for every other
+    /// launch and when the host installed no audience.
+    pub(super) async fn fork_source_answered_absent(
+        &self,
+        caller: Option<&AgentIdentity>,
+        launch_mode: &crate::launch::MemberLaunchMode,
+    ) -> bool {
+        let crate::launch::MemberLaunchMode::Fork {
+            source_member_id, ..
+        } = launch_mode
+        else {
+            return false;
+        };
+        !self
+            .members_hidden_from(caller, std::slice::from_ref(source_member_id))
+            .await
+            .is_empty()
+    }
+
+    /// For the member tools that spawn: the refusal `caller` is answered in
+    /// place of `error`, the refusal of a launch that resumes session
+    /// `resumed`, when `error` says the session is bound to a member of this
+    /// mob that the host's member tool audience
+    /// ([`Self::members_hidden_from`]) hides from `caller`. It is the
+    /// refusal of a resume of a session nobody holds
+    /// ([`MobError::SessionUnavailableForResume`], absent), so the caller is
+    /// told neither the member nor the mob. `None` when `error` is answered
+    /// as it is: every other refusal, a session bound to a member the
+    /// caller is shown or to a member of another mob, and a host with no
+    /// audience.
+    ///
+    /// The refusal of a resume that declares a role carries the bound
+    /// member in its text alone; for it the member is read from the roster
+    /// by the session, never from the text.
+    pub(super) async fn resume_refusal_answered_absent(
+        &self,
+        caller: Option<&AgentIdentity>,
+        resumed: Option<&SessionId>,
+        error: &MobError,
+    ) -> Option<MobError> {
+        let resumed = resumed?;
+        self.member_tool_audience.as_ref()?;
+        let bound = match error {
+            MobError::ResumeSessionBoundToAnotherMember {
+                bound_mob_id,
+                bound_member_id,
+                ..
+            } if bound_mob_id == &self.definition().id => bound_member_id.clone(),
+            MobError::MemberRoleMigrationRejected { .. } => self
+                .roster()
+                .await
+                .find_by_bridge_session_id(resumed)
+                .map(|entry| entry.agent_identity.clone())?,
+            _ => return None,
+        };
+        if self
+            .members_hidden_from(caller, std::slice::from_ref(&bound))
+            .await
+            .is_empty()
+        {
+            return None;
+        }
+        Some(MobError::SessionUnavailableForResume {
+            session_id: resumed.clone(),
+            reason: crate::error::SessionResumeUnavailableReason::Absent,
+            runtime_state: None,
+            verdict: None,
+        })
+    }
+
+    /// [`Self::resume_refusal_answered_absent`] for one entry of a spawn of
+    /// many: the entry's failure as `caller` is answered, classified again
+    /// when its refusal is replaced.
+    pub(super) async fn spawn_many_failure_shown_to(
+        &self,
+        caller: Option<&AgentIdentity>,
+        resumed: Option<&SessionId>,
+        failure: MobSpawnManyFailure,
+    ) -> Result<MobSpawnManyFailure, MobError> {
+        match self
+            .resume_refusal_answered_absent(caller, resumed, &failure.error)
+            .await
+        {
+            Some(absent) => self.classify_spawn_many_failure(absent).await,
+            None => Ok(failure),
         }
     }
 
@@ -15143,6 +15480,27 @@ impl MobHandle {
         ) {
             spec.mark_agent_creation();
         }
+        // A store-owned identity is seated from its row, with no host step:
+        // its host composes the seat of its fresh local spawn here, before
+        // the spawn is sent (the kickoff spawn of its create, and the spawn
+        // a start or a rotation owes it). That spawn is the first build of
+        // its session, so it takes everything the host composed. A refusal
+        // fails the spawn with the host's reason: nothing is sent, and the
+        // identity stays owed its seat.
+        if spec.seats_store_owned_row()
+            && let Some(preparer) = self.member_build_preparer.as_ref()
+        {
+            let composed = Box::pin(super::member_build_preparer::compose_store_owned_seat(
+                preparer.as_ref(),
+                self.host_read_handle(),
+                &mut spec,
+                true,
+            ))
+            .await;
+            composed.map_err(|refusal| {
+                super::member_build_preparer::spawn_refusal_error(&spec.identity, refusal)
+            })?;
+        }
         let spawn_source = SpawnSource::for_launch_mode(spawn_source, &spec.launch_mode);
         match self
             .execute_machine_command(MobMachineCommand::Spawn {
@@ -15611,9 +15969,10 @@ impl MobHandle {
         identity: AgentIdentity,
         initial_message: Option<ContentInput>,
     ) -> Result<MemberRespawnReceipt, MobRespawnError> {
-        match self
+        let agent_identity = identity.clone();
+        let reply = match self
             .execute_machine_command(MobMachineCommand::Respawn {
-                agent_identity: identity,
+                agent_identity,
                 initial_message,
                 successor_spec: None,
             })
@@ -15623,7 +15982,15 @@ impl MobHandle {
             _ => Err(MobRespawnError::from(MobError::Internal(
                 "unexpected command result variant".into(),
             ))),
+        };
+        // The member of a store-owned identity is respawned on its own
+        // session with the labels its roster entry reads: its row lets go
+        // of an owed label restamp that seat row settles, as after
+        // `respawn_member`.
+        if reply.is_ok() {
+            self.settle_store_owned_seat_row(&identity).await;
         }
+        reply
     }
 
     /// Atomically retire a member and replace it from a fully lowered spawn spec.
@@ -15760,6 +16127,10 @@ impl MobHandle {
                 MobRespawnError::Mob(error) => error,
                 other => MobError::Internal(other.to_string()),
             })?;
+        // A store-owned identity's row lets go of what this seat row
+        // settles: a respawn with the row's labels is how a host carries
+        // out an owed label restamp itself.
+        self.settle_store_owned_seat_row(&identity).await;
         let mut receipt = receipt;
         if wake && let Err(error) = self.ensure_member_live(&identity).await {
             receipt.wake_error = Some(std::sync::Arc::new(error));
@@ -19760,7 +20131,7 @@ impl MobHandle {
                 return Ok(ForkMemberAtTurnBoundary::SourceBusy { waited });
             }
         };
-        self.seat_forked_member(member, fork)
+        self.seat_forked_member(source_identity, member, fork)
             .await
             .map(ForkMemberAtTurnBoundary::Forked)
     }
@@ -19995,10 +20366,19 @@ impl MobHandle {
         Ok((inheritance, app_context_from_fork_child))
     }
 
-    /// Seat an already committed durable fork as a new mob member through the
-    /// ordinary resume pipeline.
+    /// Seat an already committed durable fork of `source_identity` as a new
+    /// mob member through the ordinary resume pipeline.
+    ///
+    /// Before the seat, the child's operator instruction snapshot is
+    /// recorded in its committed session
+    /// ([`Self::record_fork_member_instruction_birth`]): the shared records
+    /// and, through the fork lineage root the seat then records, the
+    /// records written for that root and its forks. So the snapshot is
+    /// recorded before the seat, whoever starts the child. A snapshot that
+    /// cannot be recorded fails the fork: the committed child stays unseated.
     async fn seat_forked_member(
         &self,
+        source_identity: &AgentIdentity,
         mut member: SpawnMemberSpec,
         fork: meerkat_core::SessionForkResult,
     ) -> Result<ForkMemberResult, MobError> {
@@ -20010,6 +20390,26 @@ impl MobHandle {
         member.launch_mode = crate::launch::MemberLaunchMode::Resume {
             bridge_session_id: fork_session_id.clone(),
             resume_from_role: None,
+        };
+        member.instruction_lineage_root = match self
+            .record_fork_member_instruction_birth(
+                source_identity,
+                &child_identity,
+                &member.role_name,
+                &fork_session_id,
+            )
+            .await
+        {
+            Ok(root) => root,
+            Err(error) => {
+                return Err(MobError::ForkMemberProvisionFailed {
+                    member_id: child_identity,
+                    fork_session_id,
+                    reason: format!(
+                        "the child's operator instruction snapshot could not be recorded: {error}"
+                    ),
+                });
+            }
         };
         if let Err(error) = self
             .spawn_spec_internal_with_source(member, SpawnSource::PersistedForkResume)
@@ -20138,7 +20538,7 @@ impl MobHandle {
                 None,
             )
             .await?;
-        self.seat_forked_member(member, fork).await
+        self.seat_forked_member(source_identity, member, fork).await
     }
 
     /// Admit a fork of `source_identity` for `member` and persist the forked
@@ -20469,9 +20869,11 @@ impl MobHandle {
         // a handoff dropped in transit, retires the child.
         let (handoff_tx, handoff_rx) = tokio::sync::oneshot::channel();
         let seat = self.clone();
+        let fork_source = source_identity.clone();
         tokio::spawn(async move {
             let handoff = seat
                 .seat_and_start_detached_fork_child(
+                    fork_source,
                     member,
                     session_fork,
                     task,
@@ -20496,9 +20898,12 @@ impl MobHandle {
     /// exact turn and start the supervisor that owns the run. The returned
     /// run is armed to retire the child if it is dropped before its holder
     /// takes it (see [`Self::fork_member_then_run_detached`]). A child whose
-    /// turn could not be admitted is retired.
+    /// turn could not be admitted is retired. `source_identity` is the
+    /// member the fork was taken from.
+    #[allow(clippy::too_many_arguments)]
     async fn seat_and_start_detached_fork_child(
         &self,
+        source_identity: AgentIdentity,
         member: SpawnMemberSpec,
         session_fork: meerkat_core::SessionForkResult,
         task: ContentInput,
@@ -20510,7 +20915,9 @@ impl MobHandle {
             .fork_job
             .as_ref()
             .and_then(|job| job.turn_delivery.clone());
-        let fork = self.seat_forked_member(member, session_fork).await?;
+        let fork = self
+            .seat_forked_member(&source_identity, member, session_fork)
+            .await?;
         let work = Self::fork_child_work(task, objective_id);
         let admitted = match turn_delivery {
             // The job's durable result is read back through this identity.
@@ -23365,17 +23772,38 @@ mod tests {
         };
 
         assert_eq!(
-            SpawnContinuityIntent::Ephemeral.for_profile(&durable, &identity),
+            SpawnContinuityIntent::Ephemeral.for_seat(&durable, &identity, false),
             SpawnContinuityIntent::DurableIdentity {
                 continuity_key: "worker-1".to_string(),
             }
         );
         assert_eq!(
-            SpawnContinuityIntent::Ephemeral.for_profile(&ordinary, &identity),
+            SpawnContinuityIntent::Ephemeral.for_seat(&ordinary, &identity, false),
             SpawnContinuityIntent::Ephemeral
         );
-        assert_eq!(explicit.clone().for_profile(&durable, &identity), explicit);
-        assert_eq!(explicit.clone().for_profile(&ordinary, &identity), explicit);
+        // A seat taken with created custody is durable on any profile.
+        for profile in [&ordinary, &durable] {
+            assert_eq!(
+                SpawnContinuityIntent::Ephemeral.for_seat(profile, &identity, true),
+                SpawnContinuityIntent::DurableIdentity {
+                    continuity_key: "worker-1".to_string(),
+                }
+            );
+        }
+        for created_custody in [false, true] {
+            assert_eq!(
+                explicit
+                    .clone()
+                    .for_seat(&durable, &identity, created_custody),
+                explicit
+            );
+            assert_eq!(
+                explicit
+                    .clone()
+                    .for_seat(&ordinary, &identity, created_custody),
+                explicit
+            );
+        }
     }
 
     /// A failed fork-context probe is classified by what failed it: a

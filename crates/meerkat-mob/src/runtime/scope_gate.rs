@@ -338,6 +338,9 @@ impl MobCommand {
             // feedback: the write it realizes was admitted at its verb.
             | Self::PrepareMemberInstructionDelivery { .. }
             | Self::SettleMemberInstructionDeliveries { .. }
+            // A durable fork's read of its child's operator instruction
+            // birth: the fork that asks was admitted at its own verb.
+            | Self::PrepareForkMemberInstructionBirth { .. }
             // Builder/test config seam; no principal caller today —
             // reclassify the moment a surface exposes it.
             | Self::SetSpawnPolicy { .. }
@@ -365,6 +368,8 @@ impl MobCommand {
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
             | Self::OwedMemberWakeRetryArmedForTest { .. }
+            | Self::EmitKickoffNoticeForTest { .. }
+            | Self::ResolveRetirementEndpointForTest { .. }
             | Self::InjectUnreadableNameAtLadderOpenForTest { .. }
             | Self::QueueRoutedEffectForTest { .. }
             | Self::WakeMemberFromEffectForTest { .. }
@@ -579,6 +584,7 @@ impl MobCommand {
             | Self::CloseDeclaredApply { .. }
             | Self::PrepareMemberInstructionDelivery { .. }
             | Self::SettleMemberInstructionDeliveries { .. }
+            | Self::PrepareForkMemberInstructionBirth { .. }
             | Self::SpawnProvisioned { .. }
             | Self::SpawnPreparationSettled { .. }
             | Self::MemberTurnAdmissionSettled { .. }
@@ -685,6 +691,8 @@ impl MobCommand {
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
             | Self::OwedMemberWakeRetryArmedForTest { .. }
+            | Self::EmitKickoffNoticeForTest { .. }
+            | Self::ResolveRetirementEndpointForTest { .. }
             | Self::InjectUnreadableNameAtLadderOpenForTest { .. }
             | Self::QueueRoutedEffectForTest { .. }
             | Self::WakeMemberFromEffectForTest { .. }
@@ -984,6 +992,9 @@ impl MobCommand {
             Self::SettleMemberInstructionDeliveries { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
+            Self::PrepareForkMemberInstructionBirth { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
             // Fenced remote-upcall handles also route their machine admission
             // and other actor-serialized queries through this gate. Preserve
             // the typed stale-authority error on every Result-bearing internal
@@ -1063,6 +1074,14 @@ impl MobCommand {
             }
             #[cfg(test)]
             Self::OwedMemberWakeRetryArmedForTest { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::EmitKickoffNoticeForTest { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::ResolveRetirementEndpointForTest { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             #[cfg(test)]

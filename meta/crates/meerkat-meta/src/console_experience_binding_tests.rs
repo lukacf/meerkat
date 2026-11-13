@@ -1157,3 +1157,299 @@ async fn the_join_binds_the_runtimes_own_identities_under_a_namespaced_aggregato
     gate.add_permits(64);
     runtime.mob_handle().stop().await.unwrap();
 }
+
+/// The join labels an identity-first row by the display name its
+/// registration carries: the label the roster, the sidebar and the topology
+/// node read. A registration without one leaves the row's own label, and a
+/// plain member is never touched.
+#[tokio::test]
+async fn the_join_labels_an_identity_first_row_by_its_registrations_display_name() {
+    let bindings = IdentityBindingCut {
+        display_names: BTreeMap::from([(KEEPER.to_string(), "Keeper Display".to_string())]),
+        ..cut(&[
+            (KEEPER, Some("s0"), IdentityLifecycleState::Active),
+            (OTHER, Some("o0"), IdentityLifecycleState::Active),
+        ])
+    };
+    let labelled = |mut row: ConsoleMember, display_name: &str| {
+        row.labels
+            .insert("display_name".to_string(), display_name.to_string());
+        row
+    };
+    let mut members = vec![
+        // A store-owned identity's row: no label names it, and its seat
+        // carries no display name.
+        row(KEEPER, None, Some("s0")),
+        // A registration without a display name: the seat's label stays.
+        labelled(row(OTHER, Some(OTHER), Some("o0")), "Other Seat"),
+        // A plain member that happens to carry a display name.
+        labelled(row("worker-1", None, Some("p0")), "Worker Seat"),
+    ];
+    let untouched = members[1..].to_vec();
+
+    let pending = join_identity_bindings(
+        &mut members,
+        &bindings,
+        &bindings,
+        true,
+        &BTreeSet::new(),
+        None,
+    )
+    .await;
+
+    assert!(pending.is_empty(), "a display name makes no row pending");
+    assert_eq!(
+        members[0].labels.get("display_name").map(String::as_str),
+        Some("Keeper Display"),
+        "the registration's display name is the row's label"
+    );
+    assert_eq!(&members[1..], untouched.as_slice());
+
+    // A rename moves no binding: the walk still answers for the request.
+    let renamed = IdentityBindingCut {
+        display_names: BTreeMap::from([(KEEPER.to_string(), "Keeper Renamed".to_string())]),
+        ..bindings.clone()
+    };
+    assert!(bindings.answers_for(&renamed));
+    assert!(bindings.moved_in(&renamed).is_empty());
+    let mut members = vec![row(KEEPER, None, Some("s0"))];
+    let pending = join_identity_bindings(
+        &mut members,
+        &bindings,
+        &renamed,
+        false,
+        &BTreeSet::new(),
+        None,
+    )
+    .await;
+    assert!(pending.is_empty());
+    assert_eq!(
+        members[0].labels.get("display_name").map(String::as_str),
+        Some("Keeper Renamed"),
+        "the request's cut names the label, not the walk's"
+    );
+}
+
+/// A runtime over the state directory `state`, as a gateway boots it. Its
+/// roster declares the keeper alone, with `keeper_labels`; the members are
+/// turn driven, so no seat owes a turn.
+async fn durable_identity_runtime(
+    state: &std::path::Path,
+    mob_id: &str,
+    keeper_labels: BTreeMap<String, String>,
+) -> UnifiedRuntime {
+    let definition = MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "{mob_id}"
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+external_addressable = true
+[profiles.worker.tools]
+comms = true
+"#
+    ))
+    .unwrap();
+    let roster = Arc::new(MutableRosterProvider::new(vec![DurableAgentSpec {
+        runtime_mode_override: None,
+        ..spec(KEEPER, keeper_labels)
+    }]));
+    Box::pin(
+        UnifiedRuntime::builder()
+            .definition(definition)
+            .persistent_state(state)
+            .continuity_from_state_dir(state)
+            .await
+            .unwrap()
+            .roster_provider(roster)
+            .identity_runtime_instance_id("console-display-name")
+            .default_llm_client(Arc::new(NeverCalledClient))
+            .build(),
+    )
+    .await
+    .unwrap()
+}
+
+/// The label of every member the experience read lists, twice: as its
+/// roster row and its topology node read it (`labels.display_name`, else
+/// the row's id) and as the sidebar reads it (the agent's `label`).
+async fn experience_labels(
+    runtime: &UnifiedRuntime,
+    read_model: &ConsoleSnapshotReadModel,
+) -> BTreeMap<String, (String, String)> {
+    let identity_runtime = runtime.identity_runtime().unwrap();
+    let (snapshot, pending) = Box::pin(build_live_snapshot(
+        runtime.mob_runtime(),
+        &[],
+        None,
+        &AllowAllConsoleVisibilityPolicy,
+        read_model,
+        Some(identity_runtime.runtime()),
+    ))
+    .await;
+    assert!(pending.is_empty(), "no binding moved: {pending:?}");
+    snapshot
+        .members
+        .iter()
+        .map(|member| {
+            let row_label = member
+                .labels
+                .get("display_name")
+                .cloned()
+                .unwrap_or_else(|| member.agent_identity.clone());
+            let sidebar_label = snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.agent_id == member.agent_identity)
+                .map(|agent| agent.label.clone())
+                .unwrap_or_default();
+            (member.agent_identity.clone(), (row_label, sidebar_label))
+        })
+        .collect()
+}
+
+/// The experience read labels a store-owned agent by its row's display name
+/// when the row has one, else by its name, as it labels a configured agent:
+/// a change of the row's display name shows at the next read, with no
+/// restart and no new walk of the roster, and again after a restart over
+/// the same state directory. Core seats a store-owned identity's member with
+/// its row's labels, which hold no display name, and an update of the row
+/// reaches no seat: the label is the registration's, which the change path
+/// refreshes from the row once the change committed
+/// (`IdentityRuntime::register_from_row`). The configured agent's label
+/// stays its seat's throughout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_experience_labels_a_store_owned_agent_by_its_rows_display_name() {
+    const CREATED: &str = "created-keeper";
+    let state = tempfile::tempdir().unwrap();
+    let mob_id = format!("console-display-name-{}", uuid::Uuid::new_v4());
+    let keeper_labels = || BTreeMap::from([("display_name".to_string(), "Keeper One".to_string())]);
+    let created = AgentIdentity::parse(CREATED).unwrap();
+    let operation = |name: &str| {
+        meerkat_mob::IdentityOperation::new(
+            name,
+            meerkat_core::approval::decision::Sha256Digest::of(name.as_bytes()).as_str(),
+        )
+    };
+    let allow = || {
+        meerkat_mob::IdentityChangeConsentInput::Policy(meerkat_mob::IdentityPolicyOutcome::Allow)
+    };
+    let label = |name: &str| (name.to_string(), name.to_string());
+
+    let runtime = durable_identity_runtime(state.path(), &mob_id, keeper_labels()).await;
+    let handle = runtime.mob_handle();
+    let public_identity_runtime = runtime.identity_runtime().unwrap();
+    let identity_runtime = public_identity_runtime.runtime();
+
+    // A store-owned agent whose row has no display name.
+    let unnamed = meerkat_mob::CreatedIdentitySpec::new(CREATED, "worker");
+    let change = handle
+        .create_store_owned_identities(
+            meerkat_mob::StoreOwnedIdentityCreate::new(
+                operation("create-created-keeper"),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                vec![meerkat_mob::CreatedIdentityRequest::new(unnamed.clone())],
+            ),
+            allow(),
+        )
+        .await
+        .map(|created| created.change);
+    assert!(
+        matches!(
+            change,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "{change:?}"
+    );
+    assert!(
+        identity_runtime.register_from_row(&created).await.unwrap(),
+        "the change path registers the created row"
+    );
+
+    // One read model for both reads, as a console that stays open.
+    let read_model = ConsoleSnapshotReadModel::default();
+    let labels = experience_labels(&runtime, &read_model).await;
+    assert_eq!(
+        labels.get(CREATED),
+        Some(&label(CREATED)),
+        "a row without a display name is labelled by its name: {labels:?}"
+    );
+    assert_eq!(
+        labels.get(KEEPER),
+        Some(&label("Keeper One")),
+        "the configured agent is labelled by its seat's display name: {labels:?}"
+    );
+
+    // The row gets a display name; the change path refreshes the
+    // registration from it.
+    let change = handle
+        .update_store_owned_identity(
+            meerkat_mob::StoreOwnedIdentityUpdate::new(
+                operation("update-created-keeper"),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                unnamed.clone().with_display_name("Created Display"),
+                unnamed.spec_digest().unwrap(),
+            ),
+            allow(),
+        )
+        .await
+        .map(|updated| updated.change);
+    assert!(
+        matches!(
+            change,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "{change:?}"
+    );
+    assert!(identity_runtime.register_from_row(&created).await.unwrap());
+    let labels = experience_labels(&runtime, &read_model).await;
+    assert_eq!(
+        labels.get(CREATED),
+        Some(&label("Created Display")),
+        "the row's display name is the label at the next read, with no restart: {labels:?}"
+    );
+    assert_eq!(
+        labels.get(KEEPER),
+        Some(&label("Keeper One")),
+        "the configured agent's label is unchanged: {labels:?}"
+    );
+
+    // A restart over the same state directory: the boot registers the row
+    // again, and the label is its display name still.
+    let mut stood_down = runtime.shutdown().await.child_mob_stand_down;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let released = |outcome: &crate::ChildMobStandDownOutcome| {
+        matches!(
+            outcome,
+            crate::ChildMobStandDownOutcome::Released { .. }
+                | crate::ChildMobStandDownOutcome::NotConfigured
+        )
+    };
+    while !released(&stood_down) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stood_down = runtime.mob_runtime().stand_down_child_mobs(deadline).await;
+    }
+    assert!(
+        released(&stood_down),
+        "the child root is released: {stood_down:?}"
+    );
+    drop(read_model);
+    drop(handle);
+    drop(public_identity_runtime);
+    drop(runtime);
+
+    let runtime = durable_identity_runtime(state.path(), &mob_id, keeper_labels()).await;
+    let labels = experience_labels(&runtime, &ConsoleSnapshotReadModel::default()).await;
+    assert_eq!(
+        labels.get(CREATED),
+        Some(&label("Created Display")),
+        "the label follows the row after a restart: {labels:?}"
+    );
+    assert_eq!(
+        labels.get(KEEPER),
+        Some(&label("Keeper One")),
+        "the configured agent's label is unchanged after a restart: {labels:?}"
+    );
+    let _ = runtime.shutdown().await;
+}

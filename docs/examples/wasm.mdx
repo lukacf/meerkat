@@ -91,6 +91,10 @@ definition. A host that wants the declared topology must separately load a
 For proxy deployments, pass a provider-specific dummy key and base URL. The
 proxy injects the real server-side credential.
 
+The proxy keeps the key out of the page. It does not check who calls it: a
+request that reaches the proxy is forwarded with the real key. Put it behind
+your own authentication, and do not expose it to a network you do not trust.
+
 ```typescript
 const runtime = await MeerkatRuntime.init(wasm, {
   anthropicApiKey: "proxy",

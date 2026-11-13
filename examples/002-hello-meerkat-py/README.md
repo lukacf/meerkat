@@ -5,9 +5,11 @@ communicates via JSON-RPC, so no HTTP server setup is required.
 
 ## Prerequisites
 
-The quickest way is the released SDK. On first use it downloads the `rkat-rpc`
-runtime of its own version and checks it against a digest pinned in the
-package, so there is nothing else to install:
+The quickest way is the released SDK, with nothing else to install. When
+`MEERKAT_BIN_PATH` is not set and no `rkat-rpc` is on `PATH`, it downloads
+the `rkat-rpc` runtime of its own version on first use and checks it against
+a digest pinned in the package. A binary you name or have on `PATH` is used
+as it is, without that check:
 
 ```bash
 python3 -m venv .venv

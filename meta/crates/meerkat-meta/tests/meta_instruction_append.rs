@@ -2348,6 +2348,113 @@ async fn a_store_owned_agents_change_made_before_a_stop_is_recorded_at_its_first
     rig.shutdown().await;
 }
 
+/// An agent that is archived when a start finds its row changed with no
+/// record, and that is changed through the identity methods while it is
+/// still archived. That change is its first use after the start, so the
+/// comparison owed to it runs then, against the conversation its
+/// retirement kept: no member holds the agent, and the record is written
+/// while it is archived. The agent's first run after its unarchive carries
+/// the entry, and nothing is written again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archived_agents_unrecorded_change_is_recorded_at_its_first_change_while_archived() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    rig.create(&["Keep ALPHA records."]).await;
+    rig.turn(CREATED, "FIRST-TURN").await;
+    let archived = rig
+        .mob()
+        .archive_identity(
+            meerkat_mob::IdentityArchiveChange::new(operation("archive"), host(), CREATED),
+            allow(),
+        )
+        .await;
+    assert!(
+        matches!(
+            archived,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "{archived:?}"
+    );
+    rig.update(
+        "update-one",
+        &["Keep ALPHA records."],
+        &["Keep BETA records."],
+    )
+    .await;
+    assert_eq!(
+        rig.record(CREATED).await,
+        None,
+        "nothing reported the change"
+    );
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(identity_policy(), IdentityFamilyOptions::new()),
+        "the runtime serves identities and takes the policy"
+    );
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        None,
+        "the start alone records nothing for the archived agent"
+    );
+
+    // The agent's first change after the start, while it is archived; it
+    // leaves the instructions as they are.
+    let read = rig.rpc("meta/identity/get", json!({"name": CREATED})).await;
+    let digest = read["result"]["spec_digest"].clone();
+    assert!(digest.is_string(), "the archived agent reads: {read:#}");
+    let updated = rig
+        .rpc(
+            "meta/identity/update",
+            json!({"request_id": "rename-1", "name": CREATED, "expected_spec_digest": digest,
+                   "set": {"display_name": "Keeper"}}),
+        )
+        .await;
+    assert_eq!(updated["result"]["outcome"], json!("done"), "{updated:#}");
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        Some(json!(1)),
+        "the record exists when the archived agent's first change answers: it was compared \
+         with the conversation its retirement kept"
+    );
+
+    let unarchived = rig
+        .mob()
+        .unarchive_identity(
+            meerkat_mob::IdentityArchiveChange::new(operation("unarchive"), host(), CREATED),
+            allow(),
+        )
+        .await;
+    assert!(
+        matches!(
+            unarchived,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "{unarchived:?}"
+    );
+    rig.turn(CREATED, "FIRST-AFTER-UNARCHIVE").await;
+    let request = entries(&rig.request_messages("FIRST-AFTER-UNARCHIVE"));
+    assert_eq!(
+        request.len(),
+        1,
+        "the unarchived agent's first run carries the entry: {request:#?}"
+    );
+    assert!(
+        carries(&request[0], &["Keep BETA records."]),
+        "the unarchived agent runs on the change: {}",
+        request[0]
+    );
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        Some(json!(1)),
+        "nothing was written again"
+    );
+    rig.shutdown().await;
+}
+
 /// The limit, pinned as it is: a run the mob starts itself, with no
 /// delivery through the gateway before it, runs on the instructions the
 /// agent's conversation holds and records nothing. The change nothing

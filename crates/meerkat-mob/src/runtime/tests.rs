@@ -1662,6 +1662,7 @@ impl CoreCommsRuntime for MockCommsRuntime {
 
 fn mock_run_result(session_id: SessionId, text: String) -> RunResult {
     RunResult {
+        reasoning_effort: None,
         text,
         session_id,
         usage: Usage::default(),

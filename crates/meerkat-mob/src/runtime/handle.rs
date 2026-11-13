@@ -24380,6 +24380,7 @@ mod tests {
         output_tokens: u64,
     ) -> meerkat_core::RunResult {
         meerkat_core::RunResult {
+            reasoning_effort: None,
             text: text.into(),
             session_id,
             usage: meerkat_core::Usage {

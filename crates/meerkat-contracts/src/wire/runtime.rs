@@ -1397,6 +1397,7 @@ impl From<WireProviderParamsOverride>
 {
     fn from(value: WireProviderParamsOverride) -> Self {
         Self {
+            reasoning_route_witness: None,
             temperature: value.temperature,
             top_p: value.top_p,
             max_output_tokens: value.max_output_tokens,

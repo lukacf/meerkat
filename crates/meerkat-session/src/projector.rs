@@ -862,6 +862,7 @@ mod tests {
             &sid,
             &[
                 AgentEvent::RunStarted {
+                    reasoning_effort: None,
                     request_reasoning: None,
                     identity: Default::default(),
                     session_id: sid.clone(),

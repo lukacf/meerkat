@@ -143,6 +143,10 @@ const AGENT_LLM_CLIENT_DEFAULT_METHODS: &[AgentLlmClientDefaultMethod] = &[
         "reasoning_route",
         "absence reports no route, so no source states the reasoning-effort levels it accepts",
     ),
+    AgentLlmClientDefaultMethod::compatibility(
+        "default_provider_tag",
+        "absence reports no default tag; decorators must forward the tag of the client they wrap",
+    ),
     AgentLlmClientDefaultMethod::fail_closed(
         "prepare_controller_credential",
         "unsupported clients refuse existing-controller credential maintenance",

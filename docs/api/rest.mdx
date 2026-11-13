@@ -1678,6 +1678,16 @@ Do not require this envelope on every failure. Auth routes may return only
 `{"error":"..."}`; webhook admission has route-specific error projections,
 and framework JSON/path extraction errors can use different bodies.
 
+A `reasoning_effort` level that the model's route does not accept answers
+HTTP `400` with code `INVALID_PARAMS` and `details`
+`{"kind": "reasoning_effort_refused", "retryable": <bool>, "reasoning_effort_refusal": {...}}`,
+the object JSON-RPC carries as `error.data` (see
+[Reasoning effort refusal data](/api/rpc#reasoning-effort-refusal-data)). A
+refused session build and a turn that failed for the refusal answer the same
+way. When that turn belongs to the request that created its session,
+`details` also carries `session_id`, `session_ref`, `session_created: true`
+and `resumable: true`.
+
 For a session that was durably created but whose first turn failed, the server
 returns `SESSION_CREATED_WITH_TURN_FAILURE` with resumable session identity in
 `details`. A genuinely unknown provider failure now runs the bounded retry

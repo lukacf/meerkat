@@ -9530,6 +9530,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         if defer_initial_turn {
             return Ok((
                 RunResult {
+                    reasoning_effort: None,
                     text: String::new(),
                     session_id,
                     turns: 0,
@@ -13378,6 +13379,7 @@ mod runtime_turn_metadata_tests {
     fn success_with_machine_terminal_witness_is_rejected_for_every_session_backend() {
         let outcome = SessionTurnExecutionOutcome {
             result: Ok(RunResult {
+                reasoning_effort: None,
                 text: "impossible success".to_string(),
                 session_id: SessionId::new(),
                 usage: Usage::default(),
@@ -13540,6 +13542,7 @@ mod runtime_turn_metadata_tests {
                         .len(),
                 );
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -13966,6 +13969,7 @@ mod runtime_turn_metadata_tests {
             _event_tx: mpsc::Sender<AgentEvent>,
         ) -> Result<RunResult, AgentError> {
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -14456,6 +14460,7 @@ mod injected_context_turn_tests {
     impl InjectedContextProbeAgent {
         fn ok_result(&self) -> RunResult {
             RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -15275,6 +15280,7 @@ mod admission_window_tests {
             }
             self.run_calls.fetch_add(1, Ordering::SeqCst);
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ran".to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -15980,6 +15986,7 @@ mod archive_shutdown_drain_tests {
                 .expect("drain probe run release semaphore should stay open")
                 .forget();
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ran".to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -17072,6 +17079,7 @@ mod inline_video_admission_tests {
                 self.session_id = run_result_session_id.clone();
             }
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: self
                     .run_result_session_id

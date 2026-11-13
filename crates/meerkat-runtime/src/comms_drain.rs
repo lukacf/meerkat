@@ -13225,6 +13225,7 @@ mod tests {
         let event = interaction_terminal_event(
             interaction_id,
             CompletionOutcome::Completed(Box::new(meerkat_core::RunResult {
+                reasoning_effort: None,
                 text: "{\"answer\":42}".to_string(),
                 session_id: meerkat_core::SessionId::new(),
                 usage: meerkat_core::Usage::default(),
@@ -13260,6 +13261,7 @@ mod tests {
         let event = interaction_terminal_event(
             interaction_id,
             CompletionOutcome::Completed(Box::new(meerkat_core::RunResult {
+                reasoning_effort: None,
                 text: "main output".to_string(),
                 session_id: meerkat_core::SessionId::new(),
                 usage: meerkat_core::Usage::default(),

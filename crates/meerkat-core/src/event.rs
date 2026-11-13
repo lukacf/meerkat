@@ -402,9 +402,11 @@ pub enum AgentErrorReason {
     // route (`AgentError::ReasoningEffortRefused`): at a build, at a
     // reconfiguration or before a provider request. A turn that failed for
     // it carries the refusal, so a surface answers the turn with the
-    // refusal it answers the session error with.
+    // refusal it answers the session error with. Boxed to keep the reason,
+    // and every error that carries one, small; the wire form is the
+    // refusal's own.
     ReasoningEffortRefused {
-        refusal: crate::ReasoningEffortRefusal,
+        refusal: Box<crate::ReasoningEffortRefusal>,
     },
 }
 
@@ -530,7 +532,7 @@ impl AgentErrorReason {
                 refusal: (**refusal).clone(),
             }),
             AgentError::ReasoningEffortRefused(refusal) => Some(Self::ReasoningEffortRefused {
-                refusal: (**refusal).clone(),
+                refusal: refusal.clone(),
             }),
             _ => None,
         }
@@ -1200,6 +1202,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::ToolResultsBoundedForRequest { .. } => "tool_results_bounded_for_request",
         AgentEvent::RequestedCompactionSkipped { .. } => "requested_compaction_skipped",
         AgentEvent::OperatorInstructionsApplied { .. } => "operator_instructions_applied",
+        AgentEvent::RequestReasoningEffortResolved { .. } => "request_reasoning_effort_resolved",
     }
 }
 
@@ -2514,6 +2517,13 @@ pub enum AgentEvent {
         /// `request_reasoning_lowered`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_reasoning: Option<crate::lifecycle::run_primitive::ReasoningBatchDisposition>,
+        /// The session's provider-neutral `reasoning_effort` level as it
+        /// resolves on the session's route when the run starts, before any
+        /// provider request; absent when the session sets no level. What
+        /// each request was sent with is reported per request by
+        /// `request_reasoning_effort_resolved`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<crate::ReasoningEffortResolution>,
     },
 
     /// Agent run completed successfully
@@ -3150,7 +3160,11 @@ pub enum AgentEvent {
     /// preference: what the batch requested, what the attempt's baseline
     /// request already said, and what the attempt actually sent. Emitted per
     /// prepared request (and again for a model-fallback attempt), so a turn
-    /// whose attempts differ reports each one; never a turn-level claim.
+    /// whose attempts differ reports each one; never a turn-level claim. For
+    /// a model-fallback attempt the preference is judged on the direct route
+    /// of the target's provider and the target model's catalog row;
+    /// `RequestReasoningEffortResolved` is the authoritative record of what
+    /// a request was sent with.
     RequestReasoningLowered {
         /// The provider turn this attempt belongs to; absent for a
         /// model-fallback attempt (see `fallback_attempt`).
@@ -3191,6 +3205,11 @@ pub enum AgentEvent {
         /// dispatched again, at `awaiting_model` the last committed round.
         round: u64,
         resume_point: RunResumePointKind,
+        /// The session's provider-neutral `reasoning_effort` level as it
+        /// resolves on the session's route when the run resumes; absent
+        /// when the session sets no level (see `run_started`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<crate::ReasoningEffortResolution>,
     },
     /// One model request of a run carried some of the run's own tool results
     /// shortened, for that request only: with them whole the request was over
@@ -3265,6 +3284,32 @@ pub enum AgentEvent {
         /// A delta's changes, sorted by slot; empty for a snapshot.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         changes: Vec<crate::InstructionChange>,
+    },
+    /// One provider request was sent with the session's provider-neutral
+    /// `reasoning_effort` level: the level the request named, the level
+    /// sent, the model, the route and the provider fields it was written
+    /// to. Published once for each request that was handed to the provider
+    /// (a turn's request, an extraction request, a compaction summary
+    /// request, a controller request, a model-fallback attempt), after the
+    /// request settled; a request refused before it was sent reports
+    /// nothing. Requests of a session that sets no level report nothing.
+    /// The event states what was sent, never what was planned: a request
+    /// that is prepared again (after a route change, say) reports the
+    /// resolution of the preparation that was sent.
+    ///
+    /// Appended after every released variant: declaration order is the
+    /// implicit discriminant (the xtask `released_enum_ordinals` test).
+    RequestReasoningEffortResolved {
+        /// The provider turn the request belongs to; absent for a request
+        /// outside a turn (a compaction summary).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_number: Option<u32>,
+        /// Set when the request is a model-fallback attempt: the failed
+        /// attempt it replaces.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fallback_attempt: Option<u32>,
+        /// What the request was sent with.
+        resolution: crate::ReasoningEffortResolution,
     },
 }
 
@@ -3850,6 +3895,7 @@ mod tests {
     fn run_resumed_has_its_own_wire_name_and_round_trips() {
         let run_id = crate::lifecycle::RunId::new();
         let event = AgentEvent::RunResumed {
+            reasoning_effort: None,
             session_id: SessionId::new(),
             run_id: run_id.clone(),
             round: 2,
@@ -5091,6 +5137,7 @@ mod tests {
         // Test all event variants serialize correctly
         let events = vec![
             AgentEvent::RunStarted {
+                reasoning_effort: None,
                 request_reasoning: None,
                 identity: Default::default(),
                 session_id: SessionId::new(),
@@ -5502,6 +5549,7 @@ mod tests {
     #[test]
     fn run_started_pending_tail_serializes_typed_variant() {
         let event = AgentEvent::RunStarted {
+            reasoning_effort: None,
             request_reasoning: None,
             identity: Default::default(),
             session_id: SessionId::new(),
@@ -5814,6 +5862,51 @@ mod tests {
         assert_eq!(decoded, reason);
     }
 
+    /// A refused reasoning effort level is a typed reason whose refusal is
+    /// boxed, so the reason and every error that carries one stay small. The
+    /// box changes nothing on the wire or in the schema: the reason
+    /// serializes as the refusal's own document under the
+    /// `reasoning_effort_refused` tag and reads back, and a boxed refusal has
+    /// the refusal's schema.
+    #[test]
+    fn refused_reasoning_effort_reason_is_boxed_and_unchanged_on_the_wire() {
+        let document = serde_json::json!({
+            "requested": "max", "provider": "anthropic", "model": "test-anthropic-default",
+            "route": {"backend": "anthropic_api", "api": "messages"},
+            "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+            "facts": "catalog",
+        });
+        let refusal: crate::ReasoningEffortRefusal =
+            serde_json::from_value(document.clone()).expect("a refusal document reads");
+        let error = crate::error::AgentError::ReasoningEffortRefused(Box::new(refusal.clone()));
+        let reason = AgentErrorReason::ReasoningEffortRefused {
+            refusal: Box::new(refusal),
+        };
+        assert_eq!(
+            AgentErrorReason::from_agent_error(&error),
+            Some(reason.clone())
+        );
+
+        let wire = serde_json::to_value(&reason).expect("serialize");
+        assert_eq!(
+            wire,
+            serde_json::json!({"reason_type": "reasoning_effort_refused", "refusal": document})
+        );
+        let decoded: AgentErrorReason = serde_json::from_value(wire).expect("decode");
+        assert_eq!(decoded, reason);
+
+        #[cfg(feature = "schema")]
+        {
+            let boxed = schemars::schema_for!(Box<crate::ReasoningEffortRefusal>);
+            let plain = schemars::schema_for!(crate::ReasoningEffortRefusal);
+            assert_eq!(
+                serde_json::to_string(&boxed).expect("schema serializes"),
+                serde_json::to_string(&plain).expect("schema serializes"),
+                "a boxed refusal has the refusal's schema"
+            );
+        }
+    }
+
     #[test]
     fn provider_error_projection_uses_canonical_retryability() {
         for (kind, raw_retryability, expected_retryable) in [
@@ -5963,6 +6056,7 @@ mod tests {
     fn test_agent_event_type_mapping_is_total_for_all_variants() {
         let events = vec![
             AgentEvent::RunStarted {
+                reasoning_effort: None,
                 request_reasoning: None,
                 identity: Default::default(),
                 session_id: SessionId::new(),

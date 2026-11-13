@@ -1115,6 +1115,16 @@ pub struct ProviderParamsOverride {
     #[serde(skip)]
     #[cfg_attr(feature = "schema", schemars(skip))]
     pub tool_choice: Option<ToolChoice>,
+    /// Request-local route witness of a resolved `reasoning_effort` level:
+    /// what the client that serves the request observed about its route
+    /// when the level was resolved for it. The agent loop writes it on a
+    /// request's own copy beside the route's typed field; the provider
+    /// adapter compares it with the route the request is bound to and asks
+    /// for a new preparation when they differ. Never serialized: it cannot
+    /// be persisted into session defaults or sent on a wire.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub reasoning_route_witness: Option<crate::ReasoningRouteObservation>,
 }
 
 impl ProviderParamsOverride {
@@ -1163,6 +1173,7 @@ impl ProviderParamsOverride {
             && self.provider_tag.is_none()
             && self.reasoning_effort.is_none()
             && self.tool_choice.is_none()
+            && self.reasoning_route_witness.is_none()
     }
 
     /// Clear any provider-native web-search / grounding tool body from this

@@ -1306,6 +1306,11 @@ fn runtime_driver_error_to_session_error(
     if let Some(held) = error.durable_hold_session_error() {
         return held;
     }
+    // A reconfiguration refused for its reasoning effort level keeps the
+    // typed refusal a refused build has.
+    if let Some(refused) = error.reasoning_effort_refused_session_error() {
+        return refused;
+    }
     SessionError::Agent(meerkat_core::AgentError::InternalError(error.to_string()))
 }
 
@@ -5156,7 +5161,12 @@ fn completion_outcome_to_api_result(
         meerkat_runtime::completion::CompletionOutcome::Cancelled => {
             Err(ApiError::RequestCancelled { details: None })
         }
-        meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, .. } => {
+        meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, error } => {
+            if let Some(refused) =
+                reasoning_effort_refused_turn_api_error(&error, session_id, realm, session_created)
+            {
+                return Err(refused);
+            }
             let message = format!("turn abandoned: {reason}");
             if session_created {
                 Err(session_created_with_turn_failure_api_error(
@@ -5167,6 +5177,11 @@ fn completion_outcome_to_api_result(
             }
         }
         meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
+            if let Some(refused) =
+                reasoning_effort_refused_turn_api_error(&error, session_id, realm, session_created)
+            {
+                return Err(refused);
+            }
             let message = format!("turn abandoned: {reason}");
             let details = json!({
                 "error": error,
@@ -5877,6 +5892,9 @@ fn create_session_error_to_api(err: SessionError) -> ApiError {
     }
     if let Some(held) = session_durable_hold_api_error(&err) {
         return held;
+    }
+    if let Some(refused) = reasoning_effort_refused_api_error(&err) {
+        return refused;
     }
     let message = err.to_string();
     match err.primary_error() {
@@ -9147,6 +9165,77 @@ fn session_durable_hold_api_error(error: &SessionError) -> Option<ApiError> {
     Some(ApiError::SessionNotRunningWithData {
         message: error.to_string(),
         details: meerkat_contracts::error::session_error_details(error).unwrap_or(Value::Null),
+    })
+}
+
+/// `ApiError::BadRequestWithData` for a refused `reasoning_effort` level
+/// (`AgentError::ReasoningEffortRefused`): HTTP 400 with the session
+/// transport's code (`INVALID_PARAMS`) and the error's typed data as
+/// details, `{"kind": "reasoning_effort_refused", "retryable": <bool>,
+/// "reasoning_effort_refusal": {...}}`, as JSON-RPC answers it. `None` for
+/// any other error.
+fn reasoning_effort_refused_api_error(error: &SessionError) -> Option<ApiError> {
+    let SessionError::Agent(agent_error) = error.primary_error() else {
+        return None;
+    };
+    if !matches!(
+        agent_error.primary_error(),
+        meerkat_core::error::AgentError::ReasoningEffortRefused(_)
+    ) {
+        return None;
+    }
+    Some(ApiError::BadRequestWithData {
+        message: error.to_string(),
+        code: meerkat_contracts::error::session_transport_error_code(error).to_string(),
+        details: error.structured_data()?,
+    })
+}
+
+/// The answer of a turn that failed for a refused `reasoning_effort` level
+/// (its typed reason is the refusal): exactly the answer of a refused build
+/// ([`reasoning_effort_refused_api_error`]), so a caller sees one shape
+/// whichever checkpoint refused. When the turn belongs to the request that
+/// created its session, the details also name the created session
+/// (`session_id`, `session_ref`, `session_created`, `resumable`), as a
+/// created session's other turn failures do, so the caller does not lose it.
+/// `None` for any other turn error.
+fn reasoning_effort_refused_turn_api_error(
+    turn_error: &meerkat_core::TurnErrorMetadata,
+    session_id: &SessionId,
+    realm: &meerkat_core::RealmId,
+    session_created: bool,
+) -> Option<ApiError> {
+    let Some(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { refusal }) =
+        &turn_error.reason
+    else {
+        return None;
+    };
+    let answer = reasoning_effort_refused_api_error(&SessionError::Agent(
+        meerkat_core::error::AgentError::ReasoningEffortRefused(refusal.clone()),
+    ))?;
+    if !session_created {
+        return Some(answer);
+    }
+    Some(match answer {
+        ApiError::BadRequestWithData {
+            message,
+            code,
+            details: Value::Object(mut details),
+        } => {
+            details.insert("session_id".to_string(), json!(session_id.to_string()));
+            details.insert(
+                "session_ref".to_string(),
+                json!(format_session_ref(realm, session_id)),
+            );
+            details.insert("session_created".to_string(), json!(true));
+            details.insert("resumable".to_string(), json!(true));
+            ApiError::BadRequestWithData {
+                message,
+                code,
+                details: Value::Object(details),
+            }
+        }
+        other => other,
     })
 }
 
@@ -18194,6 +18283,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
     fn test_run_result_to_response_carries_skill_diagnostics() {
         let session_id = SessionId::new();
         let result = meerkat_core::RunResult {
+            reasoning_effort: None,
             text: "ok".to_string(),
             session_id: session_id.clone(),
             usage: Default::default(),
@@ -18489,6 +18579,175 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         ));
 
         assert!(matches!(err, ApiError::RequestCancelled { details: None }));
+    }
+
+    /// Refusal documents for the REST rows, each with the `retryable` value
+    /// its details carry: a catalogued level the model does not accept, a
+    /// refusal that names no route, and the one transient reason.
+    fn reasoning_effort_refusal_documents() -> Vec<(Value, bool)> {
+        vec![
+            (
+                json!({
+                    "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                    "route": {"backend": "anthropic_api", "api": "messages"},
+                    "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+                    "facts": "catalog",
+                }),
+                false,
+            ),
+            (
+                json!({
+                    "requested": "high", "provider": "other", "model": "custom-model-1",
+                    "route": null,
+                    "reason": "supported_levels_unknown", "supported": null, "facts": null,
+                }),
+                false,
+            ),
+            (
+                json!({
+                    "requested": "high", "provider": "openai", "model": "account-model-1",
+                    "route": {"backend": "copilot", "api": "responses"},
+                    "reason": "supported_levels_unavailable", "supported": null, "facts": null,
+                }),
+                true,
+            ),
+        ]
+    }
+
+    async fn api_error_status_and_payload(error: ApiError) -> (StatusCode, Value) {
+        use http_body_util::BodyExt as _;
+        let response = error.into_response();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    /// The two turn errors a refused level reaches a completion as: an apply
+    /// failure of the turn's build, and a run that failed before a provider
+    /// request.
+    fn reasoning_effort_refused_turn_errors(
+        refusal: &meerkat_core::ReasoningEffortRefusal,
+    ) -> [meerkat_core::TurnErrorMetadata; 2] {
+        let reason = meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+            refusal: Box::new(refusal.clone()),
+        };
+        let detail = format!("agent error: {refusal}");
+        let mut apply_failure =
+            meerkat_core::TurnErrorMetadata::runtime_apply_failure(detail.clone());
+        apply_failure.reason = Some(reason.clone());
+        let mut failed_run = meerkat_core::TurnErrorMetadata::terminal(
+            meerkat_core::TurnTerminalCauseKind::FatalFailure,
+            meerkat_core::TurnTerminalOutcome::Failed,
+            detail,
+        );
+        failed_run.reason = Some(reason);
+        [apply_failure, failed_run]
+    }
+
+    /// A refused `reasoning_effort` level answers HTTP 400 `INVALID_PARAMS`
+    /// with the typed details, in one shape whichever checkpoint refused:
+    /// the session error path (a refused build), a refused live
+    /// reconfiguration, and a turn that failed for the refusal. `retryable`
+    /// is `true` only for the unavailable reason; a refusal that names no
+    /// route renders with `"route": null`.
+    #[tokio::test]
+    async fn a_refused_reasoning_effort_answers_400_with_the_typed_details() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
+        for (document, retryable) in reasoning_effort_refusal_documents() {
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document.clone()).expect("a refusal document reads");
+            let expected = json!({
+                "error": format!("agent error: {refusal}"),
+                "code": "INVALID_PARAMS",
+                "details": {
+                    "kind": "reasoning_effort_refused",
+                    "retryable": retryable,
+                    "reasoning_effort_refusal": document,
+                },
+            });
+
+            let mut answers = vec![
+                create_session_error_to_api(SessionError::Agent(
+                    meerkat_core::AgentError::ReasoningEffortRefused(Box::new(refusal.clone())),
+                )),
+                create_session_error_to_api(runtime_driver_error_to_session_error(
+                    meerkat_runtime::RuntimeDriverError::ReasoningEffortRefused(Box::new(
+                        refusal.clone(),
+                    )),
+                )),
+            ];
+            for turn_error in reasoning_effort_refused_turn_errors(&refusal) {
+                for outcome in [
+                    meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                        reason: format!("agent error: {refusal}"),
+                        error: turn_error.clone(),
+                    },
+                    meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                        reason: format!("agent error: {refusal}"),
+                        error: turn_error.clone(),
+                    },
+                ] {
+                    answers.push(
+                        completion_outcome_to_api_result(outcome, &session_id, &realm, false)
+                            .expect_err("a refused level is an API error"),
+                    );
+                }
+            }
+            for answer in answers {
+                let (status, payload) = api_error_status_and_payload(answer).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{payload}");
+                assert_eq!(payload, expected);
+            }
+        }
+    }
+
+    /// A turn refused for its level in the request that created its session
+    /// answers the same 400 and details, and names the created session
+    /// beside them, so the caller does not lose it.
+    #[tokio::test]
+    async fn a_refused_first_turn_names_the_created_session_beside_the_refusal() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
+        for (document, retryable) in reasoning_effort_refusal_documents() {
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document.clone()).expect("a refusal document reads");
+            for turn_error in reasoning_effort_refused_turn_errors(&refusal) {
+                let answer = completion_outcome_to_api_result(
+                    meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                        reason: format!("agent error: {refusal}"),
+                        error: turn_error,
+                    },
+                    &session_id,
+                    &realm,
+                    true,
+                )
+                .expect_err("a refused level is an API error");
+                let (status, payload) = api_error_status_and_payload(answer).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{payload}");
+                assert_eq!(
+                    payload,
+                    json!({
+                        "error": format!("agent error: {refusal}"),
+                        "code": "INVALID_PARAMS",
+                        "details": {
+                            "kind": "reasoning_effort_refused",
+                            "retryable": retryable,
+                            "reasoning_effort_refusal": document,
+                            "session_id": session_id.to_string(),
+                            "session_ref": format_session_ref(&realm, &session_id),
+                            "session_created": true,
+                            "resumable": true,
+                        },
+                    })
+                );
+                assert_eq!(
+                    SessionError::reasoning_effort_refusal_from_data(&payload["details"]),
+                    Some(refusal.clone()),
+                    "the reader takes the refusal with the session members beside it"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "mob")]
@@ -19703,6 +19962,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             let realm = meerkat_core::RealmId::parse("rest-cancel").unwrap();
             let response = run_result_to_response(
                 meerkat_core::types::RunResult {
+                    reasoning_effort: None,
                     text: "must not leak".to_string(),
                     session_id: SessionId::new(),
                     usage: meerkat_core::types::Usage::default(),

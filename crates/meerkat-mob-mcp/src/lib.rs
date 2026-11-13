@@ -9694,6 +9694,7 @@ impl LocalSessionService {
         let (tx, _) = tokio::sync::broadcast::channel::<EventEnvelope<AgentEvent>>(256);
         self.event_txs.write().await.insert(sid.clone(), tx);
         Ok(RunResult {
+            reasoning_effort: None,
             text: "ok".to_string(),
             session_id: sid,
             usage: Usage::default(),
@@ -9749,6 +9750,7 @@ impl SessionService for LocalSessionService {
                 next_seq(&mut seq),
                 None,
                 AgentEvent::RunStarted {
+                    reasoning_effort: None,
                     request_reasoning: None,
                     identity: Default::default(),
                     session_id: id.clone(),
@@ -9799,6 +9801,7 @@ impl SessionService for LocalSessionService {
             ));
         }
         Ok(RunResult {
+            reasoning_effort: None,
             text: "ok".to_string(),
             session_id: id.clone(),
             usage: Usage::default(),
@@ -13462,6 +13465,7 @@ mod tests {
                     .insert(sid.clone(), Arc::new(Notify::new()));
             }
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: sid,
                 usage: Usage::default(),
@@ -13595,6 +13599,7 @@ mod tests {
                 notifier.notified().await;
             }
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: id.clone(),
                 usage: Usage::default(),

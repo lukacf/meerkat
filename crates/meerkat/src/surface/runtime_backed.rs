@@ -3004,6 +3004,10 @@ mod tests {
             self.selection.clone()
         }
 
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            self.inner.reasoning_route()
+        }
+
         fn project_replay_messages(
             &self,
             messages: &[meerkat_core::Message],
@@ -4033,8 +4037,11 @@ mod tests {
     /// its first attempt with the refusal as its durable reason.
     ///
     /// A turn that names the state the session is already at goes on, and
-    /// with a level on the session it fails inside the run with the
-    /// unresolved-level refusal, its input consumed.
+    /// with a level on the session it fails inside the run with the typed
+    /// refusal of a level no source states for the route, its input
+    /// consumed. The session is built at the level while the test client
+    /// reports a route that accepts it (a build refuses a level no source
+    /// states); the client reports no route from then on.
     #[tokio::test]
     async fn turn_reasoning_effort_not_applied_is_refused_and_ends_at_the_retry_cap_today() {
         use meerkat_core::lifecycle::run_primitive::{
@@ -4044,16 +4051,64 @@ mod tests {
 
         const NOT_APPLIED: &str =
             "the turn's reasoning_effort was not applied to the session before the turn";
-        const UNRESOLVED: &str = "reasoning_effort cannot be resolved by this build";
+        const UNRESOLVED: &str = "no source states the levels this route accepts";
+
+        /// Reports its inner client's route until `reports_route` is turned
+        /// off, then no route: no source states the levels it accepts.
+        struct RouteSwitchClient {
+            inner: ControllerSetupClient,
+            reports_route: Arc<AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmClient for RouteSwitchClient {
+            fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+                if self.reports_route.load(Ordering::SeqCst) {
+                    self.inner.reasoning_route()
+                } else {
+                    None
+                }
+            }
+
+            fn project_replay_messages(
+                &self,
+                messages: &[meerkat_core::Message],
+            ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+                self.inner.project_replay_messages(messages)
+            }
+
+            fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+                self.inner.stream(request)
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                self.inner.provider()
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                Ok(())
+            }
+        }
 
         let temp = tempfile::tempdir().expect("tempdir");
         let provider_requests = Arc::new(AtomicUsize::new(0));
+        let reports_route = Arc::new(AtomicBool::new(true));
+        // The client reports the family's direct route, whose catalog row
+        // accepts `high` for this model: a session created at `high` passes
+        // the build's level check and reaches the turn-level rules below.
         let (service, adapter) = build_test_service_with_llm(
             &temp,
-            Arc::new(ControllerSetupClient {
-                inner: TestClient::for_provider(meerkat_core::Provider::OpenAI),
-                selection: None,
-                calls: Arc::clone(&provider_requests),
+            Arc::new(RouteSwitchClient {
+                inner: ControllerSetupClient {
+                    inner: TestClient::for_provider(meerkat_core::Provider::OpenAI)
+                        .with_reasoning_route(
+                            meerkat_core::direct_route_observation(meerkat_core::Provider::OpenAI)
+                                .expect("the family has a direct route"),
+                        ),
+                    selection: None,
+                    calls: Arc::clone(&provider_requests),
+                },
+                reports_route: Arc::clone(&reports_route),
             }),
         )
         .await;
@@ -4164,8 +4219,8 @@ mod tests {
             );
             assert_refused_start_terminal(terminal);
         };
-        // Refused inside the run by the unresolved-level guard: the run
-        // failed through the turn authority and consumed its input.
+        // Refused inside the run when its level is resolved for the route:
+        // the run failed through the turn authority and consumed its input.
         let refused_inside_the_run = |(outcome, terminal): &Settled| {
             assert!(
                 matches!(
@@ -4173,7 +4228,7 @@ mod tests {
                     CompletionOutcome::AbandonedWithError { reason, error }
                         if reason.contains(UNRESOLVED) && error.terminal
                 ),
-                "expected the unresolved-level refusal: {outcome:?}"
+                "expected the refusal of a level no source states: {outcome:?}"
             );
             assert_eq!(terminal, &meerkat_runtime::InputTerminalOutcome::Consumed);
         };
@@ -4211,8 +4266,11 @@ mod tests {
             ..Default::default()
         })
         .await;
+        // From here on the client reports no route: no source states the
+        // levels the session's route accepts.
+        reports_route.store(false, Ordering::SeqCst);
         // The turn names the state the session is at: it goes on, to the
-        // refusal of a level nothing resolves yet.
+        // refusal of a level no source states for the route.
         let settled = turn(
             at_high.clone(),
             Some(TurnMetadataOverride::Set(EffortLevel::High)),

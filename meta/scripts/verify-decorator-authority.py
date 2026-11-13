@@ -19,6 +19,12 @@ route: a decorator that omits it hides the route its client serves, and a
 against. Every production decorator defines it too: a forward to the client it
 wraps, or its own answer with the reason beside it.
 
+And for `AgentLlmClient::default_provider_tag`, whose DEFAULT reports no
+default tag: a decorator that omits it hides the default fields its client
+applies to a request that carries no tag, so a resolved `reasoning_effort`
+level replaces them instead of joining them. Every production decorator
+defines it as well.
+
 THREE TRAPS THIS AVOIDS, all found the hard way:
 
   FILE-LEVEL MATCHING IS NOT IMPL-LEVEL. Asking whether the FILE containing an
@@ -55,7 +61,8 @@ MOD_LINE = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{")
 # name here only with a reason, never to silence a failure.
 EXEMPT: dict[str, str] = {}
 
-# Impls that define no reasoning_route, each with the reason. The scan reads a
+# Impls that define no reasoning_route and no default_provider_tag, each with
+# the reason. The scan reads a
 # file that is a test module as a whole (`#[cfg(test)] #[path = ...] mod x;`)
 # as production, so its test doubles are named here; a production decorator
 # never is.
@@ -132,6 +139,21 @@ def main() -> int:
                     "            self.inner.reasoning_route()\n"
                     "        }"
                 )
+            if "fn default_provider_tag" not in body and name in ROUTE_EXEMPT:
+                print(f"  exempt   {name} default_provider_tag ({ROUTE_EXEMPT[name]})")
+            elif "fn default_provider_tag" not in body:
+                failures.append(
+                    f"{name} ({rel}:{i + 1}) does not define default_provider_tag. "
+                    "The trait default reports no default tag, so a resolved "
+                    "reasoning_effort level would replace the default fields of "
+                    "every client this decorator wraps instead of joining them. "
+                    "Add the forward, or the decorator's own answer with the "
+                    "reason beside it:\n"
+                    "        fn default_provider_tag(&self) "
+                    "-> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {\n"
+                    "            self.inner.default_provider_tag()\n"
+                    "        }"
+                )
             if "fn request_attempt_authority" in body:
                 continue
             if name in EXEMPT:
@@ -159,7 +181,7 @@ def main() -> int:
     if failures:
         print(
             "production AgentLlmClient decorators must forward authority and "
-            "define reasoning_route:",
+            "define reasoning_route and default_provider_tag:",
             file=sys.stderr,
         )
         for f in failures:

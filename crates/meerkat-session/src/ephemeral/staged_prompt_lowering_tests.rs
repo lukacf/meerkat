@@ -134,6 +134,7 @@ impl SessionAgentBuilder for ProbeBuilder {
 impl ProbeAgent {
     fn ok_result(&self) -> RunResult {
         RunResult {
+            reasoning_effort: None,
             text: "ok".to_string(),
             session_id: self.session_id.clone(),
             usage: Usage::default(),
@@ -197,6 +198,7 @@ impl SessionAgent for ProbeAgent {
         }
         let _ = event_tx
             .send(AgentEvent::RunStarted {
+                reasoning_effort: None,
                 session_id: self.session_id.clone(),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 input: input.prompt.clone().into(),

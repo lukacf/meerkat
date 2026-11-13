@@ -60,6 +60,7 @@ fn sample_metadata() -> RuntimeTurnMetadata {
         provider: Some(Provider::Anthropic),
         self_hosted_server_id: None,
         provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
+            reasoning_route_witness: None,
             temperature: Some(0.2),
             top_p: Some(0.9),
             max_output_tokens: Some(1024),

@@ -615,6 +615,16 @@ impl LlmClient for ProviderAgnosticLlmClient {
         self.inner.reasoning_route()
     }
 
+    // The route the wrapped client bound a projection to. The trait's
+    // default answers with the request-free route, which is not the
+    // projection's for a client whose route can change between requests.
+    fn reasoning_route_of(
+        &self,
+        projection: &meerkat_llm_core::LlmReplayProjection,
+    ) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route_of(projection)
+    }
+
     fn plain_model_route(
         &self,
         logical_model: &str,
@@ -739,6 +749,13 @@ impl meerkat_core::AgentLlmClient for ReplaySanitizingAgentLlmClient {
     // set on a member whose client reports none is refused as unknown.
     fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
         self.inner.reasoning_route()
+    }
+
+    // The default tag of the wrapped client. The trait's default is no tag,
+    // and a level resolved for a member whose client hides its tag would
+    // replace that client's default fields instead of joining them.
+    fn default_provider_tag(&self) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+        self.inner.default_provider_tag()
     }
 
     fn controller_model_facts(
@@ -958,6 +975,16 @@ impl LlmClient for ReplaySanitizingLlmClient {
     // set on a member whose client reports none is refused as unknown.
     fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
         self.inner.reasoning_route()
+    }
+
+    // The route the wrapped client bound a projection to. The trait's
+    // default answers with the request-free route, which is not the
+    // projection's for a client whose route can change between requests.
+    fn reasoning_route_of(
+        &self,
+        projection: &meerkat_llm_core::LlmReplayProjection,
+    ) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route_of(projection)
     }
 
     fn plain_model_route(
@@ -17206,6 +17233,15 @@ realm_profile = "worker-v2"
             Some(crate::memory::dispatch_taint::controller_test_support::reasoning_route())
         }
 
+        fn reasoning_route_of(
+            &self,
+            _projection: &meerkat_llm_core::LlmReplayProjection,
+        ) -> Option<meerkat_core::ReasoningRouteObservation> {
+            Some(
+                crate::memory::dispatch_taint::controller_test_support::reasoning_route_of_a_projection(),
+            )
+        }
+
         fn plain_model_route(
             &self,
             logical_model: &str,
@@ -17308,14 +17344,19 @@ realm_profile = "worker-v2"
     /// agent client. The trait's default is no route, and a level set on a
     /// member whose client reports no route is refused as unknown on every
     /// route, so a wrapper that omits the forward compiles and takes the
-    /// option away from every member.
+    /// option away from every member. The raw wrappers answer for a replay
+    /// projection with what the wrapped client says about that projection
+    /// (not with its request-free route), and the agent-client sanitizer
+    /// reports the wrapped client's default provider tag.
     #[test]
     fn member_client_wrappers_forward_the_wrapped_clients_reasoning_route() {
         use crate::memory::dispatch_taint::controller_test_support::{
-            PinnedInner, reasoning_route,
+            PinnedInner, default_provider_tag, reasoning_route, reasoning_route_of_a_projection,
         };
         let inner: Arc<dyn LlmClient> = Arc::new(GovernedRawClient::default());
+        let projection = meerkat_llm_core::LlmReplayProjection::new(Vec::new());
         assert_eq!(inner.reasoning_route(), Some(reasoning_route()));
+        assert_ne!(reasoning_route_of_a_projection(), reasoning_route());
         for (shape, client) in [
             (
                 "provider-agnostic",
@@ -17339,12 +17380,22 @@ realm_profile = "worker-v2"
             ),
         ] {
             assert_eq!(client.reasoning_route(), Some(reasoning_route()), "{shape}");
+            assert_eq!(
+                client.reasoning_route_of(&projection),
+                Some(reasoning_route_of_a_projection()),
+                "{shape}: the wrapped client's answer for the projection"
+            );
         }
 
         let wrapped = ReplaySanitizingAgentLlmClient::new(Arc::new(PinnedInner::default()));
         assert_eq!(
             meerkat_core::AgentLlmClient::reasoning_route(&wrapped),
             Some(reasoning_route()),
+            "the replay sanitizer around the agent client"
+        );
+        assert_eq!(
+            meerkat_core::AgentLlmClient::default_provider_tag(&wrapped),
+            Some(default_provider_tag()),
             "the replay sanitizer around the agent client"
         );
     }
@@ -18492,6 +18543,7 @@ realm_profile = "worker-v2"
             _req: CreateSessionRequest,
         ) -> Result<meerkat_core::types::RunResult, SessionError> {
             Ok(meerkat_core::types::RunResult {
+                reasoning_effort: None,
                 text: String::new(),
                 session_id: self.session.id().clone(),
                 usage: meerkat_core::types::Usage::default(),
@@ -19105,6 +19157,7 @@ comms = true
                         .and_then(|build| build.initial_tool_filter.clone()),
                 );
             Ok(meerkat_core::RunResult {
+                reasoning_effort: None,
                 text: String::new(),
                 session_id,
                 usage: meerkat_core::types::Usage::default(),
@@ -19603,6 +19656,7 @@ comms = true
                 });
             }
             Ok(meerkat_core::RunResult {
+                reasoning_effort: None,
                 text: "owner terminal result".to_string(),
                 session_id: session_id.clone(),
                 usage: meerkat_core::types::Usage::default(),

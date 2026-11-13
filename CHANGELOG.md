@@ -90,6 +90,42 @@ them.
   `reasoning_effort: Option<TurnMetadataOverride<EffortLevel>>` (see Added).
   Code that builds it with a struct literal sets the new field; `None` keeps
   the earlier behaviour.
+- `meerkat-core`: `AgentEvent::RunStarted` and `AgentEvent::RunResumed` gain
+  the field `reasoning_effort: Option<ReasoningEffortResolution>`, `RunResult`
+  gains the public field `reasoning_effort: Option<ReasoningEffortReport>`,
+  and `ProviderParamsOverride` gains the public request-local field
+  `reasoning_route_witness: Option<ReasoningRouteObservation>` (see Added).
+  Code that builds these values with a struct literal, or matches the two
+  event variants without `..`, must add the member; `None` keeps the earlier
+  behaviour. `AgentEvent` gains the variant `RequestReasoningEffortResolved`
+  (the enum is non-exhaustive, so a match outside the crate already has a
+  wildcard arm).
+- `meerkat-contracts`: `WireRunResult` gains the public field
+  `reasoning_effort: Option<ReasoningEffortReport>` (see Added). Code that
+  builds it with a struct literal must add the member; `None` keeps the
+  earlier behaviour.
+
+- `meerkat-core`: `model_fallback::ModelFallbackSkipReason` gains the variant
+  `ReasoningEffortUnsupported` (wire value `reasoning_effort_unsupported`;
+  see Added). A match over the enum without a wildcard arm handles the new
+  variant.
+
+- `meerkat-core`: `event::AgentErrorReason` gains the variant
+  `ReasoningEffortRefused { refusal: Box<ReasoningEffortRefusal> }`,
+  appended last (see Added). A match over the enum without a wildcard arm
+  handles the new variant. The refusal is boxed to keep the reason small; a
+  box serializes as its content, so the wire form is the refusal's own. On
+  the wire the reason vocabulary of a failed run
+  (`error_report.reason.reason_type`) gains the value
+  `reasoning_effort_refused`; a client that reads it as a closed set accepts
+  the new value. `AgentError` gains the variant
+  `ReasoningEffortRefused(Box<ReasoningEffortRefusal>)`, appended last; the
+  enum is `#[non_exhaustive]`, so a match outside the crate is unaffected.
+
+- `meerkat`: `BuildAgentError` gains the variant
+  `ReasoningEffortRefused(Box<ReasoningEffortRefusal>)`, appended last (see
+  Added). A match over the enum without a wildcard arm handles the new
+  variant.
 
 - The request types of the public surfaces gain the field `reasoning_effort`
   (see Added): `meerkat-rpc` `handlers::session::CreateSessionParams`
@@ -118,8 +154,9 @@ them.
 ### Added
 
 - `meerkat-core`, `meerkat-llm-core`: the vocabulary of a provider-neutral
-  `reasoning_effort` option, as types only. Nothing reads them yet: no
-  request, wire form or schema changes. `meerkat_core::reasoning_effort`
+  `reasoning_effort` option. The entries below are built from these types:
+  the resolver, the route every client reports, the typed refusal and the
+  reports of what a run sent. `meerkat_core::reasoning_effort`
   (re-exported at the crate root) adds the route a request is served on
   (`ModelApi`, `ReasoningBackend`, and the reported form `ReasoningRoute`,
   `{"backend": "<provider-matrix string>", "api": "<snake_case API>"}`),
@@ -141,8 +178,10 @@ them.
   compile unchanged; `LlmClientAdapter` forwards its client's answer.
 
 - `meerkat-core`: the resolver of the provider-neutral `reasoning_effort`
-  option. No request, wire form or schema names the option yet, so no
-  request changes. `resolve_reasoning_effort` decides, for a requested
+  option. The agent runs it right before each provider request of a session
+  that sets the level, and the check at a build, a model fallback's check of
+  its target and a turn's reasoning preference run it too (see the entries
+  below). `resolve_reasoning_effort` decides, for a requested
   level, a model and a `ReasoningRouteObservation`, what one provider
   request is sent with: it writes the route's typed effort field on the
   request's own params and returns a `ReasoningEffortResolution`, or
@@ -173,7 +212,7 @@ them.
     body, reasoning turned off). `ReasoningResolveMode::Preference` is the
     existing owner-only reasoning preference, whose per-request lowering
     now runs through the same resolver with its outcomes unchanged.
-    Upgrade note for when a request can name a level: beside a level, a
+    Upgrade note: beside a level, a
     generic `thinking_budget_tokens` is refused on every route, OpenAI
     routes included, where that field was accepted and had no effect
     before; remove the budget or the level.
@@ -197,21 +236,25 @@ them.
   `None` when the entry states none, otherwise the stated levels, each once,
   from `none` to `max`; a word that names no level is left out. The read is
   tolerant: a value that is not an array states no levels, array elements
-  that are not strings are skipped, and neither fails the model list. No
-  request changes: nothing Meerkat sends to Copilot reads the levels yet,
-  and the account capability gate does not check them. The levels are part
-  of what a Copilot route compares, so when a refreshed list states other
-  levels for a session's model, the session's prepared route is rebuilt, as
-  it already is when the list changes another capability of the model. A
-  list that only writes the same levels in another order, or writes one
-  twice, states nothing new and changes no route.
+  that are not strings are skipped, and neither fails the model list. On a
+  Copilot route these levels are the source of the levels the
+  `reasoning_effort` option and a turn's reasoning preference accept (see
+  the entries below); the account capability gate does not check them. The
+  levels are part of what a Copilot route compares, so when a refreshed
+  list states other levels for a session's model, the session's prepared
+  route is rebuilt, as it already is when the list changes another
+  capability of the model. A list that only writes the same levels in
+  another order, or writes one twice, states nothing new and changes no
+  route.
 
 - `meerkat-openai`, `meerkat-anthropic`, `meerkat-gemini`,
   `meerkat-copilot`, `meerkat-llm-core`, `meerkat`: every LLM client a
   factory builds reports, without I/O, the route it serves through
   `reasoning_route()` (the accessor above): the provider-matrix backend,
   the provider API, and the reasoning effort levels the route itself
-  states. Nothing reads the reports yet, and no request changes.
+  states. The per-request resolution, the check at a build and at a
+  caller's reconfiguration, a model fallback's check of its target and a
+  turn's reasoning preference read these reports (see the entries below).
   - OpenAI: `OpenAiClient` reports the Responses API on the backend of its
     wire. `OpenAiCompatibleClient` reports the API of its mode on the
     backend it was declared for (`with_openai_backend`, or the new
@@ -256,7 +299,8 @@ them.
   row, and for a model whose reasoning payload the catalog does not enable
   (no row, or a row without reasoning) it is sent as
   `reasoning: {"effort": "<level>"}` with no `summary` and no `include`.
-  Nothing sets the marker yet. A level without it behaves as before: it is
+  The resolver sets the marker when it writes a level for an OpenAI-family
+  route. A level without it behaves as before: it is
   checked against the row, and dropped for a model without a reasoning
   row. A request without a marked level builds the same body as before.
   On the Chat Completions wire of `OpenAiCompatibleClient` a marked level
@@ -280,14 +324,15 @@ them.
   (`SelfHostedServerRef.reasoning_effort_levels`), and the model's client
   reports them with its route
   (`OpenAiCompatibleClient::with_operator_reasoning_effort_levels`).
-  Nothing else reads the declaration yet, and no request changes.
+  On a self-hosted route the declared levels are the source of the levels
+  the `reasoning_effort` option and a turn's reasoning preference accept
+  (see the entries below).
 
 - `meerkat-core`, `meerkat-contracts`, `meerkat-runtime`, `meerkat-session`,
   `meerkat-mob`, `meerkat-rpc`, `meerkat-llm-core`: a session can store a
   provider-neutral reasoning effort level, `reasoning_effort`, and a turn
-  can set or clear it. It is stored and carried here; nothing resolves it
-  for a provider route yet, so a request that carries it is refused, never
-  sent (see the last paragraph).
+  can set or clear it. It is stored and carried here; it is resolved for
+  the provider route right before each request (see the last paragraph).
 
   The level is one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`
   and `max` (`EffortLevel`), with one spelling each: `x_high` is refused
@@ -346,16 +391,159 @@ them.
   it abandoned at its retry cap: the stored input's reason is
   `max_attempts_exhausted`, not the refusal.
 
-  Until the level can be resolved for the route that serves a request, a
-  request whose params carry it reaches no provider. The turn fails with the
-  configuration error `reasoning_effort cannot be resolved by this build`
-  before any client is called, a compaction summary request included, and
-  the provider adapter independently refuses a request that still carries
-  the level (`reasoning_effort reached the provider adapter unresolved`).
-  The level stays on the session, so its later turns are refused too until a
-  turn clears it. Provider-specific effort settings (`provider_tag`) are
+  The level is resolved for the route that serves a request right before
+  each provider request (see the entry on the per-request resolution below).
+  The provider adapter independently refuses a request that reaches it with
+  the level unresolved (`reasoning_effort reached the provider adapter
+  unresolved`). Provider-specific effort settings (`provider_tag`) are
   unchanged. The LayerDecision schema that adaptive mob packs bundle does
   not carry the level, so the schema stays the released one.
+- `meerkat-core`, `meerkat-llm-core`, `meerkat-copilot`: a request that
+  carries the provider-neutral `reasoning_effort` level is now resolved and
+  sent. Right before every provider request (a turn's request, an extraction
+  request, a compaction summary request, a controller request), the agent
+  resolves the level for the model and for the route of the client that
+  serves that request, writes the route's own field on the request's copy
+  (`reasoning.effort` on OpenAI Responses, `reasoning_effort` and
+  `reasoning.effort` on Chat Completions, `output_config.effort` on Anthropic
+  Messages, `thinkingConfig.thinkingLevel` on Gemini) and takes the neutral
+  level off that copy. The session's stored params are not rewritten. A level
+  the route does not take, a route whose levels no source states, and a
+  level that conflicts with another reasoning setting of the request fail
+  the turn with the typed error `AgentError::ReasoningEffortRefused`
+  (`run_failed` reason `reasoning_effort_refused`) before any provider
+  request: the client is not called, nothing is retried, no model fallback
+  starts, and the model, the route and the session's identity stay as they
+  were. A run whose level the session's route does not take when the run
+  starts ends the same way, before `run_started` is published. A compaction
+  whose summary client's route does not take the level fails that compaction
+  with the same typed error and the run goes on.
+  - The route can change between the resolution and the request (on a GitHub
+    Copilot route the account's model list can move a model to another
+    endpoint or change the levels it states). The request copy carries what
+    the client observed about its route when the level was resolved
+    (`ProviderParamsOverride.reasoning_route_witness`, request-local, never
+    serialized); the provider adapter compares it with the route the request
+    is bound to and, when they differ, refuses the request as a route change,
+    so the agent prepares it again and resolves the level for the route as it
+    is then. A request is never sent with a translation made for another
+    route. A compaction summary request that meets a route change fails that
+    compaction, and the run goes on.
+  - A client's own default provider tag applies to a request that carries
+    none. A resolved level is written into that tag, so the client's default
+    fields are still sent, and a default field that conflicts with the level
+    is refused like the request's own.
+  - Reports. `run_started` and `run_resumed` carry `reasoning_effort`, the
+    resolution against the session's route when the run starts. The new event
+    `request_reasoning_effort_resolved {turn_number?, fallback_attempt?,
+    resolution}` is published once for each request that was handed to the
+    provider with the level, after the request settled: it states what was
+    sent, never what was planned, and a request refused before it was sent
+    reports nothing. `turn_number` is absent for a compaction summary
+    request. The run result (`RunResult`, `WireRunResult`) carries
+    `reasoning_effort: {requested, sent}`: the level the run's requests named
+    and one row per distinct resolution the run sent (level, provider, model,
+    route, provider fields, the source of the route's levels, who decided the
+    level, and the number of requests), in first-use order. A session that
+    sets no level reports none of this and its requests are unchanged. A run
+    that continues a callback suspension keeps its report; a run resumed from
+    its durable run cursor after a restart reports the requests it sends
+    from the resume on.
+  - New public items: `AgentLlmClient::default_provider_tag()` (the tag a
+    client applies to a request that carries none; default `None`),
+    `LlmClient::reasoning_route_of(&LlmReplayProjection)` (the route
+    observation of the route a replay projection is bound to; default: the
+    client's `reasoning_route()`) and
+    `LlmReplayProjection::route_witness::<T>()`. Every client wrapper in the
+    workspace forwards the two methods to the client it wraps or answers for
+    its own route; a custom wrapper must do the same, or the level is
+    resolved without the wrapped client's default tag and compared with the
+    wrong route.
+  The schema artifacts and the generated SDK types do not carry the new
+  members yet.
+
+- `meerkat`, `meerkat-core`: a model fallback keeps a session's
+  `reasoning_effort` level. Each chain target carries the level, and before
+  any switch the target is checked against its own route, as its client
+  observes it at that moment, and its model's catalog row. A target whose
+  route does not accept the level (the level is unsupported, the supported
+  levels are unknown or cannot be read, or the level conflicts with the
+  target's own params or with a default provider tag of the target's
+  client) is skipped with the reason
+  `reasoning_effort_unsupported` in `model_fallback_skipped` and in the
+  `model_fallback` notice's `skipped_targets`; when every target is skipped
+  the original failure stands. A target that accepts the level keeps it: the
+  fallback attempt and every later turn resolve it for the target's route
+  (`request_reasoning_effort_resolved` carries `fallback_attempt` for the
+  attempt, and the run result lists the origin and the target as separate
+  `sent` rows), and the identity the session commits to holds the level,
+  through recovery and resume too. A refused level never starts a fallback.
+  A session without a level falls back exactly as before. A turn's reasoning
+  preference on a fallback attempt is judged on the direct route of the
+  target's provider (`request_reasoning_lowered`); the per-request
+  resolution event is the record of what was sent.
+
+- `meerkat-core`, `meerkat-contracts`, `meerkat`, `meerkat-runtime`,
+  `meerkat-rpc`, `meerkat-rest`, `meerkat-mob`: a reasoning effort level the
+  model's route does not accept is refused when the agent is built or a
+  caller reconfigures it, with one typed answer on every surface.
+
+  A session's level (`provider_params.reasoning_effort`) is judged against
+  the route of the client its build made and the model's catalog row, next
+  to the other build-time request checks: at a fresh build, at a resumed
+  build (which keeps the stored level through the resume merge, a mob
+  member's included), at the build that recovers a session that is not
+  live, and when a caller reconfigures a live session (a turn's model,
+  provider params or level override; the JSON-RPC session runtime and the
+  mob member executor apply those). A level the route does not accept is
+  refused before anything is published: no session is created, no provider
+  request is made, a refused resume or recovery leaves the stored identity
+  as it was, and a refused reconfiguration leaves the live session's
+  identity, client and stored params as they were. The stored params are
+  never rewritten: the level stays in the neutral field. A build or a
+  target that carries no level is not judged. A level that passes this
+  check is resolved again for the route that serves each request (see the
+  entry above this one): a level that route takes is sent, and a level it
+  does not take, or a route whose levels no source states, is refused
+  there with the same typed refusal.
+
+  The refusal is `ReasoningEffortRefusal`, raised as
+  `AgentError::ReasoningEffortRefused` (from a build:
+  `BuildAgentError::ReasoningEffortRefused`; from a live reconfiguration:
+  `RuntimeDriverError::ReasoningEffortRefused`, with
+  `RuntimeDriverError::reasoning_effort_refused_session_error()` giving the
+  session error). Its error class is `config`, its turn failure source is
+  `ConfigError`, the agent loop never retries it and it is never a model
+  fallback trigger (for the stored record of a turn refused before its run
+  starts, see Known limitations).
+  Surfaces answer it as `INVALID_PARAMS` (JSON-RPC `-32602`, HTTP `400`)
+  with the data
+  `{"kind": "reasoning_effort_refused", "retryable": <bool>, "reasoning_effort_refusal": {...}}`
+  (`SessionError::REASONING_EFFORT_REFUSED_KIND`, read back by
+  `SessionError::reasoning_effort_refusal_from_data`). `retryable` is `true`
+  only for the reason `supported_levels_unavailable`
+  (`ReasoningEffortRefusalReason::is_transient()`): the account's model
+  list is not loaded, and the same request can succeed later with no
+  change. Meerkat does not retry it for the caller. A turn that fails for the
+  refusal carries it as its typed reason
+  (`AgentErrorReason::ReasoningEffortRefused`, in `run_failed` as
+  `{"reason_type": "reasoning_effort_refused", "refusal": {...}}`), and
+  JSON-RPC and REST answer such a turn exactly as they answer a refused
+  build, so a caller sees one shape whichever checkpoint refused. On REST,
+  a refused turn of the request that created its session also names the
+  created session in `details` (`session_id`, `session_ref`,
+  `session_created`, `resumable`).
+
+  `SessionLlmReconfigureHost` (`meerkat-runtime`) gains the defaulted method
+  `judge_requested_target_session_llm_identity`: the host's judgement of a
+  target a caller asked for, called by
+  `reconfigure_session_llm_identity` after the target is resolved and
+  before anything is staged. It decides nothing about a committed
+  model-routing handoff, whose lifecycle the routing machine owns: a
+  `brain_swap` handoff and a switch-turn request are applied as before and
+  keep the session's level, and a level their target's route does not
+  accept is then refused at each request until it is changed or cleared.
+  The default accepts every target; the facade's host judges the level.
 
 - **Reasoning effort, one setting for every provider.** A provider-neutral
   `reasoning_effort` level (`none`, `minimal`, `low`, `medium`, `high`,
@@ -429,6 +617,26 @@ them.
   `reasoning_effort` key; a clear leaves them without a level and is refused
   beside a nested one). Every surface that takes the parameter calls it.
 
+### Changed
+
+- `meerkat-core`: a turn's reasoning-effort preference is judged by the
+  route of the client that serves the request, where the client reports
+  one. On a GitHub Copilot route that is the account's model list: the
+  preferred level is applied where the model's entry states it (also for a
+  model no catalog row describes), and is not applied where the entry does
+  not state it (`unsupported_level`) or where the account states nothing for
+  the model or its list is not loaded (`unknown_supported_levels`). It was
+  judged by the levels of the provider's direct API before, which a Copilot
+  route can refuse. On a self-hosted route the operator's declared levels
+  decide. A client that reports no route is judged as before. When the
+  session also sets the provider-neutral `reasoning_effort` level, a
+  preferred level the route takes is sent in its place for that turn and
+  reported with `decided_by: preference`; otherwise the session's level is
+  sent.
+- `meerkat-core`: a compaction summary request of a session that sets the
+  provider-neutral `reasoning_effort` level is sent with that level,
+  resolved for the summary client's route.
+
 ### Fixed
 
 - `meerkat-copilot` (GitHub Copilot device sign-in): an account no longer
@@ -457,7 +665,10 @@ them.
   without the field refuses both, because those records refuse unknown
   fields. The first is a session whose stored provider params hold the
   level: any session that set `reasoning_effort` (or
-  `provider_params.reasoning_effort`) and has not cleared it since. An
+  `provider_params.reasoning_effort`) and has not cleared it since. This
+  includes a session that fell back to a model fallback target while it held
+  a level: its fallback identity and its fallback record carry the level
+  until it is cleared. An
   older release fails to read it with ``unknown field `reasoning_effort`,
   expected one of `temperature`, `top_p`, `max_output_tokens`, `reasoning`,
   `thinking_budget_tokens`, `provider_tag` ``, and the session cannot be
@@ -468,6 +679,17 @@ them.
   replacing or clearing `provider_params` does not. Sessions and inputs
   that never carried the level are written exactly as before and read on
   either release.
+
+### Known limitations
+
+- A turn that asks for a reasoning effort level its session's route refuses
+  is answered with the typed refusal and makes no provider request, but its
+  stored input does not end with the refusal as its reason. Through the
+  JSON-RPC session runtime the turn is attempted once and its stored input
+  ends as abandoned with the reason `stopped`: the runtime retires the
+  session's live registration after the refused start and rebuilds it from
+  the stored session at the next turn. The refusal reason is in the typed
+  details of the answer (`reasoning_effort_refusal`).
 
 ## [0.9.14] - 2026-11-11
 

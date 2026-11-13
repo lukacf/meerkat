@@ -516,7 +516,11 @@ Migration is suppressed after visible text or reasoning.
 
 Admission uses the actual hydrated, compacted request, output reserve, target
 context limits, required tools/modalities, structured output, and credential
-authority. Unsafe candidates produce typed `model_fallback_skipped` events,
+authority. A session's `reasoning_effort` level is carried to each target and
+checked against the target's own route: a target that does not accept it is
+skipped (`reasoning_effort_unsupported`), never switched to with another
+effort, and the session keeps the level on the target it commits to. Unsafe
+candidates produce typed `model_fallback_skipped` events,
 even if every candidate is rejected. Staging is not commitment; only
 `model_fallback_committed` confirms the canonical sticky route changed.
 

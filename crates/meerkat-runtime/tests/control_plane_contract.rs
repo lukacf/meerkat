@@ -67,6 +67,7 @@ fn make_progress_input(label: &str) -> Input {
 
 fn make_run_result(text: &str) -> RunResult {
     RunResult {
+        reasoning_effort: None,
         text: text.into(),
         session_id: SessionId::new(),
         usage: Usage::default(),

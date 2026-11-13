@@ -4817,7 +4817,7 @@ mod tests {
         }
     }
 
-    /// R2.1, the Gemini family: the generateContent client reports the
+    /// The Gemini family: the generateContent client reports the
     /// backend it was built for. No account list and no operator levels are
     /// its to state.
     #[test]
@@ -4859,7 +4859,7 @@ mod tests {
         );
     }
 
-    /// R2.2, generateContent: the level Core writes on the tag reaches the
+    /// generateContent: the level Core writes on the tag reaches the
     /// wire as `generationConfig.thinkingConfig.thinkingLevel`, in the flat
     /// field and in the nested config, on every backend, and no thinking
     /// budget is written with it.

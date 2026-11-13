@@ -1870,7 +1870,7 @@ mod tests {
         connection
     }
 
-    /// R2.1, the Claude family: the Messages client reports the backend the
+    /// The Claude family: the Messages client reports the backend the
     /// connection it was built for names, whichever credential shape built
     /// it, and the client a host builds directly reports the Claude API. No
     /// account list and no operator levels are theirs to state.
@@ -1953,7 +1953,7 @@ mod tests {
         );
     }
 
-    /// R2.2, Messages on the direct backends: the level Core writes on the
+    /// Messages on the direct backends: the level Core writes on the
     /// tag (`effort` alone) reaches the wire as `output_config.effort`, and
     /// the rest of the body is the body of the same request without a level.
     #[cfg(not(target_arch = "wasm32"))]
@@ -2343,7 +2343,7 @@ mod copilot_wire_model_tests {
         assert_eq!(recorded.body["model"], "claude-opus-5");
     }
 
-    /// R2.1: the Copilot route's Messages client reports the Copilot backend
+    /// The Copilot route's Messages client reports the Copilot backend
     /// of the Claude family. The account's statement is the routed client's
     /// to add, so this client states none.
     #[test]
@@ -2368,7 +2368,7 @@ mod copilot_wire_model_tests {
         );
     }
 
-    /// R2.2, Messages on the Copilot route: Core writes the level there as
+    /// Messages on the Copilot route: Core writes the level there as
     /// the pair adaptive thinking with effort. The request that carries the
     /// pair sends `thinking: {"type": "adaptive"}` and `output_config.effort`
     /// and nothing else the same request without a level does not send: no

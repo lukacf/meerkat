@@ -1774,6 +1774,10 @@ MACOS_WORK_ROOT_LIMIT = 24
 MACOS_BUILD_SECONDS = 5 * 3600
 # How much of a failed command's log a macOS step shows on stderr (the whole log stays in the records).
 FAILED_LOG_TAIL_BYTES = 16 * 1024
+# Commands that answer a failure with one line and keep their own children's logs (*.stdout, *.stderr) in a
+# directory under the work root: the component build and the library's official installer.
+MACOS_OWN_LOGS = {"library-components": "components/logs",
+                  "official-playwright-install": "cli-qualification/official-run/install"}
 MACOS_LANE = "connect-macos-arm64"
 MACOS_STEPS = ("preflight", "library", "resources", "build", "stage", "check-gateway", "check-cli",
                "check-consumer", "check-conversation", "check-official-install", "stage-record")
@@ -1925,28 +1929,42 @@ class StepRecorder(Recorder):
         acted on by the terminal or the runner that reads this step's output.
         """
         try:
-            log, record = self.records / (name + ".log"), self.records / (name + ".json")
-            with log.open("rb") as stream:
-                size = stream.seek(0, os.SEEK_END)
-                stream.seek(max(0, size - FAILED_LOG_TAIL_BYTES))
-                text = stream.read(FAILED_LOG_TAIL_BYTES).decode("utf-8", errors="replace")
-            if size > FAILED_LOG_TAIL_BYTES:
-                text = text.split("\n", 1)[-1]  # the first line shown is a whole line
+            record = self.records / (name + ".json")
             ended = "its end is not recorded"
             if record.is_file():
                 value = read_json(record)
                 ended = "timed out" if value.get("timed_out") else "exit " + str(
                     value.get("exit_code") if value.get("exit_code") is not None else value.get("process_exit_code"))
-            shown = "".join(character if character in "\n\t" or character.isprintable()
-                            else character.encode("unicode_escape").decode("ascii") for character in text)
-            print(f"connect-candidate macos {self.step}: command {name} did not succeed ({ended}); the end of its "
-                  f"log records/{name}.log ({size} bytes, at most the last {FAILED_LOG_TAIL_BYTES} shown):",
-                  file=sys.stderr)
-            for line in shown.splitlines():
-                print("  | " + line.replace("##[", "# #["), file=sys.stderr)
+            self.say_end(self.records / (name + ".log"),
+                         f"connect-candidate macos {self.step}: command {name} did not succeed ({ended}); "
+                         f"the end of its log records/{name}.log")
+            # A command that answers a failure with one line and keeps its own children's logs in files:
+            # the newest of those files that says anything.
+            kept = self.work / MACOS_OWN_LOGS[name] if name in MACOS_OWN_LOGS else None
+            if kept is not None and kept.is_dir():
+                said = [path for path in kept.iterdir() if path.suffix in (".stderr", ".stdout")
+                        and path.is_file() and not path.is_symlink() and path.stat().st_size]
+                if said:
+                    newest = max(said, key=lambda path: (path.stat().st_mtime_ns, path.suffix == ".stderr", path.name))
+                    self.say_end(newest, f"connect-candidate macos {self.step}: the newest log {name} kept, "
+                                         f"{MACOS_OWN_LOGS[name]}/{newest.name}")
         except Exception as unreadable:  # the command's own failure is what the caller must see
             print(f"connect-candidate macos {self.step}: command {name} did not succeed; its log could not be "
                   f"shown ({type(unreadable).__name__})", file=sys.stderr)
+
+    @staticmethod
+    def say_end(log, heading):
+        with log.open("rb") as stream:
+            size = stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, size - FAILED_LOG_TAIL_BYTES))
+            text = stream.read(FAILED_LOG_TAIL_BYTES).decode("utf-8", errors="replace")
+        if size > FAILED_LOG_TAIL_BYTES:
+            text = text.split("\n", 1)[-1]  # the first line shown is a whole line
+        shown = "".join(character if character in "\n\t" or character.isprintable()
+                        else character.encode("unicode_escape").decode("ascii") for character in text)
+        print(f"{heading} ({size} bytes, at most the last {FAILED_LOG_TAIL_BYTES} shown):", file=sys.stderr)
+        for line in shown.splitlines():
+            print("  | " + line.replace("##[", "# #["), file=sys.stderr)
 
 
 def macos_environment(work, **extra):

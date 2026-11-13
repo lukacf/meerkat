@@ -847,6 +847,21 @@ jobs:
           compression-level: 0
           retention-days: 3
 
+      # The one conditional step of this job. It masks nothing: it runs only
+      # when a step above has failed, and the job stays failed. The runner
+      # and its work root are gone after the job, so what the producer kept
+      # of a refused step (its command records and logs, each cut to its
+      # end, under a total bound, never a product file) is uploaded here.
+      - name: Upload the failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connect-macos-arm64-stage-build-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /private/tmp/cw/failure-evidence
+          if-no-files-found: ignore
+          overwrite: false
+          retention-days: 7
+
   # The second half of stage one: the test executables, the installed checks
   # and the stage record. The stage record is the producer's directory,
   # uploaded unchanged; the shutdown review in it stays pending and the CLI
@@ -1068,6 +1083,18 @@ jobs:
           if-no-files-found: error
           overwrite: false
           retention-days: 90
+
+      # The one conditional step of this job, as in stage_macos_build: only
+      # after a failure, which it leaves a failure.
+      - name: Upload the failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connect-macos-arm64-stage-check-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /private/tmp/cw/failure-evidence
+          if-no-files-found: ignore
+          overwrite: false
+          retention-days: 7
 
   # Stage two of the complete macOS arm64 installation (dispatch,
   # macos-assemble), after the stage record's shutdown evidence was read and

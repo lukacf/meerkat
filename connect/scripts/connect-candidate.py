@@ -1778,6 +1778,19 @@ FAILED_LOG_TAIL_BYTES = 16 * 1024
 # directory under the work root: the component build and the library's official installer.
 MACOS_OWN_LOGS = {"library-components": "components/logs",
                   "official-playwright-install": "cli-qualification/official-run/install"}
+# What a refused stage one step keeps for the reader of a failed hosted job, whose work root is gone with
+# the runner: <work>/failure-evidence. Only records and logs, by directory and name pattern (never a
+# product file), each cut to its end, the whole bounded. The workflow's one conditional step uploads it.
+FAILURE_EVIDENCE = "failure-evidence"
+FAILURE_EVIDENCE_FILE_BYTES = 1024**2
+FAILURE_EVIDENCE_TOTAL_BYTES = 64 * 1024**2
+FAILURE_EVIDENCE_FILES = 4000
+FAILURE_EVIDENCE_SOURCES = (
+    ("records", ("*.log", "*.json")), ("records/pinned-inputs", ("*.json",)),
+    ("components/logs", ("*.stdout", "*.stderr")),
+    ("cli-qualification", ("*.json",)), ("cli-qualification/conversation-run", ("transcript.txt",)),
+    ("cli-qualification/official-run/install", ("*.stdout", "*.stderr")),
+    ("gateway-verification", ("manifest.json",)))
 MACOS_LANE = "connect-macos-arm64"
 MACOS_STEPS = ("preflight", "library", "resources", "build", "stage", "check-gateway", "check-cli",
                "check-consumer", "check-conversation", "check-official-install", "stage-record")
@@ -3368,6 +3381,45 @@ def macos_release_check(assembly_directory, privacy_report, privacy_report_sha25
     return value
 
 
+def macos_failure_evidence(work, step, refusal):
+    """Keep what explains a refused stage one step under <work>/failure-evidence. Returns the directory.
+
+    Nothing is kept (None) when the work root has no records yet or already holds evidence: a job stops
+    at its first refusal, so there is one failure to explain. Copies only; the originals stay.
+    """
+    evidence = work / FAILURE_EVIDENCE
+    if (work.is_symlink() or not work.is_dir() or not (work / "records").is_dir()
+            or evidence.exists() or evidence.is_symlink()):
+        return None
+    evidence.mkdir()
+    rows, total = [], 0
+    for directory, patterns in FAILURE_EVIDENCE_SOURCES:
+        for pattern in patterns:
+            for path in sorted((work / directory).glob(pattern)):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                name, size = path.relative_to(work).as_posix(), path.stat().st_size
+                keep = min(size, FAILURE_EVIDENCE_FILE_BYTES)
+                if len(rows) >= FAILURE_EVIDENCE_FILES or total + keep > FAILURE_EVIDENCE_TOTAL_BYTES:
+                    rows.append({"path": name, "bytes": size, "kept_bytes": 0, "left_out": "the evidence is full"})
+                    continue
+                with path.open("rb") as stream:
+                    stream.seek(size - keep)
+                    data = stream.read(keep)
+                target = evidence / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+                total += len(data)
+                rows.append({"path": name, "bytes": size, "kept_bytes": len(data),
+                             "kept": "all" if len(data) == size else "the end"})
+    write_new(evidence / "FAILURE.json", {"schema": "connect-macos-failure-evidence/1", "step": step,
+        "refusal": refusal, "scope": "records and logs of a refused stage one step; no product file",
+        "bounds": {"file_bytes": FAILURE_EVIDENCE_FILE_BYTES, "total_bytes": FAILURE_EVIDENCE_TOTAL_BYTES,
+                   "files": FAILURE_EVIDENCE_FILES},
+        "kept_bytes": total, "files": rows})
+    return evidence
+
+
 def macos_main(arguments):
     parser = argparse.ArgumentParser(prog="connect-candidate.py macos",
         description="The complete macOS arm64 installation: the stage one steps, the stage two assembly and "
@@ -3416,6 +3468,15 @@ def macos_main(arguments):
     except (ValueError, OSError, KeyError, subprocess.CalledProcessError, tarfile.TarError,
             zipfile.BadZipFile) as refusal:
         print(f"connect-candidate macos {args.step} refused: {type(refusal).__name__}: {refusal}", file=sys.stderr)
+        if args.step in MACOS_STEPS and args.work is not None:
+            # The refusal above is the result; keeping its evidence must not replace it.
+            try:
+                evidence = macos_failure_evidence(args.work, args.step, f"{type(refusal).__name__}: {refusal}")
+                if evidence is not None:
+                    print(f"connect-candidate macos {args.step}: failure evidence kept in {evidence}", file=sys.stderr)
+            except Exception as unkept:
+                print(f"connect-candidate macos {args.step}: failure evidence could not be kept "
+                      f"({type(unkept).__name__})", file=sys.stderr)
         return 1
     return 0
 

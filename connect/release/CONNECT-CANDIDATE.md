@@ -433,6 +433,14 @@ anything, creates a release or a tag, or holds a provider key:
   `rkat_release_tag=vX.Y.Z` the consumer check takes Core's published `rkat`
   archive by that release's `checksums.sha256`; without it `rkat` is built
   from the dispatched commit, and such a stage is never assembled.
+  No step of either job hides a failure. A stage one step that fails prints
+  the end of the failed command's log, and the producer keeps
+  `failure-evidence` under the work root: its command records and logs, each
+  cut to its end, under a total bound, and no product file. The last step of
+  each job, the only conditional one, runs only after a failure and uploads
+  that directory as `connect-macos-arm64-stage-build-failure-<run id>-<attempt>`
+  or `connect-macos-arm64-stage-check-failure-<run id>-<attempt>`, kept seven
+  days.
 - `mode=macos-assemble` runs stage two in one job, dispatched at the stage's
   own commit with `candidate_run_id` (the stage run's id, optionally followed
   by `-<attempt>`) and `acceptance_sha256` (the SHA-256 `accept-review`

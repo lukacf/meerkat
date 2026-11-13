@@ -10891,8 +10891,13 @@ fn unapplied_turn_reasoning_effort(
     session_level: Option<meerkat_core::model_profile::capabilities::EffortLevel>,
 ) -> Option<meerkat_core::error::AgentError> {
     use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    // A level is quoted; the absent state is spelled out, so that it never
+    // reads as the level `none`.
     let level = |level: Option<meerkat_core::model_profile::capabilities::EffortLevel>| {
-        level.map_or("none", |level| level.as_wire_str())
+        level.map_or_else(
+            || "no level".to_string(),
+            |level| format!("'{}'", level.as_wire_str()),
+        )
     };
     let wanted = match turn? {
         TurnMetadataOverride::Set(wanted) => Some(*wanted),
@@ -10900,8 +10905,7 @@ fn unapplied_turn_reasoning_effort(
     };
     (wanted != session_level).then(|| {
         meerkat_core::error::AgentError::ConfigError(format!(
-            "{TURN_REASONING_EFFORT_NOT_APPLIED}: the turn asks for '{}' and the session is at \
-             '{}'",
+            "{TURN_REASONING_EFFORT_NOT_APPLIED}: the turn asks for {} and the session is at {}",
             level(wanted),
             level(session_level),
         ))

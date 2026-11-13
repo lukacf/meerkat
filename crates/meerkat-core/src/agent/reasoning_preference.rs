@@ -17,8 +17,8 @@ use crate::lifecycle::run_primitive::{
 };
 use crate::model_profile::capabilities::{EffortLevel, ModelCapabilities};
 use crate::reasoning_effort::{
-    ReasoningEffortDecidedBy, ReasoningEffortRefusalReason, ReasoningFactsSource,
-    ReasoningResolveInput, ReasoningResolveMode, ReasoningRouteObservation,
+    AccountLevelStatement, ModelApi, ReasoningEffortDecidedBy, ReasoningEffortRefusalReason,
+    ReasoningFactsSource, ReasoningResolveInput, ReasoningResolveMode, ReasoningRouteObservation,
     direct_route_observation, explicit_provider_effort, resolve_reasoning_effort,
 };
 
@@ -113,14 +113,29 @@ fn apply(
         None => direct_route_observation(provider),
     };
     let observation = route.map(|route| &route.observation).or(direct.as_ref());
-    // Where the catalog row states the route's levels, a model without a
-    // row of its own provider has no catalog fact, whatever else the
-    // baseline says. A route whose levels the account or the operator
-    // states needs no row.
-    let catalog_states_levels = observation.is_none_or(|observation| {
-        observation.backend.levels_source() == ReasoningFactsSource::Catalog
-    });
-    if catalog_states_levels && row.is_none() {
+    // Whether the route gives a preference nothing to be judged by: no
+    // catalog fact, whatever else the baseline says. The catalog row states
+    // the levels of a catalog route and, while the account states nothing
+    // for the model (its entry states no levels, or its list is not
+    // loaded), of an account's route: a model without a row of its own
+    // provider has none there. An operator's route has none where the
+    // operator declared no levels, as for every self-hosted model before a
+    // client could report its route. An account entry or an operator
+    // declaration that states levels needs no row.
+    let no_catalog_fact = match observation {
+        None => row.is_none(),
+        Some(observation) => match observation.backend.levels_source() {
+            ReasoningFactsSource::Catalog => row.is_none(),
+            ReasoningFactsSource::Account => match &observation.account {
+                AccountLevelStatement::NotStated | AccountLevelStatement::ListUnavailable => {
+                    row.is_none()
+                }
+                AccountLevelStatement::Stated(_) | AccountLevelStatement::NotApplicable => false,
+            },
+            ReasoningFactsSource::Operator => observation.operator_levels.is_none(),
+        },
+    };
+    if no_catalog_fact {
         return Err(ReasoningNotAppliedReason::NoCatalogFact);
     }
     let input = ReasoningResolveInput::new(
@@ -132,7 +147,28 @@ fn apply(
         ReasoningEffortDecidedBy::Preference,
     );
     match resolve_reasoning_effort(input, params, ReasoningResolveMode::Preference) {
-        Ok(_) => Ok(()),
+        Ok(resolution) => {
+            // The resolved marker tells the Responses client that a source
+            // other than the catalog stated the level, so the client sends
+            // it without judging it by the catalog row. A preference keeps
+            // it only there: for a level an account's entry or an
+            // operator's declaration stated, on the Responses API. Where
+            // the catalog row decided, the level goes out unmarked, as it
+            // always did. On a Chat Completions route it goes out unmarked
+            // too: a client built for a model without reasoning support
+            // refuses a marked level and drops an unmarked one, and a
+            // preference never fails a request.
+            let keeps_marker = resolution.facts != ReasoningFactsSource::Catalog
+                && resolution.route.api == ModelApi::Responses;
+            if !keeps_marker
+                && let Some(ProviderTag::OpenAi(tag)) = params
+                    .as_mut()
+                    .and_then(|params| params.provider_tag.as_mut())
+            {
+                tag.reasoning_effort_resolved = false;
+            }
+            Ok(())
+        }
         Err(refusal) => Err(not_applied_reason(
             refusal.reason,
             observation.is_some(),

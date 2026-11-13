@@ -2453,7 +2453,9 @@ fn check_outcome(context: &str, case: &Case<'_>, seen: &mut std::collections::BT
         catalog_row,
         &mut params,
     );
-    let facts = supported_reasoning_levels(provider, observation, catalog_row);
+    // The facts as the mode reads them: a preference reads the catalog row
+    // where the account's entry states no levels.
+    let facts = level_facts(provider, observation, catalog_row, mode);
     match outcome {
         Ok(resolution) => {
             seen.insert("resolved".to_owned());

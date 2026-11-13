@@ -7566,6 +7566,67 @@ impl SessionRuntime {
         }
     }
 
+    /// Whether a turn's overrides name a member of the session's LLM
+    /// identity (model, provider, self-hosted server, provider params,
+    /// reasoning effort level, auth binding).
+    fn turn_overrides_name_llm_identity(ov: &crate::handlers::turn::TurnOverrides) -> bool {
+        ov.model.is_some()
+            || ov.provider.is_some()
+            || ov.self_hosted_server_id.is_some()
+            || ov.provider_params.is_some()
+            || ov.reasoning_effort.is_some()
+            || ov.auth_binding.is_some()
+    }
+
+    /// Whether a turn asks for the reasoning effort level the session
+    /// already holds and for nothing else of its LLM identity: the level it
+    /// sets is the session's level, or it clears a level the session does
+    /// not hold. Such a turn changes nothing, so it is admitted without a
+    /// reconfiguration: naming the same level on every turn builds no
+    /// client and keeps the live session as it is. The session's level is
+    /// read from its own LLM identity and compared as a typed level.
+    async fn turn_repeats_the_sessions_reasoning_effort(
+        &self,
+        session_id: &SessionId,
+        ov: &crate::handlers::turn::TurnOverrides,
+    ) -> Result<bool, RpcError> {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        if ov.model.is_some()
+            || ov.provider.is_some()
+            || ov.self_hosted_server_id.is_some()
+            || ov.provider_params.is_some()
+            || ov.auth_binding.is_some()
+        {
+            return Ok(false);
+        }
+        let asked = match ov.reasoning_effort.as_ref() {
+            Some(TurnMetadataOverride::Set(level)) => Some(*level),
+            Some(TurnMetadataOverride::Clear) => None,
+            None => return Ok(false),
+        };
+        let held = self
+            .current_materialized_llm_identity(session_id)
+            .await?
+            .provider_params
+            .and_then(|params| params.reasoning_effort);
+        Ok(asked == held)
+    }
+
+    /// Whether a turn's overrides ask for an LLM identity the session does
+    /// not already hold, so that the session is reconfigured before the
+    /// turn. A turn that only repeats the session's reasoning effort level
+    /// asks for none.
+    async fn turn_overrides_reconfigure_llm_identity(
+        &self,
+        session_id: &SessionId,
+        ov: &crate::handlers::turn::TurnOverrides,
+    ) -> Result<bool, RpcError> {
+        Ok(Self::turn_overrides_name_llm_identity(ov)
+            && !self
+                .turn_repeats_the_sessions_reasoning_effort(session_id, ov)
+                .await?)
+    }
+
     fn llm_reconfigure_host(&self) -> SessionRuntimeLlmReconfigureHost {
         SessionRuntimeLlmReconfigureHost {
             service: Arc::<PersistentSessionService<FactoryAgentBuilder>>::downgrade(&self.service),
@@ -9648,6 +9709,27 @@ impl SessionRuntime {
         let effective_identity = self
             .effective_llm_identity_for_turn(session_id, overrides.as_ref())
             .await?;
+        // A turn that asks for another LLM identity is judged for the level
+        // its target carries here, before its input is admitted: a level
+        // the target's route refuses is the caller's request, refused, so
+        // it admits nothing and starts no run. The reconfiguration inside
+        // the turn's apply judges again, for inputs other producers admit.
+        // Only a live session is judged here; a staged or a stored session
+        // is judged by its build.
+        if let Some(ov) = overrides.as_ref()
+            && matches!(self.service.has_live_session(session_id).await, Ok(true))
+            && self
+                .turn_overrides_reconfigure_llm_identity(session_id, ov)
+                .await?
+        {
+            meerkat_runtime::SessionLlmReconfigureHost::judge_requested_target_session_llm_identity(
+                &self.llm_reconfigure_host(),
+                session_id,
+                &effective_identity,
+            )
+            .await
+            .map_err(runtime_driver_error_to_rpc)?;
+        }
         self.validate_prompt_video_input(&prompt, &effective_identity)
             .await?;
         let workgraph_service = self.workgraph_service().ok();
@@ -10697,12 +10779,9 @@ impl SessionRuntime {
                 == Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun);
             if !resumed_run
                 && let Some(ref ov) = overrides
-                && (ov.model.is_some()
-                    || ov.provider.is_some()
-                    || ov.self_hosted_server_id.is_some()
-                    || ov.provider_params.is_some()
-                    || ov.reasoning_effort.is_some()
-                    || ov.auth_binding.is_some())
+                && self
+                    .turn_overrides_reconfigure_llm_identity(session_id, ov)
+                    .await?
             {
                 match llm_reconfigure_boundary {
                     LlmReconfigureBoundaryOwnership::Acquire => {
@@ -12146,12 +12225,9 @@ impl SessionRuntime {
 
         // Hot-swap LLM client if model/provider/provider_params changed.
         if let Some(ref ov) = overrides
-            && (ov.model.is_some()
-                || ov.provider.is_some()
-                || ov.self_hosted_server_id.is_some()
-                || ov.provider_params.is_some()
-                || ov.reasoning_effort.is_some()
-                || ov.auth_binding.is_some())
+            && self
+                .turn_overrides_reconfigure_llm_identity(session_id, ov)
+                .await?
         {
             self.hot_swap_llm_client(session_id, ov).await?;
         }
@@ -42226,23 +42302,17 @@ mod tests {
         }
     }
 
-    /// A known limit, pinned as measured. A turn through the runtime whose
-    /// level the session's route refuses is a refused start. The caller is
+    /// A turn through the runtime whose level the live session's route
+    /// refuses is refused before its input is admitted. The caller is
     /// answered with the typed refusal; the level was judged once and no
-    /// request reached the provider. The stored input does not end with the
-    /// refusal as its reason: the cleanup this runtime runs after a failed
-    /// start retires the session's live registration (the next turn rebuilds
-    /// it from the stored session), which ends the input `Abandoned` with the
-    /// reason `Stopped`. The input is not attempted again.
-    ///
-    /// This is the one row to change when a refused start ends with the
-    /// refusal as its stored reason.
+    /// request reached the provider. No input is stored for the turn, so
+    /// there is no stored input to end with any reason, and the session's
+    /// runtime registration stays.
     #[tokio::test]
-    async fn a_turn_level_the_route_refuses_is_attempted_once_and_ends_abandoned_as_stopped_today()
-    {
+    async fn a_turn_level_the_route_refuses_on_a_live_session_stores_no_input() {
         use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
         use meerkat_core::model_profile::capabilities::EffortLevel;
-        use meerkat_runtime::input_state::{InputAbandonReason, InputTerminalOutcome};
+        use meerkat_runtime::input_state::InputTerminalOutcome;
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
@@ -42305,47 +42375,31 @@ mod tests {
             "{refused:?}"
         );
 
-        // The caller is answered once the runtime's cleanup after the failed
-        // start has run. Wait (bounded) until both stored inputs, the first
-        // turn's and the refused turn's, are terminal, then read them.
+        // The only stored input is the first turn's, consumed: the refused
+        // turn was never admitted.
         let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
-        let mut terminals = Vec::new();
-        for _ in 0..400 {
-            terminals = runtime
-                .service
-                .runtime_store()
-                .load_input_states_strict(&runtime_id)
-                .await
-                .expect("the stored input rows are readable")
-                .into_iter()
-                .map(|row| row.seed.terminal_outcome)
-                .collect::<Vec<_>>();
-            if terminals.len() == 2 && terminals.iter().all(Option::is_some) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        let mut consumed = 0;
-        let mut others = Vec::new();
-        for terminal in terminals.iter().cloned() {
-            match terminal {
-                Some(InputTerminalOutcome::Consumed) => consumed += 1,
-                other => others.push(other),
-            }
-        }
-        assert_eq!(consumed, 1, "the first turn's input: {terminals:?}");
+        let terminals = runtime
+            .service
+            .runtime_store()
+            .load_input_states_strict(&runtime_id)
+            .await
+            .expect("the stored input rows are readable")
+            .into_iter()
+            .map(|row| row.seed.terminal_outcome)
+            .collect::<Vec<_>>();
         assert_eq!(
-            others,
-            vec![Some(InputTerminalOutcome::Abandoned {
-                reason: InputAbandonReason::Stopped,
-            })],
-            "the refused turn's input ends abandoned as stopped today, not with the refusal: \
-             {terminals:?}"
+            terminals,
+            vec![Some(InputTerminalOutcome::Consumed)],
+            "the refused turn stores no input"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "the session's runtime registration stays"
         );
         assert_eq!(
             route_reads.load(AtomicOrdering::SeqCst) - route_reads_before,
             1,
-            "the level is judged once: the refused start is not attempted again"
+            "the level is judged once, before admission"
         );
         assert_eq!(
             requests.load(AtomicOrdering::SeqCst),

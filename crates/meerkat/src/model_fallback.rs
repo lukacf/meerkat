@@ -2411,18 +2411,15 @@ mod tests {
     /// that accepts the level is configured.
     #[test]
     fn a_refused_level_never_starts_a_fallback() {
-        let refusal =
-            AgentError::ReasoningEffortRefused(Box::new(meerkat_core::ReasoningEffortRefusal {
-                requested: EffortLevel::High,
-                provider: Provider::OpenAI,
-                model: "primary".to_string(),
-                route: None,
-                reason: meerkat_core::ReasoningEffortRefusalReason::UnsupportedLevel,
-                supported: Some(vec![EffortLevel::Low]),
-                facts: Some(meerkat_core::ReasoningFactsSource::Account),
-                conflicting_param: None,
-                conflicting_level: None,
-            }));
+        // Read from the wire form: the type is built only by the resolver.
+        let refused: meerkat_core::ReasoningEffortRefusal =
+            serde_json::from_value(serde_json::json!({
+                "requested": "high", "provider": "openai", "model": "primary",
+                "route": null, "reason": "unsupported_level",
+                "supported": ["low"], "facts": "account",
+            }))
+            .expect("a refusal reads from its wire form");
+        let refusal = AgentError::ReasoningEffortRefused(Box::new(refused));
         assert_eq!(model_fallback_trigger(&refusal), None);
         let (accepting, probed) = leveled_target(
             "accepting",

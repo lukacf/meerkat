@@ -7568,11 +7568,16 @@ async fn continue_session_inner(
         {
             Ok(v) => v,
             Err(e) => {
+                // A level the rebuilt session's route refuses is the
+                // caller's request, answered as the create answers it.
+                let rebuild_error = reasoning_effort_refused_api_error(&e).unwrap_or_else(|| {
+                    ApiError::Internal(format!("Failed to rebuild session: {e}"))
+                });
                 let error = unregister_rest_runtime_after_api_error_locked(
                     state,
                     &session_id,
                     runtime_was_registered,
-                    ApiError::Internal(format!("Failed to rebuild session: {e}")),
+                    rebuild_error,
                 )
                 .await;
                 drop(caller_event_tx);

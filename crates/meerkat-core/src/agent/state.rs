@@ -236,6 +236,21 @@ fn controller_feedback_params(
     Some(params)
 }
 
+/// Take the session's provider-neutral reasoning effort level off the
+/// params of a request that a client other than the session's own serves
+/// (the bound controller). The level belongs to the session's own model
+/// requests: such a request does not carry it and so is never refused for
+/// it. Params that carried nothing else are no params, as before the level
+/// was set.
+fn without_session_reasoning_effort(params: &mut Option<ProviderParamsOverride>) {
+    let Some(inner) = params.as_mut() else {
+        return;
+    };
+    if inner.reasoning_effort.take().is_some() && inner.is_empty() {
+        *params = None;
+    }
+}
+
 /// Which failure the retry loop is recovering from.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LlmFailureOrigin {
@@ -1264,13 +1279,10 @@ where
                         crate::OperationRefusalKind::MalformedFacts,
                     ),
                 })?;
-            // The controller serves this request: the level is resolved
-            // against the controller client's own route and model.
-            let reasoning_effort = self.resolve_request_reasoning_effort(
-                controller.client().as_ref(),
-                self.request_model_profile(true).as_ref(),
-                &mut provider_params,
-            )?;
+            // The level belongs to the session's own model requests. A
+            // request the bound controller serves does not carry it, so the
+            // controller's route can never refuse the session's level.
+            without_session_reasoning_effort(&mut provider_params);
             // Use the admitted immutable provider client. A mutable fallback
             // wrapper cannot silently move the controller to another route.
             return Arc::clone(controller.client())
@@ -1284,7 +1296,7 @@ where
                 )
                 .map(|attempt| PreparedModelAttempt {
                     attempt,
-                    reasoning_effort,
+                    reasoning_effort: None,
                 });
         }
         // Every preparation resolves the level again, against the route the
@@ -1329,6 +1341,14 @@ where
     where
         L: crate::AgentLlmClient + ?Sized,
     {
+        // A copy that carries no level asks the client nothing: its route
+        // and its default tag are read only to resolve a level.
+        if params
+            .as_ref()
+            .is_none_or(|params| params.reasoning_effort.is_none())
+        {
+            return Ok(None);
+        }
         crate::agent::request_reasoning_effort::resolve_request_reasoning_effort(
             &crate::agent::request_reasoning_effort::RequestReasoningTarget::of(client, profile),
             self.session_reasoning_effort(),
@@ -4284,6 +4304,14 @@ where
         {
             params.reasoning_effort = None;
         }
+        // The probe's request is built now, by the client that resolved the
+        // level, and never sent: it needs no witness of the route the level
+        // was resolved for. With one, a route that changes between the two
+        // reads would fail this admission as a route change, outside the
+        // request path's own recovery.
+        if let Some(params) = probe_params.as_mut() {
+            params.reasoning_route_witness = None;
+        }
         let pressure = self
             .client
             .request_pressure(
@@ -5277,8 +5305,22 @@ where
                                     request_pressure: provider_request_pressure,
                                     parent_revision,
                                     summarization_budget,
-                                    provider_params: self.compaction_provider_params(),
-                                    session_reasoning_effort: self.session_reasoning_effort(),
+                                    // A summary the bound controller writes
+                                    // is not the session's own model
+                                    // request: it does not carry the
+                                    // session's level.
+                                    provider_params: {
+                                        let mut params = self.compaction_provider_params();
+                                        if controller.is_some() {
+                                            without_session_reasoning_effort(&mut params);
+                                        }
+                                        params
+                                    },
+                                    session_reasoning_effort: if controller.is_some() {
+                                        None
+                                    } else {
+                                        self.session_reasoning_effort()
+                                    },
                                     summary_model: self.request_model_profile(controller.is_some()),
                                     wait_report: self.refusal_wait_report(
                                         self.tool_dispatch_context.run_id().cloned(),
@@ -36294,17 +36336,32 @@ mod tests {
             );
             for probe in &probed {
                 assert_leveled_resolved(probe.as_ref(), ReasoningEffort::High, "a probe");
-                // A probe builds its request at once, on the client that
-                // resolved the level: it carries no route witness, so a
-                // route that changes between the two reads cannot fail the
-                // admission as a route change.
-                assert!(
+            }
+            // A prepared request probes its pressure with the copy it is
+            // sent with, witness included. The re-admission of the fallback
+            // target is different. It runs before every request the session
+            // makes on the target (the attempt that commits it and the later
+            // turn's), builds its probe at once, on the client that resolved
+            // the level, and carries no route witness, so a route that
+            // changes between the two reads cannot fail the admission as a
+            // route change.
+            let admission_probes = probed
+                .iter()
+                .filter(|probe| {
                     probe
                         .as_ref()
-                        .is_some_and(|params| params.reasoning_route_witness.is_none()),
-                    "a probe carries no route witness: {probe:?}"
-                );
-            }
+                        .is_some_and(|params| params.reasoning_route_witness.is_none())
+                })
+                .count();
+            let requests_on_the_target = served
+                .iter()
+                .filter(|(model, _)| *model == "backup")
+                .count();
+            assert_eq!(
+                (admission_probes, requests_on_the_target),
+                (2, 2),
+                "each re-admission's probe carries no route witness: {probed:?}"
+            );
         }
 
         /// A route that stops taking the level while the session is on its

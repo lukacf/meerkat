@@ -11259,17 +11259,24 @@ impl AgentFactory {
         validate_gemini_request_shaping(provider, &model, build_config.provider_params.as_ref())?;
         // The provider-neutral reasoning effort level is judged against the
         // route of the client this build made, with the catalog row of the
-        // model as its backend serves it.
-        validate_reasoning_effort_for_route(
-            provider,
-            &model,
-            build_config.provider_params.as_ref(),
-            llm_adapter.reasoning_route().as_ref(),
-            registry
-                .profile_witness_for_identity(config, &resolved_llm_identity)
-                .and_then(|witness| witness.catalog_capabilities()),
-        )
-        .map_err(BuildAgentError::ReasoningEffortRefused)?;
+        // model as its backend serves it. A build that carries no level
+        // reads neither.
+        if build_config
+            .provider_params
+            .as_ref()
+            .is_some_and(|params| params.reasoning_effort.is_some())
+        {
+            validate_reasoning_effort_for_route(
+                provider,
+                &model,
+                build_config.provider_params.as_ref(),
+                llm_adapter.reasoning_route().as_ref(),
+                registry
+                    .profile_witness_for_identity(config, &resolved_llm_identity)
+                    .and_then(|witness| witness.catalog_capabilities()),
+            )
+            .map_err(BuildAgentError::ReasoningEffortRefused)?;
+        }
         if let Some(params) = build_config.provider_params.clone() {
             builder = builder.provider_params(params);
         }

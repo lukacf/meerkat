@@ -169,6 +169,10 @@ pub struct RestContinueSessionRequest {
     /// <level>}`) sets it, `{"action":"clear"}` removes it, and omission
     /// keeps the level the session recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "crate::wire::runtime::reasoning_effort_turn_override_schema")
+    )]
     pub reasoning_effort: Option<
         crate::wire::runtime::WireTurnMetadataOverride<
             meerkat_core::model_profile::capabilities::EffortLevel,

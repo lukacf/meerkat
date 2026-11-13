@@ -54,6 +54,9 @@ fn runtime_driver_error_to_session_error(err: meerkat_runtime::RuntimeDriverErro
     if let Some(in_progress) = err.teardown_in_progress_session_error() {
         return in_progress;
     }
+    if let Some(refused) = err.reasoning_effort_refused_session_error() {
+        return refused;
+    }
     SessionError::Agent(meerkat_core::error::AgentError::InternalError(
         err.to_string(),
     ))
@@ -2710,6 +2713,29 @@ fn format_agent_result(
     }
 }
 
+/// A refused `reasoning_effort` level as a tool error, in the form JSON-RPC
+/// answers it: the session transport's code (invalid params, -32602), the
+/// refusal's message, and the typed data `{"kind":
+/// "reasoning_effort_refused", "retryable": <bool>,
+/// "reasoning_effort_refusal": {...}}`. A host reads the refusal from the
+/// data and never from the text. `None` for any other error.
+fn reasoning_effort_refused_tool_error(error: &SessionError) -> Option<ToolCallError> {
+    let SessionError::Agent(agent_error) = error.primary_error() else {
+        return None;
+    };
+    if !matches!(
+        agent_error.primary_error(),
+        meerkat::AgentError::ReasoningEffortRefused(_)
+    ) {
+        return None;
+    }
+    Some(ToolCallError::new(
+        meerkat_contracts::error::session_transport_error_code(error).jsonrpc_code(),
+        error.to_string(),
+        meerkat_contracts::error::session_error_details(error),
+    ))
+}
+
 fn format_agent_result_tool(
     result: Result<meerkat_core::types::RunResult, SessionError>,
     session_id: &meerkat::SessionId,
@@ -2718,6 +2744,10 @@ fn format_agent_result_tool(
         Err(SessionError::Agent(meerkat::AgentError::Cancelled)) => {
             Err(request_cancelled_tool_error())
         }
+        Err(error) => match reasoning_effort_refused_tool_error(&error) {
+            Some(refused) => Err(refused),
+            None => format_agent_result(Err(error), session_id).map_err(ToolCallError::internal),
+        },
         result => format_agent_result(result, session_id).map_err(ToolCallError::internal),
     }
 }
@@ -2774,6 +2804,18 @@ fn post_commit_session_created_error(
                 "resumable": true,
             })),
         );
+    }
+
+    // A refused reasoning effort level keeps its typed form; the data also
+    // names the session this call created, as its other failures do.
+    if let Some(mut refused) = reasoning_effort_refused_tool_error(err) {
+        if let Some(Value::Object(data)) = refused.data.as_mut() {
+            data.insert("session_id".to_string(), json!(session_id.to_string()));
+            data.insert("session_ref".to_string(), json!(session_id.to_string()));
+            data.insert("session_created".to_string(), json!(true));
+            data.insert("resumable".to_string(), json!(true));
+        }
+        return refused;
     }
 
     ToolCallError::internal_with_data(

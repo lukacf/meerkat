@@ -119,7 +119,7 @@
     "route": { "type": "string", "pattern": "^[a-z][a-z0-9_]*/[a-z][a-z0-9_]*$", "maxLength": 96 },
     "model_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$", "maxLength": 128 },
     "model": {
-      "description": "The model of a cell: its id, or the rule the row picks it by when it runs.",
+      "description": "The model of a cell: its id; the rule the row picks it by when it runs; or, for a cell its row observed and withheld the id of, the statement of that. A withheld id is no model id: it shows no model a row names.",
       "oneOf": [
         {
           "type": "object",
@@ -127,7 +127,13 @@
           "required": ["id"],
           "properties": { "id": { "$ref": "#/$defs/model_id" } }
         },
-        { "$ref": "#/$defs/by_rule" }
+        { "$ref": "#/$defs/by_rule" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["observed"],
+          "properties": { "observed": { "const": "id_withheld" } }
+        }
       ]
     },
     "requested_level": {
@@ -287,7 +293,9 @@
         "test_not_in_leg_result",
         "test_skipped",
         "no_cells_observed",
-        "cell_skipped"
+        "cell_skipped",
+        "model_not_proven",
+        "model_not_observed"
       ]
     },
     "leg_run": {
@@ -404,7 +412,7 @@
       }
     },
     "entry_source_only": {
-      "description": "A cell whose row is in the source at the product commit and has no result of its own there.",
+      "description": "A cell whose row is in the source at the product commit and has no result of its own there; or a model the manifest names for a row with observed cells that no cell the row observed shows (model_not_observed), or that only a cell with a withheld id could be (model_not_proven).",
       "type": "object",
       "additionalProperties": false,
       "required": [

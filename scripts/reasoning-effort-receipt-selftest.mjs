@@ -20,6 +20,7 @@ import {
   RECEIPT_JSON_NAME,
   RECEIPT_MARKDOWN_NAME,
   ReceiptError,
+  WITHHELD_MODEL_ID,
   assertPublishable,
   buildLegResult,
   buildNotRunResult,
@@ -27,6 +28,7 @@ import {
   checkReceipt,
   definesTest,
   generate,
+  liveGaps,
   parseNextestJson,
   parseNextestLog,
   renderMarkdown,
@@ -167,8 +169,9 @@ function cellLine(test, cell, model, level, route) {
 /// A `libtest-json-plus` run of the route rows with `--no-capture`: a pass,
 /// a failure with captured output, an ignored test, a pass on the second
 /// try, and a library test of another crate. The rows' cell lines are whole
-/// lines between the events; the failed test's line is in its output.
-function routesJson({ cellLines = true } = {}) {
+/// lines between the events; the failed test's line is in its output. `also`
+/// is more whole lines the rows print.
+function routesJson({ cellLines = true, also = [] } = {}) {
   const printed = cellLines
     ? [
         cellLine("supported_level_is_sent", "direct", "catalog-model-9", "high", "openai_api/responses"),
@@ -185,6 +188,7 @@ function routesJson({ cellLines = true } = {}) {
     testEvent("started", "demo-facade::effort_routes$supported_level_is_sent"),
     testEvent("ignored", "demo-facade::effort_routes$live_matrix"),
     ...printed,
+    ...also,
     testEvent("ok", "demo-facade::effort_routes$supported_level_is_sent", { exec_time: 0.2 }),
     testEvent("failed", "demo-facade::effort_routes$unsupported_level_is_refused", { exec_time: 0.1, stdout: failedOutput }),
     testEvent("ok", "demo-facade::effort_routes$resumed_level_is_sent#2", { exec_time: 0.1 }),
@@ -938,7 +942,7 @@ row("the cells a live row prints are read from the run's output, each line exact
     ["a member the schema does not know", line({ ...sent, login: "someone" }), /observation line at line 5 .* does not match its schema.*login/],
     ["the provider's message", line({ ...failed, message: "You exceeded your current quota." }), /does not match its schema.*message/],
     ["a code that is a sentence", line({ ...failed, error_code: "quota exceeded for the account" }), /does not match its schema.*error_code/],
-    ["a model the row redacted", line({ ...sent, model: "<redacted>" }), /does not match its schema.*model/],
+    ["a model the row withheld a part of", line({ ...sent, model: `listed-${WITHHELD_MODEL_ID}` }), /does not match its schema.*model/],
     ["a missing member", line({ row: "live.matrix", model: "listed-model-a" }), /does not match its schema.*has no provider_family/],
     ["a level outside the set", line({ ...sent, requested_level: "x_high" }), /does not match its schema.*requested_level/],
     ["a list", `${OBSERVATION_LINE_PREFIX}[]`, /does not match its schema/],
@@ -954,9 +958,9 @@ row("the cells a live row prints are read from the run's output, each line exact
   refuses(() => parseNextestLog(`    ${line({ ...sent, host: "somewhere" })}\n     Summary [   0.041s] 1 test run: 1 passed, 0 skipped\n`), /does not match its schema.*host/, "a line with another member in a log");
   refuses(() => record(output([line({ ...sent, http_status: 200 })])), /on an observation that did not fail/, "a status on a cell that passed");
   refuses(() => record(output([]), { observations: [{ ...sent, login: "someone" }] }), /observation 1 of the observations given does not match its schema.*login/, "a file item with another member");
-  // The prefix is the one the live rows print (their source is not in this
-  // tree to read it from). The two prefixes are two words: a cell line is no
-  // observation, and the reverse.
+  // The prefix is the one the live rows print (the row of the committed
+  // manifest reads it in their source). The two prefixes are two words: a
+  // cell line is no observation, and the reverse.
   assert.equal(OBSERVATION_LINE_PREFIX, "reasoning-effort-receipt-observation ");
   assert.notEqual(OBSERVATION_LINE_PREFIX, CELL_LINE_PREFIX);
   refuses(() => parseNextestJson(output([`${CELL_LINE_PREFIX}${JSON.stringify(sent)}`])), /cell line at line 5 .* does not match its schema/, "an observation after the cell line's prefix");
@@ -1005,6 +1009,136 @@ row("a failed live cell carries the typed status and code its row emitted, never
   const copy = structuredClone(receipt);
   copy.entries.find((entry) => entry.failure !== null).failure.message = "text";
   assert.notDeepEqual(schemaErrors(schema, schema, copy), [], "the receipt schema has no place for a message either");
+});
+
+row("a model id a live row withheld is a form of its own, and never the model a row is to show", () => {
+  const withheld = observation({ model: WITHHELD_MODEL_ID });
+  assert.equal(WITHHELD_MODEL_ID, schemas().inputs.$defs.withheld_model_id.const, "the constant is the schema's");
+  assert.equal(new RegExp(schemas().inputs.$defs.model_id.pattern, "u").test(WITHHELD_MODEL_ID), false, "no model id can be the constant");
+
+  // Accepted where a live row says what it saw: in a line and in a file. The leg result keeps the constant.
+  const opening = [suite("started", "demo-facade", "effort_routes", "test"), testEvent("ok", "demo-facade::effort_routes$live_matrix")].map((event) => JSON.stringify(event));
+  assert.deepEqual(parseNextestJson([opening[0], `${OBSERVATION_LINE_PREFIX}${JSON.stringify(withheld)}`, opening[1]].join("\n")).observations, [withheld]);
+  const result = liveResult([observation(), withheld]);
+  assert.deepEqual(result.observations.map((item) => item.model), [WITHHELD_MODEL_ID, "listed-model-a"]);
+
+  // In the receipt the cell is executed with its own result, and its model is the statement, not an id.
+  const receipt = buildReceipt(withResult("live.json", result));
+  assert.deepEqual(
+    receipt.entries.filter((entry) => entry.row === "live.matrix").map((entry) => [entry.id, entry.model, entry.status, entry.result, entry.values_basis, entry.route]),
+    [
+      ["live.matrix/#1", { observed: "id_withheld" }, "executed", "pass", "observation", "copilot/responses"],
+      ["live.matrix/#2", { id: "listed-model-a" }, "executed", "pass", "observation", "copilot/responses"],
+    ],
+  );
+  const { json, markdown } = generate(withResult("live.json", result));
+  assert.ok(!json.includes(WITHHELD_MODEL_ID) && !markdown.includes(WITHHELD_MODEL_ID), "the receipt states it in its own words");
+  assert.ok(markdown.includes("| `live.matrix/#1` | openai | observed, id withheld | responses | `copilot/responses` | `high` | sent: `high` | executed, live | pass |"));
+  const skipped = buildReceipt(withResult("live.json", liveResult([observation({ model: WITHHELD_MODEL_ID, result: "skip" })])));
+  assert.deepEqual([entryOf(skipped, "live.matrix/#1").model, entryOf(skipped, "live.matrix/#1").gap], [{ observed: "id_withheld" }, "cell_skipped"]);
+
+  // Only the constant: nothing near it is the constant or a model id.
+  for (const model of [`${WITHHELD_MODEL_ID}-5`, `listed-${WITHHELD_MODEL_ID}`, WITHHELD_MODEL_ID.toUpperCase(), WITHHELD_MODEL_ID.slice(1), ` ${WITHHELD_MODEL_ID}`, "<withheld>", "<>"]) {
+    refuses(() => liveResult([observation({ model })]), /does not match its schema.*model/, `the model ${model}`);
+  }
+  // A scripted row has nothing to withhold: its cell line names a model id.
+  refuses(
+    () => parseNextestJson(`${opening[0]}\n${cellLine("a_row", "direct", WITHHELD_MODEL_ID, "low", "openai_api/responses")}`),
+    /cell line at line 2 .* does not match its schema.*model/,
+    "a cell line with a withheld model",
+  );
+  // The receipt schema has the statement as one form of a model, and no id that is the constant.
+  const { receipt: schema } = schemas();
+  const withModel = (model) => {
+    const copy = structuredClone(receipt);
+    copy.entries.find((entry) => entry.id === "live.matrix/#1").model = model;
+    return schemaErrors(schema, schema, copy);
+  };
+  assert.deepEqual(withModel({ observed: "id_withheld" }), []);
+  assert.notDeepEqual(withModel({ observed: "id_known" }), []);
+  assert.notDeepEqual(withModel({ id: WITHHELD_MODEL_ID }), [], "no model id of a receipt is the constant");
+  assert.notDeepEqual(withModel({ observed: "id_withheld", id: "listed-model-a" }), []);
+
+  // A model the manifest names for the row, on a cell of the matrix.
+  const naming = manifest();
+  naming.rows.find((item) => item.id === "live.matrix").named_models = [{ cell: "copilot", model: { id: "listed-model-a" } }];
+  const named = (result, edit = naming) => {
+    const change = withResult("live.json", result);
+    change.manifestText = serialize(edit);
+    return buildReceipt(change);
+  };
+  const live = (built) => built.entries.filter((entry) => entry.row === "live.matrix").map((entry) => [entry.id, entry.status, entry.gap]);
+  // A cell that names the id shows it, whatever became of the cell: the named model has no entry of its own.
+  assert.deepEqual(live(named(result)), [
+    ["live.matrix/#1", "executed", null],
+    ["live.matrix/#2", "executed", null],
+  ]);
+  assert.deepEqual(live(named(liveResult([observation({ result: "fail" })]))), [["live.matrix/#1", "executed", null]]);
+  assert.deepEqual(live(named(liveResult([observation({ result: "skip" })]))), [["live.matrix/#1", "not_run", "cell_skipped"]]);
+  // A cell with its id withheld never shows it: the named model is a gap, not a pass.
+  const hidden = named(liveResult([withheld]));
+  assert.deepEqual(live(hidden), [
+    ["live.matrix/#1", "executed", null],
+    ["live.matrix/copilot", "source_only", "model_not_proven"],
+  ]);
+  const unproven = entryOf(hidden, "live.matrix/copilot");
+  assert.deepEqual(
+    [unproven.cell, unproven.provider_family, unproven.model, unproven.api, unproven.route, unproven.requested_level, unproven.outcome, unproven.values_basis, unproven.result, unproven.result_file, unproven.test.name],
+    ["copilot", "openai", { id: "listed-model-a" }, "responses", "copilot/responses", null, null, "manifest", null, null, "live_matrix"],
+  );
+  assert.deepEqual(hidden.gaps.filter((gap) => gap.id.startsWith("live.matrix/")), [{ scope: "entry", id: "live.matrix/copilot", reason: "model_not_proven" }]);
+  assert.equal(entryOf(hidden, "live.matrix/#1").result, "pass", "the withheld cell itself passed");
+  // The check names it among the live gaps and, as every gap of a live leg, does not hold it against the receipt.
+  assert.ok(liveGaps(hidden).includes("entry live.matrix/copilot is a gap of the live legs: model_not_proven"));
+  assert.ok(!checkReceipt(hidden).some((problem) => problem.includes("live.matrix")));
+  const shown = renderMarkdown(hidden);
+  assert.ok(shown.includes("| `live.matrix/copilot` | openai | `listed-model-a` | responses | `copilot/responses` | - | - | source only: its leg saw a cell of this route with its model id withheld: the named model is not proven | - |"));
+  assert.ok(shown.includes("- Row `live.matrix`: 1 entry, its leg saw a cell of this route with its model id withheld: the named model is not proven."));
+  // Another model, and a cell of another route (the named id or a withheld one), show nothing of this cell.
+  assert.deepEqual(live(named(liveResult([observation({ model: "listed-model-b" })]))).at(-1), ["live.matrix/copilot", "source_only", "model_not_observed"]);
+  for (const elsewhere of [{ backend: "openai_api" }, { api: "chat_completions" }, { provider_family: "anthropic" }]) {
+    for (const model of ["listed-model-a", WITHHELD_MODEL_ID]) {
+      assert.deepEqual(
+        live(named(liveResult([observation({ model, ...elsewhere })]))).at(-1),
+        ["live.matrix/copilot", "source_only", "model_not_observed"],
+        `${model} on ${JSON.stringify(elsewhere)}`,
+      );
+    }
+  }
+  assert.ok(renderMarkdown(named(liveResult([]))).includes("- Row `live.matrix`: 1 entry, its leg ran and recorded no cell of the named model on this route."));
+  // Where the row has no result here, the named model is listed with the row's own gap.
+  assert.deepEqual(live(named(liveResult([]))), [
+    ["live.matrix/-", "source_only", "no_cells_observed"],
+    ["live.matrix/copilot", "source_only", "model_not_observed"],
+  ]);
+  assert.deepEqual(live(named(buildNotRunResult({ leg: "live", reason: "credential_unavailable" }))), [
+    ["live.matrix/-", "source_only", "leg_not_run"],
+    ["live.matrix/copilot", "source_only", "leg_not_run"],
+  ]);
+  assert.deepEqual(live(named(liveResult([observation()], OTHER_COMMIT))), [
+    ["live.matrix/-", "source_only", "ran_at_another_commit"],
+    ["live.matrix/copilot", "source_only", "ran_at_another_commit"],
+  ]);
+  const untested = manifest();
+  untested.rows.find((item) => item.id === "live.cli").named_models = [{ cell: "direct", model: { id: "listed-model-a" } }];
+  const planned = entryOf(named(liveResult([observation()]), untested), "live.cli/direct");
+  assert.deepEqual([planned.status, planned.gap, planned.model, planned.route, planned.test], ["not_run", "no_test_row", { id: "listed-model-a" }, "openai_api/responses", null]);
+
+  // What the manifest may name: one model id for a cell it defines.
+  for (const [what, list, pattern] of [
+    ["a cell the manifest does not define", [{ cell: "nowhere", model: { id: "listed-model-a" } }], /row live\.matrix of the manifest names the cell nowhere, which it does not define/],
+    ["two models for one cell", [{ cell: "copilot", model: { id: "listed-model-a" } }, { cell: "copilot", model: { id: "listed-model-b" } }], /names the entry live\.matrix\/copilot twice/],
+    ["a model by rule", [{ cell: "copilot", model: { rule: "catalog_model" } }], /manifest does not match its schema/],
+    ["the constant as the model", [{ cell: "copilot", model: { id: WITHHELD_MODEL_ID } }], /manifest does not match its schema/],
+    ["no model at all", [], /manifest does not match its schema/],
+  ]) {
+    const copy = manifest();
+    copy.rows.find((item) => item.id === "live.matrix").named_models = list;
+    refuses(() => buildReceipt(input({ manifestText: serialize(copy) })), pattern, what);
+  }
+  const declared = manifest();
+  declared.rows[0].named_models = [{ cell: "copilot", model: { id: "listed-model-a" } }];
+  refuses(() => buildReceipt(input({ manifestText: serialize(declared) })), /manifest does not match its schema/, "a named model on a row whose cells the manifest lists");
 });
 
 row("the rows' cell lines name the model and level a row picked, and are the only output read", () => {
@@ -1227,6 +1361,104 @@ row("a row that asks for several levels on a cell has an entry for each level it
   assert.notDeepEqual(withId("routes.unsupported/direct:max", "source_only"), [], "an entry that did not run is one for its cell");
 });
 
+row("a second thing a test asserts is a row of its own, and the lines of that case are its lines", () => {
+  // The refusing test also refuses an accepted level, for another reason, on one route.
+  const cased = manifest();
+  cased.rows.splice(2, 0, {
+    id: "routes.conflict",
+    leg: "routes",
+    title: "An accepted level is refused when the session sets a control that conflicts with it.",
+    case: "conflict",
+    test: routesTest("unsupported_level_is_refused"),
+    outcome: { kind: "refused", reason: "conflicting_control" },
+    model: { rule: "catalog_model" },
+    requested_level: { rule: "accepted_level" },
+    cells: [{ cell: "copilot" }],
+  });
+  const ofCase = { test: "unsupported_level_is_refused", case: "conflict", cell: "copilot", model: "listed-model-a", level: "high", route: "copilot/responses" };
+  const text = (line) => `${CELL_LINE_PREFIX}${JSON.stringify(line)}`;
+  const run = (...lines) => routesResult({ output: Buffer.from(routesJson({ also: lines.map(text) })) });
+  const build = (result, edit = cased) => {
+    const change = withResult("routes.json", result);
+    change.manifestText = serialize(edit);
+    return buildReceipt(change);
+  };
+
+  // The reader keeps the case, after the test; a line without one sorts first.
+  const result = run({ route: ofCase.route, level: ofCase.level, model: ofCase.model, cell: ofCase.cell, case: ofCase.case, test: ofCase.test });
+  assert.equal(JSON.stringify(result.cell_lines.filter((line) => line.case !== undefined)), JSON.stringify([ofCase]), "the members in the schema's order");
+  assert.deepEqual(
+    result.cell_lines.map((line) => [line.test, line.case ?? "-", line.cell, line.level].join("/")),
+    [
+      "resumed_level_is_sent/-/direct/low",
+      "supported_level_is_sent/-/copilot/low",
+      "supported_level_is_sent/-/direct/high",
+      "unsupported_level_is_refused/-/direct/none",
+      "unsupported_level_is_refused/-/direct/max",
+      "unsupported_level_is_refused/conflict/copilot/high",
+    ],
+  );
+
+  // The case is one entry of its own row, with the row's outcome and the test's result.
+  const receipt = build(result);
+  const entry = entryOf(receipt, "routes.conflict/copilot");
+  assert.deepEqual(
+    [entry.row, entry.cell, entry.model, entry.requested_level, entry.outcome, entry.values_basis, entry.status, entry.result, entry.test.name, entry.title],
+    ["routes.conflict", "copilot", { id: "listed-model-a" }, { level: "high" }, { kind: "refused", reason: "conflicting_control" }, "row_output", "executed", "fail", "unsupported_level_is_refused", cased.rows[2].title],
+  );
+  assert.ok(renderMarkdown(receipt).includes("| `routes.conflict/copilot` | openai | `listed-model-a` | responses | `copilot/responses` | `high` | refused: `conflicting_control` | executed, in process | fail |"));
+  // The test's row without a case keeps its own lines and takes none of the case's.
+  assert.deepEqual(
+    receipt.entries.filter((item) => item.row === "routes.unsupported").map((item) => [item.id, item.model]),
+    [
+      ["routes.unsupported/direct:none", { id: "catalog-model-9" }],
+      ["routes.unsupported/direct:max", { id: "catalog-model-9" }],
+      ["routes.unsupported/copilot", { rule: "catalog_model" }],
+    ],
+  );
+  // A line of the case and a line without one, of one cell and level, are two lines: one for each row.
+  const both = build(run(ofCase, { test: ofCase.test, cell: "copilot", model: "listed-model-b", level: "high", route: "copilot/responses" }));
+  assert.deepEqual(
+    [entryOf(both, "routes.conflict/copilot").model, entryOf(both, "routes.unsupported/copilot:high").model],
+    [{ id: "listed-model-a" }, { id: "listed-model-b" }],
+  );
+  // Without its line the case is still an entry, on the test's own result, named by the manifest's rules.
+  const silent = entryOf(build(routesResult()), "routes.conflict/copilot");
+  assert.deepEqual([silent.status, silent.result, silent.model, silent.requested_level, silent.values_basis], ["executed", "fail", { rule: "catalog_model" }, { rule: "accepted_level" }, "manifest"]);
+
+  // A line belongs to exactly one row: the row of its test and its case that lists its cell.
+  const strayLine = (line, pattern, what, edit) => refuses(() => build(run(line), edit), pattern, what);
+  strayLine({ ...ofCase, case: "another" }, /cell line of unsupported_level_is_refused \(case another\), cell copilot, which is not a cell of exactly one row/, "a case no row has");
+  strayLine({ ...ofCase, test: "supported_level_is_sent" }, /cell line of supported_level_is_sent \(case conflict\), cell copilot, which is not a cell/, "a case on a line of a test whose row has none");
+  strayLine({ ...ofCase, cell: "direct", route: "openai_api/responses" }, /\(case conflict\), cell direct, which is not a cell of exactly one row/, "a cell the case's row does not list");
+  strayLine(ofCase, /\(case conflict\), cell copilot, which is not a cell of exactly one row/, "a manifest without the case's row", manifest());
+  const twice = structuredClone(cased);
+  twice.rows.push({ ...twice.rows[2], id: "routes.conflict_again" });
+  strayLine(ofCase, /\(case conflict\), cell copilot, which is not a cell of exactly one row/, "two rows of one test and one case", twice);
+  // The case's row has one entry for its cell: a second level is one line too many.
+  refuses(
+    () => build(run(ofCase, { ...ofCase, level: "low" })),
+    /two cell lines of unsupported_level_is_refused \(case conflict\), cell copilot, and row routes\.conflict of the manifest has one entry for a cell/,
+    "two levels for the case",
+  );
+  // Its line is held to the manifest like any other.
+  refuses(() => build(run({ ...ofCase, route: "copilot/chat_completions" })), /row routes\.conflict reports the route copilot\/chat_completions for the cell copilot/, "another route");
+  // Two lines of the case that disagree, and the same line twice in a result file.
+  refuses(() => run(ofCase, { ...ofCase, model: "listed-model-b" }), /says another thing of unsupported_level_is_refused \(case conflict\), cell copilot, level high/, "two lines of one case that disagree");
+  assert.equal(run(ofCase, ofCase).cell_lines.length, 6, "the same line twice is one line");
+  const doubled = structuredClone(result);
+  doubled.cell_lines.push(ofCase);
+  refuses(() => build(doubled), /two cell lines of one level of one cell of one test/, "a case's line twice in a result file");
+  // The case is one word, on the line and in the manifest.
+  refuses(() => run({ ...ofCase, case: "Second Case" }), /does not match its schema.*case/, "a case that is a phrase");
+  const phrased = structuredClone(cased);
+  phrased.rows[2].case = "Second Case";
+  refuses(() => build(result, phrased), /manifest does not match its schema/, "a case of the manifest that is a phrase");
+  const observedCase = manifest();
+  observedCase.rows.find((item) => item.id === "live.matrix").case = "conflict";
+  refuses(() => buildReceipt(input({ manifestText: serialize(observedCase) })), /manifest does not match its schema/, "a case on a row with observed cells");
+});
+
 row("--check fails on a failed entry and on a gap of the offline legs, never on a gap of a live leg", () => {
   // The fixture as it stands: two failed entries, one in-process entry its
   // log did not name, the built-binary row without a test; the live gaps.
@@ -1239,6 +1471,10 @@ row("--check fails on a failed entry and on a gap of the offline legs, never on 
     "entry binary.supported/direct is a gap of the offline legs: no_test_row",
   ]);
   assert.ok(receipt.gaps.some((gap) => gap.scope === "leg" && gap.id === "live") && receipt.gaps.some((gap) => gap.id === "live.matrix/-"), "the live gaps are in the receipt");
+  // The gaps of the live legs are named, each with its reason, and are no problem of the check.
+  const liveOnes = ["leg live is a gap of the live legs: credential_unavailable", "entry live.matrix/- is a gap of the live legs: leg_not_run", "entry live.cli/- is a gap of the live legs: no_test_row"];
+  assert.deepEqual(liveGaps(receipt), liveOnes);
+  assert.equal(checkReceipt(receipt).filter((problem) => problem.includes(" is a gap of ")).length + liveGaps(receipt).length, receipt.gaps.length, "every gap is held against the receipt or named beside it");
 
   // Every offline entry executed and passed: the live gaps alone pass the check.
   const offline = manifest();
@@ -1251,6 +1487,7 @@ row("--check fails on a failed entry and on a gap of the offline legs, never on 
   const clean = buildReceipt(passing);
   assert.deepEqual([clean.totals.entries.failed, clean.gaps.map((gap) => `${gap.scope} ${gap.id} ${gap.reason}`)], [0, ["leg live credential_unavailable", "entry live.matrix/- leg_not_run", "entry live.cli/- no_test_row"]]);
   assert.deepEqual(checkReceipt(clean), [], "gaps of a live leg do not fail the check");
+  assert.deepEqual(liveGaps(clean), liveOnes, "and are named all the same");
 
   // Each offline gap class fails it; a live failure fails it; a live skip does not.
   const kinds = (change) => checkReceipt(buildReceipt(change)).map((problem) => problem.replace(/^.*: /u, "").replace(/^entry .* failed$/u, "failed"));
@@ -1279,6 +1516,8 @@ row("--check fails on a failed entry and on a gap of the offline legs, never on 
   const stray = structuredClone(clean);
   stray.gaps.push({ scope: "entry", id: "routes.supported/elsewhere", reason: "leg_not_run" });
   assert.deepEqual(checkReceipt(stray), ["the gap of entry routes.supported/elsewhere names no entry of the receipt"]);
+  assert.deepEqual(liveGaps(stray), liveOnes, "a gap that names no entry is no live gap");
+  assert.deepEqual(liveGaps(buildReceipt(withRoutes(buildNotRunResult({ leg: "routes", reason: "not_scheduled" })))), liveOnes, "a gap of an offline leg is no live gap");
 });
 
 row("forbidden fields are absent: nothing of an account, a credential, a host or a run's text is written", () => {
@@ -1378,13 +1617,44 @@ row("the committed manifest matches its schema, names tests the tree defines, an
   assert.ok(routes.includes(`"${CELL_LINE_PREFIX}{}"`), "the route rows print the prefix the generator reads");
   assert.deepEqual(
     [...new Set([...routes.matchAll(/report_cell\(\s*"([A-Za-z0-9_]+)"/gu)].map((match) => match[1]))].sort(),
-    committed.rows.filter((item) => item.test?.source === routesSource).map((item) => item.test.name).sort(),
+    [...new Set(committed.rows.filter((item) => item.test?.source === routesSource).map((item) => item.test.name))].sort(),
     "the tests that print their cells are the manifest's route rows",
   );
-  // The rows the live rows name in their observation lines are rows with observed cells.
-  for (const id of ["live.copilot_matrix", "live.direct_providers"]) {
-    assert.equal(committed.rows.find((item) => item.id === id)?.cells, "observed", `${id} is a row with observed cells`);
-  }
+  // A case of a route row that the manifest lists as a row of its own
+  // prints its line under the manifest's word for it.
+  assert.deepEqual(
+    [...routes.matchAll(/report_case\(\s*"([A-Za-z0-9_]+)",\s*"([a-z0-9_]+)"/gu)].map((match) => `${match[1]} ${match[2]}`).sort(),
+    committed.rows.filter((item) => item.case !== undefined).map((item) => `${item.test.name} ${item.case}`).sort(),
+    "the cases the route rows print are the manifest's rows with a case",
+  );
+  // Every refusal reason the route rows assert is the outcome of a row: a
+  // refusal a row asserts without an entry of its own is a hole in the receipt.
+  assert.deepEqual(
+    [...new Set([...routes.matchAll(/ReasoningEffortRefusalReason::([A-Za-z]+)/gu)].map((match) => match[1].replace(/(?<=[a-z0-9])(?=[A-Z])/gu, "_").toLowerCase()))].sort(),
+    [...new Set(committed.rows.filter((item) => item.test?.source === routesSource && item.outcome.kind === "refused").map((item) => item.outcome.reason))].sort(),
+    "the refusal reasons the route rows assert are the refusal reasons of the manifest's route rows",
+  );
+  // The live rows: the manifest names their tests, and the rows they print
+  // in their observation lines are its rows with observed cells and a test.
+  const liveSource = "tests/integration/src/live_reasoning_matrix.rs";
+  const live = read(liveSource).toString("utf8");
+  const observedRows = committed.rows.filter((item) => item.cells === "observed" && item.test !== null);
+  assert.deepEqual(
+    observedRows.map((item) => [item.id, item.test.package, item.test.target, item.test.name]),
+    [
+      ["live.copilot_matrix", "meerkat-integration-tests", "copilot_live_e2e", "copilot_live_reasoning_effort_matrix"],
+      ["live.direct_providers", "meerkat-integration-tests", "e2e_live_lane", "direct_provider_live_reasoning_effort"],
+    ],
+  );
+  const lanes = /pub const fn receipt_row\(self\) -> &'static str \{([\s\S]*?)\n {4}\}/u.exec(live);
+  assert.ok(lanes !== null, "the live rows name their receipt rows");
+  assert.deepEqual(
+    [...lanes[1].matchAll(/=> "([a-z0-9_.]+)"/gu)].map((match) => match[1]).sort(),
+    observedRows.map((item) => item.id).sort(),
+    "the rows the live rows print are the manifest's rows with observed cells and a test",
+  );
+  assert.ok(live.includes(`pub const RECEIPT_OBSERVATION_PREFIX: &str = "${OBSERVATION_LINE_PREFIX}";`), "the live rows print the prefix the generator reads");
+  assert.ok(live.includes(`pub const REDACTED: &str = "${WITHHELD_MODEL_ID}";`), "what the live rows put for a withheld value is the constant the inputs schema takes for a model");
   // The one row with an entry for each level prints its line inside its loop
   // over the levels it refuses, and nowhere else.
   const refusing = "unsupported_level_is_refused_before_any_provider_request";
@@ -1481,6 +1751,9 @@ row("the command line records a run, generates both files from the commit, and v
     "check: entry routes.unsupported/copilot failed",
     "check: leg binary is a gap of the offline legs: rows_not_built",
     "check: entry binary.supported/direct is a gap of the offline legs: no_test_row",
+    "check: named, not held against the receipt: leg live is a gap of the live legs: credential_unavailable",
+    "check: named, not held against the receipt: entry live.matrix/- is a gap of the live legs: leg_not_run",
+    "check: named, not held against the receipt: entry live.cli/- is a gap of the live legs: no_test_row",
     "check failed: 5 failed entries or gaps of the offline legs",
     "",
   ]);
@@ -1498,7 +1771,20 @@ row("the command line records a run, generates both files from the commit, and v
   mkdirSync(liveResults);
   assert.equal(cli(["record", "--leg", "live", "--not-run", "ran_at_another_commit", "--output", join(liveResults, "live.json")], { env }).status, 0, "a leg may be recorded as run at another commit");
   const passed = cli(["generate", "--results", liveResults, "--output-dir", join(work, "live-out"), "--repo", repo, "--commit", head, "--manifest", liveManifest, "--check"], { env });
-  assert.deepEqual([passed.status, passed.stdout.split("\n")[1]], [0, "check passed: no failed entry and no gap in the offline legs"], passed.stdout);
+  assert.deepEqual(
+    [passed.status, passed.stdout.split("\n").slice(1)],
+    [
+      0,
+      [
+        "check: named, not held against the receipt: leg live is a gap of the live legs: ran_at_another_commit",
+        "check: named, not held against the receipt: entry live.matrix/- is a gap of the live legs: leg_not_run",
+        "check: named, not held against the receipt: entry live.cli/- is a gap of the live legs: no_test_row",
+        "check passed: no failed entry and no gap in the offline legs",
+        "",
+      ],
+    ],
+    passed.stdout,
+  );
   const liveMarkdown = readFileSync(join(work, "live-out", RECEIPT_MARKDOWN_NAME), "utf8");
   assert.ok(liveMarkdown.includes("| `live` | live | not run here: it ran at another commit |") && liveMarkdown.includes("- Leg `live`: it ran at another commit."));
   // A receipt that does not hold is refused before it is judged.

@@ -116,6 +116,22 @@
       ]
     },
     {
+      "id": "routes.second_thinking_type",
+      "leg": "routes",
+      "title": "On Copilot Messages a level the route accepts is refused with the typed refusal when the session sets a second thinking type; nothing is sent.",
+      "case": "second_thinking_type",
+      "test": {
+        "package": "meerkat",
+        "target": "reasoning_effort_routes",
+        "name": "unsupported_level_is_refused_before_any_provider_request",
+        "source": "crates/meerkat/tests/reasoning_effort_routes.rs"
+      },
+      "outcome": { "kind": "refused", "reason": "conflicting_thinking_type" },
+      "model": { "rule": "catalog_model_listed_with_a_dot" },
+      "requested_level": { "rule": "accepted_level" },
+      "cells": [{ "cell": "copilot_claude" }]
+    },
+    {
       "id": "routes.unknown",
       "leg": "routes",
       "title": "A level nothing states the accepted set for is refused as unknown before any request is sent.",
@@ -275,7 +291,12 @@
       "id": "live.copilot_matrix",
       "leg": "live_copilot",
       "title": "Every model a real Copilot account lists with stated levels, on the endpoint the account serves it on: stated levels are sent, a level outside them is refused.",
-      "test": null,
+      "test": {
+        "package": "meerkat-integration-tests",
+        "target": "copilot_live_e2e",
+        "name": "copilot_live_reasoning_effort_matrix",
+        "source": "tests/integration/tests/copilot_live_e2e.rs"
+      },
       "cells": "observed"
     },
     {
@@ -289,7 +310,12 @@
       "id": "live.direct_providers",
       "leg": "live_direct",
       "title": "Each direct provider API that has a key: an accepted level is sent, a level outside the catalog row is refused.",
-      "test": null,
+      "test": {
+        "package": "meerkat-integration-tests",
+        "target": "e2e_live_lane",
+        "name": "direct_provider_live_reasoning_effort",
+        "source": "tests/integration/tests/e2e_live_lane.rs"
+      },
       "cells": "observed"
     }
   ]

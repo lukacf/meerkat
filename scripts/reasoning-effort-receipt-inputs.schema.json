@@ -15,6 +15,14 @@
     "level": { "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"] },
     "model_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$", "maxLength": 128 },
     "route": { "type": "string", "pattern": "^[a-z][a-z0-9_]*/[a-z][a-z0-9_]*$", "maxLength": 96 },
+    "withheld_model_id": {
+      "description": "What a row with observed cells prints in place of a model id it withheld (its redactor found a private value of the account in the id). One constant, which no model id can be: the receipt records the cell as observed with its id withheld, and the cell shows no model a row names.",
+      "const": "<redacted>"
+    },
+    "observed_model": {
+      "description": "The model of an observed cell: its id, or the constant that says the row withheld it.",
+      "oneOf": [{ "$ref": "#/$defs/model_id" }, { "$ref": "#/$defs/withheld_model_id" }]
+    },
     "observation": {
       "description": "One cell a row with observed cells saw: an item of a leg result's observations, and the JSON object of a line a row prints after the prefix `reasoning-effort-receipt-observation `. A failed cell may carry the HTTP status and an error code as typed fields its row emits; the code is one word of the row's own failure classes, never a provider's text.",
       "type": "object",
@@ -25,7 +33,7 @@
         "provider_family": { "$ref": "#/$defs/provider_family" },
         "backend": { "$ref": "#/$defs/token" },
         "api": { "$ref": "#/$defs/api" },
-        "model": { "$ref": "#/$defs/model_id" },
+        "model": { "$ref": "#/$defs/observed_model" },
         "requested_level": { "$ref": "#/$defs/level" },
         "outcome": {
           "oneOf": [
@@ -55,12 +63,13 @@
       }
     },
     "cell_line": {
-      "description": "What a row says it picked for one cell: the line it prints after the prefix `reasoning-effort-receipt-cell `, one JSON object. test is the row's function name, cell the manifest's cell id, route the route as reported (backend/api).",
+      "description": "What a row says it picked for one cell: the line it prints after the prefix `reasoning-effort-receipt-cell `, one JSON object. test is the row's function name, cell the manifest's cell id, route the route as reported (backend/api). case is there only on a line of a case of the test that the manifest lists as a row of its own, and is that row's case.",
       "type": "object",
       "additionalProperties": false,
       "required": ["test", "cell", "model", "level", "route"],
       "properties": {
         "test": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "maxLength": 200 },
+        "case": { "$ref": "#/$defs/token" },
         "cell": { "$ref": "#/$defs/token" },
         "model": { "$ref": "#/$defs/model_id" },
         "level": { "$ref": "#/$defs/level" },
@@ -189,6 +198,10 @@
           "description": "How many cell lines the row prints for a cell. per_cell (the default): one, the model and level of the cell. per_level: one for each level the row asks for on the cell; an executed cell then has one entry per line, and the manifest names the levels by rule.",
           "enum": ["per_cell", "per_level"]
         },
+        "case": {
+          "description": "Set where the row is one case of a test that has another row: a second thing the test asserts (a refusal for another reason, say). The test prints this word as case in the cell lines of the case, and those lines are this row's. A test has one row without a case at most.",
+          "$ref": "#/$defs/token"
+        },
         "test": { "oneOf": [{ "$ref": "#/$defs/test_ref" }, { "type": "null" }] },
         "outcome": {
           "oneOf": [
@@ -243,7 +256,26 @@
         "leg": { "$ref": "#/$defs/token" },
         "title": { "$ref": "#/$defs/sentence" },
         "test": { "oneOf": [{ "$ref": "#/$defs/test_ref" }, { "type": "null" }] },
-        "cells": { "const": "observed" }
+        "cells": { "const": "observed" },
+        "named_models": {
+          "description": "The models the row is to show, each on a cell of the matrix (one for a cell). An observed cell shows one only when it names that model id on the cell's provider family, backend and API; a cell whose id the row withheld shows none. A named model no cell shows is an entry of its own and a gap.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["cell", "model"],
+            "properties": {
+              "cell": { "$ref": "#/$defs/token" },
+              "model": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id"],
+                "properties": { "id": { "$ref": "#/$defs/model_id" } }
+              }
+            }
+          }
+        }
       }
     },
     "leg_result": {

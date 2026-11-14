@@ -1277,22 +1277,16 @@ async fn a_people_subject_holds_the_approver_id_on_the_console() {
 
     // Gating decide: the gate names the approver id, and the Console decides
     // as the signed-in person, who holds that id only as the people subject.
-    let evaluated = runtime
-        .evaluate_gating_action_with_origin(
-            serde_json::from_value(json!({
-                "action": "release the reviewed artifact",
-                "actor_id": "requester",
-                "risk_tier": "r3",
-                "requested_approver": "team:owners",
-            }))
-            .expect("gating request"),
-            Some(GatingOrigin {
-                identity: "router".to_string(),
-                conversation_id: None,
-                interaction_id: None,
-            }),
-        )
-        .await;
+    let request = || {
+        serde_json::from_value(json!({
+            "action": "release the reviewed artifact",
+            "actor_id": "requester",
+            "risk_tier": "r3",
+            "requested_approver": "team:owners",
+        }))
+        .expect("gating request")
+    };
+    let evaluated = runtime.evaluate_gating_action(request()).await;
     let pending_id = evaluated.pending_id.clone().expect("a pending gate");
     let decided = rpc(
         &app,
@@ -1306,6 +1300,43 @@ async fn a_people_subject_holds_the_approver_id_on_the_console() {
     .await;
     assert!(decided["error"].is_null(), "{decided}");
     assert_eq!(decided["result"]["approver_id"], json!("team:owners"));
+
+    // The same gate with an origin this Console holds no agent for is shown
+    // to an administrator only: holding the approver id decides nothing for
+    // a request the pending list withholds. The decide is answered as a
+    // decide of an id that is not pending is, and the request stays pending.
+    let withheld = runtime
+        .evaluate_gating_action_with_origin(
+            request(),
+            Some(GatingOrigin {
+                identity: "router".to_string(),
+                conversation_id: None,
+                interaction_id: None,
+            }),
+        )
+        .await
+        .pending_id
+        .expect("a pending gate");
+    let decide = |pending_id: String| {
+        rpc(
+            &app,
+            Some(DAVE),
+            "meta/gating/decide",
+            json!({ "pending_id": pending_id, "decision": "approve" }),
+        )
+    };
+    let of_withheld = decide(withheld.clone()).await;
+    let of_no_request = decide("gate-pending-never-minted".to_string()).await;
+    assert!(!of_withheld["error"].is_null(), "{of_withheld}");
+    assert_eq!(of_withheld, of_no_request, "{of_withheld}");
+    let still_pending = runtime.list_gating_pending().await;
+    assert_eq!(
+        still_pending
+            .iter()
+            .map(|entry| entry.pending_id.as_str())
+            .collect::<Vec<_>>(),
+        [withheld.as_str()]
+    );
     drop(app);
     runtime.shutdown().await;
 }

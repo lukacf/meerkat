@@ -24,12 +24,12 @@
 //! attested human decision: person authenticated, in the login it was made
 //! in, on the ingress `console`. The checks an approval's decide makes
 //! under the access fence (the person is still current and still holds
-//! `gating.decide`, [`console_decide_fenced`], and may still view the
-//! asking member) are the eligibility the owner checks when the decision
-//! commits, with the fence held through that call, so a revocation
-//! published while the request waited is honored. A person who may no
-//! longer view the asking member then is answered as at the start: as for
-//! an id that is not pending.
+//! `gating.decide`, [`console_decide_fenced`], and is still shown the
+//! asking member, [`gating_origin_shown_when_applied`]) are the eligibility
+//! the owner checks when the decision commits, with the fence held through
+//! that call, so a revocation published while the request waited is
+//! honored. A person who is no longer shown the asking member then is
+//! answered as at the start: as for an id that is not pending.
 
 use std::sync::OnceLock;
 
@@ -111,25 +111,25 @@ enum Ineligible {
 }
 
 /// The person who decides, eligible while the checks of an approval's
-/// decide pass under the access fence and the person may view the asking
-/// member. What failed is kept for the route's answer.
+/// decide pass under the access fence and the person is still shown the
+/// asking member, by the rule an approval's decide asks of its origin when
+/// it is applied ([`gating_origin_shown_when_applied`]). What failed is
+/// kept for the route's answer.
 struct FencedPerson<'a, 'fence> {
     decider: &'a ConsoleApprovalDecider,
     fence: Option<&'a AccessDecisionFence<'fence>>,
+    access_view: Option<&'a AccessView>,
     asker: &'a str,
     ineligible: OnceLock<Ineligible>,
 }
 
 impl ConsentEligibility for FencedPerson<'_, '_> {
     fn check_current(&self) -> Result<(), ConsentIneligible> {
-        if let Err(refusal) = console_decide_fenced(self.decider, self.fence, None) {
+        if let Err(refusal) = console_decide_fenced(self.decider, self.fence) {
             let _ = self.ineligible.set(Ineligible::Refused(refusal));
             return Err(ConsentIneligible);
         }
-        if self
-            .fence
-            .is_some_and(|fence| !fence.can_view_agent(self.asker))
-        {
+        if !gating_origin_shown_when_applied(self.fence, self.access_view, Some(self.asker)) {
             let _ = self.ineligible.set(Ineligible::Hidden);
             return Err(ConsentIneligible);
         }
@@ -258,6 +258,7 @@ pub(super) async fn decide(
     let eligibility = FencedPerson {
         decider: &decider,
         fence: fence.as_ref(),
+        access_view,
         asker: set.asker(),
         ineligible: OnceLock::new(),
     };

@@ -4681,9 +4681,9 @@ the session keeps its model, its level, its stored params and its live
 registration, and nothing is queued for the turn. A turn that has to build
 its session first (a deferred create's first turn, or a stored session that
 is not live), and a turn whose route changes between that check and its
-start, is judged when it starts: it is attempted once, and its stored input
-ends as abandoned with the reason `stopped`, not with the refusal (see
-Known limitations in the changelog). A run that fails for the refusal
+start, is judged when it starts: its stored input ends as abandoned with
+the reason `stopped`, not with the refusal (see Known limitations in the
+changelog). A run that fails for the refusal
 reports it in `run_failed` as the `error_report` reason
 `{"reason_type": "reasoning_effort_refused", "refusal": {...}}` with class
 `config`. No provider request is made for a refused level. The MCP server

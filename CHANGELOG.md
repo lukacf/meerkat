@@ -2365,11 +2365,13 @@ them.
   its input is stored. A turn that has to build its session first (a
   deferred create's first turn, or a stored session that is not live), and
   a turn whose route changes between that check and its start, is judged
-  when it starts: it is attempted once and its stored input ends as
-  abandoned with the reason `stopped`, not with the refusal, and the
-  runtime retires the session's live registration after the refused start
-  and rebuilds it from the stored session at the next turn. The refusal
-  reason is in the typed details of the answer (`reasoning_effort_refusal`).
+  when it starts: its stored input ends as abandoned with the reason
+  `stopped`, not with the refusal. The refused start costs the session
+  that one turn and nothing it owns: its mobs and their members stay. The
+  runtime retires the session's live runtime (its registration and its
+  MCP adapter) after the refused start, and the next turn builds it again
+  from the stored session. The refusal reason is in the typed details of
+  the answer (`reasoning_effort_refusal`).
 
 - MCP server: `meerkat_resume` rebuilds the session whenever it names a
   reasoning effort level, and retires the live session before that build.

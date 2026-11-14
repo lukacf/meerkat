@@ -105,7 +105,7 @@ Send `expected_spec_digest`: the agent's `spec_digest` from identity_list, or fr
 
 `set` names what changes; a member you leave out stays as it is. `instructions` and `context` are replaced whole. `labels` sets each key you give and keeps the others; `labels_remove` removes keys. A label the host reserves stays as it is: an update that would give it another value or remove it is refused `reserved_key` (at `set.labels` or `set.labels_remove`). `profile` moves the agent to that profile's model, tools and skills on the same conversation. A move into a profile whose agents the host prepares is refused `unsupported` at `set.profile`: create the agent in that profile instead. `peers_add` and `peers_remove` change who it can message.
 
-An instructions change is in the agent's record at once. It reaches the agent at its next run; a run that starts within moments of the change may still use the earlier instructions; earlier instructions are never rewritten. The result says what became of it in `agents[0].instructions.kind`: `applies_at_next_run`; `applies_after_compaction` (the agent's model takes new instructions only at the head of what it reads, so the change reaches it after its next compaction); `applies_at_next_session` with a `reason` (the change does not reach the agent as it runs now, and applies when it next starts a new conversation); `unchanged`.
+An instructions change is in the agent's record at once. It reaches the agent at its next run, or later when the result says so; a run that starts within moments of the change may still use the earlier instructions; earlier instructions are never rewritten. The result says what became of it in `agents[0].instructions.kind`: `applies_at_next_run`; `applies_after_compaction` (the agent's model takes new instructions only at the head of what it reads, so the change does not reach it at its next run: it waits for the agent's next compaction, which a short conversation may never reach, and until then the agent follows its earlier instructions; only its host can bring the change in sooner, by resetting the agent, which discards its conversation); `applies_at_next_session` with a `reason` (the change does not reach the agent as it runs now, and applies when it next starts a new conversation); `unchanged`.
 
 You cannot change yourself (`self_change_refused`). An agent that the host's configuration declares is changed there, not here (`owner_read_only`).
 
@@ -151,7 +151,7 @@ The result's `outcome` is `done`, `pending_decision` or `refused`, and `request_
           "type": "string"
         },
         "instructions": {
-          "description": "The standing brief, replaced whole. One string per section; most agents need one. It reaches the agent at its next run; a run that starts within moments of the change may still use the earlier instructions; earlier instructions are never rewritten.",
+          "description": "The standing brief, replaced whole. One string per section; most agents need one. It reaches the agent at its next run, or later when the result says so; a run that starts within moments of the change may still use the earlier instructions; earlier instructions are never rewritten.",
           "items": {
             "type": "string"
           },

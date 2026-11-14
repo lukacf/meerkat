@@ -128,7 +128,8 @@ timestamp_ms, payload}`; `payload.type` is the event type.
   `compaction_failed`, `budget_warning`, `retrying`,
   `model_fallback_skipped`, `model_fallback_staged`,
   `model_fallback_committed`, `model_fallback_target_failed`,
-  `request_reasoning_lowered`, `provider_cache_breakpoints_discarded`,
+  `request_reasoning_lowered`, `request_reasoning_effort_resolved`,
+  `provider_cache_breakpoints_discarded`,
   `turn_usage_accounting_unmeasured`,
   `turn_usage_accounting_identity_disputed`, `operation_observation_failed`,
   `tool_results_bounded_for_request` (a request carried the run's own tool
@@ -140,8 +141,24 @@ timestamp_ms, payload}`; `payload.type` is the event type.
   turns; no public turn input accepts it; `minimal` is refused). It holds the
   batch disposition (`{"disposition": "apply", "level": ...}`,
   `superseded_by_explicit`, `conflicting` or `mixed_with_unpreferred`);
-  `request_reasoning_lowered {requested, baseline, outcome?}` reports what
-  each provider attempt sent.
+  `request_reasoning_lowered {requested, baseline, outcome?}` reports the
+  level judged for each provider attempt the turn prepares, including a
+  fallback attempt that is then skipped (no request is sent for it). The
+  preference is judged by the model's catalog row, except where the route
+  of the client that serves the request states levels itself: on a GitHub
+  Copilot route whose account entry for the model states levels, the entry
+  decides (`unsupported_level` where it does not state the level; an entry
+  that states none, or a list that is not loaded, leaves the catalog row to
+  decide), and on a self-hosted route with operator-declared levels the
+  declaration decides (`no_catalog_fact` where none are declared).
+- Reasoning effort level: `request_reasoning_effort_resolved {turn_number?,
+  fallback_attempt?, resolution}` reports each provider request that was
+  handed to the provider client with a session's provider-neutral
+  `reasoning_effort` level, after the call settled (it states the level the
+  request was handed over with; a call that failed after the hand-over is
+  counted, a request refused before it reports nothing);
+  `run_started.reasoning_effort` (and `run_resumed`) hold the resolution
+  when the run starts.
 - Other: `skills_resolved`, `skill_resolution_failed`,
   `peer_content_ingested`, `boundary_append_applied`,
   `boundary_appends_discarded`, `background_job_completed`,

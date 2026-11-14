@@ -69,6 +69,16 @@ pub struct WireModelProfile {
     /// Beta headers authorized by the model capability catalog.
     #[serde(default)]
     pub beta_headers: Vec<WireModelBetaHeader>,
+    /// The levels the provider-neutral `reasoning_effort` option accepts for
+    /// this model on its provider's own API (the direct route), lowest
+    /// first. Empty when the model takes no level there. Absent when no
+    /// source states them: a self-hosted model (the operator declares its
+    /// levels) or a model with no catalog row. A route that answers for
+    /// itself (a GitHub Copilot account's model list) can accept other
+    /// levels than these; a refused request names that route's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_levels:
+        Option<Vec<meerkat_core::model_profile::capabilities::EffortLevel>>,
 }
 
 /// Catalog-owned beta header metadata.

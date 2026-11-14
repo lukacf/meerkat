@@ -139,13 +139,29 @@ pub(crate) fn failure_document(error: &anyhow::Error) -> WireRunFailure {
 
 /// The wire data of the typed owner that decided the code, read from the
 /// projection the other surfaces report the same error with: a session
-/// error's data, a runtime driver error's native admission detail or the
-/// data of its teardown or hosting session error, a refused help-session
-/// resume's data, and a mob error's typed console detail. No data is built
-/// here, so the document holds what those surfaces hold and nothing more.
+/// error's data, an agent error's refused reasoning effort level (the data
+/// of the session error the other surfaces wrap it in), a runtime driver
+/// error's native admission detail or the data of its teardown or hosting
+/// session error, a refused help-session resume's data, and a mob error's
+/// typed console detail. No data is built here, so the document holds what
+/// those surfaces hold and nothing more.
 fn owner_details(owner: &(dyn std::error::Error + 'static)) -> Option<serde_json::Value> {
     if let Some(error) = owner.downcast_ref::<meerkat_core::SessionError>() {
         return session_error_details(error);
+    }
+    // This command reports a session's agent error as the agent error
+    // itself, so a refused reasoning effort level arrives here without its
+    // session error. Its details are that session error's own projection;
+    // the variant is named because an agent error cannot be cloned into one
+    // generically. An agent error whose session projection carries data and
+    // that has no arm here prints no details (a refused tool grant gate; see
+    // the row `agent_errors_with_wire_data_have_a_failure_document_decision`).
+    if let Some(meerkat_core::AgentError::ReasoningEffortRefused(refusal)) =
+        owner.downcast_ref::<meerkat_core::AgentError>()
+    {
+        return session_error_details(&meerkat_core::SessionError::Agent(
+            meerkat_core::AgentError::ReasoningEffortRefused(refusal.clone()),
+        ));
     }
     if let Some(error) = owner.downcast_ref::<meerkat_runtime::RuntimeDriverError>() {
         return runtime_driver_error_details(error);
@@ -158,6 +174,24 @@ fn owner_details(owner: &(dyn std::error::Error + 'static)) -> Option<serde_json
         return detail.detail_value().ok();
     }
     None
+}
+
+/// The typed error of a turn that ended because the session's reasoning
+/// effort level was refused before a provider request, when `error` is the
+/// typed turn error of such a turn. The command then fails exactly as a
+/// refused build does: the same typed owner, exit status and failure
+/// document, whichever checkpoint refused.
+pub(crate) fn reasoning_effort_refused_turn(
+    error: &meerkat_core::TurnErrorMetadata,
+) -> Option<meerkat_core::SessionError> {
+    match error.reason.as_ref()? {
+        meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { refusal } => {
+            Some(meerkat_core::SessionError::Agent(
+                meerkat_core::AgentError::ReasoningEffortRefused(refusal.clone()),
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// Write the failure document of `error` as one JSON document on stdout,
@@ -236,6 +270,15 @@ fn owner_code(cause: &(dyn std::error::Error + 'static)) -> Option<OwnerCode> {
     }
     if let Some(refusal) = cause.downcast_ref::<meerkat::help::HelpSessionNotResumable>() {
         return Some(OwnerCode::Public(refusal.error_code()));
+    }
+    // A command that names the reasoning effort level in two places that
+    // disagree is the caller's request, refused before anything is built:
+    // invalid params, as JSON-RPC and REST answer the same disagreement.
+    if let Some(meerkat_core::SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree {
+        ..
+    }) = cause.downcast_ref::<meerkat_core::SessionLlmIdentityOverrideError>()
+    {
+        return Some(OwnerCode::Public(ErrorCode::InvalidParams));
     }
     if let Some(code) = config_write_admission_code(cause) {
         return Some(OwnerCode::Public(code));
@@ -1157,6 +1200,202 @@ mod tests {
             serde_json::json!({ "error": turn_error })
         );
         assert_eq!(failure_exit_status(&error), crate::EXIT_ERROR);
+    }
+
+    fn refused_level(reason: &str, supported: serde_json::Value) -> serde_json::Value {
+        let facts = if supported.is_null() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!("catalog")
+        };
+        serde_json::json!({
+            "requested": "max",
+            "provider": "anthropic",
+            "model": "claude-opus-4-5",
+            "route": {"backend": "anthropic_api", "api": "messages"},
+            "reason": reason,
+            "supported": supported,
+            "facts": facts,
+        })
+    }
+
+    fn refused_build(refusal: &serde_json::Value) -> anyhow::Error {
+        let refusal: meerkat_core::ReasoningEffortRefusal =
+            serde_json::from_value(refusal.clone()).unwrap();
+        crate::session_err_to_anyhow(SessionError::Agent(AgentError::ReasoningEffortRefused(
+            Box::new(refusal),
+        )))
+    }
+
+    /// The failure document of `error`, as the JSON `rkat run` writes.
+    fn failure_document_json(error: &anyhow::Error) -> serde_json::Value {
+        serde_json::to_value(failure_document(error)).unwrap()
+    }
+
+    /// A refused reasoning effort level exits 2 and gives one failure
+    /// document: `INVALID_PARAMS` with the typed refusal as its details and
+    /// the stderr text as its message.
+    #[test]
+    fn a_refused_reasoning_effort_level_prints_its_document_and_exits_2() {
+        let refusal = refused_level(
+            "unsupported_level",
+            serde_json::json!(["low", "medium", "high"]),
+        );
+        let error = refused_build(&refusal);
+        assert_eq!(failure_exit_status(&error), 2);
+        assert_eq!(failure_error_code(&error), Some(ErrorCode::InvalidParams));
+        assert_eq!(
+            failure_document_json(&error),
+            serde_json::json!({
+                "error": {
+                    "code": "INVALID_PARAMS",
+                    "category": "validation",
+                    "message": error.to_string(),
+                    "details": {
+                        "kind": "reasoning_effort_refused",
+                        "retryable": false,
+                        "reasoning_effort_refusal": refusal,
+                    },
+                }
+            })
+        );
+        // No other failure's document carries the refusal.
+        for other in [
+            crate::session_err_to_anyhow(SessionError::Busy {
+                id: SessionId::new(),
+            }),
+            session_not_found(&SessionId::new()),
+            anyhow::anyhow!("--comms-listen-tcp cannot be used with --no-comms"),
+        ] {
+            let document = failure_document_json(&other);
+            assert_ne!(
+                document["error"]["details"]["kind"], "reasoning_effort_refused",
+                "{other}"
+            );
+            assert!(
+                document["error"]["details"]
+                    .get("reasoning_effort_refusal")
+                    .is_none(),
+                "{other}"
+            );
+        }
+    }
+
+    /// Only the reason that can pass later with no configuration change is
+    /// marked retryable; the exit status is 2 for every reason.
+    #[test]
+    fn the_transient_refusal_is_marked_on_the_cli() {
+        for (reason, retryable) in [
+            ("supported_levels_unavailable", true),
+            ("supported_levels_unknown", false),
+        ] {
+            let error = refused_build(&refused_level(reason, serde_json::Value::Null));
+            let document = failure_document_json(&error);
+            let details = &document["error"]["details"];
+            assert_eq!(details["retryable"], retryable, "{reason}");
+            assert_eq!(details["reasoning_effort_refusal"]["reason"], reason);
+            assert!(details["reasoning_effort_refusal"]["supported"].is_null());
+            assert!(details["reasoning_effort_refusal"]["facts"].is_null());
+            assert_eq!(failure_exit_status(&error), 2, "{reason}");
+        }
+    }
+
+    /// A refusal that names no route renders: `route` is `null` in the
+    /// document and the message leaves the route out.
+    #[test]
+    fn a_refusal_without_a_route_renders() {
+        let mut refusal = refused_level("supported_levels_unknown", serde_json::Value::Null);
+        refusal["route"] = serde_json::Value::Null;
+        let error = refused_build(&refusal);
+        let document = failure_document_json(&error);
+        let details = &document["error"]["details"];
+        assert!(details["reasoning_effort_refusal"]["route"].is_null());
+        assert_eq!(details["reasoning_effort_refusal"], refusal);
+        let message = document["error"]["message"].as_str().unwrap();
+        assert!(!message.contains(" on "), "{message}");
+        assert_eq!(failure_exit_status(&error), 2);
+    }
+
+    /// A turn that ended because the level was refused before a provider
+    /// request fails exactly as a refused build does: the same typed owner,
+    /// exit status 2 and the same failure document, never the failed-turn
+    /// document of another cause.
+    #[test]
+    fn a_refusal_inside_a_turn_has_the_build_time_shape() {
+        let refusal = refused_level("unsupported_level", serde_json::json!(["low", "medium"]));
+        let typed: meerkat_core::ReasoningEffortRefusal =
+            serde_json::from_value(refusal.clone()).unwrap();
+        let mut turn_error = meerkat_core::TurnErrorMetadata::terminal(
+            meerkat_core::TurnTerminalCauseKind::FatalFailure,
+            meerkat_core::TurnTerminalOutcome::Failed,
+            "reasoning effort refused",
+        );
+        turn_error.reason = Some(
+            meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+                refusal: Box::new(typed),
+            },
+        );
+        let in_turn = match crate::completion_outcome_to_cli_runtime_turn_result(
+            meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                reason: "reasoning effort refused".to_string(),
+                error: turn_error,
+            },
+            &SessionId::new(),
+            &meerkat_core::connection::RealmId::parse("cli-exit").unwrap(),
+            true,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("an abandoned completion is a failure"),
+        };
+        let at_build = refused_build(&refusal);
+        assert_eq!(failure_exit_status(&in_turn), 2);
+        assert_eq!(failure_error_code(&in_turn), failure_error_code(&at_build));
+        let in_turn_document = failure_document_json(&in_turn);
+        let at_build_document = failure_document_json(&at_build);
+        assert_eq!(
+            in_turn_document["error"]["details"],
+            at_build_document["error"]["details"]
+        );
+        assert_eq!(in_turn_document["error"]["code"], "INVALID_PARAMS");
+        assert_eq!(in_turn_document["error"]["message"], in_turn.to_string());
+        assert_eq!(in_turn.to_string(), at_build.to_string());
+    }
+
+    /// Every agent error whose session error carries wire data on the other
+    /// surfaces has a decision here, because this command reports the agent
+    /// error without its session error: the document carries that data, or
+    /// it prints no details on purpose. The two below are every such agent
+    /// error (meerkat-core's row
+    /// `the_agent_errors_with_wire_data_are_the_listed_ones` names them and
+    /// does not compile when a variant is added without being placed).
+    #[test]
+    fn agent_errors_with_wire_data_have_a_failure_document_decision() {
+        // A refused reasoning effort level: the session projection's data.
+        let refusal: meerkat_core::ReasoningEffortRefusal = serde_json::from_value(refused_level(
+            "unsupported_level",
+            serde_json::json!(["low", "medium"]),
+        ))
+        .unwrap();
+        let projection = session_error_details(&SessionError::Agent(
+            AgentError::ReasoningEffortRefused(Box::new(refusal.clone())),
+        ));
+        assert!(projection.is_some());
+        let bare = anyhow::Error::from(AgentError::ReasoningEffortRefused(Box::new(refusal)));
+        assert_eq!(failure_document(&bare).error.details, projection);
+
+        // A refused scoped tool grant gate: no details. Its session error
+        // carries data, and this command does not print it for the bare
+        // agent error.
+        let gate = || {
+            AgentError::ToolGrantGateRefused(Box::new(
+                meerkat_core::tool_grant::GrantGateRefusal::NoGrantService,
+            ))
+        };
+        assert!(session_error_details(&SessionError::Agent(gate())).is_some());
+        assert_eq!(
+            failure_document(&anyhow::Error::from(gate())).error.details,
+            None
+        );
     }
 
     /// Joining a shutdown failure onto an earlier failure keeps the earlier

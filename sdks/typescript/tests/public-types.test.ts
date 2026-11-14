@@ -888,9 +888,21 @@ const publicMobTurnStartOptions: MobTurnStartOptions = {
 
 const publicMobTurnStartOptionsClear: MobTurnStartOptions = {
   providerParams: { action: "clear" },
+  reasoningEffort: { action: "clear" },
   authBinding: { action: "clear" },
 };
 void publicMobTurnStartOptionsClear;
+
+const publicMobTurnStartOptionsWithLevel: MobTurnStartOptions = {
+  reasoningEffort: "xhigh",
+};
+void publicMobTurnStartOptionsWithLevel;
+
+const publicMobTurnStartOptionsWithRetiredSpelling: MobTurnStartOptions = {
+  // @ts-expect-error the neutral level has one spelling: `xhigh`.
+  reasoningEffort: "x_high",
+};
+void publicMobTurnStartOptionsWithRetiredSpelling;
 
 const publicMobTurnStartOptionsWithRetiredSplitClear: MobTurnStartOptions = {
   model: "gpt-test",
@@ -916,6 +928,7 @@ type MobTurnStartSupportedWireOptionKeys =
   | "output_schema"
   | "provider"
   | "provider_params"
+  | "reasoning_effort"
   | "self_hosted_server_id"
   | "session_events"
   | "skill_refs"

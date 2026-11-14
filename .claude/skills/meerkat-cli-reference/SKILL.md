@@ -148,6 +148,7 @@ Common options:
 --open-in-browser               # open HTML output after writing the artifact
 --html-template <NAME>          # builtin: polished
 --html-template-file <PATH>
+--reasoning-effort <none|minimal|low|medium|high|xhigh|max>  # provider-neutral level; refused (exit 2) if the model or route does not accept it
 --skill <PATH_OR_ID>            # repeatable
 -t, --tools <safe|workspace|full|none>
 -v, --verbose
@@ -165,6 +166,7 @@ Advanced options (`rkat run --help` only):
 --yolo                          # alias for --tools full
 --param <KEY=VALUE>             # repeatable
 --params-json <JSON>
+--no-reasoning-effort           # with --resume only: remove the session's level
 --schema <SCHEMA>               # inline JSON when it starts with {, else a file path
 --export-atif                   # opt-in: write an ATIF trajectory after the turn (run and --resume)
 --allow-tool <TOOL>             # repeatable first-turn allow overlay
@@ -229,7 +231,10 @@ turn that outlasted the retries, `kind` `retry_exhausted`, carries it): its
 class can succeed on a later attempt. A typed error before the turn prints its own code
 and data; a check made by the CLI itself prints `INTERNAL_ERROR` without
 `details`. Exit statuses do not change with the output mode (a failed turn
-exits 1 whatever the document's code) and stderr keeps its `Error:` line.
+exits 1 whatever the document's code, except a turn refused for its
+reasoning effort level, which exits 2 like the refused build; see Reasoning
+effort refusal in the CLI configuration reference) and stderr keeps its
+`Error:` line.
 With `--stream` the streamed text precedes the document. An argument the
 parser refuses (exit 2) prints no document, text and HTML output print none,
 and no command other than `rkat run` prints one (`rkat help --output json`

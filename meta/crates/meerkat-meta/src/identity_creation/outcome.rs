@@ -319,10 +319,11 @@ closed_tokens!(IdentityOutcome {
 });
 
 /// What became of an update's instructions change. The new text is in the
-/// agent's record at once, whatever the outcome: it reaches the agent at
-/// its next run, a run that starts within moments of the change may still
-/// use the earlier instructions, and earlier instructions are never
-/// rewritten.
+/// agent's record at once, whatever the outcome, and earlier instructions
+/// are never rewritten. When it reaches the agent is what the outcome says.
+/// The instruction status read (`meta/instruction_status`) is the authority
+/// for whether the change is in effect: the agent's slot reads `pending`
+/// until it is, then `effective`.
 ///
 /// This is the one definition of the outcome: the field of an update's
 /// result is this type and nothing else names its values.
@@ -330,10 +331,15 @@ closed_tokens!(IdentityOutcome {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum InstructionOutcome {
-    /// The change reaches the agent at its next run.
+    /// The change reaches the agent at its next run. A run that starts
+    /// within moments of the change may still use the earlier instructions.
     AppliesAtNextRun,
     /// The agent's model takes new instructions only at the head of what
-    /// it reads: the change reaches the agent after its next compaction.
+    /// it reads: the change reaches the agent after its next compaction,
+    /// which a short conversation may never reach. Also the answer when
+    /// how the agent's model takes them could not be read: an agent with a
+    /// conversation is never answered [`Self::AppliesAtNextRun`] without
+    /// that having been read.
     AppliesAfterCompaction,
     /// The change does not reach the agent as it runs now, for `reason`: it
     /// applies when the agent next starts afresh.

@@ -1095,6 +1095,25 @@ impl AccessDecisionFence<'_> {
             .decide_agent_lineage(ACTION_AGENT_VIEW, identity, &lineage)
             .is_allow()
     }
+
+    /// Whether this caller may see a gating request recorded with the origin
+    /// `identity`, as the pending list and the audit read decide it:
+    /// `agent.view` on the agent ([`Self::can_view_agent`]), and, for a
+    /// caller the console keeps apart from other people
+    /// ([`AccessView::kept_apart_from_other_people`]), only an agent the
+    /// held attributes know ([`AccessView::withholds_unknown_member`]): an
+    /// origin the console does not know may have been private to a person.
+    pub(crate) fn can_see_origin(&self, identity: &str) -> bool {
+        self.can_view_agent(identity) && !self.withholds_unknown_member(identity)
+    }
+
+    /// [`AccessView::withholds_unknown_member`], with the agent looked up in
+    /// the held attributes.
+    fn withholds_unknown_member(&self, identity: &str) -> bool {
+        let alias = self.view.runtime_alias_member(identity);
+        self.view.kept_apart_from_other_people()
+            && !AccessView::known_in(&self.attributes, alias.member_key(identity))
+    }
 }
 
 /// The most links an access decision walks along an agent's lineage: the
@@ -1784,6 +1803,12 @@ impl AccessView {
             .attributes
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::known_in(&cache, identity)
+    }
+
+    /// Whether `cache` holds the agent `identity` names, by its identity or
+    /// its projected `agent_id`.
+    fn known_in(cache: &BTreeMap<String, Arc<AgentResourceAttributes>>, identity: &str) -> bool {
         cache.contains_key(identity)
             || cache
                 .values()
@@ -3092,6 +3117,79 @@ mod tests {
         let root = configured.view_for_subject(Some("root@example.test"));
         assert!(!root.kept_apart_from_other_people());
         assert!(root.can_view_uncaptured_member("anyone"));
+    }
+
+    /// The decision fence sees the origin of a gating request as the
+    /// pending list does: `agent.view` on the agent, and, for a caller the
+    /// console keeps apart from other people, only an agent the console
+    /// knows. A person who is not an admin is refused an origin the console
+    /// was never told about, under rules that reach it and with the rules
+    /// switched off; an admin is not; and a known agent is decided by
+    /// `agent.view` alone.
+    #[test]
+    fn the_decision_fence_sees_an_origin_as_the_pending_list_does() {
+        let known = AgentResourceAttributes {
+            identity: "known".to_string(),
+            agent_id: None,
+            role: None,
+            labels: BTreeMap::new(),
+        };
+        let everyone_views = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "everyone-views".to_string(),
+                    actions: vec!["agent.view".to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "hidden-is-hidden".to_string(),
+                    effect: AccessEffect::Deny,
+                    actions: vec!["agent.view".to_string()],
+                    agents: vec!["hidden".to_string()],
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        let rules_off = AccessController::new(AccessControlConfig {
+            enabled: false,
+            admins: vec!["root@example.test".to_string()],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        for (rules, controller) in [("rules on", &everyone_views), ("rules off", &rules_off)] {
+            controller.record_agent_attributes(known.clone());
+            controller.record_agent_attributes(AgentResourceAttributes {
+                identity: "hidden".to_string(),
+                ..known.clone()
+            });
+            for (caller, subject, sees_unknown) in [
+                ("a person who is not an admin", "bob@example.test", false),
+                ("an admin", "root@example.test", true),
+            ] {
+                let names = ["known", "hidden", "never-told"];
+                let fence = controller.decision_fence(Some(subject), None);
+                let by_fence = names.map(|identity| fence.can_see_origin(identity));
+                drop(fence);
+                let view = controller.view_for_subject(Some(subject));
+                let by_list = names.map(|identity| {
+                    view.can_view_agent(identity) && !view.withholds_unknown_member(identity)
+                });
+                assert_eq!(
+                    by_fence, by_list,
+                    "{rules}, {caller}: the fence and the pending list's rule"
+                );
+                let sees_hidden = sees_unknown || rules == "rules off";
+                assert_eq!(
+                    by_fence,
+                    [true, sees_hidden, sees_unknown],
+                    "{rules}, {caller}"
+                );
+            }
+        }
     }
 
     #[test]

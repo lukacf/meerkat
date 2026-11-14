@@ -402,8 +402,10 @@ auth_binding = { realm = "global", binding = "openai_oauth" }
   target emits `model_fallback_skipped` with a reason: `provider_boundary`,
   `auth_unavailable`, `context_fit`, `context_unknown`, `output_budget`,
   `modality_parity`, `tool_parity` (output schema cannot compile, or web
-  search lost), `tool_choice_unsupported`, `request_unsupported`,
-  `admission_unavailable`.
+  search lost), `tool_choice_unsupported`, `reasoning_effort_unsupported`
+  (the target's route does not accept the session's `reasoning_effort`
+  level; a target that accepts it keeps the level for the attempt and for
+  later turns), `request_unsupported`, `admission_unavailable`.
 - A switch emits `model_fallback_staged` and `model_fallback_committed`, adds
   a `model_fallback` system notice (models, reason, limits, hidden tools) to
   the transcript, re-applies the output schema for the new provider, and runs

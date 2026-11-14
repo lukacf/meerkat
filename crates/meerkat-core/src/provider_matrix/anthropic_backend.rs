@@ -1,6 +1,7 @@
 //! Anthropic backend kinds (typed, provider-owned).
 
 use super::anthropic_auth::AnthropicAuthMethod;
+use crate::reasoning_effort::ReasoningFactsSource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnthropicBackendKind {
@@ -87,6 +88,21 @@ impl AnthropicBackendKind {
             // Foundry uses a per-deployment base URL from binding options.
             Self::Foundry => "",
             Self::Copilot => "",
+        }
+    }
+
+    /// Which source states the reasoning effort levels this backend accepts
+    /// for a model. The native API, Bedrock, Vertex and Foundry forward the
+    /// provider's own Messages API, so the catalog row states their levels.
+    /// Copilot answers for itself: the account's model list states its
+    /// levels, and the catalog row never does. The one owner of that
+    /// decision; a new kind must decide (no wildcard arm).
+    pub fn reasoning_levels_source(self) -> ReasoningFactsSource {
+        match self {
+            Self::AnthropicApi | Self::Bedrock | Self::Vertex | Self::Foundry => {
+                ReasoningFactsSource::Catalog
+            }
+            Self::Copilot => ReasoningFactsSource::Account,
         }
     }
 }

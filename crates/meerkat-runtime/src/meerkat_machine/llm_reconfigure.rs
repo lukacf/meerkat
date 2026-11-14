@@ -375,6 +375,19 @@ impl MeerkatMachine {
         let command = self
             .prepare_reconfigure_session_llm_command(session_id, request)
             .await?;
+        // This is the caller's entry: the host judges the resolved target
+        // here, before the command stages anything. A committed
+        // model-routing handoff prepares its command without this entry, so
+        // its realization is not judged and its lifecycle stays the routing
+        // machine's.
+        if let MeerkatMachineCommand::ReconfigureSessionLlmIdentity {
+            target_identity, ..
+        } = &command
+        {
+            self.llm_reconfigure_host()?
+                .judge_requested_target_session_llm_identity(session_id, target_identity)
+                .await?;
+        }
         drop(mutation_guard);
         match self
             .execute_meerkat_machine_command(None, command)

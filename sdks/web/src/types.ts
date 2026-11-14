@@ -231,8 +231,13 @@ export type ProviderName =
   | 'self_hosted'
   | 'other';
 
-/** Profile fields that win over durable session metadata on resume. */
-export type ResumeOverrideField = 'model' | 'provider' | 'provider_params';
+/**
+ * Profile fields that win over durable session metadata on resume.
+ * `reasoning_effort` makes the profile decide a resumed member's
+ * provider-neutral reasoning effort level: the level its `provider_params`
+ * name, or none.
+ */
+export type ResumeOverrideField = 'model' | 'provider' | 'provider_params' | 'reasoning_effort';
 
 /**
  * User-defined model registry entry (`[models.<id>]`).
@@ -315,7 +320,11 @@ export interface Profile {
   max_inline_peer_notifications?: number;
   /** JSON Schema for structured output extraction. */
   output_schema?: unknown;
-  /** Provider-specific parameters (e.g. thinking_budget, reasoning_effort). */
+  /**
+   * Provider-specific parameters (e.g. thinking_budget). The provider-neutral
+   * reasoning effort level of the profile's members is its `reasoning_effort`
+   * key: `{ reasoning_effort: 'high' }`.
+   */
   provider_params?: unknown;
 }
 

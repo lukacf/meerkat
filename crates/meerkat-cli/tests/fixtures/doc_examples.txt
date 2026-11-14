@@ -19,6 +19,10 @@ docs/cli/commands.mdx	rkat run -t workspace "fix the failing test"
 docs/cli/commands.mdx	rkat run --yolo --param temperature=0.2 "take the gloves off"
 docs/cli/commands.mdx	rkat run --help
 docs/cli/commands.mdx	rkat -m claude-sonnet-4-6 --param temperature=0.2 --param max_output_tokens=4000 "triage this incident"
+docs/cli/commands.mdx	rkat run -m gpt-5.5 --reasoning-effort high "plan the migration"
+docs/cli/commands.mdx	rkat run -m gpt-5.5 --reasoning-effort high -t workspace --schema ./plan.schema.json --stream --output json "plan the migration"
+docs/cli/commands.mdx	rkat run --resume last --reasoning-effort low "now the short version"
+docs/cli/commands.mdx	rkat run --resume last --no-reasoning-effort "continue"
 docs/cli/commands.mdx	rkat --schema ./triage.schema.json "extract issues from this diff"
 docs/cli/commands.mdx	rkat run --html "explain how prompt caching works in this repo"
 docs/cli/commands.mdx	rkat run --browser "create a visual implementation plan for this change"
@@ -59,6 +63,7 @@ docs/concepts/configuration.mdx	rkat --realm team-alpha config patch --json '{"a
 docs/concepts/configuration.mdx	rkat run --html --html-template polished "Explain this design"
 docs/concepts/configuration.mdx	rkat run --html --html-template-file ./templates/incident.html "Summarize this incident"
 docs/concepts/providers.mdx	rkat models
+docs/concepts/providers.mdx	rkat run --model gpt-5.5 --reasoning-effort high "Plan the migration"
 docs/concepts/providers.mdx	rkat run --model claude-sonnet-4-6 --params-json '{"provider_tag":{"provider":"anthropic","thinking_budget_tokens":10000,"cache_control":"disabled"}}' "Solve this problem"
 docs/concepts/providers.mdx	rkat run --model gpt-5.6-terra --params-json '{"provider_tag":{"provider":"open_ai","reasoning_effort":"max","reasoning_mode":"pro","reasoning_context":"all_turns","text_verbosity":"high"}}' "Prove this theorem"
 docs/concepts/providers.mdx	rkat run --model gemini-3.8-flash --params-json '{"provider_tag":{"provider":"gemini","thinking_level":"medium"}}' "Analyze this data"

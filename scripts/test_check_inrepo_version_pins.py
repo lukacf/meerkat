@@ -304,6 +304,68 @@ class ShapeTests(GuardTest):
         self.repo.write("docs/history.md", "Since demo-meta 1.2.0 the gateway restarts.\n")
         self.assertClean()
 
+    def test_a_known_issue_link_to_a_release_page_is_recorded_history(self):
+        # A page that tells the reader of a later version what an earlier release's page
+        # says keeps pointing at that page, whatever the version of the tree.
+        page = "https://github.com/lukacf/meerkat/releases/tag"
+        self.repo.write("docs/notes.md", textwrap.dedent(f"""\
+            Fixed here; see the [known issue on the 1.4.1 release page]({page}/v1.4.1) for earlier releases.
+            Details: [known issue on the Meta 1.4.0 release page]({page}/meta-v1.4.0).
+            Both the [known issue on the Connect 1.3.9 release page]({page}/connect-v1.3.9) and the
+            [known issue on the Core 1.2.0 release page]({page}/v1.2.0) describe it.
+            """))
+        self.assertClean()
+
+    def test_only_the_known_issue_form_is_recorded_history(self):
+        # The link text and the target together make the form: other words, another
+        # target, or a release URL outside such a link are pins as before.
+        releases = "https://github.com/lukacf/meerkat/releases"
+        known = "known issue on the 1.4.1 release page"
+        lines = [
+            f"Install [Demo Core 1.4.1]({releases}/tag/v1.4.1) first.",
+            f"Download the archives from the [release page]({releases}/tag/connect-v1.4.1).",
+            f"See the [release notes]({releases}/tag/meta-v1.4.1).",
+            f"See the [1.4.1 release page]({releases}/tag/v1.4.1).",
+            f"See the [known issues on the 1.4.1 release page]({releases}/tag/v1.4.1).",
+            f"See the [{known}]({releases}/tag/v1.4.0).",
+            f"See the [{known}]({releases}/tag/meta-v1.4.1).",
+            f"See the [known issue on the Meta 1.4.1 release page]({releases}/tag/v1.4.1).",
+            f"See the [known issue on the meta 1.4.1 release page]({releases}/tag/meta-v1.4.1).",
+            f"See the [{known}]({releases}/tag/v1.4.1/assets).",
+            f"See the [{known}]({releases}/download/v1.4.1/checksums.sha256).",
+            f"See the {known}: {releases}/tag/v1.4.1",
+            f"See the [known issue on the Tool 0.3.0 release page]({releases}/tag/tool-v0.3.0).",
+            "See the [known issue on the 1.0.0 release page]"
+            "(https://github.com/lukacf/meerkat-meta/releases/tag/v1.0.0).",
+        ]
+        self.repo.write("docs/get.md", "\n".join(lines) + "\n")
+        err = self.assertFindings()
+        for number in range(1, len(lines) + 1):
+            self.assertEqual(err.count(f"docs/get.md:{number}: "), 1, f"line {number}: {lines[number - 1]}\n{err}")
+        self.assertIn(f"{len(lines)} pin(s) below", err)
+
+    def test_a_known_issue_link_hides_nothing_beside_it(self):
+        # The link alone is history: an install command, a download URL and an archive
+        # name on the same line or the next one are still read.
+        releases = "https://github.com/lukacf/meerkat/releases"
+        link = f"[known issue on the 1.4.1 release page]({releases}/tag/v1.4.1)"
+        self.repo.write("docs/upgrade.md", textwrap.dedent(f"""\
+            See the {link}, then run `pip install demo-meta==1.4.1`.
+            See the {link}, then run `npm install @rkat/demo@1.4.1`.
+            See the {link}, then fetch {releases}/download/v1.4.1/checksums.sha256
+            See the {link} and unpack demo-cli-1.4.1-linux-x86_64.tar.gz
+            See the {link}.
+            """))
+        self.repo.write("docs/install.md", 'pip install demo-meta==1.4.0\ndemo-core = "=1.4.1"\n')
+        err = self.assertFindings("docs/upgrade.md:1: requirement demo-meta==1.4.1: pins demo-meta 1.4.1",
+                                  "docs/upgrade.md:2: npm-spec @rkat/demo@1.4.1: pins @rkat/demo 1.4.1",
+                                  "docs/upgrade.md:3: release lukacf/meerkat release v1.4.1: pins core 1.4.1",
+                                  "docs/upgrade.md:4: asset demo-cli-1.4.1: pins core 1.4.1",
+                                  "docs/install.md:1: requirement demo-meta==1.4.0",
+                                  'docs/install.md:2: cargo demo-core = "=1.4.1"')
+        self.assertNotIn("docs/upgrade.md:5", err)
+        self.assertIn("6 pin(s) below", err)
+
 
 class AllowlistTests(GuardTest):
     def setUp(self):
@@ -338,6 +400,197 @@ class AllowlistTests(GuardTest):
         self.repo.config["allow"] = [{"path": "docs/old.md", "reason": "Recorded history of releases.", "until": "x"}]
         self.repo.save_config()
         self.assertFindings("unknown keys", code=2)
+
+    def test_a_context_entry_covers_only_the_pins_in_that_text(self):
+        # Two lines pin the same release; the entry names the words that stand beside one of them.
+        url = "https://github.com/lukacf/meerkat/releases/tag/v1.4.1"
+        self.repo.write("docs/pair.md", f"Use [Demo Core 1.4.1]({url}), the release the\n"
+                        "add-on 1.4.1 was made with.\n\n"
+                        f"Install [Demo Core 1.4.1]({url}) first.\n")
+        self.repo.allow(path="docs/pair.md", match=r"^lukacf/meerkat release v1\.4\.1$",
+                        context=r"\[Demo Core 1\.4\.1\]\([^)]*/tag/v1\.4\.1\), "
+                                r"the release the add-on 1\.4\.1 was made with",
+                        reason="The page of the add-on names the release it was made with.")
+        err = self.assertFindings("docs/pair.md:4: release lukacf/meerkat release v1.4.1", "docs/old.md:1:")
+        self.assertNotIn("docs/pair.md:1:", err)
+        self.assertNotIn("covers nothing", err)
+        # An entry of context alone is not a whole-file entry: the file is still read.
+        self.repo.config["allow"][-1].pop("match")
+        self.repo.save_config()
+        err = self.assertFindings("docs/pair.md:4: release lukacf/meerkat release v1.4.1")
+        self.assertNotIn("docs/pair.md:1:", err)
+        self.repo.allow(path="docs/pair.md", context="(", reason="Not a regular expression at all.")
+        self.assertFindings(code=2)
+
+    def test_a_context_entry_covers_only_the_pin_inside_its_text(self):
+        # The entry names a sentence. A pin that only stands near that sentence (on its
+        # line, or on the line before it) is not the sentence's pin and is still reported.
+        releases = "https://github.com/lukacf/meerkat/releases"
+        held = f"Use [Demo Core 1.4.1]({releases}/tag/v1.4.1), the release the add-on 1.4.1 was made with"
+        entry = {"path": "docs/pair.md", "match": r"^lukacf/meerkat release v1\.4\.1$",
+                 "context": r"\[Demo Core 1\.4\.1\]\([^)]*/tag/v1\.4\.1\), "
+                            r"the release the add-on 1\.4\.1 was made with",
+                 "reason": "The page of the add-on names the release it was made with."}
+        for label, page, line in (
+                ("a download address on the sentence's line",
+                 f"{held}; fetch {releases}/download/v1.4.1/sums.txt\n", 1),
+                ("a second link on the sentence's line", f"{held}, or see the [page]({releases}/tag/v1.4.1).\n", 1),
+                ("a link on the line before the sentence", f"Get it from {releases}/tag/v1.4.1 first.\n{held}.\n", 1)):
+            with self.subTest(label):
+                self.repo.config["allow"] = [entry]
+                self.repo.save_config()
+                self.repo.write("docs/pair.md", page)
+                err = self.assertFindings(f"docs/pair.md:{line}: release lukacf/meerkat release v1.4.1")
+                self.assertEqual(err.count("docs/pair.md:"), 1, err)
+                self.assertNotIn("covers nothing", err)
+        # The sentence alone is covered, and so is one whose words begin on the line before the pin.
+        self.repo.write("docs/pair.md", f"{held}.\n")
+        self.repo.write("docs/old.md", "")
+        self.assertClean()
+        self.repo.config["allow"] = [dict(entry, match=r"^demo-meta==1\.4\.1$",
+                                          context=r"the add-on requires `demo-meta==1\.4\.1`\. Nothing newer")]
+        self.repo.save_config()
+        self.repo.write("docs/pair.md",
+                        "Until then the add-on\nrequires `demo-meta==1.4.1`. Nothing\nnewer works with it.\n")
+        self.assertClean()
+
+    def test_a_context_entry_covers_no_pin_read_from_a_structure(self):
+        # A dependency read from a manifest's structure has no place in a line of prose.
+        self.repo.write("docs/old.md", "")
+        self.repo.write("connect/sdk/package.json", json.dumps({
+            "name": "@rkat/demo-connect", "version": "1.4.2",
+            "dependencies": {"@rkat/demo": "1.4.1"}}, indent=2) + "\n")
+        self.repo.allow(path="connect/sdk/package.json", context="@rkat/demo",
+                        reason="A context names prose, not a manifest.")
+        err = self.assertFindings("connect/sdk/package.json:5: dependencies @rkat/demo@1.4.1")
+        self.assertIn("covers nothing", err)
+
+
+class HoldTests(GuardTest):
+    """An entry with `at` holds its pins for one release of the package they pin.
+
+    It waits while that package is below the version, covers its pins at the version, and
+    is stale after it: the next bump stops on the pins and on the entry, and the hold is
+    decided again.
+    """
+
+    URL = "https://github.com/lukacf/meerkat/releases/tag/v1.4.2"
+    PLAIN = f"Install [Demo Core 1.4.2]({URL})\nfor the agent.\n"
+    HELD = f"Install [Demo Core 1.4.2]({URL}), the Core release\nConnect 1.4.2 was released with, for the agent.\n"
+    FINDING = "connect/README.md:1: release lukacf/meerkat release v1.4.2: pins core 1.4.2, below its version"
+    STALE = "allow entry 0 connect/README.md (^lukacf/meerkat release v1\\.4\\.2$) [at 1.4.3] covers nothing; delete it"
+
+    def tree(self, version, page, **changes):
+        """The tree at `version` with the page and the hold for the release 1.4.3."""
+        self.repo = Repo(self.repo.root, version=version)
+        self.repo.write("connect/README.md", page)
+        entry = {"path": "connect/README.md", "match": r"^lukacf/meerkat release v1\.4\.2$",
+                 "context": r"\[Demo Core 1\.4\.2\]\([^)]*/tag/v1\.4\.2\), "
+                            r"the Core release Connect 1\.4\.2 was released with\b",
+                 "at": "1.4.3",
+                 "reason": "The page describes the Connect release that was made with Core 1.4.2."}
+        entry.update(changes)
+        self.repo.allow(**{name: value for name, value in entry.items() if value is not None})
+
+    def test_a_hold_waits_below_its_version(self):
+        # The entry lands before the bump it is for: the pin is no finding yet, with or
+        # without the words, and the entry is not stale.
+        for page in (self.PLAIN, self.HELD):
+            with self.subTest(page=page):
+                self.tree("1.4.2", page)
+                self.assertIn("1 allow entries", self.assertClean())
+
+    def test_a_hold_covers_its_pin_at_its_version(self):
+        self.tree("1.4.3", self.HELD)
+        self.assertClean()
+
+    def test_a_hold_needs_the_words_beside_the_link(self):
+        self.tree("1.4.3", self.PLAIN)
+        err = self.assertFindings(f"{self.FINDING} 1.4.3", self.STALE)
+        self.assertIn("1 pin(s) below", err)
+        self.assertIn("1 stale allow entry.", err)
+
+    def test_a_hold_needs_the_link_the_words_name(self):
+        # The words still say 1.4.2 and the link moved on: nothing is pinned below the
+        # tree, and the entry that holds the old link covers nothing.
+        self.tree("1.4.3", self.HELD.replace("releases/tag/v1.4.2", "releases/tag/v1.4.3"))
+        err = self.assertFindings(self.STALE)
+        self.assertIn("0 pin(s) below", err)
+
+    def test_a_hold_ends_with_its_version(self):
+        self.tree("1.4.4", self.HELD)
+        err = self.assertFindings(f"{self.FINDING} 1.4.4", self.STALE)
+        self.assertIn("1 pin(s) below", err)
+        self.assertIn("1 stale allow entry.", err)
+
+    def test_a_hold_that_waits_on_no_pin_is_stale(self):
+        self.tree("1.4.2", "Install Demo Core first.\n")
+        self.assertFindings(self.STALE)
+
+    def test_a_hold_follows_the_package_its_pin_names(self):
+        # Meta moves past the hold's version while Core stays below it: the hold still
+        # waits on its Core pin, and it covers no pin on Meta.
+        self.tree("1.4.2", self.HELD + "See https://github.com/lukacf/meerkat/releases/tag/meta-v1.4.2\n",
+                  match=r"release (meta-)?v1\.4\.2$", context=None)
+        self.repo.write("meta/crates/demo-meta-rs/Cargo.toml", '[package]\nname = "demo-meta-rs"\nversion = "1.4.4"\n')
+        self.repo.write("meta/sdk/package.json", json.dumps({"name": "@rkat/demo-meta", "version": "1.4.4"}))
+        self.repo.write("meta/sdk/pyproject.toml", '[project]\nname = "demo-meta"\nversion = "1.4.4"\n')
+        err = self.assertFindings("connect/README.md:3: release lukacf/meerkat release meta-v1.4.2: pins meta 1.4.2")
+        self.assertIn("1 pin(s) below", err)
+        self.assertIn("0 stale allow entries", err)
+
+    def test_a_hold_on_a_requirement_reads_the_sentence_in_its_paragraph(self):
+        # The words that make the sentence a statement about a published release stand
+        # lines before the pin: the context is read in the pin's paragraph.
+        page = ("Until Connect 1.4.3 is published, use Connect 1.4.2. An environment\n"
+                "with the `host` extra of Connect 1.4.2's `demo-kit` cannot\n"
+                "take `demo-meta` 1.4.3 until Connect 1.4.3 is published: the extra\n"
+                "requires `demo-meta==1.4.2`. In that pairing:\n\n- nothing else changes.\n")
+        hold = {"match": r"^demo-meta==1\.4\.2$",
+                "context": r"Connect 1\.4\.2's `demo-kit` cannot take `demo-meta` 1\.4\.3 until Connect 1\.4\.3 is "
+                           r"published: the extra requires `demo-meta==1\.4\.2`\."}
+        stale = "allow entry 0 connect/README.md (^demo-meta==1\\.4\\.2$) [at 1.4.3] covers nothing; delete it"
+        self.tree("1.4.2", page, **hold)
+        self.assertClean()
+        self.tree("1.4.3", page, **hold)
+        self.assertClean()
+        # A bare install command on the same page is not the sentence.
+        self.tree("1.4.3", page + "\nRun `pip install demo-meta==1.4.2`.\n", **hold)
+        err = self.assertFindings("connect/README.md:8: requirement demo-meta==1.4.2: pins demo-meta 1.4.2")
+        self.assertIn("1 pin(s) below", err)
+        self.assertIn("0 stale allow entries", err)
+        # The same sentence with another pin is not the held one.
+        self.tree("1.4.3", page.replace("==1.4.2", "==1.4.1"), **hold)
+        err = self.assertFindings("connect/README.md:4: requirement demo-meta==1.4.1: pins demo-meta 1.4.1", stale)
+        self.assertIn("1 pin(s) below", err)
+        # Other words around the pin are not the held sentence.
+        self.tree("1.4.3", page.replace("the extra\nrequires", "the extra\nneeds"), **hold)
+        self.assertFindings("connect/README.md:4: requirement demo-meta==1.4.2: pins demo-meta 1.4.2", stale)
+        # The next version ends the hold.
+        self.tree("1.4.4", page, **hold)
+        err = self.assertFindings("connect/README.md:4: requirement demo-meta==1.4.2: pins demo-meta 1.4.2", stale)
+        self.assertIn("1 pin(s) below", err)
+        self.assertIn("1 stale allow entry.", err)
+
+    def test_a_hold_names_a_version_and_the_pins_it_holds(self):
+        for changes, needle in (({"at": "next"}, "at must be a version"),
+                                ({"at": 143}, "at must be a version"),
+                                ({"match": None, "context": None}, "at needs a match or a context"),
+                                ({"key": "^files/"}, "at takes no key")):
+            with self.subTest(changes=changes):
+                self.tree("1.4.2", self.HELD, **changes)
+                self.assertFindings(needle, code=2)
+
+    def test_write_leaves_a_held_pin_in_place(self):
+        manifest = '[project]\nname = "demo-py"\nversion = "1.4.2"\ndependencies = ["demo-meta==1.4.2"]\n'
+        self.tree("1.4.3", self.HELD)
+        self.repo.write("connect/py/pyproject.toml", manifest)
+        self.repo.allow(path="connect/py/pyproject.toml", match=r"^demo-meta==1\.4\.2$", at="1.4.3",
+                        reason="The package requires the Meta release it was built with.")
+        code, out, err = self.repo.run(write=True)
+        self.assertEqual(code, 0, err)
+        self.assertEqual((self.repo.root / "connect/py/pyproject.toml").read_text(), manifest)
+        self.assertNotIn("moved", out)
 
 
 class KeyEntryTests(GuardTest):

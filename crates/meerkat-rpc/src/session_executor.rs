@@ -826,6 +826,69 @@ mod typed_context_append_tests {
         assert!(matches!(error, CoreExecutorError::ApplyFailed { .. }));
         assert_eq!(error.apply_failure_cause().reason(), None);
     }
+
+    /// A `reasoning_effort` level the session's build or a pre-turn
+    /// reconfiguration refused crosses this process's own bridge as an apply
+    /// failure that keeps the typed refusal as its reason, so the failed
+    /// turn's error carries it. A refusal that names no route crosses
+    /// unchanged. The grant gate's data gives no effort reason.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_refused_reasoning_effort_crosses_the_rpc_bridge_with_its_typed_reason() {
+        for document in [
+            serde_json::json!({
+                "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                "route": {"backend": "anthropic_api", "api": "messages"},
+                "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+                "facts": "catalog",
+            }),
+            serde_json::json!({
+                "requested": "high", "provider": "other", "model": "custom-model-1",
+                "route": null,
+                "reason": "supported_levels_unknown", "supported": null, "facts": null,
+            }),
+        ] {
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document).expect("a refusal document reads");
+            for rpc_error in [
+                crate::session_runtime::session_error_to_rpc(SessionError::Agent(
+                    meerkat_core::AgentError::ReasoningEffortRefused(Box::new(refusal.clone())),
+                )),
+                crate::session_runtime::runtime_driver_error_to_rpc(
+                    meerkat_runtime::RuntimeDriverError::ReasoningEffortRefused(Box::new(
+                        refusal.clone(),
+                    )),
+                ),
+            ] {
+                let error = core_executor_error_from_rpc(rpc_error);
+                assert!(
+                    matches!(error, CoreExecutorError::ApplyFailed { .. }),
+                    "a refused level is an apply failure of the turn: {error:?}"
+                );
+                let cause = error.apply_failure_cause();
+                assert_eq!(cause.kind, CoreApplyFailureCauseKind::RuntimeTurn);
+                assert_eq!(cause.message(), format!("agent error: {refusal}"));
+                assert_eq!(
+                    cause.reason(),
+                    Some(
+                        &meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+                            refusal: Box::new(refusal.clone()),
+                        }
+                    )
+                );
+            }
+        }
+
+        let gate = core_executor_error_from_rpc(crate::session_runtime::session_error_to_rpc(
+            SessionError::Agent(meerkat_core::AgentError::ToolGrantGateRefused(Box::new(
+                meerkat_core::tool_grant::GrantGateRefusal::NoGrantService,
+            ))),
+        ));
+        assert!(matches!(
+            gate.apply_failure_cause().reason(),
+            Some(meerkat_core::event::AgentErrorReason::ToolGrantGateRefused { .. })
+        ));
+    }
 }
 
 /// The data key with which the session runtime hands its executor a run that
@@ -925,6 +988,13 @@ pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
         .data
         .as_ref()
         .and_then(SessionError::tool_grant_gate_refusal_from_data);
+    // A refused `reasoning_effort` level (the session's build, or the
+    // reconfiguration before the turn) crosses the same way, in its own
+    // typed data.
+    let effort_refusal = err
+        .data
+        .as_ref()
+        .and_then(SessionError::reasoning_effort_refusal_from_data);
     let message = err.message;
     let cause = match kind {
         Some(CoreApplyFailureCauseKind::ExecutorStopped) => {
@@ -940,6 +1010,14 @@ pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
     let cause = match gate_refusal {
         Some(refusal) => cause
             .with_reason(meerkat_core::event::AgentErrorReason::ToolGrantGateRefused { refusal }),
+        None => cause,
+    };
+    let cause = match effort_refusal {
+        Some(refusal) => cause.with_reason(
+            meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+                refusal: Box::new(refusal),
+            },
+        ),
         None => cause,
     };
     CoreExecutorError::apply_failed(cause)

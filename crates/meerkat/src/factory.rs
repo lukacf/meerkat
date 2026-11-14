@@ -2810,6 +2810,13 @@ pub enum BuildAgentError {
     #[error("keep_alive requires comms_name to be set")]
     #[cfg(feature = "comms")]
     KeepAliveRequiresCommsName,
+
+    /// The build's `reasoning_effort` level was refused for the model and
+    /// the route of the client the build made. Nothing of the build was
+    /// published and no provider request was made. Boxed to keep the error
+    /// small.
+    #[error("{0}")]
+    ReasoningEffortRefused(Box<meerkat_core::ReasoningEffortRefusal>),
 }
 
 /// Authoritative, side-effect-free-with-respect-to-session-state LLM
@@ -3103,6 +3110,45 @@ fn validate_gemini_request_shaping(
         Some(rejection) => Err(BuildAgentError::Config(rejection)),
         None => Ok(()),
     }
+}
+
+/// Refuse a provider-neutral `reasoning_effort` level the route of the
+/// client that will serve the session does not accept, when the agent is
+/// built or a caller reconfigures it, instead of at its first request.
+///
+/// The level `provider_params` carry is resolved strictly
+/// ([`meerkat_core::resolve_reasoning_effort`]) for `model` of `provider`
+/// against `observation`, what the built client reports about its route
+/// (`None` when it reports none), and `catalog_row`, the model's catalog
+/// row. The resolution runs on a scratch copy: the params themselves are
+/// not rewritten, so the session keeps the level in the neutral field and
+/// every request resolves it again for the route that serves it. Params
+/// that carry no level are not judged.
+pub(crate) fn validate_reasoning_effort_for_route(
+    provider: Provider,
+    model: &str,
+    provider_params: Option<&meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    observation: Option<&meerkat_core::ReasoningRouteObservation>,
+    catalog_row: Option<&meerkat_core::model_profile::capabilities::ModelCapabilities>,
+) -> Result<(), Box<meerkat_core::ReasoningEffortRefusal>> {
+    let Some(requested) = provider_params.and_then(|params| params.reasoning_effort) else {
+        return Ok(());
+    };
+    let mut scratch = provider_params.cloned();
+    meerkat_core::resolve_reasoning_effort(
+        meerkat_core::ReasoningResolveInput::new(
+            requested,
+            provider,
+            model,
+            observation,
+            catalog_row,
+            meerkat_core::ReasoningEffortDecidedBy::Request,
+        ),
+        &mut scratch,
+        meerkat_core::ReasoningResolveMode::Strict,
+    )
+    .map(|_resolution| ())
+    .map_err(Box::new)
 }
 
 /// Typed create-session model hints supplied by a public surface.
@@ -3647,6 +3693,9 @@ struct SelfHostedClientSpec {
     supports_reasoning: bool,
     supports_image_input: bool,
     supports_image_tool_results: bool,
+    /// The reasoning effort levels the operator declared for the model, as
+    /// the registry entry holds them.
+    reasoning_effort_levels: Option<Vec<meerkat_core::model_profile::capabilities::EffortLevel>>,
 }
 
 struct SelfHostedClientBuild {
@@ -7653,6 +7702,18 @@ impl AgentFactory {
         let current_credential_identity =
             Self::credential_identity_for_llm_identity(config, current)
                 .map_err(BuildAgentError::LlmClient)?;
+        // A chain entry names a model, not params: a target takes none of
+        // the session's params except its reasoning effort level, which a
+        // session keeps across every identity change (the one rule of
+        // `resolve_session_provider_params`). The identity a fallback commits
+        // and the target's request policy then carry the level, and each
+        // request on the target resolves it for the target's own route.
+        let target_provider_params = meerkat_core::resolve_session_provider_params(
+            current.provider_params.as_ref(),
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear),
+            None,
+        )
+        .map_err(|error| BuildAgentError::Config(error.to_string()))?;
         let mut identities = Vec::new();
         let mut skipped = Vec::new();
         for target in &config.model_fallback.chain {
@@ -7749,7 +7810,7 @@ impl AgentFactory {
                 model,
                 provider,
                 self_hosted_server_id,
-                provider_params: None,
+                provider_params: target_provider_params.clone(),
                 auth_binding,
             };
             if identity.model == current.model
@@ -7829,6 +7890,7 @@ impl AgentFactory {
             supports_reasoning: profile.supports_reasoning,
             supports_image_input: profile.image_input,
             supports_image_tool_results: profile.image_tool_results,
+            reasoning_effort_levels: self_hosted.reasoning_effort_levels.clone(),
         })
     }
 
@@ -7900,26 +7962,37 @@ impl AgentFactory {
             // Authorizer-backed auth is refused above, so the credential is
             // fixed here: the resolved static secret, or none for an
             // authless server.
-            let client: Arc<dyn LlmClient> = Arc::new(
-                OpenAiCompatibleClient::new_with_options(
-                    spec.mode,
-                    spec.remote_model,
-                    base_url,
-                    bearer_token,
-                    OpenAiCompatibleClientOptions {
-                        supports_temperature: spec.supports_temperature,
-                        supports_thinking: spec.supports_thinking,
-                        supports_reasoning: spec.supports_reasoning,
-                        supports_image_tool_results: spec.supports_image_tool_results,
-                    },
-                )
-                .with_image_input_support(spec.supports_image_input)
-                // The configured server that serves the model is the issuer
-                // of the continuity material this client receives: such
-                // material is replayed to that server only.
-                .with_self_hosted_server(spec.server_id)
-                .with_static_credential(),
-            );
+            let client = OpenAiCompatibleClient::new_with_options(
+                spec.mode,
+                spec.remote_model,
+                base_url,
+                bearer_token,
+                OpenAiCompatibleClientOptions {
+                    supports_temperature: spec.supports_temperature,
+                    supports_thinking: spec.supports_thinking,
+                    supports_reasoning: spec.supports_reasoning,
+                    supports_image_tool_results: spec.supports_image_tool_results,
+                },
+            )
+            .with_image_input_support(spec.supports_image_input)
+            // The configured server that serves the model is the issuer
+            // of the continuity material this client receives: such
+            // material is replayed to that server only.
+            .with_self_hosted_server(spec.server_id)
+            .with_static_credential()
+            .with_operator_reasoning_effort_levels(spec.reasoning_effort_levels);
+            // The route the client reports names the backend of the
+            // connection that resolved its server. A connection that names
+            // no self-hosted backend declares none, and the client then
+            // reports no route.
+            let client: Arc<dyn LlmClient> = Arc::new(match connection.backend {
+                meerkat_providers::NormalizedBackendKind::SelfHosted(backend) => {
+                    client.with_self_hosted_backend(backend)
+                }
+                meerkat_providers::NormalizedBackendKind::OpenAi(_)
+                | meerkat_providers::NormalizedBackendKind::Anthropic(_)
+                | meerkat_providers::NormalizedBackendKind::Google(_) => client,
+            });
             // The selected target the session identity will carry: the
             // durable binding it records, and the actual resolved backend
             // and credential owner, as for a registry-built client.
@@ -10989,6 +11062,7 @@ impl AgentFactory {
                 || mask.provider
                 || mask.self_hosted_server_id
                 || mask.provider_params
+                || mask.reasoning_effort
                 || mask.auth_binding
             {
                 metadata.apply_llm_identity(&SessionLlmIdentity {
@@ -11183,6 +11257,26 @@ impl AgentFactory {
             build_config.provider_params.as_ref(),
         )?;
         validate_gemini_request_shaping(provider, &model, build_config.provider_params.as_ref())?;
+        // The provider-neutral reasoning effort level is judged against the
+        // route of the client this build made, with the catalog row of the
+        // model as its backend serves it. A build that carries no level
+        // reads neither.
+        if build_config
+            .provider_params
+            .as_ref()
+            .is_some_and(|params| params.reasoning_effort.is_some())
+        {
+            validate_reasoning_effort_for_route(
+                provider,
+                &model,
+                build_config.provider_params.as_ref(),
+                llm_adapter.reasoning_route().as_ref(),
+                registry
+                    .profile_witness_for_identity(config, &resolved_llm_identity)
+                    .and_then(|witness| witness.catalog_capabilities()),
+            )
+            .map_err(BuildAgentError::ReasoningEffortRefused)?;
+        }
         if let Some(params) = build_config.provider_params.clone() {
             builder = builder.provider_params(params);
         }
@@ -12636,6 +12730,9 @@ mod brain_swap_runtime_loop_ab_tests;
 #[cfg(all(test, feature = "session-compaction", not(target_arch = "wasm32")))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod compaction_summary_budget_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod reasoning_effort_build_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod resume_provider_override_binding_tests;
@@ -18473,6 +18570,10 @@ mod tests {
     const FALLBACK_REALM_RELOAD: &str = "fallback_reload";
     const FALLBACK_REALM_HEAD_CANONICAL: &str = "fallback_head_canonical";
     const FALLBACK_REALM_SETTLED_ACTOR: &str = "fallback_settled_actor";
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    const FALLBACK_REALM_LEVEL_KEPT: &str = "fallback_level_kept";
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    const FALLBACK_REALM_LEVEL_SKIPPED: &str = "fallback_level_skipped";
 
     fn inline_realm_section(entries: &[(&str, &str)]) -> RealmConfigSection {
         RealmConfigSection::from_inline_api_keys(entries)
@@ -19670,6 +19771,828 @@ mod tests {
         );
     }
 
+    // ---- a session's reasoning effort level across a sticky fallback ----
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    type RecordedProviderTags =
+        Arc<std::sync::Mutex<Vec<Option<meerkat_core::lifecycle::run_primitive::ProviderTag>>>>;
+
+    /// A scripted provider client that reports the route it serves and
+    /// records the provider tag of every request it is asked to stream.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    struct LeveledStickyFallbackClient {
+        provider: Provider,
+        route: meerkat_core::ReasoningRouteObservation,
+        fail_recoverably: bool,
+        requests: RecordedProviderTags,
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[async_trait]
+    impl LlmClient for LeveledStickyFallbackClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            Some(self.route.clone())
+        }
+
+        fn request_pressure(
+            &self,
+            _request: &meerkat_client::LlmRequest,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_client::LlmError>
+        {
+            Ok(Some(meerkat_core::ProviderRequestPressure::new(0, None)))
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<meerkat_client::LlmEvent, meerkat_client::LlmError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.provider_params.clone());
+            if self.fail_recoverably {
+                Box::pin(futures::stream::iter(vec![Err(
+                    meerkat_client::LlmError::ServerOverloaded,
+                )]))
+            } else {
+                Box::pin(futures::stream::iter(vec![
+                    Ok(meerkat_client::LlmEvent::TextDelta {
+                        delta: "backup success".to_string(),
+                        meta: None,
+                    }),
+                    Ok(meerkat_client::LlmEvent::UsageUpdate {
+                        usage: meerkat_core::TurnUsage::host_declared(
+                            self.provider,
+                            &request.model,
+                            meerkat_core::Usage::default(),
+                        ),
+                    }),
+                    Ok(meerkat_client::LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::success(
+                            meerkat_core::StopReason::EndTurn,
+                        ),
+                    }),
+                ]))
+            }
+        }
+
+        fn provider(&self) -> Provider {
+            self.provider
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    /// The factory of the sticky fallback rows with route-reporting clients:
+    /// an Anthropic primary on the provider's direct route that always fails
+    /// recoverably, and an OpenAI backup on an account's route whose model
+    /// list states `backup_levels`.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    fn leveled_sticky_fallback_factory(
+        store_path: PathBuf,
+        backup_levels: &[meerkat_core::model_profile::capabilities::EffortLevel],
+        primary_requests: RecordedProviderTags,
+        backup_requests: RecordedProviderTags,
+    ) -> AgentFactory {
+        let primary_client: Arc<dyn LlmClient> = Arc::new(LeveledStickyFallbackClient {
+            provider: Provider::Anthropic,
+            route: meerkat_core::direct_route_observation(Provider::Anthropic)
+                .expect("the Anthropic family has a direct route"),
+            fail_recoverably: true,
+            requests: primary_requests,
+        });
+        let backup_client: Arc<dyn LlmClient> = Arc::new(LeveledStickyFallbackClient {
+            provider: Provider::OpenAI,
+            route: meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::OpenAi(
+                    meerkat_core::provider_matrix::OpenAiBackendKind::Copilot,
+                ),
+                api: meerkat_core::ModelApi::Responses,
+                account: meerkat_core::AccountLevelStatement::Stated(backup_levels.to_vec()),
+                operator_levels: None,
+            },
+            fail_recoverably: false,
+            requests: backup_requests,
+        });
+        let mut factory = AgentFactory::new(store_path)
+            .without_provider_auth_persistence()
+            .builtins(false);
+        factory.provider_registry = Arc::new(
+            meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty()
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::Anthropic,
+                    client: primary_client,
+                }))
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::OpenAI,
+                    client: backup_client,
+                })),
+        );
+        factory
+    }
+
+    /// One prompt through the runtime, with its completion.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    async fn run_sticky_fallback_prompt(
+        adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+        session_id: &meerkat_core::SessionId,
+        prompt: &str,
+    ) -> meerkat_runtime::completion::CompletionOutcome {
+        let (_accept, completion) = adapter
+            .accept_input_with_completion(
+                session_id,
+                meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(prompt, None)),
+            )
+            .await
+            .expect("accept the runtime prompt");
+        let completion = completion.expect("the prompt provides a completion handle");
+        tokio::time::timeout(std::time::Duration::from_secs(10), completion.wait())
+            .await
+            .expect("the prompt completes before the timeout")
+            .expect("the completion waiter resolves")
+    }
+
+    /// The effort an OpenAI-family request carries in its own field.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    fn openai_request_effort(
+        tag: Option<&meerkat_core::lifecycle::run_primitive::ProviderTag>,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::ReasoningEffort> {
+        match tag {
+            Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(tag)) => {
+                tag.reasoning_effort
+            }
+            _ => None,
+        }
+    }
+
+    /// A session at a reasoning effort level that falls back keeps the level
+    /// on the fallback target: the fallback attempt's request carries the
+    /// target route's own effort field and the run reports the origin and
+    /// the target as two rows; the stored identity is the target with the
+    /// level and nothing else; a later turn on the target carries the field
+    /// too; and after a cold restart the session is rebuilt on the target
+    /// with the level and its next turn carries the field.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_sticky_fallback_keeps_the_level_through_later_turns_recovery_and_resume() {
+        use meerkat_core::lifecycle::run_primitive::{ProviderParamsOverride, ReasoningEffort};
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_runtime::completion::CompletionOutcome;
+
+        const PRIMARY_MODEL: &str = "claude-sonnet-4-6";
+        const BACKUP_MODEL: &str = "custom-text-only-backup";
+        const EXTERNAL_TOOL: &str = "known_external_tool";
+
+        let level_only = ProviderParamsOverride {
+            reasoning_effort: Some(EffortLevel::High),
+            ..Default::default()
+        };
+        let backup_binding = configured_auth_binding(FALLBACK_REALM_LEVEL_KEPT, "default_openai");
+        let config = sticky_fallback_test_config(
+            FALLBACK_REALM_LEVEL_KEPT,
+            BACKUP_MODEL,
+            backup_binding.clone(),
+        );
+        let temp = tempfile::tempdir().expect("leveled fallback tempdir");
+        let sqlite_store = Arc::new(
+            meerkat_store::SqliteSessionStore::open(temp.path().join("sessions.sqlite3"))
+                .expect("open sqlite session store"),
+        );
+        let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let recorded = |requests: &RecordedProviderTags| {
+            requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
+        let session_id;
+
+        {
+            let primary_requests = RecordedProviderTags::default();
+            let backup_requests = RecordedProviderTags::default();
+            let factory = leveled_sticky_fallback_factory(
+                temp.path().join("first-factory-sessions"),
+                &[EffortLevel::Low, EffortLevel::High],
+                Arc::clone(&primary_requests),
+                Arc::clone(&backup_requests),
+            );
+            let builder = crate::FactoryAgentBuilder::new(factory, config.clone());
+            let persistence = crate::PersistenceBundle::new(
+                Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
+                Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+                Arc::clone(&blob_store) as Arc<dyn BlobStore>,
+            )
+            .expect("construct runtime authority");
+            let (service, adapter) =
+                crate::surface::build_runtime_backed_service(builder, 4, persistence)
+                    .expect("compose the runtime-backed service");
+            let service = Arc::new(service);
+            let session = Session::new();
+            session_id = session.id().clone();
+            let mut request = sticky_fallback_runtime_request(
+                FALLBACK_REALM_LEVEL_KEPT,
+                PRIMARY_MODEL,
+                sticky_fallback_visibility_dispatcher(EXTERNAL_TOOL),
+            );
+            request
+                .build
+                .as_mut()
+                .expect("the request carries build options")
+                .provider_params = Some(level_only.clone());
+            Box::pin(crate::surface::materialize_session(
+                &service,
+                &adapter,
+                session,
+                request,
+                {
+                    let service = Arc::clone(&service);
+                    let adapter = Arc::clone(&adapter);
+                    move |session_id| {
+                        crate::surface::default_persistent_executor(service, adapter, session_id)
+                    }
+                },
+            ))
+            .await
+            .expect("materialize the session at the level");
+
+            // The run that falls back.
+            let completion = run_sticky_fallback_prompt(&adapter, &session_id, "first").await;
+            let CompletionOutcome::Completed(run) = completion else {
+                panic!("the fallback attempt runs at the session's level: {completion:?}");
+            };
+            assert_eq!(run.text, "backup success");
+            let report = run
+                .reasoning_effort
+                .clone()
+                .expect("the run reports what it sent");
+            assert_eq!(report.requested, EffortLevel::High);
+            assert_eq!(
+                report
+                    .sent
+                    .iter()
+                    .map(|row| (
+                        row.provider,
+                        row.model.as_str(),
+                        row.route.backend.as_str(),
+                        row.level,
+                        row.requests
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (
+                        Provider::Anthropic,
+                        PRIMARY_MODEL,
+                        "anthropic_api",
+                        EffortLevel::High,
+                        1
+                    ),
+                    (
+                        Provider::OpenAI,
+                        BACKUP_MODEL,
+                        "copilot",
+                        EffortLevel::High,
+                        1
+                    ),
+                ],
+                "the origin and the fallback target are separate rows"
+            );
+            assert_eq!(recorded(&primary_requests).len(), 1);
+            let backup_seen = recorded(&backup_requests);
+            assert_eq!(backup_seen.len(), 1);
+            assert_eq!(
+                openai_request_effort(backup_seen[0].as_ref()),
+                Some(ReasoningEffort::High),
+                "the fallback attempt carries the target route's own effort field"
+            );
+
+            // The stored session: the target, with the level and nothing else.
+            let authoritative = service
+                .load_authoritative_session(&session_id)
+                .await
+                .expect("load the durable fallback session")
+                .expect("the durable fallback session exists");
+            let metadata = authoritative
+                .session_metadata()
+                .expect("the fallback session keeps its metadata");
+            let identity = metadata.llm_identity();
+            assert_eq!(identity.model, BACKUP_MODEL);
+            assert_eq!(identity.provider, Provider::OpenAI);
+            assert_eq!(identity.auth_binding.as_ref(), Some(&backup_binding));
+            assert_eq!(
+                identity.provider_params,
+                Some(level_only.clone()),
+                "the stored identity carries the neutral level and nothing else"
+            );
+            let provenance = metadata
+                .model_fallback
+                .as_ref()
+                .expect("the fallback record is stored");
+            assert_eq!(provenance.target, identity);
+            assert_eq!(
+                provenance.previous.provider_params,
+                Some(level_only.clone())
+            );
+
+            // A later turn on the fallback target.
+            let completion = run_sticky_fallback_prompt(&adapter, &session_id, "second").await;
+            let CompletionOutcome::Completed(run) = completion else {
+                panic!("a later turn on the fallback target keeps the level: {completion:?}");
+            };
+            let report = run
+                .reasoning_effort
+                .clone()
+                .expect("the later run reports what it sent");
+            assert_eq!(report.sent.len(), 1);
+            assert_eq!(report.sent[0].model, BACKUP_MODEL);
+            assert_eq!(recorded(&primary_requests).len(), 1, "the primary is left");
+            let backup_seen = recorded(&backup_requests);
+            assert_eq!(backup_seen.len(), 2);
+            assert_eq!(
+                openai_request_effort(backup_seen[1].as_ref()),
+                Some(ReasoningEffort::High),
+                "a later turn on the fallback target carries the field"
+            );
+        }
+
+        // A cold restart: a fresh factory, service and runtime over the
+        // retained stores.
+        let restart_primary_requests = RecordedProviderTags::default();
+        let restart_backup_requests = RecordedProviderTags::default();
+        let restart_factory = leveled_sticky_fallback_factory(
+            temp.path().join("restarted-factory-sessions"),
+            &[EffortLevel::Low, EffortLevel::High],
+            Arc::clone(&restart_primary_requests),
+            Arc::clone(&restart_backup_requests),
+        );
+        let restart_builder = crate::FactoryAgentBuilder::new(restart_factory, config);
+        let restart_persistence = crate::PersistenceBundle::new(
+            Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            Arc::clone(&blob_store) as Arc<dyn BlobStore>,
+        )
+        .expect("construct runtime authority");
+        let (restart_service, restart_adapter) =
+            crate::surface::build_runtime_backed_service(restart_builder, 4, restart_persistence)
+                .expect("compose the runtime-backed service");
+        let restart_service = Arc::new(restart_service);
+        let resume_session = restart_service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the fallback session from retained persistence")
+            .expect("the retained fallback session exists");
+        // The resume names no level of its own: the session's stands.
+        let restart_request = sticky_fallback_runtime_request(
+            FALLBACK_REALM_LEVEL_KEPT,
+            PRIMARY_MODEL,
+            sticky_fallback_visibility_dispatcher(EXTERNAL_TOOL),
+        );
+        Box::pin(crate::surface::materialize_session(
+            &restart_service,
+            &restart_adapter,
+            resume_session,
+            restart_request,
+            {
+                let service = Arc::clone(&restart_service);
+                let adapter = Arc::clone(&restart_adapter);
+                move |session_id| {
+                    crate::surface::default_persistent_executor(service, adapter, session_id)
+                }
+            },
+        ))
+        .await
+        .expect("rematerialize the retained fallback session");
+        let live_identity = restart_service
+            .live_session_llm_identity(&session_id)
+            .await
+            .expect("read the rebuilt session's live identity");
+        assert_eq!(live_identity.model, BACKUP_MODEL);
+        assert_eq!(live_identity.provider, Provider::OpenAI);
+        assert_eq!(
+            live_identity.provider_params,
+            Some(level_only),
+            "the rebuilt session keeps the level on the fallback target"
+        );
+
+        let completion =
+            run_sticky_fallback_prompt(&restart_adapter, &session_id, "after the restart").await;
+        assert!(
+            matches!(completion, CompletionOutcome::Completed(_)),
+            "a turn after the restart runs on the fallback target: {completion:?}"
+        );
+        assert!(
+            recorded(&restart_primary_requests).is_empty(),
+            "the failed primary is not asked again"
+        );
+        let backup_seen = recorded(&restart_backup_requests);
+        assert_eq!(backup_seen.len(), 1);
+        assert_eq!(
+            openai_request_effort(backup_seen[0].as_ref()),
+            Some(ReasoningEffort::High),
+            "the turn after the restart carries the field"
+        );
+    }
+
+    /// The twin: a fallback target whose route does not accept the session's
+    /// level is skipped with the typed reason before any switch. The retry
+    /// runs on the session's own model, the original failure stands, the
+    /// target is never asked, and the session's identity is unchanged.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_fallback_target_that_refuses_the_level_leaves_the_session_as_it_was() {
+        use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+        use meerkat_core::model_fallback::ModelFallbackSkipReason;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        const PRIMARY_MODEL: &str = "claude-sonnet-4-6";
+        const BACKUP_MODEL: &str = "custom-text-only-backup";
+
+        let level_only = ProviderParamsOverride {
+            reasoning_effort: Some(EffortLevel::High),
+            ..Default::default()
+        };
+        let primary_binding =
+            configured_auth_binding(FALLBACK_REALM_LEVEL_SKIPPED, "default_anthropic");
+        let backup_binding =
+            configured_auth_binding(FALLBACK_REALM_LEVEL_SKIPPED, "default_openai");
+        let config =
+            sticky_fallback_test_config(FALLBACK_REALM_LEVEL_SKIPPED, BACKUP_MODEL, backup_binding);
+        let primary_requests = RecordedProviderTags::default();
+        let backup_requests = RecordedProviderTags::default();
+        let temp = tempfile::tempdir().expect("leveled fallback tempdir");
+        // The backup's account states only `low`.
+        let factory = leveled_sticky_fallback_factory(
+            temp.path().join("sessions"),
+            &[EffortLevel::Low],
+            Arc::clone(&primary_requests),
+            Arc::clone(&backup_requests),
+        );
+
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let session = Session::new();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("ephemeral machine should prepare real session-owned bindings");
+        let mut build = AgentBuildConfig::new(PRIMARY_MODEL);
+        build.max_tokens = Some(1024);
+        build.provider = Some(Provider::Anthropic);
+        build.realm_id = Some(RealmId::parse(FALLBACK_REALM_LEVEL_SKIPPED).expect("test realm"));
+        build.auth_binding = Some(primary_binding);
+        build.provider_params = Some(level_only.clone());
+        build.resume_session = Some(session);
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+        let mut agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("the session at the level builds with its fallback chain");
+        let identity_before = agent
+            .session()
+            .session_metadata()
+            .expect("canonical session metadata")
+            .llm_identity();
+        assert_eq!(identity_before.model, PRIMARY_MODEL);
+        assert_eq!(identity_before.provider_params, Some(level_only));
+
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<meerkat_core::AgentEvent>(1024);
+        let error = agent
+            .run_with_events(
+                meerkat_core::ContentInput::Text("exercise fallback".to_string()),
+                tx,
+            )
+            .await
+            .expect_err("no target accepts the level: the original failure stands");
+        assert!(
+            !matches!(error, meerkat_core::AgentError::ReasoningEffortRefused(_)),
+            "the failure is the model's, not a refusal of the level: {error:?}"
+        );
+        let mut skipped = Vec::new();
+        let mut switched = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                meerkat_core::AgentEvent::ModelFallbackSkipped { target, .. } => {
+                    skipped.push((target.identity.model.clone(), target.reason));
+                }
+                meerkat_core::AgentEvent::ModelFallbackStaged { .. }
+                | meerkat_core::AgentEvent::ModelFallbackCommitted { .. } => switched = true,
+                _ => {}
+            }
+        }
+        assert!(
+            matches!(
+                skipped.as_slice(),
+                [(model, ModelFallbackSkipReason::ReasoningEffortUnsupported)]
+                    if model == BACKUP_MODEL
+            ),
+            "one skip of the target, with the typed reason: {skipped:?}"
+        );
+        assert!(!switched, "nothing was switched");
+        assert!(
+            backup_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "the skipped target is never asked"
+        );
+        assert_eq!(
+            primary_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            2,
+            "the retry runs on the session's own model"
+        );
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("canonical session metadata")
+                .llm_identity(),
+            identity_before,
+            "the session's identity is unchanged"
+        );
+    }
+
+    /// A proof of absence for the stored forms. An ordinary model fallback
+    /// of a session that holds a reasoning effort level: the model's call
+    /// fails recoverably (not an authentication failure); the first fallback
+    /// target's route does not state the levels it accepts, so the target is
+    /// skipped for the level, with the reason `reasoning_effort_unsupported`
+    /// (`a_fallback_target_that_refuses_the_level_leaves_the_session_as_it_was`
+    /// reads that reason from a run's events); the second target accepts the
+    /// level and is switched to, which writes the fallback notice into the
+    /// transcript. Run through the runtime on the production SQLite wiring:
+    /// no stored input row of the session names the skip's reason, in the
+    /// form the store writes or after a decode, and the stored session, its
+    /// fallback record and its transcript's fallback notice do not name it
+    /// either. The reason is a value an earlier release does not know: this
+    /// row holds that it reaches no stored input row and no stored notice.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_skipped_fallback_target_under_a_level_stores_its_reason_in_no_input_row() {
+        use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_runtime::RuntimeStore as _;
+        use meerkat_runtime::completion::CompletionOutcome;
+
+        const PRIMARY_MODEL: &str = "claude-sonnet-4-6";
+        const SKIPPED_MODEL: &str = "custom-first-backup";
+        const BACKUP_MODEL: &str = "custom-text-only-backup";
+        const EXTERNAL_TOOL: &str = "known_external_tool";
+        const SKIP_REASON: &str = "reasoning_effort_unsupported";
+
+        let level_only = ProviderParamsOverride {
+            reasoning_effort: Some(EffortLevel::High),
+            ..Default::default()
+        };
+        let skipped_binding =
+            configured_auth_binding(FALLBACK_REALM_LEVEL_SKIPPED, "default_gemini");
+        let backup_binding =
+            configured_auth_binding(FALLBACK_REALM_LEVEL_SKIPPED, "default_openai");
+        let mut config = sticky_fallback_test_config(
+            FALLBACK_REALM_LEVEL_SKIPPED,
+            BACKUP_MODEL,
+            backup_binding.clone(),
+        );
+        config.realm.insert(
+            FALLBACK_REALM_LEVEL_SKIPPED.to_string(),
+            inline_realm_section(&[
+                ("anthropic", "test-primary-key"),
+                ("gemini", "test-first-backup-key"),
+                ("openai", "test-backup-key"),
+            ]),
+        );
+        config.models.custom.insert(
+            SKIPPED_MODEL.to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider: Provider::Gemini,
+                display_name: Some("First backup".to_string()),
+                context_window: Some(32_000),
+                max_input_tokens: None,
+                max_output_tokens: Some(4_096),
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
+        // The chain: the target that is skipped for the level, then the one
+        // that accepts it.
+        config.model_fallback.chain.insert(
+            0,
+            ModelFallbackTarget {
+                model: SKIPPED_MODEL.to_string(),
+                provider: Some(Provider::Gemini),
+                auth_binding: Some(skipped_binding),
+            },
+        );
+
+        let temp = tempfile::tempdir().expect("skipped fallback tempdir");
+        let sqlite_path = temp.path().join("sessions.sqlite3");
+        let sqlite_store = Arc::new(
+            meerkat_store::SqliteSessionStore::open(sqlite_path.clone())
+                .expect("open sqlite session store"),
+        );
+        // Production sqlite-realm wiring: the runtime's input rows live in
+        // the session store's file.
+        let runtime_store = Arc::new(
+            meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(sqlite_path)
+                .expect("open head-canonical runtime store"),
+        );
+        let blob_store = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let primary_requests = RecordedProviderTags::default();
+        let skipped_requests = RecordedProviderTags::default();
+        let backup_requests = RecordedProviderTags::default();
+        // The primary always fails recoverably. The first backup serves a
+        // model its provider's direct route states no levels for. The second
+        // backup's account states `low` and `high`.
+        let primary_client: Arc<dyn LlmClient> = Arc::new(LeveledStickyFallbackClient {
+            provider: Provider::Anthropic,
+            route: meerkat_core::direct_route_observation(Provider::Anthropic)
+                .expect("the Anthropic family has a direct route"),
+            fail_recoverably: true,
+            requests: Arc::clone(&primary_requests),
+        });
+        let skipped_client: Arc<dyn LlmClient> = Arc::new(LeveledStickyFallbackClient {
+            provider: Provider::Gemini,
+            route: meerkat_core::direct_route_observation(Provider::Gemini)
+                .expect("the Gemini family has a direct route"),
+            fail_recoverably: false,
+            requests: Arc::clone(&skipped_requests),
+        });
+        let backup_client: Arc<dyn LlmClient> = Arc::new(LeveledStickyFallbackClient {
+            provider: Provider::OpenAI,
+            route: meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::OpenAi(
+                    meerkat_core::provider_matrix::OpenAiBackendKind::Copilot,
+                ),
+                api: meerkat_core::ModelApi::Responses,
+                account: meerkat_core::AccountLevelStatement::Stated(vec![
+                    EffortLevel::Low,
+                    EffortLevel::High,
+                ]),
+                operator_levels: None,
+            },
+            fail_recoverably: false,
+            requests: Arc::clone(&backup_requests),
+        });
+        let mut factory = AgentFactory::new(temp.path().join("factory-sessions"))
+            .without_provider_auth_persistence()
+            .builtins(false);
+        factory.provider_registry = Arc::new(
+            meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty()
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::Anthropic,
+                    client: primary_client,
+                }))
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::Gemini,
+                    client: skipped_client,
+                }))
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::OpenAI,
+                    client: backup_client,
+                })),
+        );
+        let builder = crate::FactoryAgentBuilder::new(factory, config);
+        let persistence = crate::PersistenceBundle::new(
+            Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            Arc::clone(&blob_store) as Arc<dyn BlobStore>,
+        )
+        .expect("construct runtime authority");
+        let (service, adapter) =
+            crate::surface::build_runtime_backed_service(builder, 4, persistence)
+                .expect("compose the runtime-backed service");
+        let service = Arc::new(service);
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let mut request = sticky_fallback_runtime_request(
+            FALLBACK_REALM_LEVEL_SKIPPED,
+            PRIMARY_MODEL,
+            sticky_fallback_visibility_dispatcher(EXTERNAL_TOOL),
+        );
+        request
+            .build
+            .as_mut()
+            .expect("the request carries build options")
+            .provider_params = Some(level_only);
+        Box::pin(crate::surface::materialize_session(
+            &service,
+            &adapter,
+            session,
+            request,
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| {
+                    crate::surface::default_persistent_executor(service, adapter, session_id)
+                }
+            },
+        ))
+        .await
+        .expect("materialize the session at the level");
+
+        // The run: the model fails, the first target is skipped, the second
+        // is switched to and answers.
+        let completion = run_sticky_fallback_prompt(&adapter, &session_id, "first").await;
+        let CompletionOutcome::Completed(run) = completion else {
+            panic!("the run ends on the second fallback target: {completion:?}");
+        };
+        assert_eq!(run.text, "backup success");
+        let asked = |requests: &RecordedProviderTags| {
+            requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+        };
+        assert_eq!(asked(&primary_requests), 1, "the session's own model");
+        assert_eq!(
+            asked(&skipped_requests),
+            0,
+            "the skipped target is never asked"
+        );
+        assert_eq!(
+            asked(&backup_requests),
+            1,
+            "the target that was switched to"
+        );
+
+        // Every stored input row of the session, in the form the store
+        // writes it, and decoded again from that form.
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let rows = runtime_store
+            .load_input_states_strict(&runtime_id)
+            .await
+            .expect("every stored input row of the session decodes");
+        assert!(!rows.is_empty(), "the turn's input is stored");
+        for row in &rows {
+            let stored = serde_json::to_string(row).expect("the stored row's form");
+            assert!(
+                !stored.contains(SKIP_REASON),
+                "a stored input row names the skip's reason: {stored}"
+            );
+            let decoded: meerkat_runtime::input_state::StoredInputState =
+                serde_json::from_str(&stored).expect("the stored form decodes");
+            assert_eq!(decoded.state.input_id, row.state.input_id);
+        }
+
+        // The stored session: switched to the second target, with its
+        // fallback record and the transcript's fallback notice. None of it
+        // names the skip's reason.
+        let authoritative = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the durable session")
+            .expect("the durable session exists");
+        let metadata = authoritative
+            .session_metadata()
+            .expect("the session keeps its metadata");
+        assert_eq!(metadata.llm_identity().model, BACKUP_MODEL);
+        assert!(
+            metadata.model_fallback.is_some(),
+            "the fallback record is stored"
+        );
+        let stored_session = serde_json::to_string(&authoritative).expect("the stored session");
+        assert!(
+            stored_session.contains("model_fallback") && stored_session.contains("skipped_targets"),
+            "the transcript holds the fallback notice with its payload"
+        );
+        assert!(
+            !stored_session.contains(SKIP_REASON),
+            "the stored session names the skip's reason"
+        );
+
+        // The stored head row of a session that was created with a level and
+        // fell back under it holds nothing the previous release's head does
+        // not know.
+        super::brain_swap_runtime_loop_ab_tests::assert_the_stored_head_has_the_previous_releases_shape(
+            &temp.path().join("sessions.sqlite3"),
+            &session_id,
+            "created with a level, after an ordinary fallback under it",
+        )
+        .await;
+    }
+
     /// P0 regression: the default persistent realm backend (sqlite) serves
     /// sessions through a HeadCanonicalV1 runtime store. A recoverable
     /// primary failure with a configured fallback chain must durably commit
@@ -20651,6 +21574,111 @@ mod tests {
         assert_eq!(identities[0].auth_binding, Some(secondary));
     }
 
+    /// A session's reasoning effort level is a session setting, not part of
+    /// a chain entry: each chain target is built with the level and with
+    /// nothing else of the session's params, so the identity a fallback
+    /// commits and its request policy keep the level. A session without a
+    /// level builds the chain targets it always built: no params, whatever
+    /// its own params are.
+    #[test]
+    fn model_fallback_chain_targets_carry_the_sessions_reasoning_effort_level() {
+        use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let factory = AgentFactory::new(std::env::temp_dir().join("meerkat-test-sessions"));
+        let mut config = Config::default();
+        let primary = configured_auth_binding("dev", "primary_openai");
+        let secondary = configured_auth_binding("dev", "secondary_openai");
+        config.realm.insert(
+            "dev".to_string(),
+            openai_realm_with_bindings(&[
+                ("primary_openai", "sk-primary"),
+                ("secondary_openai", "sk-secondary"),
+            ]),
+        );
+        config.model_fallback.enabled = Some(true);
+        config.model_fallback.chain = vec![ModelFallbackTarget {
+            model: "gpt-5.5".to_string(),
+            provider: Some(Provider::OpenAI),
+            auth_binding: Some(secondary.clone()),
+        }];
+        let registry = factory.model_registry(&config).expect("model registry");
+        let session = |provider_params: Option<ProviderParamsOverride>| SessionLlmIdentity {
+            model: "gpt-5.5".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params,
+            auth_binding: Some(primary.clone()),
+        };
+        let chain_target = |provider_params: Option<ProviderParamsOverride>| SessionLlmIdentity {
+            model: "gpt-5.5".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params,
+            auth_binding: Some(secondary.clone()),
+        };
+        let targets_of = |current: &SessionLlmIdentity| {
+            let (identities, skipped) = factory
+                .model_fallback_identities(&config, &registry, current)
+                .expect("fallback identities");
+            assert!(skipped.is_empty());
+            identities
+        };
+        let policy_params = |identity: &SessionLlmIdentity| {
+            factory
+                .request_policy_for_session_llm_identity(
+                    &config,
+                    identity,
+                    ToolCategoryOverride::Inherit,
+                    &meerkat_core::SessionId::new(),
+                )
+                .expect("the target's request policy")
+                .provider_params
+        };
+
+        // No level: the chain target of today, for a session with no params
+        // and for one with params of its own.
+        let without_level = [
+            session(None),
+            session(Some(ProviderParamsOverride {
+                temperature: Some(0.2),
+                ..Default::default()
+            })),
+        ];
+        for current in &without_level {
+            let identities = targets_of(current);
+            assert_eq!(identities, vec![chain_target(None)]);
+            assert_eq!(policy_params(&identities[0]), None);
+        }
+
+        // A level: the chain target carries it, alone.
+        let level_only = Some(ProviderParamsOverride {
+            reasoning_effort: Some(EffortLevel::High),
+            ..Default::default()
+        });
+        let with_level = [
+            session(level_only.clone()),
+            session(Some(ProviderParamsOverride {
+                temperature: Some(0.2),
+                reasoning_effort: Some(EffortLevel::High),
+                ..Default::default()
+            })),
+        ];
+        for current in &with_level {
+            let identities = targets_of(current);
+            assert_eq!(
+                identities,
+                vec![chain_target(level_only.clone())],
+                "the chain target carries the session's level and nothing else"
+            );
+            assert_eq!(
+                policy_params(&identities[0]),
+                level_only,
+                "and so does its request policy"
+            );
+        }
+    }
+
     #[test]
     fn default_model_fallback_never_constructs_catalog_targets() {
         let factory = AgentFactory::new(std::env::temp_dir().join("meerkat-test-sessions"));
@@ -21613,6 +22641,7 @@ mod tests {
                         auth_binding: Some(
                             meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear,
                         ),
+                        reasoning_effort: None,
                     },
                 )
                 .unwrap(),
@@ -21630,6 +22659,7 @@ mod tests {
                         auth_binding: Some(
                             meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear,
                         ),
+                        reasoning_effort: None,
                     },
                 )
                 .unwrap(),
@@ -21651,6 +22681,7 @@ mod tests {
                         auth_binding: Some(
                             meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear,
                         ),
+                        reasoning_effort: None,
                     },
                 )
                 .unwrap(),
@@ -22512,6 +23543,9 @@ mod tests {
     struct RecordingSelfHostedRuntime {
         calls: Arc<std::sync::Mutex<Vec<RecordedSelfHostedResolve>>>,
         authless: bool,
+        /// The backend the resolved connection names, when a row wants one
+        /// other than the binding's own.
+        backend: Option<meerkat_providers::NormalizedBackendKind>,
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
@@ -22555,7 +23589,7 @@ mod tests {
             };
             Ok(meerkat_llm_core::provider_runtime::ResolvedConnection {
                 provider: Provider::SelfHosted,
-                backend: binding.backend(),
+                backend: self.backend.unwrap_or_else(|| binding.backend()),
                 backend_profile: Arc::clone(binding.backend_profile()),
                 credential_identity: binding.credential_identity().clone(),
                 auth_lease,
@@ -22581,10 +23615,29 @@ mod tests {
                 Arc::new(RecordingSelfHostedRuntime {
                     calls: Arc::clone(&calls),
                     authless: false,
+                    backend: None,
                 }),
             ),
         );
         calls
+    }
+
+    /// A self-hosted runtime whose resolved connection names `backend`,
+    /// whatever backend the binding names.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    fn install_self_hosted_runtime_on_backend(
+        factory: &mut AgentFactory,
+        backend: meerkat_providers::NormalizedBackendKind,
+    ) {
+        factory.provider_registry = Arc::new(
+            meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty().with_runtime(
+                Arc::new(RecordingSelfHostedRuntime {
+                    calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                    authless: false,
+                    backend: Some(backend),
+                }),
+            ),
+        );
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
@@ -22597,6 +23650,7 @@ mod tests {
                 Arc::new(RecordingSelfHostedRuntime {
                     calls: Arc::clone(&calls),
                     authless: true,
+                    backend: None,
                 }),
             ),
         );
@@ -22638,6 +23692,7 @@ mod tests {
                 supports_web_search: false,
                 call_timeout_secs: Some(600),
                 stream_inactivity_timeout_secs: None,
+                reasoning_effort_levels: None,
             },
         );
         config
@@ -22863,6 +23918,7 @@ mod tests {
             supports_web_search: false,
             call_timeout_secs: Some(600),
             stream_inactivity_timeout_secs: None,
+            reasoning_effort_levels: None,
         }
     }
 
@@ -23483,6 +24539,219 @@ mod tests {
                 .prepare_controller_credential()
                 .await
                 .unwrap_or_else(|error| panic!("authless={authless}: {error}"));
+        }
+    }
+
+    /// The reasoning effort levels an operator declares for a
+    /// self-hosted model reach the route the session's client reports,
+    /// through the selected-target wrapper and the agent's adapter: the
+    /// self-hosted backend of the resolved connection, the API of the
+    /// server's style, and the declared levels. A model that declares none
+    /// reports none.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn operator_levels_reach_the_self_hosted_clients_route() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::provider_matrix::SelfHostedBackendKind;
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        for (api_style, api) in [
+            (
+                SelfHostedApiStyle::ChatCompletions,
+                ModelApi::ChatCompletions,
+            ),
+            (SelfHostedApiStyle::Responses, ModelApi::Responses),
+        ] {
+            for declared in [
+                None,
+                Some(vec![EffortLevel::High, EffortLevel::Low, EffortLevel::High]),
+            ] {
+                let temp = tempfile::tempdir().unwrap();
+                let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+                let _calls = install_recording_self_hosted_runtime(&mut factory);
+                let mut config = config_with_self_hosted_server(SelfHostedServerConfig {
+                    transport: SelfHostedTransport::OpenAiCompatible,
+                    base_url: "http://127.0.0.1:11434".to_string(),
+                    api_style,
+                });
+                config
+                    .self_hosted
+                    .models
+                    .get_mut("gemma-4-e2b")
+                    .unwrap()
+                    .reasoning_effort_levels = declared.clone();
+                insert_self_hosted_realm_binding(
+                    &mut config,
+                    "dev",
+                    "dev_local",
+                    "http://realm.example/v1",
+                    CredentialSourceSpec::InlineSecret {
+                        secret: "realm-token".to_string(),
+                    },
+                );
+
+                let session = Session::new();
+                let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+                let bindings = runtime
+                    .prepare_bindings(session.id().clone())
+                    .await
+                    .unwrap();
+                let mut build = AgentBuildConfig::new("gemma-4-e2b");
+                build.provider = Some(Provider::SelfHosted);
+                build.realm_id = Some(RealmId::parse("dev").unwrap());
+                build.resume_session = Some(session);
+                build.runtime_build_mode =
+                    meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
+                build.override_builtins = ToolCategoryOverride::Disable;
+
+                let (_agent, controller) = factory
+                    .build_agent_with_controller(build, &config)
+                    .await
+                    .unwrap_or_else(|error| panic!("{api} {declared:?}: {error}"));
+                assert_eq!(
+                    controller.client().reasoning_route(),
+                    Some(ReasoningRouteObservation {
+                        backend: ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
+                        api,
+                        account: AccountLevelStatement::NotApplicable,
+                        operator_levels: declared
+                            .as_ref()
+                            .map(|_| vec![EffortLevel::Low, EffortLevel::High]),
+                    }),
+                    "{api} {declared:?}"
+                );
+            }
+        }
+    }
+
+    /// The route a self-hosted model's session reports, built as
+    /// `operator_levels_reach_the_self_hosted_clients_route` builds it: a
+    /// Responses-style server whose model declares `high` and `low`, a realm
+    /// binding whose backend profile is of `backend_kind`, and the
+    /// self-hosted runtime `install` puts on the factory.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    async fn self_hosted_route_observed(
+        backend_kind: &str,
+        install: impl FnOnce(&mut AgentFactory),
+    ) -> Option<meerkat_core::ReasoningRouteObservation> {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        install(&mut factory);
+        let mut config = config_with_self_hosted_server(SelfHostedServerConfig {
+            transport: SelfHostedTransport::OpenAiCompatible,
+            base_url: "http://127.0.0.1:11434".to_string(),
+            api_style: SelfHostedApiStyle::Responses,
+        });
+        config
+            .self_hosted
+            .models
+            .get_mut("gemma-4-e2b")
+            .unwrap()
+            .reasoning_effort_levels = Some(vec![EffortLevel::High, EffortLevel::Low]);
+        insert_self_hosted_realm_binding(
+            &mut config,
+            "dev",
+            "dev_local",
+            "http://realm.example/v1",
+            CredentialSourceSpec::InlineSecret {
+                secret: "realm-token".to_string(),
+            },
+        );
+        config
+            .realm
+            .get_mut("dev")
+            .unwrap()
+            .backend
+            .get_mut("dev_local_backend")
+            .unwrap()
+            .backend_kind = backend_kind.to_string();
+
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .unwrap();
+        let mut build = AgentBuildConfig::new("gemma-4-e2b");
+        build.provider = Some(Provider::SelfHosted);
+        build.realm_id = Some(RealmId::parse("dev").unwrap());
+        build.resume_session = Some(session);
+        build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let (_agent, controller) = factory
+            .build_agent_with_controller(build, &config)
+            .await
+            .unwrap_or_else(|error| panic!("{backend_kind}: {error}"));
+        controller.client().reasoning_route()
+    }
+
+    /// The other self-hosted backend kind: a realm binding whose
+    /// backend profile is `openai_compatible` gives the session's client
+    /// that kind as its route's backend, with the operator's levels. The
+    /// kind is the resolved connection's, not a constant.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn the_self_hosted_clients_route_names_the_connections_backend_kind() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::provider_matrix::SelfHostedBackendKind;
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        for kind in SelfHostedBackendKind::ALL.iter().copied() {
+            assert_eq!(
+                self_hosted_route_observed(kind.as_str(), |factory| {
+                    let _calls = install_recording_self_hosted_runtime(factory);
+                })
+                .await,
+                Some(ReasoningRouteObservation {
+                    backend: ReasoningBackend::SelfHosted(kind),
+                    api: ModelApi::Responses,
+                    account: AccountLevelStatement::NotApplicable,
+                    operator_levels: Some(vec![EffortLevel::Low, EffortLevel::High]),
+                }),
+                "{}",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// A self-hosted model whose resolved connection names a backend of
+    /// another provider family declares no self-hosted backend to its
+    /// client, so the session reports no route, also when the operator
+    /// declared levels: nothing guesses a route the connection does not
+    /// name, and a level asked for there has nothing to be checked against.
+    ///
+    /// This arm is a fail-closed default. The shipped self-hosted runtime
+    /// resolves a connection on the binding's own backend, so no shipped
+    /// route reaches it; the row drives it with a test runtime that answers
+    /// with another family's backend.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_self_hosted_model_on_another_familys_connection_reports_no_route() {
+        use meerkat_core::provider_matrix::{
+            AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind,
+        };
+        use meerkat_providers::NormalizedBackendKind;
+
+        for backend in [
+            NormalizedBackendKind::OpenAi(OpenAiBackendKind::OpenAiApi),
+            NormalizedBackendKind::Anthropic(AnthropicBackendKind::AnthropicApi),
+            NormalizedBackendKind::Google(GoogleBackendKind::GoogleGenAi),
+        ] {
+            assert_eq!(
+                self_hosted_route_observed("self_hosted", |factory| {
+                    install_self_hosted_runtime_on_backend(factory, backend);
+                })
+                .await,
+                None,
+                "{backend:?}"
+            );
         }
     }
 
@@ -25834,6 +27103,7 @@ mod tests {
                 supports_web_search: false,
                 call_timeout_secs: Some(600),
                 stream_inactivity_timeout_secs: None,
+                reasoning_effort_levels: None,
             },
         );
 

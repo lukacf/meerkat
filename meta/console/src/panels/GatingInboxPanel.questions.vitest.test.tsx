@@ -173,6 +173,50 @@ describe("GatingInboxPanel question sets", () => {
     expect(tabCount(view)).toBe("2");
   });
 
+  it("shows a question set once on Pending: the card a person answers, with no decision card for it beside", () => {
+    // The durable decision of the set, as the decisions' read lists it, and
+    // a decision of another kind.
+    const ofTheSet = {
+      decisionId: PENDING_ID, kind: "ask_user.questions", phase: "open", approverId: "ask_user", approverName: "Ask user",
+      deadlineAtMs: Date.now() + 3_600_000, rendering: "Release plan", statusOnly: false,
+    };
+    const other = { decisionId: `decision:${"c".repeat(64)}`, kind: "route.release", phase: "open", rendering: "Release build 7.", statusOnly: false };
+    const panel = (snapshot?: QuestionSetSnapshot) => (
+      <GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={approvals([])} decisions={[ofTheSet, other]}
+        questions={snapshot ? { snapshot, onAnswer: vi.fn(), onDismiss: vi.fn() } : undefined} />
+    );
+    const view = render(panel(sets()));
+    expect(view.getByTestId(`question-set:${PENDING_ID}`)).toBeTruthy();
+    expect(view.queryByTestId(`decision-card:${PENDING_ID}`)).toBeNull();
+    // A decision of another kind keeps its card.
+    expect(view.getByTestId(`decision-card:${other.decisionId}`)).toBeTruthy();
+    // While the sets are read, or their list may be out of date, the set is
+    // the question list's to show.
+    for (const status of ["loading", "stale"] as const) {
+      view.rerender(panel(sets({ status })));
+      expect(view.queryByTestId(`decision-card:${PENDING_ID}`), status).toBeNull();
+      expect(view.getByTestId(`decision-card:${other.decisionId}`)).toBeTruthy();
+    }
+    // Where the question sets are not read, the decision card is the one
+    // place that shows the set.
+    for (const status of ["unavailable", "forbidden", "unsupported"] as const) {
+      view.rerender(panel(sets({ status, sets: [] })));
+      expect(view.getByTestId(`decision-card:${PENDING_ID}`), status).toBeTruthy();
+    }
+    view.rerender(panel());
+    expect(view.getByTestId(`decision-card:${PENDING_ID}`)).toBeTruthy();
+  });
+
+  it("shows no decision list when the question sets are the only decisions", () => {
+    const ofTheSet = { decisionId: PENDING_ID, kind: "ask_user.questions", phase: "open", statusOnly: false };
+    const view = render(
+      <GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={approvals([])} decisions={[ofTheSet]}
+        questions={{ snapshot: sets(), onAnswer: vi.fn(), onDismiss: vi.fn() }} />,
+    );
+    expect(view.getByTestId(`question-set:${PENDING_ID}`)).toBeTruthy();
+    expect(view.queryByTestId("decision-card-list")).toBeNull();
+  });
+
   it("is unchanged without the question sets prop", () => {
     const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={approvals()} />);
     expect(view.queryByTestId("question-set-list")).toBeNull();

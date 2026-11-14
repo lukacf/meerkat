@@ -3887,6 +3887,8 @@ mod tests {
             Some(REASONING_EFFORT_DIRECTLY_IN_CREATE)
         );
 
+        // Requests that do not read for another reason: each is a failed
+        // read, and none is taken for the refusal.
         for (create, action) in [
             // No model: the spec does not read, with or without the member.
             (serde_json::json!({}), prompt.clone()),
@@ -3899,19 +3901,10 @@ mod tests {
                 serde_json::json!({"model": "claude-sonnet-4-6"}),
                 serde_json::json!({"type": "prompt", "reasoning_effort": "high"}),
             ),
-            // The provider-params form reads; the service refuses it.
-            (
-                serde_json::json!({
-                    "model": "claude-sonnet-4-6",
-                    "provider_params": {"reasoning_effort": "high"}
-                }),
-                prompt,
-            ),
         ] {
-            for failure in create_and_update_parse_errors(targets(create.clone(), action.clone()))
-                .into_iter()
-                .flatten()
-            {
+            for failure in create_and_update_parse_errors(targets(create.clone(), action.clone())) {
+                let failure = failure
+                    .unwrap_or_else(|| panic!("{create} {action}: the request does not read"));
                 assert_eq!(
                     direct_reasoning_effort_refusal(&failure),
                     None,
@@ -3919,6 +3912,18 @@ mod tests {
                 );
             }
         }
+        // The provider-params form reads: the schedule service refuses it,
+        // not the read.
+        assert_eq!(
+            create_and_update_parse_errors(targets(
+                serde_json::json!({
+                    "model": "claude-sonnet-4-6",
+                    "provider_params": {"reasoning_effort": "high"}
+                }),
+                prompt,
+            )),
+            [None, None]
+        );
         assert_eq!(
             direct_reasoning_effort_refusal("unknown field `reasoning_effort`"),
             None

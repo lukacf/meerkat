@@ -75,10 +75,10 @@ It re-checks its output and refuses to write if anything forbidden remains.
 `scripts/gpt-live-scrub-provider-stream check DIR` is the committed-fixture
 gate: it exits nonzero on any finding and prints only `file:line: rule`, never
 the matched text. It runs as the `gpt-live-replay-fixture-scrubbed`
-pre-commit hook on every fixture here. In PR CI,
+pre-commit hook on every fixture here. In CI, on the push to `main`,
 `gpt_live_replay::replay_fixtures_are_scrubbed` applies the credential, SDP,
 home-path and voice-audio rules to every embedded fixture, so an unscrubbed
-fixture fails the lane.
+fixture fails the lane; before the merge the pre-commit hook is the check.
 
 Scenario content (instructions, transcripts, injected context) is synthetic
 test fixture text, so it is kept: replay needs it.
@@ -94,9 +94,11 @@ shared exact-receipt live host with a concurrent bootstrap summary.
 cargo test -p meerkat-integration-tests --features gpt-live-replay --test gpt_live_replay
 ```
 
-PR CI runs it as the `gpt-live-replay` integration suite
-(`scripts/ci-cargo-lanes.mjs`) whenever a package on the public Live path,
-this directory or the harness changes.
+CI runs it as the `gpt-live-replay` integration suite
+(`scripts/ci-cargo-lanes.mjs`) on the push to `main`, whenever a package on
+the public Live path, this directory or the harness changed. A pull request
+does not run it: the suite compiles the mob chain, which the planner leaves
+to the push. Run the command above before pushing such a change.
 
 - **Provider:** `support/gpt_live_replay.rs`'s `Cassette` serves the fixture
   as a local public Live API, reached through

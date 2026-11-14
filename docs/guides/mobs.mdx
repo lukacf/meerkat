@@ -1480,8 +1480,8 @@ On JSON-RPC this is error `-32602` with the message `invalid state
 transition: Running -> Stopped` and no error data.
 
 To stop the mob, wait for the run to end, or cancel it with `mob/flow_cancel`
-(`MobHandle::cancel_flow`; the run id is the one `mob/flow_run` returned)
-and send the stop once `mob/flow_status` reports the run terminal. A stop
+(`MobHandle::cancel_flow`; the run id is the one `mob/flow_run` or `mob/run`
+returned) and send the stop once `mob/flow_status` reports the run terminal. A stop
 sent right after the run turns terminal can still be refused for a moment;
 send it again. A run that `mob/flow_cancel` does not bring to a terminal
 status keeps the stop refused; complete, reset or destroy the mob instead.

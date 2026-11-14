@@ -134,6 +134,24 @@ them.
   host did not build in this process. An implementation adds the two
   parameters; one that decides by identity alone ignores them.
 
+- Behaviour-only (not measured by the gate): `meerkat-mob`,
+  `meerkat-machine-schema`: a stop of a mob sent after a force cancel of a
+  member, or after a cancel of all work of a member, while a flow run of
+  the mob is still active is refused until the run is terminal, where
+  0.9.14 admitted it (read from its source, not run on the published
+  binary). The door's answer: `mob/lifecycle` with `action: "stop"` answers
+  JSON-RPC error `-32602` with the message `invalid state transition:
+  Running -> Stopped` and no error data; `MobHandle::stop` answers
+  `MobError::InvalidTransition` from `Running` to `Stopped`. What a host
+  does instead: cancel the run with `mob/flow_cancel`
+  (`MobHandle::cancel_flow`; the run id is the one `mob/flow_run` or
+  `mob/run` returned), wait for `mob/flow_status` to report it terminal,
+  send the stop, and send it again if it is refused once more (the run
+  turns terminal a moment before the mob stops counting it). No public
+  item of the machine schema or the kernels crate changes, and the
+  MobMachine's version is unchanged at 2. See Changed (the surfaces of the
+  cancel), Fixed, the Upgrade notes and Known limitations.
+
 ### Added
 
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
@@ -729,26 +747,15 @@ them.
 
 - `meerkat-mob`, `meerkat-machine-schema`: the stop of a mob stays refused
   while a flow run is active on another member, also after one member's
-  work was cancelled. After a force cancel of a member (JSON-RPC
-  `mob/force_cancel` and `mob/hard_cancel_member`, REST
+  work was cancelled; Breaking has the stop's answer and what a host does
+  instead. It holds on every surface of the cancel. A force cancel of a
+  member: JSON-RPC `mob/force_cancel` and `mob/hard_cancel_member`, REST
   `POST /mob/{id}/members/{agent_identity}/cancel`, `rkat mob force-cancel`,
   the MCP tools `mob_force_cancel` and `meerkat_mob_force_cancel`, the
   `force_cancel_member` member tool, Meta's `meta/force_cancel_member`,
-  `MobHandle::force_cancel_member` and `MobHandle::hard_cancel_member`) or
-  a cancel of all work of one member (`mob/cancel_all_work`,
-  `MobHandle::cancel_all_work`), `mob/lifecycle` with `action: "stop"`
-  (`MobHandle::stop`) now answers the existing refusal,
-  `MobError::InvalidTransition` from `Running` to `Stopped` (on JSON-RPC,
-  error `-32602` with the message `invalid state transition: Running ->
-  Stopped` and no error data), for as long as a flow run of the mob is
-  active; in that state it answered success before (see Fixed). To stop the
-  mob then, cancel the run with `mob/flow_cancel`
-  (`MobHandle::cancel_flow`; the run id is the one `mob/flow_run`
-  returned) or wait for it to end, and send the stop once
-  `mob/flow_status` reports the run terminal. A stop sent right after the
-  run turns terminal can still be refused for a moment; send it again. No
-  wire type and no stored form changes. See the Upgrade notes and Known
-  limitations.
+  `MobHandle::force_cancel_member` and `MobHandle::hard_cancel_member`. A
+  cancel of all work of one member: `mob/cancel_all_work` and
+  `MobHandle::cancel_all_work`. No wire type and no stored form changes.
 
 ### Fixed
 
@@ -1537,14 +1544,19 @@ them.
   without a message. The copy can be removed.
 
 - A host that force cancels a member, or cancels all work of a member, and
-  then stops the mob: while a flow run of the mob is still active the stop
-  is now refused with `MobError::InvalidTransition` (`Running` to
-  `Stopped`; on JSON-RPC, error `-32602`), where it answered success
-  before. Cancel the run first with `mob/flow_cancel`
-  (`MobHandle::cancel_flow`), or wait for it to end; wait for
-  `mob/flow_status` to report the run terminal and send the stop; if the
-  stop is refused once more, send it again. A host that already handles
-  this refusal of a stop under an active flow run needs no change.
+  then stops the mob gets the stop refused while a flow run of the mob is
+  still active: Breaking has the answer and what to do instead. A host
+  that already handles this refusal of a stop under an active flow run
+  needs no change. The mob's count of active flow runs is not stored: every
+  start rebuilds it from the run store (read from the source). A mob that
+  an earlier release stopped while one of its flow runs was still active
+  holds that run as not terminal; at its first start under this release
+  recovery ends the run as `Canceled`, as it does for every run it finds
+  without a live task, and the mob starts with no run counted (read from
+  the source; the recovery of a run without a live task is confirmed by a
+  test for a mob that resumes running). Rollback: this change stores
+  nothing new and changes no stored form, so 0.9.14 reads a store written
+  with it as it reads its own (read from the source).
 
 ### Known limitations
 

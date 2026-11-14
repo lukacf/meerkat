@@ -129,10 +129,11 @@ wait shows that a run ended, not that yours did; in this sample nothing else
 sends to `agent-1`. `status.status` and `status.is_final` describe the
 member, not the run.
 
-Confirmed by runs on 0.9.14: the count changes once, when a run ends, also for
-a run with tool calls, and a run the provider refuses leaves it unchanged.
-Read from the source: a provider that reports no usage adds nothing, and runs
-started by others count as well.
+Confirmed by runs on the published 0.9.14 packages: the count changes once,
+when a run ends, also for a run with tool calls, and a run the provider
+refused left it unchanged. Read from the source: a provider that reports no
+usage adds nothing, and a run started by another sender (a peer or a schedule)
+counts as well.
 
 ## Durable detached tools
 

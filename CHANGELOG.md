@@ -2206,9 +2206,11 @@ them.
   mob (the start is refused at the state check, and removing the level
   from the definition file does not help). Neither writes to the mob's
   store, and 0.9.15 loads the mob again with its level. A realm profile
-  that stores either is a one-way step too: on 0.9.14 the realm's profile
-  list fails as a whole and a read of that profile fails, and an update of
-  that profile there succeeds and drops the level. To keep the option of
+  that stores either cannot be read by 0.9.14: there the realm's profile
+  list fails as a whole and a read of that profile fails. Unlike a mob's
+  history, a realm profile keeps no earlier content: update it on 0.9.15 so
+  that it names neither (or delete it) before rolling back; an update of it
+  on 0.9.14 also succeeds and drops the level. To keep the option of
   rolling back, set the level on a session
   or a turn (a session's level is removed again by clearing it), not in a
   mob definition, a member profile or a realm profile. The rollback note
@@ -2249,8 +2251,8 @@ them.
   does not help. A reset does not help either: it keeps the history. The
   only way back is to destroy the mob on 0.9.15 and create it anew without
   the level before rolling back; its members and its history are not kept.
-  A realm profile that stores a level or the override is the same kind of
-  record: 0.9.14 cannot read it, the realm's profile list fails as a whole
+  A realm profile that stores a level or the override is also unreadable
+  by 0.9.14: 0.9.14 cannot read it, the realm's profile list fails as a whole
   while the row is there, and an update of that profile on 0.9.14 succeeds,
   replaces the row and drops the level (the one place where 0.9.14 loses
   it). To keep

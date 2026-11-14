@@ -426,9 +426,11 @@ route (the four differences are listed under Changed in the changelog).
   under its id get the same answer. A Meta gateway on 0.9.14 does not
   start on the state directory of such a mob. Neither writes to the mob's
   store, and 0.9.15 loads it again with the level. A realm profile that
-  stores either is a one-way step too: on 0.9.14 the realm's profile list
-  fails as a whole and a read of that profile fails; an update of that
-  profile on 0.9.14 succeeds and drops the level. To keep the option of
+  stores either cannot be read by 0.9.14: there the realm's profile list
+  fails as a whole and a read of that profile fails. Unlike a mob's
+  history, a realm profile keeps no earlier content: update it on 0.9.15
+  so that it names neither (or delete it) before rolling back; an update
+  of it on 0.9.14 also succeeds and drops the level. To keep the option of
   rolling back, set the level on a session or
   a turn, not in a mob definition, a member profile or a realm profile.
   There is no `rkat storage doctor` finding or count for stored levels yet:
@@ -665,9 +667,14 @@ what a rollback costs (the note beside the change is under
   Neither writes to the mob's store, and 0.9.15 loads it again with the
   level.
 - **A realm profile that holds a level,** or the `resume_overrides` value
-  `reasoning_effort`. This is a one-way step too: on 0.9.14 the realm's
-  profile list fails as a whole and a read of that profile fails; an
-  update of that profile on 0.9.14 succeeds and drops the level.
+  `reasoning_effort`. 0.9.14 cannot read such a profile while its stored
+  row holds either: the realm's profile list fails as a whole and a read
+  of that profile fails; an update of that profile on 0.9.14 succeeds and
+  drops the level. Before rolling back, replace the profile on 0.9.15 with
+  one that holds neither, or delete it; a profile keeps no history, so the
+  replaced row is all 0.9.14 reads (stated from the store's code, not from
+  a run). A member that was spawned from the profile while it held a level
+  is the mob case above.
 
 To keep the option of rolling back, set the level on a session or a turn,
 not in a mob definition, a member profile or a realm profile. There is no
@@ -679,7 +686,8 @@ are written exactly as before and read on either release. What 0.9.14
 does with a mob definition and a realm profile that hold a level was
 measured with development builds of both releases; the session, accepted
 input, member snapshot and member spec cases are stated from the code of
-both releases, not from a run of 0.9.14.
+both releases, not from a run of 0.9.14; the removal on 0.9.15 before a
+rollback was not run.
 
 **A schedule paused for its target.** Nothing is refused, and the pause is
 not lost. 0.9.14 has no such mark: it ignores `paused_for_target` and reads

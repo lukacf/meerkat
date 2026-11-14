@@ -46,7 +46,8 @@ if (PROXY_URL) {
   const hint = document.querySelector(".key-hint") as HTMLElement | null;
   if (hint) hint.textContent = "Provider requests routed through configured server";
 } else {
-  // Standalone: pre-fill from environment variables (baked in at build/dev time)
+  // Standalone: the dev server pre-fills these from environment variables.
+  // A build leaves them empty (see vite.config.ts), so no key is ever in dist.
   if (__ANTHROPIC_API_KEY__) anthropicKeyInput.value = __ANTHROPIC_API_KEY__;
   if (__OPENAI_API_KEY__) openaiKeyInput.value = __OPENAI_API_KEY__;
   if (__GEMINI_API_KEY__) geminiKeyInput.value = __GEMINI_API_KEY__;

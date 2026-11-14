@@ -4,7 +4,7 @@ description: "What changes when a Meta 0.9.3 deployment moves to 0.9.4: the one-
 icon: "arrow-up"
 ---
 
-*Mirrored from Meerkat Meta main at [abdabeb8e978](https://github.com/lukacf/meerkat/commit/abdabeb8e97805385e71d66da7e78136c4b0e68c) on 2026-11-12; Meta version 0.9.14 at that commit.*
+*Mirrored from Meerkat Meta main at [359f08425e2d](https://github.com/lukacf/meerkat/commit/359f08425e2df4c8a799e105645fe3f6499bc650) on 2026-11-14; Meta version 0.9.14 at that commit.*
 
 Meta 0.9.4 keeps sessions and identities in Meerkat Core's own stores. Meta no
 longer keeps a continuity copy of a member's transcript and no longer holds
@@ -657,7 +657,9 @@ detected.
   `AuthorityUnavailable`; the refusal's `agent_identity` label tells it
   apart from a worker's refusal. A failed respawn shows as that identity's
   typed refusal in the bootstrap status and is retried at every roster pass;
-  `meta/respawn` stays the manual remedy. The pass leaves some live members
+  `meta/respawn` stays the manual remedy. Known issue, noted 2026-11-13: on Meta 0.9.9 through 0.9.14, respawning an identity on a gateway that keeps its state on disk, or on an embedding host that keeps its state on disk and uses identities, can destroy the mobs it created and its delegates. See the
+  [known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+  for the affected releases, how it happens and what to do. The pass leaves some live members
   as they are, with only a warning in the log. One whose role differs from
   the roster profile needs `meta/respawn`, declaring the role migration.
   Leave one whose session Core holds no durable copy of running: a respawn
@@ -734,7 +736,10 @@ meta_gateway identity-reset --state-dir <dir> --identity <identity> --apply
   run identity-reset again for the resets made since. `--mob-store <path>`
   names the mob store as for `storage-migrate-native`.
 - The next roster compile that lists the identity carries the row out, as
-  [The first boot](#the-first-boot) describes: a live member is replaced by
+  [The first boot](#the-first-boot) describes (from 0.9.15, for an identity whose
+  record is its row in the mob's identity store, which no roster lists, the next
+  start's roster pass carries it out the same way, building nothing): a
+  live member is replaced by
   its successor on a fresh session and stays live; a retired identity gets
   a fresh session and stays dormant. The old session stays in Core's store,
   bound to nothing. As for the online reset, a live member's old session is

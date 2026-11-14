@@ -4,7 +4,7 @@ description: "Why the gateways bind loopback, how to publish them behind a rever
 icon: "server"
 ---
 
-*Mirrored from Meerkat Meta main at [abdabeb8e978](https://github.com/lukacf/meerkat/commit/abdabeb8e97805385e71d66da7e78136c4b0e68c) on 2026-11-12; Meta version 0.9.14 at that commit.*
+*Mirrored from Meerkat Meta main at [359f08425e2d](https://github.com/lukacf/meerkat/commit/359f08425e2df4c8a799e105645fe3f6499bc650) on 2026-11-14; Meta version 0.9.14 at that commit.*
 
 Both bundled gateways, the console/admin `meta_gateway` and the SDK-facing
 `rpc_gateway`, bind `127.0.0.1` on an ephemeral port unless the launch selects
@@ -305,6 +305,15 @@ that store:
 
 `meta_gateway` runs none of these side effects: it composes no customizer, no
 retirement hook and no agent memory.
+
+From 0.9.15, an agent whose record is its row in the mob's identity store (one
+created at run time) that is archived or removed is owed what an identity that leaves
+the roster is owed: the harvest of the compactions its last session holds,
+that session's distillation, an exit interview and the retirement hook, which
+hears the cause `unlisted`. They run right after its member's retirement
+ended, by the same rules as above; no order is promised between them and the
+answer of the archive or the removal. A removal of an archived agent owes
+nothing more.
 
 A retirement that distills the session it ends, or drops its memory scope,
 first harvests the compactions that session holds: a delete, a reset, a

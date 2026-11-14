@@ -1,0 +1,351 @@
+---
+title: "Identity policy"
+description: "The host's rules for changes of long-term agents: who may create, change, archive, remove or adopt an agent, and under which outcome."
+icon: "id-card"
+---
+
+*Mirrored from Meerkat Meta main at [359f08425e2d](https://github.com/lukacf/meerkat/commit/359f08425e2df4c8a799e105645fe3f6499bc650) on 2026-11-14; Meta version 0.9.14 at that commit.*
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+Available from Meerkat Meta 0.9.15.
+
+A mob's long-term agents can be created, changed, archived and removed while
+the mob runs: by host code and the SDKs (`meta/identity/*`, see
+[Agent changes](/meta/api/rpc#agent-changes)), by a person at the Console, and by
+agents through their identity tools. Nothing of that is possible until the
+host says so. The host's identity policy is the one place it says so.
+
+A launch gives the policy as `runtime_options.identity_creation` (the SDK
+builders send it unchanged), or a native Rust host composition returns it
+from `GatewayHostComposition::identity_creation_policy`. Never both. It needs
+a persistent launch (`persistent_state`): the agents' records are durable.
+
+## What a launch answers
+
+Every launch whose mob has long-term agents serves the identity methods and
+lists them in `meta/capabilities`. What they answer depends on the policy:
+
+| The launch gives | Reads (`list`, `get`, `directory`, `operation`) | Changes, and `plan` | Identity tools of agents | Console `identity_changes.available` |
+|------------------|--------------------------------------------------|---------------------|--------------------------|---------------------------------------|
+| No policy | Answer. The directory says `not_allowed` for every profile and every peer | Refused `change_denied`; the sentence says the launch gives no identity creation policy | Not mounted | `false` |
+| A policy with `enabled: false` | The same as no policy | The same as no policy | Not mounted | `false` |
+| A policy with `enabled: true` and no rule that matches | Answer. The directory says what the rules give the caller | Refused `change_denied` by the default outcome, `deny` | Mounted | `true`, unless the Console is read-only |
+
+In the first two states every agent stays exactly as the host configured it,
+and no method answers method not found. The shape of a disabled policy is
+still checked at init.
+
+An enabled policy is checked whole at init, and init is refused for any part
+of it that is malformed, names a profile the mob does not define, or names
+something this release does not carry out. An unknown key is refused at
+every level. A disabled policy is checked for its shape only: a malformed
+part or an unknown key refuses init, and the checks of the mob's profiles
+and of what this release carries out are not reached.
+
+## Shape
+
+```json
+{
+  "enabled": true,
+  "reserved_keys": { "labels": ["team"] },
+  "authority_fields": { "team": { "values": ["core", "field"] } },
+  "peers": {
+    "rules": [
+      { "id": "core-team",
+        "target": { "labels": { "team": "core" } },
+        "outcome": "require_approval",
+        "reason": "a member of the core team" }
+    ],
+    "default": "allow"
+  },
+  "approval": {
+    "rules": [
+      { "change": ["create", "descriptive", "archive"],
+        "requester": { "kind": "host", "surface": "rpc" },
+        "target": { "profile": ["assistant"] },
+        "outcome": { "kind": "allow" } },
+      { "change": ["create"],
+        "requester": { "kind": "agent", "profile": ["planner"] },
+        "target": { "profile": ["assistant"] },
+        "outcome": { "kind": "require_approval", "approver": { "id": "owner" } } },
+      { "change": ["remove"],
+        "target": { "profile": ["assistant"] },
+        "outcome": { "kind": "require_approval", "approver": { "id": "owner" } } }
+    ],
+    "default": { "kind": "deny" },
+    "timeouts_ms": { "create": 86400000 }
+  }
+}
+```
+
+| Member | Meaning |
+|--------|---------|
+| `enabled` | Whether changes of agents are accepted at all. `false` by default; the shape of a disabled policy is still checked. |
+| `reserved_keys.labels` | Label keys a request sets only as an authority field. Every label key a selector of the policy reads is reserved too, without being listed. |
+| `authority_fields` | The reserved label keys a request may set, each with the values it may take (`{"values": [...]}`). An authority field is set only under a human decision. |
+| `peers` | Which agents a new or updated agent may list as peers: `rules` (each `{id, target, outcome, reason?}`) and `default`. A peer outcome is `allow`, `require_approval` or `deny` (the default). |
+| `approval` | Which outcome each change gets: `rules`, `default` (`{"kind": "deny"}` unless the host says otherwise) and `timeouts_ms`, the decision timeout per change class (24 hours for `create`, 4 hours for the others, at most 7 days). |
+| `preparation` | Which profiles' new agents the host prepares before their first use: `{"<profile>": {"mode": "required"}}`. See [Preparation](#preparation). A profile the policy does not name needs none. |
+
+## Preparation
+
+Some agents need something from their host before they can run: a
+workspace, a credential, a record in another system. Name the profile under
+`preparation` with `{"mode": "required"}`, and every agent created of that
+profile waits for its host:
+
+```json
+{ "enabled": true,
+  "preparation": { "assistant": { "mode": "required" } },
+  "approval": { "rules": [
+    { "change": ["create"], "requester": { "kind": "host", "surface": "rpc" },
+      "target": { "profile": ["assistant"] }, "outcome": { "kind": "allow" } }
+  ] } }
+```
+
+- The create commits the agent and answers `pending_preparation`. A create
+  a person approved answers the same once it is carried out.
+- Until the host settles it the agent has no member: `meta/identity/get`
+  and `meta/identity/list` read it `readiness: "preparation_pending"` and
+  name its create in `open_operations`, `meta/status_identity` reads it
+  `preparation_pending: true`, a
+  message to it is refused retryable, its archive is refused the retryable
+  `host_preparation_pending`, and nothing is built, run or woken for it. Its
+  `first_message` waits too. An update changes its record and leaves it
+  waiting.
+- The host prepares what the agent needs and calls
+  [`meta/identity/settle_preparation`](/meta/api/rpc#meta%2Fidentity%2Fsettle_preparation)
+  with the agent's `name`. The agent is seated dormant, and its first
+  message, if it has one, runs once. The settle names the agent, not a
+  version of it: the agent is seated as its record reads at the settle, so
+  an update made while it waited is part of what is seated.
+- A restart changes nothing of this: a waiting agent waits in the next
+  process, and its settle seats it there.
+
+Waiting costs nothing, so a host that cannot prepare an agent yet leaves it
+waiting and settles later. A host that gives up on an agent removes it with
+`meta/identity/remove`: that is the removal every agent has, and the name is
+retired like any removed name.
+
+Only the host's operator settles a preparation (the SDK host on the stdio
+gateway): the host is what prepares, so nobody else says an agent is
+prepared. The preparation is of an agent's first use: an update and an
+unarchive ask for none.
+
+For the same reason an agent is not moved **into** a profile the policy
+prepares. Such an update is refused `unsupported`
+(`feature: "move_into_prepared_profile"`, at `set.profile`) and changes
+nothing: the agent ran on another profile already and would run on this one
+without ever having been prepared. Create the agent in that profile instead.
+The refusal is given when the move is asked, whatever the approval rules
+say of a profile change: a rule that has a person decide it asks nobody
+for a move that could only be refused, and a plan of the move answers the
+refusal.
+A move out of a prepared profile is an update like any other, and an agent
+that still waits keeps waiting after it.
+
+## Approval rules
+
+A rule is `{change, requester, target, outcome}`.
+
+**`change`** lists the change classes the rule governs:
+
+| Class | What it is |
+|-------|------------|
+| `create` | A new agent |
+| `descriptive` | An update of the display name, the instructions, the context or the labels that are no authority field |
+| `capability` | An update of who reaches the agent and how it runs: its `addressability` and its `runtime_mode_override` |
+| `peers` | Peers added or removed |
+| `authority` | An authority field set. A rule that lets it through without a human decision is refused at init |
+| `profile` | A move to another profile: the agent then has that profile's model, tools and skills, on the same conversation |
+| `archive` | An archive, and an unarchive |
+| `remove` | A removal: permanent, the name is never available again |
+| `adopt` | The release of a configured agent from configuration (see [Adopting configured agents](#adopting-configured-agents)) |
+
+**`requester`** selects who asks, as the transport attributed it, never as a
+request said:
+
+| Member | Selects |
+|--------|---------|
+| `kind` | `host` (host code, the SDKs and a Console that signs nobody in), `human` (a person signed in to the Console) or `agent` (a member agent, from the session its tool call ran in) |
+| `surface` | The host's surface: `rpc` for the stdio gateway's SDK host, `console` for the Console. Only with `kind: "host"` |
+| `identity` | Agent names. Only for an agent |
+| `profile` | Agent profiles. Only for an agent |
+| `labels` | Authority labels the requesting agent carries, all of them. Only for an agent |
+
+An absent member selects anything, a list selects any of its values, and an
+empty selector selects every requester. A selector that can select nobody
+(a surface beside an agent's member, for example) is refused at init.
+
+**`target`** selects the agents whose changes the rule governs, by
+`identity` (names), `profile` and `labels` (authority labels). For a create
+it is the agent being created; for an update it is the agent both as it is
+and as the update leaves it, so a rule for either governs the update.
+
+**`outcome`** is `{kind, approver?, timeout_ms?}`:
+
+| `kind` | What happens |
+|--------|--------------|
+| `allow` | The change commits at once |
+| `require_approval` | The change is held for a person acting for `approver` (`{"id": "..."}`, or `{"label": "..."}` for the value of one of the requesting agent's authority labels). Nothing is written until it is decided; a person cannot approve their own request |
+| `deny` | The change is refused `change_denied` |
+
+A held change answers `pending_decision` and is a durable decision of kind
+`identity.<change>`: a person decides it through the
+[durable decision methods](/meta/api/rpc#durable-decision-methods), and Meerkat
+then carries it out by itself, as the requester that asked. Its requester
+withdraws it with `meta/identity/withdraw`, and so does the host's operator
+on the stdio gateway. An agent that asked is told
+the outcome by a message to itself; host code and a person read
+`meta/identity/operation`.
+
+A person's approval is evidence, never authority over the policy. When an
+approved change is carried out, the policy the launch has then is asked
+again: if its rules deny the change now, nothing is executed, the decision
+ends refused and `meta/identity/operation` says the change was denied. A
+launch without an enabled policy carries nothing out: the decision stays
+as it is until a launch with a policy runs, or its deadline passes. A host
+that turns its policy off does not get its held changes refused for that:
+they lapse at their deadlines.
+
+Two more kinds are part of the policy's vocabulary and are **refused at init
+in this release**: `notify`, because no notice reaches an approver yet, and
+`review`, because no reviewer decides yet. Write `allow` where you would
+write `notify`: the consent a change committed under is recorded with the
+agent and reads back from `meta/identity/get` and `meta/identity/list`
+(`provenance.consent`) and from `meta/identity/operation`. Write
+`require_approval` where you would write `review`, or review the request in
+your own code before you ask under `allow`. The preparation mode
+`constructed` is refused at init too: no method of this release holds or
+activates a construction, so an agent of such a profile would wait for it
+without end. Write `required` (see [Preparation](#preparation)).
+
+A mob whose runtime is governed runs no first message: a create that gives
+`first_message` there is refused `unsupported`
+(`first_message_in_governed_realm`) before anything is written. Create the
+agent without one and send it its first input through the host's governed
+ingress.
+
+### How a request is judged
+
+Every rule whose `change`, `requester` and `target` all match governs the
+request, and the **strictest** of their outcomes applies (`allow`, then
+`require_approval`, then `deny`). A change no rule governs gets the default,
+which is `deny` unless the host changes it.
+
+An update can touch several classes at once: new instructions are
+`descriptive`, a new peer is `peers`, a new profile is `profile`. Each class
+is judged by its own rules, and the strictest outcome applies to the whole
+request. An update that changes the instructions under an `allow` rule and
+adds a peer no rule governs is denied as a whole; nothing of it is applied.
+
+A peer whose peer rule says `require_approval` raises the request to a human
+decision whatever its approval rules say, and an authority field always needs
+one.
+
+### Select by target profile
+
+Write every rule with a `target` that names profiles. A profile is what
+gives an agent its model, tools and skills, so the target profile is what
+says how much a rule lets through.
+
+```json
+{ "change": ["create"],
+  "requester": { "kind": "agent" },
+  "target": { "profile": ["assistant"] },
+  "outcome": { "kind": "allow" } }
+```
+
+This rule lets member agents create agents of the profile `assistant`, and
+nothing else.
+
+**What an `allow` rule for agent creates without a target selector admits.**
+Any agent that has the mob tools may then create agents of any profile of
+the mob, including profiles with more tools than its own, with instructions
+and a first message it wrote, as often as it likes; and an agent it created
+this way may do the same. Meerkat builds no count, no rate limit and no
+ceiling tied to the creator: an agent created at run time is the same kind
+of agent as a configured one, and who asked for it is recorded and grants
+or limits nothing. The host's rule is the only control, so say in it which
+profiles it is for.
+
+## Who asked is recorded, and decides nothing
+
+An agent's record keeps how it entered (`created`, `adopted`, `imported`),
+who asked, when, and the consent it committed under. No rule can select by
+it, and no rule needs to: the rules select the requester of the change
+being judged now and the agent being changed.
+
+An agent never changes itself (`self_change_refused`), and a member that is
+private to one person (a Console side chat, for example) asks for no change
+at all (`private_requester`): its own record says whom it is private to,
+whether or not it has run since its host started.
+
+## What a caller is shown
+
+Every read of the family and every peer a change names goes through one
+rule. A caller is shown the agents its view of the mob shows it: on the
+Console the agents the caller's access rules let it view (`agent.view`),
+on the stdio gateway every agent. An agent is shown no agent that is
+private to one person (one whose labels carry `console.private_to`),
+whatever it asks: its `list` and its `directory` leave such an agent out,
+and a `get`, a `plan` or a change of it answers `identity_unknown`,
+exactly as a name no agent holds. A create under its name is the one
+thing that differs from a name no agent holds: one namespace holds every
+name, so a taken name cannot be created, and the create is refused
+`name_taken`. The refusal says nothing of what holds the name to a
+caller that is not shown every agent (an agent, or a Console caller that
+does not administer the runtime): `by` reads `identity` whether the
+holder is an agent the caller is shown, one it is not, a removed agent's
+name or a worker member. The host and an administrator read the holder
+(`identity`, `removed`, `worker`, `unreadable`). Who is private is read from the agent's
+own record, never from what the running host happened to start, so the
+rule holds for an agent that has not run since its host started. A `get`
+names to an agent only the peers it is shown, and who asked for an agent
+only while the asker's record can be read and is shown to it: once an
+asker is removed, an agent reads no `provenance` on the agents that asker
+asked for. The host reads all of it.
+
+The list of an agent's schedules, which the answer of an archive, an
+unarchive and a removal and their plan carry (`schedules`), is the host's:
+the stdio gateway's caller is given it, and on the Console a caller with
+`runtime.admin`. A schedule that targets an agent may be anybody's, so
+every other caller (an agent that asks for the change, a Console caller
+without `runtime.admin`) is told what became of the schedules and how many
+they are (`effect`, `count`), with no `schedules` list.
+
+## Peers a caller may name
+
+A change names as peers only agents its caller is shown, and an agent
+private to one person is nobody's peer. A peer the caller may not name is
+answered `peer_unknown`, exactly as a name no agent holds, and never
+`peer_not_allowed`: a peer rule speaks only to a caller that sees the
+peer.
+
+## Adopting configured agents
+
+An agent the host's configuration declares is read-only at run time: a
+change of it answers `owner_read_only`. `adopt` releases it from
+configuration. From then on it is changed at run time like any other agent,
+and configuration no longer declares it: a roster that still lists the name
+changes nothing. The agent keeps its name, its member, its session and its
+history; nothing restarts and nothing wakes.
+
+A rule opens it like any other change:
+
+```json
+{ "change": ["adopt"],
+  "requester": { "kind": "host", "surface": "rpc" },
+  "target": { "profile": ["assistant"] },
+  "outcome": { "kind": "allow" } }
+```
+
+## On the Console
+
+A Console caller is judged twice: by the access actions
+(`agent.identity.create`, `agent.identity.manage`, `agent.identity.remove`;
+see [Access control](/meta/concepts/access-control)), which say who may call the
+methods at all, and then by this policy, with the caller as the requester:
+`{"kind": "human"}` for a signed-in person, `{"kind": "host", "surface":
+"console"}` for a Console that signs nobody in.

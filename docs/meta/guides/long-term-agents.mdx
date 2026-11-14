@@ -1,0 +1,551 @@
+---
+title: "Create and change long-term agents from host code"
+description: "Move an agent your configuration declares to run-time changes, then create, update, archive and remove long-term agents with the Python and TypeScript SDKs."
+icon: "users-gear"
+---
+
+*Mirrored from Meerkat Meta main at [359f08425e2d](https://github.com/lukacf/meerkat/commit/359f08425e2df4c8a799e105645fe3f6499bc650) on 2026-11-14; Meta version 0.9.14 at that commit.*
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+Available from Meerkat Meta 0.9.15.
+
+A long-term agent is a durable, named member of the mob. It keeps its own
+conversation and memory across restarts, and it is addressed by name. Your
+host code can read and change the mob's agents while the gateway runs, with
+`runtime.identities` in the Python SDK (`meerkat-meta`) and the TypeScript
+SDK (`@rkat/meta-sdk`). Each call is one `meta/identity/*` host method.
+
+There is one kind of agent. An agent made at run time is the same as one
+your configuration declares: the same profile, tools, memory, peers, console
+entry and restart recovery. Who asked for an agent is recorded, and nothing
+reads it for a decision. No read tells the two apart.
+
+This page starts with the case of an application that already has agents:
+moving one from configuration to run-time changes.
+
+## 1. Launch with a policy
+
+The gateway changes agents only under your policy. Give the policy on the
+builder. It is sent as `runtime_options.identity_creation`, and it needs a
+persistent launch.
+
+| The launch gives | Reads (`list`, `get`, `directory`, `operation`) | A change, and `plan` |
+| --- | --- | --- |
+| no policy | answer | refused `change_denied` |
+| a policy with `"enabled": false` | answer | refused `change_denied` |
+| an enabled policy | answer | each change gets the outcome of the rules that match it; a change no rule matches is refused `change_denied` |
+
+A call of this family never answers "method not found" on a gateway of this
+release: that answer means the gateway is older.
+
+<CodeGroup>
+
+```python Python
+from meerkat_meta import Meta
+
+runtime = await (
+    Meta.builder()
+    .gateway(gateway_bin)
+    .mob("mob.toml")
+    .persistent_state(state_dir)
+    .roster(roster)
+    .identity_creation({
+        "enabled": True,
+        "approval": {"rules": [{
+            "change": ["adopt"],
+            "requester": {"kind": "host", "surface": "rpc"},
+            "outcome": {"kind": "allow"},
+        }]},
+    })
+    .build()
+)
+```
+
+```typescript TypeScript
+import { Meta } from "@rkat/meta-sdk";
+
+const runtime = await Meta.builder()
+  .gateway(gatewayBin)
+  .mob("mob.toml")
+  .persistentState(stateDir)
+  .rosterProvider(roster)
+  .identityCreation({
+    enabled: true,
+    approval: { rules: [{
+      change: ["adopt"],
+      requester: { kind: "host", surface: "rpc" },
+      outcome: { kind: "allow" },
+    }] },
+  })
+  .build();
+```
+
+</CodeGroup>
+
+A rule names the changes it governs in `change`, selects by the requester and
+the target, and gives an outcome. The rule above lets your SDK calls, which
+are the host on the `rpc` surface, adopt agents. A rule must name at least one
+change: `create`, `descriptive` (display name, instructions, context, labels),
+`capability`, `peers`, `profile`, `archive` (an archive and an unarchive),
+`remove`, `adopt` or `authority`. A change no rule matches gets the default
+outcome, which is `deny`, so the sections below need their changes added to
+the rule. An `authority` change always needs a person's decision: a rule that
+allows it is refused at init.
+
+The outcomes of this release are `allow`, `require_approval` (a person
+decides; the rule names an `approver`) and `deny`. A policy that names
+`notify` or `review` is refused at init.
+
+The SDK sends the policy unchanged and models none of it: the gateway owns
+its shape and refuses the init for a policy it cannot read. The
+[policy reference](/meta/reference/identity-policy) has the whole shape.
+
+## 2. Adopt an agent your configuration declares
+
+An agent your configuration declares is changed in configuration. A run-time
+change of it is refused `owner_read_only`. To change it at run time, adopt it
+first: `adopt` releases the agent from configuration. From then on it is
+changed at run time, and configuration no longer declares it.
+
+The agent keeps its name, its conversation, its memory and the peers it has.
+
+<CodeGroup>
+
+```python Python
+from meerkat_meta import IdentityRefusedError
+
+identities = runtime.identities
+
+record = await identities.get("scout")
+try:
+    outcome = await identities.adopt(
+        "scout",
+        expected_spec_digest=record.spec_digest,
+        request_id="adopt-scout-1",
+    )
+except IdentityRefusedError as refused:
+    if refused.retryable:
+        ...  # for example declared_apply_open: send the same request again later
+    else:
+        raise
+else:
+    if outcome.outcome == "done":
+        ...  # adopted: stop declaring "scout" in your configuration
+```
+
+```typescript TypeScript
+import { IdentityRefusedError } from "@rkat/meta-sdk";
+
+const identities = runtime.identities;
+
+const record = await identities.get("scout");
+try {
+  const outcome = await identities.adopt("scout", {
+    expectedSpecDigest: record.specDigest,
+    requestId: "adopt-scout-1",
+  });
+  if (outcome.outcome === "done") {
+    // adopted: stop declaring "scout" in your configuration
+  }
+} catch (error) {
+  if (error instanceof IdentityRefusedError && error.retryable) {
+    // for example declared_apply_open: send the same request again later
+  } else {
+    throw error;
+  }
+}
+```
+
+</CodeGroup>
+
+Three things make this safe to automate:
+
+- **`request_id` names the change.** The same id and the same request return
+  the same state and commit at most once. After a lost answer or a restart,
+  send the same call again, or read it with `operation`. A different request
+  under the same id is refused `operation_reused`.
+- **`expected_spec_digest` is the spec you read.** There is one spec digest
+  on every surface, the digest of the agent's record: the same value in
+  `list`, `get`, a change's outcome and the `current_digest` of a
+  `stale_spec` refusal. An adoption does not change it.
+- **A refusal says what to do.** `not_adoptable` carries a `reason` in its
+  details; an agent that is changed at run time already answers
+  `nothing_to_adopt`. `declared_apply_open` is retryable: the gateway is
+  applying your configuration, so send the same request again.
+
+Once the adoption committed, stop declaring the agent in your configuration.
+While your roster still lists it, the agent is served from its record and the
+roster's entry for that name is not applied: the identity's status
+(`runtime.status(name)`) reads `roster_listing_superseded` true
+(`rosterListingSuperseded` in TypeScript), and false for every other agent;
+`get`, `list`, the directory and the plan of a change of it read the same
+member.
+
+To adopt every agent, page through `list` and adopt each one:
+
+<CodeGroup>
+
+```python Python
+after = None
+while True:
+    page = await identities.list(after=after)
+    for agent in page.agents:
+        try:
+            await identities.adopt(
+                agent.name,
+                expected_spec_digest=agent.spec_digest,
+                request_id=f"adopt-{agent.name}-1",
+            )
+        except IdentityRefusedError as refused:
+            if refused.details.get("reason") != "nothing_to_adopt":
+                raise
+    if page.next is None:
+        break
+    after = page.next
+```
+
+```typescript TypeScript
+let after: string | undefined;
+for (;;) {
+  const page = await identities.list({ after });
+  for (const agent of page.agents) {
+    try {
+      await identities.adopt(agent.name, {
+        expectedSpecDigest: agent.specDigest,
+        requestId: `adopt-${agent.name}-1`,
+      });
+    } catch (error) {
+      const known =
+        error instanceof IdentityRefusedError &&
+        error.details.reason === "nothing_to_adopt";
+      if (!known) throw error;
+    }
+  }
+  if (page.next === null) break;
+  after = page.next;
+}
+```
+
+</CodeGroup>
+
+## 3. Read an operation later
+
+A change answers one of three outcomes, or is refused:
+
+| Outcome | Meaning |
+| --- | --- |
+| `done` | The change committed. `agents` lists each agent with its `spec_digest` afterwards. |
+| `pending_decision` | A person must decide. Nothing but the decision is written. This is a normal answer, not an error. |
+| `pending_preparation` | The change committed, and an agent is not usable until your host has prepared it and called `settle_preparation` (see Host preparation in section 4). A create answers it for an agent of a profile whose preparation your policy names `required`. |
+
+An agent's `open_operations` (`get` and `list`) are the ids of the operations
+open for it: its create while it waits for your host's preparation, and each
+change of it that is held for a person's decision or approved and not yet
+carried out. The gateway leaves the member out when nothing is open; the SDKs
+then read an empty list.
+
+`pending_decision` carries the `operation_id`, the `decision_id` and the
+decision's `deadline_ms`. Do not repeat the change under a new `request_id`.
+The SDK does not poll: read the operation when you want its state, by your
+own `request_id` or by the outcome's `operation_id`.
+
+<CodeGroup>
+
+```python Python
+state = await identities.operation(request_id="adopt-scout-1")
+if state.outcome == "done":
+    ...
+elif state.outcome == "pending_decision":
+    ...  # still held; state.deadline_ms
+elif state.outcome == "refused":
+    state.refusal.kind  # for example decision_closed
+elif state.outcome == "unknown":
+    ...  # nothing committed and nothing is held: asking it commits at most once
+```
+
+```typescript TypeScript
+const state = await identities.operation({ requestId: "adopt-scout-1" });
+switch (state.outcome) {
+  case "done":
+    break;
+  case "pending_decision":
+    break; // still held; state.deadlineMs
+  case "refused":
+    state.refusal.kind; // for example decision_closed
+    break;
+  case "unknown":
+    break; // nothing committed and nothing is held: asking it commits at most once
+}
+```
+
+</CodeGroup>
+
+`withdraw` ends a held decision without writing anything. After a withdrawal
+the operation reads `refused` with kind `decision_closed`
+(`state: withdrawn`), a second `withdraw` answers `decision_closed` too, and
+the same `request_id` cannot be asked again: ask the change under a new one.
+
+A person decides a
+held change through the [durable decision methods](/meta/api/rpc#durable-decision-methods);
+the person who asked cannot decide their own request. In this release the
+host's own consequence lines come from a Rust host composition only: a
+decision of an SDK host renders without them.
+
+## 4. Create, update, archive and remove
+
+<CodeGroup>
+
+```python Python
+from meerkat_meta import AgentSet, AgentSpec
+
+created = await identities.create(
+    [
+        AgentSpec(
+            name="editor",
+            profile="writer",
+            display_name="Editor",
+            instructions=["Edit for clarity."],
+            peers=["scout"],
+            first_message="Introduce yourself to scout.",
+        )
+    ],
+    request_id="create-editor-1",
+)
+digest = created.agents[0].spec_digest
+
+updated = await identities.update(
+    "editor",
+    expected_spec_digest=digest,
+    request_id="update-editor-1",
+    set=AgentSet(instructions=["Edit for clarity.", "Keep the author's voice."]),
+)
+agent = updated.agents[0]
+agent.instructions.kind        # "applies_at_next_run", ...
+digest = agent.spec_digest
+
+await identities.archive("editor", expected_spec_digest=digest, request_id="archive-editor-1")
+await identities.unarchive("editor", expected_spec_digest=digest, request_id="unarchive-editor-1")
+await identities.remove("editor", expected_spec_digest=digest, request_id="remove-editor-1")
+```
+
+```typescript TypeScript
+const created = await identities.create(
+  [
+    {
+      name: "editor",
+      profile: "writer",
+      displayName: "Editor",
+      instructions: ["Edit for clarity."],
+      peers: ["scout"],
+      firstMessage: "Introduce yourself to scout.",
+    },
+  ],
+  { requestId: "create-editor-1" },
+);
+let digest = created.outcome === "done" ? created.agents[0].specDigest! : "";
+
+const updated = await identities.update("editor", {
+  expectedSpecDigest: digest,
+  requestId: "update-editor-1",
+  set: { instructions: ["Edit for clarity.", "Keep the author's voice."] },
+});
+if (updated.outcome === "done") {
+  const agent = updated.agents[0];
+  agent.instructions?.kind; // "applies_at_next_run", ...
+  digest = agent.specDigest!;
+}
+
+await identities.archive("editor", { expectedSpecDigest: digest, requestId: "archive-editor-1" });
+await identities.unarchive("editor", { expectedSpecDigest: digest, requestId: "unarchive-editor-1" });
+await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remove-editor-1" });
+```
+
+</CodeGroup>
+
+- **Create.** One call creates 1 to 256 agents, all or nothing; they may name
+  each other as peers. A new agent is dormant: nothing is loaded and nothing
+  wakes until its first delivery or its first message. Each agent's outcome
+  carries its `seat`: `owed` means the agent is committed and durable and its
+  first message did not start; it is seated at its next delivery, without a
+  restart. On a governed runtime a create that gives a first message is
+  refused before anything is written (`unsupported` at
+  `agents[i].first_message`): create the agent without one. The peers an
+  agent lists are checked against the policy's `peers` rules, whose default
+  is `deny` (`peer_not_allowed`): allow them there, for example with
+  `"peers": {"default": "allow"}`. An agent may name who reaches it,
+  `addressability` (`addressable`, the default, or `internal_only`), and
+  how it runs, `runtime_mode_override` (`autonomous_host` or `turn_driven`;
+  left out, as its profile says): the members and values of a
+  [roster row](/meta/concepts/roster), with the same meaning. `get` and `list`
+  read both back, each only when it is not the default.
+- **Update.** `set` names what changes; a member left out is unchanged.
+  `instructions` and `context` are replaced whole. `labels` sets the keys it
+  names, and `labels_remove` removes keys. A reserved label the agent
+  carries (one of Meta's own, or one your policy reserves, that its
+  configuration gave it before its adoption) stays through an update that
+  does not name it; an update that would change or remove it is refused
+  `reserved_key` at `set.labels`, the removal of one of Meta's own labels at
+  `set.labels_remove`. A label change reaches the
+  agent's member at once while the member is idle, on the same conversation,
+  with no respawn and no reset; a member that held work then takes it at a
+  retry of the update, at its next update, or at its next seat. A `profile`
+  change moves the agent
+  to that profile's model and tools on the same conversation.
+  `addressability` and `runtime_mode_override` take the values they take on
+  a create and are the change class `capability` of your policy; an update
+  sets a runtime mode and cannot return the agent to its profile's.
+- **Instructions.** A change of instructions is in the agent's record at
+  once. It reaches the agent at its next run; a run that starts within
+  moments of the change may still use the earlier instructions; earlier
+  instructions are never rewritten. The update's outcome says which applies:
+  `applies_at_next_run`, `applies_after_compaction`, `applies_at_next_session`
+  (with a `reason`) or `unchanged`.
+- **Archive and unarchive.** An archived agent keeps its name, record,
+  conversation and memory, and messages to it are refused. Like any agent
+  that leaves, it is owed the harvest and distillation of its last
+  conversation, an exit interview and the retirement hook (cause
+  `unlisted`); they start right after its member retired, and no order is
+  promised between them and the archive's answer. Unarchive
+  brings it back on the same conversation. While it is archived the
+  identity's status (`runtime.status(name)`) reads `archived` true; the
+  member is left out otherwise.
+- **Remove.** Removal is permanent: the name is never available again
+  (`name_taken`). The agent's conversation and memory are kept, and no
+  other agent can reach them. A removal owes what an archive owes (the
+  harvest, the exit interview, the retirement hook); a removal of an
+  archived agent owes nothing more. Archive an agent that may be needed
+  later.
+- **Schedules.** The schedules that target an agent follow these three
+  changes, so that none keeps firing at an agent that takes no delivery: an
+  archive pauses its Active schedules, an unarchive resumes exactly the
+  schedules paused that way (one somebody paused by name stays paused), and
+  a removal ends every one. A schedule is the agent's when it names the
+  agent or its session, or is a Console schedule for it. The agent's entry
+  of the first answer says how its schedules stand after the change:
+  `schedules` with its `effect` (`paused`, `resumed`, `ended`),
+  `count`, the `schedules` (`schedule_id` and `name`) and `incomplete`,
+  true when a schedule could not be read or changed (send the same request
+  again: it follows the rest). After an archive the list is the schedules
+  paused for the agent; after an unarchive, the agent's schedules that are
+  active after the call, one somebody resumed by name while it was archived
+  included; after a removal, the ended ones. A schedule somebody paused by
+  name is on neither of the first two lists. The `effect` and the `count`
+  are told to every caller of the change; the list is your host's. These
+  calls are given it, and so is a Console caller with `runtime.admin`. An
+  agent that asks for the change through its tools, and any other Console
+  caller, is answered without the list, since a schedule that targets an
+  agent may be anybody's. A replay of the request and a
+  later `operation` read state no `schedules`, so do not compare a retry's
+  answer whole with the first one. `plan` of those changes carries the list
+  the change would answer. While an agent is archived no schedule is pointed
+  at it through Meta: the agents' schedule tools and the Console refuse a
+  create or an update that would (`identity_archived`); a pause, a resume
+  and a delete by name stay. Two limits hold for a schedule that names only
+  a session: a removal of the session's agent does not end it, and one
+  created, or resumed by name, while that agent is archived is active. Each
+  of its fires ends as a missing target and no turn runs; after a removal,
+  end it by hand ([Agent changes](/meta/api/rpc#agent-changes)).
+- **Host preparation.** When your policy names a profile's preparation
+  `required`, a create of an agent of that profile answers
+  `pending_preparation`: the agent reads `readiness` `preparation_pending`,
+  takes no delivery (a retryable refusal), runs nothing and wakes nothing.
+  Its status reads `preparation_pending` true (`preparationPending`), and
+  its `open_operations` name its create until the settle.
+  Prepare what it needs, then call
+  `identities.settle_preparation(name, request_id=...)`
+  (`settlePreparation(name, { requestId })`): the agent is seated dormant
+  and its first message, if it has one, runs once. The same `request_id`
+  and name answer the same result. An agent that awaits no preparation
+  refuses `preparation_not_pending`. If you cannot prepare an agent, leave
+  it pending (waiting costs nothing) or remove it.
+
+`directory` lists the profiles you may name and the agents you may list as
+peers, each with the verdict your rules give it (`allowed`, `needs_decision`
+with the lines the decision shows, or `not_allowed`). `plan` answers the outcome
+and the rendering a change would get, and holds and writes nothing.
+`changes_hold` holds every change for a while, for example during a deploy:
+each change is refused the retryable `changes_held`. The hold does not
+survive a restart of the host: set it again as soon as the start has
+answered, before you serve callers. The start itself is not held: what a
+launch carries out before your call (a held change that was approved, a
+change asked by an agent a schedule wakes) is carried out.
+
+## 5. Handle a refusal
+
+Every refusal of every call raises one error, `IdentityRefusedError`. Nothing
+of a refused change was written.
+
+| Member | Meaning |
+| --- | --- |
+| `kind` | One of the closed vocabulary `IDENTITY_REFUSAL_KINDS`, for example `stale_spec`, `name_taken`, `owner_read_only`, `change_denied`. |
+| `field` | The request field the refusal concerns, as a path in the wire's names: `agents[1].name`, `set.labels`, `peers_add[0]`, `name`. Absent for the request as a whole. |
+| `detail` | One sentence: what was wrong, and what to send instead. |
+| `retryable` | Whether the same request may succeed later unchanged. |
+| `details` | The kind's own members, for example `current_digest` for `stale_spec`. |
+
+<CodeGroup>
+
+```python Python
+try:
+    await identities.update("editor", expected_spec_digest=digest, request_id="update-editor-2",
+                            set=AgentSet(display_name="Chief editor"))
+except IdentityRefusedError as refused:
+    if refused.kind == "stale_spec":
+        digest = refused.details["current_digest"]   # read again, then ask anew
+    elif refused.retryable:
+        ...                                          # same request, later
+    else:
+        log.warning("%s at %s: %s", refused.kind, refused.field, refused.detail)
+```
+
+```typescript TypeScript
+try {
+  await identities.update("editor", {
+    expectedSpecDigest: digest,
+    requestId: "update-editor-2",
+    set: { displayName: "Chief editor" },
+  });
+} catch (error) {
+  if (!(error instanceof IdentityRefusedError)) throw error;
+  if (error.kind === "stale_spec") {
+    digest = String(error.details.current_digest); // read again, then ask anew
+  } else if (error.retryable) {
+    // same request, later
+  } else {
+    console.warn(`${error.kind} at ${error.field}: ${error.detail}`);
+  }
+}
+```
+
+</CodeGroup>
+
+The vocabulary is closed: a new kind is a breaking change of the SDKs. A
+gateway newer than your SDK may still send a kind the SDK does not list. It
+is the same error, with the kind's token in `kind` and `known_kind`
+(`knownKind`) false, so handle an unknown kind by `retryable` and `detail`.
+
+Params the gateway cannot read are this error too, with kind
+`invalid_request`: problem `malformed` for an unknown member or a wrong type,
+`empty` for a change without its `request_id`. One case is not this error: a
+candidate launch refuses every change before the family is reached, with the
+gateway-wide `-32047` and kind `candidate_launch` (`AnnouncementRefusedError`
+in both SDKs). It still answers the reads.
+
+Advisory values are open. An agent's `readiness`, a change's `state`, a
+provenance's `entered`, a directory verdict, the `addressability` and
+`runtime_mode_override` an agent reads back and the `effect` on its
+schedules may take values your SDK does not know: they are kept as the
+gateway sent them.
+
+`get` and `list` answer each agent's `provenance`: how it came to exist, who
+asked, when, and the consent the change committed under. It is recorded and
+shown; nothing reads it for a decision.
+
+## See also
+
+- [Python SDK](/meta/sdks/python#long-term-agents)
+- [TypeScript SDK](/meta/sdks/typescript#long-term-agents)
+- [Identity policy](/meta/reference/identity-policy)
+- [Agent changes](/meta/api/rpc#agent-changes): the host methods behind the calls
+- [Durable decisions](/meta/reference/decisions)

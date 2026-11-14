@@ -4,7 +4,7 @@ description: "TypeScript SDK for Meta with type-safe contracts, parity tests, an
 icon: "js"
 ---
 
-*Mirrored from Meerkat Meta main at [abdabeb8e978](https://github.com/lukacf/meerkat/commit/abdabeb8e97805385e71d66da7e78136c4b0e68c) on 2026-11-12; Meta version 0.9.14 at that commit.*
+*Mirrored from Meerkat Meta main at [359f08425e2d](https://github.com/lukacf/meerkat/commit/359f08425e2df4c8a799e105645fe3f6499bc650) on 2026-11-14; Meta version 0.9.14 at that commit.*
 
 The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
 
@@ -74,7 +74,12 @@ await rt.revokeInstruction("app.example", "tone", 2);
 
 A write resolves once the record is durable (`disposition` `"committed"`, or
 `"duplicate"` for an exact repeat); a refusal rejects with an RPC error whose
-`data.instruction_set_code` names it (for example `stale_revision`). The
+`data.instruction_set_code` names it (for example `stale_revision`). A
+member target is for that member alone. From 0.9.15 Meerkat has
+`include_forks`, a record for a member and its forks: `setInstruction`
+refuses a target that carries it, and such a record is written by a Rust
+host that embeds Meta, through the mob handle's `set_operator_instruction`
+(`instructionStatus` shows it). The
 status read never wakes a member and names each member by its `identity`;
 its advisory values (a pending or blocked `reason`, `residency`) may be new
 to this SDK, so keep them as they are. These replace
@@ -165,7 +170,9 @@ const rt = await Meta.builder()
 ```
 
 `"on_demand"` (the gateway default when unset) materializes only the members
-that hold work; `"on_demand_verified"` also checks every other member once,
+that must be live, such as those that hold work (the full set is under
+`member_restore` in
+[Configuration](/meta/reference/configuration#sdk-and-gateway-runtime-options)); `"on_demand_verified"` also checks every other member once,
 read-only, before ready, so a member whose session cannot be resumed reads
 broken at ready; `"eager"` materializes every member. Another value throws
 `RangeError`. A read never materializes a member:
@@ -300,6 +307,136 @@ identity); both are advisory. Every refusal rejects with
 `ToolGrantRequestRefusedError`; its kinds are
 `TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
 [Scoped tool grants](/meta/api/rpc#scoped-tool-grants).
+
+## Long-term agents
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+`runtime.identities` reads and changes the mob's long-term agents, one call
+per `meta/identity/*` host method. Every agent is read and changed the same
+way, whoever asked for it and by whatever route it came to exist. The
+[guide](/meta/guides/long-term-agents) walks through adopting an agent your
+configuration declares.
+
+```typescript
+import { IdentityRefusedError } from "@rkat/meta-sdk";
+
+const identities = runtime.identities;
+
+const record = await identities.get("scout"); // AgentRecord
+const page = await identities.list({ includeArchived: true }); // { agents, next }
+try {
+  const outcome = await identities.adopt("scout", {
+    expectedSpecDigest: record.specDigest,
+    requestId: "adopt-scout-1",
+  });
+  outcome.outcome; // "done", "pending_decision" or "pending_preparation"
+} catch (error) {
+  if (error instanceof IdentityRefusedError) {
+    error.kind, error.field, error.detail, error.retryable, error.details;
+  }
+}
+
+const state = await identities.operation({ requestId: "adopt-scout-1" });
+```
+
+| Call | Sends | Resolves |
+| --- | --- | --- |
+| `create(agents, { requestId, proposer?, sourceEvidence? })` | `agents`: `AgentSpec[]` (`name`, `profile`, `displayName`, `instructions`, `context`, `labels`, `firstMessage`, `peers`, `addressability`, `runtimeModeOverride`) | outcome |
+| `update(name, { expectedSpecDigest, requestId, set?, peersAdd?, peersRemove? })` | `set`: `AgentSet` (`displayName`, `instructions`, `context`, `labels`, `labelsRemove`, `profile`, `addressability`, `runtimeModeOverride`) | outcome |
+| `archive`, `unarchive`, `remove`, `adopt` `(name, { expectedSpecDigest, requestId })` | the agent and the spec digest you read | outcome |
+| `settlePreparation(name, { requestId })` | the agent your host has prepared | outcome |
+| `withdraw({ requestId } \| { operationId })` | exactly one of the two | `IdentityWithdrawn` |
+| `changesHold(held, { reason? })` | | `IdentityChangesHold` |
+| `list({ profile?, includeArchived?, after? })` | | `AgentPage` of `AgentSummary` |
+| `get(name)` | | `AgentRecord` |
+| `operation({ requestId } \| { operationId })` | exactly one of the two | `IdentityOperation` |
+| `directory({ query?, after? })` | | `AgentDirectoryPage` |
+| `plan(change, request)` | `change` and a `CreateAgents`, `UpdateAgent` or `AgentRef` | `IdentityChangePlan` |
+
+Options and answers are camelCase; the SDK spells the wire's names. A change
+needs your `requestId`: the same id and request return the same state and
+commit at most once. `expectedSpecDigest` is the agent's `specDigest` as you
+read it. There is one spec digest on every surface: the same value in `list`,
+`get`, an outcome and `stale_spec`'s `current_digest`.
+
+An outcome is a union discriminated by `outcome`: `done` (`operationId`,
+`agents`), `pending_decision` (`operationId`, `decisionId`, `deadlineMs`) or
+`pending_preparation`. A held decision is a normal answer. The SDK does not
+poll: read `operation` when you want the state; it also resolves `refused`
+(the operation ended refused) and `unknown`. Each `AgentOutcome` carries the
+agent's `specDigest` afterwards, a create's `seat` (`seated` or `owed`) and
+an update's `instructions` (`applies_at_next_run`,
+`applies_after_compaction`, `applies_at_next_session` with a `reason`, or
+`unchanged`).
+
+The first answer of an `archive`, an `unarchive` and a `remove` also carries
+the agent's `schedules` (`SchedulesFollowed`: `effect`, `count`,
+`schedules` of `{ scheduleId, name }`, `incomplete`): how the agent's
+schedules stand after the change; `null` otherwise. After an archive the
+list is the schedules paused for the agent; after an unarchive, its
+schedules that are active after the call (one somebody resumed by name
+meanwhile included); after a removal, the ended ones. The gateway gives
+your host the list; a caller that is not given it (an agent that asks for
+the change, a Console caller without `runtime.admin`) is told the `effect`
+and the `count` only, and such an answer reads as an empty `schedules` with
+its `count` kept. A
+replay of the request and an `operation` read state none, so compare a
+retry by `operationId` and each agent's `state` and `specDigest`, not
+whole. `IdentityChangePlan.schedules` carries the list a planned change
+would answer.
+
+`AgentSpec` and `AgentSet` take `addressability` (`addressable`,
+`internal_only`) and `runtimeModeOverride` (`autonomous_host`,
+`turn_driven`), the members and values of a roster row; `AgentSummary` and
+`AgentRecord` read both back, each `null` when it is the default.
+
+A create of an agent of a profile whose preparation the policy names
+`required` resolves `pending_preparation`: prepare what the agent needs,
+then `settlePreparation(name, { requestId })` seats it. An agent that
+awaits none refuses `preparation_not_pending`.
+
+`IdentityStatus.rosterListingSuperseded` (`runtime.status(name)`) is `true`
+when the host's roster lists a name whose agent is served from its record,
+an adopted agent your roster still lists for one: the roster's entry is not
+applied. `get`, `list`, the directory and the plan of a change of such an
+agent read the same member (`AgentSummary`, `AgentRecord`, `DirectoryPeer`,
+`IdentityChangePlan`). `IdentityStatus.archived` is `true` while the agent
+is archived,
+and `IdentityStatus.preparationPending` while it waits for its host's
+preparation; the gateway writes each only when it is so. An agent's spec
+digest, provenance and `openOperations` are read with `get` and `list`:
+`openOperations` names its create while it waits for its host, and each
+change of it that is held or approved and not yet carried out, and is
+empty when nothing is open.
+
+Every refusal of every call rejects with `IdentityRefusedError` (`-32058`);
+its kinds are the closed vocabulary `IDENTITY_REFUSAL_KINDS`
+(`IdentityRefusalKind`). A kind newer than the SDK is the same error with
+`knownKind` false. Only `operation` resolves a refusal as a value. A
+candidate launch refuses a change with the gateway-wide
+`AnnouncementRefusedError` (`kind` `candidate_launch`). `field` and the keys
+of `details` are in the wire's names (`agents[1].name`, `current_digest`).
+Advisory values (`readiness`, a change's `state`, provenance, directory
+verdicts) are kept as the gateway sent them.
+
+The gateway changes agents only under the host's policy:
+`MetaBuilder.identityCreation(policy)` sends it as
+`runtime_options.identity_creation`, in wire form. Without one every change
+is refused `change_denied`. The outcomes of this release are `allow`,
+`require_approval` and `deny`; a policy that names `notify` or `review` is
+refused at init. See the [policy reference](/meta/reference/identity-policy) and,
+for the methods themselves, [Agent changes](/meta/api/rpc#agent-changes).
+
+A 0.9.15 client against a 0.9.14 gateway was exercised in one keyless run
+only (the Meta Python SDK's own tests that start a real gateway without a
+provider key, against a gateway built at the 0.9.14 commit); no other client
+and no 0.9.14 runtime was exercised. Of the tests in that run that start a
+real gateway, the five that existed at 0.9.14 and need no provider key
+passed; the failures were in tests new in 0.9.15 (the identity methods and
+cross-mob delivery between gateways) or in tests that need a provider key.
+The methods for agents created at run time (meta/identity) need a 0.9.15
+gateway: upgrade the gateway before the SDKs that call them.
 
 ## Realm MCP administration
 
@@ -731,6 +868,12 @@ The builder forwards `consoleConfig(path)` as `runtime_options.console_config_pa
 The gateway binds `127.0.0.1` on an ephemeral port by default. `httpListen("0.0.0.0:8080")`, `allowRemote()` and `httpPublicBaseUrl(url)` are the exposure knobs (`runtime_options.http_listen`, `allow_remote`, `http_public_base_url`): a non-loopback bind is refused at init unless `auth(...)` enforces console auth or `allowRemote()` acknowledges the exposure, and the advertised base is read back as `runtime.rustHttpPublicBaseUrl` while `runtime.rustHttpBaseUrl` stays the same-host form the SDK itself dials. See [Deployment](/meta/guides/deployment).
 
 `meerkatConfig(path)` forwards a Meerkat host `config.toml` as `runtime_options.meerkat_config_path`, the only door for the `[self_hosted]` and `[realm]` tables Meerkat keeps out of `mob.toml` (a host-config `[models]` table reaches the factory too, but a profile's `model` must be catalogued, provider-annotated or defined under `mob.toml`'s own `[models.<id>]` to pass the init model check); a missing, malformed or non-validating file refuses init rather than building agents from the default config, and a top-level `[self_hosted]` or `[realm]` table inside `mob.toml` is refused at init with a message naming this option. The Python twin is `.meerkat_config(path)`. See [Self-hosted models and the Meerkat host config](/meta/reference/configuration#self-hosted-models-and-the-meerkat-host-config).
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+`memberCommsTcp(address = "127.0.0.1:0")` gives the locally hosted mob members signed TCP comms endpoints (`runtime_options.member_comms_address`): each member binds a port on `address`. From 0.9.15 `MobHandle.peerInfo` reports it as `dialable_address`, and the rest of this note, on wiring members of two gateways and on what a wire survives, applies from 0.9.15. `MobHandle.wireCrossMob(localMemberId, remoteMemberId, remoteHandle)` wires a member of this mob and a member of another mob to each other, so the two agents can send each other ordinary peer messages. Every runtime starts its own gateway process, so two mob handles are normally two processes: call `memberCommsTcp()` on both builders. `peerInfo` answers `member_id`, `mob_id`, `comms_name`, `peer_id`, `address` (the in-process address), `pubkey_b64` (the member's own transport key) and, only for a member with a socket endpoint, `dialable_address`. When both answers carry `dialable_address`, each side is wired to the other by that address and the member's key (never the gateway key of `peerPubkey()`); otherwise each side is wired by the in-process address with no key, which works when one process hosts both mobs, and a member that process does not have is refused in plain words with nothing wired. A refused second side undoes the first, unless that side was wired before the call. Calling the helper again for a pair that is already wired with the same endpoints changes nothing. A wire is never replaced: when a side is already wired to that peer with another endpoint (another address, or another key after a respawn), its `wireLocal` is refused in plain words and nothing changes; call `unwireLocal` on both sides, each with the other member's current `peerInfo`, then wire again. A member of a stopped mob still accepts a message through a wire and is handed it when its mob resumes. The Python twins are `.member_comms_tcp(address)` and `wire_cross_mob(...)`.
+
+Between two gateways, a wire survives a gateway restart on persistent state only when each wired member's `dialable_address` is the same after the restart. With `memberCommsTcp()`'s default address (port `0`, a port the system picks at each start) it is not: the restarted member binds another port, is restored `broken`, and its wires are dead. Give a mob with persistent state a fixed address (`memberCommsTcp("host:port")`). To wire a member again after its address changed: `respawnMember` the broken member (it comes back active with its new address, and on a fresh conversation: a respawn starts the member on a new session); `unwireLocal` on the other gateway, with the respawned member's current `peerInfo`; `unwireLocal` on the restarted gateway, with the other member's current `peerInfo`; then `wireCrossMob` again. With member socket endpoints, run one member per gateway today.
 
 `providerCredentialsRoot(path)` forwards a provider credentials directory as `runtime_options.provider_credentials_root`: every agent the gateway builds resolves and persists provider logins and tokens there instead of the process default `<config dir>/meerkat/credentials`, which every process of the OS user shares. The path is absolute: the gateway opens it once at init, creating it when missing, and a relative path or a root it cannot open refuses init rather than falling back to the default. Give each user their own root, and pass the same root on every reopen of that user's state; a host moving off a per-process `XDG_CONFIG_HOME=<C>` passes `<C>/meerkat/credentials` to keep existing logins. See [Provider credentials](/meta/reference/configuration#provider-credentials).
 

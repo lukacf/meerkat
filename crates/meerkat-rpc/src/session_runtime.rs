@@ -26599,18 +26599,6 @@ mod tests {
         keep_alive: bool,
         comms_name: Option<&str>,
     ) -> meerkat::Occurrence {
-        fire_scheduled_action_with_params(runtime, action, keep_alive, comms_name, None).await
-    }
-
-    /// [`fire_scheduled_action_on_a_new_session`] with the provider params of
-    /// the session the schedule materializes.
-    async fn fire_scheduled_action_with_params(
-        runtime: &Arc<SessionRuntime>,
-        action: meerkat::ScheduledSessionAction,
-        keep_alive: bool,
-        comms_name: Option<&str>,
-        provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
-    ) -> meerkat::Occurrence {
         let schedule = runtime
             .schedule_service()
             .create(meerkat::CreateScheduleRequest {
@@ -26628,7 +26616,7 @@ mod tests {
                             provider: None,
                             output_schema: None,
                             structured_output_retries: None,
-                            provider_params,
+                            provider_params: None,
                             comms_name: comms_name.map(str::to_string),
                             peer_meta: None,
                             labels: Default::default(),
@@ -26758,15 +26746,81 @@ mod tests {
     }
 
     /// A reasoning effort level in a schedule's session materialization spec
-    /// is judged when the occurrence is delivered, by the build of the
-    /// session the fire materializes, as a session create judges it: a level
-    /// the route accepts is sent with the scheduled turn's request, and a
-    /// level the route refuses reaches no provider and fails the delivery.
-    /// Nothing judges the level when the schedule is written.
+    /// is not accepted in this release: the schedule service refuses it when
+    /// the schedule is created and when an update gives a schedule such a
+    /// target, with its invalid-request error. A refused create stores
+    /// nothing, and a refused update leaves the stored schedule as it was. A
+    /// spec without a level is accepted as before.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_scheduled_sessions_level_is_judged_when_its_occurrence_is_delivered() {
-        use meerkat_core::lifecycle::run_primitive::{AnthropicEffort, ProviderParamsOverride};
-        use meerkat_core::model_profile::capabilities::EffortLevel;
+    async fn a_schedules_session_spec_that_names_a_level_is_refused_when_it_is_written() {
+        let (_temp, runtime) = scheduled_delivery_runtime().await;
+        let service = runtime.schedule_service();
+        let request = |provider_params: serde_json::Value| -> meerkat::CreateScheduleRequest {
+            serde_json::from_value(serde_json::json!({
+                "trigger": {"type": "once", "due_at_utc": "2100-01-01T00:00:00Z"},
+                "target": {
+                    "target_kind": "session",
+                    "type": "materialize_on_demand_session",
+                    "create": {"model": "claude-sonnet-4-5", "provider_params": provider_params},
+                    "action": {"type": "prompt", "prompt": "scheduled check"}
+                }
+            }))
+            .expect("the request parses")
+        };
+        let names_the_key = |error: &meerkat::ScheduleDomainError| {
+            matches!(
+                error,
+                meerkat::ScheduleDomainError::InvalidSchedule(text)
+                    if text.contains("reasoning_effort")
+                        && text.contains("not accepted in a schedule's session settings")
+            )
+        };
+
+        let refused = service
+            .create(request(serde_json::json!({"reasoning_effort": "high"})))
+            .await
+            .expect_err("a level in a schedule's session settings is refused at create");
+        assert!(names_the_key(&refused), "{refused:?}");
+        assert!(
+            service.list().await.expect("list").is_empty(),
+            "the refused create stored nothing"
+        );
+
+        let created = service
+            .create(request(serde_json::json!({})))
+            .await
+            .expect("a spec without a level is accepted");
+        let stored_before = service.get(&created.schedule_id).await.expect("get");
+        let refused = service
+            .update(
+                &created.schedule_id,
+                meerkat::UpdateScheduleRequest {
+                    target: Some(request(serde_json::json!({"reasoning_effort": "high"})).target),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("a level in a schedule's session settings is refused at update");
+        assert!(names_the_key(&refused), "{refused:?}");
+        let stored_after = service.get(&created.schedule_id).await.expect("get");
+        assert_eq!(
+            (&stored_after.target, stored_after.revision),
+            (&stored_before.target, stored_before.revision),
+            "the refused update left the stored schedule's target and revision as they were"
+        );
+    }
+
+    /// The judge at delivery stays: a scheduled session is built from its
+    /// spec by the host's materialization, and the level its spec carries is
+    /// judged by that session's build at its first turn, as a session create
+    /// judges it. A level the route accepts is sent with the turn, and a
+    /// level the route refuses is answered with the typed refusal and
+    /// reaches no provider. The schedule service no longer stores such a
+    /// spec, so this row drives the delivery's two steps directly: the form
+    /// a store written before the refusal existed still holds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_scheduled_sessions_level_is_judged_by_the_session_its_delivery_builds() {
+        use meerkat_core::lifecycle::run_primitive::AnthropicEffort;
 
         let mut observed = Vec::new();
         for route_states_high in [true, false] {
@@ -26776,56 +26830,56 @@ mod tests {
                 .states_levels
                 .store(route_states_high, AtomicOrdering::SeqCst);
             runtime.set_default_llm_client(Some(client.clone()));
-            let occurrence = fire_scheduled_action_with_params(
-                &runtime,
-                scheduled_prompt(),
-                false,
-                None,
-                Some(ProviderParamsOverride {
-                    reasoning_effort: Some(EffortLevel::High),
-                    ..Default::default()
-                }),
-            )
-            .await;
-            observed.push((
-                route_states_high,
-                occurrence.phase,
-                occurrence.failure_class,
-                occurrence.failure_detail.clone(),
-                client.sent_efforts(),
-            ));
+            let spec: meerkat::SessionMaterializationSpec =
+                serde_json::from_value(serde_json::json!({
+                    "model": "claude-sonnet-4-5",
+                    "provider_params": {"reasoning_effort": "high"}
+                }))
+                .expect("the spec parses");
+            let session_id = runtime
+                .materialize_scheduled_session(&SessionId::new(), &spec)
+                .await
+                .expect("the delivery's materialization stages the session");
+            let (event_tx, _event_rx) = mpsc::channel(100);
+            let turn = runtime
+                .start_turn_via_runtime(
+                    &session_id,
+                    "scheduled check".into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    (
+                        error.code,
+                        error
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.pointer("/reasoning_effort_refusal/reason"))
+                            .cloned(),
+                    )
+                });
+            observed.push((route_states_high, turn, client.sent_efforts()));
         }
-        // Read first, asserted second: a failure prints both outcomes.
-        let (_, phase, failure_class, failure_detail, sent) = &observed[0];
         assert_eq!(
-            (phase, failure_class, failure_detail, sent),
-            (
-                &meerkat::OccurrencePhase::Completed,
-                &None,
-                &None,
-                &vec![Some(AnthropicEffort::High)]
-            ),
-            "a level the route accepts is applied to the scheduled turn: {observed:#?}"
-        );
-        // A level the route refuses: the delivery fails as rejected by the
-        // runtime, the failure detail carries the refusal's text and its
-        // typed reason, and no provider was reached.
-        let (_, phase, failure_class, failure_detail, sent) = &observed[1];
-        assert_eq!(
-            (phase, failure_class, sent.is_empty()),
-            (
-                &meerkat::OccurrencePhase::DeliveryFailed,
-                &Some(meerkat::OccurrenceFailureClass::RuntimeRejected),
-                true
-            ),
-            "a level the route refuses fails the delivery and reaches no provider: {observed:#?}"
-        );
-        let detail = failure_detail.as_deref().unwrap_or_default();
-        assert!(
-            detail.contains("reasoning effort 'high' cannot be checked")
-                && detail.contains(r#""reason_type":"reasoning_effort_refused""#)
-                && detail.contains(r#""reason":"supported_levels_unknown""#),
-            "the failure detail names the refusal: {observed:#?}"
+            observed,
+            vec![
+                (true, Ok(()), vec![Some(AnthropicEffort::High)]),
+                (
+                    false,
+                    Err((
+                        error::INVALID_PARAMS,
+                        Some(serde_json::json!("supported_levels_unknown"))
+                    )),
+                    Vec::new()
+                ),
+            ],
+            "(the route states the level, the scheduled session's first turn, the efforts sent)"
         );
     }
 

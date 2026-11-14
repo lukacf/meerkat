@@ -68,7 +68,8 @@ repository of its own.
 
 rkat's own state directory is packed like any other. A command such as
 `rkat run` that is started inside the mob directory creates `.rkat/` there
-when no directory above it has one, also when the run fails. It holds the
+when no directory above it has one; even a run that fails for a missing
+provider key creates it. It holds the
 stored conversations of those runs, the prompts included, and all of it goes
 into the pack. With a `.rkat/` in a directory above, the state goes there and
 is not packed. `rkat mob pack`, `rkat mob inspect` and `rkat mob validate` do
@@ -176,7 +177,8 @@ rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack --sign ./ke
 
 Signing embeds the public key but does not install the signer in the verifier's
 trust configuration. Use permissive mode for this immediate local path, then
-switch to strict after installing the signer as trusted:
+switch to strict after installing the signer as trusted (see
+[Trusting a signer](#trusting-a-signer)):
 
 ```bash
 rkat mob run ./dist/release-triage.mobpack --prompt "triage release regressions" --trust-policy permissive
@@ -200,6 +202,47 @@ Permissive mode accepts unsigned packs and valid signatures from unknown
 signers with warnings. It still rejects an invalid signature, digest mismatch,
 or signer-key mismatch. Permissive means relaxed signer enrollment, not skipped
 integrity.
+
+### Trusting a signer
+
+A signing key is a file that holds 32 random bytes as 64 hexadecimal
+characters. Make one, for example, with:
+
+```bash
+openssl rand -hex 32 > ./keys/release.key
+```
+
+Keep it outside the mob directory. A signed pack carries the signer id and
+the public key in its `signature.toml`:
+
+```bash
+tar -xzf ./dist/release-triage.mobpack -O signature.toml
+```
+
+A host trusts a signer once a trust store lists it. `rkat` reads two files,
+each optional: `~/.rkat/trusted-signers.toml` for the user, and
+`.rkat/trusted-signers.toml` in the directory `rkat` is run from. Each lists
+signers by id, with the `public_key` value from `signature.toml`:
+
+```toml
+[signers]
+"release@example.com" = "<public key>"
+```
+
+When both files list a signer, the entry in the directory's file is used, and
+`rkat` prints a warning that it overrides the user's entry. Check the result
+with `rkat mob validate ./dist/release-triage.mobpack`: under the default
+`strict` policy it refuses the pack as an unknown signer before the signer is
+listed, and prints `valid` with the pack's digest after.
+
+**Replacing a key.** There is no revocation list. To replace a signer's key,
+sign with the new key and replace the signer's entry in every trust store that
+lists it. Until an entry is replaced, that host accepts packs signed with the
+old key and refuses packs signed with the new one. Once it is replaced, a pack
+signed with the old key is refused as a signer-key mismatch, under `strict`
+and under `permissive`. Replace the entry; do not only remove it: with the
+entry removed, a host that runs `permissive` accepts a pack signed with the
+old key again, as an unknown signer with a warning.
 
 ## Run Modes
 

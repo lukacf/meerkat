@@ -248,10 +248,20 @@ pub struct MemberRespawn {
     /// The next incarnation's profile override; `None` keeps the member's
     /// own, which applies under the member's own role only. `Some(None)`
     /// seats it with no override, so it follows its role's profile.
+    #[allow(
+        clippy::option_option,
+        reason = "as `compaction_floor`: a request that names no override keeps the member's, \
+                  and one that names `None` removes it"
+    )]
     pub(crate) profile_override: Option<Option<crate::profile::Profile>>,
     /// The next incarnation's model override; `None` keeps the member's
     /// own, which applies under the member's own role only. `Some(None)`
     /// seats it with no override.
+    #[allow(
+        clippy::option_option,
+        reason = "as `compaction_floor`: a request that names no override keeps the member's, \
+                  and one that names `None` removes it"
+    )]
     pub(crate) model_override: Option<Option<String>>,
     /// The build inputs the next incarnation's builds apply on the kept
     /// session (a declared role migration's composed build): its

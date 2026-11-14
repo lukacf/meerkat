@@ -3625,11 +3625,19 @@ comms = true
         }
     }
 
+    /// The terminal the call reads in place of the maintenance input's own.
+    type SubstituteTerminal =
+        fn(meerkat_runtime::CompletionOutcome) -> meerkat_runtime::CompletionOutcome;
+
+    /// A substituted terminal's row: its class as `completion_type` names
+    /// it, the row's mob id, and the substitution.
+    type SubstitutedClass = (&'static str, &'static str, SubstituteTerminal);
+
     /// Reads the maintenance input's own terminal, then answers
     /// `substitute` of it: a terminal class no scripted run produces.
     struct SubstitutedTerminalObserver {
         inner: Arc<meerkat_runtime::MeerkatMachine>,
-        substitute: fn(meerkat_runtime::CompletionOutcome) -> meerkat_runtime::CompletionOutcome,
+        substitute: SubstituteTerminal,
     }
 
     #[async_trait::async_trait]
@@ -3653,7 +3661,7 @@ comms = true
     /// threshold afterwards.
     async fn compact_with_a_substituted_terminal(
         mob_id: &str,
-        substitute: fn(meerkat_runtime::CompletionOutcome) -> meerkat_runtime::CompletionOutcome,
+        substitute: SubstituteTerminal,
     ) -> (Value, Option<u64>, Option<u64>) {
         let harness = operator_verb_harness("worker:main", mob_id).await;
         let fat = "seeded transcript ballast ".repeat(160);
@@ -3703,11 +3711,7 @@ comms = true
     /// class answered stage `terminal` and left the floor (256).
     #[tokio::test(flavor = "multi_thread")]
     async fn compact_member_restores_the_profile_on_each_definite_terminal() {
-        let classes: [(
-            &str,
-            &str,
-            fn(meerkat_runtime::CompletionOutcome) -> meerkat_runtime::CompletionOutcome,
-        ); 2] = [
+        let classes: [SubstitutedClass; 2] = [
             ("abandoned", "operator-definite-abandoned", |_| {
                 meerkat_runtime::CompletionOutcome::Abandoned {
                     reason: "substituted".to_string(),
@@ -3755,11 +3759,7 @@ comms = true
     /// or runs again.
     #[tokio::test(flavor = "multi_thread")]
     async fn compact_member_restores_nothing_on_each_terminal_that_is_not_definite() {
-        let classes: [(
-            &str,
-            &str,
-            fn(meerkat_runtime::CompletionOutcome) -> meerkat_runtime::CompletionOutcome,
-        ); 6] = [
+        let classes: [SubstitutedClass; 6] = [
             (
                 "wrong_session",
                 "operator-indefinite-session",

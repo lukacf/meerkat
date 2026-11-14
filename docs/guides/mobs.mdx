@@ -1167,7 +1167,8 @@ unit: the member's current run is cancelled at the run's next boundary, and
 the input it held queued is abandoned. Input admitted after the cancel is
 untouched. Cancelling an idle member is not an error. On success the result
 is `{"mob_id": "...", "ok": true}`. The cancel is of that member's work
-only: a flow run on another member stays active (see
+only: a flow run on another member stays active, and from 0.9.15 a stop of
+the mob is still refused while it is (see
 [Stopping a mob with an active flow run](#stopping-a-mob-with-an-active-flow-run)).
 
 <Warning>
@@ -1487,9 +1488,11 @@ send it again. A run that `mob/flow_cancel` does not bring to a terminal
 status keeps the stop refused; complete, reset or destroy the mob instead.
 
 Cancelling one member's work does not end a flow run on another member.
-After `mob/force_cancel`, `mob/hard_cancel_member` or `mob/cancel_all_work`
-on one member, a flow run that is active on another member is still active
-and the stop is still refused until that run ends or is cancelled.
+From 0.9.15, after `mob/force_cancel`, `mob/hard_cancel_member` or
+`mob/cancel_all_work` on one member, a flow run that is active on another
+member is still active and the stop is still refused until that run ends or
+is cancelled. Through 0.9.14 the stop was admitted and the run went on, no
+longer counted (read from the 0.9.14 source, not run on that release).
 
 ## Observe And Operate
 
@@ -1531,7 +1534,7 @@ roster has never seen is refused with a typed `MemberNotFound`. A member whose
 runtime registration needs a durability reload is refused with a typed
 `MemberReloadRequired` (`-32029`) until its registration is reloaded. The
 cancel is of that member's work only: a flow run on another member stays
-active, and a stop of the mob is still refused while it is (see
+active, and from 0.9.15 a stop of the mob is still refused while it is (see
 [Stopping a mob with an active flow run](#stopping-a-mob-with-an-active-flow-run)).
 
 ## Persistence

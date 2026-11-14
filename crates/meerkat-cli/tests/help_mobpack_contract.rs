@@ -529,11 +529,16 @@ fn mob_pack_refuses_when_a_path_to_leave_out_cannot_be_resolved()
         "the pack must be refused and nothing written; wrote {written:?}: {}",
         output_text(&packed)
     );
+    // What a script sees: the exit status, nothing on standard output, and a
+    // message whose part before the system's own error text is fixed.
+    assert_eq!(packed.status.code(), Some(1), "{}", output_text(&packed));
+    assert_eq!(String::from_utf8_lossy(&packed.stdout), "");
     let stderr = String::from_utf8_lossy(&packed.stderr);
     assert!(
-        stderr.contains("mob pack failed")
-            && stderr.contains("skills/../new.mobpack")
-            && stderr.contains("Permission denied"),
+        stderr.starts_with(
+            "Error: mob pack failed: I/O error: cannot resolve 'skills/../new.mobpack', a file \
+             the pack must leave out: Permission denied"
+        ),
         "the refusal names the path and the reason: {}",
         output_text(&packed)
     );

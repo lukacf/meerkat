@@ -707,6 +707,29 @@ them.
   Registrations of different inboxes under one key are still ambiguous:
   nothing is handed off. Sends scoped to a namespace are unchanged.
 
+- `rkat`, `meerkat-mob-pack`: `rkat mob pack` now fails in two cases in
+  which it wrote a pack before, because a path it cannot resolve is never
+  compared as written (see Security). When the real path of the signing
+  key or of the output file, or the identity of the file there, cannot be
+  read for another reason than that the file does not exist (a directory on
+  the way that the account may not search, a symbolic link loop), the
+  command writes no pack, exits with status 1 and prints one line on
+  standard error, with the path as it was written:
+  `Error: mob pack failed: I/O error: cannot resolve '<path>', a file the pack must leave out: <system error>`.
+  When the real path of the mob directory cannot be resolved, it exits with
+  status 1 and prints:
+  `Error: mob pack failed: I/O error: cannot resolve the mob directory '<directory>': <system error>`.
+  `<system error>` is the operating system's text, such as
+  `Permission denied (os error 13)`. A path that names no file, such as an
+  output that is not written yet, is not an error. The refusal for an
+  identity that cannot be read is read from the source: no test could
+  build that case without privileges; the refusal for a path is run. In
+  Rust, `pack_directory` and `pack_directory_with_excludes` return
+  `PackValidationError::Io` with the text after `I/O error: `. Also changed
+  against 0.9.14, on Linux and macOS: a hard link to the signing key or to
+  the output file under another name is now left out of the pack; 0.9.14
+  packed it.
+
 - `meerkat-comms`: a route never outlives its inbox. When a runtime's
   in-process inbox leaves the registry (`CommsRuntime::retire_inproc_route`,
   the runtime's drop, or a successor's
@@ -1179,26 +1202,34 @@ them.
   and its own output file out of the pack however their paths are written.
   Before, each was left out only when its path was written with the mob
   directory argument, exactly as typed, as its prefix:
-  `rkat mob pack mob -o mob/out.mobpack --sign mob/key.hex` left both out,
-  and so did `.` with `./out.mobpack` and `./key.hex`. In every other
-  spelling a signing key kept in the mob directory was packed, and so was
-  the output of an earlier pack. Inside the mob directory,
-  `rkat mob pack . -o out.mobpack --sign key.hex` packed both. So did
-  `./mob` with `mob/key.hex`, `mob` with `./mob/key.hex`, an absolute
-  directory with a relative path or the reverse, a `..` in a path, and a
-  path through a symbolic link. A pack that holds its signing key hands the
-  key to everyone who receives the pack, and whoever has the key can sign
-  packs as that signer. The key and the output file are now left out as the
-  files their paths name, wherever the command is run from; a symbolic link
-  given as `--sign` or `-o` names the file it points to, and an output file
-  that does not exist yet is nothing to leave out. The rule covers the key
-  this pack is signed with and this pack's own output file, and nothing
-  else about what is packed changes. A key file in the mob directory that
-  this pack is not signed with (an unsigned pack, or another key), a pack
-  written earlier under another name, and a copy of the key under another
-  name, a hard link included, are files like any other and are packed, as
-  before. Keep signing keys and earlier packs outside the mob directory.
-  The Rust functions `meerkat_mob_pack::pack::pack_directory` and
+  `rkat mob pack mob -o mob/out.mobpack --sign mob/key.hex --signer-id <id>`
+  left both out, and so did `.` with `./out.mobpack` and `./key.hex`. In
+  every other spelling a signing key kept in the mob directory was packed,
+  and so was the output of an earlier pack. Inside the mob directory,
+  `rkat mob pack . -o out.mobpack --sign key.hex --signer-id <id>` packed
+  both. So did `./mob` with `mob/key.hex`, `mob` with `./mob/key.hex`, an
+  absolute directory with a relative path or the reverse, a `..` in a path,
+  and a path through a symbolic link. A pack that holds its signing key
+  hands the key to everyone who receives the pack, and whoever has the key
+  can sign packs as that signer. The key and the output file are now left
+  out as the files their paths name, wherever the command is run from; a
+  symbolic link given as `--sign` or `-o` names the file it points to, and
+  an output file that does not exist yet is nothing to leave out. What is
+  left out is the file that is this pack's signing key and the file this
+  run writes: by its resolved path, and on Linux and macOS also by file
+  identity (device and inode), so another name of the same file, a hard
+  link or another case on a file system that ignores case, is left out
+  too. On Windows the comparison is by resolved path only (read from the
+  source, not run). No file system that ignores case was run on any
+  platform: that case rests on the source, and the identity comparison is
+  run through hard links. A path that cannot be resolved is never compared
+  as written: the pack is refused (see Changed). Nothing else about what
+  is packed changes. A copy of the key is another file and is still
+  packed, and so are a key file this pack is not signed with (an unsigned
+  pack, or another key) and a pack written earlier under another name.
+  Keep the key and the output outside the mob directory, and check a pack
+  with `rkat mob inspect <pack>`. The Rust functions
+  `meerkat_mob_pack::pack::pack_directory` and
   `pack_directory_with_excludes` follow the same rule, with unchanged
   signatures. If a pack that left your machine holds its signing key, the
   key is exposed: see the Upgrade notes. Affects 0.4.1 through 0.9.14.
@@ -1287,13 +1318,18 @@ them.
   them. Remove the copies of the packs that hold the key where you can.
 
 - `rkat mob pack` of a directory that holds the signing key or the output
-  of an earlier pack now gives a pack without those files, so its digest
-  differs from the digest of a pack an earlier release made from the same
-  directory with them in it. Where such a pack's digest is pinned, pin the
-  new one; a signature is over the digest, so the pack is signed again when
-  it is packed. A pack an earlier release made without those files has the
-  same digest as before, and existing pack files are not changed: they
-  verify as they did.
+  of an earlier pack, or a hard link to either under another name, now
+  gives a pack without those files, so its digest differs from the digest
+  of a pack an earlier release made from the same directory with them in
+  it. Where such a pack's digest is pinned, pin the new one; a signature is
+  over the digest, so the pack is signed again when it is packed. A pack an
+  earlier release made without those files has the same digest as before,
+  and existing pack files are not changed: they verify as they did.
+
+- A script that runs `rkat mob pack` in a place where the signing key's or
+  the output's real path cannot be read (see Changed) now gets exit status
+  1 and no pack where it got a pack before. Run it where the paths resolve,
+  or give paths that do.
 
 - A script that runs `rkat run --output json` (or `--json`) must not read
   non-empty stdout as success, nor parse the last stdout document as a run
@@ -1432,6 +1468,19 @@ them.
   pre-0.9 state rewrites it: that second writer gives the file the
   permissions the manifest had). Keep the directories that hold them closed
   to other accounts, or run under a umask of 077.
+
+- `rkat mob pack` leaves out the file that is the pack's signing key and
+  its own output file, and nothing else. A copy of the key, a key file the
+  pack is not signed with (an unsigned pack, or another key) and a pack
+  written earlier under another name are packed like every other file in
+  the mob directory. On Windows the two files are recognized by their
+  resolved paths only, so a hard link to the key under another name is
+  packed there. Whether Windows recognizes a key or an output typed in
+  another case than it is stored is not established: the standard library
+  resolves a path there by opening it and asking the system for the final
+  path of the handle, and what case that answer has was neither run nor
+  found in the sources at hand. Keep keys and packs outside the mob
+  directory, and check a pack with `rkat mob inspect <pack>`.
 
 - Mob: an explicit resume of a stopped mob (`MobHandle::resume`) rebuilds
   each member from its seat as the host's spawn customizer makes it and

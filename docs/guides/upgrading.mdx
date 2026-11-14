@@ -393,6 +393,17 @@ under `## [0.9.15]`.
   `UnifiedRuntimeBuilder` and both gateway binaries complete the bootstrap
   themselves. **Do:** a host of that kind calls one of them after its
   bootstrap.
+- Question sets (`ask_user`): mob members get the stock tool `ask_user`, and
+  `meta/gating/questions` lists what they asked a person. The tool holds a
+  durable decision of the new kind `ask_user.questions` in the decision
+  store the gateway already keeps; no store schema changes, and a decision
+  recorded without a typed answer keeps its bytes and its digest. A 0.9.14
+  gateway has no `meta/gating/questions` (it answers method not found), and
+  a 0.9.14 Console or SDK against a 0.9.15 gateway lists no question set
+  (they are not part of `meta/gating/pending`), so a set nobody answers ends
+  `timed_out` at its deadline. **Do:** upgrade the gateway before a Console
+  or an SDK that reads question sets; before a rollback see the question
+  sets item under "Rolling back to 0.9.14".
 - Rust: `identity_creation::ChangeClass` gains the variants `Archive` (an
   archive and an unarchive) and `Adopt`. **Do:** add both arms to each
   exhaustive match on it.
@@ -646,6 +657,22 @@ of these kinds that are `open` or `approved` (`meta/decisions/list` with
 `executed`, or withdraw it (`meta/identity/withdraw`, or
 `meta/decisions/withdraw` as the host). While rolled back, decide none of
 them.
+
+**Question sets agents asked (`ask_user`).** A question set is a decision of
+kind `ask_user.questions` in the gateway's decision store. A 0.9.14 gateway
+has no `ask_user` tool and no `meta/gating/questions`: it lists an open set
+among the durable decisions (`meta/decisions/list`), the set cannot be
+answered there, and its asking agent is told nothing while rolled back. A
+set that was answered on 0.9.15 keeps the person's answers in the
+decision's evidence, a member 0.9.14 does not know: a 0.9.14 gateway reports
+that one decision unreadable (it is listed as unreadable and nothing
+executes it) and reads every other decision as before; it does not change
+the row, which reads again after the return to 0.9.15. A set that was
+dismissed, withdrawn or timed out carries no answers and is read as any
+ended decision (read from the 0.9.14 source, not run). **Do:** before a
+rollback, have each open set answered or dismissed (`meta/gating/questions`
+lists them), or withdraw it (`meta/decisions/withdraw` as the host), so that
+no agent waits for an answer while rolled back.
 
 **Access rules for changes of agents.** 0.9.15 adds the actions
 `agent.identity.create`, `agent.identity.manage` and `agent.identity.remove`.

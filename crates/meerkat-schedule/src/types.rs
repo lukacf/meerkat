@@ -1201,7 +1201,7 @@ impl TargetBinding {
 
     pub fn validate_public_api(&self) -> Result<(), String> {
         match self {
-            Self::Session(_) => Ok(()),
+            Self::Session(binding) => binding.refuse_reasoning_effort_level(),
             Self::Identity(binding) => binding.validate_public_api(),
             Self::Mob(binding) => binding.validate_public_api(),
             Self::HostRunnable(_) => Ok(()),
@@ -1251,6 +1251,32 @@ impl SessionTargetBinding {
 
     pub fn stable_key(&self) -> Result<String, String> {
         semantic_json_key("session_target", self)
+    }
+
+    /// A schedule's session spec does not take the provider-neutral
+    /// `reasoning_effort` level in this release. A stored schedule that names
+    /// one cannot be read by an earlier release (its params refuse the key),
+    /// which fails that release's schedule list as a whole, and a schedule
+    /// deleted with the level cannot be repaired. So a request that would
+    /// store one is refused when the schedule is created or updated. A
+    /// provider's own effort under `provider_tag` is accepted as before, and a
+    /// level that is already stored is still judged when an occurrence is
+    /// delivered.
+    fn refuse_reasoning_effort_level(&self) -> Result<(), String> {
+        if let Self::MaterializeOnDemandSession { create, .. } = self
+            && create
+                .provider_params
+                .as_ref()
+                .is_some_and(|params| params.reasoning_effort.is_some())
+        {
+            return Err(
+                "provider_params.reasoning_effort is not accepted in a schedule's session settings \
+                 in this release; a provider's own effort setting under \
+                 provider_params.provider_tag is"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 
     pub fn action(&self) -> &ScheduledSessionAction {

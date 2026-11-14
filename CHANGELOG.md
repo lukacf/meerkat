@@ -753,9 +753,9 @@ them.
   went on running. A same-session successor now keeps that management,
   through any number of such steps, in the same process and after a restart;
   the steps below say which changes of a member keep it and which end it.
-  Mobs created before this release are covered without any call, for the
-  successor steps a release from 0.9.10 on made. The session's create
-  capability and its current role's tools decide each call as before.
+  Mobs created before this release are covered without any call. The
+  session's create capability and its current role's tools decide each call
+  as before.
   - Keeps the creator's management: `MobHandle::respawn_member`, once or
     many times; a declared role migration and a runtime-mode restamp of an
     identity entry's member, a store-owned identity's profile move and
@@ -770,8 +770,7 @@ them.
   - Not brought back: upgrading does not give back a management a creator
     had already lost. A creator that was retired and seated again on its
     session before the upgrade stays without its management of the mobs it
-    created, and so does one whose successor steps a release before 0.9.10
-    made. Those mobs end as before, with the session that owns them (see
+    created. Those mobs end as before, with the session that owns them (see
     the Upgrade notes).
   The 0.9.4 Known limitation about a member "reset to its next generation,
   over the same session" described this case; it no longer applies to a

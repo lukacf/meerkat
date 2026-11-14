@@ -599,8 +599,8 @@ impl MemberBinding {
     /// on a fresh session, a seat that follows a plain retirement (a member
     /// retired and later seated again on its kept session), a legacy member
     /// reset, a session binding recovery that moves the member to another
-    /// session, and a seat whose rows carry no such link (a journal written
-    /// before 0.9.10 records none). A recovered-binding row that names the
+    /// session, and a seat whose rows carry no such link. A recovered-binding
+    /// row that names the
     /// session the member already holds (an endpoint registration, the
     /// session's first creation, an adoption) moves nothing and leaves the
     /// chain as it is.
@@ -2711,11 +2711,12 @@ mod tests {
         );
     }
 
-    /// A journal as 0.9.9 wrote a same-session successor: the retirement and
-    /// the seat on the same session one generation up, neither row carrying
-    /// the step's link. The seat starts a chain of its own. So does every
-    /// later member that was retired and seated again on its kept session,
-    /// whose rows have the same shape.
+    /// A journal whose rows lack the step's link: a retirement and a seat on
+    /// the same session one generation up, neither row naming the other. No
+    /// release wrote a same-session successor that way (each one that has
+    /// the step journals its link on both rows); it is the shape of a member
+    /// that was retired and seated again on its kept session. The seat
+    /// starts a chain of its own.
     #[test]
     fn a_successor_journaled_without_its_link_starts_a_chain_of_its_own() {
         let member = AgentIdentity::from("member");

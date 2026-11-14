@@ -781,7 +781,11 @@ mod tests {
     /// `<temp>/mob` with the pack sources only.
     fn exclusion_fixture() -> TempDir {
         let temp = TempDir::new().unwrap();
-        let mob = temp.path().join("mob");
+        write_exclusion_sources(&temp.path().join("mob"));
+        temp
+    }
+
+    fn write_exclusion_sources(mob: &Path) {
         std::fs::create_dir_all(mob.join("skills")).unwrap();
         std::fs::write(
             mob.join("manifest.toml"),
@@ -790,7 +794,6 @@ mod tests {
         .unwrap();
         std::fs::write(mob.join("definition.json"), br#"{"id":"mob"}"#).unwrap();
         std::fs::write(mob.join("skills").join("notes.md"), "# Notes skill\n").unwrap();
-        temp
     }
 
     /// The same fixture with a signing key (`mob/key.hex`) and the output of
@@ -1091,15 +1094,58 @@ mod tests {
         assert_key_and_output_left_out("links to keys beside the sources", &files);
     }
 
+    /// A second name of the key file, or of the output file, is the same
+    /// file: it is left out too, in whatever directory of the pack it is.
     #[cfg(unix)]
     #[test]
-    fn test_pack_exclusion_guard_hard_link_under_another_name_is_a_second_file() {
+    fn test_pack_exclusion_hard_links_inside_the_directory_are_left_out() {
         let temp = exclusion_fixture_with_key_and_output();
         let mob = temp.path().join("mob");
-        std::fs::hard_link(mob.join("key.hex"), mob.join("key-copy.hex")).unwrap();
+        std::fs::hard_link(mob.join("key.hex"), mob.join("key-again.hex")).unwrap();
+        std::fs::hard_link(mob.join("key.hex"), mob.join("skills").join("k")).unwrap();
+        std::fs::hard_link(mob.join("out.mobpack"), mob.join("out-again.mobpack")).unwrap();
 
-        // The exclusion follows the paths it is given. No path names the
-        // second name of the key file, so it is packed like any other file.
+        let files = signed_pack_files(&mob, &mob.join("key.hex"), &mob.join("out.mobpack"));
+        assert_eq!(
+            files,
+            sorted_names(&[
+                "definition.json",
+                "manifest.toml",
+                "signature.toml",
+                "skills/notes.md"
+            ]),
+            "every name of the key file and of the output file is left out"
+        );
+    }
+
+    /// The key and the output given by names outside the directory that are
+    /// hard links to the files inside it: no path comparison can tell, the
+    /// files are the same.
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_exclusion_key_and_output_given_as_hard_links_outside_the_directory() {
+        let temp = exclusion_fixture_with_key_and_output();
+        let mob = temp.path().join("mob");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::hard_link(mob.join("key.hex"), outside.join("signing.hex")).unwrap();
+        std::fs::hard_link(mob.join("out.mobpack"), outside.join("latest.mobpack")).unwrap();
+
+        let files = signed_pack_files(
+            &mob,
+            &outside.join("signing.hex"),
+            &outside.join("latest.mobpack"),
+        );
+        assert_key_and_output_left_out("key and output given as hard links outside", &files);
+    }
+
+    /// A copy of the key is another file with the same bytes: it is packed.
+    #[test]
+    fn test_pack_exclusion_guard_copy_of_the_key_is_an_ordinary_file() {
+        let temp = exclusion_fixture_with_key_and_output();
+        let mob = temp.path().join("mob");
+        std::fs::copy(mob.join("key.hex"), mob.join("key-copy.hex")).unwrap();
+
         let files = signed_pack_files(&mob, &mob.join("key.hex"), &mob.join("out.mobpack"));
         let mut expected = EXCLUSION_SOURCES.to_vec();
         expected.extend(["key-copy.hex", "signature.toml"]);
@@ -1208,6 +1254,75 @@ mod tests {
             pack_directory_with_excludes(&through_parent, None, &[missing_parent.as_path()])
                 .unwrap();
         assert_eq!(first.archive_bytes, third.archive_bytes);
+    }
+
+    /// A path to leave out that cannot be resolved, for another reason than
+    /// that it names no file, refuses the pack. It is never compared as
+    /// written, which could pack the key.
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_exclusion_path_that_cannot_be_resolved_refuses_the_pack() {
+        use std::os::unix::fs::PermissionsExt;
+
+        /// Gives the directory its search permission back, also on a panic,
+        /// so that the temporary directory can be removed.
+        struct Searchable<'a>(&'a Path);
+        impl Drop for Searchable<'_> {
+            fn drop(&mut self) {
+                std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        let temp = TempDir::new().unwrap();
+        let guard = temp.path().join("guard");
+        let mob = guard.join("mob");
+        write_exclusion_sources(&mob);
+        write_throwaway_key(&mob.join("key.hex"));
+        std::fs::write(mob.join("out.mobpack"), b"earlier output").unwrap();
+
+        // Typed inside the mob directory, whose parent then loses its search
+        // permission: relative paths still open, real paths do not resolve.
+        let (unsearchable, with_output, key_alone) = with_current_dir(&mob, || {
+            let _searchable = Searchable(&guard);
+            std::fs::set_permissions(&guard, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let unsearchable = std::fs::metadata(&mob).is_err();
+            let signing = Some(SigningRequest {
+                signer_id: "test-signer",
+                key_path: Path::new("skills/../key.hex"),
+            });
+            let with_output = pack_directory_with_excludes(
+                Path::new("."),
+                signing,
+                &[Path::new("skills/../out.mobpack")],
+            );
+            let key_alone = pack_directory(Path::new("."), signing);
+            (unsearchable, with_output, key_alone)
+        });
+        if !unsearchable {
+            // An account that passes every permission check (root) cannot
+            // build the setting.
+            return;
+        }
+
+        for (unresolved, result) in [
+            ("skills/../out.mobpack", with_output),
+            ("skills/../key.hex", key_alone),
+        ] {
+            let refusal = match result {
+                Err(refusal) => refusal.to_string(),
+                Ok(packed) => panic!(
+                    "`{unresolved}` does not resolve, yet a pack was made of {:?}",
+                    extract_targz_safe(&packed.archive_bytes)
+                        .unwrap()
+                        .into_keys()
+                        .collect::<Vec<_>>()
+                ),
+            };
+            assert!(
+                refusal.contains(unresolved) && refusal.contains("Permission denied"),
+                "the refusal names the path and the reason: {refusal}"
+            );
+        }
     }
 
     #[test]

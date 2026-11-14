@@ -343,29 +343,68 @@ fn mob_pack_leaves_key_and_output_out_however_their_paths_are_written()
         .collect();
     assert_eq!(key_hex.len(), 64);
 
-    // (typed inside the mob directory, directory, key, output); `{mob}` is
-    // the mob directory's absolute path.
+    // (typed inside the mob directory, directory, key, output, where the key
+    // file is in the mob directory); `{mob}` is the mob directory's absolute
+    // path.
     let spellings = [
-        (true, ".", "key.hex", "out.mobpack"),
-        (true, ".", "./key.hex", "./out.mobpack"),
-        (false, "mob", "mob/key.hex", "mob/out.mobpack"),
-        (false, "./mob", "mob/key.hex", "mob/out.mobpack"),
-        (false, "mob", "./mob/key.hex", "./mob/out.mobpack"),
-        (false, "{mob}", "mob/key.hex", "mob/out.mobpack"),
-        (false, "{mob}", "{mob}/key.hex", "{mob}/out.mobpack"),
+        (true, ".", "key.hex", "out.mobpack", "key.hex"),
+        (true, ".", "./key.hex", "./out.mobpack", "key.hex"),
+        (false, "mob", "mob/key.hex", "mob/out.mobpack", "key.hex"),
+        (false, "./mob", "mob/key.hex", "mob/out.mobpack", "key.hex"),
+        (
+            false,
+            "mob",
+            "./mob/key.hex",
+            "./mob/out.mobpack",
+            "key.hex",
+        ),
+        (false, "{mob}", "mob/key.hex", "mob/out.mobpack", "key.hex"),
+        (
+            false,
+            "{mob}",
+            "{mob}/key.hex",
+            "{mob}/out.mobpack",
+            "key.hex",
+        ),
+        // A trailing separator, as shell completion writes a directory.
+        (false, "mob/", "mob/key.hex", "mob/out.mobpack", "key.hex"),
+        (
+            false,
+            "mob",
+            "{mob}/key.hex",
+            "{mob}/out.mobpack",
+            "key.hex",
+        ),
+        (
+            false,
+            "mob",
+            "mob/../mob/key.hex",
+            "mob/../mob/out.mobpack",
+            "key.hex",
+        ),
+        // The key in a subdirectory of the mob directory.
+        (
+            false,
+            "./mob",
+            "mob/keys/sign.key",
+            "mob/out.mobpack",
+            "keys/sign.key",
+        ),
+        // The key inside, the output outside.
+        (true, ".", "key.hex", "../x.mobpack", "key.hex"),
     ];
 
     let mut packed_by_spelling = Vec::new();
-    for (inside_mob, dir, key, output) in spellings {
+    for (inside_mob, dir, key, output, key_file) in spellings {
         let temp = tempfile::tempdir()?;
         let mob = temp.path().join("mob");
-        std::fs::create_dir_all(&mob)?;
+        std::fs::create_dir_all(mob.join("keys"))?;
         std::fs::write(
             mob.join("manifest.toml"),
             "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
         )?;
         std::fs::write(mob.join("definition.json"), br#"{"id":"fixture"}"#)?;
-        std::fs::write(mob.join("key.hex"), &key_hex)?;
+        std::fs::write(mob.join(key_file), &key_hex)?;
 
         let absolute = mob.display().to_string();
         let dir = dir.replace("{mob}", &absolute);
@@ -419,6 +458,84 @@ fn mob_pack_leaves_key_and_output_out_however_their_paths_are_written()
         packed_by_spelling.is_empty(),
         "only the sources and the signature are packed; not so for:\n{}",
         packed_by_spelling.join("\n")
+    );
+    Ok(())
+}
+
+/// A path to leave out whose real path cannot be resolved, for another reason
+/// than that it names no file, refuses the pack: no pack is written, and the
+/// error names the path. The command is typed inside the mob directory, whose
+/// parent loses its search permission before `rkat` starts.
+#[cfg(unix)]
+#[test]
+fn mob_pack_refuses_when_a_path_to_leave_out_cannot_be_resolved()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rkat = std::env::var_os("CARGO_BIN_EXE_rkat")
+        .ok_or("Cargo or Nextest must provide the runtime rkat binary path")?;
+    let temp = tempfile::tempdir()?;
+    let guard = temp.path().join("guard");
+    let mob = guard.join("mob");
+    std::fs::create_dir_all(mob.join("skills"))?;
+    std::fs::write(
+        mob.join("manifest.toml"),
+        "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
+    )?;
+    std::fs::write(mob.join("definition.json"), br#"{"id":"fixture"}"#)?;
+    // Throwaway signing key: 32 bytes made up here, as 64 hex digits.
+    let key_hex: String = (0u8..32)
+        .map(|index| index.wrapping_mul(5).wrapping_add(3))
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .filter_map(|nibble| char::from_digit(u32::from(nibble), 16))
+        .collect();
+    std::fs::write(mob.join("key.hex"), key_hex)?;
+
+    // An account that passes every permission check (root) cannot build the
+    // setting: the row has nothing to say there.
+    std::fs::set_permissions(&guard, std::fs::Permissions::from_mode(0o000))?;
+    let unsearchable = std::fs::metadata(&mob).is_err();
+    std::fs::set_permissions(&guard, std::fs::Permissions::from_mode(0o755))?;
+    if !unsearchable {
+        return Ok(());
+    }
+
+    // The shell enters the mob directory, takes the search permission from
+    // its parent and becomes `rkat` (`$0`). The realm state is kept outside
+    // the tree (`$1`), so that the command gets as far as the pack.
+    let packed = Command::new("/bin/sh")
+        .current_dir(&mob)
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env_remove("RKAT_TRUST_POLICY")
+        .arg("-c")
+        .arg(
+            "chmod 000 .. && exec \"$0\" --state-root \"$1\" mob pack . \
+             -o skills/../new.mobpack --sign skills/../key.hex --signer-id team@example.com",
+        )
+        .arg(&rkat)
+        .arg(temp.path().join("state"))
+        .output();
+    std::fs::set_permissions(&guard, std::fs::Permissions::from_mode(0o755))?;
+    let packed = packed?;
+
+    let written: Vec<String> = std::fs::read_dir(&mob)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".mobpack"))
+        .collect();
+    assert!(
+        !packed.status.success() && written.is_empty(),
+        "the pack must be refused and nothing written; wrote {written:?}: {}",
+        output_text(&packed)
+    );
+    let stderr = String::from_utf8_lossy(&packed.stderr);
+    assert!(
+        stderr.contains("mob pack failed")
+            && stderr.contains("skills/../new.mobpack")
+            && stderr.contains("Permission denied"),
+        "the refusal names the path and the reason: {}",
+        output_text(&packed)
     );
     Ok(())
 }

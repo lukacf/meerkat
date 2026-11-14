@@ -1625,6 +1625,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveRuntimeCompletionResultRuntimeApplyFailedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionResultRuntimeApplyRefusedInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionResultRuntimeApplyRefusedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionResultRuntimeApplyRefusedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionResultRuntimeApplyRefusedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionResultRuntimeApplyRefusedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionResultRuntimeApplyRefusedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultMachineFailedInitializing`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8199,6 +8217,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveAbandonedCompletionResultRuntimeApplyFailedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyRefusedInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyRefusedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyRefusedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyRefusedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyRefusedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyRefusedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveCheckpointCompletionResultSucceededInitializing`

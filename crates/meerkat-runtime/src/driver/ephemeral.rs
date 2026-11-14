@@ -3935,6 +3935,22 @@ impl EphemeralRuntimeDriver {
         self.with_dsl_state(|state| !state.input_lane.is_empty())
     }
 
+    /// Whether the machine holds any of `input_ids` as queued work: in a
+    /// lane, or in the queued phase. A failed batch none of whose members
+    /// the machine holds so has nothing to put behind the backlog: the
+    /// machine's failure realization ended every member. A member the
+    /// machine tracks as queued without a lane entry still counts, so the
+    /// defer sweep meets it and refuses that corrupt projection as before.
+    pub(crate) fn has_queued_input_among(&self, input_ids: &[InputId]) -> bool {
+        self.with_dsl_state(|state| {
+            input_ids.iter().any(|input_id| {
+                let key = Self::dsl_key(input_id);
+                state.input_lane.contains_key(&key)
+                    || state.input_phases.get(&key).copied() == Some(mm_dsl::InputPhase::Queued)
+            })
+        })
+    }
+
     pub(crate) fn defer_queued_inputs_behind_backlog(
         &mut self,
         input_ids: &[InputId],
@@ -7604,6 +7620,27 @@ impl EphemeralRuntimeDriver {
                 // A contributor one of the run's committed rounds already
                 // applied did execute: its effect is the run's committed
                 // history, so it ends consumed, never as never executed.
+                self.consume_applied_contributors_of_run(run_id, contributing_input_ids)
+            }
+            FailedRunContributorDisposition::Refused => {
+                // The executor refused the request with nothing applied, so
+                // the contributors never executed either, and they end the
+                // same way: inside this realization, with the stored reason
+                // `NeverExecuted`. Unlike the class above nothing is in
+                // flight and nothing went wrong in the runtime: the refusal
+                // is the request's answer, and a replay would only have it
+                // refused again up to the retry cap.
+                tracing::debug!(
+                    run_id = ?run_id,
+                    contributors = contributing_input_ids.len(),
+                    "runtime ended the contributors of a run whose request was refused"
+                );
+                self.abandon_staged_inputs(
+                    contributing_input_ids,
+                    InputAbandonReason::NeverExecuted,
+                )?;
+                // As above: a contributor a committed round of the run
+                // already applied did execute, and ends consumed.
                 self.consume_applied_contributors_of_run(run_id, contributing_input_ids)
             }
             FailedRunContributorDisposition::Replayed => {

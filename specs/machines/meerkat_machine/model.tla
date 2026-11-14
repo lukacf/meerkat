@@ -7975,6 +7975,7 @@ ResolveRuntimeCompletionResultRuntimeApplyFailedInitializing(run_id, terminal, f
     /\ (IF (terminal_outcome = Some("Failed")) THEN TRUE ELSE (IF (terminal_outcome = Some("BudgetExhausted")) THEN TRUE ELSE (IF (terminal_outcome = Some("TimeBudgetExceeded")) THEN TRUE ELSE (terminal_outcome = Some("StructuredOutputValidationFailed")))))
     /\ ((terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
     /\ (terminal_cause_kind = Some("RuntimeApplyFailure"))
+    /\ (last_runtime_apply_failure_cause # Some("RequestRefused"))
     /\ phase' = "Initializing"
     /\ model_step_count' = model_step_count + 1
     /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = run_id) THEN TRUE ELSE runtime_completion_result_resolved
@@ -7990,6 +7991,7 @@ ResolveRuntimeCompletionResultRuntimeApplyFailedIdle(run_id, terminal, finalizat
     /\ (IF (terminal_outcome = Some("Failed")) THEN TRUE ELSE (IF (terminal_outcome = Some("BudgetExhausted")) THEN TRUE ELSE (IF (terminal_outcome = Some("TimeBudgetExceeded")) THEN TRUE ELSE (terminal_outcome = Some("StructuredOutputValidationFailed")))))
     /\ ((terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
     /\ (terminal_cause_kind = Some("RuntimeApplyFailure"))
+    /\ (last_runtime_apply_failure_cause # Some("RequestRefused"))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = run_id) THEN TRUE ELSE runtime_completion_result_resolved
@@ -8005,6 +8007,7 @@ ResolveRuntimeCompletionResultRuntimeApplyFailedAttached(run_id, terminal, final
     /\ (IF (terminal_outcome = Some("Failed")) THEN TRUE ELSE (IF (terminal_outcome = Some("BudgetExhausted")) THEN TRUE ELSE (IF (terminal_outcome = Some("TimeBudgetExceeded")) THEN TRUE ELSE (terminal_outcome = Some("StructuredOutputValidationFailed")))))
     /\ ((terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
     /\ (terminal_cause_kind = Some("RuntimeApplyFailure"))
+    /\ (last_runtime_apply_failure_cause # Some("RequestRefused"))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = run_id) THEN TRUE ELSE runtime_completion_result_resolved
@@ -8020,6 +8023,7 @@ ResolveRuntimeCompletionResultRuntimeApplyFailedRunning(run_id, terminal, finali
     /\ (IF (terminal_outcome = Some("Failed")) THEN TRUE ELSE (IF (terminal_outcome = Some("BudgetExhausted")) THEN TRUE ELSE (IF (terminal_outcome = Some("TimeBudgetExceeded")) THEN TRUE ELSE (terminal_outcome = Some("StructuredOutputValidationFailed")))))
     /\ ((terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
     /\ (terminal_cause_kind = Some("RuntimeApplyFailure"))
+    /\ (last_runtime_apply_failure_cause # Some("RequestRefused"))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = run_id) THEN TRUE ELSE runtime_completion_result_resolved
@@ -8035,6 +8039,7 @@ ResolveRuntimeCompletionResultRuntimeApplyFailedRetired(run_id, terminal, finali
     /\ (IF (terminal_outcome = Some("Failed")) THEN TRUE ELSE (IF (terminal_outcome = Some("BudgetExhausted")) THEN TRUE ELSE (IF (terminal_outcome = Some("TimeBudgetExceeded")) THEN TRUE ELSE (terminal_outcome = Some("StructuredOutputValidationFailed")))))
     /\ ((terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
     /\ (terminal_cause_kind = Some("RuntimeApplyFailure"))
+    /\ (last_runtime_apply_failure_cause # Some("RequestRefused"))
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = run_id) THEN TRUE ELSE runtime_completion_result_resolved
@@ -8050,6 +8055,103 @@ ResolveRuntimeCompletionResultRuntimeApplyFailedStopped(run_id, terminal, finali
     /\ (IF (terminal_outcome = Some("Failed")) THEN TRUE ELSE (IF (terminal_outcome = Some("BudgetExhausted")) THEN TRUE ELSE (IF (terminal_outcome = Some("TimeBudgetExceeded")) THEN TRUE ELSE (terminal_outcome = Some("StructuredOutputValidationFailed")))))
     /\ ((terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
     /\ (terminal_cause_kind = Some("RuntimeApplyFailure"))
+    /\ (last_runtime_apply_failure_cause # Some("RequestRefused"))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = run_id) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_107906f5c7b323e4
+
+
+ResolveRuntimeCompletionResultRuntimeApplyRefusedInitializing(run_id, terminal, finalization) ==
+    /\ phase = "Initializing"
+    /\ (session_id # None)
+    /\ ((run_id # None) /\ (runtime_completion_result_run_id = run_id))
+    /\ (finalization = "Succeeded")
+    /\ (terminal = "MachineTerminal")
+    /\ (IF (terminal_outcome = Some("Failed")) THEN TRUE ELSE (IF (terminal_outcome = Some("BudgetExhausted")) THEN TRUE ELSE (IF (terminal_outcome = Some("TimeBudgetExceeded")) THEN TRUE ELSE (terminal_outcome = Some("StructuredOutputValidationFailed")))))
+    /\ ((terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
+    /\ (terminal_cause_kind = Some("RuntimeApplyFailure"))
+    /\ (last_runtime_apply_failure_cause = Some("RequestRefused"))
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = run_id) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_107906f5c7b323e4
+
+
+ResolveRuntimeCompletionResultRuntimeApplyRefusedIdle(run_id, terminal, finalization) ==
+    /\ phase = "Idle"
+    /\ (session_id # None)
+    /\ ((run_id # None) /\ (runtime_completion_result_run_id = run_id))
+    /\ (finalization = "Succeeded")
+    /\ (terminal = "MachineTerminal")
+    /\ (IF (terminal_outcome = Some("Failed")) THEN TRUE ELSE (IF (terminal_outcome = Some("BudgetExhausted")) THEN TRUE ELSE (IF (terminal_outcome = Some("TimeBudgetExceeded")) THEN TRUE ELSE (terminal_outcome = Some("StructuredOutputValidationFailed")))))
+    /\ ((terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
+    /\ (terminal_cause_kind = Some("RuntimeApplyFailure"))
+    /\ (last_runtime_apply_failure_cause = Some("RequestRefused"))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = run_id) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_107906f5c7b323e4
+
+
+ResolveRuntimeCompletionResultRuntimeApplyRefusedAttached(run_id, terminal, finalization) ==
+    /\ phase = "Attached"
+    /\ (session_id # None)
+    /\ ((run_id # None) /\ (runtime_completion_result_run_id = run_id))
+    /\ (finalization = "Succeeded")
+    /\ (terminal = "MachineTerminal")
+    /\ (IF (terminal_outcome = Some("Failed")) THEN TRUE ELSE (IF (terminal_outcome = Some("BudgetExhausted")) THEN TRUE ELSE (IF (terminal_outcome = Some("TimeBudgetExceeded")) THEN TRUE ELSE (terminal_outcome = Some("StructuredOutputValidationFailed")))))
+    /\ ((terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
+    /\ (terminal_cause_kind = Some("RuntimeApplyFailure"))
+    /\ (last_runtime_apply_failure_cause = Some("RequestRefused"))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = run_id) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_107906f5c7b323e4
+
+
+ResolveRuntimeCompletionResultRuntimeApplyRefusedRunning(run_id, terminal, finalization) ==
+    /\ phase = "Running"
+    /\ (session_id # None)
+    /\ ((run_id # None) /\ (runtime_completion_result_run_id = run_id))
+    /\ (finalization = "Succeeded")
+    /\ (terminal = "MachineTerminal")
+    /\ (IF (terminal_outcome = Some("Failed")) THEN TRUE ELSE (IF (terminal_outcome = Some("BudgetExhausted")) THEN TRUE ELSE (IF (terminal_outcome = Some("TimeBudgetExceeded")) THEN TRUE ELSE (terminal_outcome = Some("StructuredOutputValidationFailed")))))
+    /\ ((terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
+    /\ (terminal_cause_kind = Some("RuntimeApplyFailure"))
+    /\ (last_runtime_apply_failure_cause = Some("RequestRefused"))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = run_id) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_107906f5c7b323e4
+
+
+ResolveRuntimeCompletionResultRuntimeApplyRefusedRetired(run_id, terminal, finalization) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ ((run_id # None) /\ (runtime_completion_result_run_id = run_id))
+    /\ (finalization = "Succeeded")
+    /\ (terminal = "MachineTerminal")
+    /\ (IF (terminal_outcome = Some("Failed")) THEN TRUE ELSE (IF (terminal_outcome = Some("BudgetExhausted")) THEN TRUE ELSE (IF (terminal_outcome = Some("TimeBudgetExceeded")) THEN TRUE ELSE (terminal_outcome = Some("StructuredOutputValidationFailed")))))
+    /\ ((terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
+    /\ (terminal_cause_kind = Some("RuntimeApplyFailure"))
+    /\ (last_runtime_apply_failure_cause = Some("RequestRefused"))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = run_id) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_107906f5c7b323e4
+
+
+ResolveRuntimeCompletionResultRuntimeApplyRefusedStopped(run_id, terminal, finalization) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ ((run_id # None) /\ (runtime_completion_result_run_id = run_id))
+    /\ (finalization = "Succeeded")
+    /\ (terminal = "MachineTerminal")
+    /\ (IF (terminal_outcome = Some("Failed")) THEN TRUE ELSE (IF (terminal_outcome = Some("BudgetExhausted")) THEN TRUE ELSE (IF (terminal_outcome = Some("TimeBudgetExceeded")) THEN TRUE ELSE (terminal_outcome = Some("StructuredOutputValidationFailed")))))
+    /\ ((terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
+    /\ (terminal_cause_kind = Some("RuntimeApplyFailure"))
+    /\ (last_runtime_apply_failure_cause = Some("RequestRefused"))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = run_id) THEN TRUE ELSE runtime_completion_result_resolved
@@ -38338,6 +38440,7 @@ ResolveAbandonedCompletionResultRuntimeApplyFailedInitializing(owner_input_id, r
     /\ ((arg_terminal_outcome = "Failed") /\ (arg_terminal_cause_kind = "RuntimeApplyFailure"))
     /\ (\A recipient \in recipient_input_ids : ((recipient \in DOMAIN input_phases) /\ ((IF recipient \in DOMAIN input_phases THEN input_phases[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_terminal_kind) /\ ((IF recipient \in DOMAIN input_terminal_kind THEN input_terminal_kind[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_run_associations) /\ ((IF recipient \in DOMAIN input_run_associations THEN input_run_associations[recipient] ELSE "None") = run_id)))
     /\ (finalization = "Succeeded")
+    /\ (IF (runtime_completion_result_run_id # Some(run_id)) THEN TRUE ELSE (last_runtime_apply_failure_cause # Some("RequestRefused")))
     /\ phase' = "Initializing"
     /\ model_step_count' = model_step_count + 1
     /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
@@ -38351,6 +38454,7 @@ ResolveAbandonedCompletionResultRuntimeApplyFailedIdle(owner_input_id, run_id, c
     /\ ((arg_terminal_outcome = "Failed") /\ (arg_terminal_cause_kind = "RuntimeApplyFailure"))
     /\ (\A recipient \in recipient_input_ids : ((recipient \in DOMAIN input_phases) /\ ((IF recipient \in DOMAIN input_phases THEN input_phases[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_terminal_kind) /\ ((IF recipient \in DOMAIN input_terminal_kind THEN input_terminal_kind[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_run_associations) /\ ((IF recipient \in DOMAIN input_run_associations THEN input_run_associations[recipient] ELSE "None") = run_id)))
     /\ (finalization = "Succeeded")
+    /\ (IF (runtime_completion_result_run_id # Some(run_id)) THEN TRUE ELSE (last_runtime_apply_failure_cause # Some("RequestRefused")))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
@@ -38364,6 +38468,7 @@ ResolveAbandonedCompletionResultRuntimeApplyFailedAttached(owner_input_id, run_i
     /\ ((arg_terminal_outcome = "Failed") /\ (arg_terminal_cause_kind = "RuntimeApplyFailure"))
     /\ (\A recipient \in recipient_input_ids : ((recipient \in DOMAIN input_phases) /\ ((IF recipient \in DOMAIN input_phases THEN input_phases[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_terminal_kind) /\ ((IF recipient \in DOMAIN input_terminal_kind THEN input_terminal_kind[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_run_associations) /\ ((IF recipient \in DOMAIN input_run_associations THEN input_run_associations[recipient] ELSE "None") = run_id)))
     /\ (finalization = "Succeeded")
+    /\ (IF (runtime_completion_result_run_id # Some(run_id)) THEN TRUE ELSE (last_runtime_apply_failure_cause # Some("RequestRefused")))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
@@ -38377,6 +38482,7 @@ ResolveAbandonedCompletionResultRuntimeApplyFailedRunning(owner_input_id, run_id
     /\ ((arg_terminal_outcome = "Failed") /\ (arg_terminal_cause_kind = "RuntimeApplyFailure"))
     /\ (\A recipient \in recipient_input_ids : ((recipient \in DOMAIN input_phases) /\ ((IF recipient \in DOMAIN input_phases THEN input_phases[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_terminal_kind) /\ ((IF recipient \in DOMAIN input_terminal_kind THEN input_terminal_kind[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_run_associations) /\ ((IF recipient \in DOMAIN input_run_associations THEN input_run_associations[recipient] ELSE "None") = run_id)))
     /\ (finalization = "Succeeded")
+    /\ (IF (runtime_completion_result_run_id # Some(run_id)) THEN TRUE ELSE (last_runtime_apply_failure_cause # Some("RequestRefused")))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
@@ -38390,6 +38496,7 @@ ResolveAbandonedCompletionResultRuntimeApplyFailedRetired(owner_input_id, run_id
     /\ ((arg_terminal_outcome = "Failed") /\ (arg_terminal_cause_kind = "RuntimeApplyFailure"))
     /\ (\A recipient \in recipient_input_ids : ((recipient \in DOMAIN input_phases) /\ ((IF recipient \in DOMAIN input_phases THEN input_phases[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_terminal_kind) /\ ((IF recipient \in DOMAIN input_terminal_kind THEN input_terminal_kind[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_run_associations) /\ ((IF recipient \in DOMAIN input_run_associations THEN input_run_associations[recipient] ELSE "None") = run_id)))
     /\ (finalization = "Succeeded")
+    /\ (IF (runtime_completion_result_run_id # Some(run_id)) THEN TRUE ELSE (last_runtime_apply_failure_cause # Some("RequestRefused")))
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
@@ -38403,6 +38510,91 @@ ResolveAbandonedCompletionResultRuntimeApplyFailedStopped(owner_input_id, run_id
     /\ ((arg_terminal_outcome = "Failed") /\ (arg_terminal_cause_kind = "RuntimeApplyFailure"))
     /\ (\A recipient \in recipient_input_ids : ((recipient \in DOMAIN input_phases) /\ ((IF recipient \in DOMAIN input_phases THEN input_phases[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_terminal_kind) /\ ((IF recipient \in DOMAIN input_terminal_kind THEN input_terminal_kind[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_run_associations) /\ ((IF recipient \in DOMAIN input_run_associations THEN input_run_associations[recipient] ELSE "None") = run_id)))
     /\ (finalization = "Succeeded")
+    /\ (IF (runtime_completion_result_run_id # Some(run_id)) THEN TRUE ELSE (last_runtime_apply_failure_cause # Some("RequestRefused")))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_107906f5c7b323e4
+
+
+ResolveAbandonedCompletionResultRuntimeApplyRefusedInitializing(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization) ==
+    /\ phase = "Initializing"
+    /\ (session_id # None)
+    /\ ((Cardinality(recipient_input_ids) > 0) /\ (Cardinality(recipient_input_ids) <= 256) /\ (owner_input_id \in recipient_input_ids) /\ (candidate_digest # "") /\ (completion_input_ids_digest # "") /\ ~(requires_session_checkpoint) /\ ~(has_interaction_terminal_outbox))
+    /\ ((arg_terminal_outcome = "Failed") /\ (arg_terminal_cause_kind = "RuntimeApplyFailure"))
+    /\ (\A recipient \in recipient_input_ids : ((recipient \in DOMAIN input_phases) /\ ((IF recipient \in DOMAIN input_phases THEN input_phases[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_terminal_kind) /\ ((IF recipient \in DOMAIN input_terminal_kind THEN input_terminal_kind[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_run_associations) /\ ((IF recipient \in DOMAIN input_run_associations THEN input_run_associations[recipient] ELSE "None") = run_id)))
+    /\ (finalization = "Succeeded")
+    /\ ((runtime_completion_result_run_id = Some(run_id)) /\ (last_runtime_apply_failure_cause = Some("RequestRefused")))
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_107906f5c7b323e4
+
+
+ResolveAbandonedCompletionResultRuntimeApplyRefusedIdle(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization) ==
+    /\ phase = "Idle"
+    /\ (session_id # None)
+    /\ ((Cardinality(recipient_input_ids) > 0) /\ (Cardinality(recipient_input_ids) <= 256) /\ (owner_input_id \in recipient_input_ids) /\ (candidate_digest # "") /\ (completion_input_ids_digest # "") /\ ~(requires_session_checkpoint) /\ ~(has_interaction_terminal_outbox))
+    /\ ((arg_terminal_outcome = "Failed") /\ (arg_terminal_cause_kind = "RuntimeApplyFailure"))
+    /\ (\A recipient \in recipient_input_ids : ((recipient \in DOMAIN input_phases) /\ ((IF recipient \in DOMAIN input_phases THEN input_phases[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_terminal_kind) /\ ((IF recipient \in DOMAIN input_terminal_kind THEN input_terminal_kind[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_run_associations) /\ ((IF recipient \in DOMAIN input_run_associations THEN input_run_associations[recipient] ELSE "None") = run_id)))
+    /\ (finalization = "Succeeded")
+    /\ ((runtime_completion_result_run_id = Some(run_id)) /\ (last_runtime_apply_failure_cause = Some("RequestRefused")))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_107906f5c7b323e4
+
+
+ResolveAbandonedCompletionResultRuntimeApplyRefusedAttached(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization) ==
+    /\ phase = "Attached"
+    /\ (session_id # None)
+    /\ ((Cardinality(recipient_input_ids) > 0) /\ (Cardinality(recipient_input_ids) <= 256) /\ (owner_input_id \in recipient_input_ids) /\ (candidate_digest # "") /\ (completion_input_ids_digest # "") /\ ~(requires_session_checkpoint) /\ ~(has_interaction_terminal_outbox))
+    /\ ((arg_terminal_outcome = "Failed") /\ (arg_terminal_cause_kind = "RuntimeApplyFailure"))
+    /\ (\A recipient \in recipient_input_ids : ((recipient \in DOMAIN input_phases) /\ ((IF recipient \in DOMAIN input_phases THEN input_phases[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_terminal_kind) /\ ((IF recipient \in DOMAIN input_terminal_kind THEN input_terminal_kind[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_run_associations) /\ ((IF recipient \in DOMAIN input_run_associations THEN input_run_associations[recipient] ELSE "None") = run_id)))
+    /\ (finalization = "Succeeded")
+    /\ ((runtime_completion_result_run_id = Some(run_id)) /\ (last_runtime_apply_failure_cause = Some("RequestRefused")))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_107906f5c7b323e4
+
+
+ResolveAbandonedCompletionResultRuntimeApplyRefusedRunning(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization) ==
+    /\ phase = "Running"
+    /\ (session_id # None)
+    /\ ((Cardinality(recipient_input_ids) > 0) /\ (Cardinality(recipient_input_ids) <= 256) /\ (owner_input_id \in recipient_input_ids) /\ (candidate_digest # "") /\ (completion_input_ids_digest # "") /\ ~(requires_session_checkpoint) /\ ~(has_interaction_terminal_outbox))
+    /\ ((arg_terminal_outcome = "Failed") /\ (arg_terminal_cause_kind = "RuntimeApplyFailure"))
+    /\ (\A recipient \in recipient_input_ids : ((recipient \in DOMAIN input_phases) /\ ((IF recipient \in DOMAIN input_phases THEN input_phases[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_terminal_kind) /\ ((IF recipient \in DOMAIN input_terminal_kind THEN input_terminal_kind[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_run_associations) /\ ((IF recipient \in DOMAIN input_run_associations THEN input_run_associations[recipient] ELSE "None") = run_id)))
+    /\ (finalization = "Succeeded")
+    /\ ((runtime_completion_result_run_id = Some(run_id)) /\ (last_runtime_apply_failure_cause = Some("RequestRefused")))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_107906f5c7b323e4
+
+
+ResolveAbandonedCompletionResultRuntimeApplyRefusedRetired(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ ((Cardinality(recipient_input_ids) > 0) /\ (Cardinality(recipient_input_ids) <= 256) /\ (owner_input_id \in recipient_input_ids) /\ (candidate_digest # "") /\ (completion_input_ids_digest # "") /\ ~(requires_session_checkpoint) /\ ~(has_interaction_terminal_outbox))
+    /\ ((arg_terminal_outcome = "Failed") /\ (arg_terminal_cause_kind = "RuntimeApplyFailure"))
+    /\ (\A recipient \in recipient_input_ids : ((recipient \in DOMAIN input_phases) /\ ((IF recipient \in DOMAIN input_phases THEN input_phases[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_terminal_kind) /\ ((IF recipient \in DOMAIN input_terminal_kind THEN input_terminal_kind[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_run_associations) /\ ((IF recipient \in DOMAIN input_run_associations THEN input_run_associations[recipient] ELSE "None") = run_id)))
+    /\ (finalization = "Succeeded")
+    /\ ((runtime_completion_result_run_id = Some(run_id)) /\ (last_runtime_apply_failure_cause = Some("RequestRefused")))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_107906f5c7b323e4
+
+
+ResolveAbandonedCompletionResultRuntimeApplyRefusedStopped(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ ((Cardinality(recipient_input_ids) > 0) /\ (Cardinality(recipient_input_ids) <= 256) /\ (owner_input_id \in recipient_input_ids) /\ (candidate_digest # "") /\ (completion_input_ids_digest # "") /\ ~(requires_session_checkpoint) /\ ~(has_interaction_terminal_outbox))
+    /\ ((arg_terminal_outcome = "Failed") /\ (arg_terminal_cause_kind = "RuntimeApplyFailure"))
+    /\ (\A recipient \in recipient_input_ids : ((recipient \in DOMAIN input_phases) /\ ((IF recipient \in DOMAIN input_phases THEN input_phases[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_terminal_kind) /\ ((IF recipient \in DOMAIN input_terminal_kind THEN input_terminal_kind[recipient] ELSE "None") = "Abandoned") /\ (recipient \in DOMAIN input_run_associations) /\ ((IF recipient \in DOMAIN input_run_associations THEN input_run_associations[recipient] ELSE "None") = run_id)))
+    /\ (finalization = "Succeeded")
+    /\ ((runtime_completion_result_run_id = Some(run_id)) /\ (last_runtime_apply_failure_cause = Some("RequestRefused")))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
@@ -40209,6 +40401,12 @@ Next ==
     \/ (phase = "Running") /\ \E run_id \in OptionRunIdValues : \E terminal \in RuntimeCompletionTerminalObservationValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveRuntimeCompletionResultRuntimeApplyFailedRunning(run_id, terminal, finalization)
     \/ (phase = "Retired") /\ \E run_id \in OptionRunIdValues : \E terminal \in RuntimeCompletionTerminalObservationValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveRuntimeCompletionResultRuntimeApplyFailedRetired(run_id, terminal, finalization)
     \/ (phase = "Stopped") /\ \E run_id \in OptionRunIdValues : \E terminal \in RuntimeCompletionTerminalObservationValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveRuntimeCompletionResultRuntimeApplyFailedStopped(run_id, terminal, finalization)
+    \/ (phase = "Initializing") /\ \E run_id \in OptionRunIdValues : \E terminal \in RuntimeCompletionTerminalObservationValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveRuntimeCompletionResultRuntimeApplyRefusedInitializing(run_id, terminal, finalization)
+    \/ (phase = "Idle") /\ \E run_id \in OptionRunIdValues : \E terminal \in RuntimeCompletionTerminalObservationValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveRuntimeCompletionResultRuntimeApplyRefusedIdle(run_id, terminal, finalization)
+    \/ (phase = "Attached") /\ \E run_id \in OptionRunIdValues : \E terminal \in RuntimeCompletionTerminalObservationValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveRuntimeCompletionResultRuntimeApplyRefusedAttached(run_id, terminal, finalization)
+    \/ (phase = "Running") /\ \E run_id \in OptionRunIdValues : \E terminal \in RuntimeCompletionTerminalObservationValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveRuntimeCompletionResultRuntimeApplyRefusedRunning(run_id, terminal, finalization)
+    \/ (phase = "Retired") /\ \E run_id \in OptionRunIdValues : \E terminal \in RuntimeCompletionTerminalObservationValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveRuntimeCompletionResultRuntimeApplyRefusedRetired(run_id, terminal, finalization)
+    \/ (phase = "Stopped") /\ \E run_id \in OptionRunIdValues : \E terminal \in RuntimeCompletionTerminalObservationValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveRuntimeCompletionResultRuntimeApplyRefusedStopped(run_id, terminal, finalization)
     \/ (phase = "Initializing") /\ \E run_id \in OptionRunIdValues : \E terminal \in RuntimeCompletionTerminalObservationValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveRuntimeCompletionResultMachineFailedInitializing(run_id, terminal, finalization)
     \/ (phase = "Idle") /\ \E run_id \in OptionRunIdValues : \E terminal \in RuntimeCompletionTerminalObservationValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveRuntimeCompletionResultMachineFailedIdle(run_id, terminal, finalization)
     \/ (phase = "Attached") /\ \E run_id \in OptionRunIdValues : \E terminal \in RuntimeCompletionTerminalObservationValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveRuntimeCompletionResultMachineFailedAttached(run_id, terminal, finalization)
@@ -42401,6 +42599,12 @@ Next ==
     \/ (phase = "Running") /\ \E owner_input_id \in StringValues : \E run_id \in RunIdValues : \E candidate_digest \in StringValues : \E completion_input_ids_digest \in StringValues : \E recipient_input_ids \in SetOfStringValues : \E arg_terminal_outcome \in TurnTerminalOutcomeValues : \E arg_terminal_cause_kind \in TurnTerminalCauseKindValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveAbandonedCompletionResultRuntimeApplyFailedRunning(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, FALSE, FALSE, finalization)
     \/ (phase = "Retired") /\ \E owner_input_id \in StringValues : \E run_id \in RunIdValues : \E candidate_digest \in StringValues : \E completion_input_ids_digest \in StringValues : \E recipient_input_ids \in SetOfStringValues : \E arg_terminal_outcome \in TurnTerminalOutcomeValues : \E arg_terminal_cause_kind \in TurnTerminalCauseKindValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveAbandonedCompletionResultRuntimeApplyFailedRetired(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, FALSE, FALSE, finalization)
     \/ (phase = "Stopped") /\ \E owner_input_id \in StringValues : \E run_id \in RunIdValues : \E candidate_digest \in StringValues : \E completion_input_ids_digest \in StringValues : \E recipient_input_ids \in SetOfStringValues : \E arg_terminal_outcome \in TurnTerminalOutcomeValues : \E arg_terminal_cause_kind \in TurnTerminalCauseKindValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveAbandonedCompletionResultRuntimeApplyFailedStopped(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, FALSE, FALSE, finalization)
+    \/ (phase = "Initializing") /\ \E owner_input_id \in StringValues : \E run_id \in RunIdValues : \E candidate_digest \in StringValues : \E completion_input_ids_digest \in StringValues : \E recipient_input_ids \in SetOfStringValues : \E arg_terminal_outcome \in TurnTerminalOutcomeValues : \E arg_terminal_cause_kind \in TurnTerminalCauseKindValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveAbandonedCompletionResultRuntimeApplyRefusedInitializing(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, FALSE, FALSE, finalization)
+    \/ (phase = "Idle") /\ \E owner_input_id \in StringValues : \E run_id \in RunIdValues : \E candidate_digest \in StringValues : \E completion_input_ids_digest \in StringValues : \E recipient_input_ids \in SetOfStringValues : \E arg_terminal_outcome \in TurnTerminalOutcomeValues : \E arg_terminal_cause_kind \in TurnTerminalCauseKindValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveAbandonedCompletionResultRuntimeApplyRefusedIdle(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, FALSE, FALSE, finalization)
+    \/ (phase = "Attached") /\ \E owner_input_id \in StringValues : \E run_id \in RunIdValues : \E candidate_digest \in StringValues : \E completion_input_ids_digest \in StringValues : \E recipient_input_ids \in SetOfStringValues : \E arg_terminal_outcome \in TurnTerminalOutcomeValues : \E arg_terminal_cause_kind \in TurnTerminalCauseKindValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveAbandonedCompletionResultRuntimeApplyRefusedAttached(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, FALSE, FALSE, finalization)
+    \/ (phase = "Running") /\ \E owner_input_id \in StringValues : \E run_id \in RunIdValues : \E candidate_digest \in StringValues : \E completion_input_ids_digest \in StringValues : \E recipient_input_ids \in SetOfStringValues : \E arg_terminal_outcome \in TurnTerminalOutcomeValues : \E arg_terminal_cause_kind \in TurnTerminalCauseKindValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveAbandonedCompletionResultRuntimeApplyRefusedRunning(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, FALSE, FALSE, finalization)
+    \/ (phase = "Retired") /\ \E owner_input_id \in StringValues : \E run_id \in RunIdValues : \E candidate_digest \in StringValues : \E completion_input_ids_digest \in StringValues : \E recipient_input_ids \in SetOfStringValues : \E arg_terminal_outcome \in TurnTerminalOutcomeValues : \E arg_terminal_cause_kind \in TurnTerminalCauseKindValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveAbandonedCompletionResultRuntimeApplyRefusedRetired(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, FALSE, FALSE, finalization)
+    \/ (phase = "Stopped") /\ \E owner_input_id \in StringValues : \E run_id \in RunIdValues : \E candidate_digest \in StringValues : \E completion_input_ids_digest \in StringValues : \E recipient_input_ids \in SetOfStringValues : \E arg_terminal_outcome \in TurnTerminalOutcomeValues : \E arg_terminal_cause_kind \in TurnTerminalCauseKindValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveAbandonedCompletionResultRuntimeApplyRefusedStopped(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, FALSE, FALSE, finalization)
     \/ (phase = "Initializing") /\ \E owner_input_id \in StringValues : \E run_id \in RunIdValues : \E candidate_digest \in StringValues : \E completion_input_ids_digest \in StringValues : \E requires_session_checkpoint \in BOOLEAN : \E recipient_input_ids \in SetOfStringValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveCheckpointCompletionResultSucceededInitializing(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
     \/ (phase = "Idle") /\ \E owner_input_id \in StringValues : \E run_id \in RunIdValues : \E candidate_digest \in StringValues : \E completion_input_ids_digest \in StringValues : \E requires_session_checkpoint \in BOOLEAN : \E recipient_input_ids \in SetOfStringValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveCheckpointCompletionResultSucceededIdle(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
     \/ (phase = "Attached") /\ \E owner_input_id \in StringValues : \E run_id \in RunIdValues : \E candidate_digest \in StringValues : \E completion_input_ids_digest \in StringValues : \E requires_session_checkpoint \in BOOLEAN : \E recipient_input_ids \in SetOfStringValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveCheckpointCompletionResultSucceededAttached(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)

@@ -151,6 +151,43 @@ them.
   a downstream exhaustive match needs the two new arms, or a wildcard arm.
 
 - Rust API of `meerkat-runtime`, `meerkat-machine-schema` and
+  `meerkat-machine-kernels`: the cause of a failed apply,
+  `RuntimeApplyFailureCause` (meerkat-runtime `meerkat_machine::dsl`,
+  meerkat-machine-schema `catalog::dsl::meerkat_machine`, and the kernel's
+  copy `generated::meerkat::RuntimeApplyFailureCause`), gains
+  `RequestRefused`, appended last: the request was refused and nothing was
+  applied (see Fixed). The kernel `generated::meerkat::TransitionId` gains
+  twelve variants, appended last:
+  `ResolveRuntimeCompletionResultRuntimeApplyRefusedInitializing`,
+  `ResolveRuntimeCompletionResultRuntimeApplyRefusedIdle`,
+  `ResolveRuntimeCompletionResultRuntimeApplyRefusedAttached`,
+  `ResolveRuntimeCompletionResultRuntimeApplyRefusedRunning`,
+  `ResolveRuntimeCompletionResultRuntimeApplyRefusedRetired`,
+  `ResolveRuntimeCompletionResultRuntimeApplyRefusedStopped`,
+  `ResolveAbandonedCompletionResultRuntimeApplyRefusedInitializing`,
+  `ResolveAbandonedCompletionResultRuntimeApplyRefusedIdle`,
+  `ResolveAbandonedCompletionResultRuntimeApplyRefusedAttached`,
+  `ResolveAbandonedCompletionResultRuntimeApplyRefusedRunning`,
+  `ResolveAbandonedCompletionResultRuntimeApplyRefusedRetired` and
+  `ResolveAbandonedCompletionResultRuntimeApplyRefusedStopped`. The result
+  of a run whose apply failed is now answered by two arms, split on that
+  cause, both for the run and for the inputs the run abandoned: the arms
+  `ResolveRuntimeCompletionResultRuntimeApplyFailed` and
+  `ResolveAbandonedCompletionResultRuntimeApplyFailed` answer every other
+  cause as before, and the new arms
+  `ResolveRuntimeCompletionResultRuntimeApplyRefused` and
+  `ResolveAbandonedCompletionResultRuntimeApplyRefused` answer a refused
+  request with the existing outcome `Abandoned`. No input, effect, state
+  field or outcome value of the machine changes, the machine's version
+  stays `1`, and no existing variant's implicit discriminant moves. Every
+  enum named here is exhaustive, so a downstream exhaustive match needs the
+  new arms, or a wildcard arm. The kernel's copy of
+  `RuntimeApplyFailureCause` derives serde, as before, and is a closed set:
+  nothing Meerkat ships serializes it and the kernel never produces the
+  value itself, but an embedder that serializes its own kernel state after
+  passing the new value in writes a value an older kernel refuses to read.
+
+- Rust API of `meerkat-runtime`, `meerkat-machine-schema` and
   `meerkat-machine-kernels`: the machine now says which cleanup follows a
   completion, so no surface chooses it. `RuntimeCompletionCleanupAction`
   (meerkat-runtime `meerkat_machine::dsl`, meerkat-machine-schema
@@ -1734,6 +1771,24 @@ them.
   the rule for a Rust host whose own relay asks the machine about a session
   it does not read as archived. A stopped runtime with inputs still queued
   is cleaned up as before.
+
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`: a
+  turn refused for its reasoning effort level at its start no longer ends
+  the session's other queued requests. A turn that had been accepted and
+  was then refused when it started was answered the typed refusal, and the
+  session's runtime registration was retired as after a start that failed:
+  every other request queued on the session ended without a run. Now the
+  refused turn ends alone. It is answered the typed
+  `reasoning_effort_refused` refusal, its input ends once as never executed
+  and is not started again, the requests queued behind it run in their
+  order, and the session keeps its runtime registration and what is
+  attached to it while its live session is present. When no live session
+  is present at the refusal, the registration is cleaned up as before. The
+  machine now answers such a turn as an abandoned turn, not as a failed
+  apply (see Breaking for the cause value and the kernel's transition
+  names); what is stored for the refused input is the existing
+  never-executed record and the turn's typed error. The reasoning effort
+  controls are new in this release, so no released version had this.
 
 - `meerkat-rpc`, `meerkat-rest`, `meerkat`: a session that was cleaned up
   without being archived no longer loses the agents it created to the

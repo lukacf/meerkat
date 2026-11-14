@@ -10418,6 +10418,8 @@ pub enum RuntimeApplyFailureCause {
     ExecutorControlFailed,
     #[serde(rename = "ExecutorInternal")]
     ExecutorInternal,
+    #[serde(rename = "RequestRefused")]
+    RequestRefused,
 }
 impl RuntimeApplyFailureCause {
     pub fn as_str(&self) -> &'static str {
@@ -10431,6 +10433,7 @@ impl RuntimeApplyFailureCause {
             Self::ExecutorStopped => "ExecutorStopped",
             Self::ExecutorControlFailed => "ExecutorControlFailed",
             Self::ExecutorInternal => "ExecutorInternal",
+            Self::RequestRefused => "RequestRefused",
         }
     }
 }
@@ -10447,6 +10450,7 @@ impl std::convert::TryFrom<&str> for RuntimeApplyFailureCause {
             "ExecutorStopped" => Ok(Self::ExecutorStopped),
             "ExecutorControlFailed" => Ok(Self::ExecutorControlFailed),
             "ExecutorInternal" => Ok(Self::ExecutorInternal),
+            "RequestRefused" => Ok(Self::RequestRefused),
             other => Err(format!("invalid RuntimeApplyFailureCause value `{other}`")),
         }
     }
@@ -26542,6 +26546,18 @@ pub enum TransitionId {
     ResolveRuntimeCompletionCleanupInputTerminatedWhileServingAttached,
     ResolveRuntimeCompletionCleanupInputTerminatedWhileServingRunning,
     ResolveRuntimeCompletionCleanupInputTerminatedWhileDrainingRetired,
+    ResolveRuntimeCompletionResultRuntimeApplyRefusedInitializing,
+    ResolveRuntimeCompletionResultRuntimeApplyRefusedIdle,
+    ResolveRuntimeCompletionResultRuntimeApplyRefusedAttached,
+    ResolveRuntimeCompletionResultRuntimeApplyRefusedRunning,
+    ResolveRuntimeCompletionResultRuntimeApplyRefusedRetired,
+    ResolveRuntimeCompletionResultRuntimeApplyRefusedStopped,
+    ResolveAbandonedCompletionResultRuntimeApplyRefusedInitializing,
+    ResolveAbandonedCompletionResultRuntimeApplyRefusedIdle,
+    ResolveAbandonedCompletionResultRuntimeApplyRefusedAttached,
+    ResolveAbandonedCompletionResultRuntimeApplyRefusedRunning,
+    ResolveAbandonedCompletionResultRuntimeApplyRefusedRetired,
+    ResolveAbandonedCompletionResultRuntimeApplyRefusedStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

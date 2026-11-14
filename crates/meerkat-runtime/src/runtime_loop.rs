@@ -5394,12 +5394,16 @@ async fn prepare_turn_state_for_primitive(
 /// Decide what becomes of a failed run's staged contributors, from the typed
 /// apply failure alone.
 ///
-/// Exactly one failure class refuses the release: a run whose consumer never
-/// began executing. There the loop dropped an `apply` whose in-flight fate it
+/// Two failure classes refuse the release. One is a run whose consumer never
+/// began executing: there the loop dropped an `apply` whose in-flight fate it
 /// cannot observe, so returning a contributor to its work lane could have the
-/// instruction carried out twice. Every other failure - including every other
-/// teardown reason - is an answer the executor gave, with nothing in flight, so
-/// replay repeats nothing.
+/// instruction carried out twice. The other is a request the executor refused
+/// with nothing applied (the machine's cause `RequestRefused`, decided by the
+/// one mapping the failed run's machine input uses): the answer is the
+/// request's own, so a replay would be refused the same way up to the retry
+/// cap, and the contributors end once instead. Every other failure -
+/// including every other teardown reason - is an answer the executor gave,
+/// with nothing in flight, so replay repeats nothing.
 ///
 /// `CoreExecutorTeardownReason` is `#[non_exhaustive]`, so this stays a
 /// `matches!` on the one reason rather than a `match` that would silently
@@ -5416,6 +5420,11 @@ fn failed_run_contributor_disposition(
         }
     ) {
         crate::meerkat_machine::FailedRunContributorDisposition::Terminalized
+    } else if let CoreExecutorError::ApplyFailed { cause } = error
+        && crate::meerkat_machine::dsl::RuntimeApplyFailureCause::from(cause)
+            == crate::meerkat_machine::dsl::RuntimeApplyFailureCause::RequestRefused
+    {
+        crate::meerkat_machine::FailedRunContributorDisposition::Refused
     } else {
         crate::meerkat_machine::FailedRunContributorDisposition::Replayed
     }
@@ -7390,6 +7399,17 @@ async fn resolve_failed_batch_backlog(
             // empty backlog, and the machine's own stage-attempt budget bounds
             // the retry: the payload either succeeds or `ResolveStagedRollback`
             // terminalizes it as MaxAttemptsExhausted.
+            return FailedBatchBacklogOutcome::ContinueProcessing;
+        }
+        if !d.has_queued_input_among(input_ids) {
+            // The machine holds none of the failed batch as queued work: its
+            // failure realization ended every member (a refused request ends
+            // its contributors with the run, and a persistent driver has
+            // archived them with their receipt, so the machine no longer
+            // tracks them). Nothing of the batch is there to put behind the
+            // backlog, and what is queued runs next. This is read from the
+            // machine's own state, like the two decisions above, never from
+            // the failure's kind.
             return FailedBatchBacklogOutcome::ContinueProcessing;
         }
         d.defer_queued_inputs_behind_backlog(input_ids, cancelled_run_id)
@@ -15016,6 +15036,74 @@ mod tests {
             failed_run_contributor_disposition(&CoreExecutorError::Internal(
                 "ordinary apply failure".into()
             )),
+            FailedRunContributorDisposition::Replayed
+        );
+    }
+
+    /// A failed apply whose typed reason is the reasoning effort refusal is
+    /// a refused request, whatever kind the executor gave it: the machine's
+    /// cause for it is `RequestRefused` and its contributors end with it.
+    /// The same failure without that reason, and a failure that carries
+    /// another typed reason, keep the executor's kind and are replayed.
+    #[test]
+    fn a_refused_reasoning_effort_level_is_a_refused_request_and_ends_its_contributors() {
+        use crate::meerkat_machine::FailedRunContributorDisposition;
+        use crate::meerkat_machine::dsl::RuntimeApplyFailureCause;
+        use meerkat_core::lifecycle::core_executor::{
+            CoreApplyFailureCause, CoreApplyFailureCauseKind,
+        };
+
+        let refusal: meerkat_core::ReasoningEffortRefusal =
+            serde_json::from_value(serde_json::json!({
+                "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                "route": {"backend": "anthropic_api", "api": "messages"},
+                "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+                "facts": "catalog",
+            }))
+            .unwrap();
+        let reason = meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+            refusal: Box::new(refusal),
+        };
+        for kind in [
+            CoreApplyFailureCauseKind::RuntimeTurn,
+            CoreApplyFailureCauseKind::ExecutorInternal,
+            CoreApplyFailureCauseKind::Unknown,
+        ] {
+            let refused = CoreApplyFailureCause::new(kind, "refused").with_reason(reason.clone());
+            assert_eq!(
+                RuntimeApplyFailureCause::from(&refused),
+                RuntimeApplyFailureCause::RequestRefused,
+                "{}",
+                kind.as_str()
+            );
+            assert_eq!(
+                failed_run_contributor_disposition(&CoreExecutorError::apply_failed(refused)),
+                FailedRunContributorDisposition::Refused,
+                "{}",
+                kind.as_str()
+            );
+        }
+
+        let plain = CoreApplyFailureCause::runtime_turn("the turn could not be started");
+        assert_eq!(
+            RuntimeApplyFailureCause::from(&plain),
+            RuntimeApplyFailureCause::RuntimeTurn
+        );
+        assert_eq!(
+            failed_run_contributor_disposition(&CoreExecutorError::apply_failed(plain)),
+            FailedRunContributorDisposition::Replayed
+        );
+        let rate_limited = CoreApplyFailureCause::runtime_turn("another typed reason").with_reason(
+            meerkat_core::event::AgentErrorReason::LlmRateLimited {
+                retry_after_ms: None,
+            },
+        );
+        assert_eq!(
+            RuntimeApplyFailureCause::from(&rate_limited),
+            RuntimeApplyFailureCause::RuntimeTurn
+        );
+        assert_eq!(
+            failed_run_contributor_disposition(&CoreExecutorError::apply_failed(rate_limited)),
             FailedRunContributorDisposition::Replayed
         );
     }

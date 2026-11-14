@@ -5641,6 +5641,15 @@ impl DriverEntry {
         }
     }
 
+    /// Whether the machine holds any of `input_ids` as queued work (in a
+    /// lane, or in the queued phase).
+    pub(crate) fn has_queued_input_among(&self, input_ids: &[InputId]) -> bool {
+        match self {
+            DriverEntry::Ephemeral(d) => d.has_queued_input_among(input_ids),
+            DriverEntry::Persistent(d) => d.has_queued_input_among(input_ids),
+        }
+    }
+
     pub(crate) fn defer_queued_inputs_behind_backlog(
         &mut self,
         input_ids: &[InputId],
@@ -7291,14 +7300,22 @@ pub(crate) enum FailedRunContributorDisposition {
     /// machine terminalizes the contributors instead: refuse the release
     /// rather than risk it.
     Terminalized,
+    /// The executor refused the request and applied nothing. The refusal is
+    /// the request's own answer, so a replay would be refused the same way
+    /// up to the retry cap. The machine ends the contributors once, with the
+    /// stored reason of a run that never executed, and the run's failure is
+    /// their answer. It is realized exactly as [`Self::Terminalized`]; it is
+    /// a variant of its own only to keep that class's error line out of the
+    /// log for a refused request.
+    Refused,
 }
 
 impl FailedRunContributorDisposition {
     /// Whether the failed-run realization still owes its contributors a staged
     /// terminal outbox. The machine-terminal path staged one before this point;
-    /// the other two did not.
+    /// the others did not.
     pub(crate) fn owes_terminal_outboxes(self) -> bool {
-        matches!(self, Self::Replayed | Self::Terminalized)
+        matches!(self, Self::Replayed | Self::Terminalized | Self::Refused)
     }
 
     pub(crate) fn as_str(self) -> &'static str {
@@ -7306,6 +7323,7 @@ impl FailedRunContributorDisposition {
             Self::Consumed => "Consumed",
             Self::Replayed => "Replayed",
             Self::Terminalized => "Terminalized",
+            Self::Refused => "Refused",
         }
     }
 }

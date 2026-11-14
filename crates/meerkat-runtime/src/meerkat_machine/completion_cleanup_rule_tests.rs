@@ -1517,6 +1517,9 @@ struct RefusedStart {
     same_registration: (bool, bool, bool, bool),
     /// The runtime's phase after the three turns.
     phase: RuntimeState,
+    /// Whether the machine's own lane state holds the refused run's input in
+    /// a lane: when the refused turn was answered, and after every turn.
+    refused_in_a_lane: (bool, bool),
 }
 
 async fn answered(handle: CompletionHandle) -> Result<CompletionOutcome, String> {
@@ -1639,6 +1642,17 @@ async fn a_turn_refused_at_its_start(persistent: bool) -> RefusedStart {
                 )
             }
         };
+    // The machine's own lane state, read once the refused turn is answered:
+    // whether it holds the refused run's input in a lane.
+    let in_a_lane = |input_id: &InputId| {
+        authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .input_lane
+            .contains_key(&input_id.to_string())
+    };
+    let refused_in_a_lane_when_answered = in_a_lane(&refused);
     let behind_answer = answer_name(&answered(behind_handle).await);
     // One more turn, accepted after everything queued so far was answered:
     // a start the runtime still owed any earlier input comes before it.
@@ -1663,6 +1677,7 @@ async fn a_turn_refused_at_its_start(persistent: bool) -> RefusedStart {
         .await;
     let authority_now = session_authority(&machine, &session_id).await;
     let binding_now = binding_of(&authority_now, &session_id);
+    let refused_in_a_lane = (refused_in_a_lane_when_answered, in_a_lane(&refused));
     let result = RefusedStart {
         running,
         refused,
@@ -1701,6 +1716,7 @@ async fn a_turn_refused_at_its_start(persistent: bool) -> RefusedStart {
             ),
         ),
         phase: phase_of(&authority_now),
+        refused_in_a_lane,
     };
     first_apply.close();
     result
@@ -1799,6 +1815,32 @@ async fn a_turn_refused_at_its_start_ends_once_with_the_refusal_and_is_not_start
             ),
             "persistent {persistent}: the refused input's stored record (phase, terminal \
              record, attempts counted)"
+        );
+    }
+}
+
+/// After a refused run the machine's own lane state holds none of that
+/// run's inputs: the refused input is in no lane when its turn is answered
+/// and in none after the turns behind it have run. The runtime loop reads
+/// that state to decide that nothing of the failed run is put behind the
+/// queued work.
+#[tokio::test]
+async fn a_refused_run_leaves_none_of_its_inputs_in_a_lane() {
+    for persistent in [true, false] {
+        let end = a_turn_refused_at_its_start(persistent).await;
+        assert_eq!(
+            end.refused_in_a_lane,
+            (false, false),
+            "persistent {persistent}: the refused input is in a lane (when its turn was \
+             answered, after every turn)"
+        );
+        assert_eq!(
+            end.batches
+                .iter()
+                .filter(|batch| batch.contains(&end.refused))
+                .count(),
+            1,
+            "persistent {persistent}: the starts that carried the refused input"
         );
     }
 }

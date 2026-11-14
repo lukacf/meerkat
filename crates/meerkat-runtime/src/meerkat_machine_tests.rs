@@ -42729,6 +42729,64 @@ async fn a_never_started_resumed_run_consumes_the_inputs_its_rounds_applied() {
     assert_cold_registration_neither_resumes_nor_requeues(run).await;
 }
 
+/// A run whose request was refused ends its inputs exactly as a run that
+/// never began executing does: the same realization, so the same durable
+/// rows. Each input's stored terminal record is the same byte for byte (the
+/// staged input never executed, the one a committed round applied consumed),
+/// and neither run leaves an input in a lane or bound to the run.
+#[tokio::test]
+async fn a_refused_run_stores_for_its_inputs_what_a_never_started_run_stores() {
+    let mut stored = Vec::new();
+    for disposition in [
+        crate::meerkat_machine::FailedRunContributorDisposition::Terminalized,
+        crate::meerkat_machine::FailedRunContributorDisposition::Refused,
+    ] {
+        let run = resumed_run_with_applied_inputs(1, 1, false).await;
+        fail_runtime_loop_run(
+            &run.driver,
+            run.run_id.clone(),
+            CoreApplyFailureCause::executor_stopped(),
+            disposition,
+        )
+        .await
+        .expect("the run ends its inputs");
+        let records: Vec<(crate::input_state::InputLifecycleState, Vec<u8>)> =
+            ended_run_input_outcomes(&run)
+                .await
+                .into_iter()
+                .map(|(phase, terminal)| {
+                    (
+                        phase,
+                        serde_json::to_vec(&terminal).expect("a terminal record serializes"),
+                    )
+                })
+                .collect();
+        stored.push(records);
+        assert_cold_registration_neither_resumes_nor_requeues(run).await;
+    }
+    assert_eq!(
+        stored[0], stored[1],
+        "(phase, stored terminal record) of each input: a never-started run, a refused run"
+    );
+    assert_eq!(
+        stored[1]
+            .iter()
+            .map(|(phase, terminal)| (*phase, String::from_utf8_lossy(terminal).into_owned()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                crate::input_state::InputLifecycleState::Consumed,
+                r#"{"outcome_type":"consumed"}"#.to_string(),
+            ),
+            (
+                crate::input_state::InputLifecycleState::Abandoned,
+                r#"{"outcome_type":"abandoned","reason":"never_executed"}"#.to_string(),
+            ),
+        ],
+        "the refused run's inputs: the one a committed round applied, the staged one"
+    );
+}
+
 /// A durable Steer that would join a resumed run at its model boundary.
 fn resumed_run_durable_steer() -> Input {
     let mut metadata = crate::runtime_stamped_prompt_turn_metadata(None);

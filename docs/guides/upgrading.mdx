@@ -650,7 +650,8 @@ what a rollback costs (the note beside the change is under
   the level from every session that set it (`rkat run --resume <SESSION>
   --no-reasoning-effort`, or a turn with `reasoning_effort`
   `{"action":"clear"}`), and let accepted turns that carry it finish.
-  Replacing or clearing `provider_params` does not remove the level.
+  Replacing or clearing `provider_params` does not remove the level. This
+  item was not run: it is stated from the code of both releases.
 - **A mob whose definition or a member profile ever stored a level.**
   Storing a level in a mob is a one-way step: its event history records
   every definition and each member's profile snapshot, and 0.9.14 reads
@@ -665,7 +666,13 @@ what a rollback costs (the note beside the change is under
   restore retry and a create under its id get the same answer. A Meta
   gateway on 0.9.14 does not start on the state directory of such a mob.
   Neither writes to the mob's store, and 0.9.15 loads it again with the
-  level.
+  level. Confirmed by a run for a level in the mob's definition: a mob
+  created by a development build of the tree with this change was opened
+  by development builds of the commit the tag `v0.9.14` names, on
+  `rkat-rpc` and on a Meta gateway, without a provider key and on scratch
+  state, and then again by the first build; no published binary was used.
+  Not run: a level in a spawned member's stored profile, and destroying
+  the mob and creating it anew.
 - **A realm profile that holds a level,** or the `resume_overrides` value
   `reasoning_effort`. 0.9.14 cannot read such a profile while its stored
   row holds either: the realm's profile list fails as a whole and a read
@@ -674,7 +681,9 @@ what a rollback costs (the note beside the change is under
   one that holds neither, or delete it; a profile keeps no history, so the
   replaced row is all 0.9.14 reads (stated from the store's code, not from
   a run). A member that was spawned from the profile while it held a level
-  is the mob case above.
+  is the mob case above. Confirmed by a run, on the 0.9.14 side only and
+  with the same two `rkat-rpc` builds: the failing list, the failing read,
+  and the update that drops the level.
 
 To keep the option of rolling back, set the level on a session or a turn,
 not in a mob definition, a member profile or a realm profile. There is no

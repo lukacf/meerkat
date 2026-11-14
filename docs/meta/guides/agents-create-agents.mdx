@@ -1,0 +1,315 @@
+---
+title: "Agents that create agents"
+description: "Let an agent create, change, archive and remove long-term agents under the host's identity policy: the policy, the grant, the eight identity tools and their outcomes."
+icon: "user-plus"
+---
+
+*Mirrored from Meerkat Meta main at [359f08425e2d](https://github.com/lukacf/meerkat/commit/359f08425e2df4c8a799e105645fe3f6499bc650) on 2026-11-14; Meta version 0.9.14 at that commit.*
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+Available from Meerkat Meta 0.9.15.
+
+An agent can create a long-term agent at run time. A long-term agent is an
+identity of the mob: a durable, named member that keeps its own conversation
+and memory across restarts and is addressed by its name. An agent created at
+run time is the same kind of agent as one your configuration declares: it gets
+its model, tools and skills from its profile, it is reached through the same
+doors, and it survives a restart with no roster entry. The agent that asked
+for it is recorded as who asked. It does not own the new agent, the new agent
+does not report to it, and the new agent is not limited to the asking agent's
+tools.
+
+Nothing of this is on by default. An agent gets the identity tools only when
+both of these hold:
+
+1. the launch carries an identity policy (`runtime_options.identity_creation`
+   with `enabled: true`), and
+2. the agent's profile has mob tools (`tools.mob = true`), which is its spawn
+   grant.
+
+Without either, the tools are absent from the agent's tool list. They are not
+listed and then refused.
+
+## The policy the host enables
+
+The policy is one object in `runtime_options.identity_creation` of
+`meta/init` (a Rust host returns the same shape from
+`GatewayHostComposition::identity_creation_policy`). It needs a persistent
+state root. Unknown keys are refused at every level, and the default outcome
+of every change is `deny`, so each change an agent may ask is opted in by a
+rule. [Identity policy](/meta/reference/identity-policy) is the policy's reference;
+this section is what an agent's tools need of it.
+
+```json
+{
+  "enabled": true,
+  "peers": {
+    "rules": [
+      { "id": "research-team", "target": { "profile": ["researcher"] }, "outcome": "allow" }
+    ],
+    "default": "deny"
+  },
+  "approval": {
+    "rules": [
+      {
+        "change": ["create", "descriptive", "peers", "archive"],
+        "requester": { "kind": "agent", "profile": ["coordinator"] },
+        "target": { "profile": ["researcher"] },
+        "outcome": { "kind": "allow" }
+      },
+      {
+        "change": ["remove", "profile"],
+        "requester": { "kind": "agent", "profile": ["coordinator"] },
+        "target": { "profile": ["researcher"] },
+        "outcome": { "kind": "require_approval", "approver": { "id": "owner" } }
+      }
+    ],
+    "default": { "kind": "deny" }
+  }
+}
+```
+
+A rule selects by the change (`create`, `descriptive`, `capability`, `peers`,
+`authority`, `profile`, `archive`, `remove`, `adopt`), by who asks (`kind`,
+and for an agent its `identity`, `profile` and authority labels) and by the
+target agent (`identity`, `profile`, authority labels). Every matching rule
+applies and the strictest outcome wins. An update that touches several
+classes is judged per class, and the strictest outcome applies to the whole
+request.
+
+The outcomes in this release are `allow`, `require_approval` and `deny`. A
+policy that names `notify` or `review` is refused at launch.
+
+<Warning>
+Always give an agent rule a `target`. The spawn grant covers every profile of
+the mob, so the rule is the only control over what an agent may create. A rule
+`{"change": ["create"], "requester": {"kind": "agent"}, "outcome": {"kind":
+"allow"}}` with no `target` lets every agent that has mob tools create agents
+of every profile, as often as it likes, each with the instructions and first
+message the creating agent wrote. A new agent of a profile with mob tools can
+then create agents itself. There is no count per creator and no ceiling tied
+to the creator: an agent created at run time is an ordinary agent of its
+profile.
+</Warning>
+
+`peers` decides which agents a create or an update may wire an agent to. Its
+default is `deny`: an agent can list a peer only when a peer rule allows that
+peer, and an agent that wants to be reachable by the agent it creates lists
+its own name as a peer like any other.
+
+## The grant
+
+The right to ask is the ordinary spawn grant: the mob operator authority a
+member of a profile with `tools.mob = true` is built with. By default it
+covers every profile of the mob. Core checks it when a change is asked and
+again when it commits, for each profile the change names, so a grant that was
+narrowed or revoked meanwhile ends the change (`profile_not_allowed`,
+`grant_revoked`) with nothing written.
+
+A member that is private to a person (a console side chat, a member such a
+member created, a fork of one) gets no identity tools, whatever its profile:
+it would carry a person's conversation into a shared agent's instructions or
+first message. A call that reaches the tools anyway is refused
+`private_requester`.
+
+## The eight tools
+
+| Tool | Arguments | What it does |
+| --- | --- | --- |
+| `identity_create` | `agents: [{name, profile, display_name?, instructions?, context?, labels?, first_message?, peers?}]`, `request_id?` | Creates 1 to 256 agents, all together or not at all. They may name each other as peers. |
+| `identity_update` | `name`, `expected_spec_digest`, `set {display_name?, instructions?, context?, labels?, labels_remove?, profile?}`, `peers_add?`, `peers_remove?`, `request_id?` | Changes one agent. A member left out of `set` stays as it is. |
+| `identity_archive` | `name`, `expected_spec_digest`, `request_id?` | Stops an agent and keeps it: name, record, conversation and memory stay, its last conversation is harvested as for any agent that leaves, and messages to it are refused. Its schedules are paused with it. |
+| `identity_unarchive` | `name`, `expected_spec_digest`, `request_id?` | Brings an archived agent back on the conversation it had. The schedules its archive paused are resumed. |
+| `identity_remove` | `name`, `expected_spec_digest`, `request_id?` | Removes an agent for good. Its name is never available again; its last conversation is harvested as for any agent that leaves. Its schedules are ended. |
+| `identity_list` | `profile?`, `include_archived?`, `after?` | Lists the mob's long-term agents that are not private to a person, of any profile. Read only. |
+| `identity_get` | `name` | Reads one agent's record: what the list says of it, and its instructions, context, labels and peers. Read only. |
+| `identity_directory` | `query?`, `after?` | Lists the profiles the caller may create agents of and the agents it may name as peers, each `allowed`, `needs_decision` or `not_allowed`. Read only. |
+
+These are the same requests the host methods `meta/identity/*` take, field
+for field, without the two members only the host plane writes (`proposer`,
+`source_evidence`). The arguments are closed: an argument a tool does not name
+is refused `invalid_request` with the argument as `field`. Who asks is never
+an argument. It is the member whose session made the call: an agent acts only
+as itself, and a change attributed to another agent than the calling session's
+member is refused `invalid_request`.
+
+What the tools do not take in this release: grants, schedules, a fork source,
+another mob, placement, binding, backend, addressability or runtime mode.
+Grants and schedules for a new agent are separate calls. An agent's
+addressability and runtime mode are set by the host (`meta/identity/create`,
+`meta/identity/update`); `identity_list` and `identity_get` read them back.
+There is no reset tool; a host resets an agent with its own methods.
+
+### What a model is told
+
+Each tool's description says what a long-term agent is, that the caller is
+recorded and owns nothing, what each outcome means and what to do on it. The
+texts are part of the product and are pinned by tests, so an edit is
+deliberate.
+
+- **`first_message`** runs once as the new agent's first turn. It is a kickoff
+  with no requester: it is not a message from the creating agent, the new
+  agent has nothing to reply to, and it reaches the creating agent only if
+  that agent is one of its peers. The turn has the same tools as any other
+  turn of the new agent. A create with a first message answers once the new
+  agent's session exists; the first run continues after the answer. Without a
+  first message the agent is created dormant:
+  nothing is loaded and nothing runs until something is delivered to it. In a
+  governed realm an agent is created without a first message: a create that
+  gives one is refused (`unsupported` at `agents[i].first_message`), and the
+  agent's first input comes through the host's own ingress.
+- **`instructions`** is a list of strings, one per section; most agents need
+  one.
+- **`labels`.** The host reserves some label keys, and a create that gives one
+  is refused. An update keeps a reserved label the agent carries when it does
+  not name it; an update that would give it another value or remove it is
+  refused `reserved_key` at `set.labels` (the removal of one of the product's
+  own label keys at `set.labels_remove`).
+- **An agent never changes itself.** An update, archive, unarchive or removal
+  that names the caller is refused `self_change_refused`.
+- **A configured agent is changed in configuration.** A run-time change of an
+  agent your roster declares is refused `owner_read_only`.
+
+## Outcomes
+
+Every change answers one typed outcome, the same on every surface:
+
+| `outcome` | Meaning | What the caller does |
+| --- | --- | --- |
+| `done` | The change committed. `agents` names each agent with its `state`, `spec_digest` and `spec_revision`. | Keep the `spec_digest`: the next change of that agent sends it as `expected_spec_digest`. |
+| `pending_decision` | A person must decide (`decision_id`, `deadline_ms`). Nothing is written but the decision. | Wait. Repeating the call with other arguments is a new request. The identical call with the same `request_id` returns the current state. An agent that is itself a long-term agent gets a notice when the decision is made. |
+| `pending_preparation` | The create committed, and at least one agent (its `state` is `pending_preparation`) waits for the host to prepare it: it has no member, takes no message and runs nothing until the host settles it, and its first message runs once then. | Nothing: no tool settles it. `identity_list` and `identity_get` read it as `readiness: "preparation_pending"`, and the identical call with the same `request_id` returns where it stands. |
+| `refused` | Nothing was written. `kind` is one of a closed vocabulary, `field` names the argument, `detail` says what to send instead, `retryable` says whether the same call may succeed later. | Fix what `detail` names, or retry later when `retryable` is true. |
+
+A person cannot approve a request they made themselves.
+
+A tool's answer is this outcome without its `operation_id`. An operation id
+is the host's handle on a change (`meta/identity/operation` reads by it): an
+agent names its request with its own `request_id`, no tool takes an operation
+id, and nothing an agent reads of its own change names one, neither the
+tool's answer nor the notice of a decision. A held change's `decision_id` and
+`deadline_ms` are in the answer.
+
+A change is keyed by its operation. With a `request_id`, the same id and the
+same arguments read the same state and never commit twice, and the same id
+with other arguments is refused `operation_reused`. Without one, the operation
+is derived from where the tool call ran (its session, run, round and call id),
+so a call the runtime dispatches again after an interruption reads the state
+of the first.
+
+On a create, an agent's `seat` is `seated`, or `owed` when its first message
+did not start: the agent exists and its name is taken, and it is seated, and
+its first message runs once, at its next delivery.
+
+### An agent the host prepares
+
+A policy may name a preparation for a profile
+(`preparation.<profile>.mode: "required"`, see
+[Identity policy](/meta/reference/identity-policy)). An agent created of such a
+profile waits for its host: its create answers `pending_preparation`, and
+until the host's operator settles it (`meta/identity/settle_preparation`) it
+has no member, takes no message and runs nothing. Its first message, if it
+has one, runs once when it is settled. There is no tool for the settle, and
+nothing an agent sends speeds it up: the agent that asked reads where the new
+agent stands with `identity_list` and `identity_get`
+(`readiness: "preparation_pending"`), or with the identical create under the
+same `request_id`, which answers `done` once the agent is settled.
+
+An update of an agent that waits changes its record only, and the agent still
+waits. An update that moves an agent into a profile the host prepares is
+refused `unsupported` at `set.profile`: the agent is created in that profile
+instead. Only a create answers `pending_preparation`.
+
+## Changing instructions
+
+An instructions change is in the agent's record at once. It reaches the agent
+at its next run; a run that starts within moments of the change may still use
+the earlier instructions; earlier instructions are never rewritten. A dormant
+agent is not woken by it.
+
+The update's result says what became of the change in
+`agents[0].instructions`:
+
+| `kind` | Meaning |
+| --- | --- |
+| `applies_at_next_run` | The change reaches the agent at its next run. |
+| `applies_after_compaction` | The agent's model takes new instructions only at the head of what it reads: the change reaches it after its next compaction. |
+| `applies_at_next_session` | The change does not reach the agent as it runs now, for `reason`, and applies when the agent next starts a new conversation. Reasons: `prepared_authorization_required` (a governed runtime), `slot_limit_exceeded`, `active_set_budget_exceeded`, `lowering_unavailable`, `body_too_large`, `record_unavailable`. |
+| `unchanged` | The agent holds the same instructions already. |
+
+## Archive, remove, and a fresh life
+
+Three different things end an agent's current work, and they are not
+interchangeable:
+
+- **Archive** (`identity_archive`, `meta/identity/archive`) stops the agent
+  and keeps everything. Messages to it are refused until it is unarchived, and
+  it comes back on the same conversation with its current instructions.
+- **Remove** (`identity_remove`, `meta/identity/remove`) retires the name for
+  good. The name is never an agent again, for anyone. The removed agent's
+  conversation and memory are kept, and nothing can reach them.
+- **`meta/delete_identity`** gives an agent a fresh life and keeps it: a new
+  conversation under the same name. It removes nothing from the mob.
+
+An archive and a removal owe the agent what leaving the roster owes any
+agent: its last conversation is harvested and distilled, an exit interview is
+queued and the host's retirement hook is told (see
+[Lifecycle side effects across a restart](/meta/guides/deployment#lifecycle-side-effects-across-a-restart)).
+They run right after the agent's member has stopped; no order is promised
+between them and the change's answer. A removal of an archived agent owes
+nothing more.
+
+The schedules that target an agent follow these changes: an archive pauses
+the active ones, an unarchive resumes exactly those (a schedule somebody
+paused by name stays paused), and a removal ends every one. The first answer
+of the change says so in `agents[0].schedules`. An agent is told the effect
+and how many schedules there are (`{effect, count, incomplete?}`); which
+schedules they are is the host's to read (`meta/identity/*` over the stdio
+gateway, and a Console caller with `runtime.admin`). `incomplete: true` means
+a schedule could not be read or changed yet, and the identical call with the
+same `request_id` follows the rest. A launch whose host connects no schedules
+to these changes changes none, and the answer has no `schedules`.
+
+## Listing and looking up
+
+`identity_list` shows every long-term agent of the mob that is not private to
+a person, of any profile and whoever asked for it. It is not a list of "my
+agents", and it is not limited to what the caller may create: an agent of a
+profile the caller may create no agent of is listed too, and
+`identity_directory` is the read that says what the caller may create and
+name. Each entry carries
+`name`, `display_name`, `profile`, `spec_digest`, `spec_revision`, `archived`
+and `readiness`, and, read back only, `addressability` when the agent is
+`internal_only` and `runtime_mode_override` when the agent's record names
+one. An agent that waits for its host's preparation reads
+`readiness: "preparation_pending"`: it has no member and takes no message
+until the host settles that. An agent is not shown who asked for another agent, when, or
+under which consent, nor another requester's open operations, nor whether the
+host's roster lists the agent's name as well; the host's
+`meta/identity/list` shows those. A list is in one stable order, and `after`
+continues it.
+
+`identity_get` reads one agent's record by name: the list entry's members,
+and its `instructions`, `context`, `labels` and `peers` (the peers its
+changes listed, among the agents the caller is shown). It is the host's
+`meta/identity/get` without who asked for the agent, when, or under which
+consent, and without another requester's open operations.
+
+`identity_directory` answers "what may I name" before a create: each profile
+and each possible peer with a verdict. Its peers are the agents that are
+neither archived nor private to a person.
+
+One rule decides which agents an agent is shown, in every read and in every
+change: an agent is shown no member that is private to a person. A read or a
+change that names such a member answers `identity_unknown` at `name`, exactly
+as for a name no agent holds, so the answer tells nothing about it.
+
+All three are reads: they never wake an agent and load nothing.
+
+## Tool list size
+
+The eight tools may wait behind the deferred tool catalog. In a session whose
+tool catalog is exact and large enough to defer, their definitions are left
+out of the model request, and the model finds them with `tool_catalog_search`
+and loads them with `tool_catalog_load` before its first call.

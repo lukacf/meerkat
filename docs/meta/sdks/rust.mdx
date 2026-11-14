@@ -4,7 +4,7 @@ description: "Use Meta as a Rust library: bootstrap runtimes, route module calls
 icon: "code"
 ---
 
-*Mirrored from Meerkat Meta main at [abdabeb8e978](https://github.com/lukacf/meerkat/commit/abdabeb8e97805385e71d66da7e78136c4b0e68c) on 2026-11-12; Meta version 0.9.14 at that commit.*
+*Mirrored from Meerkat Meta main at [359f08425e2d](https://github.com/lukacf/meerkat/commit/359f08425e2df4c8a799e105645fe3f6499bc650) on 2026-11-14; Meta version 0.9.14 at that commit.*
 
 The Rust crate `meerkat-meta` is the primary interface for Meta. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
 
@@ -237,6 +237,22 @@ from a legacy constructor (`UnifiedRuntime::bootstrap` and the
 context withdraws a completion not yet taken, because the identity bootstrap
 that follows mints again; attaching one leaves it as it is.
 
+From 0.9.15, a runtime from a legacy constructor must complete its bootstrap
+(an identity bootstrap, or `activate_without_identity_context`) before an agent created at
+run time can be built. Until one of them returns, every build of such an agent
+is refused for now with a reason that names both calls: the runtime does not
+know yet whether its host composes an agent customizer whose build step
+applies to that agent. An agent that starts at its creation (it was given a
+first message, or its profile runs as an autonomous host, the default) and one
+the mob's start owes its seat stay owed their seat, and the call that
+completes the bootstrap seats them, once. A delivery to an agent seated
+dormant is refused retryable (`host_preparation_pending`), nothing is
+delivered, and the sender sends it again once the bootstrap is complete; work
+the agent already owes is retried by the mob.
+Creating an agent that builds nothing (no first message, a turn-driven
+profile) is unchanged. Through 0.9.14 such an agent was built from its record
+at once.
+
 `publish(f)` runs `f` once, only while the runtime has not begun to close and
 its mob still admits work. The runtime's close (`shutdown`, a failed
 bootstrap's cleanup, or the retained teardown of a dropped composition) begins
@@ -377,6 +393,31 @@ seated identity (one seated with nothing built yet) gets two
 build's. A respawn does the same: its seat calls `customize_build`, and its
 build calls it again.
 
+From 0.9.15, an agent created at run time (an identity whose record is its
+row in the mob's identity store, not the roster) has no seat of the host's making: Core
+seats it from its row. `customize_build` runs once right before each build
+of its member, and that build takes the draft as a configured identity's
+seat does: the model and the provider parameters at every build, and the
+system prompt, the additional instructions and the context at the first
+build of the member's session, in its first life and in the fresh life a
+reset or a delete starts. A later build keeps the instructions its session
+was first built with. Its tools reach every build.
+
+A customizer that sets labels must find them in such an agent's row. The
+agent's member carries its row's labels and no others, and an access rule
+or an audience that selects by label reads the member's seat. When the
+draft's labels are not exactly the seat's (a key added, dropped or given
+another value), the agent is refused its seat for good and nothing is built:
+it is never seated without a label the host requires. The refusal names the
+label keys, never a value; the refused send answers it and
+`meta/status_identity` shows it under `customizer_tools_pending`. Put the
+label in the agent's row, at its create or by an update: an agent that is
+owed its seat is seated by the update, and an agent Core already holds a
+member of takes its row's labels at the update itself while its member is
+idle (a member that held work then takes them at a retry of the update, at
+its next update, or at a respawn or a reset). A customizer that sets no
+labels is unaffected.
+
 `after_create` is best-effort: the seat or build stands whatever it answers.
 The gateway calls it once Core's journal records the seat, with no lock of
 the identity held, so once the init has settled an `after_create` can call
@@ -491,8 +532,12 @@ the context carries, which becomes the runtime's own. That covers the builds
 from the mob's lift on, so a clean restart (the mob stays stopped until the
 identity bootstrap lifts it) is covered, but a crash resume is not: the
 members a killed process left owing work are built at the start, before the
-identity bootstrap, without their tools until their next build. Without any
-customizer the identity bootstrap changes nothing.
+identity bootstrap, without their tools until their next build. An agent
+created at run time (from 0.9.15) is not among them: every build of it is refused until the
+identity bootstrap, which then seats one the start owes its seat through the
+customizer's build step, so its labels are compared with the seat's before
+anything is built. Without any customizer the identity bootstrap leaves the
+member builds as they are and seats such an agent from its record.
 
 ### Member restore
 

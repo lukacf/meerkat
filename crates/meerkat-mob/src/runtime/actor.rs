@@ -5448,6 +5448,17 @@ fn disposal_uses_host_release_authority(host_owned: bool) -> bool {
 #[cfg(test)]
 pub(super) static SPAWN_PROVISIONED_COMMAND_DELAY_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+/// The sessions of the spawns whose completion the delay above is holding
+/// back: each is recorded once its pending slot names it, before the delay.
+#[cfg(test)]
+pub(super) static SPAWN_PROVISIONED_COMPLETIONS_HELD: std::sync::Mutex<
+    Vec<meerkat_core::types::SessionId>,
+> = std::sync::Mutex::new(Vec::new());
+/// When set, the pending spawn the retire fixture stages names a session it
+/// resumed, as a resume-mode spawn's slot does, instead of none.
+#[cfg(test)]
+pub(super) static STAGED_PENDING_SPAWN_RESUMED_ORIGIN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 #[cfg(test)]
 pub(super) static IDENTITY_RECONCILE_COMPLETION_REQUEUES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -37073,6 +37084,9 @@ impl MobActor {
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress {
                 bridge_session_id: Some(pending_spawn_session_id),
                 operation_id: Some(operation_id),
+                session_origin: STAGED_PENDING_SPAWN_RESUMED_ORIGIN
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .then_some(super::provisioner::ProvisionSessionOrigin::ResumedDurable),
                 ..PendingSpawnProgress::default()
             })),
             pending_recipient_trust_peer_id: None,
@@ -39173,6 +39187,17 @@ impl MobActor {
                             let delay_ms = SPAWN_PROVISIONED_COMMAND_DELAY_MS
                                 .load(std::sync::atomic::Ordering::Relaxed);
                             if delay_ms > 0 {
+                                // The slot names the provisioned session from
+                                // here on. A row that holds the completion
+                                // back waits for this record of the session.
+                                if let Some(held_session_id) =
+                                    spawn_receipt.member_ref.bridge_session_id()
+                                {
+                                    SPAWN_PROVISIONED_COMPLETIONS_HELD
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .push(held_session_id.clone());
+                                }
                                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                             }
                         }

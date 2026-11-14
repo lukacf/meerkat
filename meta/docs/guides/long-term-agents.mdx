@@ -409,19 +409,18 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   `applies_at_next_run`, `applies_after_compaction`, `applies_at_next_session`
   (with a `reason`) or `unchanged`.
 - **Archive and unarchive.** An archived agent keeps its name, record,
-  conversation and memory, and messages to it are refused. The mobs it
-  created with its own tools are not kept: at the gateway's next start
-  they are removed with their stores, their members' conversations are no
-  longer attached to any mob, and an unarchive does not restore them.
-  Before you archive such an agent, have it destroy its mobs, or keep the
-  agent. Like any agent
+  conversation and memory, and messages to it are refused. Like any agent
   that leaves, it is owed the harvest and distillation of its last
   conversation, an exit interview and the retirement hook (cause
   `unlisted`); they start right after its member retired, and no order is
   promised between them and the archive's answer. Unarchive
   brings it back on the same conversation. While it is archived the
   identity's status (`runtime.status(name)`) reads `archived` true; the
-  member is left out otherwise.
+  member is left out otherwise. Archiving an agent removes the mobs it
+  created. They stay until the gateway next starts; then each of those mobs
+  is removed with its store, and unarchiving the agent does not bring them
+  back. Have the agent destroy its mobs before you archive it. Do not
+  archive an agent whose mobs must stay.
 - **Remove.** Removal is permanent: the name is never available again
   (`name_taken`). The agent's conversation and memory are kept, and no
   other agent can reach them. A removal owes what an archive owes (the

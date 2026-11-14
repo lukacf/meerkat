@@ -1283,10 +1283,8 @@ Security, Upgrade and Changed.
   refuses the respawn before anything changes, where it used to leave the
   identity without a member), and once for its build; `after_create` is
   told once, of the session the respawn keeps. That is the count of
-  0.9.14 (two calls: confirmed by a test for a served member). One case
-  can differ, by reading and not by a run: a respawn that meets a role
-  move of the identity which its declaration has not carried out yet can
-  ask the customizer a third time. The successor is seated
+  0.9.14 (two calls: confirmed by a test for a served member; Known
+  limitations names one case that can differ). The successor is seated
   with the customizer's current answer, as the seat of 0.9.14 was: its
   labels and its profile and model overrides. A session a build already
   created keeps the context, the instructions and the system prompt its
@@ -1739,6 +1737,10 @@ Security, Upgrade and Changed.
     member whose sessions are kept in memory only before anything ends,
     the mobs of a session no store holds are held, not ended, at the next
     start, and a member without a session owns no mobs through one.
+- A respawn of an identity whose configured profile differs from its
+  seated member's (a role move not yet carried out) can call
+  `customize_build` three times instead of two (read from the source, not
+  confirmed by a run).
 - Schedules of an archived agent: Meta's own doors (the agents' schedule
   tools, the Console) point no schedule at an archived agent. Meerkat's own
   schedule methods (`schedule/create`, `schedule/update`, REST) do not judge

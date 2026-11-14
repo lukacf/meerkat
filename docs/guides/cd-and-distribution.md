@@ -244,6 +244,58 @@ Release assets include platform archives plus a checksum manifest:
 - `checksums.sha256`
 - `index.json`
 
+Every binary is asked for its link-time registrations before it is published.
+Capabilities and built-in skills are registered by constructors that run
+before `main`; a linker that leaves them out of the table the process runs at
+start still links a working binary, which then reports no capabilities and
+carries no built-in skill (the Linux x86_64 archives through 0.9.14, whose
+lane linked with gold from binutils 2.35.2; that lane now passes
+`--linkopt=-fuse-ld=bfd`, and `scripts/check-bazel-release-features.py` fails
+a Linux release build case without it).
+`scripts/check-release-binary-registrations` starts the built binary in one
+configuration that needs no provider secret (an empty home and state root,
+the default configuration, a project with one skill that requires `sessions`)
+and compares its answer with the checked-out source: the capability ids equal
+the registered ones, every built-in skill registered with no required
+capability is listed by name, no built-in is listed that the source does not
+register, and the project skill is listed. On `rkat-rpc`, the server the SDKs
+start, it also spawns one mob member (on a self-hosted model served by a
+loopback port the check itself holds, with auth method `none`: no secret, and
+no request leaves the runner) and requires the built-in `mob-communication`
+skill in the member's stored prompt: a member build drops a skill it cannot
+resolve and goes on, so a binary without registrations spawns members that
+work without their mob instructions and nothing fails. The other three
+binaries get no member spawn: they link the same crates in the same lane, and
+a member spawn there needs a host daemon or another call shape. Of an ELF
+file the check also reads the dynamic section and refuses more than one
+init-array table, which is all it can tell about a binary the runner cannot
+run.
+
+- Each build job runs the check on the targets its runner runs, and so do the
+  jobs that run the Windows and Intel macOS archives.
+- The BuildBuddy lane packages its Linux aarch64 and macOS arm64 binaries on an
+  x86_64 Linux runner. `verify_critical_native_binaries` runs them on
+  `ubuntu-24.04-arm` and `macos-15` (15 minutes at most per target), and both
+  build gates require it: the critical gate, and the full gate, which is all
+  the trailing publisher waits for while it publishes every archive the
+  release still lacks.
+- `publish_critical_release_assets` runs the check again on the Linux x86_64
+  archives it is about to publish, whichever run built them (a
+  [prebuild](#pre-tag-prebuild)'s included).
+- Before a tag, three runs exercise parts of this, none of them publishing:
+  `release-binaries-check.yml` runs the check in the two build lanes on a
+  candidate commit and runs the BuildBuddy lane's arm64 binaries on runners of
+  their own, with full checkouts and no Windows job;
+  `windows-cross-validate.yml` runs the check on the Windows binaries on
+  `windows-2025-vs2026`; and a prebuild dispatch (`make release-prebuild`) is
+  the only one that runs `release.yml`'s own verify jobs, with their sparse
+  checkouts of the release tree. Only a hosted run proves the Windows, macOS
+  and Linux aarch64 legs.
+
+The check has no version condition: an asset recovery that rebuilds a tag
+before 0.9.15 fails it on Linux x86_64, since those rebuilt archives are the
+defect.
+
 ## Homebrew Tap
 
 The featured CLI install path is the Homebrew tap:

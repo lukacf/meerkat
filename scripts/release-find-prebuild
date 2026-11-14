@@ -55,6 +55,7 @@ CRITICAL_JOBS=(
   "Require green CI"
   "Build and package surface binaries with GitHub-hosted runners (*)"
   "Build and package surface binaries via BuildBuddy"
+  "Run the BuildBuddy binaries on a runner of their target (*)"
   "Build Web SDK package"
   "Release critical binary build gate"
 )

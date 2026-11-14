@@ -1,5 +1,9 @@
 #![cfg(all(feature = "gpt-live-replay", not(target_arch = "wasm32")))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+// The live gate's file is a crate root in its own target and declares its
+// own copy of the harness support module, so this target loads those two
+// files twice: once here and once inside `gpt_live_public_e2e`.
+#![allow(clippy::duplicate_mod)]
 
 //! Deterministic replays of recorded Turbo S gpt-live-1 runs (S104).
 //!

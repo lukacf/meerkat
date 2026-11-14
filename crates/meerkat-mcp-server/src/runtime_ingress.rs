@@ -4124,8 +4124,18 @@ mod tests {
             .await
             .expect("attach the session");
 
-        // An external event queued on the idle session: nothing runs it
-        // before the session's next turn.
+        // Run starts are held before the event is queued, so no run can take
+        // the event before the recall. Without the hold the attached
+        // session's runtime loop can take it first, and the recall then
+        // answers, correctly, that a run holds it.
+        context
+            .runtime_adapter
+            .hold_run_starts(
+                &session_id,
+                meerkat_runtime::RunStartHoldReason::HostRecovery,
+            )
+            .await
+            .expect("hold run starts");
         let input = Input::ExternalEvent(ExternalEventInput {
             objective_id: None,
             header: InputHeader {

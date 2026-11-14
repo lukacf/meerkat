@@ -1262,9 +1262,10 @@ them.
   every other spelling a signing key kept in the mob directory was packed,
   and so was the output of an earlier pack. Inside the mob directory,
   `rkat mob pack . -o out.mobpack --sign key.hex --signer-id <id>` packed
-  both. So did `./mob` with `mob/key.hex`, `mob` with `./mob/key.hex`, an
-  absolute directory with a relative path or the reverse, a `..` in a path,
-  and a path through a symbolic link. A pack that holds its signing key
+  the key, and from the second run on the output of the run before. So did
+  `./mob` with `mob/key.hex`, `mob` with `./mob/key.hex`, an absolute
+  directory with a relative path or the reverse, a `..` in a path, and a
+  path through a symbolic link. A pack that holds its signing key
   hands the key to everyone who receives the pack, and whoever has the key
   can sign packs as that signer. The key and the output file are now left
   out as the files their paths name, wherever the command is run from; a

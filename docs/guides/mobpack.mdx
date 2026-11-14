@@ -76,12 +76,13 @@ is not packed. `rkat mob pack`, `rkat mob inspect` and `rkat mob validate` do
 not create the directory.
 
 Two files are meant to be left out: the key this pack is signed with
-(`--sign`) and the file this run writes (`-o`). In 0.4.1 through 0.9.14 each
-is left out only when its path is written with the mob directory argument,
-exactly as typed, as its prefix
+(`--sign`) and the file this run writes (`-o`). In 0.4.1 through 0.9.14
+(confirmed by runs on 0.9.14; the earlier releases read from the source)
+each is left out only when its path is written with the mob directory
+argument, exactly as typed, as its prefix
 (`rkat mob pack mob -o mob/out.mobpack --sign mob/release.key --signer-id <id>`,
 or `.` with `./out.mobpack` and `./release.key`). Written any other way,
-both are packed:
+the key is packed, and so is the output of an earlier pack at that path:
 `rkat mob pack . -o out.mobpack --sign release.key --signer-id <id>` inside
 the mob directory, `./mob` with `mob/release.key`, an absolute directory
 with a relative path, a path through a symbolic link. A pack that holds its
@@ -110,7 +111,7 @@ Before you share a pack or host a bundle:
 
 - Keep env files, keys and repository metadata out of the mob directory.
 - Keep the signing key and the pack output outside the mob directory, as the
-  commands in this guide do.
+  command under Signed packs and trust policy does.
 - Keep rkat's state out of the mob directory: run `rkat` from another
   directory, or pass `--state-root <directory outside the mob directory>`. If
   the mob directory already holds a `.rkat/` directory, move it out.

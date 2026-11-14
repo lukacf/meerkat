@@ -2568,12 +2568,33 @@ request that names one).
 </Accordion>
 
 `outcome` is `answered` or `dismissed`. The asking agent then receives the
-typed result as an input of its own. Refusals are the existing ones, and none
-decides anything: `-32030` `access_denied` (the caller lacks `gating.decide`,
-or may not view the asking agent), `-32057` `approver_unauthenticated` (a
-console caller who is not a signed-in person) and `-32602` invalid params (an
-invalid answer set, `escalate`, or a set that is no longer open or not
-found).
+typed result as an input of its own. A refused request decides nothing:
+
+- A decide the set itself refuses is answered `-32602` with the typed data
+  of the [decision methods](#durable-decision-methods): `data.kind` is
+  `"decision_refused"` and the refusal is an object,
+  `data.decision_refusal.kind`. For a question set it is `not_open` (the
+  set was answered, dismissed, withdrawn or timed out already),
+  `subject_changed` (`presented_digest` is not the set's `subject_digest`:
+  read the set again), `expired` (the deadline passed as the decision was
+  applied) or `not_eligible` (the decider may not decide this set).
+
+  ```json
+  {
+    "code": -32602,
+    "message": "decision decision:5f1c... refused the input: not_open",
+    "data": { "kind": "decision_refused", "decision_refusal": { "kind": "not_open" } }
+  }
+  ```
+- A request at fault is `-32602` invalid params with a sentence and no
+  data: an invalid answer set, a missing `presented_digest`, `escalate`.
+- A Console caller who is not a signed-in person is refused `-32057`
+  `approver_unauthenticated`, and a person without `gating.decide` `-32030`
+  `access_denied`, as for every decision. The Console checks both again
+  right before the decision is applied.
+- A `pending_id` that names no set listed to the caller (an unknown id, or
+  a set of an agent the caller may not view) is answered exactly as any id
+  that is not pending.
 
 ### `meta/gating/withdraw`
 

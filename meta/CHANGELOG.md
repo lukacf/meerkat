@@ -925,8 +925,17 @@ Security, Upgrade and Changed.
   of its own. A set is a durable decision of kind `ask_user.questions`: it
   survives a restart and ends `timed_out` at its deadline (one hour unless
   the call says otherwise). The call answers `no_human_surface`, and holds
-  nothing, when the gateway serves no Console, when it keeps no durable
-  decisions (no persistent state directory), and on a candidate launch.
+  nothing, when there is no person to show the questions to or no way back
+  to the asker: the gateway serves no Console; its Console can identify no
+  person (it requires no sign-in and has no access control with a trusted
+  token issuer) or takes no changes (read-only); it keeps no durable
+  decisions (no persistent state directory); it runs a candidate launch; or
+  no answer can be routed to the asker, as for a member of a mob other than
+  the runtime's own (a sub-mob an agent created, for one). A member whose
+  build already has a tool
+  named `ask_user` keeps that tool and gets none from the gateway: its
+  questions are that tool's, are not held or listed here, and whoever
+  mounted it shows and answers them.
   `meta/gating/questions` lists the open sets, soonest deadline first: all
   of them on the stdio gateway, and on the Console (with `gating.view`) the
   ones whose asking agent the caller may view. A set is answered through
@@ -935,13 +944,28 @@ Security, Upgrade and Changed.
   `presented_digest` dismisses it, and the result is
   `{pending_id, kind: "question_set", outcome, decided_at_ms}`. On the
   Console a signed-in person with `gating.decide` who can view the asking
-  agent answers; the refusals are the existing `access_denied`,
-  `approver_unauthenticated` and invalid params. The Console shows each
-  open set as a card, at the top of the inbox's Pending tab and in the
-  asking agent's chat: one group of choices per question, the agent's
-  recommendation marked and never preselected, "Something else" for the
-  person's own words where allowed, Send answers and Dismiss, and a state
-  for answered, dismissed, timed out and not permitted. Python
+  agent answers. Nothing is decided by a refused request. A decide the set
+  itself refuses is answered `-32602` with `data.kind = "decision_refused"`
+  and the refusal as an object, `data.decision_refusal.kind`: `not_open`
+  (answered, dismissed, withdrawn or timed out already), `subject_changed`
+  (the `presented_digest` is not the set's), `expired` (the deadline passed
+  as the decision was applied) or `not_eligible`. A request at fault (an
+  invalid answer set, no digest, `escalate`) is plain invalid params. A
+  caller who is not a signed-in person is refused `approver_unauthenticated`
+  and a person without `gating.decide` `access_denied`. A set that is not
+  listed to the caller is answered exactly as an id that is not pending.
+  The Console shows each open set as a card, at the top of the inbox's
+  Pending tab and in the asking agent's chat, and counts it in "Needs you"
+  and on the Approvals view: who asked and by when, one group of choices
+  per question, the agent's recommendation marked and never preselected,
+  "Something else" for the person's own words where allowed, Send answers
+  and Dismiss. A card says "Answered" or "Dismissed" once the gateway
+  confirmed it, "Not sent" with what to do when the gateway refused the
+  reply and still lists the set, and why nobody can answer when the caller
+  is not signed in or may not decide. A set the gateway no longer lists
+  leaves the screen whole; where its card was, one line says that the
+  question is no longer waiting for an answer. The deadline shown is the
+  gateway's, and the card never ends a set by the browser's clock. Python
   `MobHandle.gating_questions`, `gating_answer` and `gating_dismiss` and
   TypeScript `gatingQuestions`, `gatingAnswer` and `gatingDismiss` wrap the
   two methods. An SDK or Console older than this release does not list

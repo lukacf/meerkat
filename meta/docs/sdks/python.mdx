@@ -1731,7 +1731,12 @@ for question_set in await handle.gating_questions():
 the agent as `unanswered`, and free text is allowed only where the question
 sets `allow_free_text`. `gating_dismiss()` returns the same
 `GatingQuestionSetResult` with `outcome` `dismissed`. The gateway refuses an
-invalid answer set and a set that is no longer open as invalid params.
+invalid answer set as invalid params (`-32602`). A set that itself refuses
+the decide (it is no longer open, or `presented_digest` is not its digest) is
+refused `-32602` with the typed refusal in the error's data:
+`data.kind = "decision_refused"` and `data.decision_refusal.kind` (`not_open`,
+`subject_changed`, `expired` or `not_eligible`); see
+[Answering a question set](/api/rpc#answering-a-question-set).
 
 Approval records a decision and does not execute the action. These methods expose
 [Meta gating](/concepts/gating); native retained-action consent and model-review

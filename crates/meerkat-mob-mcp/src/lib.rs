@@ -2950,6 +2950,11 @@ impl MobMcpState {
                 creator_generation,
                 owner_session,
             } => {
+                // Another session is refused before anything of the member's
+                // mob is read: its answer never depends on that mob.
+                if owner_session != *session_id {
+                    return false;
+                }
                 let Ok(parent) = self.handle_for(&parent_mob_id).await else {
                     return false;
                 };

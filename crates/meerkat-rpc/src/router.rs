@@ -21054,7 +21054,7 @@ mod tests {
         });
         let running_session = tokio::spawn(call("turn/start", session_turn.clone()));
         let running_member = tokio::spawn(call("mob/turn_start", member_turn.clone()));
-        tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::time::timeout(Duration::from_mins(1), async {
             while client.calls.load(Ordering::SeqCst) < before + 2 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -21142,7 +21142,7 @@ mod tests {
             ("the session's", running_session),
             ("the member's", running_member),
         ] {
-            let response = tokio::time::timeout(Duration::from_secs(60), running)
+            let response = tokio::time::timeout(Duration::from_mins(1), running)
                 .await
                 .unwrap_or_else(|_| panic!("{what} running turn is answered"))
                 .expect("the turn task");
@@ -21271,7 +21271,7 @@ mod tests {
             let before = client.calls.load(Ordering::SeqCst);
             client.held.store(true, Ordering::SeqCst);
             let running = tokio::spawn(call("mob/turn_start", member_turn("running")));
-            tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::time::timeout(Duration::from_mins(1), async {
                 while client.calls.load(Ordering::SeqCst) < before + 1 {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
@@ -21320,7 +21320,7 @@ mod tests {
             );
             client.held.store(false, Ordering::SeqCst);
             for (what, turn) in [("the running turn", running), ("the plain turn", plain)] {
-                let response = tokio::time::timeout(Duration::from_secs(60), turn)
+                let response = tokio::time::timeout(Duration::from_mins(1), turn)
                     .await
                     .unwrap_or_else(|_| panic!("{what} is answered"))
                     .expect("the turn task");

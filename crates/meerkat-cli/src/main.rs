@@ -17050,6 +17050,20 @@ async fn resume_session_with_llm_override(
             app_context: parsed_app_context,
             ..Default::default()
         };
+        // A resume that names the reasoning effort level in two places that
+        // disagree is the caller's request. The recovery applies this rule
+        // too, but reports its refusal as text; asked here first, with the
+        // same inputs, the typed refusal stays in the error chain and the
+        // command exits as an invalid request, as on a new session.
+        meerkat_core::resolve_session_provider_params(
+            stored_metadata.provider_params.as_ref(),
+            recovery_overrides
+                .provider_params
+                .as_ref()
+                .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::as_ref),
+            recovery_overrides.reasoning_effort.clone(),
+        )
+        .map_err(anyhow::Error::new)?;
         let recovered = meerkat_core::session_recovery::build_recovered_session(
             session,
             &recovery_overrides,

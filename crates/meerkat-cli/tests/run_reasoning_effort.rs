@@ -902,10 +902,26 @@ fn cli_two_spellings_that_disagree_on_resume_are_an_invalid_request() {
 
     // The documents are an invalid request's: validation, and no refusal
     // details (the disagreement is not a route's refusal).
-    for finished in [&level_json, &clear_json] {
+    for (finished, places) in [
+        (
+            &level_json,
+            "reasoning_effort is 'high' but provider_params.reasoning_effort is 'low'",
+        ),
+        (
+            &clear_json,
+            "reasoning_effort is cleared but provider_params.reasoning_effort is 'low'",
+        ),
+    ] {
         let document = only_document(finished);
         assert_eq!(document["error"]["category"], "validation", "{document}");
         assert!(document["error"].get("details").is_none(), "{document}");
+        // The same text the create path's document carries: both places.
+        assert!(
+            document["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(places)),
+            "{document}"
+        );
     }
     // Text mode: both places are named on stderr, and stdout is empty.
     assert!(

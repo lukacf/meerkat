@@ -927,10 +927,32 @@ fn gating_audit_entry_origin(entry: &crate::runtime::GatingAuditEntry) -> Option
 /// `identity`: only a caller that may view that agent, and, for a caller the
 /// console keeps apart from other people, only when the console knows the
 /// agent ([`AccessView::withholds_unknown_member`]): an origin it does not
-/// know may have been private to a person.
+/// know may have been private to a person. The pending list, the audit read
+/// and a decide by a request's id all ask it: a request withheld from a
+/// caller is not one the caller may decide.
 fn gating_origin_visible(access_view: Option<&AccessView>, identity: &str) -> bool {
     access_view.is_none_or(|view| {
         view.can_view_agent(identity) && !view.withholds_unknown_member(identity)
+    })
+}
+
+/// Whether the caller of a decide is shown the request it decides, asked
+/// once, on the entry the gating owner holds when the decision is applied:
+/// a request with no origin is shown, and one with an origin is shown as the
+/// pending list shows it ([`gating_origin_visible`]). With an access
+/// controller the decision fence answers, by the same rule on the
+/// configuration and roster it holds
+/// ([`crate::access::AccessDecisionFence::can_see_origin`]); the caller's
+/// view is asked only when there is no fence, since its reads take the lock
+/// a fence holds.
+pub(crate) fn gating_origin_shown_when_applied(
+    fence: Option<&crate::access::AccessDecisionFence<'_>>,
+    access_view: Option<&AccessView>,
+    origin: Option<&str>,
+) -> bool {
+    origin.is_none_or(|identity| match fence {
+        Some(fence) => fence.can_see_origin(identity),
+        None => gating_origin_visible(access_view, identity),
     })
 }
 
@@ -942,6 +964,50 @@ fn gating_audit_entry_visible(
     access_view: Option<&AccessView>,
 ) -> bool {
     gating_audit_entry_origin(entry)
+        .is_none_or(|identity| gating_origin_visible(access_view, identity))
+}
+
+/// Whether a caller may see the delivery record of an approval notification
+/// ([`crate::runtime::APPROVAL_NOTIFICATION_KIND`]). Its payload carries the
+/// request's id and action text, so the record is shown as the pending list
+/// shows the request: by [`gating_origin_visible`] on the request's origin,
+/// read from the pending entry or, once the request is settled, from its
+/// audit entries. A request the gating owner no longer holds is attributed
+/// by nothing: its notification is withheld from every caller the console
+/// keeps apart from other people
+/// ([`AccessView::kept_apart_from_other_people`]). Every other delivery
+/// record is shown here and left to the caller's audience
+/// ([`admin_read_answer_for_audience`]).
+fn approval_notification_shown(
+    record: &crate::runtime::DeliveryRecord,
+    pending: &[crate::runtime::GatingPendingEntry],
+    audit: &[crate::runtime::GatingAuditEntry],
+    access_view: Option<&AccessView>,
+) -> bool {
+    if record.payload.get("kind").and_then(Value::as_str)
+        != Some(crate::runtime::APPROVAL_NOTIFICATION_KIND)
+    {
+        return true;
+    }
+    let pending_id = record.payload.get("pending_id").and_then(Value::as_str);
+    if let Some(entry) = pending
+        .iter()
+        .find(|entry| Some(entry.pending_id.as_str()) == pending_id)
+    {
+        return entry
+            .origin
+            .as_ref()
+            .is_none_or(|origin| gating_origin_visible(access_view, &origin.identity));
+    }
+    let mut settled = audit
+        .iter()
+        .filter(|entry| pending_id.is_some() && entry.pending_id.as_deref() == pending_id)
+        .peekable();
+    if settled.peek().is_none() {
+        return !access_view.is_some_and(AccessView::kept_apart_from_other_people);
+    }
+    settled
+        .find_map(gating_audit_entry_origin)
         .is_none_or(|identity| gating_origin_visible(access_view, identity))
 }
 
@@ -13216,6 +13282,13 @@ pub(crate) mod console_decide_holds {
         }
     }
 
+    /// The key of the hold a gating decide of `pending_id` passes before it
+    /// takes the gating owner: a row files a request while the decide is on
+    /// its way.
+    pub(crate) fn before_owner(pending_id: &str) -> String {
+        format!("before-owner:{pending_id}")
+    }
+
     /// Wait at the hold on `pending_id`, when one is installed. A hold
     /// holds one decide.
     pub(crate) async fn pass(pending_id: &str) {
@@ -15804,22 +15877,40 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .get("limit")
                 .and_then(Value::as_u64)
                 .unwrap_or(50) as usize;
-            let history = module_runtime
-                .lock()
-                .await
-                .delivery_history(DeliveryHistoryRequest {
+            // The whole retained history (a bounded collection) is read and
+            // the page is cut to `limit` last, after the records withheld
+            // from the caller are left out: a page holds the newest records
+            // its caller may read, and its size tells nothing of the others.
+            let (mut history, pending, audit) = {
+                let mut owner = module_runtime.lock().await;
+                let history = owner.delivery_history(DeliveryHistoryRequest {
                     recipient: None,
                     sink: None,
-                    limit,
+                    limit: usize::MAX,
                 });
+                (
+                    history,
+                    owner.list_gating_pending(),
+                    owner.gating_audit_entries(usize::MAX),
+                )
+            };
+            // The record of an approval notification is shown as the pending
+            // list shows its request.
+            history.deliveries.retain(|record| {
+                approval_notification_shown(record, &pending, &audit, access_view)
+            });
             // Every delivery that names a member hidden from the caller, as
             // its recipient or in its payload, is left out.
-            let answer = admin_read_answer_for_audience(
+            let mut answer = admin_read_answer_for_audience(
                 runtime,
                 access_view,
                 serde_json::to_value(history).unwrap_or(Value::Null),
             )
             .await;
+            if let Some(deliveries) = answer.get_mut("deliveries").and_then(Value::as_array_mut) {
+                let older = deliveries.len().saturating_sub(limit);
+                deliveries.drain(..older);
+            }
             response_value(response_id, Some(answer), None)
         })
         .await,
@@ -15937,21 +16028,12 @@ async fn handle_console_runtime_rpc_with_visibility(
                     "approver_id is not accepted: the console decides as the signed-in person",
                 );
             }
-            if let Some(view) = access_view {
-                let pending = module_runtime.lock().await.list_gating_pending();
-                if pending.iter().any(|entry| {
-                    entry.pending_id == pending_id
-                        && entry
-                            .origin
-                            .as_ref()
-                            .is_some_and(|origin| !view.can_view_agent(&origin.identity))
-                }) {
-                    return access_denied_rpc_error(
-                        response_id,
-                        "access denied to approval origin",
-                    );
-                }
-            }
+            // A request the pending list withholds from this caller is one
+            // it may not know of. Nothing on this route reads the request
+            // before the gating owner is held: every step up to there is the
+            // same for any id, and the owner answers a withheld request as
+            // an id that is not pending, so the caller cannot tell the two
+            // apart.
             let Some(decider) =
                 ConsoleApprovalDecider::of(governance, authenticated_principal, access_view)
             else {
@@ -15976,6 +16058,10 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .get("reason")
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
+            // Test hook: the decide waits here before it takes the gating
+            // owner.
+            #[cfg(test)]
+            console_decide_holds::pass(&console_decide_holds::before_owner(pending_id)).await;
             let mut owner = module_runtime.lock().await;
             // Test hook: the decide waits here while it holds the gating
             // owner, after the route's last await and before the apply.
@@ -15990,18 +16076,34 @@ async fn handle_console_runtime_rpc_with_visibility(
             // After the route's last await, right before the decision is
             // applied: the person must still be current, and the access
             // fence, held through the mutation so a revocation published
-            // while this request waited is honored, re-reads the grant, the
-            // origin (as the person's audience sees it: an origin private to
-            // someone else is not one they may decide for) and the approver
-            // ids the person holds now.
+            // while this request waited is honored, re-reads the grant and
+            // the approver ids the person holds now. Whether the person is
+            // shown the request is asked here and nowhere else, on the entry
+            // the owner holds now ([`gating_origin_shown_when_applied`]: as
+            // the pending list decides it for the person's audience, so an
+            // origin private to someone else, or one the console does not
+            // know, is not one they may decide for). A request the person is
+            // not shown is decided as an id that is not pending.
             let fence = access.map(|controller| {
                 controller.decision_fence(
                     Some(&decider.principal),
                     access_view.and_then(AccessView::private_owner_key),
                 )
             });
-            let (decided, notices) =
-                owner.decide_gating_action_attested(request, &decider.evidence(), |entry| {
+            let (decided, notices) = owner.decide_gating_action_attested(
+                request,
+                &decider.evidence(),
+                |entry| {
+                    gating_origin_shown_when_applied(
+                        fence.as_ref(),
+                        access_view,
+                        entry
+                            .origin
+                            .as_ref()
+                            .map(|origin| origin.identity.as_str()),
+                    )
+                },
+                |_| {
                     if !decider.still_current() {
                         return Err(ConsoleDecideRefusal::NotCurrent);
                     }
@@ -16016,19 +16118,12 @@ async fn handle_console_runtime_rpc_with_visibility(
                             "access denied to gating decisions",
                         ));
                     }
-                    if entry
-                        .and_then(|entry| entry.origin.as_ref())
-                        .is_some_and(|origin| !fence.can_view_agent(&origin.identity))
-                    {
-                        return Err(ConsoleDecideRefusal::AccessDenied(
-                            "access denied to approval origin",
-                        ));
-                    }
                     Ok(crate::runtime::GatingDecider {
                         principal: decider.principal.clone(),
                         held_approver_ids: fence.held_approver_ids(),
                     })
-                });
+                },
+            );
             drop(fence);
             drop(owner);
             notices.deliver();

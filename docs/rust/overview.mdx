@@ -496,7 +496,7 @@ match event {
     AgentEvent::RunCompleted { session_id, result, structured_output, extraction_required, usage, .. } => {}
     AgentEvent::RunFailed { session_id, error_report, .. } => {}
     // A run continued from a resume point after an interruption
-    AgentEvent::RunResumed { session_id, run_id, round, resume_point } => {}
+    AgentEvent::RunResumed { session_id, run_id, round, resume_point, .. } => {}
 
     // Structured-output extraction (after a completed main run)
     AgentEvent::ExtractionSucceeded { session_id, structured_output, schema_warnings, origin, .. } => {}

@@ -2351,6 +2351,46 @@ fn an_instructions_update_right_after_a_create_with_a_first_message_answers_by_t
     }
 }
 
+/// What brings a waiting change into effect on a model that takes a system
+/// instruction only ahead of the conversation. A respawn does not: it keeps
+/// the agent's conversation, and the slot still waits after the next run. A
+/// reset does: the agent starts a new conversation, and after its next run
+/// the slot is in effect.
+#[test]
+fn an_instructions_update_that_waits_takes_effect_after_a_reset_and_not_after_a_respawn() {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::launched_with_keeper_on(scratch.path(), "prefix");
+    gateway.turn(KEEPER, "FIRST-TURN");
+    assert_eq!(
+        gateway.update_keeper_instructions(),
+        json!({"kind": "applies_after_compaction"})
+    );
+    assert_eq!(
+        gateway.keeper_slot_state_once_recorded(),
+        pending_for_the_prefix()
+    );
+
+    let respawned = gateway.ok("meta/respawn", json!({"identity": KEEPER}));
+    gateway.turn(KEEPER, "AFTER-THE-RESPAWN");
+    assert_eq!(
+        gateway.keeper_slot_state_once_recorded(),
+        pending_for_the_prefix(),
+        "a respawn keeps the conversation, and the change still waits: {respawned:#}"
+    );
+
+    let reset = gateway.ok("meta/reset", json!({"identity": KEEPER}));
+    assert_ne!(
+        reset["session_id"], respawned["session_id"],
+        "a reset starts the agent on a new conversation: {reset:#}"
+    );
+    gateway.turn(KEEPER, "AFTER-THE-RESET");
+    assert_eq!(
+        gateway.keeper_slot_state_once_recorded(),
+        in_effect(),
+        "the first run of the new conversation put the change in effect"
+    );
+}
+
 /// An agent on a model that takes a system instruction after conversation
 /// rows, with a conversation, on the same gateway: the update answers
 /// `applies_at_next_run`, the status read says the slot waits for a run

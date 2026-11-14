@@ -15817,6 +15817,20 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
         self.inner.session_comms_identity_root()
     }
 
+    // Forwarded: the inner factory builder answers from the model registry
+    // of the config a build reads. This wrapper adds SDK callbacks around
+    // agent construction and knows no model. The trait's default answers
+    // "cannot tell" for every model, and an instruction read of a member's
+    // session then states no lowering: an update of an agent's
+    // instructions would say when the change applies without knowing how
+    // the agent's model takes it.
+    async fn instruction_lowering_for_identity(
+        &self,
+        identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Option<meerkat_core::InstructionLowering> {
+        self.inner.instruction_lowering_for_identity(identity).await
+    }
+
     async fn abort_absent_session_compaction_stages(
         &self,
         session_id: &meerkat_core::SessionId,

@@ -147,9 +147,9 @@ const WHAT_A_LONG_TERM_AGENT_IS: &str = "A long-term agent is a durable, named m
     tools. For a helper that does one task and is discarded, use the worker tools (delegate, \
     fork_off, mob_spawn_member) instead.";
 
-const INSTRUCTIONS_REACH: &str = "It reaches the agent at its next run; a run that starts \
-    within moments of the change may still use the earlier instructions; earlier \
-    instructions are never rewritten.";
+const INSTRUCTIONS_REACH: &str = "It reaches the agent at its next run, or later when the \
+    result says so; a run that starts within moments of the change may still use the earlier \
+    instructions; earlier instructions are never rewritten.";
 
 const FIRST_MESSAGE_ANSWER: &str = "A create with a first message answers once the new agent's \
     session exists; the first run continues after the answer.";
@@ -243,8 +243,12 @@ fn description(name: &str) -> String {
              An instructions change is in the agent's record at once. {INSTRUCTIONS_REACH} \
              The result says what became of it in `agents[0].instructions.kind`: \
              `applies_at_next_run`; `applies_after_compaction` (the agent's model takes new \
-             instructions only at the head of what it reads, so the change reaches it after \
-             its next compaction); `applies_at_next_session` with a `reason` (the change \
+             instructions only at the head of what it reads, so the change does not reach \
+             it at its next run: it waits for the agent's next compaction, which a short \
+             conversation may never reach, and until then the agent follows its earlier \
+             instructions; only its host can bring the change in sooner, by resetting the \
+             agent, which discards its conversation); `applies_at_next_session` with a \
+             `reason` (the change \
              does not reach the agent as it runs now, and applies when it next starts a new \
              conversation); `unchanged`.\n\n\
              You cannot change yourself (`self_change_refused`). {CONFIGURED_AGENT}\n\n\

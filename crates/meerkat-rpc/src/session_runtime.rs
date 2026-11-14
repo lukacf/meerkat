@@ -45810,6 +45810,205 @@ mod tests {
         served.abort();
     }
 
+    /// A session holds a level and a turn runs. A turn that changes the
+    /// model and clears the level carries no level in its target, but
+    /// queued it would move the session to another model under every turn
+    /// behind it: a turn that repeats the session's level, admitted behind
+    /// it as a repeat, would set that level on the new model at its start.
+    /// So a turn that names anything of the LLM identity beside the level
+    /// on a session that holds a level is not queued either: it is answered
+    /// that the session is busy, with the reason in its data, at once, and
+    /// stores no input. A clear alone still queues, and so does a repeat of
+    /// the level behind it: both run, on the same model.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_model_change_with_a_clear_on_a_busy_session_that_holds_a_level_is_answered_busy() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let session = FailedStartSession::materialized().await;
+        // The route states `high`, and a turn gives the session that level.
+        session
+            .client
+            .route_states_level
+            .store(1, AtomicOrdering::SeqCst);
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let leveled = session.spawn_turn(
+            "sets the level",
+            Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))),
+        );
+        session
+            .release_request(requests + 1, "the turn that sets the level")
+            .await;
+        leveled
+            .await
+            .unwrap()
+            .expect("the turn that sets the level runs");
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session.session_id);
+        let stored_inputs = || async {
+            session
+                .runtime
+                .service
+                .runtime_store()
+                .load_input_states_strict(&runtime_id)
+                .await
+                .expect("the stored input rows are readable")
+                .len()
+        };
+
+        // A turn runs, past its first round.
+        let running = session.start_turn_past_its_first_round("running").await;
+        let inputs_before = stored_inputs().await;
+
+        // A model change with a clear is answered at once.
+        let busy = tokio::time::timeout(
+            Duration::from_secs(10),
+            session.spawn_turn(
+                "changes the model and clears the level",
+                Some(crate::handlers::turn::TurnOverrides {
+                    model: Some("claude-opus-4-8".to_string()),
+                    reasoning_effort: Some(TurnMetadataOverride::Clear),
+                    ..Default::default()
+                }),
+            ),
+        )
+        .await
+        .expect("the request is answered while the turn runs")
+        .unwrap()
+        .expect_err("a model change on a session that holds a level is not queued");
+        assert_eq!(
+            (
+                (busy.code, busy.data.clone()),
+                stored_inputs().await,
+                session.active_inputs().await
+            ),
+            (level_change_needs_idle_session(), inputs_before, 1),
+            "((code, data), stored inputs, active inputs): {busy:?}"
+        );
+
+        // A clear alone queues, and a repeat of the level behind it.
+        let clear = session.spawn_turn(
+            "clears the level",
+            Some(level_overrides(TurnMetadataOverride::Clear)),
+        );
+        session.wait_for_active_inputs(2).await;
+        let repeat = session.spawn_turn(
+            "repeats the level",
+            Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))),
+        );
+        session.wait_for_active_inputs(3).await;
+        let served = session.serve_model_requests();
+        assert_eq!(
+            (
+                FailedStartSession::turn_answer(running).await,
+                FailedStartSession::turn_answer(clear).await,
+                FailedStartSession::turn_answer(repeat).await,
+            ),
+            (Ok(()), Ok(()), Ok(())),
+            "(the running turn, the clear, the repeat of the level behind it)"
+        );
+        served.abort();
+        assert_eq!(
+            session.holdings().await,
+            (true, 1, true, true, true, true, true),
+            "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+             runtime registration, stored session) after the queue ran"
+        );
+    }
+
+    /// A deferred create's session is built by its first turn. While that
+    /// first turn is building, a turn that names a level is not queued
+    /// behind it: queued, it would be judged only at its own start. It is
+    /// answered that the session is busy, with the reason in its data, at
+    /// once, and nothing is admitted beside the first turn, which completes.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_level_turn_sent_while_a_deferred_sessions_first_turn_builds_is_answered_busy() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let client = Arc::new(FailedStartLlmClient::default());
+        runtime.set_default_llm_client(Some(Arc::clone(&client) as Arc<dyn LlmClient>));
+        // The route states `high`.
+        client.route_states_level.store(1, AtomicOrdering::SeqCst);
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig::new("claude-sonnet-4-5"),
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .expect("the deferred session is created");
+
+        // The first turn's build is held where it reads the client's
+        // provider.
+        client
+            .hold_next_provider_read
+            .store(true, AtomicOrdering::SeqCst);
+        let first = spawn_runtime_turn(&runtime, &session_id, "first", None);
+        tokio::time::timeout(Duration::from_mins(1), async {
+            while !client.provider_read_held.load(AtomicOrdering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the first turn's build reads the client's provider");
+
+        let answered = tokio::time::timeout(
+            Duration::from_secs(10),
+            spawn_runtime_turn(
+                &runtime,
+                &session_id,
+                "names a level",
+                Some(level_overrides(TurnMetadataOverride::Set(
+                    EffortLevel::High,
+                ))),
+            ),
+        )
+        .await;
+        // The held build is released whatever the answer was, so a failing
+        // row does not wait for the hold's own deadline.
+        client
+            .provider_read_released
+            .store(true, AtomicOrdering::SeqCst);
+        let busy = answered
+            .expect("the request is answered while the first turn builds")
+            .unwrap()
+            .expect_err("a level turn is not queued behind a first turn that is building");
+        assert_eq!(
+            (busy.code, busy.data.clone()),
+            level_change_needs_idle_session(),
+            "{busy:?}"
+        );
+        assert_eq!(
+            runtime
+                .runtime_adapter
+                .list_active_inputs(&session_id)
+                .await
+                .map(|inputs| inputs.len())
+                .unwrap_or(0),
+            1,
+            "nothing was admitted beside the first turn"
+        );
+
+        tokio::time::timeout(Duration::from_mins(1), async {
+            while client.calls.load(AtomicOrdering::SeqCst) < 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the first turn reaches the provider");
+        client.release.notify_one();
+        first.await.unwrap().expect("the first turn completes");
+    }
+
     /// One reason for a refusal is transient: the source of the levels
     /// exists and cannot be read now (an account's model list that is not
     /// loaded). A stored session that holds a level and is not live is not

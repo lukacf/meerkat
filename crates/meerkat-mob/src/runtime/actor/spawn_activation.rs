@@ -1095,9 +1095,7 @@ impl MobActor {
     ) -> SpawnCleanupObserver {
         let identity = anchor.agent_identity.clone();
         let spawn_ticket = anchor.spawn_ticket;
-        let member_ref = MemberRef::from_bridge_session_id(anchor.session_id.clone());
-        let operation_id = anchor.operation_id.clone();
-        let reason = anchor.reason.clone();
+        let task_anchor = anchor.clone();
         // Visible before the attempt starts: no gate may observe a drained
         // window while the compensation is in flight.
         self.pending_spawn_cleanup_anchors
@@ -1107,9 +1105,7 @@ impl MobActor {
         let command_tx = self.command_tx.clone();
         let mob_id = self.definition.id.clone();
         self.actor_io_tasks.spawn(async move {
-            let result = provisioner
-                .abort_member_provision(&member_ref, &operation_id, &reason)
-                .await;
+            let result = task_anchor.settle(&provisioner).await;
             if command_tx
                 .send(RoutedMobCommand::internal(
                     MobCommand::PendingSpawnAnchorSettled {

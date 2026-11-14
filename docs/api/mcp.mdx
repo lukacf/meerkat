@@ -68,7 +68,7 @@ source of truth for tool names and availability.
 | `meerkat_mob_spawn` | Spawn a member into a mob (mob feature) |
 | `meerkat_mob_spawn_many` | Spawn multiple members into a mob (mob feature) |
 | `meerkat_mob_retire` | Retire a mob member (mob feature) |
-| `meerkat_mob_respawn` | Respawn a mob member with topology restore (mob feature) |
+| `meerkat_mob_respawn` | Respawn a mob member with topology restore; a worker's successor starts on a new session, and the mobs its earlier session created are not carried over and end at the next start of the host (mob feature) |
 | `meerkat_mob_wire` | Wire two mob members or an external peer (mob feature) |
 | `meerkat_mob_wire_members_batch` | Wire multiple mob member pairs in one call (mob feature) |
 | `meerkat_mob_unwire` | Remove mob comms wiring (mob feature) |

@@ -201,6 +201,81 @@ async fn parked_spawn_activation_does_not_stall_the_loop_or_other_members() {
     assert!(mob.member_exists("w-1").await);
 }
 
+/// A stop of the mob waits for a spawn activation that is in flight: while
+/// the activation holds custody the stop is parked and the mob stays
+/// running; once the activation has settled the stop is admitted. The spawn
+/// is not cancelled by the stop, and its member is seated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_during_a_spawn_activation_waits_for_the_activation() {
+    let mob = create_activation_mob(turn_driven_activation_definition()).await;
+    mob.spawn("w-0").await.expect("first member spawns");
+    // Every comms-runtime read in the next member's activation parks, so its
+    // activation is in flight for at least one park.
+    mob.service.set_comms_runtime_delay_for_next_calls(3, 1_200);
+
+    let spawning = {
+        let handle = mob.handle.clone();
+        tokio::spawn(async move {
+            handle
+                .spawn(
+                    ProfileName::from("worker"),
+                    AgentIdentity::from("w-1"),
+                    None,
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while mob.custody().await.total == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the spawn's activation takes custody");
+
+    let stopping = {
+        let handle = mob.handle.clone();
+        tokio::spawn(async move { handle.stop().await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let census = mob.custody().await;
+    assert!(
+        census.total > 0,
+        "the activation was no longer in flight when the stop was checked; the row proves nothing"
+    );
+    assert!(
+        !stopping.is_finished(),
+        "a stop must wait while a spawn activation holds custody"
+    );
+    assert_eq!(
+        mob.handle
+            .status()
+            .await
+            .expect("status while the stop waits"),
+        MobState::Running,
+        "the mob stays running until the waiting stop is admitted"
+    );
+
+    let receipt = tokio::time::timeout(Duration::from_secs(20), spawning)
+        .await
+        .expect("the activation settles")
+        .expect("spawn task joins");
+    receipt.expect("the stop that waited did not cancel the spawn");
+    tokio::time::timeout(Duration::from_secs(20), stopping)
+        .await
+        .expect("the stop is admitted once the activation settled")
+        .expect("stop task joins")
+        .expect("the stop succeeds");
+    assert_eq!(
+        mob.handle.status().await.expect("status after the stop"),
+        MobState::Stopped
+    );
+    assert!(
+        mob.member_exists("w-1").await,
+        "the member whose activation the stop waited for is seated"
+    );
+}
+
 /// A failed activation stage compensates EXACTLY: the spawn error reaches the
 /// caller and the identity is respawnable, so nothing is left half-committed
 /// (no dropped provision, no wedged spawn-exec phase).

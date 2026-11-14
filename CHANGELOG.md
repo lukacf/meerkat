@@ -744,6 +744,32 @@ them.
 
 ### Fixed
 
+- `meerkat-mob`: cancelling a member spawn that resumes an existing session
+  no longer archives that session. A spawn in resume mode (JSON-RPC
+  `mob/spawn` with `launch_mode: {"mode": "resume", ...}` and the Python and
+  TypeScript SDK calls over it; for Rust embedders
+  `SpawnMemberSpec::with_resume_bridge_session_id`, also through
+  `ensure_member` of an absent member) names a session that already exists.
+  When the mob was stopped, completed, reset, shut down or destroyed (or,
+  for Rust embedders, all its members were retired with
+  `MobHandle::retire_all`) in the short interval after that spawn had
+  attached the session and before the mob had taken the spawn's result, the
+  cancelled spawn was cleaned up as if it had created the session: the
+  existing session was archived, and the mobs it owned were removed at the
+  next start of the host. A caller that had gone away did not withdraw the
+  spawn, so a stop that followed a disconnected or timed-out request could
+  meet it. The same happened when the mob refused the attached member for a
+  missing capability (an autonomous member whose session offers no
+  interaction event injector). A cancelled or refused spawn now releases a
+  session it resumed, as a failed resume spawn already did: the session
+  stays as it was and a later spawn can resume it. The fix is no wider than
+  that. A spawn that created its session is cleaned up as before. A retire
+  is unchanged in both of its cases: a retire that cancels the pending
+  spawn of a member the mob already holds ends that spawn's session, as
+  before, whether the spawn created or resumed it; a retire of an identity
+  the mob does not hold yet leaves its pending spawn alone, as before.
+  Affects 0.7.29 through 0.9.14; 0.6.0 through 0.7.28 were not checked.
+
 - `meerkat-core`: a turn that fails because a provider failure outlasted the
   retries now says what failed. Its typed turn error (`error.data.error` of
   a JSON-RPC turn, `details.error` of REST, the `error=` JSON of the CLI's

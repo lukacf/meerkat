@@ -24,11 +24,7 @@ async fn effect_preparation_observation(contended: bool) {
                 .prepare_workflow_parent_source(&c.parent.original)
                 .await
                 .unwrap();
-            let parent =
-                c.f.source
-                    .submit_authenticated_original(c.parent.clone())
-                    .await
-                    .unwrap();
+            let parent = submit_planning_parent(&c.f.source, &c.parent).await;
             finish(&c, "planning_parent", &parent).await;
             let probe = c.f.probe.as_ref().unwrap();
             probe.arm_next_input();
@@ -40,16 +36,15 @@ async fn effect_preparation_observation(contended: bool) {
                 original.reference == *c.f.original_reference(),
                 "coordinator must retain the exact source reference"
             );
-            let planning =
-                c.f.source
-                    .prepare_workflow_planning(
-                        &c.parent.original,
-                        c.lead.clone(),
-                        c.terms.clone(),
-                        c.lineage.clone(),
-                    )
-                    .await
-                    .unwrap();
+            let planning = prepare_planning(
+                &c.f.source,
+                &c.parent.original,
+                &c.lead,
+                &c.terms,
+                &c.lineage,
+            )
+            .await
+            .unwrap();
             // Preserve the actual canonical request/join and local interest,
             // but leave effect preparation to the same coordinator helper used
             // by production advance. Existing fixture users still prepare here.

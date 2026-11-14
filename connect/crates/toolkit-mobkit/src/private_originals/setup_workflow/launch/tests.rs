@@ -47,6 +47,394 @@ fn native(observation: WorkflowLaunchObservation) -> PrivateOriginalSubmission {
         }
     }
 }
+
+/// What a row saw of an owner change when a step answered unavailable. A
+/// step is made again only with one of these, and the row says which. None
+/// of them counts for a step that published itself under the call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OwnerChangeSeen {
+    /// The row's observation of the publication, taken before the call, met
+    /// a change that was being published: another actor's, since the call
+    /// had not begun.
+    AtPreparation,
+    /// The stamp of that observation is no longer current, and the step
+    /// published nothing itself: another actor published an owner change
+    /// after the row prepared the call.
+    Published,
+    /// The stamp is still current, so nobody published on it, and the grant
+    /// authority names a change in progress: one still being prepared, or
+    /// another hold of the publication's writer.
+    Named,
+}
+
+/// The row's own observation of the grant authority's publication, taken
+/// before each call of a step: what that call is prepared against.
+pub(super) type Prepared = Result<
+    meerkat_authorization::publication::LocalPublicationStamp,
+    meerkat_authorization::publication::PublicationError,
+>;
+
+/// Observes `publication` for the next call of a step.
+pub(super) fn prepared_against(
+    publication: &meerkat_authorization::publication::LocalAuthorizationPublication,
+) -> Prepared {
+    publication.observe(|| ()).map(|((), stamp)| stamp)
+}
+
+/// The waiting state of one host-side step that an owner change answered
+/// "unavailable now".
+///
+/// Rows of this module make two product entry points that do not wait, the
+/// planning parent's submission and the planning preparation, often right
+/// after a turn completed. Made while the owners of the grant authority's
+/// publication change, each answers unavailable at once and admits or
+/// prepares nothing (seen on a loaded runner: 6 of 100 runs of the second
+/// host input row on 4 CPUs shared with 8 busy loops). Neither answer says
+/// why: the same typed answer has other origins (a refused bind, a failed
+/// readiness check, a missing owner). So a row makes such a step again only
+/// when it saw an owner change of ANOTHER actor, and says what it saw
+/// ([`OwnerChangeSeen`]): its own observation of the publication, taken
+/// before the call, met a change being published; or that observation's
+/// stamp is no longer current after the answer; or the stamp is still
+/// current and the grant authority names a change in progress then
+/// (`LocalGrantAuthority::owner_change_in_progress`). Each of the three
+/// counts only when the step published nothing itself under the call. An
+/// unavailable answer with none of them fails the row at once, with the
+/// answer in the failure.
+///
+/// The publication is one sequence that every owner shares, and a stamp
+/// cannot tell who moved it. A step publishes on it too (a submission's bind
+/// issues the original's controller grant, then persists its binding; a
+/// preparation's last step writes the lead source's evidence), so the row
+/// reads what the step itself publishes before the call and after the
+/// answer, and what it saw counts only when that is unchanged. A step that
+/// got as far as its own first publication and was refused after it is not
+/// made again, whatever refused it: the row cannot tell whether another
+/// actor published as well, and a change it met before the call did not
+/// refuse a step that published after it.
+///
+/// With a change seen, the row waits while one is named, within Core's
+/// bound for an owner change counted from the step's first unavailable
+/// answer, and then makes the step again. When none is named (the change it
+/// saw has completed), it makes the step again at once, at most Core's free
+/// rebuilds times for one step. This differs from Core's own waiter
+/// (`OwnerChangeChurn`) in two ways: a change that was waited out spends
+/// none of those, so the number of times a step is made again inside the
+/// bound is not limited, and they are not cut off by the bound. An
+/// unavailable answer past either bound fails the row here; every other
+/// answer of the step fails it where the row reads the answer.
+///
+/// What a row sees is evidence of the cause, not proof of it: an unavailable
+/// answer of another origin, decided before the step's own first
+/// publication, is still made again when the row saw another actor's owner
+/// change in its window. That window is wider than the call: it runs from
+/// the row's stamp, taken before the call, to the row's check of it, made
+/// after the answer and after the second reading of the step's own facts.
+#[derive(Default)]
+pub(super) struct OwnerChangeRetry {
+    deadline: Option<tokio::time::Instant>,
+    settled: u8,
+}
+impl OwnerChangeRetry {
+    /// Called after `step` answered `refusal`, its unavailable answer, to a
+    /// call prepared against `prepared`: returns what the row saw of an owner
+    /// change once the step may be made again, or fails the row. `own` says
+    /// what the step itself published under the call, when it published.
+    pub(super) async fn again(
+        &mut self,
+        grants: &meerkat_authorization::grants::LocalGrantAuthority,
+        prepared: &Prepared,
+        own: Option<&str>,
+        step: &str,
+        refusal: &str,
+    ) -> OwnerChangeSeen {
+        use meerkat_authorization::publication::PublicationError;
+        let deadline = *self.deadline.get_or_insert_with(|| {
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND
+        });
+        let seen = match (prepared, own) {
+            (Err(PublicationError::Changed), None) => Ok(OwnerChangeSeen::AtPreparation),
+            (Err(PublicationError::Changed), Some(own)) => Err(format!(
+                "a change was met at preparation, but the step published itself ({own})"
+            )),
+            (Err(PublicationError::Unavailable), _) => {
+                Err("the publication was unavailable when the step was prepared".to_owned())
+            }
+            (Ok(stamp), own) => match (stamp.check_current(), own) {
+                (Err(PublicationError::Changed), None) => Ok(OwnerChangeSeen::Published),
+                (Err(PublicationError::Changed), Some(own)) => Err(format!(
+                    "the publication moved, but the step published itself ({own})"
+                )),
+                (Err(PublicationError::Unavailable), _) => {
+                    Err("the publication is unavailable".to_owned())
+                }
+                (Ok(()), None) if grants.owner_change_in_progress().is_some() => {
+                    Ok(OwnerChangeSeen::Named)
+                }
+                (Ok(()), Some(own)) if grants.owner_change_in_progress().is_some() => Err(format!(
+                    "a change is named, but the step published itself ({own})"
+                )),
+                (Ok(()), _) => Err(
+                    "the publication is as the step was prepared against and no change is named"
+                        .to_owned(),
+                ),
+            },
+        };
+        let seen = match seen {
+            Ok(seen) => seen,
+            Err(unseen) => panic!("{step} answered {refusal} with no owner change seen: {unseen}"),
+        };
+        if grants.owner_change_in_progress().is_none() {
+            self.settled += 1;
+            assert!(
+                self.settled <= meerkat_core::authorization::OWNER_CHANGE_FREE_REBUILDS,
+                "{step} stayed unavailable with no owner change in progress"
+            );
+            return seen;
+        }
+        while grants.owner_change_in_progress().is_some() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "an owner change outlasted Core's bound while {step} was unavailable"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        seen
+    }
+}
+
+/// The one answer of the planning parent's submission that is made again,
+/// by its name: `NativeOutcomeUnavailable`. The first input's controller
+/// binding resolves the controller lineage once, with no wait, and a
+/// publication that changed under that read answers unavailable. Every other
+/// answer, an error of any kind included, is the row's to read.
+pub(super) fn submission_unavailable(
+    answer: &Result<PrivateOriginalSubmission, PrivateOriginalError>,
+) -> Option<&'static str> {
+    matches!(
+        answer,
+        Ok(PrivateOriginalSubmission::NativeOutcomeUnavailable)
+    )
+    .then_some("NativeOutcomeUnavailable")
+}
+
+/// The one answer of the planning preparation that is made again, by its
+/// name: `Unavailable`. Both of its observations of the publication, the
+/// first and its one rebuild, met a change before or during the read. A
+/// conflict or a denial is never made again.
+pub(super) fn planning_unavailable<T>(
+    answer: &Result<T, PrivateOriginalError>,
+) -> Option<&'static str> {
+    matches!(answer, Err(PrivateOriginalError::Unavailable)).then_some("Err(Unavailable)")
+}
+
+/// What a submission's own bind publishes on the shared publication, in its
+/// order: the original's controller grant, then its binding. Both are facts
+/// only that bind produces.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct SubmissionPublished {
+    pub(super) controller_grant_issued: bool,
+    pub(super) bound: bool,
+}
+
+/// Reads what the bind of `original` has published so far. Neither read
+/// publishes. The retry compares a reading taken before a call with one
+/// taken after it, so it sees nothing for an original that is already bound
+/// before the call: it is for the first submission of an original, which
+/// every call site makes, and not for a replay.
+pub(super) async fn submission_published(
+    source: &crate::private_originals::PrivateOriginals,
+    original: &crate::private_originals::PrivateOriginalRef,
+) -> SubmissionPublished {
+    let controller_grant = EvidenceId::new(format!(
+        "original-controller-{}",
+        source.key(original).unwrap().id
+    ))
+    .unwrap();
+    SubmissionPublished {
+        controller_grant_issued: source
+            .owner
+            .grants()
+            .issued_reference(&controller_grant)
+            .unwrap()
+            .is_some(),
+        bound: source.binding_evidence(original).await.unwrap().is_some(),
+    }
+}
+
+/// What a planning preparation itself publishes: its last step writes the
+/// lead source's planning evidence. Whether the lead source carries it.
+///
+/// Unlike the submission's reading ([`submission_witness_reads`]), nothing
+/// checks that this one reads `true` after a preparation: a lead that is
+/// already bound without evidence is prepared without the write. That is
+/// accepted because the write is the preparation's last fallible step
+/// (after it only the plan list's lock and its cap can answer unavailable),
+/// so a reading gone blind could let through only a refusal that has almost
+/// nothing to come from.
+pub(super) async fn planning_published(
+    source: &crate::private_originals::PrivateOriginals,
+    lead: &crate::private_originals::PrivateOriginalRef,
+) -> bool {
+    let row = source
+        .store
+        .get(&source.key(lead).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    source
+        .decode_record(&row, lead)
+        .unwrap()
+        .planning_source_evidence
+        .is_some()
+}
+
+/// A step's last answer, with what the row saw of an owner change each time
+/// it made the step again. `again` is empty when the first answer is the
+/// last.
+pub(super) struct Made<T> {
+    pub(super) answer: T,
+    pub(super) again: Vec<OwnerChangeSeen>,
+}
+
+/// Makes `call` and returns its answer, making it again through
+/// [`OwnerChangeRetry`] only while `unavailable` names the answer as the
+/// step's unavailable one, and only for an owner change of another actor
+/// seen against the observation of `publication` taken before that call.
+/// `own` reads what the step itself publishes; it is read before each call
+/// and after an unavailable answer, and a step that published under its call
+/// is not made again, whatever the row saw. Each time the step is made
+/// again the row says on the test's output what it saw. The bounds are the
+/// retry's own, so a row's deadline is never extended.
+pub(super) async fn made_again<T, O: PartialEq + std::fmt::Debug>(
+    publication: &meerkat_authorization::publication::LocalAuthorizationPublication,
+    grants: &meerkat_authorization::grants::LocalGrantAuthority,
+    step: &str,
+    unavailable: fn(&T) -> Option<&'static str>,
+    own: impl AsyncFn() -> O,
+    mut call: impl AsyncFnMut() -> T,
+) -> Made<T> {
+    let mut retry = OwnerChangeRetry::default();
+    let mut again = Vec::new();
+    loop {
+        let before = own().await;
+        let prepared = prepared_against(publication);
+        let answer = call().await;
+        let Some(refusal) = unavailable(&answer) else {
+            return Made { answer, again };
+        };
+        let after = own().await;
+        let own = (before != after).then(|| format!("{before:?} became {after:?}"));
+        let seen = retry
+            .again(grants, &prepared, own.as_deref(), step, refusal)
+            .await;
+        eprintln!("made again: {step} answered {refusal}; owner change seen: {seen:?}");
+        again.push(seen);
+    }
+}
+
+/// The answer of a submission a row needs admitted. An error of the
+/// submission fails the row here, as its `unwrap` did. A submission that was
+/// made again must be the first admission of its original and the only one:
+/// `Admitted` with `deduplicated: false` and a turn ticket. An earlier call
+/// that answered unavailable and admitted all the same shows as a
+/// deduplicated admission (the native replay) or as one without a ticket
+/// (the reconciled earlier input), and fails the row here.
+pub(super) fn first_admission(
+    step: &str,
+    made: Made<Result<PrivateOriginalSubmission, PrivateOriginalError>>,
+) -> PrivateOriginalSubmission {
+    let answer = made.answer.unwrap();
+    assert!(
+        made.again.is_empty()
+            || matches!(
+                &answer,
+                PrivateOriginalSubmission::Admitted {
+                    deduplicated: false,
+                    turn_ticket: Some(_),
+                    ..
+                }
+            ),
+        "{step}, made again after {:?}, did not admit for the first time: {}",
+        made.again,
+        serde_json::to_string(&answer).unwrap()
+    );
+    answer
+}
+
+/// After an admitted submission of `original` the witness of its own
+/// publications must read both of them: a witness that reads nothing (the
+/// controller grant's name changed, for one) would let a step be made again
+/// for its own publication.
+pub(super) async fn submission_witness_reads(
+    source: &crate::private_originals::PrivateOriginals,
+    original: &crate::private_originals::PrivateOriginalRef,
+    answer: &PrivateOriginalSubmission,
+) {
+    if matches!(answer, PrivateOriginalSubmission::Admitted { .. }) {
+        assert_eq!(
+            submission_published(source, original).await,
+            SubmissionPublished {
+                controller_grant_issued: true,
+                bound: true,
+            },
+            "an admitted submission published its controller grant and its binding"
+        );
+    }
+}
+
+/// The planning parent's submission, made again only on
+/// [`submission_unavailable`] and only for an owner change of another actor
+/// seen; made again, it must admit for the first time ([`first_admission`]).
+pub(super) async fn submit_planning_parent(
+    source: &Arc<crate::private_originals::PrivateOriginals>,
+    parent: &PrivateOriginalSubmit,
+) -> PrivateOriginalSubmission {
+    let step = "the planning parent's submission";
+    let made = made_again(
+        &source.owner.publication(),
+        &source.owner.grants(),
+        step,
+        submission_unavailable,
+        async || submission_published(source, &parent.original).await,
+        async || source.submit_authenticated_original(parent.clone()).await,
+    )
+    .await;
+    let answer = first_admission(step, made);
+    submission_witness_reads(source, &parent.original, &answer).await;
+    answer
+}
+
+/// The planning preparation, made again only on [`planning_unavailable`] and
+/// only for an owner change of another actor seen. Every other error is
+/// returned to the row.
+pub(super) async fn prepare_planning(
+    source: &Arc<crate::private_originals::PrivateOriginals>,
+    parent: &crate::private_originals::PrivateOriginalRef,
+    submission: &PrivateOriginalSubmit,
+    terms: &SetupWorkflowTerms,
+    lineage: &[meerkat_authorization_contracts::grant::GrantLineageRef],
+) -> Result<Arc<InstalledWorkflowPlanning>, PrivateOriginalError> {
+    made_again(
+        &source.owner.publication(),
+        &source.owner.grants(),
+        "the planning preparation",
+        planning_unavailable,
+        async || planning_published(source, &submission.original).await,
+        async || {
+            source
+                .prepare_workflow_planning(
+                    parent,
+                    submission.clone(),
+                    terms.clone(),
+                    lineage.to_vec(),
+                )
+                .await
+        },
+    )
+    .await
+    .answer
+}
 struct Inline;
 impl ContextReferenceOwner for Inline {
     fn verify_access(
@@ -1382,7 +1770,7 @@ async fn scoped_g_close_observes_finalization_after_native_unregister() {
     let body = AssertUnwindSafe(tokio::time::timeout(GUARD, async {
         let source = &c.f.source;
         source.prepare_workflow_parent_source(&c.parent.original).await.unwrap();
-        let p = source.submit_authenticated_original(c.parent.clone()).await.unwrap();
+        let p = submit_planning_parent(source, &c.parent).await;
         finish(&c, "planning_parent", &p).await;
         let probe = c.f.probe.as_ref().unwrap();
         probe.arm_next_input();
@@ -1391,8 +1779,7 @@ async fn scoped_g_close_observes_finalization_after_native_unregister() {
         let dispatch = probe.captured();
         assert_eq!(dispatch.origin_session_id(), Some(&c.f.session));
         let original = source.acquisition_original(&dispatch).await.unwrap();
-        let planning = source.prepare_workflow_planning(&c.parent.original,
-            c.lead.clone(), c.terms.clone(), c.lineage.clone()).await.unwrap();
+        let planning = prepare_planning(source, &c.parent.original, &c.lead, &c.terms, &c.lineage).await.unwrap();
         let (membership, snapshot) = join_waiter(&c.f, &planning, &original, &dispatch,
             &c.backend, &c.work, "scoped-close-waiter").await;
         let admitted = native(planning.launch(&snapshot).await.unwrap());

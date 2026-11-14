@@ -102,17 +102,212 @@ excludes them without requiring them to fail.
 
 ## Refusal after prepared
 
-Status: open. Kind: not yet determined, seen on the 0.9.10 tree too. The
-row excludes it without requiring it to fail.
+Status: closed. No test of this class is on the known-red list: its one
+test was fixed in test code and runs in the row again. The section stays as
+the record of the decision the tests' audit check implements.
+Kind: test-side (the audit check, and a fixture that reopened without the
+close's final release).
 
-- `private_originals::governed_submit::tests::dynamic_member_native_tests::peer_ingress_tests::fresh_host_restores_governed_peer_binding_and_replays_it_exactly`:
-  the restored peer binding's `reply_to_peer` operation is refused
-  `reprepare_required` after its `Prepared` audit entry, and
-  `tool_succeeded_in` accepts that refusal only before the preparation, so
-  the check at `peer_ingress_tests.rs:344` fails. It failed in 1 of 20 runs
-  alone on the 0.9.10 tree. Next: capture the refusal's read basis, then
-  decide whether a refusal after the preparation is a re-preparation the
-  check should accept, or a defect.
+Decided: a refusal to rebuild recorded after an operation's `Prepared`
+audit entry is a waited-out re-preparation, not a defect, when all of this
+holds: its reason is `reprepare_required`; its read basis is
+`change_in_progress` or `publication_changed` (one read state, a
+publication that changed under the attempt: the first while the change was
+still in progress as the attempt ended, the second once it had completed);
+a later `Prepared` entry of the same operation follows it; and the
+operation's success follows that entry. It is what a check made again
+during an owner change leaves once its bounded wait settled: Core's own
+staging of a dispatch, a Connect check around a tool's effect
+(`current_check::check_after_owner_change`), or a test gate that uses it.
+`tool_succeeded_in` accepts exactly that shape
+(`a_tool_checked_again_during_an_owner_change_after_its_preparation_still_succeeded`
+pins it and its limits: both read bases are accepted, an owner answer and a
+refusal with no read are not; the later `Prepared` and the success behind
+it must be the checked operation's own; a success recorded before the later
+`Prepared` does not count).
+
+The check examines the one operation that prepared the named tool. Another
+operation's `Prepared` or success never excuses the checked operation's
+refusal, and a second operation of the same tool fails "must prepare once".
+
+Kept fatal, and these are real product outcomes, not only test shapes: a
+`reprepare_required` refusal after `Prepared` that no later `Prepared` and
+success follow. Product paths leave it, among them:
+- a waiting check whose bounded wait does not settle
+  (`current_check::waiting` returns the last refusal: one deadline of
+  `OWNER_CHANGE_WAIT_BOUND` from its first wait, within the call's remaining
+  tool time, and the free rebuilds, neither renewed);
+- a bare check answered at once by a caller that holds custody or is past
+  its deadline (`check_before_effect`, the only check of `current_check`
+  that product code uses bare; for example `refused_at_deadline` in
+  `installed_host/acquisition/task_approval.rs`).
+In these two the caller gets Core's typed refusal to rebuild and the call
+ends refused. The account request tools check without a wait and are
+tracked as their own product item.
+A refusal of any other reason and an unavailable answer stay fatal whatever
+follows them.
+
+Follow-ups, residuals of the test's audit check (noted, not changed):
+- the count is unbounded: the check accepts any number of refusals to
+  rebuild and re-preparations of the operation before its success, where a
+  product check has a few free rebuilds and one bounded wait;
+- an error outcome recorded between the re-preparation and the success is
+  not examined: the check reads only the operation's refused and
+  unavailable entries.
+
+History. The class had one test, an intermittent known red:
+`fresh_host_restores_governed_peer_binding_and_replays_it_exactly` of
+`private_originals::governed_submit::tests::dynamic_member_native_tests::peer_ingress_tests`.
+It had two failures. (1) The restored peer binding's `reply_to_peer`
+operation is refused `reprepare_required` (basis `change_in_progress`)
+after its `Prepared` audit entry, by Core's staging between the dispatch
+entry and the execution policy entry, then prepared again and successful;
+the check at `peer_ingress_tests.rs:344` refused that shape (1 of 20 runs
+alone on the 0.9.10 tree, 1 of 100 on 4 CPUs shared with 8 busy loops on
+0.9.12) and accepts it now. (2) Under the same load the fresh host's
+restore open answered `Unavailable`
+(`installed_host/controller_first_input_fixture.rs:1653`, 6 and 12 of 100
+runs on 0.9.12, 13 of 100 on 0.9.11), before any audit entry was read: the
+grant store's owner lease, an exclusive lock that an open takes without
+waiting, was still held by the closed host. This fixture's reopen never
+made the close's final release (`release_native_custody`), which the
+process's close makes after its joins, so the lease ended only when the
+last reference to the old owner dropped. The failed open wrote nothing, and
+the same open a moment later succeeded with the binding intact.
+`reopen_with_recorder` makes the release now. With both fixes the test
+passed 100 of 100 runs under that load and left the known-red list. It was
+an intermittent entry, so the suite's filter went from 25 excluded tests to
+24, and the ratchet, which runs only the known reds that fail every time,
+stayed at 20. A successor process started while its predecessor still holds
+the lease gets the same refusal at once, with no retry; that product
+behaviour is tracked on its own.
+
+## Unavailable right after a turn
+
+Status: closed. No test of this class is on the known-red list: its rows
+make the refused step again in test code. The section stays as the record of
+what the rows do and of the product behaviour behind it.
+Kind: test-side ordering over two product entry points that do not wait.
+
+Rows of the planning launch make two host-side calls that do not wait, the
+planning parent's `submit_authenticated_original` and
+`prepare_workflow_planning`, often right after a turn completed. A completed
+turn's source custody settles in the background, and that settlement
+changes the source's owners. Made while they change, each call is answered
+"unavailable now", with nothing admitted or prepared. The submission answers
+`NativeOutcomeUnavailable`: the first input's controller binding resolves
+the controller lineage once, with no wait, and a publication that changed
+under that read is unavailable. The preparation answers `Unavailable`: both
+of its observations of the publication, the first and its one rebuild, met
+a change before or during the read.
+
+The rows treated either answer as fatal. Seen: the second host input row
+(`second_host_input_keeps_dedicated_g_and_refuses_foreign_and_cancelled_parent`)
+failed 6 of 100 runs on 4 CPUs shared with 8 busy loops, in both shapes;
+`dedicated_held_member_admits_exact_g_and_refuses_foreign_history` failed
+this row's job on a push to main on 2026-11-12, in the second shape.
+
+Decided, in two parts. Those two rows wait for each completed turn's custody
+to be promoted before their next step (`custody_promoted`: the source row
+records the attempt Promoted, and the source writer was taken once after
+it). And the rows over the dedicated fixture's planning parent make an
+unavailable step again in test code, so a row without that wait, or an owner
+change of another origin, is covered too. The rule: a row makes a call again
+only when it saw an owner change of another actor, and says what it saw.
+
+Through one helper of the launch tests (`made_again` over
+`OwnerChangeRetry`) a row observes the grant authority's publication before
+each call. After an unavailable answer it makes the step again only when
+the step published nothing itself under the call and the row saw one of
+three things: that observation met a change being published, or the
+observation's stamp is no longer current, or the stamp is still current and
+the grant authority names a change in progress
+(`LocalGrantAuthority::owner_change_in_progress`). Otherwise the answer
+fails the row at once, with the answer in the failure.
+
+The condition on the step's own publication is there because the
+publication is one sequence that every owner shares, and a stamp cannot
+tell who moved it. A step publishes on it too: a submission's bind issues
+the original's controller grant and then persists its binding, and a
+preparation's last step writes the lead source's planning evidence. So the
+helper reads those facts before the call and after the answer
+(`submission_published`, `planning_published`), and what the row saw counts
+only when they are unchanged: a stamp that moved may be the step's own
+doing, and a change the row met before the call did not refuse a step that
+published after it. A step that was refused after its own first publication
+is not made again, whatever refused it.
+
+Two things about that reading. After an admitted submission the helper
+checks that both of the submission's facts read as published, so the
+submission's reading cannot go blind without a row failing. The
+preparation's reading has no check of its own: a lead that is already bound
+without evidence is prepared without the write, so "a prepared lead carries
+the evidence" does not hold for every caller. That is accepted because the
+evidence write is the preparation's last fallible step (after it only the
+plan list's lock and its cap of 128 plans can answer unavailable), so a
+reading gone blind could let through only a refusal that has almost nothing
+to come from. And the reading compares before with after, so it sees
+nothing for an original that is already bound before the call: the helper
+is for a first submission, which all thirteen call sites make, and not for
+a replay.
+
+With a change seen the row waits while one is named, within Core's bound for
+an owner change counted from the step's first unavailable answer, and then
+makes the step again; with none named any more it makes it again at once,
+at most Core's free rebuilds times for one step. A submission that was made
+again must be the first admission of its original and the only one
+(`Admitted`, not deduplicated, with its turn ticket); a row never accepts
+the replay or the reconciliation of an earlier call that answered
+unavailable. Only those two answers are made again: a conflict, a denial, an
+error of the submission or any other outcome goes back to the row after the
+one call, and an unavailable answer past either bound fails the row with
+the step's name. The bounds are the retry's own, so no row's deadline is
+extended. `an_unavailable_step_is_made_again_only_through_an_owner_change`
+pins what counts as seen, that nothing counts for a step that published
+itself, and the bounds,
+`only_the_two_unavailable_answers_are_made_again` pins what is made again
+(a step is read under every call, a later one included),
+and `a_submission_made_again_must_admit_for_the_first_time` pins the
+admission.
+
+Which rows. The rows over the dedicated fixture's planning parent go through
+the helper: thirteen call sites in eleven test files (twelve through
+`submit_planning_parent` with `prepare_planning`, and the second host input
+row's own loop, which also checks that the parent session's input count did
+not move). The rows over fixture originals (`prepare_with_waiter_options`,
+24 call sites in 8 test files, the replay controls among them) do
+not: their planning parent's submission goes through `submit_until_answered`,
+an older rule (it checks that nothing was admitted and submits again after a
+backoff, for up to 30 s, and asks for no owner change), and their
+`prepare_workflow_planning` is made bare, twice, and unwrapped. No kept run
+failed there.
+
+Limits of the rule. In one direction, what a row sees is evidence of the
+cause, not proof of it: an unavailable answer of another origin that was
+decided before the step's own first publication is still made again when
+the row saw another actor's owner change in its window. That window is
+wider than the call: it runs from the row's stamp, taken before the call,
+to the row's check of it, made after the answer and after the second
+reading of the step's own facts. Such a step then fails the row at the next
+call in whose window no such change is seen, or at the retry's bounds.
+
+In the other direction, three true refusals fail the row, so that the first
+such red is read as one of these and not as a new defect:
+- a submission that was refused by another actor's owner change after its
+  own bind had issued the controller grant (the bind resolves the lineage
+  again after the issuance): the stamp moved, but the step published too,
+  and the row cannot tell the two apart;
+- a hold of the publication's writer that ended before the row looked, and
+  published nothing: nothing is left to see, where Core's own waiter rebuilds
+  once for free;
+- a short hold of the source collection that publishes nothing: the
+  preparation ends by taking the source collection without waiting, and a
+  reader that holds it at that instant makes the preparation answer
+  `Unavailable` with nothing published and nothing named.
+
+Not changed, and not established: the two entry points answer at once in an
+owner change (the preparation after one rebuild); whether their production
+callers make the call again was not established.
 
 ## Slow runner timeouts
 

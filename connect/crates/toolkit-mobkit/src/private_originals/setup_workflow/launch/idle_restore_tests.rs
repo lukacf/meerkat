@@ -109,7 +109,7 @@ async fn admit_then_close() -> Saved {
     let c = PersistentDedicated::persistent().await;
     let body = AssertUnwindSafe(Box::pin(async {
         c.f.source.prepare_workflow_parent_source(&c.parent.original).await.unwrap();
-        let p = c.f.source.submit_authenticated_original(c.parent.clone()).await.unwrap();
+        let p = submit_planning_parent(&c.f.source, &c.parent).await;
         finish(&c, "planning_parent", &p).await;
         let probe = c.f.probe.as_ref().unwrap();
         assert_eq!(probe.captured().origin_session_id(), Some(&c.parent_session));
@@ -123,8 +123,7 @@ async fn admit_then_close() -> Saved {
         let original = c.f.source.acquisition_original(&dispatch).await.unwrap();
         assert_eq!(original.source_record.key, c.f.source.key(c.f.original_reference()).unwrap());
         assert_eq!(original.original.association(), &c.f.binding().await.unwrap().unwrap());
-        let planning = c.f.source.prepare_workflow_planning(&c.parent.original,
-            c.lead.clone(), c.terms.clone(), c.lineage.clone()).await.unwrap();
+        let planning = prepare_planning(&c.f.source, &c.parent.original, &c.lead, &c.terms, &c.lineage).await.unwrap();
         let (membership, snapshot) = join_waiter(&c.f, &planning, &original, &dispatch, &c.backend, &c.work, "restore-waiter").await;
         let admitted = native(planning.launch(&snapshot).await.unwrap());
         finish(&c, "planning_lead", &admitted).await;

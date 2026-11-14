@@ -1566,11 +1566,12 @@ them.
   built, and the session starts without it. This applies to
   `rkat run --skill`, JSON-RPC `session/create` (and the Python and
   TypeScript SDK create calls), REST `POST /sessions`, the MCP server's
-  `meerkat_run`, a schedule's first occurrence and mob member spawns. The
-  signs are a `skill_resolution_failed` event where the surface delivers
-  events and one warning in the server's log; `rkat run` itself prints
-  neither by default and, with `--verbose` or `RUST_LOG=warn`, only the
-  warning (by a run); when skills are disabled altogether there is neither.
+  `meerkat_run`, a schedule's first occurrence and in-process mob member
+  spawns. The signs are a `skill_resolution_failed` event where the surface
+  delivers events and one warning in the server's log; `rkat run` itself
+  prints neither by default and, with `--verbose` or `RUST_LOG=warn`, only
+  the warning (by a run); when skills are disabled altogether there is
+  neither.
 
 - Until Connect 0.9.15 is published, Connect 0.9.14 is the Connect release
   for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in

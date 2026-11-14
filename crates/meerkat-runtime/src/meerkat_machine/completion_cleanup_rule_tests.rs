@@ -1371,3 +1371,472 @@ async fn the_cleanup_rule_keeps_its_table_on_a_retired_runtime_that_still_drains
     }
     retiring.served.permits.close();
 }
+
+// ---------------------------------------------------------------------------
+// A turn refused at its start
+// ---------------------------------------------------------------------------
+
+/// A durable operator prompt: one turn.
+fn keyed_prompt(key: &str) -> Input {
+    Input::Prompt(crate::input::PromptInput {
+        injected_context: Vec::new(),
+        header: crate::input::InputHeader {
+            ingress_context: None,
+            retained_resume: None,
+            authority_association: None,
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: crate::input::InputOrigin::Operator,
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: Some(crate::identifiers::IdempotencyKey::new(key)),
+            supersession_key: None,
+            correlation_id: None,
+            requester: None,
+        },
+        content: format!("the turn {key}").into(),
+        typed_turn_appends: Vec::new(),
+        turn_metadata: None,
+    })
+}
+
+/// The refusal a turn is answered when the model's route does not take the
+/// reasoning effort level the turn would run with.
+fn effort_refusal() -> meerkat_core::ReasoningEffortRefusal {
+    serde_json::from_value(serde_json::json!({
+        "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+        "route": {"backend": "anthropic_api", "api": "messages"},
+        "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+        "facts": "catalog",
+    }))
+    .expect("a reasoning effort refusal")
+}
+
+/// Executor whose first apply waits for one permit. An apply that carries
+/// the input `refused` names is refused for its reasoning effort level, as
+/// the reconfiguration before a turn refuses it: nothing was applied. Every
+/// other apply answers a result.
+struct RefusingExecutor {
+    session_id: SessionId,
+    first_apply: Arc<crate::tokio::sync::Semaphore>,
+    batches: Arc<std::sync::Mutex<Vec<Vec<InputId>>>>,
+    refused: Arc<std::sync::Mutex<Option<InputId>>>,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutor for RefusingExecutor {
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        let contributors = primitive.contributing_input_ids().to_vec();
+        let call = {
+            let mut batches = self
+                .batches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            batches.push(contributors.clone());
+            batches.len()
+        };
+        if call == 1 {
+            self.first_apply
+                .acquire()
+                .await
+                .map_err(|_| CoreExecutorError::Stopped)?
+                .forget();
+        }
+        let refused = self
+            .refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if refused.is_some_and(|refused| contributors.contains(&refused)) {
+            let refusal = effort_refusal();
+            return Err(CoreExecutorError::apply_failed(
+                meerkat_core::lifecycle::core_executor::CoreApplyFailureCause::runtime_turn(
+                    refusal.to_string(),
+                )
+                .with_reason(
+                    meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+                        refusal: Box::new(refusal),
+                    },
+                ),
+            ));
+        }
+        Ok(CoreApplyOutput::with_run_result(
+            RunBoundaryReceiptDraft {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: contributors,
+                conversation_digest: None,
+                message_count: 0,
+            },
+            None,
+            run_result(&self.session_id, &format!("answer-{call}")),
+        ))
+    }
+
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+}
+
+/// What a turn refused at its start, with one turn running ahead of it and
+/// one queued behind it, left of itself and of the session.
+struct RefusedStart {
+    /// The inputs of the turns, in the order they were accepted: the three,
+    /// then one more accepted once the turn queued behind was answered.
+    running: InputId,
+    refused: InputId,
+    behind: InputId,
+    later: InputId,
+    /// What each turn's waiter was answered.
+    running_answer: String,
+    refused_answer: serde_json::Value,
+    behind_answer: String,
+    later_answer: String,
+    /// What the relay that waited on the refused turn is told, by what it
+    /// observed of the session: (the outcome the rule was asked about, the
+    /// action), for a live session present, not observed and absent.
+    relay: Vec<Result<(Outcome, Action), String>>,
+    /// The inputs of each apply the executor was handed, in order.
+    batches: Vec<Vec<InputId>>,
+    /// The refused input's stored record: (phase, terminal record as it is
+    /// stored, attempts counted).
+    stored: (String, serde_json::Value, u32),
+    /// The refused input's stored receipt, as it is stored.
+    receipt: serde_json::Value,
+    /// Whether the session is served by the registration it had before the
+    /// refusal: (the registration has not ended, the same runtime epoch, the
+    /// same authority, the same runtime binding).
+    same_registration: (bool, bool, bool, bool),
+    /// The runtime's phase after the three turns.
+    phase: RuntimeState,
+}
+
+async fn answered(handle: CompletionHandle) -> Result<CompletionOutcome, String> {
+    match tokio::time::timeout(BOUND, handle.try_wait()).await {
+        Err(_) => Err("not answered".to_string()),
+        Ok(Err(error)) => Err(format!("wait failure: {error}")),
+        Ok(Ok(outcome)) => Ok(outcome),
+    }
+}
+
+/// The name of an answer: its completion type, or why there is none.
+fn answer_name(answer: &Result<CompletionOutcome, String>) -> String {
+    match answer {
+        Err(none) => none.clone(),
+        Ok(outcome) => {
+            serde_json::to_value(outcome).expect("an outcome serializes")["completion_type"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        }
+    }
+}
+
+async fn a_turn_refused_at_its_start(persistent: bool) -> RefusedStart {
+    let machine = if persistent {
+        persistent_machine()
+    } else {
+        Arc::new(MeerkatMachine::ephemeral())
+    };
+    let session_id = SessionId::new();
+    let first_apply = Arc::new(crate::tokio::sync::Semaphore::new(0));
+    let batches = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let refused_input = Arc::new(std::sync::Mutex::new(None));
+    machine
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(RefusingExecutor {
+                session_id: session_id.clone(),
+                first_apply: Arc::clone(&first_apply),
+                batches: Arc::clone(&batches),
+                refused: Arc::clone(&refused_input),
+            }),
+        )
+        .await
+        .expect("register the refusing executor");
+    let authority = session_authority(&machine, &session_id).await;
+    let registration = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("the session is registered");
+
+    // One turn runs; two are queued behind it. The first of the two is the
+    // one that will be refused at its start.
+    let accept_prompt = |key: &'static str| {
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        async move {
+            let input = keyed_prompt(key);
+            let input_id = input.id().clone();
+            let (outcome, handle) = machine
+                .accept_input_with_completion(&session_id, input)
+                .await
+                .expect("accept the turn");
+            assert!(outcome.is_accepted());
+            (
+                input_id,
+                handle.expect("an accepted input has a completion handle"),
+            )
+        }
+    };
+    let (running, running_handle) = accept_prompt("running").await;
+    tokio::time::timeout(BOUND, async {
+        while batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the first turn starts");
+    let binding = binding_of(&authority, &session_id);
+    let (refused, refused_handle) = accept_prompt("refused").await;
+    let (behind, behind_handle) = accept_prompt("behind").await;
+    *refused_input
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(refused.clone());
+    first_apply.add_permits(1);
+
+    let running_answer = answer_name(&answered(running_handle).await);
+    let (refused_answer, relay) =
+        match tokio::time::timeout(BOUND, refused_handle.try_wait_with_cleanup_observation()).await
+        {
+            Err(_) => (serde_json::json!("not answered"), Vec::new()),
+            Ok(Err(error)) => (
+                serde_json::json!(format!("wait failure: {error}")),
+                Vec::new(),
+            ),
+            Ok(Ok((release, observation))) => {
+                let outcome = release.release().await.expect("the outcome is released");
+                let mut relay = Vec::new();
+                for live in [Live::Present, Live::NotObserved, Live::Absent] {
+                    relay.push(
+                        machine
+                            .resolve_runtime_completion_cleanup(
+                                &session_id,
+                                observation.clone(),
+                                false,
+                                live,
+                            )
+                            .await
+                            .map(|authority| (authority.outcome, authority.action))
+                            .map_err(|error| error.to_string()),
+                    );
+                }
+                (
+                    serde_json::to_value(&outcome).expect("an outcome serializes"),
+                    relay,
+                )
+            }
+        };
+    let behind_answer = answer_name(&answered(behind_handle).await);
+    // One more turn, accepted after everything queued so far was answered:
+    // a start the runtime still owed any earlier input comes before it.
+    let (later, later_handle) = accept_prompt("later").await;
+    let later_answer = answer_name(&answered(later_handle).await);
+
+    let stored =
+        <MeerkatMachine as SessionServiceRuntimeExt>::input_state(&machine, &session_id, &refused)
+            .await
+            .expect("the refused input's record is read")
+            .expect("the refused input has a record");
+    let receipt = <MeerkatMachine as SessionServiceRuntimeExt>::input_terminal_completion(
+        &machine,
+        &session_id,
+        &refused,
+    )
+    .await
+    .map(|receipt| serde_json::to_value(&receipt).expect("a receipt serializes"))
+    .unwrap_or_else(|error| serde_json::json!(format!("no receipt: {error}")));
+    let now = machine
+        .current_session_registration_witness(&session_id)
+        .await;
+    let authority_now = session_authority(&machine, &session_id).await;
+    let binding_now = binding_of(&authority_now, &session_id);
+    let result = RefusedStart {
+        running,
+        refused,
+        behind,
+        later,
+        running_answer,
+        refused_answer,
+        behind_answer,
+        later_answer,
+        relay,
+        batches: batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone(),
+        stored: (
+            format!("{:?}", stored.seed.phase),
+            serde_json::to_value(&stored.seed.terminal_outcome)
+                .expect("a terminal record serializes"),
+            stored.seed.attempt_count,
+        ),
+        receipt,
+        same_registration: (
+            !registration.has_ended(),
+            now.is_some_and(|now| now.epoch_id() == registration.epoch_id()),
+            Arc::ptr_eq(&authority, &authority_now),
+            (
+                &binding.runtime_id,
+                binding.fence_token,
+                binding.generation,
+                &binding.epoch_id,
+            ) == (
+                &binding_now.runtime_id,
+                binding_now.fence_token,
+                binding_now.generation,
+                &binding_now.epoch_id,
+            ),
+        ),
+        phase: phase_of(&authority_now),
+    };
+    first_apply.close();
+    result
+}
+
+/// A turn refused at its start for its reasoning effort level, with a turn
+/// queued behind it, costs the session nothing else: the relay that waited
+/// on the refused turn is told to keep the runtime while the live session is
+/// there (the refused reconfiguration left it as it was), the turn queued
+/// behind runs and is answered its result, and the session is still served
+/// by the registration it had. A relay that finds no live session is told to
+/// clean up, as for every abandoned turn.
+#[tokio::test]
+async fn a_turn_refused_at_its_start_keeps_the_runtime_and_the_turn_queued_behind_it_runs() {
+    for persistent in [true, false] {
+        let end = a_turn_refused_at_its_start(persistent).await;
+        assert_eq!(
+            end.relay,
+            vec![
+                Ok((Outcome::Abandoned, Action::RetainRuntime)),
+                Ok((Outcome::Abandoned, Action::RetainRuntime)),
+                Ok((Outcome::Abandoned, Action::CleanupRuntime)),
+            ],
+            "persistent {persistent}: what the refused turn's relay is told, with the live \
+             session present, not observed and absent"
+        );
+        assert_eq!(
+            (
+                end.running_answer.as_str(),
+                end.behind_answer.as_str(),
+                end.later_answer.as_str()
+            ),
+            ("completed", "completed", "completed"),
+            "persistent {persistent}: (the turn that ran ahead, the turn queued behind, a turn \
+             accepted later)"
+        );
+        assert_eq!(
+            end.same_registration,
+            (true, true, true, true),
+            "persistent {persistent}: (the registration has not ended, the same runtime epoch, \
+             the same authority, the same runtime binding)"
+        );
+        assert!(
+            serves(end.phase),
+            "persistent {persistent}: the runtime still serves, it is {}",
+            end.phase
+        );
+    }
+}
+
+/// The refused turn ends once and alone: its waiter is answered the typed
+/// refusal, it is handed to the executor once and never again, the turns
+/// around it are each handed over once in their order, and its stored
+/// record says it was never executed.
+#[tokio::test]
+async fn a_turn_refused_at_its_start_ends_once_with_the_refusal_and_is_not_started_again() {
+    let refusal = serde_json::to_value(
+        meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+            refusal: Box::new(effort_refusal()),
+        },
+    )
+    .expect("a reason serializes");
+    for persistent in [true, false] {
+        let end = a_turn_refused_at_its_start(persistent).await;
+        assert_eq!(
+            end.batches,
+            vec![
+                vec![end.running.clone()],
+                vec![end.refused.clone()],
+                vec![end.behind.clone()],
+                vec![end.later.clone()]
+            ],
+            "persistent {persistent}: the inputs of each start, in order: the refused turn is \
+             started once, and no second start of it comes before a turn accepted later"
+        );
+        assert_eq!(
+            (
+                end.refused_answer["completion_type"].as_str(),
+                &end.refused_answer["error"]["kind"],
+                &end.refused_answer["error"]["reason"],
+            ),
+            (
+                Some("abandoned_with_error"),
+                &serde_json::json!("runtime_apply_failure"),
+                &refusal,
+            ),
+            "persistent {persistent}: the refused turn's answer: {}",
+            end.refused_answer
+        );
+        assert_eq!(
+            end.stored,
+            (
+                "Abandoned".to_string(),
+                serde_json::json!({"outcome_type": "abandoned", "reason": "never_executed"}),
+                1,
+            ),
+            "persistent {persistent}: the refused input's stored record (phase, terminal \
+             record, attempts counted)"
+        );
+    }
+}
+
+/// What is stored for the refused turn uses only forms a release without
+/// this rule reads: the terminal record is the never-executed one, the
+/// stored receipt is the answer the caller got, and neither names the cause
+/// the machine keeps for the failed apply.
+#[tokio::test]
+async fn a_turn_refused_at_its_start_stores_nothing_an_earlier_release_cannot_read() {
+    for persistent in [true, false] {
+        let end = a_turn_refused_at_its_start(persistent).await;
+        assert_eq!(
+            end.stored.1,
+            serde_json::json!({"outcome_type": "abandoned", "reason": "never_executed"}),
+            "persistent {persistent}: the refused input's stored terminal record"
+        );
+        assert_eq!(
+            end.receipt, end.refused_answer,
+            "persistent {persistent}: the refused input's stored receipt is the answer its \
+             waiter got"
+        );
+        let stored = format!("{} {}", end.stored.1, end.receipt);
+        for cause in ["RequestRefused", "request_refused"] {
+            assert!(
+                !stored.contains(cause),
+                "persistent {persistent}: the stored forms name no cause {cause}: {stored}"
+            );
+        }
+        let error = end.receipt["error"]
+            .as_object()
+            .expect("the receipt carries the turn's error");
+        let mut fields: Vec<&str> = error.keys().map(String::as_str).collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            vec!["detail", "kind", "outcome", "reason", "terminal"],
+            "persistent {persistent}: the fields of the stored turn error"
+        );
+    }
+}

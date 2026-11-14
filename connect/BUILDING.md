@@ -410,6 +410,52 @@ interpreter, for example:
 TOOLKIT_TEST_PYTHON=/absolute/path/to/python3.12 npm run validate
 ```
 
+### Linux consumer bundle
+
+The Linux library's `consumers/` tree is composed from an existing Linux consumer
+bundle and this checkout by `scripts/project-library-consumers.py`. Build the two
+wheels from `sdk/agno` and `sdk/services` as their READMEs describe, then run from
+this directory:
+
+```sh
+python3 -I -B scripts/project-library-consumers.py \
+  --base /absolute/base-bundle --base-contents-sha256 HEX \
+  --agno-wheel /absolute/meerkat_toolkit_agno-0.1.5-py3-none-any.whl --agno-sha256 HEX \
+  --services-wheel /absolute/meerkat_toolkit_services-0.1.23-py3-none-any.whl --services-sha256 HEX \
+  --closure-record-in /absolute/base-closure.json \
+  --closure-record-out /absolute/new/closure.json \
+  --output /absolute/new/bundle
+```
+
+The output has the base's file set and layout. Its `catalog.json` is this checkout's
+adopted catalog with the digests of the components supplied in the run (each changed
+entry's version recomputed as `scripts/render-adopted-catalog.py` computes it),
+followed by this checkout's discovery catalog. The base catalog is only compared:
+its adopted part must be what this checkout yields for the base components. The two
+wheels are the supplied files, checked against the given digests, their declared
+name and version, and the bundle's `runtime-constraints.txt`. Every file the
+exporter derives from a component is derived again from the supplied one: the
+profile guides, the licence and notice files and the hash-locked requirement lists.
+`routes.json` changes only in the component digests, the versions of the changed
+entries and the catalog digest. The consumer guide states the composed number of
+discovery records. `CONTENTS.json` and `SHA256SUMS` are written in the exporter's
+encoding, and the dependency closure record is the given record bound to the new
+files; it is written to `--closure-record-out` and accepted under
+`--closure-record-key` (default: its file name). Every other file is the base's,
+byte for byte, checked against the base's own checksums before use.
+
+`--activepieces-archive` with `--activepieces-sha256` supplies that component too;
+without them the base's archive stays. With a supplied archive the consumer lock
+`activepieces/package-lock.json` changes in one value, the component's integrity.
+A component archive is read as a whole gzip stream first: one that is cut, damaged
+or followed by other bytes refuses. The script needs only the Python standard
+library (3.11 or later), reads no network and starts no process. It prints one JSON
+line on success. A refusal exits 2 with one line. It leaves no complete output and
+no closure record: `SHA256SUMS` is written last, and a write that fails takes the
+closure record away again. A bundle directory without `SHA256SUMS` may remain and
+must not be used. `python3 -B -m unittest -v
+scripts.test_project_library_consumers` runs its checks on synthetic inputs.
+
 ## Source checks and documentation
 
 The [default GitHub Actions workflow](.github/workflows/checks.yml) uses Python

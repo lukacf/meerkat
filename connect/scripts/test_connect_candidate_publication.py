@@ -9,9 +9,12 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import re
 import shutil
 import subprocess
 import tarfile
+import time
 
 import pytest
 
@@ -64,6 +67,97 @@ def verified_statement(path, request):
             "resolvedDependencies": [{"uri": f"git+{repo}@{request['source_ref']}", "digest": {"gitCommit": request["source_sha"]}}]},
             "runDetails": {"builder": {"id": identity}, "metadata": {"invocationId": invocation}}}}
     return [{"verificationResult": {"signature": {"certificate": cert}, "verifiedTimestamps": [{"fixture": True}], "statement": statement}}]
+
+
+# The upload receipt check: synthetic scan reports for the candidate's exact files. Made-up digests;
+# the tool commit is the request's source commit. No caller gives the check a pin: it reads the pins
+# of the target, and the coverage exceptions file, from the commit of the checkout it runs from. So
+# these tests run a copy of the check in made-up checkouts (scratch git repositories).
+RECEIPT_PINS = {'name_list_sha256': 'a1' * 32, 'rules_sha256': '8b' * 32, 'non_published_list_sha256': 'd5' * 32,
+                'detector_pinned_sha256': 'b2' * 32, 'detector_current_sha256': 'c3' * 32,
+                'detector_pinned_default_rules_sha256': '5e' * 32, 'detector_current_default_rules_sha256': '4d' * 32}
+RECEIPT_EXCEPTIONS = '{"schema": "release-payload-privacy-scan/coverage-exceptions/1", "exceptions": []}\n'
+# The check as the candidate tool finds it: the file beside it, in its own checkout.
+CHECKOUT_RECEIPT_CHECK = p.RECEIPT_CHECK
+
+
+def receipt_checkout(root, pins):
+    """A made-up checkout whose commit holds a copy of the receipt check, pins (the same for every
+    target) and a coverage exceptions file. Returns the check there."""
+    (root / 'scripts').mkdir(parents=True)
+    (root / 'release').mkdir()
+    shutil.copyfile(CHECKOUT_RECEIPT_CHECK, root / 'scripts' / CHECKOUT_RECEIPT_CHECK.name)
+    dump(root / 'release/upload-receipt-pins.json',
+         {'schema': 'release-upload-receipt-check/pins/3',
+          'targets': {target: {'names': 'holds-target', **pins} for target in p.TARGETS}})
+    (root / 'release/payload-scan-coverage-exceptions.json').write_text(RECEIPT_EXCEPTIONS)
+    environment = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+    for args in (['init', '-q'], ['add', '-A'], ['commit', '-q', '-m', 'the check and its pins']):
+        subprocess.run(['git', '-C', str(root), '-c', 'user.name=test', '-c', 'user.email=test@example.invalid',
+                        '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', *args],
+                       check=True, capture_output=True, env=environment)
+    return root / 'scripts' / CHECKOUT_RECEIPT_CHECK.name
+
+
+@pytest.fixture(scope='session')
+def receipt_checks(tmp_path_factory):
+    """The check in three checkouts: one that pins what the synthetic reports state, one that pins
+    another detector build, and one with a pin that no commit has set."""
+    base = tmp_path_factory.mktemp('receipt-checkouts')
+    return {'pinned': receipt_checkout(base / 'pinned', RECEIPT_PINS),
+            'other_pin': receipt_checkout(base / 'other', {**RECEIPT_PINS, 'detector_current_sha256': '0' * 64}),
+            'null_pin': receipt_checkout(base / 'null', {**RECEIPT_PINS, 'name_list_sha256': None})}
+
+
+@pytest.fixture(autouse=True)
+def committed_receipt_pins(monkeypatch, receipt_checks):
+    monkeypatch.setattr(p, 'RECEIPT_CHECK', receipt_checks['pinned'])
+
+
+def scan_receipt(c, **changes):
+    """A passing upload receipt written beside the case, changed as asked ('privacy', 'credential' or
+    'both': fields of a scan's part to set; 'top': fields of the document; 'payload': a function of
+    the payload rows; 'document': the whole document). The receipt only: no full report, no pin."""
+    try:
+        commit = json.loads((c.root / 'request.json').read_text())['source_sha']
+    except (OSError, ValueError, KeyError, TypeError):
+        commit = '0' * 40
+    rows = [{'name': name, 'bytes': (c.candidate / name).stat().st_size, 'sha256': p.digest(c.candidate / name)}
+            for name in c.files if (c.candidate / name).is_file()]
+    rows = changes.get('payload', lambda value: value)(rows)
+    scan = {'status': 'PASS', 'release': True, 'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'tool_commit': commit}
+    privacy = {**scan, 'tool_sha256': '9a' * 32, 'report_sha256': '1b' * 32, 'exit_code': 0,
+               'rules_sha256': RECEIPT_PINS['rules_sha256'], 'name_list_sha256': RECEIPT_PINS['name_list_sha256'],
+               'non_published_list_sha256': RECEIPT_PINS['non_published_list_sha256'],
+               'coverage_exceptions_sha256': hashlib.sha256(RECEIPT_EXCEPTIONS.encode()).hexdigest(), 'blocking_rules': True,
+               'name_rules_all_blocking': True, 'no_exemptions': True, 'accepted_only_with_proof': True,
+               'accepted_proof_tools': {'zq-prover-one': 2}}
+    credential = {**scan, 'tool_sha256': '7c' * 32, 'report_sha256': '2c' * 32,
+                  'detector_pinned_sha256': RECEIPT_PINS['detector_pinned_sha256'],
+                  'detector_current_sha256': RECEIPT_PINS['detector_current_sha256'],
+                  'detector_pinned_default_rules_sha256': RECEIPT_PINS['detector_pinned_default_rules_sha256'],
+                  'detector_current_default_rules_sha256': RECEIPT_PINS['detector_current_default_rules_sha256'],
+                  'nothing_refused': True, 'nothing_pending': True, 'nothing_unread_unaccepted': True}
+    for part, own in ((privacy, 'privacy'), (credential, 'credential')):
+        part.update(changes.get('both', {}))
+        part.update(changes.get(own, {}))
+    document = {'schema': 'release-upload-receipt/4', 'target': c.target, 'payload': rows, 'privacy': privacy,
+                'credential': credential, **changes.get('top', {})}
+    scan_receipt.count += 1
+    path = c.root / f'upload-receipt-in-{scan_receipt.count}.json'
+    dump(path, changes.get('document', document))
+    return {'upload_receipt': path, 'max_age_hours': None}
+
+
+# What the scans' full reports hold beyond a receipt: category and rule names and counts. Made up.
+FULL_PRIVACY_REPORT = {'schema': 'release-payload-privacy-scan/report/3', 'status': 'PASS', 'release': True, 'exit_code': 0,
+                       'rules': {'sha256': '8b' * 32, 'total': 4, 'blocking': 3, 'review_outside_paths': 0},
+                       'hits': {'accepted': {'madeupclass': 2}},
+                       'review_hits': {'review_madeupclass': 4}, 'accepted': {'count': 2, 'sha256': 'e5' * 32}}
+
+
+scan_receipt.count = 0
 
 
 @pytest.fixture(params=tuple(p.TARGETS))
@@ -181,7 +275,8 @@ def selected_runtime_artifacts(target):
             return real_output(argv, **kwargs)
         raise AssertionError('offline control attempted external command: ' + repr(args))
     monkeypatch.setattr(p.subprocess, 'check_output', output)
-    c.accept = lambda: p.accept_publication(c.root / 'request.json', c.candidate, c.meta, c.root / 'accepted')
+    c.accept = lambda: p.accept_publication(c.root / 'request.json', c.candidate, c.meta, c.root / 'accepted',
+                                            receipt=scan_receipt(c))
     return c
 
 
@@ -226,7 +321,8 @@ def select_forge_reader(c, tag='forge-v0.3.0'):
     c.git_refs['HEAD^{commit}'] = selected['source_sha']
     if tag:
         c.git_refs['refs/tags/' + tag + '^{commit}'] = selected['source_sha']
-    c.accept = lambda: p.accept_publication(c.root / 'request.json', c.candidate, c.forge, c.root / 'accepted')
+    c.accept = lambda: p.accept_publication(c.root / 'request.json', c.candidate, c.forge, c.root / 'accepted',
+                                            receipt=scan_receipt(c))
     return inputs
 
 
@@ -389,7 +485,7 @@ def test_publication_reader_cli_alias_is_explicit_and_exclusive(monkeypatch, fla
         argv += [flag, '/forge' if flag == '--forge-reader-source' else '/legacy']
     calls = []
     monkeypatch.setattr(p.sys, 'argv', argv)
-    monkeypatch.setattr(p, 'accept_publication', lambda *args: calls.append(args))
+    monkeypatch.setattr(p, 'accept_publication', lambda *args, receipt: calls.append(args))
     if len(flags) == 2:
         with pytest.raises(SystemExit) as error:
             p.main()
@@ -733,8 +829,175 @@ def prepare_publish(c,monkeypatch):
     # The write command must not enter either data-extraction or reader path.
     def forbidden(*args,**kwargs):raise AssertionError('write phase entered product/reader')
     monkeypatch.setattr(p,'unpack_publication_candidate',forbidden);monkeypatch.setattr(p,'read_publication_product',forbidden)
-    def publish():return p.publish_accepted(accepted,p.digest(accepted/'acceptance.json'),c.root/'publication')
+    def publish(receipt=None):return p.publish_accepted(accepted,p.digest(accepted/'acceptance.json'),c.root/'publication',receipt=receipt)
     return transport,publish
+
+
+def test_acceptance_needs_a_passing_upload_receipt_for_the_exact_candidate_bytes(fixture, monkeypatch, receipt_checks):
+    c = fixture
+    with pytest.raises(ValueError, match='--upload-receipt'):
+        p.accept_publication(c.root / 'request.json', c.candidate, c.meta, c.root / 'accepted')
+    assert not (c.root / 'accepted').exists()
+    for number, changes in enumerate([
+            {'privacy': {'status': 'REFUSED'}}, {'credential': {'status': 'REFUSED'}}, {'privacy': {'status': 'clean'}},
+            {'both': {'tool_commit': 'd' * 40}}, {'privacy': {'release': False}}, {'credential': {'release': False}},
+            {'privacy': {'exit_code': 1}}, {'privacy': {'blocking_rules': False}}, {'privacy': {'name_list_sha256': '0' * 64}},
+            {'privacy': {'rules_sha256': '0' * 64}}, {'privacy': {'coverage_exceptions_sha256': '0' * 64}},
+            {'privacy': {'coverage_exceptions_sha256': None}},
+            {'privacy': {'non_published_list_sha256': None}}, {'privacy': {'non_published_list_sha256': '0' * 64}},
+            {'both': {'generated_at': '2020-01-01T00:00:00Z'}}, {'credential': {'nothing_refused': False}},
+            {'credential': {'nothing_pending': False}}, {'credential': {'nothing_unread_unaccepted': False}},
+            {'top': {'target': next(target for target in p.TARGETS if target != c.target)}},
+            {'payload': lambda rows: rows[1:]}, {'payload': lambda rows: [dict(rows[0], sha256='0' * 64)] + rows[1:]},
+            {'payload': lambda rows: [dict(rows[0], bytes=rows[0]['bytes'] + 1)] + rows[1:]},
+            # A receipt holds exactly its fields: nothing of a full report rides along, and a full
+            # report is no receipt.
+            {'privacy': {'hits': FULL_PRIVACY_REPORT['hits']}}, {'privacy': {'rules': FULL_PRIVACY_REPORT['rules']}},
+            {'credential': {'findings': {'total': 3, 'refused': 0}}}, {'top': {'label': 'candidate'}},
+            {'top': {'privacy': FULL_PRIVACY_REPORT}}, {'document': FULL_PRIVACY_REPORT}]):
+        output = c.root / f'refused-{number}'
+        with pytest.raises(ValueError, match='upload receipt check refused'):
+            p.accept_publication(c.root / 'request.json', c.candidate, c.meta, output, receipt=scan_receipt(c, **changes))
+        assert not (output / 'acceptance.json').exists() and not c.reader_calls
+    # The pins are the checkout's: the same receipt refuses where the commit pins another build, and
+    # where a pin is not set. Nothing the caller passes can stand in for a pin.
+    for name in ('other_pin', 'null_pin'):
+        monkeypatch.setattr(p, 'RECEIPT_CHECK', receipt_checks[name])
+        for extra in ({}, RECEIPT_PINS):
+            with pytest.raises(ValueError, match='upload receipt check refused'):
+                p.accept_publication(c.root / 'request.json', c.candidate, c.meta, c.root / f'{name}-{len(extra)}',
+                                     receipt={**scan_receipt(c), **extra})
+            assert not (c.root / f'{name}-{len(extra)}' / 'acceptance.json').exists() and not c.reader_calls
+    monkeypatch.setattr(p, 'RECEIPT_CHECK', receipt_checks['pinned'])
+    receipt = scan_receipt(c)
+    p.accept_publication(c.root / 'request.json', c.candidate, c.meta, c.root / 'accepted', receipt=receipt)
+    # The record carries the receipt, byte for byte, and nothing else of the scans: no report file,
+    # no category name and no count anywhere in the directory that becomes a public artifact.
+    assert (c.root / 'accepted' / p.UPLOAD_RECEIPT).read_bytes() == receipt['upload_receipt'].read_bytes()
+    assert not (c.root / 'accepted/scan-reports').exists()
+    names = [path.name for path in (c.root / 'accepted').rglob('*') if path.is_file()]
+    assert names.count(p.UPLOAD_RECEIPT) == 1 and not [name for name in names if 'report' in name]
+    for path in (c.root / 'accepted').iterdir():
+        if path.is_file():
+            assert b'/report/' not in path.read_bytes() and b'madeupclass' not in path.read_bytes(), path.name
+
+
+@pytest.mark.parametrize('change', ['null_pin', 'other_pin', 'receipt_removed', 'receipt_replaced_refused',
+                                    'receipt_for_other_bytes', 'stale', 'other_commit', 'proof_only', 'full_report',
+                                    'reports_instead'])
+def test_publication_checks_the_upload_receipt_before_any_api_call_or_write(fixture, monkeypatch, receipt_checks, change):
+    c = fixture; t, publish = prepare_publish(c, monkeypatch)
+    api_calls = []
+    monkeypatch.setattr(p, 'publication_api', lambda *args, **kwargs: api_calls.append(args) or t.api(*args, **kwargs))
+    carried = c.root / 'accepted' / p.UPLOAD_RECEIPT
+    receipt = None
+    if change in ('null_pin', 'other_pin'):
+        # The writing checkout's commit pins another build, or has a pin that is not set. Digests the
+        # caller passes are not pins.
+        monkeypatch.setattr(p, 'RECEIPT_CHECK', receipt_checks[change])
+        receipt = dict(RECEIPT_PINS)
+    elif change == 'receipt_removed':
+        carried.unlink()
+    elif change == 'reports_instead':
+        # An acceptance record of the earlier form: two full reports and no receipt.
+        carried.unlink()
+        dump(c.root / 'accepted/scan-reports/privacy-report.json', FULL_PRIVACY_REPORT)
+        dump(c.root / 'accepted/scan-reports/credential-report.json', {'status': 'PASS'})
+    else:
+        changes = {'receipt_replaced_refused': {'credential': {'status': 'REFUSED'}},
+                   'receipt_for_other_bytes': {'payload': lambda rows: [dict(rows[0], sha256='0' * 64)] + rows[1:]},
+                   'stale': {'both': {'generated_at': '2020-01-01T00:00:00Z'}},
+                   'other_commit': {'both': {'tool_commit': 'd' * 40}},
+                   'proof_only': {'payload': lambda rows: [{'name': 'PROOF-ONLY-x', 'bytes': 1, 'sha256': '1' * 64}]},
+                   'full_report': {'document': FULL_PRIVACY_REPORT}}[change]
+        shutil.copyfile(scan_receipt(c, **changes)['upload_receipt'], carried)
+    with pytest.raises(ValueError, match='upload receipt'):
+        publish(receipt)
+    assert not api_calls and not t.uploads
+    record = p.read_json(c.root / 'publication/publication.json')
+    assert record['status'] == 'refused_or_partial' and record['write_attempted'] == [] and 'scan_receipt' not in record
+
+
+def test_publication_records_the_receipt_it_checked(fixture, monkeypatch, receipt_checks):
+    c = fixture; t, publish = prepare_publish(c, monkeypatch)
+    result = publish()
+    assert result['scan_receipt'].startswith('UPLOAD-CHECK PASS files=%d ' % len(c.files))
+    for name in c.files:
+        assert '%s=%s:' % (name, p.digest(c.candidate / name)) in result['scan_receipt']
+    assert 'release_commit=' + c.request['source_sha'] in result['scan_receipt']
+    assert p.read_json(c.root / 'publication/publication.json')['scan_receipt'] == result['scan_receipt']
+    # The record names the receipt, the two full reports it was written from (by digest), the target,
+    # the pins file and the commit of the checkout the pins were read from.
+    words = result['scan_receipt'].split()
+    pins = receipt_checks['pinned'].parent.parent / 'release/upload-receipt-pins.json'
+    assert 'target=' + c.target in words and 'pins=' + p.digest(pins) in words
+    assert 'receipt=' + p.digest(c.root / 'accepted' / p.UPLOAD_RECEIPT) in words
+    assert 'privacy_report=' + '1b' * 32 in words and 'credential_report=' + '2c' * 32 in words
+    assert any(re.fullmatch(r'pins_commit=[0-9a-f]{40}', word) for word in words)
+    assert (c.root / 'publication' / p.UPLOAD_RECEIPT).read_bytes() == (c.root / 'accepted' / p.UPLOAD_RECEIPT).read_bytes()
+
+
+def test_acceptance_checks_the_receipt_for_the_attestation_bundle_too(fixture, monkeypatch):
+    c = fixture
+    bundle = c.files[2]
+    assert bundle.endswith('-provenance.jsonl') and (c.candidate / bundle).is_file()
+    # A receipt that does not name the bundle, and receipts that name it with another digest or size.
+    for number, payload in enumerate([
+            lambda rows: [row for row in rows if row['name'] != bundle],
+            lambda rows: [dict(row, sha256='0' * 64) if row['name'] == bundle else row for row in rows],
+            lambda rows: [dict(row, bytes=row['bytes'] + 1) if row['name'] == bundle else row for row in rows]]):
+        output = c.root / f'bundle-refused-{number}'
+        with pytest.raises(ValueError, match='upload receipt check refused'):
+            p.accept_publication(c.root / 'request.json', c.candidate, c.meta, output, receipt=scan_receipt(c, payload=payload))
+        assert not (output / 'acceptance.json').exists() and not c.reader_calls
+    # The files the check is given are the three retained copies, the bundle among them.
+    commands = []
+    real_run = subprocess.run
+    def run(command, **kwargs):
+        commands.append(command)
+        return real_run(command, **kwargs)
+    monkeypatch.setattr(p.subprocess, 'run', run)
+    p.accept_publication(c.root / 'request.json', c.candidate, c.meta, c.root / 'accepted', receipt=scan_receipt(c))
+    checks = [command for command in commands if str(p.RECEIPT_CHECK) in command]
+    assert len(checks) == 1
+    assert checks[0][-len(c.files):] == [str(c.root / 'accepted/assets' / name) for name in c.files]
+
+
+def test_no_caller_gives_the_receipt_check_a_pin_or_a_full_report(fixture, monkeypatch):
+    c = fixture
+    # The candidate tool runs the check of its own checkout, and holds no pin of its own.
+    assert CHECKOUT_RECEIPT_CHECK == p.ROOT / 'scripts/release-upload-receipt-check.py'
+    assert not hasattr(p, 'RECEIPT_PINS') and not hasattr(p, 'SCAN_REPORTS')
+    arguments = type('Arguments', (), {'upload_receipt': 1, 'receipt_max_age_hours': 3})()
+    assert p.receipt_inputs(arguments) == {'upload_receipt': 1, 'max_age_hours': 3}
+    # The command it runs: the target, the receipt, the release commit, the release's version and the
+    # files. Digests in the receipt inputs are not passed on.
+    commands = []
+    real_run = subprocess.run
+    def run(command, **kwargs):
+        commands.append(command)
+        return real_run(command, **kwargs)
+    monkeypatch.setattr(p.subprocess, 'run', run)
+    p.accept_publication(c.root / 'request.json', c.candidate, c.meta, c.root / 'accepted',
+                         receipt={**scan_receipt(c), **RECEIPT_PINS})
+    checks = [command for command in commands if str(p.RECEIPT_CHECK) in command]
+    assert len(checks) == 1
+    options = [word for word in checks[0] if word.startswith('--')]
+    assert options == ['--target', '--receipt', '--release-commit', '--version']
+    assert checks[0][checks[0].index('--target') + 1] == c.target
+    # The version every file name is held to is the request's: the release the candidate is for.
+    assert checks[0][checks[0].index('--version') + 1] == c.request['connect_version']
+    assert checks[0][checks[0].index('--receipt') + 1] == str(c.root / 'accepted' / p.UPLOAD_RECEIPT)
+    assert not any(value in checks[0] for value in RECEIPT_PINS.values())
+    # Its command line has no option for a pin or for a full report.
+    for option in ('--name-list-sha256', '--rules-sha256', '--detector-pinned-sha256', '--detector-current-sha256',
+                   '--non-published-list-sha256', '--pins', '--privacy-report', '--credential-report'):
+        monkeypatch.setattr(p.sys, 'argv', ['connect-candidate.py', 'publish-accepted', '--accepted', '/accepted',
+                                            '--acceptance-sha256', '0' * 64, '--output', '/output', option, '1' * 64])
+        monkeypatch.setattr(p, 'publish_accepted', lambda *args, **kwargs: pytest.fail('publication was reached'))
+        with pytest.raises(SystemExit) as error:
+            p.main()
+        assert error.value.code == 2
 
 
 def assert_public_fragment(c, result):
@@ -990,8 +1253,8 @@ def test_replaced_private_path_cannot_substitute_entered_upload_stream(fixture,m
 
 def test_upload_command_reads_retained_stdin_not_a_path(tmp_path,monkeypatch):
     commands=[]
-    def command(argv,*,stdin=None):
-        commands.append((argv,stdin.read()))
+    def command(argv,*,stdin=None,**bound):
+        commands.append((argv,stdin.read() if stdin is not None else None,bound))
         return {'controlled':'upload receipt'}
     monkeypatch.setattr(p,'command_json',command)
     with p.tempfile.TemporaryFile('w+b',dir=tmp_path) as retained:
@@ -1001,6 +1264,9 @@ def test_upload_command_reads_retained_stdin_not_a_path(tmp_path,monkeypatch):
     assert result=={'controlled':'upload receipt'}
     assert commands[0][0][-2:]==['--input','-']
     assert commands[0][1]==b'exact accepted bytes'
+    # The upload of a file has a time bound of its own, longer than the one a read keeps.
+    p.publication_api('repos/controlled')
+    assert commands[0][2]=={'timeout':p.UPLOAD_SECONDS} and p.UPLOAD_SECONDS>=3600 and commands[1][1:]==(None,{})
 
 
 def test_private_repository_refuses_before_any_upload(fixture,monkeypatch):

@@ -1204,20 +1204,23 @@ them.
   address it bound, with a warning when that is not a loopback address. A
   request that carries an `Origin` header is served only when the origin is
   allowed and is answered 403 otherwise, preflights included, with no
-  provider call: loopback origins by default (`localhost`, `127.0.0.1` and
-  `[::1]`, http or https, any port), the one origin `--cors-origin <origin>`
-  (`allowOrigin`) names, or any origin with `*`; an `Origin` of `null` only
-  with `*`. While it is bound to a loopback address the standalone proxy
-  also refuses a request whose `Host` header is not a loopback name or
-  address; `createProxyHandler` offers that check as `loopbackHostOnly`, off
-  by default. Through 0.9.14 the standalone proxy bound every interface,
-  every origin was allowed by default, and `--cors-origin` set the response
-  header without comparing the request's origin. A request without an
-  `Origin` header is forwarded as before, except one a browser marks
-  `Sec-Fetch-Site: cross-site` (a browser sends no `Origin` on some GETs),
-  which is answered 403 unless `*` allows every origin. The proxy does not
-  check who calls it, and one that listens on another address belongs behind
-  your own authentication. Affects 0.4.1 through 0.9.14.
+  provider call: loopback origins by default (`localhost`, any `127.x.x.x`
+  address and `[::1]`, http or https, any port), the one origin
+  `--cors-origin <origin>` (`allowOrigin`) names, or any origin with `*`; an
+  `Origin` of `null` only with `*`. While it is bound to a loopback address
+  the standalone proxy also refuses a request whose `Host` header is not a
+  loopback name or address; `createProxyHandler` offers that check as
+  `loopbackHostOnly`, off by default. Through 0.9.14 the standalone proxy
+  bound every interface, every origin was allowed by default, and
+  `--cors-origin` set the response header without comparing the request's
+  origin. A caller that reached the port over the network, or a web page
+  open in a browser on the same machine, could send requests to the
+  providers with the proxy's keys. A request without an `Origin` header is
+  forwarded as before, except one a browser marks
+  `Sec-Fetch-Site: cross-site`, which is answered 403 unless `*` allows
+  every origin. The proxy does not check who calls it, and one that listens
+  on another address belongs behind your own authentication (see Known
+  limitations). Affects 0.4.1 through 0.9.14.
 
 ### Upgrade notes
 
@@ -1417,12 +1420,16 @@ them.
     did by default, and is the only setting that serves a page opened from
     a file or a sandboxed frame (`Origin: null`).
   - A server that embeds `createProxyHandler` without `allowOrigin` served
-    every origin and now serves loopback origins only: pass the site's
-    origin, or `allowOrigin: '*'` for the earlier behaviour. An
-    `allowOrigin` it already passes is now compared with each request, so a
-    page on any other origin gets 403. The handler answers a preflight
-    itself and no longer passes the provider's `access-control-*` headers
-    on.
+    every origin and now serves loopback origins only. That refuses the
+    site's own pages too: a page sends an `Origin` on its POSTs to its own
+    server, so a same-origin request gets 403 until the site's origin is
+    passed as `allowOrigin` (or `allowOrigin: '*'` for the earlier
+    behaviour). `allowOrigin` is one origin as a string; a list, a pattern
+    or a function allows no origin. An `allowOrigin` the server already
+    passes is now compared with each request, so a page on any other origin
+    gets 403. The handler answers a preflight itself and no longer passes
+    the provider's `access-control-*` headers on. A dependency range such
+    as `^0.9.14` takes 0.9.15 at the next install.
   - A client that reaches a loopback-bound standalone proxy under another
     host name (a hosts-file alias, a local reverse proxy that keeps the
     original `Host`) gets 403: call it as `localhost` or `127.0.0.1`. A
@@ -1444,6 +1451,21 @@ them.
   pre-0.9 state rewrites it: that second writer gives the file the
   permissions the manifest had). Keep the directories that hold them closed
   to other accounts, or run under a umask of 077.
+
+- `@rkat/web` provider proxy: the proxy does not authenticate its callers
+  (see Security for what it checks). Every user and process of the machine
+  reaches a proxy bound to a loopback address, and so does a page served
+  from any loopback origin. A proxy bound to another address with `--host`
+  forwards a caller on the network that sends no `Origin` header; it does
+  not check the `Host` header, so a GET from a page whose host name points
+  at the proxy is forwarded and the page reads the answer; and a cross-site
+  GET that carries no `Sec-Fetch-Site` header is forwarded, which is every
+  such GET over plain http, because a browser sends that header only to
+  https and loopback addresses. A tunnel or reverse proxy that rewrites
+  `Host` to a loopback name has the same effect on a loopback-bound proxy.
+  A request without `Origin` that a browser marks `same-site` is forwarded.
+  The proxy keeps no record of the requests it forwards. Put the proxy
+  behind your own authentication in those uses.
 
 - Mob: an explicit resume of a stopped mob (`MobHandle::resume`) rebuilds
   each member from its seat as the host's spawn customizer makes it and

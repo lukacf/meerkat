@@ -615,9 +615,9 @@ them again after the return. A rule that grants `*` or `agent.*` needs no
 change.
 
 **Identity policy.** A policy that sets `approval.timeouts_ms.archive` or
-`approval.timeouts_ms.adopt`, or whose approval rule lists `archive` or
-`adopt` under `change`, is refused by a 0.9.14 gateway at init, enabled or
-not. **Do:** before a rollback, remove those keys and values from
+`approval.timeouts_ms.adopt`, or in which a rule of `approval.rules` lists
+`archive` or `adopt` under `change`, is refused by a 0.9.14 gateway at init,
+enabled or not. **Do:** before a rollback, remove those keys and values from
 `runtime_options.identity_creation`; add them again after the return.
 
 **Agents created at run time.** A 0.9.14 gateway starts on a state that holds

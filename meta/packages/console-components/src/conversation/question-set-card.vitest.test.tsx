@@ -67,14 +67,21 @@ describe("QuestionSetCard", () => {
     expect(view.getByTestId(`question-set-asked:${PENDING_ID}`).textContent).toContain("Asked by Release Planner");
     expect(view.getByRole("status").textContent).toBe("Answer needed");
     expect(view.getByTestId(`question-set-deadline:${PENDING_ID}`).textContent).toMatch(/^in \d+m/);
-    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent)
-      .toBe("Pick one choice per question. A question you leave out reaches the agent as unanswered.");
+    // What to do, where the answers go, what happens next, and by when.
+    const hint = view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent ?? "";
+    expect(hint.startsWith("Pick one choice per question, then send. Your answers go to Release Planner, which continues with them; "
+      + "a question you leave out reaches it as unanswered. If nobody answers by ")).toBe(true);
+    expect(hint.endsWith(", Release Planner is told that the questions timed out.")).toBe(true);
     const [region, start] = groups(view);
     expect(groups(view).length).toBe(2);
     expect(view.getByRole("group", { name: "Which region goes first?" })).toBe(region);
     expect(region.querySelector("legend")?.textContent).toBe("Which region goes first?");
     expect(within(region).getAllByRole("radio").length).toBe(2);
     expect(within(start).getAllByRole("radio").length).toBe(3);
+    cleanup();
+    const undated = show({ set: questions({ deadline_at_ms: undefined }) });
+    expect(undated.view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent)
+      .toBe("Pick one choice per question, then send. Your answers go to Release Planner, which continues with them; a question you leave out reaches it as unanswered.");
   });
 
   it("falls back to the asking agent's name for a set without a title", () => {
@@ -158,6 +165,14 @@ describe("QuestionSetCard", () => {
       </AgentDirectoryProvider>,
     );
     expect(view.getByTestId(`question-set:${PENDING_ID}`).dataset.state).toBe("submitting");
+    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent).toBe("Sending your answers to Release Planner.");
+    view.rerender(
+      <AgentDirectoryProvider directory={directory}>
+        <QuestionSetCard set={questions()} resourceStatus="ready" onAnswer={onAnswer} onDismiss={onDismiss}
+          decision={{ phase: "submitting", action: "dismiss" }} />
+      </AgentDirectoryProvider>,
+    );
+    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent).toBe("Telling Release Planner that no answer is coming.");
     expect(send(view).disabled).toBe(true);
     expect(dismiss(view).disabled).toBe(true);
     expect((view.getAllByRole("radio") as HTMLInputElement[]).every((input) => input.disabled)).toBe(true);
@@ -184,7 +199,7 @@ describe("QuestionSetCard", () => {
     const { view, card } = show({ decision, closed: "answered" });
     expect(card.dataset.state).toBe("answered");
     expect(view.getByRole("status").textContent).toBe("Answered");
-    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent).toBe("Answers sent.");
+    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent).toBe("Your answers were sent to Release Planner, which continues with them.");
     const summary = view.getByTestId(`question-set-summary:${PENDING_ID}`);
     expect(within(summary).getByText("Which region goes first?").nextElementSibling?.textContent).toBe("Not answered");
     expect(within(summary).getByText("When should it start?").nextElementSibling?.textContent).toBe("After the <b>freeze</b>");
@@ -197,7 +212,7 @@ describe("QuestionSetCard", () => {
   it("says a dismissed set was dismissed", () => {
     const { view, card } = show({ decision: { phase: "dismissed", action: "dismiss" }, closed: "dismissed" });
     expect(card.dataset.state).toBe("dismissed");
-    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent).toBe("Dismissed. The agent was told no answer is coming.");
+    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent).toBe("Dismissed: no answer is coming, and Release Planner was told so.");
     expect(view.queryByRole("button", { name: "Send answers" })).toBeNull();
   });
 
@@ -330,6 +345,8 @@ describe("QuestionSetCard", () => {
     cleanup();
     const stale = show({ resourceStatus: "stale" });
     expect(stale.card.dataset.state).toBe("stale");
+    expect(stale.view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent)
+      .toBe("The Console could not read the questions again just now, so this card may be out of date. It keeps trying; you can answer once it has read them.");
     expect(send(stale.view).disabled).toBe(true);
     expect(dismiss(stale.view).disabled).toBe(true);
     cleanup();
@@ -339,6 +356,73 @@ describe("QuestionSetCard", () => {
     expect(locked.card.dataset.state).toBe("failed");
     expect(dismiss(locked.view).disabled).toBe(true);
     expect((locked.view.getAllByRole("radio") as HTMLInputElement[]).every((input) => input.disabled)).toBe(true);
+  });
+
+  it("moves focus to the question's first choice after Clear, and to the card's sentence after Send", () => {
+    const { view, onAnswer, onDismiss } = show();
+    const focusedId = () => document.activeElement?.getAttribute("data-testid") ?? null;
+    fireEvent.click(radio(view, "Tonight"));
+    const clear = view.getByRole("button", { name: "Clear the answer to: When should it start?" });
+    clear.focus();
+    fireEvent.click(clear);
+    // Clear is gone: focus is on the first choice of its question, not lost.
+    expect((document.activeElement as HTMLInputElement).type).toBe("radio");
+    expect((document.activeElement as HTMLInputElement).value).toBe("c-now");
+    fireEvent.click(radio(view, /^Europe/));
+    send(view).focus();
+    fireEvent.click(send(view));
+    const sending = (decision: QuestionSetDecisionState, closed?: "answered") => (
+      <AgentDirectoryProvider directory={directory}>
+        <QuestionSetCard set={questions()} resourceStatus="ready" onAnswer={onAnswer} onDismiss={onDismiss} decision={decision} closed={closed} />
+      </AgentDirectoryProvider>
+    );
+    // Send disables itself: focus goes to the sentence that says what happens.
+    view.rerender(sending({ phase: "submitting", action: "answer" }));
+    expect(focusedId()).toBe(`question-set-sentence:${PENDING_ID}`);
+    expect(document.activeElement?.textContent).toBe("Sending your answers to Release Planner.");
+    view.rerender(sending({ phase: "answered", action: "answer", answers: { "q-region": { kind: "choice", choiceId: "c-eu" } } }, "answered"));
+    expect(focusedId()).toBe(`question-set-sentence:${PENDING_ID}`);
+    cleanup();
+    // A card nobody acted on takes no focus when its state changes.
+    const idle = show();
+    idle.view.rerender(sending({ phase: "submitting", action: "answer" }));
+    expect(focusedId()).toBeNull();
+  });
+
+  it("moves focus to the card's sentence after Dismiss", () => {
+    const { view, onAnswer, onDismiss } = show();
+    dismiss(view).focus();
+    fireEvent.click(dismiss(view));
+    view.rerender(
+      <AgentDirectoryProvider directory={directory}>
+        <QuestionSetCard set={questions()} resourceStatus="ready" onAnswer={onAnswer} onDismiss={onDismiss}
+          decision={{ phase: "submitting", action: "dismiss" }} />
+      </AgentDirectoryProvider>,
+    );
+    expect(document.activeElement?.getAttribute("data-testid")).toBe(`question-set-sentence:${PENDING_ID}`);
+  });
+
+  it("says what it does not show of a set larger than the reader's limits", () => {
+    const choices = (count: number) => Array.from({ length: count }, (_, index) => ({ id: `c${index}`, label: `Choice ${index}` }));
+    const { view, card } = show({ set: questions({
+      title: "T".repeat(230),
+      questions: [
+        { id: "q0", prompt: "Which one?", choices: choices(10) },
+        { id: "q1", prompt: "And here?", choices: choices(9) },
+        ...Array.from({ length: 9 }, (_, index) => ({ id: `q${index + 2}`, prompt: `Question ${index + 2}?`, choices: choices(2) })),
+      ],
+    }) });
+    expect(groups(view).length).toBe(10);
+    const [first, second] = groups(view);
+    expect(within(first).getAllByRole("radio").length).toBe(8);
+    expect(within(first).getByText("2 more choices are not shown.")).toBeTruthy();
+    expect(within(second).getByText("1 more choice is not shown.")).toBeTruthy();
+    expect(within(card).getByTestId(`question-set-more:${PENDING_ID}`).textContent)
+      .toBe("1 more question is not shown. Some text is too long and is shown shortened.");
+    cleanup();
+    const usual = show();
+    expect(usual.view.queryByTestId(`question-set-more:${PENDING_ID}`)).toBeNull();
+    expect(usual.view.queryByText(/not shown/)).toBeNull();
   });
 
   it("puts names first: the identity and every id only inside the collapsed Technical details", () => {
@@ -415,6 +499,26 @@ describe("QuestionSetList", () => {
     expect(view.getByTestId("question-set-notice").textContent)
       .toBe("This question is no longer waiting for an answer. The Console could not confirm whether your answer was the one that arrived.");
     for (const word of SET_WORDS) expect(view.container.innerHTML).not.toContain(word);
+  });
+
+  it("says that the first read of the questions failed, with a way to try again, in the inbox's list only", () => {
+    const onRefresh = vi.fn();
+    const failed = listSnapshot({ status: "unavailable", sets: [], slots: {}, error: "gateway timeout" });
+    const view = render(<QuestionSetList view={{ snapshot: failed, onAnswer: vi.fn(), onDismiss: vi.fn(), onRefresh }} testId="list" />);
+    const notice = view.getByTestId("question-set-unavailable");
+    expect(notice.getAttribute("role")).toBe("status");
+    expect(notice.textContent).toContain("The questions agents asked could not be loaded. The Console keeps trying; you can also try now.");
+    fireEvent.click(view.getByRole("button", { name: "Try again" }));
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+    cleanup();
+    // One agent's conversation does not repeat it.
+    const chat = render(<QuestionSetList view={{ snapshot: failed, onAnswer: vi.fn(), onDismiss: vi.fn(), onRefresh }} identity={IDENTITY} />);
+    expect(chat.container.textContent).toBe("");
+    cleanup();
+    // A read that failed after a list was read keeps the cards: no such notice.
+    const stale = render(list(listSnapshot({ status: "stale" })));
+    expect(stale.queryByTestId("question-set-unavailable")).toBeNull();
+    expect(stale.getByTestId(`question-set:${PENDING_ID}`).dataset.state).toBe("stale");
   });
 
   it.each(["not_open", "expired"] as const)("leaves the gateway's refusal (%s) as the one line of a card it removed", (kind) => {

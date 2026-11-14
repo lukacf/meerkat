@@ -3,6 +3,7 @@ import { CONSOLE_RPC_METHODS } from "./contract";
 import type { ApprovalResourceEnvironment } from "./pending-approvals";
 import {
   FREE_TEXT_MAX_BYTES,
+  QUESTION_SET_READ_LIMITS,
   createQuestionSetResource,
   normalizeQuestionSet,
   questionSetAnswerParams,
@@ -139,6 +140,66 @@ describe("normalizeQuestionSet", () => {
     expect(read).toEqual({ ...set(), questions: [{ ...set().questions[0], recommended: undefined }, set().questions[1]] });
     expect(Object.keys(read.questions[0].choices[0])).toEqual(["id", "label"]);
     expect("recommended" in read.questions[0]).toBe(false);
+  });
+
+  it("treats a title, prompt or label of only invisible characters as empty", () => {
+    const invisible = (...points: number[]) => String.fromCodePoint(...points);
+    const question = wire().questions[0];
+    for (const blank of [
+      invisible(0x200b, 0x200b), invisible(0xfeff), invisible(0x2060), ` ${invisible(0xad)}\t`, invisible(0x3164),
+      invisible(0x200e, 0x202e, 0x200d), invisible(0xfe0f, 0x34f), invisible(0x2800),
+    ]) {
+      // An empty prompt or label is one the Console cannot present.
+      expect(normalizeQuestionSet(wire(PENDING_ID, { questions: [{ ...question, prompt: blank }] }))).toBeNull();
+      expect(normalizeQuestionSet(wire(PENDING_ID, { questions: [{ ...question, choices: [{ id: "eu", label: blank }, { id: "us", label: "United States" }] }] }))).toBeNull();
+      // An empty title is no title: the card names the asking agent instead.
+      const untitled = normalizeQuestionSet(wire(PENDING_ID, { title: blank }))!;
+      expect(untitled.pendingId).toBe(PENDING_ID);
+      expect("title" in untitled).toBe(false);
+    }
+    // Invisible characters beside visible ones are kept as sent.
+    const mixed = `Go${invisible(0x200b)} live?`;
+    expect(normalizeQuestionSet(wire(PENDING_ID, { questions: [{ ...question, prompt: mixed }] }))!.questions[0].prompt).toBe(mixed);
+  });
+
+  it("reads no more than the gateway's own limits and says what it left out", () => {
+    expect(QUESTION_SET_READ_LIMITS).toEqual({ questions: 10, choices: 8, title: 200, prompt: 1024, label: 256 });
+    const many = normalizeQuestionSet(wire(PENDING_ID, {
+      title: "T".repeat(201),
+      questions: [
+        {
+          id: "q0", prompt: "P".repeat(1500), recommended: "c9",
+          choices: Array.from({ length: 1000 }, (_, index) => ({ id: `c${index}`, label: index === 0 ? "L".repeat(300) : `Choice ${index}` })),
+        },
+        ...Array.from({ length: 11 }, (_, index) => ({ id: `q${index + 1}`, prompt: `Question ${index + 1}?`, choices: [{ id: "y", label: "Yes" }, { id: "n", label: "No" }] })),
+        // Not read: a row past the limit does not decide whether the set is shown.
+        { id: "q0", prompt: "" },
+      ],
+    }))!;
+    expect(many.questions.length).toBe(10);
+    expect(many.omittedQuestions).toBe(3);
+    expect(many.questions[0].choices.length).toBe(8);
+    expect(many.questions[0].omittedChoices).toBe(992);
+    // A recommendation for a choice that is not shown is not shown either.
+    expect("recommended" in many.questions[0]).toBe(false);
+    expect(many.title).toBe("T".repeat(200));
+    expect(many.questions[0].prompt).toBe("P".repeat(1024));
+    expect(many.questions[0].choices[0].label).toBe("L".repeat(256));
+    expect(many.shortened).toBe(true);
+    expect("omittedChoices" in many.questions[1]).toBe(false);
+    // Whole characters are kept: a cut never splits one.
+    const emoji = normalizeQuestionSet(wire(PENDING_ID, { title: "😀".repeat(201) }))!;
+    expect(emoji.title).toBe("😀".repeat(200));
+    // A set within the limits is read as sent, with nothing added.
+    const exact = normalizeQuestionSet(wire(PENDING_ID, {
+      title: "T".repeat(200),
+      questions: Array.from({ length: 10 }, (_, index) => ({
+        id: `q${index}`, prompt: "P".repeat(1024), choices: Array.from({ length: 8 }, (_unused, choice) => ({ id: `c${choice}`, label: "L".repeat(256) })),
+      })),
+    }))!;
+    expect(exact.questions.length).toBe(10);
+    expect(exact.questions.every((entry) => entry.choices.length === 8 && !("omittedChoices" in entry))).toBe(true);
+    expect("omittedQuestions" in exact || "shortened" in exact).toBe(false);
   });
 });
 
@@ -572,6 +633,24 @@ describe("createQuestionSetResource", () => {
       c.advance(60_000); await tick(); expect(reads).toBe(1);
       resource.dispose();
     }
+  });
+
+  it("says a first read failed, with its error, keeps reading, and lists the sets once a read succeeds", async () => {
+    const c = clock(); let fail = true; let reads = 0;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => { reads++; if (fail) throw new Error("gateway timeout"); return { question_sets: [wire()] }; },
+      decide: async () => ({}),
+    });
+    await tick();
+    expect(resource.getSnapshot()).toMatchObject({ status: "unavailable", error: "gateway timeout", sets: [], readOnly: false });
+    c.advance(15_000); await tick();
+    expect(reads).toBe(2);
+    expect(resource.getSnapshot().status).toBe("unavailable");
+    fail = false; await resource.refresh();
+    expect(resource.getSnapshot()).toMatchObject({ status: "ready", error: undefined });
+    expect(resource.getSnapshot().sets.length).toBe(1);
+    resource.dispose();
   });
 
   it("keeps the last list when a read fails and clears it when access is denied", async () => {

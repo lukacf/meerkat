@@ -46,6 +46,15 @@ describe("useQuestionSets", () => {
     expect(hook.result.current?.snapshot.decisions[PENDING_ID].phase).toBe("answered");
   });
 
+  it("reads the sets again when asked to", async () => {
+    const { hook, load } = mount();
+    await waitFor(() => expect(hook.result.current?.snapshot.status).toBe("ready"));
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(typeof hook.result.current?.onRefresh).toBe("function");
+    await act(async () => { await hook.result.current?.onRefresh?.(); });
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
   it("reads nothing while disabled", async () => {
     const { hook, load } = mount({ enabled: false });
     await act(async () => { await Promise.resolve(); });

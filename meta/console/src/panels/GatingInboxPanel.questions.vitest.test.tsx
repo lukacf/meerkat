@@ -107,6 +107,20 @@ describe("GatingInboxPanel question sets", () => {
     expect(view.getByTestId("gating-pending:p1")).toBeTruthy();
   });
 
+  it("says that the questions could not be loaded, with a way to try again, and still shows the approvals", () => {
+    const onRefresh = vi.fn();
+    const view = render(
+      <GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={approvals()}
+        questions={{ snapshot: sets({ status: "unavailable", sets: [], slots: {}, error: "gateway timeout" }), onAnswer: vi.fn(), onDismiss: vi.fn(), onRefresh }} />,
+    );
+    expect(view.getByTestId("question-set-unavailable").textContent)
+      .toContain("The questions agents asked could not be loaded. The Console keeps trying; you can also try now.");
+    fireEvent.click(within(view.getByTestId("question-set-unavailable")).getByRole("button", { name: "Try again" }));
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+    expect(view.getByTestId("gating-pending:p1")).toBeTruthy();
+    expect(view.getByTestId("gating-tab:pending").textContent).toContain("1");
+  });
+
   it("is unchanged without the question sets prop", () => {
     const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={approvals()} />);
     expect(view.queryByTestId("question-set-list")).toBeNull();

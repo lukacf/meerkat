@@ -1076,7 +1076,12 @@ pub fn play_step(name: &str) -> String {
 }
 
 /// The provider-stream step recorded before a typed turn is sent to the
-/// session. Between two channels it lands after the closed channel's end.
+/// session. Between two channels it is recorded on the channel the journal
+/// still calls current, the closed one: after that channel's receiver end
+/// when the recording has one, and as the channel's last line, before any
+/// end, when it has none (a host close whose transport was already gone).
+/// A replay treats a typed turn with no provider frame after it as holding
+/// nothing in either position.
 pub const TYPED_TURN_STEP: &str = "typed_turn";
 
 /// The provider-stream step recorded before the harness completes the

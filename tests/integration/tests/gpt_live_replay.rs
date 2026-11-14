@@ -35,6 +35,12 @@
 /// other rows beside the scenarios): they need no provider and no key. The
 /// scenarios themselves stay ignored (`lane:e2e-smoke`), as in their own
 /// target, and still stop at their first line without a provider key.
+///
+/// With a provider key in the environment they do NOT stop: the ignored
+/// rows of this target are the eleven live scenarios. No lane runs this
+/// target's ignored rows. Never run it with ignored rows included
+/// (`--run-ignored`, `-- --ignored`, `-- --include-ignored`) on a host that
+/// holds a provider key.
 #[path = "gpt_live_public_e2e.rs"]
 mod gpt_live_public_e2e;
 #[path = "support/gpt_live_replay.rs"]
@@ -66,7 +72,7 @@ use meerkat::surface::{
     ServiceMemberLiveHostConfig,
 };
 use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
-use meerkat_contracts::{LiveOpenTransport, WireLiveTransportBootstrap};
+use meerkat_contracts::{LiveCloseStatus, LiveOpenTransport, WireLiveTransportBootstrap};
 use meerkat_core::{
     AuthBindingRef, AuthProfileConfig, BackendProfileConfig, BindingId, BindingOrigin,
     BindingPolicy, BlobStore, Config, ConfigRuntime, ConfigStore, CredentialSourceSpec,
@@ -1505,10 +1511,12 @@ struct HeldJobs {
     observed: Arc<std::sync::Mutex<Vec<HeldJobObservation>>>,
 }
 
-/// The session's delegation records while job `job` was held.
+/// The session's delegation records while job `job` was held, and where
+/// its channel's tape stood when they were read.
 #[derive(Clone, Debug)]
 struct HeldJobObservation {
     job: usize,
+    parked: Parked,
     delegations: Vec<DelegationRecord>,
 }
 
@@ -1555,10 +1563,13 @@ async fn drive_replay(
                 let observed = Arc::clone(&held_jobs.observed);
                 gate_openers.push(tokio::spawn(async move {
                     if cassette.waiting_for(channel, &finished).await.is_ok() {
+                        // Where the tape stands when the records are read.
+                        let parked = cassette.parked(channel);
                         if let Ok(delegations) = delegation_records(&runtime, &session_id).await {
                             observed.lock().expect("held job observations").push(
                                 HeldJobObservation {
                                     job: index,
+                                    parked,
                                     delegations,
                                 },
                             );
@@ -1605,6 +1616,16 @@ async fn drive_replay(
             at_first_step: evidence.owner_appends()?,
         });
         for step in markers {
+            // A typed turn marked while the channel still receives frames
+            // was made during the channel. The driver cannot make one yet
+            // (no recording has one); it must not step past it as if it
+            // were a browser action.
+            if step == support::TYPED_TURN_STEP {
+                return Err(format!(
+                    "channel {channel}'s tape marks a typed turn while the channel is up; the replay driver cannot make it yet"
+                )
+                .into());
+            }
             cassette.release(channel, &step).await?;
             if step.starts_with("disconnect") && tape.host_closes_after(&step) {
                 cassette.at_host_close(channel).await?;
@@ -1613,6 +1634,17 @@ async fn drive_replay(
         }
         cassette.ended(channel).await?;
         host.closed(&mut open).await?;
+        // A tape that marks typed turns after this channel says how many
+        // the recorded test made here; the script must make exactly those.
+        // (The two committed recordings predate the marker and say 0.)
+        let typed_here = usize::from(script.typed_after_channel.contains_key(&channel));
+        if tape.typed_turns_after > 0 && tape.typed_turns_after != typed_here {
+            return Err(format!(
+                "channel {channel}'s tape marks {} typed turn(s) after it, the replay script makes {typed_here}",
+                tape.typed_turns_after
+            )
+            .into());
+        }
         // The recorded test typed during the closure, before the jobs the
         // close left running finished (their merge then waits behind it).
         if let Some(prompt) = script.typed_after_channel.get(&channel) {
@@ -1765,12 +1797,17 @@ const S106_TYPED_REPLY: &str = "Acknowledged: the budget code is Kestrel.";
 /// source with its reply replayed on the reopened channel as quiet runtime
 /// work.
 async fn replay_s104() -> Result<Replayed, Box<dyn std::error::Error>> {
+    replay_s104_on(Fixture::parse(S104_FIXTURE)?).await
+}
+
+/// The S104 replay over `fixture`: the committed recording, or a tape
+/// constructed from it.
+async fn replay_s104_on(fixture: Fixture) -> Result<Replayed, Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
         .try_init();
     let one_at_a_time = REPLAY_LOCK.lock().await;
-    let fixture = Fixture::parse(S104_FIXTURE)?;
     let merge_reply = runtime_work_reply(&fixture, 2)
         .ok_or("the S104 fixture carries no runtime-work append on channel 2")?;
     let jobs = recorded_jobs(&fixture);
@@ -1847,14 +1884,60 @@ async fn replay_s104() -> Result<Replayed, Box<dyn std::error::Error>> {
 /// reopened channel as quiet runtime work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn std::error::Error>> {
-    let replayed = replay_s104().await?;
+    assert_s104_replays_as_recorded(&replay_s104().await?)
+}
+
+/// A typed turn marked after the host's close. The S104 recording has no
+/// receiver end for its first channel (the host closed it and its transport
+/// was gone), so a capture made with the typed-turn marker writes that
+/// marker as the channel's last line, before any end. This is that tape:
+/// the committed recording with the one marker line a capture would add.
+/// The marker holds nothing, the channel's end included: the tape reports
+/// the typed turn, the host's close is confirmed as on the unmarked tape,
+/// and the replay is the recorded one (same client events, same seed shape
+/// at each open, the merged result on the reopened channel).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s104_replay_plays_a_tape_that_marks_the_typed_turn_after_the_host_close()
+-> Result<(), Box<dyn std::error::Error>> {
+    let recorded = Fixture::parse(S104_FIXTURE)?;
+    let marked = Fixture::with_step_marked_after(&recorded, 1, support::TYPED_TURN_STEP)?;
+    let typed_turns: Vec<usize> = marked
+        .channels
+        .iter()
+        .map(|tape| tape.typed_turns_after)
+        .collect();
+    assert_eq!(
+        typed_turns,
+        [1, 0],
+        "the tape reports the typed turn after its first channel"
+    );
+    for (marked, recorded) in marked.channels.iter().zip(&recorded.channels) {
+        assert_eq!(
+            marked.markers(),
+            recorded.markers(),
+            "the typed turn after channel {} became a tape step",
+            marked.ordinal
+        );
+    }
+    let replayed = replay_s104_on(marked).await?;
+    assert_s104_replays_as_recorded(&replayed)?;
+    // The first channel's close was confirmed by the tape's end, as on the
+    // unmarked tape: nothing was left standing at a step.
+    assert_eq!(replayed.cassette.parked(1), Parked::Ended);
+    Ok(())
+}
+
+/// What an S104 replay owes its recording: each open seeds the recorded
+/// shape, the replay sends exactly the recorded client events, and the
+/// merged job's reply reaches the reopened channel as quiet runtime work.
+fn assert_s104_replays_as_recorded(replayed: &Replayed) -> Result<(), Box<dyn std::error::Error>> {
     let Replayed {
         fixture,
         cassette,
         evidence,
         llm,
         ..
-    } = &replayed;
+    } = replayed;
 
     // Each channel opened with the recorded seed shape (item roles of the
     // startup history; texts follow from the scripted LLM).
@@ -2678,12 +2761,24 @@ async fn s106_replay_a_job_held_until_the_tape_awaits_its_result_is_recorded_run
     let [
         HeldJobObservation {
             job: 0,
+            parked,
             delegations: while_held,
         },
     ] = observed.as_slice()
     else {
         return Err(format!("the first job was observed once while held, got {observed:?}").into());
     };
+    // WHERE the job was held: the records were read while the tape waited
+    // for this job's "Finished" narration, not at any earlier state.
+    let finished = recorded_jobs(&replayed.fixture)
+        .first()
+        .and_then(|job| job.finished.clone())
+        .ok_or("the recording's first job has no Finished narration")?;
+    assert_eq!(
+        parked,
+        &Parked::Client(finished),
+        "the held job was observed while the tape stood elsewhere"
+    );
     assert_eq!(
         while_held.as_slice(),
         [DelegationRecord {
@@ -2801,19 +2896,26 @@ struct ConstructedReplay {
     _one_at_a_time: tokio::sync::MutexGuard<'static, ()>,
 }
 
+/// The first two test steps of the S106 recording's first channel, by
+/// name: a constructed tape cut before the first keeps the open alone, cut
+/// before the second it keeps the first spoken exchange too.
+const S106_FIRST_STEP: &str = "play_at:haul_e1";
+const S106_SECOND_STEP: &str = "play_at:haul_e2";
+
 /// A replay host over a tape constructed from the S106 recording's first
-/// channel (see [`Fixture::constructed`]): the executor and its seed turn
-/// as recorded, nothing driven yet.
+/// channel (see [`Fixture::constructed`]; one channel per step name, cut
+/// before that step): the executor and its seed turn as recorded, nothing
+/// driven yet.
 async fn open_constructed_s106(
     label: &'static str,
-    steps_kept: &[usize],
+    cut_before: &[&str],
     end: ConstructedEnd,
     unanswered: &[(u32, ClientKey)],
     steps: HostSteps,
 ) -> Result<ConstructedReplay, Box<dyn std::error::Error>> {
     let one_at_a_time = REPLAY_LOCK.lock().await;
     let source = Fixture::parse(S106_FIXTURE)?;
-    let fixture = Fixture::constructed(&source, 1, steps_kept, end, unanswered)?;
+    let fixture = Fixture::constructed(&source, 1, cut_before, end, unanswered)?;
     let cassette = Arc::new(Cassette::start(fixture).await?);
     let evidence = Journal::create_for(label, "Saffron".to_owned())?;
     let llm = scripted_llm(BTreeMap::from([(
@@ -2886,7 +2988,7 @@ async fn a_channel_closed_while_its_context_preparation_is_pending_reports_a_typ
     };
     let replay = open_constructed_s106(
         "pending-preparation-replay",
-        &[0, 1],
+        &[S106_FIRST_STEP, S106_SECOND_STEP],
         ConstructedEnd::HostClose,
         &[(2, late_summary.clone())],
         HostSteps {
@@ -2939,7 +3041,9 @@ async fn a_channel_closed_while_its_context_preparation_is_pending_reports_a_typ
     let replacement = next_held_summary(&mut held).await?;
     assert_eq!(replacement.session_id, host.session_id);
     // The replacement channel keeps the recording's first spoken exchange:
-    // its summary returns while the tape stands before that exchange.
+    // a late summary is delivered only once the conversation has started
+    // on its channel, so the channel needs a user turn. Its summary returns
+    // while the tape stands before that exchange.
     let exchange = cassette
         .fixture()
         .channels
@@ -2996,17 +3100,21 @@ async fn a_channel_closed_while_its_context_preparation_is_pending_reports_a_typ
 
 /// A close the provider never confirms. The tape keeps the sideband open
 /// and answers nothing after the host's close, so only the product's own
-/// confirmation bound can end the channel: the close returns, the close is
-/// committed and the custody is Closed, and not before that bound. The row
-/// spends the product's real bound once (the product has no clock seam to
-/// inject one); it asserts no upper limit on the time, only that the
-/// retirement was not earlier than the bound, which no slow host can fail.
+/// confirmation bound can end the channel: the close call returns `Closed`,
+/// the close is committed and the custody is Closed, and not before that
+/// bound. The row spends the product's real bound once (the product has no
+/// clock seam to inject one). It asserts no upper limit on the time, only
+/// that the retirement was not earlier than the bound, which no slow host
+/// can fail. That lower limit would fail only on a product that retires an
+/// unconfirmed close early; no leg of this suite makes it fail (a tape
+/// that confirms the close is caught one assertion earlier, by where the
+/// tape stands).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_close_the_provider_never_confirms_is_retired_at_the_products_own_bound()
 -> Result<(), Box<dyn std::error::Error>> {
     let replay = open_constructed_s106(
         "unconfirmed-close-replay",
-        &[0],
+        &[S106_FIRST_STEP],
         ConstructedEnd::Unconfirmed,
         &[],
         HostSteps::default(),
@@ -3031,6 +3139,10 @@ async fn a_close_the_provider_never_confirms_is_retired_at_the_products_own_boun
         .await;
     host.closed(&mut open).await?;
     let elapsed = requested.elapsed();
+    assert!(
+        matches!(status, Ok(LiveCloseStatus::Closed)),
+        "the unconfirmed close did not return Closed: {status:?}"
+    );
     assert_eq!(
         cassette.parked(channel),
         Parked::Marker(CONSTRUCTED_END_STEP.to_owned()),
@@ -3056,7 +3168,7 @@ async fn a_measured_host_is_handed_the_answer_output_and_completes_its_playback(
     let (outputs, mut published) = tokio::sync::mpsc::unbounded_channel();
     let mut replay = open_constructed_s106(
         "measured-playback-replay",
-        &[1],
+        &[S106_SECOND_STEP],
         ConstructedEnd::HostClose,
         &[],
         HostSteps {

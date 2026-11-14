@@ -34,10 +34,16 @@ Markers make replay causal without a clock: a frame recorded after a client
 event is served only once Meerkat sent that event (matched on event type and
 deterministic `event_id`), and a frame recorded after a marker only once the
 replaying test reached that step. A `typed_turn` made between two channels is
-recorded after the closed channel's `receiver_end`; it holds no frame and
-tells a replay where the typed turn fell. The two committed recordings were
-made before `play`, `typed_turn`, `playback_complete` and `truncate` existed
-and do not carry them.
+recorded on the closed channel: after its `receiver_end` when the recording
+has one, and as the channel's last line, before any end, when it has none (a
+host close whose transport was already gone, as on the first channel of the
+S104 recording). In both positions no provider frame of that channel follows
+it, and that is how a replay knows it: such a marker holds nothing, the
+channel's end included, and only tells the replay that a typed turn was made
+there. A `typed_turn` followed by provider frames was made while its channel
+was up; the replay driver cannot make one yet and stops with an error on such
+a tape. The two committed recordings were made before `play`, `typed_turn`,
+`playback_complete` and `truncate` existed and do not carry them.
 
 A raw recording that lost a line is renamed `provider-stream.jsonl.incomplete`
 at journal finish and is never a fixture.
@@ -105,6 +111,21 @@ CI runs it as the `gpt-live-replay` integration suite
 the public Live path, this directory or the harness changed. A pull request
 does not run it: the suite compiles the mob chain, which the planner leaves
 to the push. Run the command above before pushing such a change.
+
+The target also compiles the live gate's own file, so that its judge rows run
+keyless. Its eleven live scenarios are there as ignored rows: without a
+provider key each stops at its first line, with one it runs against the
+provider. No lane runs this target's ignored rows. Never run it with ignored
+rows included (`--run-ignored`, `-- --ignored`, `-- --include-ignored`) on a
+host that holds a provider key.
+
+Some rows replay a constructed tape instead of a whole recording: a tape
+built in memory by a named function (`Fixture::constructed`,
+`Fixture::with_step_marked_after`) from the lines of a committed recording,
+cut at a test step by its name, with test steps and the host's own close
+added and no provider frame invented, reordered or edited. A tape that needs
+an invented, reordered or edited provider frame is not built that way: it is
+a committed, named file here that states the recording it derives from.
 
 - **Provider:** `support/gpt_live_replay.rs`'s `Cassette` serves the fixture
   as a local public Live API, reached through

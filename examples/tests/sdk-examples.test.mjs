@@ -133,7 +133,7 @@ describe("TypeScript SDK entrypoint lifecycle", { concurrency: 4 }, () => {
         ["initialize", "capabilities/get"]);
       const creates = result.requests.filter((r) => r.method === "session/create");
       assert.equal(creates.length, example.startsWith("008") ? 4 : 1);
-      assert.ok(creates.every((r) => r.params.model === "claude-sonnet-4-6"));
+      assert.ok(creates.every((r) => r.params.model === "claude-sonnet-5-5"));
       if (example.startsWith("008")) {
         assert.equal(result.stdout.match(/Confidence:  50%/g)?.length, 4);
         const ajv = new Ajv();

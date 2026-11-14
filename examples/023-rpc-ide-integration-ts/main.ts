@@ -41,7 +41,7 @@ async function main() {
     const session = await client.createSession(
       "I'm building a VS Code extension. What are the key APIs I need?",
       {
-        model: "claude-sonnet-4-6",
+        model: "claude-sonnet-5-5",
         systemPrompt:
           "You are a VS Code extension development expert. Be concise and practical.",
       },

@@ -806,6 +806,10 @@ async fn a_same_session_successor_is_seated_with_the_composed_seat_its_request_n
             .with_build_inputs_of(&composed_seat),
     )
     .await;
+    // The override the seat holds: the request's profile with the request's
+    // model, as a spawn's seat holds its own.
+    let mut seated_profile = composed_profile;
+    seated_profile.model = "composed-model".to_string();
     let entry = seated(&mob).await;
     assert_eq!(
         (
@@ -815,7 +819,7 @@ async fn a_same_session_successor_is_seated_with_the_composed_seat_its_request_n
         ),
         (
             Generation::new(2),
-            Some(composed_profile.clone()),
+            Some(seated_profile.clone()),
             Some("composed-model".to_string())
         ),
         "the successor carries the overrides its request names"
@@ -836,7 +840,7 @@ async fn a_same_session_successor_is_seated_with_the_composed_seat_its_request_n
             inputs.additional_instructions.clone(),
         ),
         (
-            Some(composed_profile.clone()),
+            Some(seated_profile.clone()),
             Some("composed-model".to_string()),
             Some(serde_json::json!({ "answer": "second" })),
             Some(vec!["the second answer".to_string()]),
@@ -855,7 +859,7 @@ async fn a_same_session_successor_is_seated_with_the_composed_seat_its_request_n
         ),
         (
             Generation::new(3),
-            Some(composed_profile),
+            Some(seated_profile),
             Some("composed-model".to_string())
         ),
         "a request that names no override keeps the member's own"

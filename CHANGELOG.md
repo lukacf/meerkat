@@ -2459,11 +2459,13 @@ them.
   active, and `rkat run --skill <id>` loads the built-in, not the copy,
   without a message. The copy can be removed.
 
-- A configuration that defines `gemini-4-hydrogen` itself
-  (`[models.gemini-4-hydrogen]`) must drop that entry when upgrading: the
-  catalog now has the id, and configuration validation refuses a second
-  definition with "model id '<id>' must be unique across built-in, custom,
-  and self-hosted entries". See Added.
+- A configuration or a mob definition that defines `gemini-4-hydrogen`
+  itself (`[models.gemini-4-hydrogen]`) must drop that entry when upgrading:
+  the catalog now has the id, and a second definition is refused with
+  "model id '<id>' must be unique across built-in, custom, and self-hosted
+  entries", a configuration by configuration validation and a mob definition
+  when one of its members is built (the mob definition case was read from
+  the source, not run). See Added.
 
 ### Known limitations
 

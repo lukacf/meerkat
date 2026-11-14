@@ -458,10 +458,13 @@ route (the four differences are listed under Changed in the changelog).
 
 Model IDs are unique across the catalog, `[models.<id>]` entries and
 self-hosted models, and 0.9.15 adds `gemini-4-hydrogen` to the catalog. A
-realm or project configuration that has `[models.gemini-4-hydrogen]` (for
-example because you ran the model before the catalog listed it) is refused
-by configuration validation with
-`model id '<id>' must be unique across built-in, custom, and self-hosted entries`.
+realm or project configuration, or a mob definition, that has
+`[models.gemini-4-hydrogen]` (for example because you ran the model before
+the catalog listed it) is refused with
+`model id '<id>' must be unique across built-in, custom, and self-hosted entries`:
+a configuration by configuration validation, a mob definition when one of
+its members is built (the mob definition case was read from the source, not
+run).
 
 **Do:** remove the entry. The catalog row then serves the model with its own
 limits and thinking levels (`low`, `medium`, `high`; see

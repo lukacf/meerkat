@@ -228,7 +228,9 @@ Capability flags come from the catalog row, never from the model name:
   `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash` and
   `gemini-3.5-flash-lite` take no
   `temperature`, `top_p` or `top_k` (`supports_temperature: false`). The Anthropic and
-  OpenAI clients drop a generic `temperature` for them.
+  OpenAI clients drop a generic `temperature` for them. The
+  `gemini-4-hydrogen` row carries the same three flags false, so its catalog
+  profile reports `supports_temperature: false`.
 - Default per-call timeout (catalog `call_timeout_secs`): 300 s for Claude
   Opus and Fable rows, 120 s for Sonnet rows, `claude-haiku-5-5` and the
   Gemini Flash and Flash-Lite rows, 60 s for Haiku 4.5, 600 s for OpenAI rows

@@ -404,6 +404,22 @@ under `## [0.9.15]`.
   `timed_out` at its deadline. **Do:** upgrade the gateway before a Console
   or an SDK that reads question sets; before a rollback see the question
   sets item under "Rolling back to 0.9.14".
+- Decision reads with question sets. Core gains three wire types,
+  `WireDecisionAnswer`, `WireAskUserQuestionAnswer` and `WireAskUserAnswer`,
+  and the human evidence of a decision (`WireDecisionEvidence`) gains the
+  optional member `answer`, which carries them and is written only for an
+  answered question set. That is additive: the 0.9.14 Python and TypeScript
+  SDKs return a decision as the gateway wrote it, and the 0.9.14 Rust wire
+  type ignores a member it does not know. `meta/decisions/list` keeps its
+  form (`decisions`, `statuses`, `unreadable`, `next_after`) and is followed
+  with `next_after` as before; it now also lists decisions of the kind
+  `ask_user.questions`. On the stdio gateway, which the SDKs call, nothing
+  else changes. On the Console a page now holds only decisions its caller
+  may see, up to its limit, and `unreadable` is filled for an access
+  administrator only: the same form with other rows for some callers, not a
+  new member. **Do:** nothing for a client that follows `next_after`; a
+  Rust client that matches `WireDecisionEvidence::Human` field by field adds
+  `answer` or `..`.
 - Rust: `identity_creation::ChangeClass` gains the variants `Archive` (an
   archive and an unarchive) and `Adopt`. **Do:** add both arms to each
   exhaustive match on it.
@@ -659,9 +675,12 @@ of these kinds that are `open` or `approved` (`meta/decisions/list` with
 them.
 
 **Question sets agents asked (`ask_user`).** A question set is a decision of
-kind `ask_user.questions` in the gateway's decision store. A 0.9.14 gateway
-has no `ask_user` tool and no `meta/gating/questions`: it lists an open set
-among the durable decisions (`meta/decisions/list`), the set cannot be
+kind `ask_user.questions` in the gateway's decision store
+(`approval_decisions.sqlite3` in its state directory), in the row form every
+decision has. A 0.9.14 gateway does not know the kind and neither refuses
+nor skips it: a decision's kind is a string, the row is read and listed like
+any other (`meta/decisions/list`), and no executor claims it. It has no
+`ask_user` tool and no `meta/gating/questions`, so an open set cannot be
 answered there, and its asking agent is told nothing while rolled back. A
 set that was answered on 0.9.15 keeps the person's answers in the
 decision's evidence, a member 0.9.14 does not know: a 0.9.14 gateway reports
@@ -669,10 +688,11 @@ that one decision unreadable (it is listed as unreadable and nothing
 executes it) and reads every other decision as before; it does not change
 the row, which reads again after the return to 0.9.15. A set that was
 dismissed, withdrawn or timed out carries no answers and is read as any
-ended decision (read from the 0.9.14 source, not run). **Do:** before a
-rollback, have each open set answered or dismissed (`meta/gating/questions`
-lists them), or withdraw it (`meta/decisions/withdraw` as the host), so that
-no agent waits for an answer while rolled back.
+ended decision. All of this was read from the 0.9.14 source, not run.
+**Do:** before a rollback, have each open set answered or dismissed
+(`meta/gating/questions` lists them), or withdraw it
+(`meta/decisions/withdraw` as the host), so that no agent waits for an
+answer while rolled back.
 
 **Access rules for changes of agents.** 0.9.15 adds the actions
 `agent.identity.create`, `agent.identity.manage` and `agent.identity.remove`.

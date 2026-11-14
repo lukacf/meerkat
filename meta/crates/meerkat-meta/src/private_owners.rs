@@ -35,6 +35,18 @@
 //! the record picks none) gets no owner from the seed: who it is private to
 //! cannot be read, so a spawn into it is refused, and the members already
 //! seated there keep the owner their own spawn gave them.
+//!
+//! Who a mob a member created is private to is a fact of that mob as
+//! created: its creation record names its creating member, and that member's
+//! owner is the mob's. What this record holds for a mob id is a copy of that
+//! fact, and is never taken for another mob's. The create admission writes
+//! it for the mob a create is about to build, and it is dropped when the mob
+//! is destroyed ([`PrivateOwners::after_destroy_hook`]). A create that finds
+//! the id holding another answer (one a create that failed left, or one of a
+//! create still under way) leaves the id unread ([`MobOwner::Unread`]): the
+//! hosted mob's own creation record then says who it is private to, read
+//! when a spawn first asks. A spawn into a mob the record holds nothing
+//! certain for is refused as retryable, never seated as private to no one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, PoisonError, RwLock, Weak};
@@ -167,6 +179,23 @@ enum MobOwner {
     /// The mob's creation record does not say which member created it, so
     /// who the mob is private to cannot be read from it.
     Undecidable,
+    /// Creates under the id were admitted with different answers while no
+    /// record of a hosted mob stood for it: one of them failed, or several
+    /// are under way. Which of them built the mob hosted under the id is
+    /// not known here, so that mob's own creation record is read.
+    Unread,
+    /// The mob's creation record names its creating member, and nothing
+    /// says for certain who that member is private to: the mob it was
+    /// seated in is not hosted here at the incarnation the record holds, or
+    /// the member has no roster row there and this record does not know it.
+    /// Read again whenever a spawn asks, so it is settled once that mob is
+    /// hosted.
+    CreatorUnknown {
+        /// The set of mobs hosted when this was read
+        /// ([`PrivateOwners::hosted_set`]): while it is still that set,
+        /// what was read stands; once a mob joined or left, it may not.
+        hosted_set: u64,
+    },
 }
 
 #[derive(Default)]
@@ -184,8 +213,19 @@ struct Inner {
     /// not to whom when no record above names the owner.
     retired: RwLock<BTreeSet<String>>,
     /// What is known of who each mob a member created is private to
-    /// ([`MobOwner`]).
+    /// ([`MobOwner`]): a copy of what the creation record of the mob hosted
+    /// under the id says, dropped with that mob.
     mob_owners: RwLock<BTreeMap<String, MobOwner>>,
+    /// The mobs a background read of the creation record is under way for:
+    /// one read per mob, however many spawns ask meanwhile.
+    reading: std::sync::Mutex<BTreeSet<String>>,
+    /// The mobs private to a person for which members seated with no
+    /// private owner were reported, with the two counts reported: once per
+    /// mob for the life of the process.
+    reported_unlabelled: std::sync::Mutex<BTreeMap<String, (usize, usize)>>,
+    /// Background reads started, for tests.
+    #[cfg(test)]
+    reads_started: std::sync::atomic::AtomicUsize,
     /// Set once the seed landed: every event log and creation record read.
     seeded: tokio::sync::OnceCell<()>,
     /// The seed's stage among the first reads this record owes.
@@ -205,11 +245,23 @@ impl std::fmt::Debug for PrivateOwners {
 }
 
 /// The refusal of a spawn into a mob whose owner this record does not know
-/// yet: retryable, since the seed lands by itself.
+/// yet: retryable, since the seed lands by itself, and a mob the seed did
+/// not read is read from its creation record when a spawn asks.
 fn unknown_mob_owner(mob_id: &str) -> MobError {
     MobError::WiringError(format!(
         "who mob '{mob_id}' is private to is not known yet (the private-owner record is still \
          being read); retry the spawn"
+    ))
+}
+
+/// The refusal of a spawn into a mob whose creating member's owner nothing
+/// says for certain ([`MobOwner::CreatorUnknown`]). It stands until that
+/// member's mob is hosted; each refused spawn has the mob read again.
+fn unknown_creator_owner(mob_id: &str) -> MobError {
+    MobError::WiringError(format!(
+        "who mob '{mob_id}' is private to is not known: the member that created it is not seated \
+         in a hosted mob, and no record of it was read; the spawn can be made again once that \
+         member's mob is hosted"
     ))
 }
 
@@ -236,9 +288,16 @@ fn crossed_owners(source: &str) -> MobError {
 /// What a mob's creation record says about the member that created it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CreatingMember<'a> {
-    /// The record names the member, with the mob that member is seated in:
-    /// the mob is private to whoever that member is private to.
-    Named(&'a meerkat_mob::MobId, &'a meerkat_mob::AgentIdentity),
+    /// The record names the member, with the mob that member is seated in
+    /// and the incarnation that mob ran at when it created the mob: the mob
+    /// is private to whoever that member is private to. A mob hosted under
+    /// that id at another incarnation is another mob, and a member of the
+    /// same name in it is not the creating member.
+    Named(
+        &'a meerkat_mob::MobId,
+        meerkat_core::service::MobIncarnationId,
+        &'a meerkat_mob::AgentIdentity,
+    ),
     /// The record names no member: the mob is private to no one.
     NoMember,
     /// The record does not say which member created the mob: several rosters
@@ -261,14 +320,16 @@ fn creating_member(provenance: &meerkat_mob::MobProvenance) -> CreatingMember<'_
     match provenance {
         MobProvenance::Member {
             parent_mob_id,
+            parent_incarnation,
             creator_identity,
             ..
         }
         | MobProvenance::OperatorMember {
             parent_mob_id,
+            parent_incarnation,
             creator_identity,
             ..
-        } => CreatingMember::Named(parent_mob_id, creator_identity),
+        } => CreatingMember::Named(parent_mob_id, *parent_incarnation, creator_identity),
         MobProvenance::Host
         | MobProvenance::Session { .. }
         | MobProvenance::OperatorSession { .. }
@@ -310,6 +371,17 @@ impl PrivateOwners {
     /// named. `None` for a member private to no one, and for one the record
     /// does not know.
     pub(crate) fn owner_of(&self, mob_id: &str, member: &str) -> Option<String> {
+        self.known_owner_of(mob_id, member).flatten()
+    }
+
+    /// What this record knows of member `member` of mob `mob_id`: `Some` of
+    /// its owner (`None` inside for a member private to no one) from what
+    /// its build recorded, else from what the event log named, and `None`
+    /// for a member the record does not know.
+    // The two levels are the point: not known, known as private to no one,
+    // and known as private to a person are three answers.
+    #[allow(clippy::option_option)]
+    fn known_owner_of(&self, mob_id: &str, member: &str) -> Option<Option<String>> {
         let key = (mob_id.to_string(), member.to_string());
         if let Some(recorded) = self
             .inner
@@ -318,7 +390,7 @@ impl PrivateOwners {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&key)
         {
-            return recorded.clone();
+            return Some(recorded.clone());
         }
         self.inner
             .logged
@@ -326,7 +398,54 @@ impl PrivateOwners {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&key)
             .cloned()
-            .flatten()
+    }
+
+    /// The mob hosted under `mob_id` in `state` now, if one is. The lookup
+    /// starts nothing: a mob that is held or quarantined is not hosted, and
+    /// stays as it is (a lookup by id would try a quarantined mob's restore
+    /// again).
+    async fn hosted_mob(
+        state: &meerkat_mob_mcp::MobMcpState,
+        mob_id: &meerkat_mob::MobId,
+    ) -> Option<meerkat_mob::MobHandle> {
+        state
+            .mob_handles_snapshot()
+            .await
+            .ok()?
+            .into_iter()
+            .find_map(|(hosted, handle)| (hosted == *mob_id).then_some(handle))
+    }
+
+    /// Whom member `member` of the mob that runs under `mob_id` at
+    /// `incarnation` is private to, when that can be said for certain. The
+    /// mob hosted under the id must be that incarnation: a mob created under
+    /// the id since is another mob, and neither a member of the same name
+    /// in it nor what this record holds under the id and name says anything
+    /// of this member. In that mob the member's roster row says it (a
+    /// member this record knows as private stays private when its row names
+    /// nobody), and for a member that left its roster, what this record
+    /// knows of it. `None` when no mob is hosted under the id at that
+    /// incarnation, or when neither says: the member is then not taken to
+    /// be private to no one. No mob is loaded to answer
+    /// ([`Self::hosted_mob`]).
+    async fn certain_owner_of(
+        &self,
+        state: &meerkat_mob_mcp::MobMcpState,
+        mob_id: &meerkat_mob::MobId,
+        incarnation: meerkat_core::service::MobIncarnationId,
+        member: &meerkat_mob::AgentIdentity,
+    ) -> Option<Option<String>> {
+        let handle = Self::hosted_mob(state, mob_id)
+            .await
+            .filter(|hosted| hosted.incarnation() == incarnation)?;
+        if let Ok(Some(entry)) = handle.get_member(member).await {
+            return Some(
+                crate::access::private_owner(&entry.labels)
+                    .map(str::to_string)
+                    .or_else(|| self.owner_of(mob_id.as_str(), member.as_str())),
+            );
+        }
+        self.known_owner_of(mob_id.as_str(), member.as_str())
     }
 
     /// Every member this record knows, keyed by the identity its memory
@@ -385,9 +504,14 @@ impl PrivateOwners {
     }
 
     /// The owner of mob `mob_id`, which a member created: `None` for a mob
-    /// private to no one. A mob this record does not know yet is refused as
-    /// retryable ([`unknown_mob_owner`]); one whose creation record does not
-    /// say which member created it is refused for good
+    /// private to no one. A mob this record holds nothing certain for is
+    /// refused, never taken to be private to no one, and read from its
+    /// creation record in the background
+    /// ([`Self::read_hosted_mob_in_background`]): as retryable when none
+    /// was read yet or the id was left unread ([`unknown_mob_owner`]), and
+    /// until its creating member's mob is hosted when that member's owner
+    /// is what is missing ([`unknown_creator_owner`]). A mob whose creation
+    /// record does not say which member created it is refused for good
     /// ([`undecidable_mob_owner`]).
     fn mob_owner(&self, mob_id: &str) -> Result<Option<String>, MobError> {
         let recorded = self
@@ -400,19 +524,251 @@ impl PrivateOwners {
         match recorded {
             Some(MobOwner::Known(owner)) => Ok(owner),
             Some(MobOwner::Undecidable) => Err(undecidable_mob_owner(mob_id)),
-            None => Err(unknown_mob_owner(mob_id)),
+            Some(MobOwner::Unread) | None => {
+                self.read_hosted_mob_in_background(mob_id);
+                Err(unknown_mob_owner(mob_id))
+            }
+            Some(MobOwner::CreatorUnknown { hosted_set }) => {
+                self.read_hosted_mob_in_background(mob_id);
+                // What was read stands while the mobs hosted are the ones
+                // it was read over. Once a mob joined or left (the creating
+                // member's may be hosted now), the mob is being read again.
+                if self.hosted_set().is_none_or(|now| now == hosted_set) {
+                    Err(unknown_creator_owner(mob_id))
+                } else {
+                    Err(unknown_mob_owner(mob_id))
+                }
+            }
         }
     }
 
-    /// Record who mob `mob_id` is private to. The first record of a mob
-    /// stands: its creator's owner does not change.
-    fn record_mob(&self, mob_id: &str, owner: MobOwner) {
+    /// Which set of mobs the agent mob tools host now: a number that moves
+    /// whenever a mob joins or leaves the set. `None` while no agent mob
+    /// tool state is bound.
+    fn hosted_set(&self) -> Option<u64> {
+        self.child_mob_state()
+            .map(|state| *state.mob_set_changes().borrow())
+    }
+
+    /// Record who the mob a create is about to build under `mob_id` is
+    /// private to: `owner`, its creator's. A create is admitted only after
+    /// no mob was found hosted under its id, so an answer the id already
+    /// holds is of another create under it: one that failed, one still
+    /// under way, or one whose mob was hosted since. An equal answer
+    /// stands. Any other leaves the id unread ([`MobOwner::Unread`]),
+    /// whatever later creates say: which create built the mob hosted under
+    /// the id is then read from that mob's creation record, never taken
+    /// from the creates' order.
+    pub(crate) fn record_created_mob(&self, mob_id: &str, owner: Option<String>) {
+        let created = MobOwner::Known(owner);
+        let mut owners = self
+            .inner
+            .mob_owners
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        let recorded = match owners.get(mob_id) {
+            None => created,
+            Some(recorded) if *recorded == created => return,
+            Some(_) => MobOwner::Unread,
+        };
+        owners.insert(mob_id.to_string(), recorded);
+    }
+
+    /// Record what the creation record of the mob hosted under `mob_id`
+    /// says of who it is private to, for an id the record holds nothing
+    /// certain for. An answer a create wrote, or an earlier read, stands:
+    /// it is of the same mob, whose creator does not change.
+    fn record_read_mob(&self, mob_id: &str, owner: MobOwner) {
+        let mut owners = self
+            .inner
+            .mob_owners
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        if matches!(
+            owners.get(mob_id),
+            None | Some(MobOwner::Unread | MobOwner::CreatorUnknown { .. })
+        ) {
+            owners.insert(mob_id.to_string(), owner);
+        }
+    }
+
+    /// Drop what the record holds for mob `mob_id`: the mob was destroyed,
+    /// and a mob created under its id later is another mob.
+    pub(crate) fn forget_mob(&self, mob_id: &str) {
         self.inner
             .mob_owners
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .entry(mob_id.to_string())
-            .or_insert(owner);
+            .remove(mob_id);
+    }
+
+    /// Record what `provenance`, the creation record of the mob hosted
+    /// under `mob_id` when it was read at `incarnation`, says of who that
+    /// mob is private to: its creating member's owner, said for certain
+    /// ([`Self::certain_owner_of`]), and [`MobOwner::CreatorUnknown`] when
+    /// it cannot be. Nothing is recorded when the mob hosted under the id
+    /// is no longer that incarnation: the record read is of a mob destroyed
+    /// since.
+    pub(crate) async fn record_creation(
+        &self,
+        state: &meerkat_mob_mcp::MobMcpState,
+        mob_id: &meerkat_mob::MobId,
+        incarnation: meerkat_core::service::MobIncarnationId,
+        provenance: &meerkat_mob::MobProvenance,
+    ) {
+        // Read before anything else: a mob that joins or leaves while this
+        // reads leaves an unknown creating member open to the next read.
+        let hosted_set = *state.mob_set_changes().borrow();
+        let owner = match creating_member(provenance) {
+            CreatingMember::Named(parent, parent_incarnation, creator) => self
+                .certain_owner_of(state, parent, parent_incarnation, creator)
+                .await
+                .map_or(MobOwner::CreatorUnknown { hosted_set }, MobOwner::Known),
+            CreatingMember::NoMember => MobOwner::Known(None),
+            CreatingMember::Undecidable => MobOwner::Undecidable,
+        };
+        let hosted = Self::hosted_mob(state, mob_id)
+            .await
+            .filter(|hosted| hosted.incarnation() == incarnation);
+        if let Some(hosted) = hosted {
+            let private = matches!(owner, MobOwner::Known(Some(_)));
+            self.record_read_mob(mob_id.as_str(), owner);
+            if private {
+                self.report_members_seated_without_an_owner(&hosted).await;
+            }
+        }
+    }
+
+    /// Report, once per mob for the life of the process, the members
+    /// seated in `mob`, a mob private to a person, whose roster row carries
+    /// no private owner: they were seated before this release decided who
+    /// their mob is private to, and keep the audience they were seated
+    /// with until they are retired and spawned again. One warning names
+    /// the mob and two counts (such members, and all its members), no
+    /// member and no person. `Some` of the two counts when this call wrote
+    /// the warning.
+    pub(crate) async fn report_members_seated_without_an_owner(
+        &self,
+        mob: &meerkat_mob::MobHandle,
+    ) -> Option<(usize, usize)> {
+        let members = mob.list_all_members().await;
+        let without = members
+            .iter()
+            .filter(|member| crate::access::private_owner(&member.labels).is_none())
+            .count();
+        if without == 0 {
+            return None;
+        }
+        let counts = (without, members.len());
+        let mob_id = mob.mob_id();
+        let first = self
+            .inner
+            .reported_unlabelled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(mob_id.to_string(), counts)
+            .is_none();
+        if !first {
+            return None;
+        }
+        tracing::warn!(
+            mob_id = %mob_id,
+            members_without_private_owner = without,
+            members = members.len(),
+            "members of a mob that is private to a person carry no private owner: they were \
+             seated before this release decided who the mob is private to, and keep the \
+             audience they were seated with until they are retired and spawned again"
+        );
+        Some(counts)
+    }
+
+    /// Read who the mob hosted under `mob_id` is private to from its
+    /// creation record: its event log first (so the owners of its members
+    /// are known), then who created it.
+    pub(crate) async fn read_hosted_mob(
+        &self,
+        state: &meerkat_mob_mcp::MobMcpState,
+        mob_id: &meerkat_mob::MobId,
+    ) -> Result<(), String> {
+        // No mob hosted under the id: nothing spawns into it.
+        let Some(handle) = Self::hosted_mob(state, mob_id).await else {
+            return Ok(());
+        };
+        self.read_log(&handle).await?;
+        let provenance = handle
+            .provenance()
+            .await
+            .map_err(|error| error.to_string())?;
+        self.record_creation(state, mob_id, handle.incarnation(), &provenance)
+            .await;
+        Ok(())
+    }
+
+    /// [`Self::read_hosted_mob`] in the background, for a spawn that found
+    /// nothing certain for the mob (and is refused meanwhile). One read per
+    /// mob is under way at a time, however many spawns ask meanwhile; a
+    /// spawn that asks once it ended starts the next, so nothing stays
+    /// unknown for the life of the process once it can be read. Only once
+    /// the seed landed: until then the seed itself reads every hosted mob.
+    fn read_hosted_mob_in_background(&self, mob_id: &str) {
+        if !self.landed() {
+            return;
+        }
+        let (Some(state), Ok(runtime)) = (
+            self.child_mob_state(),
+            tokio::runtime::Handle::try_current(),
+        ) else {
+            return;
+        };
+        if !self
+            .inner
+            .reading
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(mob_id.to_string())
+        {
+            return;
+        }
+        #[cfg(test)]
+        self.inner
+            .reads_started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Leaves the set when the read ends, however it ends.
+        let reading = ReadUnderWay {
+            owners: self.clone(),
+            mob_id: mob_id.to_string(),
+        };
+        let owners = self.clone();
+        let mob_id = meerkat_mob::MobId::from(mob_id);
+        runtime.spawn(async move {
+            let _reading = reading;
+            if let Err(error) = owners.read_hosted_mob(&state, &mob_id).await {
+                tracing::warn!(
+                    mob_id = %mob_id,
+                    %error,
+                    "who a mob is private to could not be read from its creation record; the \
+                     next spawn into it reads again"
+                );
+            }
+        });
+    }
+
+    /// How many background reads this record started.
+    #[cfg(test)]
+    pub(crate) fn reads_started(&self) -> usize {
+        self.inner
+            .reads_started
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// How many background reads are under way.
+    #[cfg(test)]
+    pub(crate) fn reads_under_way(&self) -> usize {
+        self.inner
+            .reading
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     /// `self`, once the seed has read `log` (the event log of the runtime's
@@ -660,17 +1016,11 @@ impl PrivateOwners {
                 .provenance()
                 .await
                 .map_err(|error| error.to_string())?;
-            creations.push((mob_id, provenance));
+            creations.push((mob_id, handle.incarnation(), provenance));
         }
-        for (mob_id, provenance) in creations {
-            let owner = match creating_member(&provenance) {
-                CreatingMember::Named(parent, creator) => {
-                    MobOwner::Known(self.owner_of(parent.as_str(), creator.as_str()))
-                }
-                CreatingMember::NoMember => MobOwner::Known(None),
-                CreatingMember::Undecidable => MobOwner::Undecidable,
-            };
-            self.record_mob(mob_id.as_str(), owner);
+        for (mob_id, incarnation, provenance) in creations {
+            self.record_creation(state, &mob_id, incarnation, &provenance)
+                .await;
         }
         Ok(())
     }
@@ -741,8 +1091,7 @@ impl PrivateOwners {
 
     /// The create admission of the agent mob tools: `then` (the host's own,
     /// when there is one) decides first, then the mob is recorded as private
-    /// to its creator's owner. A creator whose owner cannot be read refuses
-    /// the create.
+    /// to its creator's owner ([`Self::admit_created_mob`]).
     pub(crate) fn before_create_hook(
         &self,
         state: Weak<meerkat_mob_mcp::MobMcpState>,
@@ -757,26 +1106,107 @@ impl PrivateOwners {
                 if let Some(then) = then {
                     then(request.clone()).await?;
                 }
-                let owner = match (request.owner_bridge_session_id.as_ref(), state.upgrade()) {
-                    (Some(session), Some(state)) => {
-                        match state.member_for_bridge_session(session).await {
-                            Ok(Some((mob_id, creator))) => {
-                                owners.owner_of(mob_id.as_str(), creator.as_str())
-                            }
-                            Ok(None) => None,
-                            Err(error) => {
-                                return Err(format!(
-                                    "who creates mob '{}' could not be read: {error}",
-                                    request.mob_id
-                                ));
-                            }
-                        }
-                    }
-                    _ => None,
-                };
-                owners.record_mob(request.mob_id.as_str(), MobOwner::Known(owner));
-                Ok(())
+                owners
+                    .admit_created_mob(
+                        &state,
+                        &request.mob_id,
+                        request.owner_bridge_session_id.as_ref(),
+                    )
+                    .await
             })
+        })
+    }
+
+    /// What the create admission records for the mob a create is about to
+    /// build under `mob_id` for the session `owner_session`. A host's own
+    /// create has no session and is private to no one. For a session, the
+    /// members whose session it is are looked up as the mob's creation
+    /// record looks them up (`MobMcpState::session_member_matches`), so
+    /// what is written here and that record say the same
+    /// ([`Self::admit_mob_created_by`]). A lookup that could not answer
+    /// refuses the create: it is never read as "no member".
+    pub(crate) async fn admit_created_mob(
+        &self,
+        state: &Weak<meerkat_mob_mcp::MobMcpState>,
+        mob_id: &meerkat_mob::MobId,
+        owner_session: Option<&meerkat_core::types::SessionId>,
+    ) -> Result<(), String> {
+        let Some(session) = owner_session else {
+            self.record_created_mob(mob_id.as_str(), None);
+            return Ok(());
+        };
+        let unreadable = |why: &dyn std::fmt::Display| {
+            format!("who creates mob '{mob_id}' could not be read: {why}")
+        };
+        let Some(state) = state.upgrade() else {
+            return Err(unreadable(&"the mob tool state is gone"));
+        };
+        let creators = state
+            .session_member_matches(session)
+            .await
+            .map_err(|error| unreadable(&error))?
+            .into_iter()
+            .map(|found| (found.mob_id, found.incarnation, found.identity))
+            .collect::<Vec<_>>();
+        self.admit_mob_created_by(&state, mob_id, &creators).await
+    }
+
+    /// [`Self::admit_created_mob`] for the members `creators` the lookup
+    /// found the creating session to be, each with its mob and the
+    /// incarnation that mob runs at. None: the mob is private to no one.
+    /// One: the mob is private to that member's owner, said for certain
+    /// ([`Self::certain_owner_of`]), and the create is refused when nothing
+    /// says it. Several: the mob's creation record will not say which of
+    /// them created it, so nothing is decided here and the id is left
+    /// unread for that record ([`MobOwner::Unread`]).
+    pub(crate) async fn admit_mob_created_by(
+        &self,
+        state: &meerkat_mob_mcp::MobMcpState,
+        mob_id: &meerkat_mob::MobId,
+        creators: &[(
+            meerkat_mob::MobId,
+            meerkat_core::service::MobIncarnationId,
+            meerkat_mob::AgentIdentity,
+        )],
+    ) -> Result<(), String> {
+        match creators {
+            [] => self.record_created_mob(mob_id.as_str(), None),
+            [(creators_mob, incarnation, creator)] => {
+                let owner = self
+                    .certain_owner_of(state, creators_mob, *incarnation, creator)
+                    .await
+                    .ok_or_else(|| {
+                        format!(
+                            "who creates mob '{mob_id}' could not be read: nothing says who its \
+                             creating member '{creator}' is private to"
+                        )
+                    })?;
+                self.record_created_mob(mob_id.as_str(), owner);
+            }
+            _ => {
+                self.inner
+                    .mob_owners
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(mob_id.to_string(), MobOwner::Unread);
+            }
+        }
+        Ok(())
+    }
+
+    /// The release hook of the agent mob tools' destroys: what the record
+    /// holds for the destroyed mob is dropped ([`Self::forget_mob`]), then
+    /// `then` (the host's own, when there is one) runs.
+    pub(crate) fn after_destroy_hook(
+        &self,
+        then: Option<meerkat_mob_mcp::MobAfterDestroy>,
+    ) -> meerkat_mob_mcp::MobAfterDestroy {
+        let owners = self.clone();
+        Arc::new(move |mob_id: &meerkat_mob::MobId| {
+            owners.forget_mob(mob_id.as_str());
+            if let Some(then) = then.as_ref() {
+                then(mob_id);
+            }
         })
     }
 
@@ -872,12 +1302,13 @@ impl PrivateOwners {
 
     /// The customizer body of a mob a member created: the mob's own owner
     /// (its creator's), else the owner [`Self::requested_owner`] names. A
-    /// mob this record does not know refuses the spawn as retryable: until
-    /// the seed lands, a mob restored from before a restart is not known. A
-    /// mob whose creation record does not say which member created it
-    /// refuses the spawn for good. A rebuild of a member already seated
-    /// there is not a spawn, and is not asked (see the customizer's
-    /// `customize_resume`).
+    /// mob this record holds nothing certain for refuses the spawn as
+    /// retryable: until the seed lands, a mob restored from before a restart
+    /// is not known, and a mob left unread is read from its creation record
+    /// once a spawn asks ([`Self::mob_owner`]). A mob whose creation record
+    /// does not say which member created it refuses the spawn for good. A
+    /// rebuild of a member already seated there is not a spawn, and is not
+    /// asked (see the customizer's `customize_resume`).
     pub(crate) fn apply_child(
         &self,
         mob_id: &str,
@@ -935,6 +1366,25 @@ struct ChildOwnerPropagation {
 struct StewardPrivateMembers {
     owners: PrivateOwners,
     handle: meerkat_mob::MobHandle,
+}
+
+/// A background read of a mob's creation record that is under way
+/// ([`PrivateOwners::read_hosted_mob_in_background`]): the mob leaves the
+/// set of mobs being read when this is dropped, however the read ended.
+struct ReadUnderWay {
+    owners: PrivateOwners,
+    mob_id: String,
+}
+
+impl Drop for ReadUnderWay {
+    fn drop(&mut self) {
+        self.owners
+            .inner
+            .reading
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.mob_id);
+    }
 }
 
 #[async_trait::async_trait]
@@ -1069,7 +1519,7 @@ mod tests {
         for provenance in &names_the_creator {
             assert_eq!(
                 creating_member(provenance),
-                CreatingMember::Named(&parent, &creator),
+                CreatingMember::Named(&parent, incarnation, &creator),
                 "{provenance:?}"
             );
         }
@@ -1242,6 +1692,149 @@ mod tests {
             "a host's own spawn is left as it is"
         );
         assert_eq!(owners.owner_of("other-mob", "side"), None);
+    }
+
+    /// What the record holds for a mob a member created is of that mob as
+    /// created. A create's answer stands for the id while the creates under
+    /// it agree. A create with another answer leaves the id unread, whatever
+    /// later creates say, and a spawn is then refused as retryable, never
+    /// seated as private to no one. A read of the hosted mob's creation
+    /// record settles an unread id and replaces no answer. A destroy drops
+    /// the record, and the next create under the id decides anew.
+    #[test]
+    fn a_created_mobs_record_is_of_the_mob_as_created() {
+        let owners = PrivateOwners::default();
+        let seated = |owners: &PrivateOwners| {
+            let mut spec = SpawnMemberSpec::new("worker", meerkat_mob::AgentIdentity::from("h"));
+            owners.apply_child("crew", None, &mut spec).map(|()| {
+                spec.labels
+                    .as_ref()
+                    .and_then(crate::access::private_owner)
+                    .map(str::to_string)
+            })
+        };
+        let refused_as_retryable = |owners: &PrivateOwners, when: &str| {
+            let refusal = seated(owners)
+                .expect_err("the spawn is refused")
+                .to_string();
+            assert!(refusal.contains("retry"), "{when}: {refusal}");
+        };
+        refused_as_retryable(&owners, "a mob the record does not know");
+
+        owners.record_created_mob("crew", Some(OWNER.to_string()));
+        assert_eq!(seated(&owners).expect("known"), Some(OWNER.to_string()));
+        owners.record_created_mob("crew", Some(OWNER.to_string()));
+        assert_eq!(
+            seated(&owners).expect("known"),
+            Some(OWNER.to_string()),
+            "a create with the same answer changes nothing"
+        );
+
+        owners.record_created_mob("crew", None);
+        refused_as_retryable(&owners, "a create with another answer leaves the id unread");
+        owners.record_created_mob("crew", None);
+        refused_as_retryable(&owners, "a later create does not settle an unread id");
+        owners.record_created_mob("crew", Some(OWNER.to_string()));
+        refused_as_retryable(&owners, "nor does one with the first answer");
+
+        owners.record_read_mob("crew", MobOwner::Known(None));
+        assert_eq!(
+            seated(&owners).expect("read"),
+            None,
+            "the hosted mob's creation record settles an unread id"
+        );
+        owners.record_read_mob("crew", MobOwner::Known(Some(OWNER.to_string())));
+        assert_eq!(
+            seated(&owners).expect("read"),
+            None,
+            "a read replaces no answer the id holds"
+        );
+
+        owners.forget_mob("crew");
+        refused_as_retryable(&owners, "a destroyed mob leaves no record");
+        owners.record_read_mob("crew", MobOwner::Known(Some(OWNER.to_string())));
+        assert_eq!(
+            seated(&owners).expect("read"),
+            Some(OWNER.to_string()),
+            "a read settles an id the record holds nothing for"
+        );
+        owners.forget_mob("crew");
+        owners.record_created_mob("crew", None);
+        assert_eq!(
+            seated(&owners).expect("known"),
+            None,
+            "the next create under the id decides anew"
+        );
+
+        // A mob whose creating member's owner nothing says is refused with
+        // a text of its own, and a later read settles it.
+        owners.forget_mob("crew");
+        owners.record_read_mob("crew", MobOwner::CreatorUnknown { hosted_set: 0 });
+        let refusal = seated(&owners)
+            .expect_err("the spawn is refused")
+            .to_string();
+        assert!(
+            refusal.contains("hosted") && !refusal.contains("retry"),
+            "the refusal says what the mob waits for: {refusal}"
+        );
+        owners.record_read_mob("crew", MobOwner::Known(Some(OWNER.to_string())));
+        assert_eq!(
+            seated(&owners).expect("read"),
+            Some(OWNER.to_string()),
+            "a later read settles a mob whose creating member was not known"
+        );
+    }
+
+    /// The destroy release drops what the record holds for the destroyed
+    /// mob, then runs the host's own release: a host release that panics
+    /// leaves nothing of the destroyed mob behind.
+    #[test]
+    // The host's release panics on purpose.
+    #[allow(clippy::panic)]
+    fn the_destroy_release_drops_the_record_and_then_runs_the_hosts_release() {
+        let owners = PrivateOwners::default();
+        let mob = meerkat_mob::MobId::from("crew");
+        let known = |owners: &PrivateOwners| {
+            let mut spec = SpawnMemberSpec::new("worker", meerkat_mob::AgentIdentity::from("h"));
+            owners.apply_child("crew", None, &mut spec).is_ok()
+        };
+
+        let released = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hosts: meerkat_mob_mcp::MobAfterDestroy = {
+            let released = Arc::clone(&released);
+            Arc::new(move |mob_id: &meerkat_mob::MobId| {
+                released.lock().unwrap().push(mob_id.to_string());
+            })
+        };
+        owners.record_created_mob("crew", Some(OWNER.to_string()));
+        assert!(known(&owners));
+        owners.after_destroy_hook(Some(hosts))(&mob);
+        assert!(!known(&owners), "the destroyed mob's record is dropped");
+        assert_eq!(
+            *released.lock().unwrap(),
+            vec!["crew".to_string()],
+            "the host's own release runs"
+        );
+
+        owners.record_created_mob("crew", Some(OWNER.to_string()));
+        let panics: meerkat_mob_mcp::MobAfterDestroy =
+            Arc::new(|_: &meerkat_mob::MobId| std::panic::panic_any("the host's release"));
+        let release = owners.after_destroy_hook(Some(panics));
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| release(&mob))).is_err(),
+            "the host's release panics"
+        );
+        assert!(
+            !known(&owners),
+            "the record was dropped before the host's release ran"
+        );
+
+        owners.record_created_mob("crew", None);
+        owners.after_destroy_hook(None)(&mob);
+        assert!(
+            !known(&owners),
+            "with no host release the record is dropped"
+        );
     }
 
     /// The memory owners name each private member by its logical memory

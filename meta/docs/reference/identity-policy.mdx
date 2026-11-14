@@ -77,6 +77,11 @@ and of what this release carries out are not reached.
 }
 ```
 
+The sample lets an archive of an assistant through without a decision while
+a removal waits for one. That does not make an archive the harmless one: an
+archive removes the mobs the agent created at the gateway's next start, and
+an unarchive does not bring them back.
+
 | Member | Meaning |
 |--------|---------|
 | `enabled` | Whether changes of agents are accepted at all. `false` by default; the shape of a disabled policy is still checked. |
@@ -157,7 +162,7 @@ A rule is `{change, requester, target, outcome}`.
 | `peers` | Peers added or removed |
 | `authority` | An authority field set. A rule that lets it through without a human decision is refused at init |
 | `profile` | A move to another profile: the agent then has that profile's model, tools and skills, on the same conversation |
-| `archive` | An archive, and an unarchive |
+| `archive` | An archive, and an unarchive. An archive removes the mobs the agent created at the gateway's next start, and an unarchive does not bring them back (see [`meta/identity/archive`](/api/rpc#meta%2Fidentity%2Farchive%2C-meta%2Fidentity%2Funarchive%2C-meta%2Fidentity%2Fremove%2C-meta%2Fidentity%2Fadopt)) |
 | `remove` | A removal: permanent, the name is never available again |
 | `adopt` | The release of a configured agent from configuration (see [Adopting configured agents](#adopting-configured-agents)) |
 

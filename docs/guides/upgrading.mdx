@@ -517,7 +517,9 @@ file or `MobStorage::identity_record_rows` for a storage). While
 - a member no same-session successor can serve (a placed member, a member
   wired to a placed member, a member on a session service that keeps no
   durable sessions) is settled by none of these: rotate it
-  (`MobHandle::rotate_member`), or archive or remove its agent.
+  (`MobHandle::rotate_member`), or archive or remove its agent (an archive
+  removes the mobs the agent created at the next start: have it destroy
+  them first, or rotate the member instead).
 
 `rkat storage doctor` and Meta's storage doctor do not report this count,
 and a host that uses only the SDKs has no read for it in 0.9.15: the Rust

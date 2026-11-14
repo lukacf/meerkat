@@ -1618,7 +1618,10 @@ async fn a_destroy_made_again_drops_nothing_of_a_later_mob_under_the_id() -> Tes
     let further = agent_tool_call(&first_creator, "mob_destroy", json!({ "mob_id": CREW })).await;
     eprintln!("the first creator's further destroy call answers: {further:?}");
     assert!(
-        further.is_err(),
+        matches!(
+            &further,
+            Err(meerkat_core::ToolError::AccessDenied { name }) if name == "mob_destroy"
+        ),
         "the first creator has no say over the later mob: {further:?}"
     );
     assert_eq!(

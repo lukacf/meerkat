@@ -6437,9 +6437,52 @@ fn parse_label_filters(
     Ok(if map.is_empty() { None } else { Some(map) })
 }
 
+/// The JSON body of `POST /schedules` and `PATCH /schedules/{id}`.
+///
+/// It is the plain JSON body in every respect but one. A body that does not
+/// read because it writes `reasoning_effort` directly in a `create` spec or
+/// on a prompt action is a refused schedule, not a malformed body: it gets
+/// the answer the schedule service gives the `provider_params` form (400
+/// with the refusal's sentence), so the refusal has one answer on this door.
+/// The schedule types refuse the member when they are read, and a parser
+/// reports that as text only, so the refusal is recognised by its sentence
+/// ([`meerkat::direct_reasoning_effort_refusal`]). Every other rejection is
+/// the JSON extractor's own, unchanged.
+struct ScheduleRequestJson<T>(T);
+
+impl<S, T> axum::extract::FromRequest<S> for ScheduleRequestJson<T>
+where
+    S: Send + Sync,
+    T: serde::de::DeserializeOwned,
+{
+    type Rejection = Response;
+
+    async fn from_request(
+        request: axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(request, state).await {
+            Ok(Json(request)) => Ok(Self(request)),
+            Err(rejection) => Err(schedule_request_rejection(rejection)),
+        }
+    }
+}
+
+fn schedule_request_rejection(rejection: axum::extract::rejection::JsonRejection) -> Response {
+    if let axum::extract::rejection::JsonRejection::JsonDataError(_) = &rejection
+        && let Some(refusal) = meerkat::direct_reasoning_effort_refusal(&rejection.body_text())
+    {
+        return schedule_error_to_api(meerkat::ScheduleDomainError::InvalidSchedule(
+            refusal.to_string(),
+        ))
+        .into_response();
+    }
+    rejection.into_response()
+}
+
 async fn create_schedule(
     State(state): State<AppState>,
-    Json(request): Json<meerkat::CreateScheduleRequest>,
+    ScheduleRequestJson(request): ScheduleRequestJson<meerkat::CreateScheduleRequest>,
 ) -> Result<Json<meerkat_contracts::wire::Schedule>, ApiError> {
     state
         .ensure_schedule_host_started()
@@ -6592,7 +6635,7 @@ async fn get_schedule(
 async fn update_schedule(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(request): Json<meerkat::UpdateScheduleRequest>,
+    ScheduleRequestJson(request): ScheduleRequestJson<meerkat::UpdateScheduleRequest>,
 ) -> Result<Json<meerkat_contracts::wire::Schedule>, ApiError> {
     let schedule_id = resolve_schedule_id(&id)?;
     state

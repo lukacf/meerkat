@@ -4676,8 +4676,8 @@ model list is not loaded): the same request can succeed later with no change.
 Meerkat does not retry a refused level for the caller.
 
 The answer is the same wherever the level is refused, with one exception:
-a schedule's `create` spec refuses the key itself, with the schedule's
-invalid-params answer and no typed refusal data (see
+a schedule's `create` spec and its prompt action refuse the key itself, with
+the schedule's invalid-params answer and no typed refusal data (see
 [Scheduling](/guides/scheduling#session-targets)). A session's level is
 checked when its agent is built: `session/create` answers the refusal (a
 deferred create reports it at its first `turn/start`), and so does the build

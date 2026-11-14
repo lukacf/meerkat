@@ -405,6 +405,9 @@ route (the four differences are listed under Changed in the changelog).
   be refused from 0.9.15. A schedule's session settings do not take the
   key in 0.9.15: a schedule whose `create` spec carries it is refused when
   it is created or updated (0.9.14 refused it there as an unknown field).
+  A `reasoning_effort` written directly in a schedule's `create` spec or on
+  its prompt action, which 0.9.14 read as an unknown member and dropped, is
+  refused the same way from 0.9.15: remove it from the request.
 - **CLI scripts.** `rkat run --reasoning-effort <LEVEL>` exits 2 when the
   level is refused; with `--output json` stdout then ends with a failure
   document (`{"error": {...}}`) instead of a run result, so a script that

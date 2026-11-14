@@ -361,8 +361,8 @@ pub use meerkat_schedule::{
     ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleToolDispatcher, ScheduleToolError,
     ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TargetProbeOutcome,
-    TriggerSpec, UpdateScheduleRequest, dispatch_schedule_list_where, handle_schedule_tools_call,
-    schedule_tools_list,
+    TriggerSpec, UpdateScheduleRequest, direct_reasoning_effort_refusal,
+    dispatch_schedule_list_where, handle_schedule_tools_call, schedule_tools_list,
 };
 pub use meerkat_tools::ToolError;
 #[cfg(not(target_arch = "wasm32"))]

@@ -50,6 +50,19 @@ them.
   `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
   read the binding file. See Security and the Upgrade notes.
 
+- Behaviour-only (not measured by the gate): `meerkat-schedule` and every
+  door that takes a schedule request: a schedule create or update that
+  writes `reasoning_effort` directly in its `create` spec or on its prompt
+  action is refused (invalid params on JSON-RPC, HTTP 400 on REST, an
+  invalid-arguments error from the schedule tools) and nothing is stored.
+  0.9.14 read the member as an unknown one and dropped it, so such a request
+  was accepted and its schedule ran without a level. The refusal is given
+  when the request is read (`SessionTargetBinding`'s and
+  `ScheduledSessionAction`'s `Deserialize`); other unknown members are still
+  dropped, and the new `meerkat_schedule::direct_reasoning_effort_refusal`
+  (also `meerkat::direct_reasoning_effort_refusal`) tells a door whether a
+  failed read was this refusal. See Known limitations.
+
 - Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
   `meerkat-machine-kernels`: the schedule lifecycle machine gains a state
   field and two inputs, and its public types follow.
@@ -2612,8 +2625,9 @@ them.
   (`POST /sessions`).
 
 - A schedule's session spec is the one surface where the reasoning effort
-  level is not accepted in this release. A schedule whose `create` spec
-  carries `provider_params.reasoning_effort` is refused when it is created
+  level is not accepted in this release. A schedule request that writes
+  `reasoning_effort` in its `create` spec (directly or in `provider_params`)
+  or on its prompt action is refused when the schedule is created
   or updated (invalid params on JSON-RPC, HTTP 400 on REST, an
   invalid-arguments error from the MCP server's and an agent's schedule
   tools), and nothing is stored. A provider's own effort under

@@ -3091,6 +3091,60 @@ mod tests {
         Ok(())
     }
 
+    /// An agent's `current_session` shortcut is read by the tool host before
+    /// the schedule service sees a target: a `reasoning_effort` member written
+    /// directly on its prompt action is refused there too, as invalid
+    /// arguments, and nothing is stored.
+    #[tokio::test]
+    async fn current_session_schedule_dispatcher_refuses_a_direct_reasoning_effort_member() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let dispatcher = CurrentSessionScheduleToolDispatcher::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            SessionId::new(),
+        );
+        let request = json!({
+            "name": "self-followup",
+            "trigger": {
+                "type": "interval",
+                "start_at_utc": (Utc::now() + Duration::minutes(1)).to_rfc3339(),
+                "every_seconds": 60
+            },
+            "target": {
+                "target_kind": "session",
+                "type": "current_session",
+                "action": {
+                    "type": "prompt",
+                    "prompt": "check this session",
+                    "reasoning_effort": "high"
+                }
+            },
+            "planning_horizon_occurrences": 1
+        });
+        let raw = RawValue::from_string(request.to_string()).expect("raw arguments");
+        let refused = dispatcher
+            .dispatch(tool_call(
+                "sched-current-level",
+                "meerkat_schedule_create",
+                raw.as_ref(),
+            ))
+            .await
+            .expect_err("the create is refused");
+        assert!(
+            matches!(refused, ToolError::InvalidArguments { .. }),
+            "{refused:?}"
+        );
+        let text = format!("{refused:?}");
+        assert!(
+            text.contains("reasoning_effort")
+                && text.contains("not accepted on a schedule's prompt action"),
+            "{text}"
+        );
+        let listed = handle_schedule_tools_call(&service, "meerkat_schedule_list", &json!({}))
+            .await
+            .expect("list");
+        assert_eq!(listed["schedules"], json!([]), "nothing is stored");
+    }
+
     #[tokio::test]
     async fn current_session_schedule_dispatcher_rewrites_update_target() -> Result<(), String> {
         let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));

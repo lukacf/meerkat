@@ -703,7 +703,20 @@ Continue an existing session.
   unchanged. A message that names this field rebuilds the session, like
   one that names `model` or `max_tokens`: while this server holds the
   session live, such a message is answered HTTP 500 `session is busy` and
-  changes nothing.
+  changes nothing. So on REST a provider-neutral level can be set only when
+  the session is created (`POST /sessions`) or on a session this server
+  does not hold live. On a live session a message that names the level, or
+  a `model`, is not served: it is refused at once, whether or not a turn is
+  running, and nothing is stored or queued for it; a turn that is running
+  and the messages queued behind it go on. In 0.9.15 the answer is HTTP 500
+  with code `INTERNAL_ERROR` and a text that says the session is busy; read
+  it as "not served on a live session", and do not rely on that status or
+  code staying. It is not an answer to retry when the session is idle:
+  sending the message again while the server holds the session is refused
+  the same way. The typed busy answer of JSON-RPC
+  (`reasoning_effort_change_needs_idle_session`) does not apply to REST.
+  `provider_params` is not a member of this request and is not read here:
+  the field is the only form of the level on a message.
 </ParamField>
 
 <ParamField body="verbose" type="bool" default="false">

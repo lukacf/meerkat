@@ -1157,6 +1157,17 @@ them.
   session's level (`turn/start`, `mob/turn_start`) goes through
   `resolve_session_provider_params`, the rule it wraps.
 
+- `meerkat-models`: Gemini 4 Hydrogen (`gemini-4-hydrogen`), Google's fast
+  Gemini 4 model, served on the free tier and the paid Gemini API tiers, is
+  a recommended catalog model with the limits and timeouts of Gemini 4 Argon
+  (a 1,048,576-token context window, 64K output, a 900 s call timeout and
+  stream-inactivity window) and the thinking levels `low`, `medium` and
+  `high` (a request that names none gets Google's default for the model,
+  `high`), while the `xhigh` level Google also documents for it is not sent
+  in this release (a `reasoning_effort` of `xhigh` is refused as
+  `unsupported_level`, and the Gemini `provider_tag` has no such value), and
+  the Gemini default model stays `gemini-4-argon`.
+
 ### Changed
 
 - Provider error text (see Security): in the errors of the OpenAI
@@ -2447,6 +2458,12 @@ them.
   `rkat skill list` shows the copy and the built-in side by side, both
   active, and `rkat run --skill <id>` loads the built-in, not the copy,
   without a message. The copy can be removed.
+
+- A configuration that defines `gemini-4-hydrogen` itself
+  (`[models.gemini-4-hydrogen]`) must drop that entry when upgrading: the
+  catalog now has the id, and configuration validation refuses a second
+  definition with "model id '<id>' must be unique across built-in, custom,
+  and self-hosted entries". See Added.
 
 ### Known limitations
 

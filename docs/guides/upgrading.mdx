@@ -452,6 +452,24 @@ route (the four differences are listed under Changed in the changelog).
   each item's own grade are under
   [Rolling back to 0.9.14](#rolling-back-to-0-9-14).
 
+### A catalog model you had defined yourself: `gemini-4-hydrogen`
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+Model IDs are unique across the catalog, `[models.<id>]` entries and
+self-hosted models, and 0.9.15 adds `gemini-4-hydrogen` to the catalog. A
+realm or project configuration that has `[models.gemini-4-hydrogen]` (for
+example because you ran the model before the catalog listed it) is refused
+by configuration validation with
+`model id '<id>' must be unique across built-in, custom, and self-hosted entries`.
+
+**Do:** remove the entry. The catalog row then serves the model with its own
+limits and thinking levels (`low`, `medium`, `high`; see
+[Providers](/concepts/providers)). After a rollback to 0.9.14 the catalog
+has no such row again: there, a session or configuration that names the
+model does not resolve it until the entry is back (read from the 0.9.14
+source, not run).
+
 ### Meta 0.9.15
 
 Meta 0.9.15 pins Core `=0.9.15`. The full list is in `meta/CHANGELOG.md`

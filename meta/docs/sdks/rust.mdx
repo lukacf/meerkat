@@ -235,8 +235,8 @@ from a legacy constructor (`UnifiedRuntime::bootstrap` and the
 context withdraws a completion not yet taken, because the identity bootstrap
 that follows mints again; attaching one leaves it as it is.
 
-A runtime from a legacy constructor must complete its bootstrap (an identity
-bootstrap, or `activate_without_identity_context`) before an agent created at
+From 0.9.15, a runtime from a legacy constructor must complete its bootstrap
+(an identity bootstrap, or `activate_without_identity_context`) before an agent created at
 run time can be built. Until one of them returns, every build of such an agent
 is refused for now with a reason that names both calls: the runtime does not
 know yet whether its host composes an agent customizer whose build step
@@ -391,8 +391,8 @@ seated identity (one seated with nothing built yet) gets two
 build's. A respawn does the same: its seat calls `customize_build`, and its
 build calls it again.
 
-An agent created at run time (an identity whose record is its row in the
-mob's identity store, not the roster) has no seat of the host's making: Core
+From 0.9.15, an agent created at run time (an identity whose record is its
+row in the mob's identity store, not the roster) has no seat of the host's making: Core
 seats it from its row. `customize_build` runs once right before each build
 of its member, and that build takes the draft as a configured identity's
 seat does: the model and the provider parameters at every build, and the
@@ -531,7 +531,7 @@ from the mob's lift on, so a clean restart (the mob stays stopped until the
 identity bootstrap lifts it) is covered, but a crash resume is not: the
 members a killed process left owing work are built at the start, before the
 identity bootstrap, without their tools until their next build. An agent
-created at run time is not among them: every build of it is refused until the
+created at run time (from 0.9.15) is not among them: every build of it is refused until the
 identity bootstrap, which then seats one the start owes its seat through the
 customizer's build step, so its labels are compared with the seat's before
 anything is built. Without any customizer the identity bootstrap leaves the

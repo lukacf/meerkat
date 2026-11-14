@@ -670,7 +670,7 @@ which asks you to confirm. An edit keeps the timing unless you change it.
 - An agent whose input is governed takes no schedule (a governed send needs
   its human present, and a scheduled send has none), and an agent that
   takes no console messages cannot be scheduled.
-- An archive pauses the agent's schedules, and its unarchive resumes
+- From 0.9.15, an archive pauses the agent's schedules, and its unarchive resumes
   exactly those. A schedule paused that way says so in words ("Paused
   because its agent is archived. It resumes when the agent is
   unarchived."), in the agent's section and in the Schedules panel; a
@@ -689,6 +689,10 @@ Schedules are the `meta/schedule/*` methods on the console RPC (see
 [Console schedules](/api/rpc#console-schedules-console)).
 
 ### Long-term agents
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+Available from Meerkat Meta 0.9.15.
 
 Where the team's host lets its agents be changed at run time (its
 [identity policy](/reference/identity-policy)), the roster creates and
@@ -1242,15 +1246,15 @@ interface ConsoleAgent {
     can_manage_schedules?: boolean; // under enforced access: agent.send and schedule.manage
     can_retire?: boolean;
     can_respawn?: boolean;
-    can_change_identity?: boolean; // edit and archive this agent at run time (agent.identity.manage)
-    can_remove_identity?: boolean; // remove this agent for good (agent.identity.remove)
+    can_change_identity?: boolean; // from 0.9.15: edit and archive this agent at run time (agent.identity.manage)
+    can_remove_identity?: boolean; // from 0.9.15: remove this agent for good (agent.identity.remove)
     runtime_mode?: string;
   };
   labels?: Record<string, string>;
 }
 ```
 
-`identity_changes` of the same read says what the console offers for the
+From 0.9.15, `identity_changes` of the same read says what the console offers for the
 team's [long-term agents](#long-term-agents): `available` (the host changes
 agents at run time and the console is writable), and `can_create`,
 `can_change` and `can_remove` for this viewer. A flag that is absent reads

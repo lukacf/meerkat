@@ -50,18 +50,19 @@ them.
   `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
   read the binding file. See Security and the Upgrade notes.
 
-- Behaviour-only (not measured by the gate): `meerkat-schedule` and every
-  door that takes a schedule request: a schedule create or update that
-  writes `reasoning_effort` directly in its `create` spec or on its prompt
-  action is refused (invalid params on JSON-RPC, HTTP 400 on REST, an
-  invalid-arguments error from the schedule tools) and nothing is stored.
+- Behaviour-only (not measured by the gate): `meerkat-schedule` and the
+  doors that take a schedule request, for session and identity targets: a
+  schedule create or update that writes `reasoning_effort` directly in a
+  session target's `create` spec or on the prompt action of a session or
+  identity target is refused (invalid params on JSON-RPC, HTTP 400 on REST,
+  an invalid-arguments error from the schedule tools) and nothing is stored.
   0.9.14 read the member as an unknown one and dropped it, so such a request
   was accepted and its schedule ran without a level. The refusal is given
   when the request is read (`SessionTargetBinding`'s and
   `ScheduledSessionAction`'s `Deserialize`); other unknown members are still
   dropped, and the new `meerkat_schedule::direct_reasoning_effort_refusal`
-  (also `meerkat::direct_reasoning_effort_refusal`) tells a door whether a
-  failed read was this refusal. See Known limitations.
+  tells a door whether a failed read was this refusal. A mob target does not
+  refuse the member yet. See Known limitations.
 
 - Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
   `meerkat-machine-kernels`: the schedule lifecycle machine gains a state
@@ -2627,10 +2628,13 @@ them.
 - A schedule's session spec is the one surface where the reasoning effort
   level is not accepted in this release. A schedule request that writes
   `reasoning_effort` in its `create` spec (directly or in `provider_params`)
-  or on its prompt action is refused when the schedule is created
+  or on the prompt action of a session or identity target is refused when
+  the schedule is created
   or updated (invalid params on JSON-RPC, HTTP 400 on REST, an
   invalid-arguments error from the MCP server's and an agent's schedule
-  tools), and nothing is stored. A provider's own effort under
+  tools), and nothing is stored. A `reasoning_effort` member written on a
+  mob target (a member send, a helper) is still accepted and ignored: the
+  delivery runs without a level. A provider's own effort under
   `provider_tag` is accepted there as before. The level is planned to
   return on schedules in a later release, together with a way back for
   stores on a rollback.

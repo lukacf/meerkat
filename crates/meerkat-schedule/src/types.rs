@@ -1232,12 +1232,15 @@ const REASONING_EFFORT_DIRECTLY_ON_PROMPT_ACTION: &str =
 /// session spec (`create`) or on a prompt action: the refusal's own
 /// sentence, without the parser's position. `None` for every other failure.
 ///
-/// A schedule does not take the provider-neutral level in this release, and
-/// a setting is applied or refused, never dropped. The two members are not
+/// A schedule does not take the provider-neutral level in this release. On
+/// session and identity targets a level a request writes is refused, not
+/// dropped. The two members are not
 /// fields of the spec or the action, so only the read itself can see them:
 /// it refuses them (the readers of `SessionTargetBinding`'s `create` and of
-/// [`ScheduledSessionAction`]), and every door that reads a schedule request
-/// answers its own invalid-request error. A parser reports a failure as text
+/// [`ScheduledSessionAction`]), and each door that reads such a target
+/// answers its own invalid-request error. A mob target (`MobTargetBinding`,
+/// `ScheduledMobAction`) does not refuse the member yet: it is still read as
+/// an unknown member there and dropped. A parser reports a failure as text
 /// only, so a door whose parse failures answer differently from its refused
 /// schedules (REST: 422 against 400) asks here whether a failed read was
 /// this refusal, and gives it the answer the `provider_params` form gets.

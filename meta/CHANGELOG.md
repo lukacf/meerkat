@@ -1770,12 +1770,14 @@ Security, Upgrade and Changed.
   mob it created, and the calls tried that name the mob were refused, while
   the mob's members can go on running; the mobs' stores stay. A completed
   `meta/compact_member` has the same cost (the RPC reference's
-  `meta/compact_member` section). A `meta/compact_member` that failed has
-  rebuilt the identity once before its maintenance turn, so the identity
-  has probably paid that cost already (read from the source, not run):
-  check whether it still lists the mobs it created. If it does and must go
-  on managing them, weigh that against the failing messages before you
-  respawn: none of the three steps is known to keep it; and before the
+  `meta/compact_member` section). A reset: it ends the identity's session,
+  and the mobs that session owns end with it, no later than the gateway's
+  next start (read from the source, not run). A `meta/compact_member` that
+  failed has rebuilt the identity once before its maintenance turn, so the
+  identity has probably paid that cost already (read from the source, not
+  run): check whether it still lists the mobs it created. If it does and
+  must go on managing them, weigh that against the failing messages before
+  you respawn: none of the three steps is known to keep it; and before the
   respawn have it retire the members of, or destroy, a mob it created whose
   members act on their own (not run).
 - An update cannot hand an agent's runtime mode back to its profile: to

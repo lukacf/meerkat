@@ -933,8 +933,11 @@ worker's respawn (`respawn`, `mob/respawn`, the `mob_respawn` tool of
 so the mobs the old incarnation created and its delegates are not carried
 over to the successor.
 An identity entry's member is respawned on its own session
-(`MobHandle::respawn_member`, and `respawn` of such a member) and keeps its
-mobs. Which side a member is on follows from how it was created: a member a
+(`MobHandle::respawn_member`, and `respawn` of such a member), so the mobs
+that session owns do not end with the respawn. What the respawned member's
+own tools list and manage of the mobs it created is not kept (see the
+`meta/compact_member` section of Meta's RPC reference). Which side a member
+is on follows from how it was created: a member a
 host seats through an identity entry (a declared or store-owned identity, the
 way a host keeps a durable roster) is an entry's member; a member spawned
 directly (a host's spawn call, an agent's `mob_spawn_member`, a helper) is a

@@ -4204,7 +4204,10 @@ For an identity that created mobs each clearing step has a cost of its own:
   identity no longer lists a mob it created, and the calls tried that name
   the mob were refused, while the mob's members can go on running; the mobs'
   stores stay. A completed `meta/compact_member` has the same cost (see the
-  top of this section).
+  top of this section);
+- a reset: it ends the identity's session, and the mobs that session owns end
+  with it, no later than the gateway's next start (read from the source, not
+  run).
 
 A `meta/compact_member` that failed has rebuilt the identity once before its
 maintenance turn, so the identity has probably paid that cost already (read

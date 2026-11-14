@@ -70,11 +70,15 @@ pub fn pack_directory_with_excludes(
     signing: Option<SigningRequest<'_>>,
     excluded_paths: &[&Path],
 ) -> Result<PackResult, PackValidationError> {
-    let mut files = scan_directory(directory)?;
-    exclude_paths_from_pack(directory, excluded_paths, &mut files);
+    let mut scanned = scan_directory(directory)?;
+    exclude_paths_from_pack(directory, excluded_paths, &mut scanned)?;
     if let Some(request) = signing {
-        exclude_paths_from_pack(directory, &[request.key_path], &mut files);
+        exclude_paths_from_pack(directory, &[request.key_path], &mut scanned)?;
     }
+    let mut files: BTreeMap<String, Vec<u8>> = scanned
+        .into_iter()
+        .map(|(path, file)| (path, file.bytes))
+        .collect();
     prepare_adaptive_build_outputs(&mut files)?;
     validate_extracted_pack_files(&files)?;
 
@@ -618,7 +622,37 @@ fn ensure_no_trust_section(files: &BTreeMap<String, Vec<u8>>) -> Result<(), Pack
     Ok(())
 }
 
-fn scan_directory(directory: &Path) -> Result<BTreeMap<String, Vec<u8>>, PackValidationError> {
+/// A regular file the scan found under the mob directory.
+struct ScannedFile {
+    bytes: Vec<u8>,
+    /// Which file it is, whatever it is called. `None` where the file system
+    /// gives none.
+    #[cfg(unix)]
+    identity: Option<FileIdentity>,
+}
+
+/// What makes two names the same file on Unix: the device and the inode.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl FileIdentity {
+    /// The identity of a regular file. An inode number of zero is no
+    /// identity: it would make every such file the same file.
+    fn of(metadata: &std::fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.is_file() && metadata.ino() != 0).then(|| Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
+
+fn scan_directory(directory: &Path) -> Result<BTreeMap<String, ScannedFile>, PackValidationError> {
     let mut files = BTreeMap::new();
     scan_directory_inner(directory, directory, &mut files)?;
     Ok(files)
@@ -627,7 +661,7 @@ fn scan_directory(directory: &Path) -> Result<BTreeMap<String, Vec<u8>>, PackVal
 fn scan_directory_inner(
     root: &Path,
     current: &Path,
-    out: &mut BTreeMap<String, Vec<u8>>,
+    out: &mut BTreeMap<String, ScannedFile>,
 ) -> Result<(), PackValidationError> {
     for entry in std::fs::read_dir(current)? {
         let entry = entry?;
@@ -644,17 +678,70 @@ fn scan_directory_inner(
             .strip_prefix(root)
             .map_err(|err| PackValidationError::Archive(err.to_string()))?;
         let rel_path = normalize_rel_path(&rel.to_string_lossy());
-        out.insert(rel_path, std::fs::read(&path)?);
+        let file = ScannedFile {
+            #[cfg(unix)]
+            identity: FileIdentity::of(&entry.metadata()?),
+            bytes: std::fs::read(&path)?,
+        };
+        out.insert(rel_path, file);
     }
     Ok(())
 }
 
-fn exclude_paths_from_pack(root: &Path, paths: &[&Path], files: &mut BTreeMap<String, Vec<u8>>) {
+/// Removes the files `paths` name from the scanned set.
+///
+/// A file is left out by what it is, not by how its path or the directory's
+/// is written. The directory and each path are resolved through the file
+/// system before they are compared, so relative and absolute forms, a leading
+/// `./`, `..` and symbolic links on the way all name the same file. On Unix a
+/// scanned file that is the same file as a path names (the same device and
+/// inode) is left out too, under whatever name or case the scan found it: a
+/// hard link, or another spelling on a file system that ignores case.
+///
+/// A path that names no file leaves nothing out. A path, or the directory,
+/// that cannot be resolved for any other reason is an error: it is never
+/// compared as written, which could pack the file it names.
+fn exclude_paths_from_pack(
+    root: &Path,
+    paths: &[&Path],
+    files: &mut BTreeMap<String, ScannedFile>,
+) -> Result<(), PackValidationError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let real_root = std::fs::canonicalize(root).map_err(|err| {
+        PackValidationError::Io(format!(
+            "cannot resolve the mob directory '{}': {err}",
+            root.display()
+        ))
+    })?;
     for path in paths {
-        if let Ok(relative) = path.strip_prefix(root) {
+        let unresolved = |err: std::io::Error| {
+            PackValidationError::Io(format!(
+                "cannot resolve '{}', a file the pack must leave out: {err}",
+                path.display()
+            ))
+        };
+        let real = match std::fs::canonicalize(path) {
+            Ok(real) => real,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(unresolved(err)),
+        };
+        if let Ok(relative) = real.strip_prefix(&real_root) {
             files.remove(&normalize_rel_path(&relative.to_string_lossy()));
         }
+        #[cfg(unix)]
+        match std::fs::metadata(&real) {
+            Ok(metadata) => {
+                if let Some(identity) = FileIdentity::of(&metadata) {
+                    files.retain(|_, file| file.identity != Some(identity));
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(unresolved(err)),
+        }
     }
+    Ok(())
 }
 
 fn normalize_rel_path(path: &str) -> String {
@@ -731,6 +818,622 @@ mod tests {
 
         assert_eq!(baseline.digest, with_excluded_outside.digest);
         assert_eq!(baseline.archive_bytes, with_excluded_outside.archive_bytes);
+    }
+
+    // The signing key and the output file are left out by the file they name,
+    // however the mob directory and their own paths are written.
+
+    const EXCLUSION_SOURCES: [&str; 3] = ["definition.json", "manifest.toml", "skills/notes.md"];
+
+    /// `<temp>/mob` with the pack sources only.
+    fn exclusion_fixture() -> TempDir {
+        let temp = TempDir::new().unwrap();
+        write_exclusion_sources(&temp.path().join("mob"));
+        temp
+    }
+
+    fn write_exclusion_sources(mob: &Path) {
+        std::fs::create_dir_all(mob.join("skills")).unwrap();
+        std::fs::write(
+            mob.join("manifest.toml"),
+            "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(mob.join("definition.json"), br#"{"id":"mob"}"#).unwrap();
+        std::fs::write(mob.join("skills").join("notes.md"), "# Notes skill\n").unwrap();
+    }
+
+    /// The same fixture with a signing key (`mob/key.hex`) and the output of
+    /// an earlier pack (`mob/out.mobpack`) beside the sources.
+    fn exclusion_fixture_with_key_and_output() -> TempDir {
+        let temp = exclusion_fixture();
+        write_throwaway_key(&temp.path().join("mob").join("key.hex"));
+        std::fs::write(
+            temp.path().join("mob").join("out.mobpack"),
+            b"earlier output",
+        )
+        .unwrap();
+        temp
+    }
+
+    /// Throwaway signing key: 32 bytes derived in the test, hex encoded.
+    fn write_throwaway_key(path: &Path) {
+        let bytes = Sha256::digest(b"mob pack exclusion rows throwaway key");
+        std::fs::write(path, hex::encode(bytes)).unwrap();
+    }
+
+    fn signed_pack_files(dir: &Path, key: &Path, output: &Path) -> Vec<String> {
+        let packed = pack_directory_with_excludes(
+            dir,
+            Some(SigningRequest {
+                signer_id: "test-signer",
+                key_path: key,
+            }),
+            &[output],
+        )
+        .unwrap();
+        extract_targz_safe(&packed.archive_bytes)
+            .unwrap()
+            .into_keys()
+            .collect()
+    }
+
+    fn sorted_names(names: &[&str]) -> Vec<String> {
+        let mut names: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
+        names.sort();
+        names
+    }
+
+    /// The signed pack holds the sources and its signature: neither the key
+    /// nor the output file.
+    fn assert_key_and_output_left_out(spelling: &str, files: &[String]) {
+        let packed: Vec<&str> = ["key.hex", "out.mobpack"]
+            .into_iter()
+            .filter(|name| files.iter().any(|file| file == name))
+            .collect();
+        assert!(
+            packed.is_empty(),
+            "{spelling}: packed {packed:?} (key.hex is the signing key, out.mobpack the output \
+             file); files: {files:?}"
+        );
+        let mut expected = EXCLUSION_SOURCES.to_vec();
+        expected.push("signature.toml");
+        assert_eq!(files, sorted_names(&expected), "{spelling}");
+    }
+
+    /// Serializes the rows that set the process current directory. No other
+    /// test of this crate depends on it.
+    static CURRENT_DIR: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Runs `body` with the process current directory set to `dir` and puts
+    /// the earlier one back afterwards, also when `body` panics.
+    fn with_current_dir<T>(dir: &Path, body: impl FnOnce() -> T) -> T {
+        struct Restore(std::path::PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).unwrap();
+            }
+        }
+        let _serial = CURRENT_DIR
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = Restore(std::env::current_dir().unwrap());
+        std::env::set_current_dir(dir).unwrap();
+        body()
+    }
+
+    /// Where a spelling row's command line is typed.
+    #[derive(Clone, Copy)]
+    enum TypedIn {
+        /// Inside the mob directory: the directory argument is `.`.
+        MobDirectory,
+        /// In the directory that holds `mob`.
+        ParentDirectory,
+    }
+
+    /// One spelling of the directory, the key and the output, as typed in
+    /// `typed_in`. The fixture holds `mob/key.hex` and `mob/out.mobpack`.
+    fn assert_spelling_leaves_key_and_output_out(
+        temp: &TempDir,
+        typed_in: TypedIn,
+        dir: &Path,
+        key: &Path,
+        output: &Path,
+    ) {
+        let current = match typed_in {
+            TypedIn::MobDirectory => temp.path().join("mob"),
+            TypedIn::ParentDirectory => temp.path().to_path_buf(),
+        };
+        let files = with_current_dir(&current, || signed_pack_files(dir, key, output));
+        assert_key_and_output_left_out(
+            &format!(
+                "directory `{}`, key `{}`, output `{}`",
+                dir.display(),
+                key.display(),
+                output.display()
+            ),
+            &files,
+        );
+    }
+
+    #[test]
+    fn test_pack_exclusion_spelling_dot_with_bare_key_and_output() {
+        let temp = exclusion_fixture_with_key_and_output();
+        assert_spelling_leaves_key_and_output_out(
+            &temp,
+            TypedIn::MobDirectory,
+            Path::new("."),
+            Path::new("key.hex"),
+            Path::new("out.mobpack"),
+        );
+    }
+
+    #[test]
+    fn test_pack_exclusion_spelling_dot_with_dot_slash_key_and_output() {
+        let temp = exclusion_fixture_with_key_and_output();
+        assert_spelling_leaves_key_and_output_out(
+            &temp,
+            TypedIn::MobDirectory,
+            Path::new("."),
+            Path::new("./key.hex"),
+            Path::new("./out.mobpack"),
+        );
+    }
+
+    #[test]
+    fn test_pack_exclusion_spelling_dir_with_dir_prefixed_key_and_output() {
+        let temp = exclusion_fixture_with_key_and_output();
+        assert_spelling_leaves_key_and_output_out(
+            &temp,
+            TypedIn::ParentDirectory,
+            Path::new("mob"),
+            Path::new("mob/key.hex"),
+            Path::new("mob/out.mobpack"),
+        );
+    }
+
+    #[test]
+    fn test_pack_exclusion_spelling_dot_slash_dir_with_dir_prefixed_key_and_output() {
+        let temp = exclusion_fixture_with_key_and_output();
+        assert_spelling_leaves_key_and_output_out(
+            &temp,
+            TypedIn::ParentDirectory,
+            Path::new("./mob"),
+            Path::new("mob/key.hex"),
+            Path::new("mob/out.mobpack"),
+        );
+    }
+
+    #[test]
+    fn test_pack_exclusion_spelling_dir_with_dot_slash_key_and_output() {
+        let temp = exclusion_fixture_with_key_and_output();
+        assert_spelling_leaves_key_and_output_out(
+            &temp,
+            TypedIn::ParentDirectory,
+            Path::new("mob"),
+            Path::new("./mob/key.hex"),
+            Path::new("./mob/out.mobpack"),
+        );
+    }
+
+    #[test]
+    fn test_pack_exclusion_spelling_absolute_dir_with_relative_key_and_output() {
+        let temp = exclusion_fixture_with_key_and_output();
+        assert_spelling_leaves_key_and_output_out(
+            &temp,
+            TypedIn::ParentDirectory,
+            &temp.path().join("mob"),
+            Path::new("mob/key.hex"),
+            Path::new("mob/out.mobpack"),
+        );
+    }
+
+    #[test]
+    fn test_pack_exclusion_spelling_relative_dir_with_absolute_key_and_output() {
+        let temp = exclusion_fixture_with_key_and_output();
+        assert_spelling_leaves_key_and_output_out(
+            &temp,
+            TypedIn::ParentDirectory,
+            Path::new("mob"),
+            &temp.path().join("mob").join("key.hex"),
+            &temp.path().join("mob").join("out.mobpack"),
+        );
+    }
+
+    #[test]
+    fn test_pack_exclusion_spelling_absolute_dir_with_absolute_key_and_output() {
+        let temp = exclusion_fixture_with_key_and_output();
+        assert_spelling_leaves_key_and_output_out(
+            &temp,
+            TypedIn::ParentDirectory,
+            &temp.path().join("mob"),
+            &temp.path().join("mob").join("key.hex"),
+            &temp.path().join("mob").join("out.mobpack"),
+        );
+    }
+
+    #[test]
+    fn test_pack_exclusion_guard_directory_with_trailing_separator() {
+        let temp = exclusion_fixture_with_key_and_output();
+        let mob = temp.path().join("mob");
+        let mut trailing = mob.clone().into_os_string();
+        trailing.push(std::path::MAIN_SEPARATOR_STR);
+        let files = signed_pack_files(
+            Path::new(&trailing),
+            &mob.join("key.hex"),
+            &mob.join("out.mobpack"),
+        );
+        assert_key_and_output_left_out("directory with a trailing separator", &files);
+    }
+
+    #[test]
+    fn test_pack_exclusion_parent_component() {
+        let temp = exclusion_fixture_with_key_and_output();
+        let mob = temp.path().join("mob");
+        let through_parent = mob.join("..").join("mob");
+
+        let files = signed_pack_files(
+            &through_parent,
+            &mob.join("key.hex"),
+            &mob.join("out.mobpack"),
+        );
+        assert_key_and_output_left_out("directory written mob/../mob", &files);
+
+        let files = signed_pack_files(
+            &mob,
+            &mob.join("skills").join("..").join("key.hex"),
+            &mob.join("skills").join("..").join("out.mobpack"),
+        );
+        assert_key_and_output_left_out("key and output written mob/skills/../<name>", &files);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_exclusion_symlinked_directory() {
+        let temp = exclusion_fixture_with_key_and_output();
+        let mob = temp.path().join("mob");
+        let link = temp.path().join("mob-link");
+        std::os::unix::fs::symlink(&mob, &link).unwrap();
+
+        let files = signed_pack_files(&link, &mob.join("key.hex"), &mob.join("out.mobpack"));
+        assert_key_and_output_left_out("symlinked directory, real key and output", &files);
+
+        let files = signed_pack_files(&mob, &link.join("key.hex"), &link.join("out.mobpack"));
+        assert_key_and_output_left_out("real directory, key and output through the link", &files);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_exclusion_key_given_as_symlink() {
+        let temp = exclusion_fixture_with_key_and_output();
+        let mob = temp.path().join("mob");
+
+        // A link outside the directory that names the key inside it is the
+        // key inside it.
+        let outside_link = temp.path().join("key-link.hex");
+        std::os::unix::fs::symlink(mob.join("key.hex"), &outside_link).unwrap();
+        let files = signed_pack_files(&mob, &outside_link, &mob.join("out.mobpack"));
+        assert_key_and_output_left_out("key given as a link outside the directory", &files);
+
+        // So is a link inside the directory: the scan skips the link, and the
+        // key it names is left out.
+        let inside_link = mob.join("key-link.hex");
+        std::os::unix::fs::symlink("key.hex", &inside_link).unwrap();
+        let files = signed_pack_files(&mob, &inside_link, &mob.join("out.mobpack"));
+        assert_key_and_output_left_out("key given as a link inside the directory", &files);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_exclusion_guard_symlinks_inside_directory_are_skipped() {
+        let temp = exclusion_fixture_with_key_and_output();
+        let mob = temp.path().join("mob");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        write_throwaway_key(&outside.join("key.hex"));
+
+        // Links in the directory to the key inside it and to a key outside it.
+        std::os::unix::fs::symlink("key.hex", mob.join("key-link.hex")).unwrap();
+        std::os::unix::fs::symlink(outside.join("key.hex"), mob.join("outside-key-link.hex"))
+            .unwrap();
+
+        let files = signed_pack_files(&mob, &mob.join("key.hex"), &mob.join("out.mobpack"));
+        assert_key_and_output_left_out("links to keys beside the sources", &files);
+    }
+
+    /// A second name of the key file, or of the output file, is the same
+    /// file: it is left out too, in whatever directory of the pack it is.
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_exclusion_hard_links_inside_the_directory_are_left_out() {
+        let temp = exclusion_fixture_with_key_and_output();
+        let mob = temp.path().join("mob");
+        std::fs::hard_link(mob.join("key.hex"), mob.join("key-again.hex")).unwrap();
+        std::fs::hard_link(mob.join("key.hex"), mob.join("skills").join("k")).unwrap();
+        std::fs::hard_link(mob.join("out.mobpack"), mob.join("out-again.mobpack")).unwrap();
+
+        let files = signed_pack_files(&mob, &mob.join("key.hex"), &mob.join("out.mobpack"));
+        assert_eq!(
+            files,
+            sorted_names(&[
+                "definition.json",
+                "manifest.toml",
+                "signature.toml",
+                "skills/notes.md"
+            ]),
+            "every name of the key file and of the output file is left out"
+        );
+    }
+
+    /// The key and the output given by names outside the directory that are
+    /// hard links to the files inside it: no path comparison can tell, the
+    /// files are the same.
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_exclusion_key_and_output_given_as_hard_links_outside_the_directory() {
+        let temp = exclusion_fixture_with_key_and_output();
+        let mob = temp.path().join("mob");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::hard_link(mob.join("key.hex"), outside.join("signing.hex")).unwrap();
+        std::fs::hard_link(mob.join("out.mobpack"), outside.join("latest.mobpack")).unwrap();
+
+        let files = signed_pack_files(
+            &mob,
+            &outside.join("signing.hex"),
+            &outside.join("latest.mobpack"),
+        );
+        assert_key_and_output_left_out("key and output given as hard links outside", &files);
+    }
+
+    /// A copy of the key is another file with the same bytes: it is packed.
+    #[test]
+    fn test_pack_exclusion_guard_copy_of_the_key_is_an_ordinary_file() {
+        let temp = exclusion_fixture_with_key_and_output();
+        let mob = temp.path().join("mob");
+        std::fs::copy(mob.join("key.hex"), mob.join("key-copy.hex")).unwrap();
+
+        let files = signed_pack_files(&mob, &mob.join("key.hex"), &mob.join("out.mobpack"));
+        let mut expected = EXCLUSION_SOURCES.to_vec();
+        expected.extend(["key-copy.hex", "signature.toml"]);
+        assert_eq!(files, sorted_names(&expected));
+    }
+
+    #[test]
+    fn test_pack_exclusion_guard_key_this_pack_is_not_signed_with_is_an_ordinary_file() {
+        let temp = exclusion_fixture();
+        let mob = temp.path().join("mob");
+        write_throwaway_key(&mob.join("key.hex"));
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        write_throwaway_key(&outside.join("other-key.hex"));
+        let mut expected = EXCLUSION_SOURCES.to_vec();
+        expected.push("key.hex");
+
+        // An unsigned pack is told of no key.
+        let unsigned: Vec<String> =
+            extract_targz_safe(&pack_directory(&mob, None).unwrap().archive_bytes)
+                .unwrap()
+                .into_keys()
+                .collect();
+        assert_eq!(unsigned, sorted_names(&expected));
+
+        // A pack signed with another key leaves out that key alone.
+        let files = signed_pack_files(
+            &mob,
+            &outside.join("other-key.hex"),
+            &outside.join("out.mobpack"),
+        );
+        expected.push("signature.toml");
+        assert_eq!(files, sorted_names(&expected));
+    }
+
+    #[test]
+    fn test_pack_exclusion_guard_earlier_pack_under_another_name_is_an_ordinary_file() {
+        let temp = exclusion_fixture();
+        let mob = temp.path().join("mob");
+        std::fs::write(mob.join("earlier.mobpack"), b"earlier output").unwrap();
+
+        // Only the output this pack is written to is left out.
+        let packed =
+            pack_directory_with_excludes(&mob, None, &[mob.join("out.mobpack").as_path()]).unwrap();
+        let files: Vec<String> = extract_targz_safe(&packed.archive_bytes)
+            .unwrap()
+            .into_keys()
+            .collect();
+        let mut expected = EXCLUSION_SOURCES.to_vec();
+        expected.push("earlier.mobpack");
+        assert_eq!(files, sorted_names(&expected));
+    }
+
+    #[test]
+    fn test_pack_exclusion_is_by_file_not_by_name() {
+        let temp = exclusion_fixture_with_key_and_output();
+        let mob = temp.path().join("mob");
+        std::fs::write(mob.join("skills").join("key.hex"), "not the signing key\n").unwrap();
+        std::fs::write(mob.join("skills").join("out.mobpack"), "not the output\n").unwrap();
+
+        let files = signed_pack_files(
+            &mob.join("..").join("mob"),
+            &mob.join("key.hex"),
+            &mob.join("out.mobpack"),
+        );
+        assert!(
+            files.iter().any(|file| file == "skills/key.hex"),
+            "a file that only shares the key's name must stay packed: {files:?}"
+        );
+        assert!(
+            files.iter().any(|file| file == "skills/out.mobpack"),
+            "a file that only shares the output's name must stay packed: {files:?}"
+        );
+        let mut expected = EXCLUSION_SOURCES.to_vec();
+        expected.extend(["signature.toml", "skills/key.hex", "skills/out.mobpack"]);
+        assert_eq!(files, sorted_names(&expected));
+    }
+
+    #[test]
+    fn test_pack_exclusion_output_not_yet_written() {
+        let temp = exclusion_fixture();
+        let mob = temp.path().join("mob");
+        let through_parent = mob.join("..").join("mob");
+        let output = mob.join("new.mobpack");
+        assert!(!output.exists());
+
+        let first = pack_directory_with_excludes(&through_parent, None, &[output.as_path()])
+            .expect("an output that does not exist yet is nothing to leave out");
+        let first_files: Vec<String> = extract_targz_safe(&first.archive_bytes)
+            .unwrap()
+            .into_keys()
+            .collect();
+        assert_eq!(first_files, sorted_names(&EXCLUSION_SOURCES));
+
+        // The second pack finds the first one's output in the directory.
+        std::fs::write(&output, &first.archive_bytes).unwrap();
+        let second =
+            pack_directory_with_excludes(&through_parent, None, &[output.as_path()]).unwrap();
+        assert_eq!(first.digest, second.digest);
+        assert_eq!(first.archive_bytes, second.archive_bytes);
+
+        // Neither does an output whose own directory does not exist yet.
+        let missing_parent = mob.join("dist").join("new.mobpack");
+        std::fs::remove_file(&output).unwrap();
+        let third =
+            pack_directory_with_excludes(&through_parent, None, &[missing_parent.as_path()])
+                .unwrap();
+        assert_eq!(first.archive_bytes, third.archive_bytes);
+    }
+
+    /// A path to leave out that cannot be resolved, for another reason than
+    /// that it names no file, refuses the pack. It is never compared as
+    /// written, which could pack the key.
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_exclusion_path_that_cannot_be_resolved_refuses_the_pack() {
+        use std::os::unix::fs::PermissionsExt;
+
+        /// Gives the directory its search permission back, also on a panic,
+        /// so that the temporary directory can be removed.
+        struct Searchable<'a>(&'a Path);
+        impl Drop for Searchable<'_> {
+            fn drop(&mut self) {
+                std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        let temp = TempDir::new().unwrap();
+        let guard = temp.path().join("guard");
+        let mob = guard.join("mob");
+        write_exclusion_sources(&mob);
+        write_throwaway_key(&mob.join("key.hex"));
+        std::fs::write(mob.join("out.mobpack"), b"earlier output").unwrap();
+
+        // Typed inside the mob directory, whose parent then loses its search
+        // permission: relative paths still open, real paths do not resolve.
+        let (unsearchable, with_output, key_alone, directory) = with_current_dir(&mob, || {
+            let _searchable = Searchable(&guard);
+            std::fs::set_permissions(&guard, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let unsearchable = std::fs::metadata(&mob).is_err();
+            let signing = Some(SigningRequest {
+                signer_id: "test-signer",
+                key_path: Path::new("skills/../key.hex"),
+            });
+            let with_output = pack_directory_with_excludes(
+                Path::new("."),
+                signing,
+                &[Path::new("skills/../out.mobpack")],
+            );
+            let key_alone = pack_directory(Path::new("."), signing);
+            // The directory itself written so that its real path does not
+            // resolve either.
+            let directory = pack_directory_with_excludes(
+                Path::new("skills/.."),
+                None,
+                &[Path::new("out.mobpack")],
+            );
+            (unsearchable, with_output, key_alone, directory)
+        });
+        if !unsearchable {
+            // An account that passes every permission check (root) cannot
+            // build the setting.
+            return;
+        }
+
+        for (refused, result) in [
+            (
+                "I/O error: cannot resolve 'skills/../out.mobpack', a file the pack must leave \
+                 out: Permission denied",
+                with_output,
+            ),
+            (
+                "I/O error: cannot resolve 'skills/../key.hex', a file the pack must leave out: \
+                 Permission denied",
+                key_alone,
+            ),
+            (
+                "I/O error: cannot resolve the mob directory 'skills/..': Permission denied",
+                directory,
+            ),
+        ] {
+            let refusal = match result {
+                Err(refusal) => refusal.to_string(),
+                Ok(packed) => panic!(
+                    "expected `{refused}`, yet a pack was made of {:?}",
+                    extract_targz_safe(&packed.archive_bytes)
+                        .unwrap()
+                        .into_keys()
+                        .collect::<Vec<_>>()
+                ),
+            };
+            assert!(
+                refusal.starts_with(refused),
+                "the refusal names the path and the reason: {refusal}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pack_exclusion_guard_key_and_output_outside_directory_change_nothing() {
+        let temp = exclusion_fixture();
+        let mob = temp.path().join("mob");
+        // Files inside the directory that share the outside files' names.
+        std::fs::write(mob.join("key.hex"), "a source file\n").unwrap();
+        std::fs::write(mob.join("out.mobpack"), "another source file\n").unwrap();
+        let baseline =
+            extract_targz_safe(&pack_directory(&mob, None).unwrap().archive_bytes).unwrap();
+
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        write_throwaway_key(&outside.join("key.hex"));
+        std::fs::write(outside.join("out.mobpack"), b"earlier output").unwrap();
+
+        for (spelling, key, output) in [
+            (
+                "outside paths",
+                outside.join("key.hex"),
+                outside.join("out.mobpack"),
+            ),
+            (
+                "outside paths written through the directory",
+                mob.join("..").join("outside").join("key.hex"),
+                mob.join("..").join("outside").join("out.mobpack"),
+            ),
+        ] {
+            let packed = pack_directory_with_excludes(
+                &mob,
+                Some(SigningRequest {
+                    signer_id: "test-signer",
+                    key_path: &key,
+                }),
+                &[output.as_path()],
+            )
+            .unwrap();
+            let mut files = extract_targz_safe(&packed.archive_bytes).unwrap();
+            assert!(
+                files.remove("signature.toml").is_some(),
+                "{spelling}: the pack is signed"
+            );
+            assert_eq!(files, baseline, "{spelling}");
+        }
     }
 
     #[test]

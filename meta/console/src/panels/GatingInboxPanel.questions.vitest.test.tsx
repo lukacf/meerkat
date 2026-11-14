@@ -74,7 +74,7 @@ describe("GatingInboxPanel question sets", () => {
         questions={{ snapshot: sets(), onAnswer: vi.fn(), onDismiss: vi.fn() }} />,
     );
     const card = view.getByTestId(`question-set:${PENDING_ID}`);
-    expect(card.dataset.state).toBe("not_permitted");
+    expect(card.dataset.state).toBe("read_only");
     expect((within(card).getByRole("button", { name: "Send answers" }) as HTMLButtonElement).disabled).toBe(true);
   });
 

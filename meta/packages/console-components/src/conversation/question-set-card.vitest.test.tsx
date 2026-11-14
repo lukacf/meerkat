@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentDirectoryProvider } from "../panel-kit";
 import { createAgentDirectory } from "../panel-kit/agents";
 import {
+  QUESTION_SET_REFUSAL_WORDS,
   normalizeQuestionSet,
   type QuestionSet,
   type QuestionSetDecisionState,
@@ -216,8 +217,10 @@ describe("QuestionSetCard", () => {
 
   it("tells a caller who is not signed in as a person to sign in, with the questions shown and disabled", () => {
     const { view, card, onAnswer } = show({ readOnly: true, readOnlyReason: "sign_in" });
-    expect(card.dataset.state).toBe("not_permitted");
-    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent).toBe("Sign in as yourself to answer");
+    expect(card.dataset.state).toBe("read_only");
+    expect(view.getByRole("status").textContent).toBe("Sign in to answer");
+    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent)
+      .toBe("Sign in as yourself to answer. Only a signed-in person can answer an agent's questions.");
     expect(view.getAllByRole("radio").length).toBe(5);
     expect((view.getAllByRole("radio") as HTMLInputElement[]).every((input) => input.disabled)).toBe(true);
     expect(send(view).disabled).toBe(true);
@@ -226,36 +229,95 @@ describe("QuestionSetCard", () => {
     expect(onAnswer).not.toHaveBeenCalled();
   });
 
-  it("tells a read-only caller they cannot answer for the agent", () => {
+  it("tells a caller with read-only access that the questions can be read and not answered", () => {
     const { view, card } = show({ readOnly: true });
-    expect(card.dataset.state).toBe("not_permitted");
-    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent).toBe("You cannot answer for this agent");
+    expect(card.dataset.state).toBe("read_only");
+    expect(view.getByRole("status").textContent).toBe("Read only");
+    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent)
+      .toBe("You can read these questions but not answer them: your access to this Console is read-only.");
     expect((view.getAllByRole("radio") as HTMLInputElement[]).every((input) => input.disabled)).toBe(true);
   });
 
+  it("tells a person who lost the permission to decide what to ask for, on every card", () => {
+    const { view, card } = show({ readOnly: true, readOnlyReason: "no_permission" });
+    expect(card.dataset.state).toBe("read_only");
+    expect(view.getByRole("status").textContent).toBe("No permission");
+    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent)
+      .toBe("You no longer have permission to answer questions here. Ask an administrator for the permission to decide.");
+    expect(send(view).disabled).toBe(true);
+    expect(dismiss(view).disabled).toBe(true);
+  });
+
   it.each([
-    [-32030, "access_denied", "You cannot answer for this agent", true],
-    [-32057, "approver_unauthenticated", "Sign in as yourself to answer", true],
-    [-32602, "refused", "This question set is no longer open, or the answer was not accepted.", false],
-  ] as const)("keeps the card and says why after a refused decision (%i)", (_code, kind, sentence, locked) => {
-    const { view, card } = show({ decision: {
+    ["not_accepted", true],
+    ["not_taken", true],
+    ["subject_changed", false],
+    ["not_eligible", false],
+    ["approver_unauthenticated", false],
+    ["access_denied", false],
+    ["caller_changed", false],
+    ["caller_not_current", false],
+  ] as const)("keeps the card after a refusal its set outlives (%s): not sent, why, what to do, and the person may send again", (kind, details) => {
+    const sentence = QUESTION_SET_REFUSAL_WORDS[kind];
+    expect(sentence.length).toBeGreaterThan(20);
+    const { view, card, onDismiss } = show({ decision: {
       phase: "refused", action: "answer", error: sentence,
-      refusal: { kind, words: sentence, detail: "the gateway's own message" },
+      refusal: { kind, words: sentence, ...(details ? { detail: "the gateway's own message" } : {}) },
     } });
-    expect(card.dataset.state).toBe("not_permitted");
-    expect(view.getByRole("status").textContent).toBe("Not permitted");
+    expect(card.dataset.state).toBe("refused");
+    expect(view.getByRole("status").textContent).toBe("Not sent");
+    expect(visibleText(card)).not.toMatch(/not permitted/i);
     expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent).toBe(sentence);
+    expect(view.getByRole("alert").textContent).toContain(sentence);
     expect(groups(view).length).toBe(2);
-    expect(dismiss(view).disabled).toBe(locked);
-    const details = view.queryByTestId(`question-set-refusal:${PENDING_ID}`);
-    if (kind === "refused") {
-      expect(details?.tagName).toBe("DETAILS");
-      expect(details?.hasAttribute("open")).toBe(false);
-      expect(details?.querySelector("summary")?.textContent).toBe("Details");
-      expect(details?.textContent).toContain("the gateway's own message");
+    expect((view.getAllByRole("radio") as HTMLInputElement[]).every((input) => !input.disabled)).toBe(true);
+    fireEvent.click(dismiss(view));
+    expect(onDismiss).toHaveBeenCalledWith(PENDING_ID);
+    const disclosure = view.queryByTestId(`question-set-refusal:${PENDING_ID}`);
+    if (details) {
+      expect(disclosure?.tagName).toBe("DETAILS");
+      expect(disclosure?.hasAttribute("open")).toBe(false);
+      expect(disclosure?.querySelector("summary")?.textContent).toBe("Details");
+      expect(disclosure?.textContent).toContain("the gateway's own message");
     } else {
-      expect(details).toBeNull();
+      expect(disclosure).toBeNull();
     }
+  });
+
+  it("offers nothing to send on a refused card while the cards are read-only, and still says why it was not sent", () => {
+    const sentence = QUESTION_SET_REFUSAL_WORDS.access_denied;
+    const { view, card } = show({
+      readOnly: true, readOnlyReason: "no_permission",
+      decision: { phase: "refused", action: "answer", error: sentence, refusal: { kind: "access_denied", words: sentence } },
+    });
+    expect(card.dataset.state).toBe("refused");
+    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent).toBe(sentence);
+    expect(send(view).disabled).toBe(true);
+    expect(dismiss(view).disabled).toBe(true);
+    expect((view.getAllByRole("radio") as HTMLInputElement[]).every((input) => input.disabled)).toBe(true);
+  });
+
+  it("drops from the draft what a set that changed no longer offers", () => {
+    const { view, onAnswer, onDismiss } = show();
+    fireEvent.click(radio(view, /^Europe/));
+    fireEvent.click(radio(view, "Tonight"));
+    const changed = questions({
+      subject_digest: `sha256:${"e".repeat(64)}`,
+      questions: [
+        { id: "q-region", prompt: "Which region goes first?", choices: [{ id: "c-us", label: "United States" }, { id: "c-asia", label: "Asia" }] },
+        { id: "q-start", prompt: "When should it start?", choices: [{ id: "c-now", label: "Now" }, { id: "c-night", label: "Tonight" }], allow_free_text: true },
+      ],
+    });
+    view.rerender(
+      <AgentDirectoryProvider directory={directory}>
+        <QuestionSetCard set={changed} resourceStatus="ready" onAnswer={onAnswer} onDismiss={onDismiss} />
+      </AgentDirectoryProvider>,
+    );
+    const [region] = groups(view);
+    expect((within(region).getAllByRole("radio") as HTMLInputElement[]).some((input) => input.checked)).toBe(false);
+    expect(radio(view, "Tonight").checked).toBe(true);
+    fireEvent.click(send(view));
+    expect(onAnswer).toHaveBeenCalledWith(PENDING_ID, { "q-start": { kind: "choice", choiceId: "c-night" } });
   });
 
   it("says when an answer may not have arrived and when the list may be out of date", () => {
@@ -350,6 +412,15 @@ describe("QuestionSetList", () => {
     expect(view.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
     expect(view.getByTestId("question-set-notice").textContent)
       .toBe("This question is no longer waiting for an answer. The Console could not confirm whether your answer was the one that arrived.");
+    for (const word of SET_WORDS) expect(view.container.innerHTML).not.toContain(word);
+  });
+
+  it.each(["not_open", "expired"] as const)("leaves the gateway's refusal (%s) as the one line of a card it removed", (kind) => {
+    const view = render(list(listSnapshot()));
+    view.rerender(list(listSnapshot({ sets: [billing()], slots: { [BILLING_ID]: 2 }, notices: [{ slot: 1, kind, atMs: 5 }] })));
+    expect(view.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
+    expect(view.getByTestId("question-set-notice").textContent).toBe(QUESTION_SET_REFUSAL_WORDS[kind]);
+    expect(QUESTION_SET_REFUSAL_WORDS[kind]).toMatch(/^This question /);
     for (const word of SET_WORDS) expect(view.container.innerHTML).not.toContain(word);
   });
 

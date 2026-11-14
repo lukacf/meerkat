@@ -56,9 +56,14 @@ const wire = (id = PENDING_ID, extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 const set = (): QuestionSet => normalizeQuestionSet(wire())!;
-const rpcError = (code: number, kind?: string, message = "refused by the gateway") => Object.assign(new Error(message), {
-  rpcError: { code, message, ...(kind ? { data: { kind } } : {}) },
+const rpcError = (code: number, data?: string | Record<string, unknown>, message = "refused by the gateway") => Object.assign(new Error(message), {
+  rpcError: { code, message, ...(data ? { data: typeof data === "string" ? { kind: data } : data } : {}) },
 });
+/** The gateway's answer to a decide the set itself refuses: invalid params
+ * with the typed refusal, an object tagged by `kind`. */
+const refusedError = (token: string) => rpcError(
+  -32602, { kind: "decision_refused", decision_refusal: { kind: token } }, `decision ${PENDING_ID} refused the input: ${token}`,
+);
 /** Whether a snapshot holds nothing of the wire set: no id, asking agent,
  * digest, title, prompt, label or question and choice id. */
 const nothingKept = (snapshot: unknown) => {
@@ -192,18 +197,54 @@ describe("question set decision params", () => {
 });
 
 describe("questionSetRefusal", () => {
-  it("reads the gateway's refusals in words and keeps its own message", () => {
-    expect(questionSetRefusal(rpcError(-32030, "access_denied", "access denied to approval origin"))).toEqual({
-      kind: "access_denied", words: "You cannot answer for this agent", detail: "access denied to approval origin",
+  it("reads the decision's typed refusal, an object tagged by kind, each with its own words", () => {
+    expect(questionSetRefusal(refusedError("not_open"))).toEqual({
+      kind: "not_open", words: "This question was already answered or closed, so nothing was sent. Nothing more is needed from you.",
+    });
+    expect(questionSetRefusal(refusedError("expired"))).toEqual({
+      kind: "expired", words: "This question timed out before the gateway took your reply, so nothing was sent. If the answer still matters, tell the agent in its chat.",
+    });
+    expect(questionSetRefusal(refusedError("subject_changed"))).toEqual({
+      kind: "subject_changed", words: "These questions changed after you opened them, so nothing was sent. Read them again, then answer.",
+    });
+    expect(questionSetRefusal(refusedError("not_eligible"))).toEqual({
+      kind: "not_eligible", words: "You are not one of the people who can answer this question, so nothing was sent. Ask an administrator if you should be.",
+    });
+    // Another refusal of the decision is not taken either; the gateway's own
+    // message stays for the details.
+    expect(questionSetRefusal(refusedError("presentation_incomplete"))).toEqual({
+      kind: "not_taken", words: "The gateway did not take this reply, so nothing was sent. Try again; if it happens again, tell an administrator.",
+      detail: `decision ${PENDING_ID} refused the input: presentation_incomplete`,
+    });
+    // The refusal is an object: a bare word is not read as one of the kinds.
+    expect(questionSetRefusal(rpcError(-32602, { kind: "decision_refused", decision_refusal: "not_open" }))?.kind).toBe("not_taken");
+    expect(questionSetRefusal(rpcError(-32602, { kind: "decision_refused" }))?.kind).toBe("not_taken");
+  });
+
+  it("reads the refusals of the person and of the caller as definite: nothing was sent", () => {
+    expect(questionSetRefusal(rpcError(-32030, "access_denied", "access denied to gating decisions"))).toEqual({
+      kind: "access_denied",
+      words: "You no longer have permission to answer questions here, so nothing was sent. Ask an administrator for the permission to decide, then send again.",
     });
     expect(questionSetRefusal(rpcError(-32057, "approver_unauthenticated"))).toEqual({
-      kind: "approver_unauthenticated", words: "Sign in as yourself to answer", detail: "refused by the gateway",
+      kind: "approver_unauthenticated", words: "Only a signed-in person can answer, so nothing was sent. Sign in as yourself, then send again.",
     });
-    expect(questionSetRefusal(rpcError(-32602, undefined, "decision is not open"))).toEqual({
-      kind: "refused", words: "This question set is no longer open, or the answer was not accepted.", detail: "decision is not open",
+    expect(questionSetRefusal(rpcError(-32056, "caller_changed"))).toEqual({
+      kind: "caller_changed", words: "This browser is now signed in as someone else, so nothing was sent or changed. Answer again as the person signed in now.",
+    });
+    expect(questionSetRefusal(rpcError(-32056, "caller_not_current"))).toEqual({
+      kind: "caller_not_current", words: "Your sign-in ended before the reply was sent, so nothing was changed. Sign in again, then send again.",
+    });
+  });
+
+  it("reads invalid params without the typed refusal as a reply that was not accepted, and anything else as uncertain", () => {
+    expect(questionSetRefusal(rpcError(-32602, undefined, "answers: unknown choice"))).toEqual({
+      kind: "not_accepted", words: "The gateway did not accept this reply, so nothing was sent. Check your choices and send again.",
+      detail: "answers: unknown choice",
     });
     expect(questionSetRefusal(new Error("network"))).toBeNull();
     expect(questionSetRefusal(rpcError(-32000))).toBeNull();
+    expect(questionSetRefusal(rpcError(-32056))).toBeNull();
   });
 });
 
@@ -283,25 +324,196 @@ describe("createQuestionSetResource", () => {
     expect(writes).toBe(0);
   });
 
-  it("keeps the set and says why when the gateway refuses the decision", async () => {
-    for (const [code, kind, refusal, words] of [
-      [-32030, "access_denied", "access_denied", "You cannot answer for this agent"],
-      [-32057, "approver_unauthenticated", "approver_unauthenticated", "Sign in as yourself to answer"],
-      [-32602, undefined, "refused", "This question set is no longer open, or the answer was not accepted."],
-    ] as const) {
-      const c = clock();
-      const resource = createQuestionSetResource({
-        scopeKey: "a", environment: c.environment,
-        load: async () => ({ question_sets: [wire()] }),
-        decide: async () => { throw rpcError(code, kind); },
-      });
-      await tick(); await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
-      const snapshot = resource.getSnapshot();
-      expect(snapshot.status).toBe("ready");
-      expect(snapshot.sets.map((entry) => entry.pendingId)).toEqual([PENDING_ID]);
-      expect(snapshot.decisions[PENDING_ID]).toMatchObject({ phase: "refused", refusal: { kind: refusal, words, detail: "refused by the gateway" } });
-      resource.dispose();
-    }
+  it.each(["not_open", "expired"] as const)("removes a set whose decide the gateway refuses as %s, at once, with that refusal's own line", async (token) => {
+    const c = clock(); let reads = 0;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      // The gateway no longer lists a set it refuses this way.
+      load: async () => ({ question_sets: reads++ === 0 ? [wire()] : [] }),
+      decide: async () => { throw refusedError(token); },
+    });
+    await tick();
+    const slot = questionSetEntries(resource.getSnapshot())[0].slot;
+    const phases: string[] = [];
+    resource.subscribe(() => { phases.push(resource.getSnapshot().decisions[PENDING_ID]?.phase ?? "none"); });
+    await resource.answer(PENDING_ID, { q2: { kind: "free_text", text: "After the freeze" } });
+    const snapshot = resource.getSnapshot();
+    expect(snapshot.sets).toEqual([]);
+    expect(snapshot.closed).toEqual([]);
+    expect(snapshot.decisions).toEqual({});
+    expect(snapshot.notices).toEqual([{ slot, kind: token, atMs: 0 }]);
+    expect(nothingKept(snapshot)).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toContain("After the freeze");
+    expect(phases).not.toContain("refused");
+    expect(phases).not.toContain("failed");
+    resource.dispose();
+  });
+
+  it("reads a set that changed again and sends the next answer with the digest it then has", async () => {
+    const c = clock(); const sent: Array<{ presented_digest: string }> = []; const changed = `sha256:${"e".repeat(64)}`;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: sent.length >= 2 ? [] : [wire(PENDING_ID, sent.length ? { subject_digest: changed } : {})] }),
+      decide: async (params) => {
+        sent.push(params);
+        if (sent.length === 1) throw refusedError("subject_changed");
+        return accepted("answered");
+      },
+    });
+    await tick(); await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    let snapshot = resource.getSnapshot();
+    expect(snapshot.sets.map((entry) => entry.subjectDigest)).toEqual([changed]);
+    expect(snapshot.decisions[PENDING_ID]).toMatchObject({ phase: "refused", refusal: { kind: "subject_changed" } });
+    expect(snapshot.decisions[PENDING_ID].refusal?.detail).toBeUndefined();
+    expect(snapshot.notices).toEqual([]);
+    await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "us" } });
+    snapshot = resource.getSnapshot();
+    expect(sent.map((params) => params.presented_digest)).toEqual([DIGEST, changed]);
+    expect(snapshot.decisions[PENDING_ID].phase).toBe("answered");
+    resource.dispose();
+  });
+
+  it.each([
+    ["not_eligible", "not_eligible"],
+    ["presentation_incomplete", "not_taken"],
+  ] as const)("keeps a listed set whose decide the gateway refuses as %s: not sent, and the person may send again", async (token, kind) => {
+    const c = clock(); let decides = 0;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: [wire()] }),
+      decide: async () => { decides++; throw refusedError(token); },
+    });
+    await tick(); await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    const snapshot = resource.getSnapshot();
+    expect(snapshot.sets.map((entry) => entry.pendingId)).toEqual([PENDING_ID]);
+    expect(snapshot.decisions[PENDING_ID]).toMatchObject({ phase: "refused", refusal: { kind } });
+    expect(snapshot.readOnly).toBe(false);
+    await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "us" } });
+    expect(decides).toBe(2);
+    resource.dispose();
+  });
+
+  it("offers no send on any card after the gateway says the person may no longer decide, until a later read", async () => {
+    const other = `decision:${"c".repeat(64)}`;
+    const c = clock(); let decides = 0;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: [wire(), wire(other)] }),
+      decide: async () => { decides++; throw rpcError(-32030, "access_denied", "access denied to gating decisions"); },
+    });
+    await tick(); await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    let snapshot = resource.getSnapshot();
+    expect(snapshot.status).toBe("ready");
+    expect(snapshot.sets.length).toBe(2);
+    expect(snapshot.decisions[PENDING_ID]).toMatchObject({ phase: "refused", refusal: { kind: "access_denied" } });
+    expect(snapshot).toMatchObject({ readOnly: true, readOnlyReason: "no_permission" });
+    // The other card sends nothing: it would be refused in turn.
+    await resource.answer(other, { q1: { kind: "choice", choiceId: "eu" } });
+    await resource.dismiss(other);
+    expect(decides).toBe(1);
+    // The next read of the list succeeds: the cards offer Send again.
+    c.advance(15_000); await tick();
+    snapshot = resource.getSnapshot();
+    expect(snapshot.readOnly).toBe(false);
+    expect(snapshot.readOnlyReason).toBeUndefined();
+    expect(snapshot.decisions[PENDING_ID]).toMatchObject({ phase: "refused", refusal: { kind: "access_denied" } });
+    await resource.answer(other, { q1: { kind: "choice", choiceId: "eu" } });
+    expect(decides).toBe(2);
+    resource.dispose();
+  });
+
+  it("recovers after the gateway asked for a signed-in person: a later read unlocks the card, and the answer goes through without a reload", async () => {
+    const c = clock(); let decides = 0;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: decides >= 2 ? [] : [wire()] }),
+      decide: async () => {
+        if (++decides === 1) throw rpcError(-32057, "approver_unauthenticated");
+        return accepted("answered");
+      },
+    });
+    await tick(); await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    expect(resource.getSnapshot()).toMatchObject({ readOnly: true, readOnlyReason: "sign_in" });
+    expect(resource.getSnapshot().decisions[PENDING_ID]).toMatchObject({ phase: "refused", refusal: { kind: "approver_unauthenticated" } });
+    await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    expect(decides).toBe(1);
+    c.advance(15_000); await tick();
+    expect(resource.getSnapshot().readOnly).toBe(false);
+    await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    expect(decides).toBe(2);
+    expect(resource.getSnapshot().decisions[PENDING_ID].phase).toBe("answered");
+    resource.dispose();
+  });
+
+  it("keeps a host's own read-only mode through a refusal and the reads after it", async () => {
+    const c = clock();
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment, readOnly: true, readOnlyReason: "sign_in",
+      load: async () => ({ question_sets: [wire()] }),
+      decide: async () => { throw rpcError(-32030, "access_denied"); },
+    });
+    await tick(); c.advance(15_000); await tick(); c.advance(15_000); await tick();
+    expect(resource.getSnapshot()).toMatchObject({ status: "ready", readOnly: true, readOnlyReason: "sign_in" });
+    resource.dispose();
+  });
+
+  it.each(["caller_changed", "caller_not_current"] as const)("reads a change refused for its caller (%s) as a definite answer: nothing was sent", async (kind) => {
+    const c = clock();
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: [wire()] }),
+      decide: async () => { throw rpcError(-32056, kind); },
+    });
+    await tick(); await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    const snapshot = resource.getSnapshot();
+    expect(snapshot.decisions[PENDING_ID]).toMatchObject({ phase: "refused", refusal: { kind } });
+    expect(snapshot.sets.length).toBe(1);
+    expect(snapshot.readOnly).toBe(false);
+    resource.dispose();
+  });
+
+  it("drops a set withdrawn while the answer was on its way, with the gateway's refusal as its one line", async () => {
+    const c = clock(); let withdrawn = false; let refuse: (error: unknown) => void = () => {};
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: withdrawn ? [] : [wire()] }),
+      decide: () => new Promise((_resolve, reject) => { refuse = reject; }),
+    });
+    await tick();
+    const job = resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    await tick();
+    // The set is withdrawn and a poll reads the list while the answer waits.
+    withdrawn = true; c.advance(15_000); await tick();
+    expect(resource.getSnapshot().sets.map((entry) => entry.pendingId)).toEqual([PENDING_ID]);
+    expect(resource.getSnapshot().decisions[PENDING_ID].phase).toBe("submitting");
+    expect(resource.getSnapshot().notices).toEqual([]);
+    refuse(refusedError("not_open")); await job;
+    const snapshot = resource.getSnapshot();
+    expect(snapshot.sets).toEqual([]);
+    expect(snapshot.closed).toEqual([]);
+    expect(snapshot.decisions).toEqual({});
+    expect(snapshot.notices.map((notice) => notice.kind)).toEqual(["not_open"]);
+    expect(nothingKept(snapshot)).toBe(true);
+    resource.dispose();
+  });
+
+  it("shows an answer the gateway took as answered, with no line, when a read in between no longer listed the set", async () => {
+    const c = clock(); let taken = false; let accept: (value: unknown) => void = () => {};
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: taken ? [] : [wire()] }),
+      decide: () => new Promise((resolve) => { accept = resolve; }),
+    });
+    await tick();
+    const job = resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    await tick();
+    taken = true; c.advance(15_000); await tick();
+    accept(accepted("answered")); await job;
+    const snapshot = resource.getSnapshot();
+    expect(snapshot.notices).toEqual([]);
+    expect(snapshot.closed.map((entry) => [entry.set.pendingId, entry.outcome])).toEqual([[PENDING_ID, "answered"]]);
+    expect(snapshot.decisions[PENDING_ID].phase).toBe("answered");
+    resource.dispose();
   });
 
   it("never invents an answer from an unknown response or a lost one", async () => {
@@ -440,7 +652,7 @@ describe("createQuestionSetResource", () => {
     await tick(); await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
     const snapshot = resource.getSnapshot();
     expect(snapshot.sets.map((entry) => entry.pendingId)).toEqual([PENDING_ID]);
-    expect(snapshot.decisions[PENDING_ID]).toMatchObject({ phase: "refused", refusal: { detail: "answers: unknown choice" } });
+    expect(snapshot.decisions[PENDING_ID]).toMatchObject({ phase: "refused", refusal: { kind: "not_accepted", detail: "answers: unknown choice" } });
     expect(questionSetEntries(snapshot).map((entry) => entry.set.pendingId)).toEqual([PENDING_ID]);
     resource.dispose();
   });

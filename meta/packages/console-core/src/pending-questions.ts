@@ -48,12 +48,27 @@ export interface QuestionSetDismissParams {
   decision: "reject";
   presented_digest: string;
 }
+/** What the gateway said of a decide it did not take. Nothing was sent to
+ * the agent in any of them.
+ * - `not_open`, `expired`: the decision's typed refusal; the set is no
+ *   longer answerable and its card goes.
+ * - `subject_changed`, `not_eligible`: the decision's typed refusal; the
+ *   set stays listed.
+ * - `not_taken`: any other typed refusal of the decision.
+ * - `not_accepted`: invalid params without the typed refusal, for a set
+ *   the gateway still lists.
+ * - `approver_unauthenticated`, `access_denied`: the person (not signed in
+ *   as a person; lost the permission to decide).
+ * - `caller_changed`, `caller_not_current`: the request's caller. */
+export type QuestionSetRefusalKind =
+  | "not_open" | "expired" | "subject_changed" | "not_eligible" | "not_taken" | "not_accepted"
+  | "approver_unauthenticated" | "access_denied" | "caller_changed" | "caller_not_current";
 /** A decision the gateway refused: nothing was sent to the agent. */
 export interface QuestionSetRefusal {
-  kind: "access_denied" | "approver_unauthenticated" | "refused";
-  /** The reason in words for the person answering. */
+  kind: QuestionSetRefusalKind;
+  /** The reason in words for the person answering, with what to do. */
   words: string;
-  /** The gateway's own message. */
+  /** The gateway's own message, where the words do not say it all. */
   detail?: string;
 }
 export interface QuestionSetDecisionState {
@@ -78,9 +93,10 @@ export interface ClosedQuestionSet {
   closedAtMs: number;
 }
 /** Why a card left the screen: the read no longer lists its set (`gone`),
- * and it did so after a send this console could not confirm
- * (`sent_unconfirmed`). */
-export type QuestionSetNoticeKind = "gone" | "sent_unconfirmed";
+ * it did so after a send this console could not confirm
+ * (`sent_unconfirmed`), or the gateway refused this console's decide
+ * because the set is no longer open (`not_open`) or expired (`expired`). */
+export type QuestionSetNoticeKind = "gone" | "sent_unconfirmed" | "not_open" | "expired";
 /** One neutral line for a card that left. It holds nothing of the set: the
  * card's own place on this page (`slot`), why it left, and when. */
 export interface QuestionSetNotice {
@@ -106,8 +122,11 @@ export interface QuestionSetSnapshot {
   slots: Readonly<Record<string, number>>;
   readOnly: boolean;
   /** Why the sets are read-only, when the console knows it: `sign_in` when
-   * the caller is no signed-in person (only a person answers). */
-  readOnlyReason?: "sign_in";
+   * the caller is no signed-in person (only a person answers), and
+   * `no_permission` after the gateway said the person may no longer
+   * decide. A reason the gateway gave on a decide holds until a later read
+   * of the list succeeds. */
+  readOnlyReason?: "sign_in" | "no_permission";
   updatedAtMs?: number;
   error?: string;
 }
@@ -196,6 +215,19 @@ function wireAnswers(set: QuestionSet, answers: QuestionSetAnswers): QuestionSet
   });
 }
 
+/** The answers the set offers now: for a question it has, a choice of that
+ * question, or the person's own words where the question allows them. A set
+ * that changed may no longer offer what a draft holds. */
+export function questionSetAnswersOffered(set: QuestionSet, answers: QuestionSetAnswers): QuestionSetAnswers {
+  const offered: Record<string, QuestionAnswer> = {};
+  for (const question of set.questions) {
+    const answer = Object.prototype.hasOwnProperty.call(answers, question.id) ? answers[question.id] : undefined;
+    if (!answer) continue;
+    if (answer.kind === "choice" ? question.choices.some((choice) => choice.id === answer.choiceId) : question.allowFreeText) offered[question.id] = answer;
+  }
+  return offered;
+}
+
 /** Whether the answers can be sent: at least one question is answered, each
  * choice is one of its question's, and free text is given only where the
  * agent allowed it, with 1 to `FREE_TEXT_MAX_BYTES` bytes. */
@@ -220,34 +252,58 @@ export function questionSetDismissParams(set: QuestionSet): QuestionSetDismissPa
   return { pending_id: set.pendingId, decision: "reject", presented_digest: set.subjectDigest };
 }
 
-/** The gateway's decision refusals in words. The kinds are the approvals'
- * own (`access_denied`, `approver_unauthenticated`); every other invalid
- * request reads as one sentence. */
-export const QUESTION_SET_REFUSAL_WORDS: Readonly<Record<QuestionSetRefusal["kind"], string>> = {
-  approver_unauthenticated: "Sign in as yourself to answer",
-  access_denied: "You cannot answer for this agent",
-  refused: "This question set is no longer open, or the answer was not accepted.",
+/** The gateway's refusals of a decide, in words for the person answering:
+ * what happened, that nothing was sent, and what to do. They name nothing
+ * of the set. */
+export const QUESTION_SET_REFUSAL_WORDS: Readonly<Record<QuestionSetRefusalKind, string>> = {
+  not_open: "This question was already answered or closed, so nothing was sent. Nothing more is needed from you.",
+  expired: "This question timed out before the gateway took your reply, so nothing was sent. If the answer still matters, tell the agent in its chat.",
+  subject_changed: "These questions changed after you opened them, so nothing was sent. Read them again, then answer.",
+  not_eligible: "You are not one of the people who can answer this question, so nothing was sent. Ask an administrator if you should be.",
+  not_taken: "The gateway did not take this reply, so nothing was sent. Try again; if it happens again, tell an administrator.",
+  not_accepted: "The gateway did not accept this reply, so nothing was sent. Check your choices and send again.",
+  approver_unauthenticated: "Only a signed-in person can answer, so nothing was sent. Sign in as yourself, then send again.",
+  access_denied: "You no longer have permission to answer questions here, so nothing was sent. Ask an administrator for the permission to decide, then send again.",
+  caller_changed: "This browser is now signed in as someone else, so nothing was sent or changed. Answer again as the person signed in now.",
+  caller_not_current: "Your sign-in ended before the reply was sent, so nothing was changed. Sign in again, then send again.",
 };
+/** The typed refusals of the decision itself that this console reads by
+ * name; every other one reads as `not_taken`. */
+const DECISION_REFUSALS: ReadonlySet<string> = new Set(["not_open", "expired", "subject_changed", "not_eligible"]);
 type RpcFailure = { httpStatus?: unknown; rpcError?: { code?: unknown; message?: unknown; data?: unknown }; responseRpcError?: { code?: unknown; message?: unknown; data?: unknown } };
-function rpcFailure(error: unknown): { code?: unknown; kind: string; message?: string } {
+function rpcFailure(error: unknown): { code?: unknown; kind: string; message?: string; data?: Record<string, unknown> } {
   const failure = error as RpcFailure | null;
   const rpc = failure?.rpcError ?? failure?.responseRpcError;
   const data = record(rpc?.data);
   const kind = typeof data?.kind === "string" ? data.kind : typeof data?.error === "string" ? data.error : "";
-  return { code: rpc?.code, kind, message: text(rpc?.message) };
+  return { code: rpc?.code, kind, message: text(rpc?.message), data };
 }
 const isDenied = (error: unknown) => {
   const { code, kind } = rpcFailure(error);
   return (error as RpcFailure | null)?.httpStatus === 403 || code === -32030 || kind === "access_denied";
 };
 /** A refusal the gateway states (nothing was decided), or null when the
- * outcome is uncertain. */
+ * outcome is uncertain. A decide the set itself refuses carries
+ * `data.kind = "decision_refused"` and the refusal as an object tagged by
+ * `kind` (`data.decision_refusal.kind`). */
 export function questionSetRefusal(error: unknown): QuestionSetRefusal | null {
-  const { code, kind, message } = rpcFailure(error);
-  const refusal: QuestionSetRefusal["kind"] | null = kind === "approver_unauthenticated" || code === -32057 ? "approver_unauthenticated"
-    : isDenied(error) ? "access_denied"
-      : code === -32602 ? "refused" : null;
-  return refusal ? { kind: refusal, words: QUESTION_SET_REFUSAL_WORDS[refusal], ...(message ? { detail: message } : {}) } : null;
+  const { code, kind, message, data } = rpcFailure(error);
+  const refusal = (name: QuestionSetRefusalKind, detailed = false): QuestionSetRefusal => (
+    { kind: name, words: QUESTION_SET_REFUSAL_WORDS[name], ...(detailed && message ? { detail: message } : {}) }
+  );
+  if (kind === "decision_refused") {
+    const token = record(data?.decision_refusal)?.kind;
+    return typeof token === "string" && DECISION_REFUSALS.has(token) ? refusal(token as QuestionSetRefusalKind) : refusal("not_taken", true);
+  }
+  if (kind === "caller_changed" || kind === "caller_not_current") return refusal(kind);
+  if (kind === "approver_unauthenticated" || code === -32057) return refusal("approver_unauthenticated");
+  // A question set's decide is denied for one reason: the person lost the
+  // permission to decide.
+  if (isDenied(error)) return refusal("access_denied");
+  // Invalid params that say no more: an answer the gateway does not accept,
+  // or an id that is not pending. The next read tells them apart.
+  if (code === -32602) return refusal("not_accepted", true);
+  return null;
 }
 function unavailableCapability(error: unknown): { method: string; availableMethods: readonly string[] } | null {
   const failure = error as { kind?: unknown; method?: unknown; availableMethods?: unknown } | null;
@@ -316,10 +372,30 @@ export function createQuestionSetResource(input: {
   let activeRead: Promise<void> | undefined;
   let invalidated = false;
   let decisionGeneration = 0;
+  /** The decisions on their way. No read is applied meanwhile: each
+   * decision is followed by a read of its own. */
+  let deciding = 0;
   const decisionJobs = new Map<string, Promise<void>>();
   // The place of each card on this page: counted here, never read from a set.
   const places = new Map<string, number>();
   let lastPlace = 0;
+  /** The gateway's capabilities stopped listing the decide. */
+  let undecidable = false;
+  /** What the gateway said of the person on a decide: every card is
+   * read-only, through the decide's own read (`reads`) and until the
+   * successful read after it. The gateway's read does not say whether the
+   * person may decide again, so the cards then offer Send again. */
+  let hold: { reason: "sign_in" | "no_permission"; reads: number } | undefined;
+  /** The refusals that wait for a read: the gateway answers an id that is
+   * not pending the same way as an answer it does not accept, and only the
+   * list says which it was. By the set's id, what the card says if the set
+   * is still listed. */
+  const unsettled = new Map<string, QuestionSetDecisionState>();
+  const access = (): Pick<QuestionSetSnapshot, "readOnly" | "readOnlyReason"> => {
+    if (input.readOnly === true) return { readOnly: true, readOnlyReason: input.readOnlyReason };
+    if (undecidable) return { readOnly: true, readOnlyReason: undefined };
+    return hold ? { readOnly: true, readOnlyReason: hold.reason } : { readOnly: false, readOnlyReason: undefined };
+  };
   const publish = (patch: Partial<QuestionSetSnapshot>) => {
     if (disposed) return;
     snapshot = { ...snapshot, ...patch };
@@ -332,7 +408,9 @@ export function createQuestionSetResource(input: {
   const end = (status: "forbidden" | "unsupported", error?: unknown) => {
     denied = true;
     places.clear();
-    publish({ sets: [], closed: [], decisions: {}, notices: [], slots: {}, status, readOnly: true, error: error === undefined ? undefined : errorText(error) });
+    unsettled.clear();
+    hold = undefined;
+    publish({ sets: [], closed: [], decisions: {}, notices: [], slots: {}, status, readOnly: true, readOnlyReason: undefined, error: error === undefined ? undefined : errorText(error) });
     lifetime.abort();
   };
   const close = (sets: readonly QuestionSet[], outcome: ClosedQuestionSetOutcome): ClosedQuestionSet[] => [
@@ -373,6 +451,9 @@ export function createQuestionSetResource(input: {
         const value = await Promise.resolve().then(() => input.load(lifetime.signal));
         if (disposed || denied) return;
         if (generation !== decisionGeneration) { invalidated = true; return; }
+        // A decision is on its way: its answer says what became of its set,
+        // and the read that follows it lists the rest.
+        if (deciding > 0) return;
         const raw = Array.isArray(value) ? value : record(value)?.question_sets;
         if (!Array.isArray(raw)) throw new Error("Question set response is unavailable");
         const sets: QuestionSet[] = [];
@@ -398,8 +479,17 @@ export function createQuestionSetResource(input: {
         }
         for (const set of sets) if (!places.has(set.pendingId)) places.set(set.pendingId, ++lastPlace);
         const closed = snapshot.closed.filter((old) => !ids.has(old.set.pendingId));
+        // A reply the gateway did not accept, without saying whether its set
+        // is still there: still listed, the card says so; no longer listed,
+        // the set went with the others above.
+        let decisions = snapshot.decisions;
+        for (const [id, refused] of unsettled) if (ids.has(id)) decisions = { ...decisions, [id]: refused };
+        unsettled.clear();
+        // What the gateway said of the person holds through the decide's own
+        // read; the successful read after it lets the cards offer Send again.
+        if (hold) { if (hold.reads > 0) hold.reads -= 1; else hold = undefined; }
         publish({
-          sets, closed, ...keptFor(sets, closed, snapshot.decisions),
+          sets, closed, ...keptFor(sets, closed, decisions), ...access(),
           notices: [...lines, ...snapshot.notices.filter((line) => now - line.atMs < NOTICE_KEEP_MS)].slice(0, NOTICE_LIMIT),
           status: "ready", updatedAtMs: now, error: undefined,
         });
@@ -420,27 +510,35 @@ export function createQuestionSetResource(input: {
   };
   const setDecision = (id: string, value: QuestionSetDecisionState) => {
     // Only the listed and the closed sets keep a decision.
-    const kept = new Set([id, ...snapshot.sets.map((set) => set.pendingId), ...snapshot.closed.map((entry) => entry.set.pendingId)]);
+    const kept = new Set([...snapshot.sets.map((set) => set.pendingId), ...snapshot.closed.map((entry) => entry.set.pendingId)]);
     publish({ decisions: Object.fromEntries(Object.entries({ ...snapshot.decisions, [id]: value }).filter(([key]) => kept.has(key))) });
+  };
+  /** Takes a set the gateway said is no longer answerable off the screen,
+   * with everything of it, and leaves that refusal as its card's one line. */
+  const remove = (pendingId: string, kind: QuestionSetNoticeKind) => {
+    const slot = places.get(pendingId);
+    const open = snapshot.sets.filter((candidate) => candidate.pendingId !== pendingId);
+    if (open.length === snapshot.sets.length) return;
+    publish({
+      sets: open, ...keptFor(open, snapshot.closed, snapshot.decisions),
+      notices: slot === undefined ? snapshot.notices : [{ slot, kind, atMs: env.now() }, ...snapshot.notices].slice(0, NOTICE_LIMIT),
+    });
   };
   const decide = (pendingId: string, action: "answer" | "dismiss", answers?: QuestionSetAnswers): Promise<void> => {
     if (disposed) return Promise.resolve();
     const existing = decisionJobs.get(pendingId);
     if (existing) return existing;
     const set = snapshot.sets.find((candidate) => candidate.pendingId === pendingId);
-    if (snapshot.readOnly || denied || snapshot.status !== "ready" || !set
+    if (snapshot.readOnly || denied || snapshot.status !== "ready" || !set || unsettled.has(pendingId)
       || (action === "answer" && (!answers || !questionSetAnswersSendable(set, answers)))) {
       return Promise.resolve();
     }
     const previous = snapshot.decisions[pendingId];
     const sent = action === "answer" ? { answers } : {};
     ++decisionGeneration;
+    ++deciding;
     setDecision(pendingId, { phase: "submitting", action, ...sent });
     const job = (async () => {
-      // A refusal that does not say whether the set is still there: the
-      // gateway answers an id that is not pending the same way as an answer
-      // it does not accept. The next read says which.
-      let unsettled: QuestionSetRefusal | undefined;
       try {
         const params = action === "answer" ? questionSetAnswerParams(set, answers!) : questionSetDismissParams(set);
         const result = record(await Promise.resolve().then(() => input.decide(params, lifetime.signal)));
@@ -462,28 +560,41 @@ export function createQuestionSetResource(input: {
         const capability = unavailableCapability(error);
         const refusal = questionSetRefusal(error);
         if (capability?.method === CONSOLE_RPC_METHODS.gatingDecide) {
-          publish({ readOnly: true });
+          undecidable = true;
+          publish(access());
           // A refused retry says nothing about an earlier dispatched attempt.
           setDecision(pendingId, previous?.phase === "failed" ? previous : {
             phase: "unavailable", action, error: "Answers are unavailable with current access",
           });
-        } else if (refusal?.kind === "refused") {
-          // The set reads as sending until the read has said whether it is
+        } else if (!refusal) {
+          setDecision(pendingId, { phase: "failed", action, ...sent, error: errorText(error) });
+        } else if (refusal.kind === "not_open" || refusal.kind === "expired") {
+          // The gateway says the set is no longer answerable: its card goes.
+          remove(pendingId, refusal.kind);
+        } else if (refusal.kind === "not_accepted") {
+          // The set reads as sending until a read has said whether it is
           // still listed; it is never shown as refused before that.
-          unsettled = refusal;
+          unsettled.set(pendingId, { phase: "refused", action, ...sent, refusal, error: refusal.words });
         } else {
-          setDecision(pendingId, refusal
-            ? { phase: "refused", action, ...sent, refusal, error: refusal.words }
-            : { phase: "failed", action, ...sent, error: errorText(error) });
+          // What the gateway said of the person holds for every card: each
+          // would be refused in turn.
+          if (refusal.kind === "access_denied") hold = { reason: "no_permission", reads: 1 };
+          else if (refusal.kind === "approver_unauthenticated") hold = { reason: "sign_in", reads: 1 };
+          if (hold) publish(access());
+          setDecision(pendingId, { phase: "refused", action, ...sent, refusal, error: refusal.words });
         }
       } finally {
         ++decisionGeneration;
+        --deciding;
         if (!disposed && !denied) await refresh(true);
-        // Still listed (or the read failed and the last list stands): the
-        // answer itself was not accepted. No longer listed: the read took the
-        // card and everything of the set with it.
-        if (unsettled && !disposed && !denied && snapshot.sets.some((candidate) => candidate.pendingId === pendingId)) {
-          setDecision(pendingId, { phase: "refused", action, ...sent, refusal: unsettled, error: unsettled.words });
+        // The read that follows the decision settles a refusal that waited
+        // for it. When that read failed, the last list stands: the reply was
+        // not accepted, and the next read that succeeds says the rest. (While
+        // another decision is on its way, its own read settles this one.)
+        const waiting = unsettled.get(pendingId);
+        if (waiting && deciding === 0 && !disposed && !denied) {
+          unsettled.delete(pendingId);
+          setDecision(pendingId, waiting);
         }
         decisionJobs.delete(pendingId);
       }
@@ -509,6 +620,7 @@ export function createQuestionSetResource(input: {
       unsubscribeVisibility();
       listeners.clear();
       places.clear();
+      unsettled.clear();
       // Preserve a stable detached empty snapshot for references retained by a
       // view while React swaps to the next authority-scoped resource.
       snapshot = { scopeKey: input.scopeKey, status: "unavailable", sets: [], closed: [], decisions: {}, notices: [], slots: {}, readOnly: true };

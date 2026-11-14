@@ -2,6 +2,7 @@ import * as React from "react";
 import {
   FREE_TEXT_MAX_BYTES,
   QUESTION_SET_REFUSAL_WORDS,
+  questionSetAnswersOffered,
   questionSetAnswersSendable,
   questionSetEntries,
   utf8ByteLength,
@@ -66,16 +67,17 @@ export function useQuestionSetsView(): QuestionSetsView | undefined {
   return React.useContext(QuestionSetsContext);
 }
 
-type QuestionSetCardState = "pending" | "submitting" | "stale" | "failed" | "answered" | "dismissed" | "not_permitted";
+type QuestionSetCardState = "pending" | "submitting" | "stale" | "failed" | "answered" | "dismissed" | "refused" | "read_only";
 
-const STATE_WORDS: Record<QuestionSetCardState, { text: string; tone: Tone }> = {
+const STATE_WORDS: Record<Exclude<QuestionSetCardState, "read_only">, { text: string; tone: Tone }> = {
   pending: { text: "Answer needed", tone: "warn" },
   submitting: { text: "Sending", tone: "info" },
   stale: { text: "May be out of date", tone: "warn" },
   failed: { text: "Not confirmed", tone: "crit" },
   answered: { text: "Answered", tone: "ok" },
   dismissed: { text: "Dismissed", tone: "neutral" },
-  not_permitted: { text: "Not permitted", tone: "locked" },
+  // The gateway refused the reply and the set is still listed.
+  refused: { text: "Not sent", tone: "crit" },
 };
 
 const SENTENCES = {
@@ -85,13 +87,23 @@ const SENTENCES = {
   failed: "The Console could not confirm that your answer arrived. If this question is still listed after the next refresh, send your answer again.",
   answered: "Answers sent.",
   dismissed: "Dismissed. The agent was told no answer is coming.",
-} satisfies Record<Exclude<QuestionSetCardState, "not_permitted">, string>;
+} satisfies Record<Exclude<QuestionSetCardState, "refused" | "read_only">, string>;
+
+/** Why nobody can answer on this card now, and what to do about it: the
+ * chip and the sentence, by the snapshot's read-only reason. */
+const READ_ONLY_WORDS = {
+  sign_in: { chip: "Sign in to answer", sentence: "Sign in as yourself to answer. Only a signed-in person can answer an agent's questions." },
+  no_permission: { chip: "No permission", sentence: "You no longer have permission to answer questions here. Ask an administrator for the permission to decide." },
+  read_only: { chip: "Read only", sentence: "You can read these questions but not answer them: your access to this Console is read-only." },
+} as const;
 
 /** The one line a card that left the screen leaves where it was. It names
  * nothing of the set. */
 const NOTICE_WORDS: Record<QuestionSetNoticeKind, string> = {
   gone: "This question is no longer waiting for an answer.",
   sent_unconfirmed: "This question is no longer waiting for an answer. The Console could not confirm whether your answer was the one that arrived.",
+  not_open: QUESTION_SET_REFUSAL_WORDS.not_open,
+  expired: QUESTION_SET_REFUSAL_WORDS.expired,
 };
 
 /** Show the byte counter from here on: near the limit, not before. */
@@ -234,26 +246,27 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, slot, r
   const refusal = decision?.phase === "refused" ? decision.refusal : undefined;
   // The state is the gateway's and this console's own decisions: never the
   // browser clock. A list that could not be read again comes before what an
-  // earlier answer said of the set.
+  // earlier reply said of the set.
   const state: QuestionSetCardState = closed === "answered" || decision?.phase === "answered" ? "answered"
     : closed === "dismissed" || decision?.phase === "dismissed" ? "dismissed"
       : decision?.phase === "submitting" ? "submitting"
         : decision?.phase === "failed" ? "failed"
           : resourceStatus !== "ready" ? "stale"
-            : refusal || readOnly ? "not_permitted"
-              : "pending";
-  const words = STATE_WORDS[state];
-  // Not permitted has three forms: sign in, no access to this agent, and
-  // the gateway's refusal of this decision (its own message under Details).
-  const refusalKind = state !== "not_permitted" ? null
-    : refusal ? refusal.kind
-      : readOnlyReason === "sign_in" ? "approver_unauthenticated" : "access_denied";
-  const sentence = refusalKind ? QUESTION_SET_REFUSAL_WORDS[refusalKind] : SENTENCES[state as Exclude<QuestionSetCardState, "not_permitted">];
+            : refusal ? "refused"
+              : readOnly ? "read_only"
+                : "pending";
+  const locked = READ_ONLY_WORDS[readOnlyReason ?? "read_only"];
+  const words = state === "read_only" ? { text: locked.chip, tone: "locked" as Tone } : STATE_WORDS[state];
+  const sentence = state === "refused" && refusal ? refusal.words : state === "read_only" ? locked.sentence : SENTENCES[state as keyof typeof SENTENCES];
   const open = !closed && state !== "answered" && state !== "dismissed";
   // A person changes the draft while the set waits, after an uncertain send,
-  // and after a refusal of the answer itself (they may correct and resend).
-  const editable = open && !readOnly && (state === "pending" || state === "failed" || (state === "not_permitted" && refusalKind === "refused"));
-  const sendable = editable && questionSetAnswersSendable(set, draft);
+  // and after a refusal the set outlives (they may correct and send again),
+  // unless the cards are read-only.
+  const editable = open && !readOnly && (state === "pending" || state === "failed" || state === "refused");
+  // What the set offers now: a set that changed may have dropped a question
+  // or a choice the draft still holds.
+  const answers = questionSetAnswersOffered(set, draft);
+  const sendable = editable && questionSetAnswersSendable(set, answers);
   const title = set.title || `Questions from ${agentName}`;
   const waiting = open && set.createdAtMs !== undefined ? formatDuration(Math.max(0, now - set.createdAtMs)) : "";
   const openChat = navigation?.openAgent ? () => navigation.openAgent?.(identity, "chat") : null;
@@ -292,11 +305,11 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, slot, r
         <p className="cc-question-set__hint" data-testid={`question-set-sentence:${set.pendingId}`}>{sentence}</p>
       ) : (
         <Notice
-          tone={state === "failed" ? "crit" : state === "stale" ? "warn" : state === "answered" ? "ok" : state === "not_permitted" ? "locked" : "neutral"}
-          role={state === "failed" || refusal ? "alert" : undefined}
+          tone={state === "failed" || state === "refused" ? "crit" : state === "stale" ? "warn" : state === "answered" ? "ok" : state === "read_only" ? "locked" : "neutral"}
+          role={state === "failed" || state === "refused" ? "alert" : undefined}
         >
           <span data-testid={`question-set-sentence:${set.pendingId}`}>{sentence}</span>
-          {refusalKind === "refused" && refusal?.detail ? (
+          {state === "refused" && refusal?.detail ? (
             <details className="cc-question-set__refusal" data-testid={`question-set-refusal:${set.pendingId}`}>
               <summary>Details</summary>
               <span className="cc-question-set__gateway">{refusal.detail}</span>
@@ -313,7 +326,7 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, slot, r
               key={question.id}
               setId={set.pendingId}
               question={question}
-              answer={draft[question.id]}
+              answer={answers[question.id]}
               disabled={!editable}
               onChange={(answer) => change(question.id, answer)}
             />
@@ -327,7 +340,7 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, slot, r
               variant="primary"
               disabled={!sendable}
               data-testid={`question-set-send:${set.pendingId}`}
-              onClick={() => { void onAnswer(set.pendingId, draft); }}
+              onClick={() => { void onAnswer(set.pendingId, answers); }}
             >
               Send answers
             </Button>

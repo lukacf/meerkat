@@ -718,7 +718,8 @@ them.
 
 - `meerkat-openai`, `meerkat-anthropic`, `meerkat-gemini`,
   `meerkat-copilot`, `meerkat-llm-core`, `meerkat`: every LLM client a
-  factory builds reports, without I/O (a row holds this for the Copilot
+  factory builds reports, without I/O (confirmed by a test of this change
+  for the Copilot
   routed client; for the others it is read from the source), the route it
   serves through `reasoning_route()` (the accessor above): the
   provider-matrix backend,
@@ -821,7 +822,9 @@ them.
   an object (RPC `session/create` and `turn/start`, REST session requests,
   MCP `meerkat_run` and `meerkat_resume`, mob profiles, the CLI's `--param`
   and `--params-json`), the nested key is accepted too (for `turn/start`
-  and `--params-json` read from the source; rows hold the others). The
+  and `--params-json` read from the source; rows hold the others), except
+  in a schedule's `create` spec, which refuses it in this release (see
+  Known limitations). The
   request surfaces also take it as a parameter of their own (see the
   "Reasoning effort" entry below).
 
@@ -947,7 +950,8 @@ them.
   `brain_swap` handoff and a switch-turn request are applied as before and
   keep the session's level, and a level their target's route does not
   accept is then refused at each request until it is changed or cleared
-  (a row holds the `brain_swap` handoff; the switch-turn request is read
+  (a test of this change confirms the `brain_swap` handoff; the
+  switch-turn request is read
   from the source).
   The default accepts every target; the facade's host judges the level.
 
@@ -978,7 +982,8 @@ them.
   and the extraction fails with the refusal's message as text, not with the
   typed error (read from the source). A compaction summary request whose
   route does not take the level fails that compaction with the same typed
-  error (a row holds this) and the run goes on (read from the source).
+  error (confirmed by a test of this change) and the run goes on (read
+  from the source).
   - The route can change between the resolution and the request (on a GitHub
     Copilot route the account's model list can move a model to another
     endpoint or change the levels it states). The request copy carries what
@@ -1090,6 +1095,8 @@ them.
   - Mob profiles: the profile's `provider_params.reasoning_effort`; the new
     `resume_overrides` value `reasoning_effort` makes a profile decide a
     resumed member's level (the level its `provider_params` name, or none).
+  - Schedules: not in this release. A schedule's `create` spec that carries
+    `provider_params.reasoning_effort` is refused (see Known limitations).
 
   Meerkat checks the level against the selected model on the route that
   serves the request and writes the provider's own field (`reasoning.effort`
@@ -2351,68 +2358,77 @@ them.
   level you mean. From this release it sets the provider-neutral level
   and is judged (see Breaking).
 
-- Before rolling back to 0.9.14 or earlier, clear the reasoning effort level
-  from every session that set it (`rkat run --resume <SESSION>
+- Before rolling back to 0.9.14 or earlier, let every turn that carries a
+  reasoning effort level finish (a turn the host interrupted is recovered
+  at the session's next use after the restart), then clear the level
+  from every session that holds one, a mob member's session included
+  (`rkat run --resume <SESSION>
   --no-reasoning-effort "<PROMPT>"`, or a turn with `reasoning_effort`
-  `{"action":"clear"}`), and let accepted turns that carry it
-  finish. A mob whose profile has carried a level has no such step (see
-  the third kind below). Three kinds of stored record carry
-  `reasoning_effort`, and a release without the field refuses each. The
-  first is a session whose stored provider params hold the
-  level: any session that set `reasoning_effort` (or
-  `provider_params.reasoning_effort`) and has not cleared it since. This
-  includes a session that fell back to a model fallback target while it held
-  a level: its fallback identity and its fallback record carry the level
-  until it is cleared. An
-  older release fails to read it with ``unknown field `reasoning_effort`,
-  expected one of `temperature`, `top_p`, `max_output_tokens`, `reasoning`,
-  `thinking_budget_tokens`, `provider_tag` ``, and the session cannot be
-  loaded or resumed there. The second is an accepted
-  input that has not run yet and whose turn carries the field: an older
-  release refuses the stored input the same way. The third is a mob's
-  records. A mob profile that sets `provider_params.reasoning_effort` is
-  stored in the mob's definition (the mob's creation and each definition
-  update record the whole definition), in the profile snapshot recorded for
-  a member whose spawn carried a profile of its own, and in member spec
-  records. 0.9.14 fails to read the definition and the snapshot, whose
-  provider params refuse a field they do not know, and refuses a spec
-  record because its content no longer matches its digest. A profile whose
-  `resume_overrides` names `reasoning_effort` is refused as an unknown
-  value. A changed profile is recorded from the change on: a mob's event
-  history keeps the definitions and snapshots it recorded before, and
-  0.9.14 reads the whole history when it resumes the mob. So a mob whose
-  history holds a profile with a level, or the `reasoning_effort` resume
-  override, cannot be resumed by 0.9.14, and removing the level afterwards
-  does not help. A reset does not help either: it keeps the history. The
-  only way back is to destroy the mob on 0.9.15 and create it anew without
-  the level before rolling back; its members and its history are not kept
-  (the reset and this way back are read from the source, not run).
-  A realm profile that stores a level or the override is also unreadable
-  by 0.9.14: the realm's profile list fails as a whole while the row is
-  there, and an update of that profile on 0.9.14 succeeds, replaces the row
-  and drops the level (the one place where 0.9.14 loses it). Before rolling
-  back, update it on 0.9.15 so that it names neither, or delete it. To keep
-  the option of rolling back, set the level on a session or a turn, not in
-  a mob definition, a member profile or a realm profile; an agent's mob
-  tools can write such a profile too (read from the source). A mob whose
-  profiles never
-  carried a level or that override is stored exactly as before. A turn with
-  `reasoning_effort` `{"action":"clear"}` removes the level from a session;
-  replacing or clearing `provider_params` does not. Sessions and inputs
-  that never carried the level are written exactly as before and read on
-  either release. Further stored forms are in "Rolling back to 0.9.14"
-  in `docs/guides/upgrading.mdx`, read from the source of both releases
-  and not run: a session's
-  model-routing history after a `brain_swap`, the stored record of a turn
-  that failed for a refused level, and the session's stored event log;
-  no step removes what was stored, so clearing a
-  session's level does not undo them. How this was established: what
-  0.9.14 does with a mob
-  definition and with a realm profile that hold a level (a Core host, a
-  Meta gateway) was measured with development builds of both releases;
-  the session, the accepted input, a spawned member's snapshot and the
-  member spec records are stated from the code of both releases, not from
-  a run of 0.9.14.
+  `{"action":"clear"}`). The clear is one turn on the
+  model per session; queries that list the unfinished turns and the
+  sessions that hold a level are in the guide's item. Replacing or clearing
+  `provider_params` does not remove the level. What 0.9.14 does with what
+  a level leaves behind was observed in runs with the released 0.9.14
+  `rkat-rpc` over stores that a development build of this change wrote,
+  unless a line says it was read from the source:
+  - A turn on a session that still holds a level, and a `session/read`
+    of it, do not return on 0.9.14: no answer and no error comes back,
+    and only the server's
+    log names the reason ("generated authority rejected durable
+    restore", ``unknown field `reasoning_effort` ``). Its history, the
+    session list and an archive answer. A turn sent to it on 0.9.14 is
+    not stored. A session that fell back to a
+    model fallback target while it held a level is such a session: its
+    fallback identity and its fallback record carry the level until it
+    is cleared (read from the source).
+  - A session that used a level and was cleared works on 0.9.14, except
+    for its event replay: `events/list_since` for it fails as a whole,
+    from any position
+    (``unknown variant `request_reasoning_effort_resolved` ``), and no
+    step ends that on 0.9.14. The status of a finished turn that ran
+    with a level answers there (confirmed by a test of this change).
+  - A turn that carries a level and has not finished is neither run nor
+    refused by 0.9.14: its status call fails there, and the input waits
+    unchanged and runs again at the session's next turn on 0.9.15.
+  - A mob member whose session still holds a level is marked broken on
+    0.9.14: a flow step routed to its role fails, and `mob/turn_start`
+    for it answers an error at once. A member whose session was cleared
+    works there.
+  - A mob whose definition holds a level in any profile, even a profile
+    no member ever used, or the `resume_overrides` value
+    `reasoning_effort`, is a one-way step: 0.9.14 quarantines the whole
+    mob (`store_unreadable`, its content retained; it is whole again on
+    0.9.15), and a Meta gateway on 0.9.14 does not start on a state
+    directory that holds such a mob (the gateway: a run with
+    development builds of both releases). The mob's creation event
+    keeps the definition, so removing the level afterwards, or a reset,
+    does not help (read from the source, not run). The way back is to
+    destroy the mob on 0.9.15 before the rollback and create it anew
+    without the level (the destroy and the new mob: one run with the
+    released 0.9.14 binary, on a Core host, with a mob created over
+    JSON-RPC; a Meta gateway was not run).
+    It costs the mob with its events, its members and their
+    conversations: after the destroy a member's session is not found by
+    its id. One mob's quarantine does not take another mob with
+    it. An agent's mob tools can write such a profile too (read from
+    the source).
+  - A realm profile that stores a level or the override: on 0.9.14
+    `mob/profile/list` fails as a whole while such a row is there and a
+    read of that profile fails. Replace or delete it on 0.9.15 before
+    rolling back: 0.9.14 then lists and reads every profile. On 0.9.14
+    itself an update of such a profile with the whole profile without
+    them succeeds, and a delete of it fails.
+
+  To keep the option of rolling back, set the level on a session or a
+  turn, not in a mob definition, a member profile or a realm profile,
+  and clear it before rolling back; the event replay of a session that
+  ran a turn with a level still fails on 0.9.14. Sessions, inputs and
+  mobs that never carried a level are written exactly as before and
+  read on either release. One more stored form that no step removes (the
+  stored record of a run that failed for a refused level after it had
+  started), a member placed on another host (see Known limitations), the
+  calls that fail and each item's grade are in "Rolling back to 0.9.14" in
+  `docs/guides/upgrading.mdx`.
 
 - Mob: an agent whose `mob_destroy` the mob refuses is now answered
   `mob destroy refused. The destroy can be retried; the host's log has the
@@ -2546,7 +2562,8 @@ them.
   deferred create's first turn, or a stored session that is not live), and
   a turn whose route changes between that check and its start, is judged
   when it starts: its stored input ends as abandoned with the reason
-  `stopped`, not with the refusal (a row holds this for a stored session
+  `stopped`, not with the refusal (confirmed by a test of this change for
+  a stored session
   that is not live; the other two cases are read from the source). The
   refused start costs the session
   that one turn and nothing it owns: its mobs and their members stay. The
@@ -2563,7 +2580,8 @@ them.
 
 - REST: a reasoning effort level sent with `POST /sessions/{id}/messages`
   for a session the server holds live is answered HTTP 500 `session is
-  busy`, and nothing is changed (a row holds this). The same holds for
+  busy`, and nothing is changed (confirmed by a test of this change). The
+  same holds for
   every other field of
   that request that rebuilds the session (`model`, `provider`,
   `max_tokens` and the rest). Set the level when the session is created
@@ -2593,6 +2611,22 @@ them.
   Rust error
   (`MobError::MemberRestoreFailed`, `cause_data`). See the mobs guide for
   the member's state and how to recover.
+
+- A reasoning effort level on a mob member placed on another host, and a
+  rollback to 0.9.14. The controlling mob follows a placed member from the
+  stored events of its session. While the member's host runs 0.9.14, the
+  controlling mob's observation of that member, and its tracking of a turn
+  or a flow step delivered to it, fail while events that 0.9.14 does not
+  know lie in the stretch of the log it reads. After such a member's host
+  has run 0.9.14 and returned, the controlling host can skip events when
+  that member's event stream is resumed from a cursor, and a wait for the
+  completion of its run can time out; the stored events are complete
+  (read from the source, not run). For a placed member the condition
+  ends when the controller process restarts or the member's residency
+  changes (its host re-binds, it moves to another host, gets a new
+  session or a new member generation, or is retired) (read from the
+  source, not run). Do not use a level on a member placed on another
+  host if you may ever go back to 0.9.14.
 
 - Read from the source: a preloaded skill that cannot be resolved (a mistyped
   name, a skill the build does not have, or a skill whose required

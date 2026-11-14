@@ -397,6 +397,20 @@ schedule's `create` spec, which does not take it in 0.9.15. A request
 that gives both must give the same level in both, or it is refused as invalid
 params.
 
+From 0.9.15, a level in a mob profile is a one-way step for a rollback. A
+mob whose definition holds a level in any profile, even a profile no member
+ever used, cannot be read by 0.9.14: after a rollback 0.9.14 quarantines the
+whole mob (its content is kept, and the mob is whole again on 0.9.15).
+On Meerkat Meta it reaches further: a Meta gateway on 0.9.14 does not start
+on a state directory that holds such a mob, so nothing stored in that
+directory can be used there. Removing the level from the definition
+afterwards does not help; the only way back is to destroy the mob on 0.9.15
+and create it anew, which loses its members, their conversations and its
+history. Where a rollback
+must stay possible, set the level
+on a session or a turn and clear it before rolling back; see
+[Rolling back to 0.9.14](/guides/upgrading#rolling-back-to-0-9-14).
+
 **On a session.** The level is part of the session's LLM identity: it is
 stored with the session and survives recovery, a resumed build, a hot swap of
 the model, and a model fallback switch. A create request sets it. A turn (or

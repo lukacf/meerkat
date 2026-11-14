@@ -264,7 +264,8 @@ MCP `meerkat_run` and `meerkat_resume`; Python `reasoning_effort=` and
 TypeScript `reasoningEffort` on create and turns; Web
 `SessionConfig.reasoningEffort`; a mob profile's
 `provider_params = { reasoning_effort = "high" }`. It is the same setting as
-`provider_params.reasoning_effort`; both given must be equal.
+`provider_params.reasoning_effort`; both given must be equal. Not on
+schedules in 0.9.15: a schedule's `create` spec that carries it is refused.
 
 ```bash
 rkat run -m gpt-5.5 --reasoning-effort high "Plan the migration"

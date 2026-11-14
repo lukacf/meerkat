@@ -3826,6 +3826,96 @@ async fn a_roster_member_no_successor_serves_is_retired_with_a_warning_that_name
     }
 }
 
+/// A host customizer that counts the builds it is asked for.
+#[derive(Default)]
+struct CountsBuilds(AtomicUsize);
+
+#[async_trait::async_trait]
+impl AgentCustomizer for CountsBuilds {
+    async fn customize_build(
+        &self,
+        _context: &AgentBuildContext,
+        _spec: &DurableAgentSpec,
+        _draft: &mut AgentBuildDraft,
+    ) -> Result<(), crate::identity_first::CustomizerError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// A respawn of a roster member whose seat the host composed and Core's
+/// step then does not serve (a bridge without the step, and a member Core's
+/// step refuses) asks the host's customizer as often as a respawn that
+/// retires the member without composing first (a bridge that does not say
+/// its sessions outlive their members: the retire and wake of 0.9.14): the
+/// build composed for the step seats the identity again at the wake's
+/// declaration, which asks for no second one.
+#[tokio::test]
+async fn a_respawn_whose_composed_seat_cores_step_does_not_serve_asks_the_customizer_no_more() {
+    let alice = identity("personal:alice");
+    let mut asked = Vec::new();
+    for (case, sessions_outlive_members, unsupported_for_mode) in [
+        ("retired without a composed seat", false, None),
+        ("a bridge without the step", true, None),
+        (
+            "a member Core's step refuses",
+            true,
+            Some(
+                "unsupported for runtime mode turn_driven: the creation the member's session \
+                 recorded cannot be read",
+            ),
+        ),
+    ] {
+        let session = SessionId::new();
+        let core = Arc::new(SeatCore {
+            archived: vec![session.clone()],
+            resumes_onto_session: true,
+            sessions_outlive_members,
+            successor_unsupported_for_mode: unsupported_for_mode.map(str::to_string),
+            ..SeatCore::default()
+        });
+        let runtime = runtime_over(None, &core);
+        let customizer = Arc::new(CountsBuilds::default());
+        runtime
+            .set_agent_customizer(Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>))
+            .await;
+        register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+            .await
+            .expect("registered live");
+        runtime
+            .materialize(&alice)
+            .await
+            .expect("the member is built");
+        let before = customizer.0.load(Ordering::SeqCst);
+
+        let scope = runtime
+            .respawn(&alice)
+            .await
+            .unwrap_or_else(|error| panic!("{case}: the respawn succeeds: {error}"))
+            .expect("a session-backed member has a delivery scope");
+
+        assert_eq!(
+            (scope.session_id(), scope.generation()),
+            (&session, meerkat_mob::Generation::new(1)),
+            "{case}: the respawn keeps the session, at the next generation"
+        );
+        assert!(
+            lock(&core.successors).is_empty(),
+            "{case}: Core's step seated no successor"
+        );
+        asked.push((case, customizer.0.load(Ordering::SeqCst) - before));
+    }
+    let retired = asked[0].1;
+    assert!(
+        retired > 0,
+        "a respawn that retires the member asks the customizer: {asked:?}"
+    );
+    assert!(
+        asked.iter().all(|(_, count)| *count == retired),
+        "a seat composed for a step Core does not serve is asked for once: {asked:?}"
+    );
+}
+
 /// A delivery to an identity whose built member Core retired: the
 /// declaration before its admission has Core revive the identity on its
 /// archived session, and Core's dispatch builds the member for the delivery.

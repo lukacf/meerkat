@@ -3078,11 +3078,13 @@ const ANSWER_LABEL: &str = "customizer-answer";
 
 /// A host customizer whose answer has a version the test switches: each
 /// `customize_build` sets the draft's model, provider parameters, labels,
-/// context and additional instructions from the current version, and each
-/// `after_create` is recorded with the session and the context it is told.
+/// context and additional instructions from the current version (and, when
+/// `prompts` is set, its system prompt), and each `after_create` is recorded
+/// with the session and the context it is told.
 #[derive(Default)]
 struct AnsweringCustomizer {
     second: std::sync::atomic::AtomicBool,
+    prompts: std::sync::atomic::AtomicBool,
     calls: AtomicUsize,
     told: std::sync::Mutex<Vec<(String, SessionCreatedContext)>>,
 }
@@ -3120,6 +3122,9 @@ impl AgentCustomizer for AnsweringCustomizer {
             .insert(ANSWER_LABEL.to_string(), label.to_string());
         draft.app_context = Some(serde_json::json!({ "answer": label }));
         draft.additional_instructions = vec![format!("instructions of the {label} answer")];
+        if self.prompts.load(Ordering::SeqCst) {
+            draft.system_prompt = Some(format!("system prompt of the {label} answer"));
+        }
         Ok(())
     }
 
@@ -3196,6 +3201,27 @@ async fn creator_answer_label(runtime: &meerkat_meta::UnifiedRuntime) -> Option<
         .and_then(|entry| entry.labels.get(ANSWER_LABEL).cloned())
 }
 
+/// The application context the creator's stored session holds: what its
+/// last build stored in the session's build state.
+async fn creator_stored_context(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    session: &meerkat_core::types::SessionId,
+) -> Option<serde_json::Value> {
+    meerkat_mob::MobSessionService::load_persisted_session(
+        &**runtime
+            .mob_runtime()
+            .session_service()
+            .expect("the runtime's session service"),
+        session,
+    )
+    .await
+    .expect("the creator's session reads")
+    .expect("the creator's session is stored")
+    .try_build_state()
+    .expect("the session's build state reads")
+    .and_then(|state| state.app_context)
+}
+
 /// A respawn seats the member with the customizer's current answer. The
 /// host's customizer answers one model, temperature and label until the
 /// test switches it; the identity runs a turn, the answer is switched, and
@@ -3203,7 +3229,8 @@ async fn creator_answer_label(runtime: &meerkat_meta::UnifiedRuntime) -> Option<
 /// seat, then its build) and tells `after_create` once, of the session it
 /// keeps, with the new answer's model and label; the member's roster label
 /// is the new answer's; and the next turn's request carries the new
-/// answer's temperature, and the model the kept session ran on.
+/// answer's temperature, and the model the kept session ran on. The kept
+/// session keeps the application context its first build stored.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_respawn_seats_and_builds_the_member_with_the_customizers_current_answer() {
     const MOB_ID: &str = "customizer-tools-restart-x";
@@ -3253,6 +3280,11 @@ async fn a_respawn_seats_and_builds_the_member_with_the_customizers_current_answ
         creator_answer_label(&runtime).await.as_deref(),
         Some("first"),
         "the seated member carries the first answer's label"
+    );
+    assert_eq!(
+        creator_stored_context(&runtime, &session).await,
+        Some(serde_json::json!({ "answer": "first" })),
+        "the session's first build stores the first answer's context"
     );
 
     customizer.second.store(true, Ordering::SeqCst);
@@ -3336,6 +3368,116 @@ async fn a_respawn_seats_and_builds_the_member_with_the_customizers_current_answ
         )],
         "after_create is told once, of the kept session, with the current answer's model and \
          label"
+    );
+    assert_eq!(
+        creator_stored_context(&runtime, &session).await,
+        Some(serde_json::json!({ "answer": "first" })),
+        "context: the kept session holds the context its first build stored; a respawn's \
+         builds on it store no other"
+    );
+    runtime.shutdown().await;
+}
+
+/// A respawn of a member that was seated and never built: the successor is
+/// seated on the same session, which no build has created yet, and its
+/// first build takes the customizer's current answer whole, as the first
+/// build of a newly seated identity does: its system prompt, its additional
+/// instructions and its context.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_respawn_of_a_member_never_built_builds_it_with_the_customizers_current_answer() {
+    const MOB_ID: &str = "customizer-tools-restart-y";
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let customizer = Arc::new(AnsweringCustomizer::default());
+    customizer.prompts.store(true, Ordering::SeqCst);
+    let capture = CaptureClient::default();
+    let runtime = Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(
+                MobDefinition::from_toml(&AGENT_SPAWN_MOB_TOML.replace("{MOB_ID}", MOB_ID))
+                    .expect("definition"),
+            )
+            .persistent_state(&state)
+            .continuity_from_state_dir(&state)
+            .await
+            .expect("open the state-dir identity substrate")
+            .roster_provider(Arc::new(ListedRoster(&[CREATOR])))
+            .agent_customizer(customizer.clone())
+            .identity_runtime_instance_id(MOB_ID)
+            .comms(true)
+            .default_llm_client(Arc::new(capture.clone()))
+            .build(),
+    )
+    .await
+    .expect("build the runtime");
+    let identities = runtime.identity_runtime().expect("identity runtime");
+    let member = meerkat_meta::member_comms_id::roster_member_id_for_identity(CREATOR);
+    let dormant = Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Dormant);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while runtime
+        .mob_handle()
+        .member_materialization_for_test(&member)
+        != dormant
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the roster seats the creator Dormant"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+    let session = identities
+        .status(&id(CREATOR))
+        .await
+        .expect("the creator's status")
+        .session_id
+        .expect("the seated creator is bound to a session");
+    assert_eq!(
+        capture.count(),
+        0,
+        "nothing ran: the creator was never built"
+    );
+
+    customizer.second.store(true, Ordering::SeqCst);
+    identities
+        .respawn(&id(CREATOR))
+        .await
+        .expect("the respawn completes");
+    identities
+        .send_awaiting_commit(
+            &id(CREATOR),
+            &meerkat_core::ContentInput::Text("hello".to_string()),
+        )
+        .await
+        .expect("the creator's first turn commits");
+
+    assert_eq!(
+        identities
+            .status(&id(CREATOR))
+            .await
+            .expect("the creator's status")
+            .session_id,
+        Some(session.clone()),
+        "on the session the identity was seated on"
+    );
+    let request = capture
+        .last()
+        .expect("the creator's first turn reached the model");
+    assert_eq!(
+        (
+            request.contains("system prompt of the second answer"),
+            request.contains("system prompt of the first answer"),
+            request.contains("instructions of the second answer"),
+            request.contains("instructions of the first answer"),
+        ),
+        (true, false, true, false),
+        "the first build takes the current answer's system prompt and instructions, and \
+         nothing of the answer the first seat was composed with: (second prompt, first \
+         prompt, second instructions, first instructions) in {request}"
+    );
+    assert_eq!(
+        creator_stored_context(&runtime, &session).await,
+        Some(serde_json::json!({ "answer": "second" })),
+        "the first build stores the current answer's context"
     );
     runtime.shutdown().await;
 }

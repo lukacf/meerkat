@@ -885,6 +885,101 @@ async fn a_same_session_successor_is_seated_with_the_composed_seat_its_request_n
     assert_eq!(mob.session("composed").await, session, "on its own session");
 }
 
+/// The two override setters of a same-session successor's request are a
+/// pair: a seat holds its profile override with its model override set on
+/// it, so a request that names only one of them seats what the other one
+/// still says. A request that names "no model override" alone keeps the
+/// member's profile override, which still holds the earlier model; a
+/// request that names a profile override alone has the member's kept model
+/// override set on that profile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_same_session_successors_request_that_names_one_override_keeps_the_other() {
+    let mob = RotationMob::new("successor-one-override").await;
+    mob.handle
+        .spawn_spec(worker_spec("mixed"))
+        .await
+        .expect("spawn the member");
+    let seated = |mob: &RotationMob| {
+        let handle = mob.handle.clone();
+        async move {
+            let entry = handle
+                .get_member(&id("mixed"))
+                .await
+                .expect("roster read")
+                .expect("the member is seated");
+            (
+                entry
+                    .effective_profile_override
+                    .map(|profile| (profile.model, profile.auto_compact_threshold)),
+                entry.effective_model_override,
+            )
+        }
+    };
+    let respawn = |mob: &RotationMob, request: MemberRespawn| {
+        let handle = mob.handle.clone();
+        async move {
+            tokio::time::timeout(STEP, handle.respawn_member(id("mixed"), request))
+                .await
+                .expect("the respawn answers")
+                .expect("the member is respawned")
+        }
+    };
+    // A profile to override with: the role's own, as a floor makes the
+    // successor carry it.
+    let floor = std::num::NonZeroU64::new(4096);
+    respawn(&mob, MemberRespawn::new().with_compaction_floor(floor)).await;
+    let composed_profile = mob
+        .handle
+        .get_member(&id("mixed"))
+        .await
+        .expect("roster read")
+        .expect("the member is seated")
+        .effective_profile_override
+        .expect("the floored successor carries its role's profile as its override");
+    let both = || {
+        MemberRespawn::new()
+            .with_profile_override(Some(composed_profile.clone()))
+            .with_model_override(Some("composed-model".to_string()))
+    };
+    respawn(&mob, both()).await;
+    assert_eq!(
+        seated(&mob).await,
+        (
+            Some(("composed-model".to_string(), floor)),
+            Some("composed-model".to_string())
+        ),
+        "seated with both"
+    );
+
+    respawn(&mob, MemberRespawn::new().with_model_override(None)).await;
+    assert_eq!(
+        seated(&mob).await,
+        (Some(("composed-model".to_string(), floor)), None),
+        "no model override alone: the kept profile override still holds the earlier model"
+    );
+
+    respawn(&mob, both()).await;
+    let mut other = composed_profile.clone();
+    other.model = "other-model".to_string();
+    other.auto_compact_threshold = std::num::NonZeroU64::new(2048);
+    respawn(
+        &mob,
+        MemberRespawn::new().with_profile_override(Some(other)),
+    )
+    .await;
+    assert_eq!(
+        seated(&mob).await,
+        (
+            Some((
+                "composed-model".to_string(),
+                std::num::NonZeroU64::new(2048)
+            )),
+            Some("composed-model".to_string())
+        ),
+        "a profile override alone: the kept model override is set on it"
+    );
+}
+
 /// The kept topology of `kept-respawned` and `kept-peer`: MobMachine holds
 /// the member edge and the external edge, and the roster holds the member
 /// edge both ways and the external peer's recorded descriptor.

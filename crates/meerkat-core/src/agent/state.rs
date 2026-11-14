@@ -311,6 +311,27 @@ type TurnEffectsFuture<'a> =
 type TurnEffectsFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AgentError>> + 'a>>;
 
+#[cfg(not(target_arch = "wasm32"))]
+type CallingLlmStepFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<CallingLlmStep, AgentError>> + Send + 'a>,
+>;
+#[cfg(target_arch = "wasm32")]
+type CallingLlmStepFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<CallingLlmStep, AgentError>> + 'a>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type CallingLlmRequestFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<CallingLlmGate<LlmStreamResult>, AgentError>>
+            + Send
+            + 'a,
+    >,
+>;
+#[cfg(target_arch = "wasm32")]
+type CallingLlmRequestFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<CallingLlmGate<LlmStreamResult>, AgentError>> + 'a>,
+>;
+
 /// Promote this turn's provider claims into authored evidence, discarding any
 /// claim whose reported identity does not match the active lowering.
 ///
@@ -7580,12 +7601,31 @@ where
         }
     }
 
+    /// [`Self::drive_calling_llm_boundary_unboxed`], built and boxed in its
+    /// own frame, like [`Self::execute_turn_effects`]: the boundary's state
+    /// lives on the heap, so the run loop's poll frames (the rounds, the
+    /// loop, the run and the surface futures above them) reserve a pointer
+    /// for it where a debug build reserved twice its size at every level.
+    /// The embedding hosts' worker-stack rows
+    /// (`restart_relink_fits_the_worker_stack_budget`) measure this path.
+    /// Nothing about the await changes: the future is polled to completion
+    /// at the same point and dropped there.
+    #[inline(never)]
+    fn drive_calling_llm_boundary<'a>(
+        &'a mut self,
+        ctx: &'a mut CallingLlmTurnCtx<'_>,
+    ) -> CallingLlmStepFuture<'a> {
+        Box::pin(self.drive_calling_llm_boundary_unboxed(ctx))
+    }
+
     /// CallingLlm phase driver: notices, tool-scope apply, request
     /// preparation, the LLM call, response classification, and the
     /// tool/extraction/terminal turn handling — each in its own poll
     /// frame (opt-level=0 reserves a slot for every local in every
     /// branch of a function; splitting turns sum into max).
-    async fn drive_calling_llm_boundary(
+    ///
+    /// Awaited through [`Self::drive_calling_llm_boundary`], its boxed form.
+    async fn drive_calling_llm_boundary_unboxed(
         &mut self,
         ctx: &mut CallingLlmTurnCtx<'_>,
     ) -> Result<CallingLlmStep, AgentError> {
@@ -8932,9 +8972,22 @@ where
             typed_provider_params,
         }))
     }
+    /// [`Self::execute_calling_llm_request_unboxed`], built and boxed in its
+    /// own frame: the request's state (the retry loop and the provider call)
+    /// lives on the heap and not in the boundary's poll frame.
+    #[inline(never)]
+    fn execute_calling_llm_request<'a>(
+        &'a mut self,
+        ctx: &'a mut CallingLlmTurnCtx<'_>,
+        tool_defs: &'a Arc<[Arc<ToolDef>]>,
+        prepared: &'a CallingLlmPrepared,
+    ) -> CallingLlmRequestFuture<'a> {
+        Box::pin(self.execute_calling_llm_request_unboxed(ctx, tool_defs, prepared))
+    }
+
     /// Hydrates the request messages, consumes the pending system
     /// context boundary, and performs the LLM call with retry.
-    async fn execute_calling_llm_request(
+    async fn execute_calling_llm_request_unboxed(
         &mut self,
         ctx: &mut CallingLlmTurnCtx<'_>,
         tool_defs: &Arc<[Arc<ToolDef>]>,

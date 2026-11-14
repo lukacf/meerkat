@@ -959,15 +959,14 @@ Security, Upgrade and Changed.
   trails until the agent is next seated is the record of its seat in the
   mob's journal: it decides nothing an update can change, it is what an
   earlier release that serves the same store reads, and only seating the
-  agent again (`meta/respawn`, with what that costs an agent that created
-  mobs) brings it in line; see the rollback notes of Meerkat's upgrade
-  guide before a rollback. A removed label stays in the peer metadata of
+  agent again (`meta/respawn`) brings it in line; see the rollback notes
+  of Meerkat's upgrade guide before a rollback. A removed label stays in the peer metadata of
   the agent's conversation, which its peers read, until the agent starts a
   new conversation. One agent is still seated again: a broken one (its
   build was refused for good, it serves nothing). Once its labels have
   changed since it was last seated, any update of it seats it again, the
-  update that changes them included; if it had created mobs before, it no
-  longer lists or manages them. See "Changing labels" in the created
+  update that changes them included; if it had created mobs before, it
+  goes on listing and managing them. See "Changing labels" in the created
   agents guide.
 
 - The texts say what a profile move of an agent created at run time does.
@@ -1400,8 +1399,9 @@ Security, Upgrade and Changed.
   respawn, each rebuild of `meta/compact_member`), its own mob tools no
   longer listed that mob and refused its calls on it (`mob_list_members`,
   `mob_check_member`, `mob_retire_member`, `mob_destroy`), at once and
-  after a restart, while the mob and its members went on running and no
-  gateway call listed, stopped or destroyed it. From this release an
+  after a restart, while the mob and its members went on running. No
+  gateway call was found that lists, stops or destroys such a mob (read
+  from the source). From this release an
   identity whose member is replaced by its successor on its own session
   keeps that management (the fix is Meerkat's: see its changelog, Fixed,
   `meerkat-mob-mcp`).
@@ -1423,9 +1423,9 @@ Security, Upgrade and Changed.
     from the source.
   - Not brought back: a mob whose creator lost its management on 0.9.14
     stays as it is. Upgrading does not bring the mob back into its
-    creator's reach, and on a stock gateway nothing ends it short of a
+    creator's reach. On a stock gateway the way found to end it is a
     reset or a delete of the identity, followed by the gateway's next
-    start.
+    start (read from the source).
 
 - A name an agent holds through its record in the mob's identity store
   that the host's roster lists too (the host adopted the agent into the

@@ -5589,8 +5589,7 @@ fn spawn_console_send_dispatch(
         let _claim = claim;
         // The sender's requester and label, as the send's own frame recorded
         // them, so a redispatch after a restart carries the same ones.
-        let sender = ConsoleSender::of_frame_payload(&user_frame.payload);
-        let attribution = ConsoleHumanAttribution::of_sender(sender.as_ref());
+        let attribution = ConsoleHumanAttribution::of_frame_payload(&user_frame.payload);
         match dispatch_message_to_resolved_member(
             &resolved,
             content,

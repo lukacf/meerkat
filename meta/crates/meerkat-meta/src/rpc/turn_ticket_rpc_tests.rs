@@ -65,6 +65,8 @@ fn content(text: &str) -> meerkat_core::ContentInput {
 struct Admission {
     interaction_id: Option<String>,
     idempotency_key: Option<String>,
+    requester: Option<meerkat_core::PrincipalRef>,
+    requester_origin: Option<meerkat_core::RequesterOrigin>,
 }
 
 type Finisher = tokio::sync::oneshot::Sender<Result<TurnOutput, String>>;
@@ -168,6 +170,8 @@ impl TicketBridge {
         lane.lock().unwrap().push(Admission {
             interaction_id: delivery.interaction_id.clone(),
             idempotency_key: key.clone(),
+            requester: delivery.requester.clone(),
+            requester_origin: delivery.requester_origin.clone(),
         });
         let session = self.current_session().to_string();
         key.is_some_and(|key| {
@@ -1472,5 +1476,132 @@ async fn an_ordinary_dispatch_naming_a_governed_door_keeps_its_ordinary_path() {
     );
     assert_eq!(bridge.external_governed.load(Ordering::SeqCst), 0);
     assert_eq!(bridge.internal_governed.load(Ordering::SeqCst), 0);
+    live.runtime.shutdown().await;
+}
+
+/// `meta/send` naming a `requester` on the host route: the person the host
+/// attests reaches the member's delivery as the requester, with origin
+/// `host_attested`, on the ingress lane and on the ticketed (`track_turn`)
+/// lane alike. The person is a `Human` in the host-attested trust domain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_send_naming_a_person_requester_carries_it_host_attested() {
+    let (live, bridge, identity_runtime, ctx, session) = ticket_bridge_rpc().await;
+    register_bound(&identity_runtime, &bridge, "watcher", &session).await;
+    let person = json!({"kind": "person", "id": "person-7"});
+
+    rpc(
+        &live.runtime,
+        &ctx,
+        "meta/send",
+        json!({"identity": "watcher", "content": "hello", "requester": person}),
+    )
+    .await;
+    let tracked = rpc(
+        &live.runtime,
+        &ctx,
+        "meta/send",
+        json!({
+            "identity": "watcher", "content": "hello", "requester": person, "track_turn": true,
+        }),
+    )
+    .await;
+    assert!(tracked.get("turn").is_some(), "{tracked}");
+
+    let expected = meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        "person-7",
+        meerkat_core::TrustDomainId::new(crate::rpc::HOST_ATTESTED_PERSON_TRUST_DOMAIN)
+            .expect("domain"),
+    )
+    .expect("principal");
+    let ingress = bridge.ingress.lock().unwrap().clone();
+    let tracked = bridge.tracked.lock().unwrap().clone();
+    assert_eq!(ingress.len(), 1, "{ingress:?}");
+    assert_eq!(tracked.len(), 1, "{tracked:?}");
+    for admission in ingress.iter().chain(tracked.iter()) {
+        assert_eq!(
+            admission.requester.as_ref(),
+            Some(&expected),
+            "{admission:?}"
+        );
+        assert_eq!(
+            admission.requester_origin,
+            Some(meerkat_core::RequesterOrigin::HostAttested),
+            "{admission:?}"
+        );
+    }
+    live.runtime.shutdown().await;
+}
+
+/// Without a `requester` the send is today's: the delivery carries no
+/// requester and no origin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_send_without_a_requester_carries_none() {
+    let (live, bridge, identity_runtime, ctx, session) = ticket_bridge_rpc().await;
+    register_bound(&identity_runtime, &bridge, "watcher", &session).await;
+    rpc(
+        &live.runtime,
+        &ctx,
+        "meta/send",
+        json!({"identity": "watcher", "content": "hello"}),
+    )
+    .await;
+    rpc(
+        &live.runtime,
+        &ctx,
+        "meta/send",
+        json!({"identity": "watcher", "content": "hello", "track_turn": true}),
+    )
+    .await;
+    let ingress = bridge.ingress.lock().unwrap().clone();
+    let tracked = bridge.tracked.lock().unwrap().clone();
+    assert_eq!((ingress.len(), tracked.len()), (1, 1));
+    for admission in ingress.iter().chain(tracked.iter()) {
+        assert_eq!(admission.requester, None, "{admission:?}");
+        assert_eq!(admission.requester_origin, None, "{admission:?}");
+    }
+    live.runtime.shutdown().await;
+}
+
+/// A malformed `requester`, or one combined with `idempotency_key` (a keyed
+/// send is a member continuation, which carries no requester), is refused
+/// `-32602` with nothing delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_malformed_or_keyed_requester_is_refused_before_delivery() {
+    let (live, bridge, identity_runtime, ctx, session) = ticket_bridge_rpc().await;
+    register_bound(&identity_runtime, &bridge, "watcher", &session).await;
+    for requester in [
+        json!("person-7"),
+        json!({"kind": "agent", "id": "person-7"}),
+        json!({"kind": "person"}),
+        json!({"kind": "person", "id": ""}),
+        json!({"kind": "person", "id": "person-7", "display_name": "P"}),
+    ] {
+        let reply = rpc_reply(
+            &live.runtime,
+            &ctx,
+            "meta/send",
+            json!({"identity": "watcher", "content": "hello", "requester": requester}),
+        )
+        .await;
+        assert_eq!(reply["error"]["code"], -32602, "{requester}: {reply}");
+    }
+    let reply = rpc_reply(
+        &live.runtime,
+        &ctx,
+        "meta/send",
+        json!({
+            "identity": "watcher", "content": "hello", "idempotency_key": "k1",
+            "requester": {"kind": "person", "id": "person-7"},
+        }),
+    )
+    .await;
+    assert_eq!(reply["error"]["code"], -32602, "{reply}");
+    assert_eq!(
+        reply["error"]["message"], "idempotency_key does not combine with requester",
+        "{reply}"
+    );
+    assert!(bridge.ingress.lock().unwrap().is_empty());
+    assert!(bridge.tracked.lock().unwrap().is_empty());
     live.runtime.shutdown().await;
 }

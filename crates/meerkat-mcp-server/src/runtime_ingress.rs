@@ -4322,6 +4322,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             operation_id: operation_id.clone(),
             event: meerkat_core::OpEvent::Cancelled { id: operation_id },

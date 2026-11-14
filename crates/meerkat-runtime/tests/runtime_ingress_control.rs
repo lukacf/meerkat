@@ -40,6 +40,7 @@ fn make_prompt(text: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         },
         content: text.into(),
         typed_turn_appends: Vec::new(),
@@ -298,6 +299,7 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         },
         operation_id: OperationId::new(),
         event: OpEvent::Cancelled {

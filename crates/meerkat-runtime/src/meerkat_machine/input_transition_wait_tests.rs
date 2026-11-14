@@ -48,6 +48,7 @@ fn keyed_prompt(key: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         },
         content: "held between lifecycle steps".into(),
         typed_turn_appends: Vec::new(),

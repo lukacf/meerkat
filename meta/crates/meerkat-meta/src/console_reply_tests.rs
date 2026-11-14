@@ -2526,3 +2526,81 @@ async fn the_console_gateway_profile_keeps_requests_and_replies_across_restarts(
     let _ = owner.shutdown().await;
     Ok(())
 }
+
+/// A console send never names its
+/// requester (the console records its own signed-in person, origin
+/// `console_signed_in`). A body that names one, even `null`, is REFUSED on
+/// `POST /console/send` (it used to be ignored) and on `meta/console/send`,
+/// and nothing is recorded for it.
+#[tokio::test]
+async fn a_console_send_naming_a_requester_is_refused_and_records_nothing() -> TestResult {
+    use tower::ServiceExt;
+    let fixture = Fixture::enforced("item7-console-requester").await?;
+    let alice = alice();
+    const REFUSED: &str = "A send that names its own requester";
+    for (key, requester) in [
+        (
+            "rest-person",
+            json!({ "kind": "person", "id": "someone-else" }),
+        ),
+        ("rest-null", Value::Null),
+    ] {
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/console/send")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {alice}"))
+                    .body(axum::body::Body::from(
+                        json!({
+                            "identity": "alpha",
+                            "content": REFUSED,
+                            "origin": "console",
+                            "idempotency_key": key,
+                            "requester": requester,
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+        let status = response.status();
+        let body: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 1 << 20).await?)?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{key}: refused: {body:#}");
+        assert_eq!(body["error"], "requester_not_accepted", "{key}: {body:#}");
+    }
+    let answer = console_rpc_as(
+        &fixture.app,
+        Some(&alice),
+        "meta/console/send",
+        json!({
+            "identity": "alpha",
+            "content": REFUSED,
+            "origin": "console",
+            "idempotency_key": "rpc-person",
+            "requester": { "kind": "person", "id": "someone-else" },
+        }),
+    )
+    .await;
+    assert_eq!(answer["error"]["code"], -32602, "rpc: refused: {answer:#}");
+    assert!(
+        answer["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("requester is not accepted")),
+        "rpc: names why: {answer:#}"
+    );
+    let frames = timeline(&fixture.app, &alice, Some("alpha"))
+        .await
+        .map_err(|error| format!("timeline: {error}"))?;
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| frame.to_string().contains(REFUSED)),
+        "no refused send is recorded: {frames:#?}"
+    );
+    fixture.stop().await;
+    Ok(())
+}

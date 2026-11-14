@@ -58,6 +58,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(PeerConvention::Request {
                 request_id: "req-1".into(),
@@ -90,6 +91,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(PeerConvention::Message),
             content: "test body".into(),
@@ -148,6 +150,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             content: "hello".into(),
             typed_turn_appends: Vec::new(),

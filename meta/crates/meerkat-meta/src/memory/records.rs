@@ -293,6 +293,110 @@ pub struct EvidenceRef {
     /// Message range within the pinned revision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<(u64, u64)>,
+    /// Evidence-scoped taint (§10.1): the exact input of the extraction call
+    /// that produced this record, stamped by the Distiller only when every
+    /// row that call read was proven clean. The write gate and later audits
+    /// read this, never `range` (a model-chosen citation). `None` means the
+    /// producing call read at least one row not proven clean, or the write
+    /// came from another path: the evidence is then unknown and a distilled
+    /// record citing it quarantines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_input: Option<CleanExtractionInput>,
+    /// Evidence-scoped taint (§10.1): the extraction call that produced this
+    /// record read at least one row whose PERSISTED facts declare it tainted
+    /// (a Comms row whose sender declared its content tainted, or provider
+    /// server-tool content). Set by the Distiller from the rows themselves,
+    /// so it holds across a process restart; the write gate classes such a
+    /// record [`QuarantineClass::Tainted`] with or without a taint tracker.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declared_tainted_input: bool,
+}
+
+/// What one proven-clean extraction call read: the absolute transcript row
+/// indices it was given (in the session, generation and revision of the
+/// enclosing [`EvidenceRef`]) and a digest over those rows' rendered
+/// content. Changing any row changes the digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanExtractionInput {
+    pub rows: Vec<u64>,
+    pub digest: String,
+}
+
+impl CleanExtractionInput {
+    /// Digest over `(index, role, text)` of each row, in order, with
+    /// length-prefixed fields so no two row lists collide by concatenation.
+    pub fn digest_rows<'a>(rows: impl IntoIterator<Item = (u64, &'a str, &'a str)>) -> String {
+        let mut hasher = Sha256::new();
+        for (index, role, text) in rows {
+            hasher.update(index.to_be_bytes());
+            hasher.update((role.len() as u64).to_be_bytes());
+            hasher.update(role.as_bytes());
+            hasher.update((text.len() as u64).to_be_bytes());
+            hasher.update(text.as_bytes());
+        }
+        let digest = hasher.finalize();
+        let mut hex = String::with_capacity(7 + digest.len() * 2);
+        hex.push_str("sha256:");
+        for byte in digest {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        hex
+    }
+
+    /// Whether this input names at least one row and carries a digest of
+    /// the form [`Self::digest_rows`] produces. The write gate accepts only
+    /// a well-formed input as clean; an empty or malformed one is unknown.
+    pub fn is_well_formed(&self) -> bool {
+        !self.rows.is_empty()
+            && self.digest.len() == 7 + 64
+            && self.digest.starts_with("sha256:")
+            && self.digest[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+}
+
+/// Why a record landed quarantined, as a durable typed class (§10.1). The
+/// review readers (the Hygienist's span hard block and the steward's dream)
+/// read each class with its own bound, so a volume of one class cannot push
+/// the other out of view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuarantineClass {
+    /// No taint fact is known: the write was quarantined only because
+    /// nothing proved its input clean (unknown evidence, no evidence, or a
+    /// quarantine-everything posture).
+    Unproven,
+    /// A taint fact was detected: a tainted session or evidence, a reset
+    /// boundary, or a tainted author. Records quarantined before this class
+    /// existed read as this class.
+    Tainted,
+}
+
+impl QuarantineClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unproven => "unproven",
+            Self::Tainted => "tainted",
+        }
+    }
+}
+
+/// The write gate's quarantine verdict: the reason recorded as the row's
+/// status detail, and its durable [`QuarantineClass`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuarantineVerdict {
+    pub reason: String,
+    pub class: QuarantineClass,
+}
+
+impl QuarantineVerdict {
+    pub fn new(reason: impl Into<String>, class: QuarantineClass) -> Self {
+        Self {
+            reason: reason.into(),
+            class,
+        }
+    }
 }
 
 /// Calibration profile reference (§11). All strings for now: the calibration
@@ -326,6 +430,11 @@ pub struct MemoryProvenance {
     pub profile: Option<CalibrationRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<VerificationClaim>,
+    /// Set when the record landed quarantined: why, as a durable class
+    /// (§10.1). Absent on active records and on records quarantined before
+    /// the class existed (those read as [`QuarantineClass::Tainted`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine_class: Option<QuarantineClass>,
 }
 
 /// Usage ledger counters (§9.2). Deterministic side only; judged-useful
@@ -812,12 +921,15 @@ mod tests {
                     generation: 2,
                     revision: None,
                     range: Some((3, 9)),
+                    clean_input: None,
+                    declared_tainted_input: false,
                 }],
                 author: MemoryAuthor::Agent {
                     identity: "identity:luka".to_string(),
                 },
                 profile: None,
                 verification: None,
+                quarantine_class: None,
             },
             trust: TrustTier::AgentObserved,
             status: RecordStatus::Superseded {

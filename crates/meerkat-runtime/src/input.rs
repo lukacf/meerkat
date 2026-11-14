@@ -77,6 +77,12 @@ pub struct InputHeader {
     /// [`Input::requester`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requester: Option<meerkat_core::PrincipalRef>,
+    /// How the host's ingress attested [`Self::requester`], when it said so
+    /// (recorded on the turn's requester, never interpreted by Core). The
+    /// host supplies it with the requester; without a requester it is
+    /// meaningless and the runtime ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_origin: Option<meerkat_core::RequesterOrigin>,
 }
 
 /// Where the input originated.
@@ -235,11 +241,10 @@ impl Input {
                     meerkat_core::types::TurnRequester::carried(claims.requester.clone())
                 })
             }
-            None => self
-                .header()
-                .requester
-                .clone()
-                .map(meerkat_core::types::TurnRequester::direct),
+            None => self.header().requester.clone().map(|principal| {
+                meerkat_core::types::TurnRequester::direct(principal)
+                    .with_origin(self.header().requester_origin.clone())
+            }),
         }
     }
 
@@ -438,6 +443,7 @@ impl PromptInput {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             content: ContentInput::Text(text.into()),
             typed_turn_appends: Vec::new(),
@@ -476,6 +482,7 @@ impl PromptInput {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             content: ContentInput::Text(String::new()),
             typed_turn_appends: vec![ConversationAppend {
@@ -540,6 +547,7 @@ impl PromptInput {
                 retained_resume: None,
                 authority_association: None,
                 requester: None,
+                requester_origin: None,
             },
             content,
             typed_turn_appends: Vec::new(),
@@ -567,6 +575,7 @@ impl PromptInput {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             content: input,
             typed_turn_appends: Vec::new(),
@@ -741,6 +750,7 @@ pub fn peer_response_terminal_input(
             supersession_key: None,
             correlation_id: Some(correlation_id),
             requester: None,
+            requester_origin: None,
         },
         convention: Some(PeerConvention::ResponseTerminal {
             request_id,
@@ -989,6 +999,7 @@ impl ContinuationInput {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             reason: "detached_background_op_completed".to_string(),
             continuation_kind: ContinuationKind::Ordinary,
@@ -1792,6 +1803,7 @@ mod tests {
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         }
     }
 
@@ -3341,6 +3353,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: Some(CorrelationId::from_uuid(stable)),
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(PeerConvention::Message),
             content: ContentInput::Blocks(vec![

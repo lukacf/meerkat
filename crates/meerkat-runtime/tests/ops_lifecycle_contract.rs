@@ -326,6 +326,7 @@ fn make_operation_input(operation_id: OperationId, event: OpEvent) -> Input {
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         },
         operation_id,
         event,

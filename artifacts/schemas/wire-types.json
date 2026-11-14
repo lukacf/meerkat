@@ -6334,6 +6334,10 @@
           }
         ]
       },
+      "RequesterOrigin": {
+        "description": "How a turn's requester was attested at the ingress that admitted it: `console_signed_in` (a person signed in to the host's console sent the input) or `host_attested` (the host relayed the input and attested the person). Open: treat any other value as not attested; it is kept and written back as read.",
+        "type": "string"
+      },
       "RevisedPromptDisposition": {
         "oneOf": [
           {
@@ -8560,6 +8564,17 @@
           "carried": {
             "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
             "type": "boolean"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RequesterOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How the host's ingress attested this requester, when it said so:\nrecorded with the requester so a policy can say which attestations\ncount. Absent for requesters whose ingress names no attestation (and\nfor every row written before the field existed)."
           },
           "principal": {
             "$ref": "#/$defs/PrincipalRef"
@@ -33139,6 +33154,10 @@
           }
         ]
       },
+      "RequesterOrigin": {
+        "description": "How a turn's requester was attested at the ingress that admitted it: `console_signed_in` (a person signed in to the host's console sent the input) or `host_attested` (the host relayed the input and attested the person). Open: treat any other value as not attested; it is kept and written back as read.",
+        "type": "string"
+      },
       "RevisedPromptDisposition": {
         "oneOf": [
           {
@@ -35365,6 +35384,17 @@
           "carried": {
             "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
             "type": "boolean"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RequesterOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How the host's ingress attested this requester, when it said so:\nrecorded with the requester so a policy can say which attestations\ncount. Absent for requesters whose ingress names no attestation (and\nfor every row written before the field existed)."
           },
           "principal": {
             "$ref": "#/$defs/PrincipalRef"
@@ -50964,6 +50994,10 @@
           }
         ]
       },
+      "RequesterOrigin": {
+        "description": "How a turn's requester was attested at the ingress that admitted it: `console_signed_in` (a person signed in to the host's console sent the input) or `host_attested` (the host relayed the input and attested the person). Open: treat any other value as not attested; it is kept and written back as read.",
+        "type": "string"
+      },
       "RetiredInstructionBody": {
         "additionalProperties": false,
         "description": "The typed marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key superseded\nit. The row keeps its [`InstructionActivationIdentity`], whose digest\nstill binds the body, and this marker keeps the body's length; the row's\ncontent is the retired header (`[meerkat-retired-instruction-v1]`).",
@@ -53280,6 +53314,17 @@
           "carried": {
             "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
             "type": "boolean"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RequesterOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How the host's ingress attested this requester, when it said so:\nrecorded with the requester so a policy can say which attestations\ncount. Absent for requesters whose ingress names no attestation (and\nfor every row written before the field existed)."
           },
           "principal": {
             "$ref": "#/$defs/PrincipalRef"
@@ -58735,6 +58780,10 @@
         ],
         "type": "object"
       },
+      "RequesterOrigin": {
+        "description": "How a turn's requester was attested at the ingress that admitted it: `console_signed_in` (a person signed in to the host's console sent the input) or `host_attested` (the host relayed the input and attested the person). Open: treat any other value as not attested; it is kept and written back as read.",
+        "type": "string"
+      },
       "TrustDomainId": {
         "allOf": [
           {
@@ -58755,6 +58804,17 @@
           "carried": {
             "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
             "type": "boolean"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RequesterOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How the host's ingress attested this requester, when it said so:\nrecorded with the requester so a policy can say which attestations\ncount. Absent for requesters whose ingress names no attestation (and\nfor every row written before the field existed)."
           },
           "principal": {
             "$ref": "#/$defs/PrincipalRef"
@@ -72572,6 +72632,10 @@
           }
         ]
       },
+      "RequesterOrigin": {
+        "description": "How a turn's requester was attested at the ingress that admitted it: `console_signed_in` (a person signed in to the host's console sent the input) or `host_attested` (the host relayed the input and attested the person). Open: treat any other value as not attested; it is kept and written back as read.",
+        "type": "string"
+      },
       "ResponseStatus": {
         "description": "Typed status for response interactions.\n\nMirrors `CommsStatus` from `meerkat-comms` — the comms runtime converts at the boundary.",
         "enum": [
@@ -75053,6 +75117,17 @@
           "carried": {
             "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
             "type": "boolean"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RequesterOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How the host's ingress attested this requester, when it said so:\nrecorded with the requester so a policy can say which attestations\ncount. Absent for requesters whose ingress names no attestation (and\nfor every row written before the field existed)."
           },
           "principal": {
             "$ref": "#/$defs/PrincipalRef"
@@ -93997,6 +94072,10 @@
           }
         ]
       },
+      "RequesterOrigin": {
+        "description": "How a turn's requester was attested at the ingress that admitted it: `console_signed_in` (a person signed in to the host's console sent the input) or `host_attested` (the host relayed the input and attested the person). Open: treat any other value as not attested; it is kept and written back as read.",
+        "type": "string"
+      },
       "RetiredInstructionBody": {
         "additionalProperties": false,
         "description": "The typed marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key superseded\nit. The row keeps its [`InstructionActivationIdentity`], whose digest\nstill binds the body, and this marker keeps the body's length; the row's\ncontent is the retired header (`[meerkat-retired-instruction-v1]`).",
@@ -96313,6 +96392,17 @@
           "carried": {
             "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
             "type": "boolean"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RequesterOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How the host's ingress attested this requester, when it said so:\nrecorded with the requester so a policy can say which attestations\ncount. Absent for requesters whose ingress names no attestation (and\nfor every row written before the field existed)."
           },
           "principal": {
             "$ref": "#/$defs/PrincipalRef"
@@ -109607,6 +109697,10 @@
           }
         ]
       },
+      "RequesterOrigin": {
+        "description": "How a turn's requester was attested at the ingress that admitted it: `console_signed_in` (a person signed in to the host's console sent the input) or `host_attested` (the host relayed the input and attested the person). Open: treat any other value as not attested; it is kept and written back as read.",
+        "type": "string"
+      },
       "RevisedPromptDisposition": {
         "oneOf": [
           {
@@ -111858,6 +111952,17 @@
           "carried": {
             "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
             "type": "boolean"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RequesterOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How the host's ingress attested this requester, when it said so:\nrecorded with the requester so a policy can say which attestations\ncount. Absent for requesters whose ingress names no attestation (and\nfor every row written before the field existed)."
           },
           "principal": {
             "$ref": "#/$defs/PrincipalRef"
@@ -182297,6 +182402,10 @@
           }
         ]
       },
+      "RequesterOrigin": {
+        "description": "How a turn's requester was attested at the ingress that admitted it: `console_signed_in` (a person signed in to the host's console sent the input) or `host_attested` (the host relayed the input and attested the person). Open: treat any other value as not attested; it is kept and written back as read.",
+        "type": "string"
+      },
       "RevisedPromptDisposition": {
         "oneOf": [
           {
@@ -184523,6 +184632,17 @@
           "carried": {
             "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
             "type": "boolean"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RequesterOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How the host's ingress attested this requester, when it said so:\nrecorded with the requester so a policy can say which attestations\ncount. Absent for requesters whose ingress names no attestation (and\nfor every row written before the field existed)."
           },
           "principal": {
             "$ref": "#/$defs/PrincipalRef"

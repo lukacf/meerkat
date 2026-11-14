@@ -131,6 +131,7 @@ impl FakeJudgmentStore {
                 author: MemoryAuthor::Operator { principal: None },
                 profile: None,
                 verification: None,
+                quarantine_class: None,
             },
             trust: TrustTier::Operator,
             status: RecordStatus::Active,
@@ -294,6 +295,7 @@ impl StewardStore for FakeJudgmentStore {
     async fn quarantined_records(
         &self,
         _realm: &str,
+        _class: meerkat_meta::memory::records::QuarantineClass,
         _limit: usize,
     ) -> Result<Vec<MemoryRecord>, AgentMemoryError> {
         Ok(Vec::new())
@@ -868,6 +870,7 @@ fn fake_fact(id: String, identity: &str, updated_at_ms: u64, body: String) -> Me
             author: MemoryAuthor::Operator { principal: None },
             profile: None,
             verification: None,
+            quarantine_class: None,
         },
         trust: TrustTier::Operator,
         status: RecordStatus::Active,

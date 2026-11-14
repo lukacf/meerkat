@@ -14,7 +14,9 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use meerkat_client::TestClient;
 use meerkat_core::types::TranscriptUserRole;
-use meerkat_core::{Message, PrincipalKind, PrincipalRef, TrustDomainId, TurnRequester};
+use meerkat_core::{
+    Message, PrincipalKind, PrincipalRef, RequesterOrigin, TrustDomainId, TurnRequester,
+};
 use meerkat_meta::{
     AccessControlConfig, AccessController, AccessRule, AuthPolicy, BigQueryNaming, ConsolePolicy,
     RuntimeDecisionInputs, RuntimeDecisionState, RuntimeOpsPolicy, TrustedOidcRuntimeConfig,
@@ -75,6 +77,14 @@ fn subject_of(email: &str) -> String {
 
 /// The person's qualified principal: the verified `sub` in the trust domain
 /// of its verified issuer.
+/// The requester a signed-in person's own live console send records: the
+/// person as direct requester, with origin `console_signed_in` (the door
+/// that admitted it). An operator probe by the same person names the person
+/// but records no origin.
+fn signed_in(email: &str) -> TurnRequester {
+    TurnRequester::direct(person(email)).with_origin(Some(RequesterOrigin::ConsoleSignedIn))
+}
+
 fn person(email: &str) -> PrincipalRef {
     PrincipalRef::in_domain(
         PrincipalKind::Human,
@@ -464,12 +474,12 @@ async fn two_people_one_member_distinct_senders() {
 
     assert_eq!(
         requester_rows(&runtime, "from alice").await,
-        vec![Some(TurnRequester::direct(person(ALICE)))],
+        vec![Some(signed_in(ALICE))],
         "alice's turn names alice as its direct requester"
     );
     assert_eq!(
         requester_rows(&runtime, "from bob").await,
-        vec![Some(TurnRequester::direct(person(BOB)))],
+        vec![Some(signed_in(BOB))],
         "bob's turn names bob as its direct requester"
     );
 
@@ -586,7 +596,7 @@ async fn http_send_keeps_operator_probe_with_its_sender() {
     assert_eq!(
         requester_rows(&runtime, "probe reply").await,
         vec![Some(TurnRequester::direct(person(ALICE)))],
-        "the probe's turn names its person as its direct requester"
+        "the probe's turn names its person as its direct requester and records no origin"
     );
     let _ = runtime.shutdown().await;
 }
@@ -855,7 +865,7 @@ async fn no_timeline_frame_another_viewer_reads_names_the_requester() {
     assert_eq!(status, StatusCode::OK, "{sent}");
     assert_eq!(
         requester_rows(&runtime, "viewed from alice").await,
-        vec![Some(TurnRequester::direct(person(ALICE)))],
+        vec![Some(signed_in(ALICE))],
         "alice's turn names her as its direct requester"
     );
     let deadline = tokio::time::Instant::now() + WAIT;

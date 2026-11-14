@@ -506,6 +506,7 @@ impl SessionRuntime {
                 supersession_key: None,
                 correlation_id: Some(schedule_runtime_correlation_id(identity)?),
                 requester: None,
+                requester_origin: None,
             },
             event_type: dispatch.event_type,
             payload: dispatch.payload,

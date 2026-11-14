@@ -191,6 +191,7 @@ async fn bridged_deliveries_carry_no_operator_memory() -> Result<(), Box<dyn Err
             &crate::console_aggregator::ConsoleHumanAttribution {
                 requester: Some(alice.clone()),
                 sender_label: None,
+                signed_in_send: false,
             },
             None,
         )

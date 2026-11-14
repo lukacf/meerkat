@@ -4104,6 +4104,7 @@ fn make_runtime_external_event_input(
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             event_type: event_type.to_string(),
             payload,

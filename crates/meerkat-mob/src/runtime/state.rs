@@ -433,6 +433,9 @@ pub(super) struct SubmitWorkPayload {
     /// (`WorkSpec::with_requester`). Shell dispatch carrier only: only host
     /// human input carries it, onto the member runtime's admitted input.
     pub requester: Option<meerkat_core::PrincipalRef>,
+    /// How the host attested `requester`, when it said so (set only by the
+    /// work spec; see `WorkSpec::requester_origin`).
+    pub requester_origin: Option<meerkat_core::RequesterOrigin>,
     /// The label naming the person who sent this work, for the member's
     /// model (`WorkSpec::with_sender_label`). Shell dispatch carrier only:
     /// only host human input carries it.

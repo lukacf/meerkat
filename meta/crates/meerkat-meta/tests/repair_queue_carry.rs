@@ -155,6 +155,7 @@ fn flow_step_input(text: &str) -> meerkat_runtime::Input {
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         },
         step_id: "carry-test-step".to_string(),
         content: meerkat_core::ContentInput::Text(text.to_string()),

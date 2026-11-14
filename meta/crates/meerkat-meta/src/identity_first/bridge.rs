@@ -2638,6 +2638,8 @@ struct InternalBridgeWork<'a> {
     /// The original requester of the explicit human lane's turn, carried to
     /// the member's admitted input. Absent on every other lane.
     requester: Option<&'a meerkat_core::PrincipalRef>,
+    /// How the host attested `requester` (see [`BridgeDelivery::requester_origin`]).
+    requester_origin: Option<meerkat_core::RequesterOrigin>,
     /// The request-only context of the explicit human lane's turn (its
     /// requester's operator memory), carried to the member's admitted input.
     /// Absent on every other lane.
@@ -2645,6 +2647,28 @@ struct InternalBridgeWork<'a> {
     /// The sender label of the explicit human lane's message, which the
     /// member's model reads right before it. Absent on every other lane.
     sender_label: Option<&'a meerkat_mob::SenderLabel>,
+}
+
+/// Why a delivery's requester may not ride the lane it asks for, if it may
+/// not. A requester rides the local host-human lane (a Console person's
+/// turn), or ordinary work only when the host attests it (origin
+/// `host_attested`); a host-attested origin needs a requester and never rides
+/// the host-human lane. `None` when the combination is admissible.
+pub(crate) fn requester_lane_refusal(
+    has_requester: bool,
+    origin: Option<&meerkat_core::RequesterOrigin>,
+    host_human_lane: bool,
+) -> Option<&'static str> {
+    let host_attested = origin == Some(&meerkat_core::RequesterOrigin::HostAttested);
+    if has_requester && !host_human_lane && !host_attested {
+        return Some(
+            "a requester is carried only on the local host-human lane or a host-attested send",
+        );
+    }
+    if host_attested && (!has_requester || host_human_lane) {
+        return Some("a host-attested requester rides only a host send that names one");
+    }
+    None
 }
 
 /// Which lane a submission runs in.
@@ -2796,7 +2820,18 @@ async fn submit_internal_bridge_work(
     // human lane (refused on every other lane before this), onto the
     // member's admitted input.
     if let Some(requester) = work.requester {
-        spec = spec.with_requester(requester.clone());
+        spec = match work.requester_origin {
+            // A person the host relays and attests under its own authority:
+            // ordinary work carrying the requester with its recorded origin.
+            Some(meerkat_core::RequesterOrigin::HostAttested) => {
+                spec.with_host_attested_requester(requester.clone())
+            }
+            // A signed-in person who sent this turn on the console: the
+            // requester with origin `console_signed_in`, nothing else.
+            origin => spec
+                .with_requester(requester.clone())
+                .with_requester_origin(origin),
+        };
     }
     if let Some(label) = work.sender_label {
         spec = spec.with_sender_label(label.clone());
@@ -4130,6 +4165,12 @@ pub struct BridgeDelivery {
     /// the member's admitted input; every other lane refuses one typed
     /// instead of delivering the turn without it.
     pub requester: Option<meerkat_core::PrincipalRef>,
+    /// How the host attested [`Self::requester`]. The local host-human lane
+    /// names [`meerkat_core::RequesterOrigin::ConsoleSignedIn`]; the only
+    /// other lane that carries a requester is a host send that names
+    /// [`meerkat_core::RequesterOrigin::HostAttested`] (`meta/send` with a
+    /// `requester`, host authority only).
+    pub requester_origin: Option<meerkat_core::RequesterOrigin>,
     /// Request-only context of this turn
     /// ([`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata::request_only_context`]):
     /// the operator memory of the turn's requester. Every model request of
@@ -4156,6 +4197,7 @@ impl BridgeDelivery {
             delivery_identity: None,
             skill_references: Vec::new(),
             requester: None,
+            requester_origin: None,
             request_only_context: None,
             sender_label: None,
         }
@@ -11939,10 +11981,13 @@ impl MobSessionBridge {
             ));
         }
         let requester = delivery.requester.as_ref();
-        if requester.is_some() && host_human_session.is_none() {
-            return Err(BridgeAdmissionError::InvalidInput(
-                "a requester is carried only on the local host-human lane".to_string(),
-            ));
+        let requester_origin = delivery.requester_origin;
+        if let Some(refusal) = requester_lane_refusal(
+            requester.is_some(),
+            requester_origin.as_ref(),
+            host_human_session.is_some(),
+        ) {
+            return Err(BridgeAdmissionError::InvalidInput(refusal.to_string()));
         }
         let request_only_context = delivery.request_only_context.as_ref();
         if request_only_context.is_some() && host_human_session.is_none() {
@@ -12006,6 +12051,7 @@ impl MobSessionBridge {
                 host_human_session,
                 skill_references,
                 requester,
+                requester_origin,
                 request_only_context,
                 sender_label,
             },
@@ -12821,6 +12867,7 @@ mod tests {
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         }
     }
 
@@ -17031,6 +17078,71 @@ mod scoped_classification_tests {
                 "{refusal:?}"
             );
             assert!(!refusal.admission_possible(), "{refusal:?}");
+        }
+    }
+}
+
+/// The bridge's requester lane check over every combination of requester
+/// (present or not), origin (none, console, host-attested, an unknown value)
+/// and lane (host-human or not): all sixteen. Each condition of the check is
+/// pinned on its own, so no single mutation of it survives.
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "a decode the row depends on failing is a test failure"
+)]
+mod requester_lane_tests {
+    use super::requester_lane_refusal;
+    use meerkat_core::RequesterOrigin;
+
+    const ONLY_LANE: &str =
+        "a requester is carried only on the local host-human lane or a host-attested send";
+    const HOST_SEND: &str = "a host-attested requester rides only a host send that names one";
+
+    #[test]
+    fn row_bridge_requester_lane_check_every_combination() {
+        let console = Some(RequesterOrigin::ConsoleSignedIn);
+        let host = Some(RequesterOrigin::HostAttested);
+        let unknown = Some(
+            serde_json::from_value::<RequesterOrigin>(serde_json::json!(
+                "a_door_from_a_newer_host"
+            ))
+            .expect("an unknown origin decodes"),
+        );
+        // (has_requester, origin, host_human_lane) -> refusal
+        let cases = [
+            // No requester, no origin: admissible on either lane.
+            (false, None, false, None),
+            (false, None, true, None),
+            // No requester with a console or unknown origin: not this check's
+            // to refuse (mob refuses an origin without a requester).
+            (false, console.clone(), false, None),
+            (false, console.clone(), true, None),
+            (false, unknown.clone(), false, None),
+            (false, unknown.clone(), true, None),
+            // A host-attested origin needs a requester.
+            (false, host.clone(), false, Some(HOST_SEND)),
+            (false, host.clone(), true, Some(HOST_SEND)),
+            // A requester on the host-human lane: admissible unless the
+            // origin claims host attestation.
+            (true, None, true, None),
+            (true, console.clone(), true, None),
+            (true, unknown.clone(), true, None),
+            (true, host.clone(), true, Some(HOST_SEND)),
+            // A requester on ordinary work: only when host-attested; an
+            // unknown origin is not an attestation.
+            (true, None, false, Some(ONLY_LANE)),
+            (true, console, false, Some(ONLY_LANE)),
+            (true, unknown, false, Some(ONLY_LANE)),
+            (true, host, false, None),
+        ];
+        assert_eq!(cases.len(), 16, "every combination");
+        for (has_requester, origin, lane, want) in &cases {
+            assert_eq!(
+                requester_lane_refusal(*has_requester, origin.as_ref(), *lane),
+                *want,
+                "requester {has_requester}, origin {origin:?}, host-human lane {lane}"
+            );
         }
     }
 }

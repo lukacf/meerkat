@@ -611,6 +611,7 @@ impl ConsoleSender {
                 .model_label
                 .clone()
                 .and_then(meerkat_mob::SenderLabel::new),
+            signed_in_send: false,
         }
     }
 }
@@ -622,12 +623,50 @@ impl ConsoleSender {
 pub(crate) struct ConsoleHumanAttribution {
     pub(crate) requester: Option<meerkat_core::PrincipalRef>,
     pub(crate) sender_label: Option<meerkat_mob::SenderLabel>,
+    /// Whether a signed-in person sent THIS turn themselves: a send with a
+    /// person requester whose origin is a live operator send (`operator` or
+    /// no kind). Such a send records the requester with origin
+    /// `console_signed_in`. A scheduled fire, a probe or any internal emitter
+    /// carries the person as requester but records no origin.
+    pub(crate) signed_in_send: bool,
 }
 
 impl ConsoleHumanAttribution {
     /// The attribution a send's recorded sender carries; none without one.
+    /// It claims no signed-in send: see [`Self::of_send`].
     pub(crate) fn of_sender(sender: Option<&ConsoleSender>) -> Self {
         sender.map(ConsoleSender::attribution).unwrap_or_default()
+    }
+
+    /// The attribution of a send by `sender` declaring `origin_kind`: a
+    /// signed-in send only for a person's live operator send.
+    pub(crate) fn of_send(
+        sender: Option<&ConsoleSender>,
+        origin_kind: Option<ConsoleTurnOrigin>,
+    ) -> Self {
+        let mut attribution = Self::of_sender(sender);
+        attribution.signed_in_send = attribution.requester.is_some()
+            && matches!(origin_kind, None | Some(ConsoleTurnOrigin::Operator));
+        attribution
+    }
+
+    /// The attribution a send's own `user_input` frame recorded: its sender
+    /// and its origin kind, so a redispatch carries exactly what the send had.
+    /// A recorded kind this build cannot read (a newer emitter's, or a damaged
+    /// frame) is NOT read as "no kind": the send keeps its requester and label
+    /// but is not a signed-in send (fail closed), so it records no origin.
+    pub(crate) fn of_frame_payload(payload: &serde_json::Value) -> Self {
+        let recorded = payload.get("origin_kind").filter(|kind| !kind.is_null());
+        let origin_kind = recorded
+            .and_then(|kind| serde_json::from_value::<ConsoleTurnOrigin>(kind.clone()).ok());
+        let mut attribution = Self::of_send(
+            ConsoleSender::of_frame_payload(payload).as_ref(),
+            origin_kind,
+        );
+        if recorded.is_some() && origin_kind.is_none() {
+            attribution.signed_in_send = false;
+        }
+        attribution
     }
 }
 
@@ -799,5 +838,63 @@ mod console_turn_origin_tests {
             assert_eq!(serde_json::to_value(kind)?, kind.as_str());
         }
         Ok(())
+    }
+}
+
+/// What a redispatch reads from a recorded frame. Only a
+/// person's live operator kind (or no kind recorded) is a signed-in send; an
+/// operator probe, an internal emitter's kind, and a kind this build cannot
+/// read are not.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod frame_attribution_tests {
+    use super::ConsoleHumanAttribution;
+    use serde_json::json;
+
+    fn person_frame(origin_kind: Option<serde_json::Value>) -> serde_json::Value {
+        let alice = meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            "alice-oidc-sub",
+            meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example.test")
+                .expect("trust domain"),
+        )
+        .expect("qualified person");
+        let sender = super::ConsoleSender {
+            kind: super::ConsoleActorKind::Person,
+            assurance: super::ConsoleActorKind::Person.assurance(),
+            display_name: Some("alice@example.test".to_string()),
+            caller_scope: "alice-caller-scope".to_string(),
+            requester: Some(alice),
+            model_label: Some("Message from alice@example.test".to_string()),
+        };
+        let mut frame = json!({ "sender": sender });
+        if let (Some(kind), Some(object)) = (origin_kind, frame.as_object_mut()) {
+            object.insert("origin_kind".to_string(), kind);
+        }
+        frame
+    }
+
+    #[test]
+    fn row_unknown_recorded_console_kind_is_not_a_signed_in_send() {
+        let cases = [
+            ("no kind recorded", None, true),
+            ("null kind", Some(json!(null)), true),
+            ("operator", Some(json!("operator")), true),
+            ("operator probe", Some(json!("operator_probe")), false),
+            (
+                "unknown kind",
+                Some(json!("a_kind_from_a_newer_console")),
+                false,
+            ),
+            ("malformed kind", Some(json!(7)), false),
+        ];
+        for (case, kind, signed_in) in cases {
+            let attribution = ConsoleHumanAttribution::of_frame_payload(&person_frame(kind));
+            assert!(
+                attribution.requester.is_some(),
+                "{case}: the frame's person is still the requester"
+            );
+            assert_eq!(attribution.signed_in_send, signed_in, "{case}");
+        }
     }
 }

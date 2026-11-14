@@ -127,6 +127,7 @@ mod tests {
             supersession_key: key.map(SupersessionKey::new),
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         }
     }
 

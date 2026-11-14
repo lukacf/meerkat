@@ -2032,6 +2032,7 @@ impl PromptReplayIdentity {
             supersession_key,
             correlation_id,
             requester,
+            requester_origin,
         } = header;
         let mut bytes = serde_json::to_vec(&(
             authority_association,
@@ -2056,6 +2057,16 @@ impl PromptReplayIdentity {
         if let Some(requester) = requester {
             bytes.extend_from_slice(b"\0requester\0");
             serde_json::to_writer(&mut bytes, requester).map_err(|error| {
+                crate::RuntimeDriverError::Internal(format!(
+                    "failed to bind prompt replay identity: {error}"
+                ))
+            })?;
+        }
+        // So is how its ingress attested the requester: a retry under another
+        // attestation is not a replay. Absent, the bytes are unchanged.
+        if let Some(origin) = requester_origin {
+            bytes.extend_from_slice(b"\0requester_origin\0");
+            serde_json::to_writer(&mut bytes, origin).map_err(|error| {
                 crate::RuntimeDriverError::Internal(format!(
                     "failed to bind prompt replay identity: {error}"
                 ))
@@ -2221,6 +2232,7 @@ impl ExternalEventReplayIdentity {
             supersession_key,
             correlation_id,
             requester,
+            requester_origin,
         } = header;
         let mut bytes = serde_json::to_vec(&(
             authority_association,
@@ -2248,6 +2260,16 @@ impl ExternalEventReplayIdentity {
             serde_json::to_writer(&mut bytes, requester).map_err(|error| {
                 crate::RuntimeDriverError::Internal(format!(
                     "failed to bind external event replay identity: {error}"
+                ))
+            })?;
+        }
+        // So is how its ingress attested the requester: a retry under another
+        // attestation is not a replay. Absent, the bytes are unchanged.
+        if let Some(origin) = requester_origin {
+            bytes.extend_from_slice(b"\0requester_origin\0");
+            serde_json::to_writer(&mut bytes, origin).map_err(|error| {
+                crate::RuntimeDriverError::Internal(format!(
+                    "failed to bind prompt replay identity: {error}"
                 ))
             })?;
         }
@@ -2908,6 +2930,7 @@ mod tests {
                     retained_resume: None,
                     authority_association: None,
                     requester: None,
+                    requester_origin: None,
                 },
                 event_type: "build".into(),
                 payload,
@@ -4434,6 +4457,7 @@ mod tests {
                         supersession_key: None,
                         correlation_id: None,
                         requester: None,
+                        requester_origin: None,
                     },
                     operation_id: OperationId::new(),
                     event: OpEvent::Cancelled {

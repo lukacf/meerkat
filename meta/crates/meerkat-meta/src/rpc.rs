@@ -102,6 +102,10 @@ pub const CONSOLE_ATTENTION_DISMISS_METHOD: &str = "meta/console/attention/dismi
 /// `meta/capabilities.feature_capabilities` name of a keyed `meta/send` that
 /// takes `handling_mode`; a gateway without it ignores the mode and queues.
 pub(crate) const KEYED_SEND_HANDLING_MODE_FEATURE: &str = "keyed_send_handling_mode";
+/// `meta/capabilities.feature_capabilities` name of a `meta/send` that takes
+/// `requester` (a person the host attests); a gateway without it ignores the
+/// field and sends without a requester.
+pub(crate) const SEND_HOST_ATTESTED_REQUESTER_FEATURE: &str = "send_host_attested_requester";
 pub(crate) const MOBPACK_AUTHORING_METHODS: &[&str] = &[
     "meta/mobpacks/schema",
     "meta/mobpacks/catalogs",
@@ -3015,6 +3019,18 @@ async fn handle_unified_rpc_json_inner(
                         "keyed send feature capability refused"
                     ),
                 }
+                // `meta/send` accepts `requester`. A client checks for this
+                // before naming one: a server without it ignores the field.
+                match crate::live_contracts::FeatureCapability::new(
+                    SEND_HOST_ATTESTED_REQUESTER_FEATURE,
+                ) {
+                    Ok(capability) => feature_capabilities.push(capability),
+                    Err(error) => tracing::error!(
+                        error,
+                        name = SEND_HOST_ATTESTED_REQUESTER_FEATURE,
+                        "host-attested requester feature capability refused"
+                    ),
+                }
             }
             let announcement_capabilities = crate::mob_announcements::rpc::capabilities_projection(
                 runtime.mob_announcements().as_ref(),
@@ -4700,6 +4716,20 @@ async fn handle_unified_rpc_json_inner(
                     );
                 }
             };
+            // `requester` (optional): the person the host attests, under its
+            // own host authority, as the original requester of this input
+            // (text that person typed). Only this host route accepts it; the
+            // Console, agent tools, peers, schedules, flows and forks have no
+            // way to name one. Absent, the send is the unattested one.
+            let host_requester = match request.params.get("requester") {
+                None | Some(Value::Null) => None,
+                Some(value) => match parse_host_attested_requester(value) {
+                    Ok(principal) => Some(principal),
+                    Err(message) => {
+                        return maybe_error_response(is_notification, response_id, -32602, message);
+                    }
+                },
+            };
             // `handling_mode` ("queue" or "steer", default "queue") is a keyed
             // send's: it is committed with the content under the key.
             let handling_mode = match mob_methods::parse_handling_mode(&request.params) {
@@ -4723,6 +4753,10 @@ async fn handle_unified_rpc_json_inner(
                         Some("track_turn")
                     } else if expected_spec_digest.is_some() {
                         Some("expected_spec_digest")
+                    } else if host_requester.is_some() {
+                        // A keyed send is committed as a member continuation,
+                        // which carries no requester.
+                        Some("requester")
                     } else {
                         None
                     };
@@ -4789,7 +4823,18 @@ async fn handle_unified_rpc_json_inner(
                         .to_string(),
                 );
             }
-            let send_result = if let Some(expected_spec_digest) = expected_spec_digest {
+            let send_result = if let Some(requester) = host_requester.as_ref() {
+                identity_rt
+                    .send_host_attested(
+                        &identity,
+                        expected_alias,
+                        &content,
+                        requester,
+                        rpc_track_turn_requested(&request.params),
+                        expected_spec_digest,
+                    )
+                    .await
+            } else if let Some(expected_spec_digest) = expected_spec_digest {
                 // The input was authored from the registered row this digest
                 // names (`meta/registered_spec`); the send re-checks it under
                 // the identity's lifecycle lock before delivery.
@@ -7711,6 +7756,39 @@ fn insert_identity_status_extras(
     }
 }
 
+/// The trust domain of a person a host attests on `meta/send` (`requester`):
+/// distinct from the Console's verified-issuer domains, so a host-attested
+/// principal and a Console signed-in one never name the same person by
+/// accident.
+pub(crate) const HOST_ATTESTED_PERSON_TRUST_DOMAIN: &str = "host-attested";
+
+/// Parse `meta/send`'s `requester`: a closed tagged form with one kind,
+/// `{"kind": "person", "id": "<opaque host-scoped stable id>"}`. Any other
+/// kind or field is refused, as is an id the principal contract rejects.
+fn parse_host_attested_requester(value: &Value) -> Result<meerkat_core::PrincipalRef, String> {
+    let Some(object) = value.as_object() else {
+        return Err("invalid requester: expected an object".to_string());
+    };
+    if let Some(field) = object
+        .keys()
+        .find(|key| !matches!(key.as_str(), "kind" | "id"))
+    {
+        return Err(format!("invalid requester: unknown field `{field}`"));
+    }
+    match object.get("kind").and_then(Value::as_str) {
+        Some("person") => {}
+        Some(kind) => return Err(format!("invalid requester: unknown kind `{kind}`")),
+        None => return Err("invalid requester: missing kind".to_string()),
+    }
+    let Some(id) = object.get("id").and_then(Value::as_str) else {
+        return Err("invalid requester: missing id".to_string());
+    };
+    let domain = meerkat_core::TrustDomainId::new(HOST_ATTESTED_PERSON_TRUST_DOMAIN)
+        .map_err(|error| format!("invalid requester: {error}"))?;
+    meerkat_core::PrincipalRef::in_domain(meerkat_core::PrincipalKind::Human, id, domain)
+        .map_err(|error| format!("invalid requester: {error}"))
+}
+
 /// The marks of an identity's status, each written only when true: why no
 /// member holds the identity (`archived`, or `preparation_pending` while it
 /// awaits its host's preparation), and `roster_listing_superseded` when the
@@ -8442,6 +8520,8 @@ fn serialize_response(response: &JsonRpcResponse) -> String {
     })
 }
 
+#[cfg(test)]
+mod host_requester_door_tests;
 /// Gateway RPC waits over a scripted ticket bridge; in-crate because they
 /// use pub(crate) view constructors (D67).
 #[cfg(test)]

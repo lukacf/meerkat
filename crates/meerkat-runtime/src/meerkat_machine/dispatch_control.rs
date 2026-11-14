@@ -3555,6 +3555,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             content: text.into(),
             typed_turn_appends: Vec::new(),

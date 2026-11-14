@@ -37,6 +37,15 @@ them.
 
 ### Breaking
 
+- `meerkat-core`: `service::StartTurnRuntimeSemantics` gains the public field
+  `requester_origin: Option<RequesterOrigin>` (how the host's ingress attested
+  `requester`). A struct literal that names every field adds it (`None` keeps
+  today's behaviour).
+- `meerkat-runtime`: `InputHeader` gains the public field
+  `requester_origin: Option<meerkat_core::RequesterOrigin>` (serde default,
+  omitted when absent, so stored inputs read back unchanged). A struct literal
+  that names every field adds it.
+
 - Behaviour-only (not measured by the gate): `meerkat-core`, `rkat`: on Unix
   a config document the engine writes is readable by its owner only, so an
   account that read one through group permissions loses that access at the
@@ -135,6 +144,20 @@ them.
   parameters; one that decides by identity alone ignores them.
 
 ### Added
+
+- `meerkat-core`: `RequesterOrigin` (`ConsoleSignedIn`, `HostAttested`, and
+  `Unknown(String)`, which a value this build does not know loads as, keeping
+  its exact text so it is written back unchanged; `as_str`, `from_wire`) and
+  `TurnRequester::{with_origin, origin}`: the turn's requester records how its
+  ingress attested it. Core carries the value and never interprets it; an
+  `Unknown` origin is never an attestation. Its wire schema is an open
+  string. Rows written before it read back with no origin. A caller-authored
+  transcript rewrite keeps a row's requester but clears its origin.
+- `meerkat-mob`: `WorkSpec::{with_host_attested_requester,
+  with_requester_origin, requester_origin}`. Ordinary (not host-human) work
+  carries a requester only when it is host-attested; an origin that does not
+  match the work's authorship, or an origin without a requester, is refused
+  before admission. Neither setter marks the turn as typed text.
 
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
   requests themselves (see Security).

@@ -49,7 +49,7 @@ use crate::memory::distiller::{CompactionFollowUp, DistillOutcome, DistillerEngi
 use crate::memory::events::{MemoryEventSink, MemoryTimelineEvent};
 use crate::memory::factory_handle::FactoryModelClientHandle;
 use crate::memory::guards::{BackgroundBudget, BackgroundBudgetConfig};
-use crate::memory::records::{ManifestTier, MemoryScope, RecordStatus};
+use crate::memory::records::{ManifestTier, MemoryScope, QuarantineClass, RecordStatus};
 use crate::memory::taint::MemberAgentEventSink;
 
 /// Embedded prompt bundle (crate-local copy of
@@ -83,7 +83,8 @@ const MAX_TRANSCRIPT_TOTAL_BYTES: usize = 48 * 1024;
 /// any text model in meerkat's catalog (the smallest cataloged ceiling is
 /// `gpt-5.4-mini`'s 16_384), and an unreached ceiling costs nothing.
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 16_384;
-/// Quarantine rows consulted per pass for the §8.6 hard-block.
+/// Quarantine rows consulted per pass for the §8.6 hard-block, per
+/// [`QuarantineClass`].
 const SPAN_QUARANTINE_LIMIT: usize = 256;
 /// Cap on the collapse replacement note.
 const MAX_COLLAPSE_REPLACEMENT_BYTES: usize = 512;
@@ -658,11 +659,18 @@ impl SpanReferenceSource for StoreSpanReferenceSource {
         session_key: &str,
     ) -> Result<Vec<SpanReference>, String> {
         let mut references = Vec::new();
-        let quarantined = self
-            .store
-            .quarantined_records(&self.realm, SPAN_QUARANTINE_LIMIT)
-            .await
-            .map_err(|err| err.to_string())?;
+        // §8.6 hard block, read per class (§10.1): each class gets its own
+        // bound, so a volume of records quarantined for unproven input can
+        // never push a record that carries a taint signal out of view.
+        let mut quarantined = Vec::new();
+        for class in [QuarantineClass::Tainted, QuarantineClass::Unproven] {
+            quarantined.extend(
+                self.store
+                    .quarantined_records(&self.realm, class, SPAN_QUARANTINE_LIMIT)
+                    .await
+                    .map_err(|err| err.to_string())?,
+            );
+        }
         for record in &quarantined {
             for evidence in &record.provenance.evidence {
                 if evidence.session_id == session_key {

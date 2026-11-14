@@ -505,6 +505,7 @@ fn make_prompt(text: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         },
         content: text.into(),
         typed_turn_appends: Vec::new(),
@@ -528,6 +529,7 @@ fn make_multimodal_prompt(text: &str, label: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         },
         content: meerkat_core::types::ContentInput::Blocks(vec![
             ContentBlock::Text {

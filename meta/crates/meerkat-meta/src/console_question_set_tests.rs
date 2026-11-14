@@ -1047,6 +1047,75 @@ async fn an_answer_rechecks_its_grants_when_it_commits() {
     );
 }
 
+/// The asking member is judged again at the moment the answer commits, by
+/// the rule an approval's decide asks of its origin when it is applied. A
+/// person starts an answer to a set of a member the Console knows; while
+/// the answer waits, the Console stops knowing that member. The answer is
+/// given as for an id that names nothing, and the set stays open.
+#[tokio::test]
+async fn a_set_whose_asker_the_console_stops_knowing_while_its_answer_waits_is_not_pending() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let setup = Setup::enforced();
+    let access = setup.access.clone().expect("access controller");
+    let console = QuestionConsole::start(
+        "questions-asker-unknown-while-waiting",
+        setup,
+        decisions_in(
+            state_dir.path(),
+            "questions-asker-unknown-while-waiting",
+            true,
+        ),
+    )
+    .await;
+    let pending_id = console.asked(ASKER, "call-1").await;
+    let listed_before = console.listed(Some(&bob())).await;
+    let hold = super::console_decide_holds::ConsoleDecideHold::install(&pending_id);
+    let decide = tokio::spawn({
+        let app = console.app.clone();
+        let bearer = bob();
+        let params = json!({
+            "pending_id": pending_id,
+            "decision": "approve",
+            "presented_digest": console.digest(&pending_id),
+            "answers": [choice("q1", "a")],
+        });
+        async move { console_rpc_as(&app, Some(&bearer), DECIDE, params).await }
+    });
+    let reached = tokio::time::timeout(Duration::from_secs(30), hold.reached()).await;
+    // The roster the Console reads next no longer holds the asking member.
+    access.replace_agent_attributes([crate::access::AgentResourceAttributes {
+        identity: OTHER.to_string(),
+        agent_id: None,
+        role: Some("worker".to_string()),
+        labels: BTreeMap::new(),
+    }]);
+    hold.release();
+    let answer = tokio::time::timeout(Duration::from_secs(30), decide).await;
+    let row = console.row(&pending_id);
+    // What the same person is answered for an id that names nothing.
+    let unknown = format!("decision:{}", "0".repeat(64));
+    let unknown_answer = console.answer(Some(&bob()), &unknown).await;
+    console.stop().await;
+
+    assert_eq!(
+        listed_before,
+        vec![pending_id.clone()],
+        "the person was listed the set when the answer started"
+    );
+    reached.expect("the decide reached its hand-off");
+    let answer = answer
+        .expect("the decide answered")
+        .expect("the decide task");
+    assert!(!unknown_answer["error"].is_null(), "{unknown_answer}");
+    assert_eq!(
+        refusal_shape(&answer, &pending_id),
+        refusal_shape(&unknown_answer, &unknown),
+        "the answer is given as for an id that names nothing: {answer}"
+    );
+    assert_eq!(row.state.phase, DecisionPhase::Open);
+    assert!(row.outcome.is_none());
+}
+
 /// A member private to a person: its set is not listed for others and not
 /// answerable by others; its owner is listed it and answers it.
 #[tokio::test]

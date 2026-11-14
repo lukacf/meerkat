@@ -467,6 +467,10 @@ line says otherwise.
   label keeps from someone, or add a deny rule that names it.
 - While rolled back, send no message from the Console to an agent created at
   run time.
+- Let every member respawn that is under way complete: wait until its call
+  (`meta/respawn`, the Console's respawn or `meta/compact_member`) has
+  answered, and after a crash during one, start 0.9.15 once more so that it
+  finishes the rotation.
 
 Each item below says what an earlier release does and what to do.
 
@@ -777,9 +781,13 @@ stays paused when its target comes back, until it is resumed by name. See
 
 **A member rotation in flight.** A member rotation that a 0.9.15 process
 started and did not finish (a respawn interrupted by a crash) is finished by
-the process that restarts. Restarting on 0.9.14 in that state has not been
-run, and whether 0.9.14 finishes it is not established: let a respawn
-complete on 0.9.15 before rolling back.
+the 0.9.15 process that restarts (read from the source). Restarting on 0.9.14
+in that state has not been run, and whether 0.9.14 finishes it is not
+established.
+
+**Do:** before a rollback, on 0.9.15, let every member respawn that is under
+way complete: a respawn whose call has answered is complete, and after a
+crash during one, start 0.9.15 once more so that it finishes the rotation.
 
 ## Upgrading to 0.9.14
 

@@ -433,8 +433,9 @@ Approval cards are personal. A request pinned to an approver id the caller does
 not hold reads **Waiting for** that approver and offers no decision; for a
 signed-in person, a request pinned to an id they hold, or pinned to no one,
 reads **For you**. **Needs you** counts only the requests that are not waiting
-for someone else (with any host items), and the sidebar's **Approvals** count
-counts the same requests. A request for the caller that someone
+for someone else (with any host items and open
+[question sets](#question-sets)), and the sidebar's **Approvals** count
+counts the same requests and the open question sets. A request for the caller that someone
 else decides keeps its card, which says how and by whom (for example
 "Approved by" the deciding person, read from the gating audit), or "Decided
 elsewhere" when the audit cannot say.
@@ -460,8 +461,10 @@ An agent can ask a person a set of multiple-choice questions with the
 console shows each open set as one card, in two places: at the top of the
 **Pending** tab of **Approvals**, above the approval requests, and in the
 asking agent's chat, with that chat's approvals. Both read the same set, and
-the Pending tab's count includes the open sets. **Needs you** does not count
-them.
+the Pending tab's count includes the open sets. **Needs you** counts them
+with the approvals ("1 pending approval, 2 question sets"), and so does the
+badge of **Approvals** in the sidebar; with a question set waiting, **Needs
+you** opens the Pending list.
 
 The card names the set (its title, or "Questions from" the agent), who asked,
 its status and its deadline. Each question is a group of radio buttons, one

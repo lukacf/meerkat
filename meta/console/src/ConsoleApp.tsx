@@ -7088,6 +7088,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onOpenApproval={openApproval}
           hostAttentionCount={hostAttention?.items.length || 0}
           attentionReplyCount={consoleAttention?.items.length || 0}
+          questionSetCount={questionSets?.snapshot.sets.length || 0}
           density={display.settings.density}
           activeControl={sidebarActiveControl}
           openControls={sidebarOpenControls}

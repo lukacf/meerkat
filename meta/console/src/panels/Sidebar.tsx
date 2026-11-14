@@ -112,6 +112,9 @@ interface SidebarProps {
   hostAttentionCount?: number;
   /** Replies meant for the signed-in person alone, counted there too. */
   attentionReplyCount?: number;
+  /** The open sets of questions agents asked a person, counted in "Needs
+   * you" and on the Approvals view, where each is answered. */
+  questionSetCount?: number;
   /** Comfortable (two-line 44 px rows) or compact (one-line 32 px rows). */
   density?: SidebarDensity;
   /** The view the focused pane shows: its nav entry wears the accent rule. */
@@ -2138,6 +2141,7 @@ export const Sidebar = React.memo(function Sidebar({
   onOpenApproval,
   hostAttentionCount = 0,
   attentionReplyCount = 0,
+  questionSetCount = 0,
   density = "comfortable",
   activeControl = null,
   openControls,
@@ -2805,11 +2809,16 @@ export const Sidebar = React.memo(function Sidebar({
   const pendingApprovals = pendingApprovalCount(approvals, approvalViewer);
   const attentionByKind = React.useMemo<Partial<Record<NavKind, SidebarNavAttention>>>(() => {
     const out: Partial<Record<NavKind, SidebarNavAttention>> = { ...navAttention };
-    if (pendingApprovals > 0) {
+    if (pendingApprovals > 0 || questionSetCount > 0) {
+      // The Approvals view lists both: the requests that wait for a decision
+      // and the sets of questions agents asked a person.
       out.gating = {
-        count: pendingApprovals,
+        count: pendingApprovals + questionSetCount,
         tone: "warn",
-        description: `${pendingApprovals} pending ${pendingApprovals === 1 ? "approval" : "approvals"}`,
+        description: [
+          pendingApprovals > 0 ? `${pendingApprovals} pending ${pendingApprovals === 1 ? "approval" : "approvals"}` : "",
+          questionSetCount > 0 ? `${questionSetCount} question ${questionSetCount === 1 ? "set" : "sets"}` : "",
+        ].filter(Boolean).join(", "),
       };
     }
     if (healthAttention) out.health = healthAttention;
@@ -2821,7 +2830,7 @@ export const Sidebar = React.memo(function Sidebar({
       };
     }
     return out;
-  }, [healthAttention, logsErrors, navAttention, pendingApprovals]);
+  }, [healthAttention, logsErrors, navAttention, pendingApprovals, questionSetCount]);
   const workbenchAttention = React.useMemo(() => {
     let count = 0;
     let tone: SidebarNavAttention["tone"] = "warn";
@@ -2905,7 +2914,7 @@ export const Sidebar = React.memo(function Sidebar({
       >
         {orderAnnouncement}
       </div>
-      {approvals || hostAttentionCount || attentionReplyCount ? <ApprovalAttention snapshot={approvals} hostItems={hostAttentionCount} replies={attentionReplyCount} onOpen={onOpenApproval || (() => onOpenControl("gating"))} /> : null}
+      {approvals || hostAttentionCount || attentionReplyCount || questionSetCount ? <ApprovalAttention snapshot={approvals} hostItems={hostAttentionCount} replies={attentionReplyCount} questionSets={questionSetCount} onOpen={onOpenApproval || (() => onOpenControl("gating"))} /> : null}
       {/* The roster's mast and search: the view menu's trigger shows while
           either is hovered or focused, and always while the view is not
           the default (A5). */}

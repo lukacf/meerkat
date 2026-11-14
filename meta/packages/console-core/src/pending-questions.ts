@@ -169,6 +169,19 @@ export const QUESTION_SET_READ_LIMITS = { questions: 10, choices: 8, title: 200,
 const text = (value: unknown) => typeof value === "string" && value.trim() ? value : undefined;
 const millis = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 8_640_000_000_000_000 ? value : undefined;
 const record = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+/** A table by an id a server supplies (a set's `pending_id`, a question's
+ * `id`). It has no prototype: an id such as `__proto__` or `constructor` is
+ * an entry like any other, and an id without an entry reads as undefined. */
+function table<T>(entries: Iterable<readonly [string, T]> = []): Record<string, T> {
+  const rows: Record<string, T> = Object.create(null);
+  for (const [id, value] of entries) rows[id] = value;
+  return rows;
+}
+/** The entry a table has for the id itself, never one it inherits: a
+ * snapshot a host or a test built may be a plain object. */
+const own = <T>(rows: Readonly<Record<string, T>>, id: string): T | undefined => (
+  Object.prototype.hasOwnProperty.call(rows, id) ? rows[id] : undefined
+);
 /** White space, controls and format characters (zero-width and direction
  * marks, the byte order mark, the soft hyphen). */
 const INVISIBLE = /[\s\p{Cc}\p{Cf}\p{Z}]/u;
@@ -267,7 +280,7 @@ export function questionSetShownWhole(set: QuestionSet): boolean {
  * carries them. Free text goes without the whitespace at its ends. */
 function wireAnswers(set: QuestionSet, answers: QuestionSetAnswers): QuestionSetWireAnswer[] {
   return set.questions.flatMap((question): QuestionSetWireAnswer[] => {
-    const answer = Object.prototype.hasOwnProperty.call(answers, question.id) ? answers[question.id] : undefined;
+    const answer = own(answers, question.id);
     if (!answer) return [];
     return [{
       question_id: question.id,
@@ -280,9 +293,9 @@ function wireAnswers(set: QuestionSet, answers: QuestionSetAnswers): QuestionSet
  * question, or the person's own words where the question allows them. A set
  * that changed may no longer offer what a draft holds. */
 export function questionSetAnswersOffered(set: QuestionSet, answers: QuestionSetAnswers): QuestionSetAnswers {
-  const offered: Record<string, QuestionAnswer> = {};
+  const offered = table<QuestionAnswer>();
   for (const question of set.questions) {
-    const answer = Object.prototype.hasOwnProperty.call(answers, question.id) ? answers[question.id] : undefined;
+    const answer = own(answers, question.id);
     if (!answer) continue;
     if (answer.kind === "choice" ? question.choices.some((choice) => choice.id === answer.choiceId) : question.allowFreeText) offered[question.id] = answer;
   }
@@ -398,12 +411,12 @@ function browserEnvironment(): ApprovalResourceEnvironment {
 export function questionSetEntries(snapshot: QuestionSetSnapshot, identity?: string): QuestionSetEntry[] {
   const mine = (set: QuestionSet) => identity === undefined || set.origin.identity === identity;
   const slot = (set: QuestionSet) => {
-    const place = Object.prototype.hasOwnProperty.call(snapshot.slots, set.pendingId) ? snapshot.slots[set.pendingId] : undefined;
+    const place = own(snapshot.slots, set.pendingId);
     return place === undefined ? {} : { slot: place };
   };
   return [
-    ...snapshot.sets.filter(mine).map((set) => ({ set, decision: snapshot.decisions[set.pendingId], ...slot(set) })),
-    ...snapshot.closed.filter((entry) => mine(entry.set)).map((entry) => ({ set: entry.set, decision: snapshot.decisions[entry.set.pendingId], closed: entry.outcome, ...slot(entry.set) })),
+    ...snapshot.sets.filter(mine).map((set) => ({ set, decision: own(snapshot.decisions, set.pendingId), ...slot(set) })),
+    ...snapshot.closed.filter((entry) => mine(entry.set)).map((entry) => ({ set: entry.set, decision: own(snapshot.decisions, entry.set.pendingId), closed: entry.outcome, ...slot(entry.set) })),
   ];
 }
 
@@ -422,7 +435,7 @@ export function createQuestionSetResource(input: {
 }): QuestionSetResource {
   const env = input.environment || browserEnvironment();
   let snapshot: QuestionSetSnapshot = {
-    scopeKey: input.scopeKey, status: "loading", sets: [], closed: [], decisions: {}, notices: [], slots: {}, readOnly: input.readOnly === true,
+    scopeKey: input.scopeKey, status: "loading", sets: [], closed: [], decisions: table(), notices: [], slots: table(), readOnly: input.readOnly === true,
     ...(input.readOnly === true && input.readOnlyReason ? { readOnlyReason: input.readOnlyReason } : {}),
   };
   const listeners = new Set<() => void>();
@@ -471,7 +484,7 @@ export function createQuestionSetResource(input: {
     places.clear();
     unsettled.clear();
     hold = undefined;
-    publish({ sets: [], closed: [], decisions: {}, notices: [], slots: {}, status, readOnly: true, readOnlyReason: undefined, error: error === undefined ? undefined : errorText(error) });
+    publish({ sets: [], closed: [], decisions: table(), notices: [], slots: table(), status, readOnly: true, readOnlyReason: undefined, error: error === undefined ? undefined : errorText(error) });
     lifetime.abort();
   };
   const close = (sets: readonly QuestionSet[], outcome: ClosedQuestionSetOutcome): ClosedQuestionSet[] => [
@@ -484,8 +497,8 @@ export function createQuestionSetResource(input: {
     const kept = new Set([...sets.map((set) => set.pendingId), ...closed.map((entry) => entry.set.pendingId)]);
     for (const id of Array.from(places.keys())) if (!kept.has(id)) places.delete(id);
     return {
-      decisions: Object.fromEntries(Object.entries(decisions).filter(([id]) => kept.has(id))),
-      slots: Object.fromEntries(places),
+      decisions: table(Object.entries(decisions).filter(([id]) => kept.has(id))),
+      slots: table(places),
     };
   };
   const schedule = () => {
@@ -536,7 +549,7 @@ export function createQuestionSetResource(input: {
           places.delete(old.pendingId);
           if (slot === undefined) continue;
           // After a send this console could not confirm, the line says so.
-          lines.push({ slot, kind: snapshot.decisions[old.pendingId]?.phase === "failed" ? "sent_unconfirmed" : "gone", atMs: now });
+          lines.push({ slot, kind: own(snapshot.decisions, old.pendingId)?.phase === "failed" ? "sent_unconfirmed" : "gone", atMs: now });
         }
         for (const set of sets) if (!places.has(set.pendingId)) places.set(set.pendingId, ++lastPlace);
         const closed = snapshot.closed.filter((old) => !ids.has(old.set.pendingId));
@@ -572,7 +585,7 @@ export function createQuestionSetResource(input: {
   const setDecision = (id: string, value: QuestionSetDecisionState) => {
     // Only the listed and the closed sets keep a decision.
     const kept = new Set([...snapshot.sets.map((set) => set.pendingId), ...snapshot.closed.map((entry) => entry.set.pendingId)]);
-    publish({ decisions: Object.fromEntries(Object.entries({ ...snapshot.decisions, [id]: value }).filter(([key]) => kept.has(key))) });
+    publish({ decisions: table(Object.entries({ ...snapshot.decisions, [id]: value }).filter(([key]) => kept.has(key))) });
   };
   /** Takes a set the gateway said is no longer answerable off the screen,
    * with everything of it, and leaves that refusal as its card's one line. */
@@ -597,7 +610,7 @@ export function createQuestionSetResource(input: {
       || (action === "answer" && (!answers || !questionSetAnswersSendable(set, answers)))) {
       return Promise.resolve();
     }
-    const previous = snapshot.decisions[pendingId];
+    const previous = own(snapshot.decisions, pendingId);
     const sent = action === "answer" ? { answers } : {};
     ++decisionGeneration;
     ++deciding;
@@ -687,7 +700,7 @@ export function createQuestionSetResource(input: {
       unsettled.clear();
       // Preserve a stable detached empty snapshot for references retained by a
       // view while React swaps to the next authority-scoped resource.
-      snapshot = { scopeKey: input.scopeKey, status: "unavailable", sets: [], closed: [], decisions: {}, notices: [], slots: {}, readOnly: true };
+      snapshot = { scopeKey: input.scopeKey, status: "unavailable", sets: [], closed: [], decisions: table(), notices: [], slots: table(), readOnly: true };
     },
   };
   schedule();

@@ -165,10 +165,17 @@ struct DeferredBrainSwapClient {
     /// The route this client reports for the provider-neutral reasoning
     /// effort option; `None` (the default) reports no route.
     reasoning_route: ScriptedReasoningRoute,
+    /// Whether calls 4 to 6 are scripted: the model asks to switch back to
+    /// A. Off (the default), a call past call 3 is unscripted.
+    switch_back: ScriptedSwitchBack,
 }
 
 /// A route observation a row scripts for every client of its environment.
 type ScriptedReasoningRoute = Arc<StdMutex<Option<meerkat_core::ReasoningRouteObservation>>>;
+
+/// Whether a row scripted the switch back to A for every client of its
+/// environment.
+type ScriptedSwitchBack = Arc<std::sync::atomic::AtomicBool>;
 
 impl DeferredBrainSwapClient {
     fn record(&self, model: &str) -> usize {
@@ -262,6 +269,36 @@ impl LlmClient for DeferredBrainSwapClient {
             3 => vec![
                 Ok(LlmEvent::TextDelta {
                     delta: SECOND_NEXT_TURN_TEXT.to_string(),
+                    meta: None,
+                }),
+                Ok(usage_event(self.provider, &request.model)),
+                Ok(done_event(StopReason::EndTurn)),
+            ],
+            // Calls 4 to 6 are scripted only by the second-switch proof: the
+            // model, by then B, asks to switch back to A; its turn completes;
+            // the turn after it is answered by whatever model the runtime
+            // routed it to.
+            4 if self.switch_back.load(std::sync::atomic::Ordering::SeqCst) => vec![
+                Ok(LlmEvent::ToolCallComplete {
+                    id: "toolu_brain_swap_back".to_string(),
+                    name: BRAIN_SWAP_TOOL_NAME.to_string(),
+                    args: serde_json::json!({ "target_model": self.route.model_a }),
+                    meta: None,
+                }),
+                Ok(usage_event(self.provider, &request.model)),
+                Ok(done_event(StopReason::ToolUse)),
+            ],
+            5 if self.switch_back.load(std::sync::atomic::Ordering::SeqCst) => vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: AUTHORING_TEXT.to_string(),
+                    meta: None,
+                }),
+                Ok(usage_event(self.provider, &request.model)),
+                Ok(done_event(StopReason::EndTurn)),
+            ],
+            6 if self.switch_back.load(std::sync::atomic::Ordering::SeqCst) => vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: NEXT_TURN_TEXT.to_string(),
                     meta: None,
                 }),
                 Ok(usage_event(self.provider, &request.model)),
@@ -478,6 +515,7 @@ fn brain_swap_discovery_requires_configured_routes_without_foreign_auth() {
                 provider: route.provider_b,
                 route,
                 reasoning_route: ScriptedReasoningRoute::default(),
+                switch_back: ScriptedSwitchBack::default(),
             }),
             availability,
             client_build_models: Arc::clone(&client_build_models),
@@ -595,6 +633,7 @@ struct AbEnvironment {
     client_build_models: Arc<StdMutex<Vec<String>>>,
     resolved_auth_bindings: Arc<StdMutex<Vec<AuthBindingRef>>>,
     reasoning_route: ScriptedReasoningRoute,
+    switch_back: ScriptedSwitchBack,
     /// Whether the configuration enables model fallback, with the route's
     /// model B as the one chain target.
     fallback_to_b: bool,
@@ -608,6 +647,14 @@ impl AbHarness {
             .reasoning_route
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = route;
+    }
+
+    /// From now on every client of this environment answers calls 4 to 6:
+    /// the model asks to switch back to A.
+    fn script_a_switch_back(&self) {
+        self.environment
+            .switch_back
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn requested_models(&self) -> Vec<String> {
@@ -818,6 +865,7 @@ fn new_environment_with(
         client_build_models: Arc::new(StdMutex::new(Vec::new())),
         resolved_auth_bindings: Arc::new(StdMutex::new(Vec::new())),
         reasoning_route: ScriptedReasoningRoute::default(),
+        switch_back: ScriptedSwitchBack::default(),
         fallback_to_b,
     })
 }
@@ -864,6 +912,7 @@ async fn try_attach_harness(
             provider,
             route,
             reasoning_route: Arc::clone(&environment.reasoning_route),
+            switch_back: Arc::clone(&environment.switch_back),
         });
         registry = registry.with_runtime(Arc::new(DeferredBrainSwapProviderRuntime {
             provider,
@@ -2136,12 +2185,14 @@ async fn a_level_change_or_clear_replaces_the_fallback_client() {
     }
 }
 
-/// The model-routing history is stored in the session's head row, and an
-/// earlier release decodes the head rows of a realm typed when it looks a
-/// session up; its provider params have no member for the provider-neutral
-/// reasoning effort level. So the realized record of a `brain_swap` holds
-/// the applied identity WITHOUT the level: it names the model that was
-/// installed, and the whole stored head row names no level. The session's
+/// The model-routing history is part of the session's head, which the SQLite
+/// store holds twice: in the session store's head row and, as a copy, in
+/// the runtime store's boundary head. An earlier release decodes a head
+/// typed when it loads that session; its provider params have no member for
+/// the provider-neutral reasoning effort level. So the realized record of a
+/// `brain_swap` holds the applied identity WITHOUT the level: it names the
+/// model that was installed, and neither stored copy of the head names a
+/// level. The session's
 /// own settings keep the level, live, stored and after a cold restart. A
 /// record in the earlier form, with the level inside, still decodes.
 #[tokio::test]
@@ -2238,6 +2289,36 @@ async fn a_brain_swap_under_a_level_records_its_applied_identity_without_the_lev
         "the stored head row names no level: {stored_head}"
     );
 
+    // Both stored copies of the head, as the SQLite file holds them: the
+    // session store's head row and the runtime store's boundary head. Each
+    // holds the realized record, and neither names a level.
+    for (table, column) in STORED_HEAD_COLUMNS {
+        let stored = stored_head_column(
+            &harness.environment.temp.path().join("sessions.sqlite3"),
+            table,
+            column,
+            &harness.session_id,
+        )
+        .unwrap_or_else(|| panic!("`{table}.{column}` holds the session's head"));
+        assert!(
+            stored.contains("model_routing_intent_realized"),
+            "`{table}.{column}` holds the realized record: {stored}"
+        );
+        assert!(
+            !stored.contains("reasoning_effort"),
+            "`{table}.{column}` names no level: {stored}"
+        );
+    }
+    assert!(
+        assert_the_stored_head_has_the_previous_releases_shape(
+            &harness.environment.temp.path().join("sessions.sqlite3"),
+            &harness.session_id,
+            "after the run's own switch under a level",
+        )
+        .await,
+        "the runtime store holds a boundary head after the switch"
+    );
+
     // A record in the earlier form, with the level inside, still decodes.
     let mut earlier = serde_json::to_value(&records).expect("the records as a value");
     let earlier_record = earlier
@@ -2263,6 +2344,161 @@ async fn a_brain_swap_under_a_level_records_its_applied_identity_without_the_lev
         Some(EffortLevel::High),
         "the session's own settings keep the level"
     );
+}
+
+/// After a `brain_swap` under a level the history holds a realized record
+/// without the level, and the session's settings hold the level. Nothing
+/// compares the two. A restart gives a fresh machine the realized record
+/// from the stored history (it reads the installed model's name), and the
+/// next input runs on B at the level without a second realization. A second
+/// switch, back to A, is committed and realized as the first was. The
+/// history then holds both realized records, neither with a level, in both
+/// stored copies of the head, and a restart after it finds the session on A
+/// at its level.
+#[tokio::test]
+async fn a_restart_and_a_second_brain_swap_after_one_under_a_level_run_and_record_no_level() {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let level_of = |identity: &SessionLlmIdentity| {
+        identity
+            .provider_params
+            .as_ref()
+            .and_then(|params| params.reasoning_effort)
+    };
+    let harness = build_harness(PersistenceProfile::HeadCanonical).await;
+    let route = harness.environment.route;
+    let _committed = commit_brain_swap_request(&harness).await;
+    harness.set_reasoning_route(Some(account_route_stating(&[EffortLevel::High])));
+    harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(None, Some(TurnMetadataOverride::Set(EffortLevel::High))),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("a level the route accepts is applied: {error}"));
+    let first = harness.run_prompt("the next input, after the swap").await;
+    assert_eq!(
+        harness.realized_terminal_count().await,
+        1,
+        "the first handoff is realized: {first:?}"
+    );
+    let after_first = harness.durable_routing_records().await;
+
+    // A restart: the fresh machine takes the realized record from the stored
+    // history, and the next input runs on B at the level.
+    let harness = harness.cold_restart().await;
+    let resumed = harness.run_prompt("the input after the restart").await;
+    assert!(
+        matches!(resumed, CompletionOutcome::Completed(ref run) if run.text == SECOND_NEXT_TURN_TEXT),
+        "the input after the restart runs: {resumed:?}"
+    );
+    assert_eq!(
+        harness.requested_calls().last(),
+        Some(&ProviderCall {
+            provider: route.provider_b,
+            model: route.model_b.to_string(),
+        })
+    );
+    assert_eq!(
+        harness.durable_routing_records().await,
+        after_first,
+        "the restart and the input after it add nothing to the history"
+    );
+    let on_b = harness.live_identity().await;
+    assert_eq!(on_b.model, route.model_b);
+    assert_eq!(level_of(&on_b), Some(EffortLevel::High));
+
+    // A second switch, asked for by the run on B: back to A.
+    harness.script_a_switch_back();
+    let authoring = harness
+        .run_prompt("please switch back after this turn")
+        .await;
+    assert!(
+        matches!(authoring, CompletionOutcome::Completed(ref run) if run.text == AUTHORING_TEXT),
+        "the second authoring turn completes on B: {authoring:?}"
+    );
+    let staged = harness.durable_routing_records().await;
+    assert_eq!(staged.len(), after_first.len() + 1, "{staged:?}");
+    assert!(
+        matches!(
+            staged.last(),
+            Some(SessionModelRoutingControlRecord::ModelRoutingIntentRequested { intent, .. })
+                if intent.target_model.as_str() == route.model_a
+        ),
+        "the second request is committed: {staged:?}"
+    );
+    let back = harness.run_prompt("the input after the second swap").await;
+    assert_eq!(
+        harness.realized_terminal_count().await,
+        2,
+        "the second handoff is realized: {back:?}"
+    );
+    assert!(
+        matches!(back, CompletionOutcome::Completed(ref run) if run.text == NEXT_TURN_TEXT),
+        "the input after the second swap runs: {back:?}"
+    );
+    assert_eq!(
+        harness.requested_calls().last(),
+        Some(&ProviderCall {
+            provider: route.provider_a,
+            model: route.model_a.to_string(),
+        })
+    );
+    let on_a = harness.live_identity().await;
+    assert_eq!(on_a.model, route.model_a);
+    assert_eq!(
+        level_of(&on_a),
+        Some(EffortLevel::High),
+        "the session keeps its level across both switches"
+    );
+    assert_eq!(harness.durable_identity().await, on_a);
+
+    // Both realized records name the model installed, and no level.
+    let records = harness.durable_routing_records().await;
+    let realized: Vec<&SessionLlmIdentity> = records
+        .iter()
+        .filter_map(|record| match record {
+            SessionModelRoutingControlRecord::ModelRoutingIntentRealized {
+                applied_identity,
+                ..
+            } => Some(&**applied_identity),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        realized
+            .iter()
+            .map(|identity| (identity.model.as_str(), level_of(identity)))
+            .collect::<Vec<_>>(),
+        vec![(route.model_b, None), (route.model_a, None)],
+        "{records:?}"
+    );
+    let store_path = harness.environment.temp.path().join("sessions.sqlite3");
+    for (table, column) in STORED_HEAD_COLUMNS {
+        let stored = stored_head_column(&store_path, table, column, &harness.session_id)
+            .unwrap_or_else(|| panic!("`{table}.{column}` holds the session's head"));
+        assert_eq!(
+            stored.matches("\"model_routing_intent_realized\"").count(),
+            2,
+            "`{table}.{column}` holds both realized records: {stored}"
+        );
+    }
+    assert!(
+        assert_the_stored_head_has_the_previous_releases_shape(
+            &store_path,
+            &harness.session_id,
+            "after a second switch under the level",
+        )
+        .await,
+        "the runtime store holds a boundary head after the second switch"
+    );
+
+    // A restart after the second switch: the session is on A at its level.
+    let harness = harness.cold_restart().await;
+    assert_eq!(harness.durable_identity().await, on_a);
+    assert_eq!(harness.realized_terminal_count().await, 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -2503,12 +2739,13 @@ const ROUTING_RECORD: Shape = Shape::Tagged(
 /// `meerkat-core`: the row and rewrite prefix accumulators, the lineage
 /// anchor, the graph prefix, the realtime event prefix, the metadata
 /// identity, `Usage` with its provider accounting, and the model-routing
-/// records with their intent and applied identity). 0.9.14 decodes the head
-/// rows of a realm typed when it looks a session up, and it recomputes each
+/// records with their intent and applied identity). 0.9.14 decodes a
+/// session's head typed when it loads that session, and it recomputes the
 /// head's token from what it decoded: a member it does not know either
-/// fails the decode or changes the token, and both fail the lookup for the
-/// whole realm. A change that adds a member or a value to anything the head
-/// row holds fails here until the row stays readable by the previous
+/// fails the decode or changes the token, and either way that session
+/// cannot be loaded there (the other sessions of the realm are loaded). A
+/// change that adds a member or a value to anything the head holds fails
+/// here until both stored copies of the head stay readable by the previous
 /// release (the rule is written at `RunResult::reasoning_effort` and at
 /// `InputTerminalCompletion::outcome` for the input row; this is its
 /// counterpart for the head row).
@@ -2624,14 +2861,64 @@ fn unknown_to_shape(value: &serde_json::Value, shape: &Shape, path: &str, found:
     }
 }
 
-/// The stored head row of `session_id` in the SQLite sessions store at
-/// `store_path` holds nothing the previous release's head does not know.
-/// `step` names where the session is in its life.
+/// The two places of the SQLite file that store a session's head: the
+/// session store's head row, and the runtime store's boundary head, which is
+/// a copy of the head at the session's last committed boundary.
+pub(super) const STORED_HEAD_COLUMNS: [(&str, &str); 2] = [
+    ("session_heads", "head_json"),
+    ("runtime_session_authority", "boundary_head_json"),
+];
+
+/// The text one of [`STORED_HEAD_COLUMNS`] holds for `session_id`, read from
+/// the SQLite file itself. `None` when the table or the session's row is
+/// absent.
+pub(super) fn stored_head_column(
+    store_path: &std::path::Path,
+    table: &str,
+    column: &str,
+    session_id: &SessionId,
+) -> Option<String> {
+    let conn = meerkat_sqlite::Connection::open(store_path).expect("open the sqlite file");
+    conn.busy_timeout(std::time::Duration::from_secs(10))
+        .expect("set the busy timeout");
+    let tables: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .expect("look the table up");
+    if tables == 0 {
+        return None;
+    }
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT {column} FROM {table} WHERE session_id = ?1"
+        ))
+        .expect("prepare the column read");
+    let mut rows = statement
+        .query([session_id.to_string()])
+        .expect("read the column");
+    rows.next().expect("step the column read").map(|row| {
+        let bytes = row
+            .get::<_, meerkat_sqlite::JsonColumnBytes>(0)
+            .expect("the column holds JSON bytes")
+            .into_bytes();
+        String::from_utf8(bytes).expect("the column holds UTF-8")
+    })
+}
+
+/// The stored head of `session_id` in the SQLite store at `store_path` holds
+/// nothing the previous release's head does not know, and names no reasoning
+/// effort (these sessions use no provider's own effort setting). Three reads:
+/// the head as the session store loads it, and the stored bytes of both
+/// [`STORED_HEAD_COLUMNS`]. `step` names where the session is in its life.
+/// Returns whether the runtime store holds a boundary head for the session.
 pub(super) async fn assert_the_stored_head_has_the_previous_releases_shape(
     store_path: &std::path::Path,
     session_id: &SessionId,
     step: &str,
-) {
+) -> bool {
     use meerkat_core::session_store::IncrementalSessionStore as _;
 
     let store = meerkat_store::SqliteSessionStore::open(store_path.to_path_buf())
@@ -2641,14 +2928,37 @@ pub(super) async fn assert_the_stored_head_has_the_previous_releases_shape(
         .await
         .expect("load the stored head")
         .unwrap_or_else(|| panic!("{step}: the session has a head row"));
-    let stored = serde_json::to_value(&head).expect("the stored head row's form");
     let mut found = Vec::new();
-    unknown_to_shape(&stored, &TAG_HEAD_SHAPE, "head", &mut found);
+    let mut check = |place: String, stored: &serde_json::Value, text: &str| {
+        let mut unknown = Vec::new();
+        unknown_to_shape(stored, &TAG_HEAD_SHAPE, "head", &mut unknown);
+        found.extend(unknown.into_iter().map(|what| format!("{place}: {what}")));
+        if text.contains("reasoning_effort") {
+            found.push(format!("{place}: names a reasoning effort in {text}"));
+        }
+    };
+    let loaded = serde_json::to_value(&head).expect("the loaded head's form");
+    check(
+        "the head the session store loads".to_string(),
+        &loaded,
+        &loaded.to_string(),
+    );
+    let mut boundary_head_stored = false;
+    for (table, column) in STORED_HEAD_COLUMNS {
+        let Some(text) = stored_head_column(store_path, table, column, session_id) else {
+            assert_ne!(table, "session_heads", "{step}: the session has a head row");
+            continue;
+        };
+        boundary_head_stored |= table == "runtime_session_authority";
+        let stored: serde_json::Value = serde_json::from_str(&text).expect("the column holds JSON");
+        check(format!("`{table}.{column}`"), &stored, &text);
+    }
     assert!(
         found.is_empty(),
-        "{step}: the stored head row holds what the previous release's head does not know: \
-         {found:?} in {stored}"
+        "{step}: the stored head holds what the previous release's head does not know: \
+         {found:#?}"
     );
+    boundary_head_stored
 }
 
 /// The fixture refuses what it must: a head whose realized routing record
@@ -2717,7 +3027,8 @@ fn the_head_shape_fixture_refuses_a_level_in_a_routing_record_and_an_unknown_mem
 }
 
 /// The level's paths through the production SQLite store, with the stored
-/// head row checked against the previous release's shape after each: a
+/// head (the session store's head row and the runtime store's boundary head,
+/// read from the file) checked against the previous release's shape after each: a
 /// session without a level; a level set on it (the reconfiguration a turn's
 /// override makes); a turn at the level; the run's own permanent model
 /// switch under the level; the level cleared; a cold restart. (A session
@@ -2737,7 +3048,7 @@ async fn the_stored_head_row_keeps_the_previous_releases_shape_on_every_level_pa
         let session_id = session_id.clone();
         async move {
             assert_the_stored_head_has_the_previous_releases_shape(&store_path, &session_id, step)
-                .await;
+                .await
         }
     };
     check("a session without a level").await;
@@ -2772,7 +3083,10 @@ async fn the_stored_head_row_keeps_the_previous_releases_shape_on_every_level_pa
             .and_then(|params| params.reasoning_effort),
         Some(EffortLevel::High)
     );
-    check("a turn at the level and the run's own permanent switch").await;
+    assert!(
+        check("a turn at the level and the run's own permanent switch").await,
+        "the runtime store holds a boundary head after the switch"
+    );
 
     harness
         .adapter

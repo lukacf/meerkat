@@ -2699,3 +2699,77 @@ async fn a_notice_that_cannot_be_sent_now_is_asked_again_and_one_for_no_agent_en
         "a notice for no agent ends failed: {ended:?}"
     );
 }
+
+/// A set its reader may not see, lying between two it may see, hides
+/// neither: the list, read a row a page, gives both, names the hidden one
+/// nowhere, and gives no page with a cursor and no row. Three members ask;
+/// the member whose set has the middle id is then made private to someone
+/// else, so the order is certain.
+#[tokio::test]
+async fn a_hidden_set_between_two_its_reader_may_see_hides_neither() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let setup = Setup::enforced().access(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![DAVE.to_string()],
+        rules: vec![rule(
+            "carol-administers-decisions",
+            CAROL,
+            &[
+                crate::access::ACTION_DECISIONS_VIEW,
+                crate::access::ACTION_DECISIONS_ADMIN,
+                ACTION_AGENT_VIEW,
+            ],
+            &[],
+        )],
+        ..crate::access::AccessControlConfig::default()
+    });
+    let access = setup.access.clone().expect("access controller");
+    let members = [ASKER, OTHER, "agent-c"];
+    let attributes = |member: &str, private: bool| crate::access::AgentResourceAttributes {
+        identity: member.to_string(),
+        agent_id: None,
+        role: Some("worker".to_string()),
+        labels: if private {
+            BTreeMap::from([(
+                crate::access::PRIVATE_TO_LABEL.to_string(),
+                person_private_owner_key(ISSUER, "oidc-sub-someone-else"),
+            )])
+        } else {
+            BTreeMap::new()
+        },
+    };
+    access.record_agent_attributes(attributes("agent-c", false));
+    let console = QuestionConsole::start(
+        "questions-hidden-between",
+        setup,
+        decisions_in(state_dir.path(), "questions-hidden-between", true),
+    )
+    .await;
+    let mut sets = Vec::new();
+    for member in members {
+        sets.push((console.asked(member, "call-1").await, member));
+    }
+    sets.sort();
+    let (hidden, hidden_member) = sets[1].clone();
+    access.record_agent_attributes(attributes(hidden_member, true));
+    let pages = decision_pages(
+        &console,
+        &carol(),
+        &json!({ "kind": ASK_USER_QUESTIONS_KIND }),
+    )
+    .await;
+    console.stop().await;
+
+    let read = serde_json::to_string(&pages).expect("pages");
+    assert!(
+        read.contains(&sets[0].0) && read.contains(&sets[2].0),
+        "both sets the reader may see are read: {read}"
+    );
+    let (named, empty_with_cursor) = told_of(&pages, &[hidden]);
+    assert_eq!(
+        named,
+        Vec::<String>::new(),
+        "the set between them is named nowhere"
+    );
+    assert_eq!(empty_with_cursor, 0, "{read}");
+}

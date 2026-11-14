@@ -99,8 +99,9 @@ without end. See the
 for the affected releases and what to do.
 </Warning>
 
-On an affected release, replace the send and the watch loop: read the
-member's `tokens_used` before the send, then wait until it is greater:
+On an affected release, keep the `ensure_member` line and replace the
+`handle.send(...)` line and the watch loop: read the member's `tokens_used`
+before the send, then wait until it is greater:
 
 ```python
         # Read the member's token count before the send
@@ -127,6 +128,12 @@ that, or a provider that reports no usage, ends this wait in the
 wait shows that a run ended, not that yours did; in this sample nothing else
 sends to `agent-1`. `status.status` and `status.is_final` describe the
 member, not the run.
+
+Confirmed by runs on the published 0.9.14 packages: the count changes once,
+when a run ends, also for a run with tool calls, and a run the provider
+refused left it unchanged. Read from the source: a provider that reports no
+usage adds nothing, and a run started by another sender (a peer or a schedule)
+counts as well.
 
 ## Durable detached tools
 

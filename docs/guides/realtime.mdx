@@ -694,6 +694,14 @@ frozen to the transcript prefix observed before the delegation offset; the
 resulting delegated transcript is a Meerkat-derived fact. Transcript
 boundaries never prove playback completed.
 
+The voice model can delegate at a pause in the middle of the user's sentence.
+The rest of that sentence then joins the delegated request: it is passed to
+the request's work while that runs, or held for work that has not started.
+Only the same sentence does: words that begin more than 1.6 s after the
+user's previous word ended (on the positions the provider reports for the
+user's words) are a new turn, which the voice model answers or delegates as a
+request of its own, and nothing of it reaches the earlier request's work.
+
 Assistant output may begin on a fresh channel from startup context or later
 canonical updates, without microphone input. Generated runtime authority keeps
 an existing foreground correlation when present; otherwise it admits a fresh

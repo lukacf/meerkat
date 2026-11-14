@@ -2730,10 +2730,16 @@ struct SessionState {
     last_request: Option<String>,
     /// Provider id of the client delegation created while a user turn was
     /// open (mid-utterance): the next user turn to finish before another
-    /// client delegation continues that utterance. A later client
-    /// delegation ends it whether it is accepted or refused for want of a
-    /// request.
+    /// client delegation continues that utterance, while the user's
+    /// sentence is still going on. A later client delegation ends it
+    /// whether it is accepted or refused for want of a request, and so does
+    /// the pause that ends a sentence
+    /// ([`Self::end_continuation_after_a_sentence_pause`]).
     continuation_of: Option<String>,
+    /// Session-timeline end of the user's speech so far: the furthest
+    /// `end_ms` of an input transcript delta. The point a sentence pause is
+    /// measured from.
+    user_speech_end_ms: Option<f64>,
     window: DelegationWindow,
     seen_delegation_ids: HashSet<String>,
     queued_observations: VecDeque<GptLiveBrokerObservation>,
@@ -2914,6 +2920,7 @@ impl Default for SessionState {
             window_finished_user_turns: Vec::new(),
             last_request: None,
             continuation_of: None,
+            user_speech_end_ms: None,
             window: DelegationWindow::default(),
             seen_delegation_ids: HashSet::new(),
             queued_observations: VecDeque::new(),
@@ -3723,6 +3730,7 @@ impl SessionState {
                     self.unanswered_user_input = true;
                     self.user_request_open = true;
                 }
+                self.end_continuation_after_a_sentence_pause(start_ms, end_ms);
                 self.record_transcript_delta(GptLiveTurnRole::User, delta);
                 self.measure_provider_input_latency(end_ms);
             }
@@ -4064,6 +4072,46 @@ impl SessionState {
 
     fn reflected_input_clock_ms(&self) -> u64 {
         self.reflected_input_samples.saturating_mul(1000) / SIDEBAND_INPUT_SAMPLE_RATE_HZ
+    }
+
+    /// Apply one user transcript delta's span to the continuation rule,
+    /// before the delta joins a turn.
+    ///
+    /// A delegation created at a pause inside the user's sentence is
+    /// continued by the rest of that sentence, and by nothing else: a word
+    /// that begins more than [`USER_FLOOR_SILENCE_RELEASE_MS`] after the
+    /// user's speech so far ended starts a new utterance, and from then on
+    /// what the user says is not more words for the earlier request's job
+    /// (with no such end, a question asked 18 s later, which the voice
+    /// answered itself, was reported as continuing the delegation and
+    /// steered into its job). The bound is the one that ends the user's
+    /// floor: a pause inside a sentence never reaches it.
+    ///
+    /// The pause is read from positions on the session timeline, never from
+    /// arrival or from the model's speech, so a word of the delegated
+    /// sentence that is transcribed late still continues it. It is measured
+    /// from the user's speech so far, not from the delegation, so a
+    /// sentence carried on word by word stays one sentence. A turn that
+    /// holds words from both sides of the pause is not reported at all: a
+    /// turn is reported whole.
+    fn end_continuation_after_a_sentence_pause(&mut self, start_ms: f64, end_ms: f64) {
+        #[allow(clippy::cast_precision_loss)]
+        let sentence_pause_ms = USER_FLOOR_SILENCE_RELEASE_MS as f64;
+        if self.continuation_of.is_some()
+            && self
+                .user_speech_end_ms
+                .is_some_and(|speech_end_ms| start_ms - speech_end_ms > sentence_pause_ms)
+        {
+            tracing::debug!(
+                start_ms,
+                "public Live user speech began after a sentence pause; the earlier delegation's continuation ended"
+            );
+            self.continuation_of = None;
+        }
+        self.user_speech_end_ms = Some(
+            self.user_speech_end_ms
+                .map_or(end_ms, |speech_end_ms| speech_end_ms.max(end_ms)),
+        );
     }
 
     fn measure_provider_input_latency(&mut self, transcribed_through_ms: f64) {

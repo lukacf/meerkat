@@ -1040,6 +1040,30 @@ them.
   0.8.51 it was sent as quiet text-chat context without the hold, and in
   both forms the same rule ignored it. See Known limitations for what the
   fix does not cover.
+- `meerkat-openai`: on a GPT Live voice channel, words the user speaks later
+  in a call no longer count as the rest of an earlier request. When the
+  voice model delegates what the user has just said without having spoken
+  since those words (the usual shape of a delegation), the session treated
+  the next thing the user said as the rest of that request, if the voice
+  model answered those words itself instead of delegating them; if the job
+  started for the earlier request was still running or waiting to start,
+  those words could also be passed to it as part of its request. There was
+  no time limit, and a text turn in between changed nothing, so the job
+  could act on words that were not meant for it. Now only the rest of the
+  same sentence continues a request: words that begin more than 1.6 s after
+  the user's previous word ended, measured on the positions the provider
+  gives for the user's words, are a new turn. The voice model answers that
+  turn or delegates it as a request of its own, and none of it reaches the
+  earlier job. Words within that pause still join the request, which is
+  what carries on a request that was delegated at a pause in mid-sentence.
+  Affects 0.8.50 through 0.9.14: in the words of the known issue on the
+  0.9.14 release page, "read from the source, and seen in our live voice
+  test runs of development builds on 2026-11-11 and 2026-11-14, whose code
+  for this is the same as in 0.9.14". The new tests drive the rule on the
+  current source and replay the committed recording of a live run, in which
+  two later questions were reported as the rest of an earlier request; no
+  test passes later words to a job that is still running (no recording
+  holds that order). See Known limitations for what the fix does not cover.
 - `meerkat-contracts`, Python and TypeScript SDKs: the method catalog and
   the documentation of the SDKs' `mob_cancel_work` / `mobCancelWork` no
   longer say that `mob/cancel_work` cancels a unit of work. The method is
@@ -1612,6 +1636,20 @@ them.
   runs twice, and the user has to ask again. A refused delegation gets no
   answer on the voice channel; how the voice model carries on after one is
   not established (no recording holds one).
+- GPT Live voice channels: the fix that keeps words spoken later in a call
+  out of an earlier request's job (see Fixed) ends a request at a pause of
+  more than 1.6 s in the user's speech. Not covered: words the user begins
+  within 1.6 s of a delegated request still join that request, also when
+  they were meant as a new one; that pause is how a request delegated in
+  mid-sentence is carried on, and a new request begun that quickly cannot be
+  told from the rest of the sentence. The pause is read from the positions
+  the provider reports for the user's words: if a provider stream reported
+  positions that do not advance, the earlier behaviour would remain (the
+  next thing the user says joins the request). In the other direction, when
+  the provider's transcript drops more than 1.6 s of the user's words in
+  the middle of a sentence, the rest of that sentence does not join a
+  request delegated before the gap: it is a new turn, and the user may have
+  to say it again.
 
 ## [0.9.14] - 2026-11-11
 

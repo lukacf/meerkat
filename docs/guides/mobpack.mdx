@@ -87,10 +87,11 @@ Before you share a pack or host a bundle:
 - Keep rkat's state out of the mob directory: run `rkat` from another
   directory, or pass `--state-root <directory outside the mob directory>`. If
   the mob directory already holds a `.rkat/` directory, move it out.
-- List what the pack holds: `rkat mob inspect <pack>` prints one `file` line
-  for each archived file. It also reads the `mobpack.bin` of a built bundle.
-  Lines that begin `.rkat/`, `.git/` or `.env` name files that should not be
-  there.
+- List what the pack holds: `rkat mob inspect <pack>` prints one line for
+  each archived file: the word `file`, a tab, and the file's path. It also
+  reads the `mobpack.bin` of a built bundle. A path with `.rkat/`, `.git/` or
+  an env file such as `.env` in it, at the top of the pack or below a
+  subdirectory, names a file that should not be there.
 - Move out everything that is not the manifest, the definition and the assets
   you meant to ship, then pack again.
 
@@ -223,7 +224,10 @@ A host trusts a signer once a trust store lists it. `rkat` reads two files,
 each optional: `~/.rkat/trusted-signers.toml` for the user, and
 `.rkat/trusted-signers.toml` in the directory `rkat` is run from. A `.rkat/`
 in a directory above is not read for this; to use a project's file from
-elsewhere, pass `--context-root <project directory>`. Each file lists
+elsewhere, pass `--context-root <project directory>`: that directory's file
+is then read in place of the run directory's. `--user-config-root
+<directory>` moves the user's file to
+`<directory>/.rkat/trusted-signers.toml`. Each file lists
 signers by id, with the `public_key` value from `signature.toml`:
 
 ```toml
@@ -231,8 +235,9 @@ signers by id, with the `public_key` value from `signature.toml`:
 "release@example.com" = "<public key>"
 ```
 
-When both files list a signer, the entry in the directory's file is used, and
-`rkat` prints a warning that it overrides the user's entry. Check the result
+When both files list a signer, the entry in the directory's file is used; if
+the two entries hold different keys, `rkat` prints a warning that it
+overrides the user's entry. Check the result
 with `rkat mob validate ./dist/release-triage.mobpack`: under the default
 `strict` policy it refuses the pack as an unknown signer before the signer is
 listed, and prints `valid` with the pack's digest after.

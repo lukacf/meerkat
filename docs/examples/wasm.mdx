@@ -69,6 +69,17 @@ const runtime = await MeerkatRuntime.initFromMobpack(wasm, mobpackBytes, {
 });
 ```
 
+<Warning>
+A key written into the page's code is sent to everyone who loads the page,
+and each of them can read it, in the code and in the requests the browser
+sends to the provider. Write a provider key into the page only on your own
+machine. A key that the person using the page enters stays in that person's
+browser: other visitors do not get it, but every script running in the page
+can read it. For a page you serve to other people, let each person enter a
+key of their own, or use the proxy form below: the browser gets a dummy key,
+and the proxy adds the real one on the server.
+</Warning>
+
 Mobpack ingress is fail-closed. The default is strict trust with an empty
 signer store, which rejects unsigned packs and unknown signers. Supply trusted
 signers for deployed packs. For a locally generated unsigned demo only, opt in
@@ -82,6 +93,9 @@ definition. A host that wants the declared topology must separately load a
 For proxy deployments, pass a provider-specific dummy key and base URL. The
 proxy injects the real server-side credential.
 
+The proxy keeps the key out of the page. Put it behind your own
+authentication, and do not expose it to a network you do not trust.
+
 ```typescript
 const runtime = await MeerkatRuntime.init(wasm, {
   anthropicApiKey: "proxy",
@@ -90,14 +104,17 @@ const runtime = await MeerkatRuntime.init(wasm, {
 });
 ```
 
+<Warning>
+Known issue, noted 2026-11-14: the proxy that ships with `@rkat/web` 0.4.1 through 0.9.14 (`npx @rkat/web proxy`) is not an authenticated proxy. It does not check who calls it, and it listens on every network interface of the machine although it prints `localhost`. See the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14) for who needs to act and what to do.
+</Warning>
+
 From 0.9.15 the standalone proxy (`npx @rkat/web proxy`) listens on the
 loopback interface (`127.0.0.1`) by default; `--host <address>` binds another
 address. It answers pages from loopback origins only, unless
 `--cors-origin <origin>` names another origin (`*` for any), and refuses a
-request from any other origin before the provider is called. The proxy does
-not check who calls it: a request without an `Origin` header is forwarded
-(unless a browser marks it cross-site), so put a proxy that listens on
-another address behind your own authentication.
+request from any other origin before the provider is called. A request
+without an `Origin` header is forwarded, unless a browser marks it
+cross-site.
 
 ## Create session and run turn
 

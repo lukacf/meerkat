@@ -102,5 +102,5 @@ cp "$RUNTIME_OUT/meerkat_web_runtime_bg.wasm" "$WEB_DIST/meerkat_web_runtime_bg.
 
 PORT="${PORT:-4173}"
 echo "Built arena app: $WEB_DIST"
-echo "Serve with: python3 -m http.server \"$PORT\" --directory \"$WEB_DIST\""
+echo "Serve with: python3 -m http.server \"$PORT\" --bind 127.0.0.1 --directory \"$WEB_DIST\""
 echo "Then open: http://127.0.0.1:$PORT"

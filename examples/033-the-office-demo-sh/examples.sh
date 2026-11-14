@@ -25,5 +25,5 @@ npm run build
 
 PORT="${PORT:-4174}"
 echo "Built The Office demo: $WEB_DIST"
-echo "Serve with: python3 -m http.server \"$PORT\" --directory \"$WEB_DIST\""
+echo "Serve with: python3 -m http.server \"$PORT\" --bind 127.0.0.1 --directory \"$WEB_DIST\""
 echo "Then open: http://127.0.0.1:$PORT"

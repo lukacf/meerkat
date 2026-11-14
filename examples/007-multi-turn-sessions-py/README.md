@@ -22,12 +22,27 @@ session.archive()  → clean up
 ```
 
 ## Run
+
+With the released SDK, from the repository root (see
+[002](../002-hello-meerkat-py/) for what it downloads and verifies on first
+use):
+
 ```bash
-# From the repository root, first build/install the local Python SDK runtime:
-# python3 -m venv .venv && . .venv/bin/activate
-# python -m pip install --upgrade pip
-# python -m pip install -e sdks/python
-# ./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
-# export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
-ANTHROPIC_API_KEY=sk-... python3 examples/007-multi-turn-sessions-py/main.py
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install meerkat-sdk
+ANTHROPIC_API_KEY=sk-... python examples/007-multi-turn-sessions-py/main.py
+```
+
+To run against this checkout instead, build the SDK and the runtime first; a
+source install of the SDK refuses to download a runtime, so point it at the
+one you build:
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e sdks/python
+./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
+export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
+ANTHROPIC_API_KEY=sk-... python examples/007-multi-turn-sessions-py/main.py
 ```

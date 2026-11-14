@@ -2267,7 +2267,21 @@ where
         }
     }
 
-    async fn handle_run_failure(
+    /// [`Self::handle_run_failure_unboxed`], built and boxed in its own
+    /// frame: every exit of a run awaits it, and a debug build reserves
+    /// room for an awaited future at each of those sites in the run's poll
+    /// frame. A failure path only: nothing is allocated for a run that
+    /// succeeds.
+    #[inline(never)]
+    fn handle_run_failure<'a>(
+        &'a mut self,
+        error: &'a AgentError,
+        event_tx: Option<&'a mpsc::Sender<AgentEvent>>,
+    ) -> super::state::BoxedAgentFuture<'a, ()> {
+        Box::pin(self.handle_run_failure_unboxed(error, event_tx))
+    }
+
+    async fn handle_run_failure_unboxed(
         &mut self,
         error: &AgentError,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
@@ -2285,7 +2299,17 @@ where
     /// boundary rolls the pre-compaction transcript/control parent back and
     /// aborts its invisible memory stages while retaining real provider usage
     /// and failed-attempt cadence.
-    async fn settle_compaction_after_run_error(&mut self, error: AgentError) -> AgentError {
+    #[inline(never)]
+    fn settle_compaction_after_run_error(
+        &mut self,
+        error: AgentError,
+    ) -> super::state::BoxedAgentFuture<'_, AgentError> {
+        Box::pin(self.settle_compaction_after_run_error_unboxed(error))
+    }
+
+    /// Awaited through [`Self::settle_compaction_after_run_error`], its
+    /// boxed form (a failure path awaited at every exit of a run).
+    async fn settle_compaction_after_run_error_unboxed(&mut self, error: AgentError) -> AgentError {
         if matches!(
             error,
             AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. }

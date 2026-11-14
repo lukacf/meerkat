@@ -83,8 +83,9 @@ pub(crate) use console_ingress::{
     ConsoleCallerVerification, ConsoleLoginKind, ConsoleSignOutError, ConsoleSignedOut,
     ResolvedConsoleCaller, apply_identity_changes_to_experience, authorize_console_rest_json_route,
     console_human_principal, console_identifies_people, console_member_access_attributes,
-    fold_console_member_attributes, render_console_rest_json_route,
-    resolve_authorized_console_caller_from_token, session_fence_first_accepted_iat,
+    console_takes_a_persons_decision, fold_console_member_attributes,
+    render_console_rest_json_route, resolve_authorized_console_caller_from_token,
+    session_fence_first_accepted_iat,
 };
 pub use event_transport::normalize_event_line;
 pub(crate) use gating::{MEMORY_CONFLICT_LOOKUP_FAILED_EVENT, is_legacy_sequential_pending_id};

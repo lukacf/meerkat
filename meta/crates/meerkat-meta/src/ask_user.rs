@@ -18,8 +18,10 @@
 //!   ([`AskUserSurface`]) once it keeps durable decisions and serves its
 //!   long-term agents. A call answers `no_human_surface` at once, holding
 //!   nothing, while the slot is empty, when the runtime keeps no durable
-//!   decisions, on a candidate launch (which acts nowhere), when the runtime
-//!   serves no Console ([`crate::console_schedules::ConsoleServed`]), and for
+//!   decisions, on a candidate launch (which acts nowhere), when no person
+//!   can decide on the runtime's Console
+//!   ([`crate::console_schedules::ConsoleServed`]: it serves none, or one
+//!   that can identify no person or takes no changes), and for
 //!   an asker no answer can be routed back to (a member of another mob than
 //!   the runtime's own, or a name that is no agent name). Otherwise the set
 //!   is held and the call answers `asked`.
@@ -114,7 +116,7 @@ impl std::fmt::Debug for AskUserSurface {
         formatter
             .debug_struct("AskUserSurface")
             .field("decisions", &self.decisions)
-            .field("console_served", &self.console.is_served())
+            .field("a_person_decides", &self.console.takes_a_persons_decision())
             .field("mob_id", &self.mob_id)
             .finish_non_exhaustive()
     }
@@ -149,9 +151,10 @@ impl AskUserSurface {
         self
     }
 
-    /// Whether a person can be shown a question now: the runtime keeps
-    /// durable decisions, it speaks for its composition, and it serves a
-    /// Console.
+    /// Whether a person can be shown a question now, and answer it: the
+    /// runtime keeps durable decisions, it speaks for its composition, and
+    /// it serves a Console on which a person can decide (one that can
+    /// identify a person and takes changes).
     fn shows_questions(&self) -> bool {
         if !self.decisions.is_available() {
             return false;
@@ -159,7 +162,7 @@ impl AskUserSurface {
         if self.decisions.is_candidate() {
             return false;
         }
-        self.console.is_served()
+        self.console.takes_a_persons_decision()
     }
 
     /// Whether the answer to a question of `asker`, a member of the mob

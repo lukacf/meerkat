@@ -437,6 +437,17 @@ pub(crate) fn console_identifies_people(
             && validate_trusted_oidc_runtime_config(&decisions.trusted_oidc).is_ok())
 }
 
+/// Whether a person can decide on this console: it can identify a person
+/// ([`console_identifies_people`]) and it takes changes. On a console that
+/// identifies nobody, or a read-only one, nobody answers what an agent asks
+/// a person.
+pub(crate) fn console_takes_a_persons_decision(
+    decisions: &RuntimeDecisionState,
+    access: Option<&AccessController>,
+) -> bool {
+    console_identifies_people(decisions, access) && !decisions.console.read_only
+}
+
 /// The view of a caller whose request carries no audience the Console
 /// resolved (an embedder's own REST route): the view of the subject the
 /// route's authentication resolved, or, where sign-in is optional, of the

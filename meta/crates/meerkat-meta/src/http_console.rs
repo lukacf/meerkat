@@ -16006,19 +16006,24 @@ async fn handle_console_runtime_rpc_with_visibility(
             // A pending id that names a question set (`crate::ask_user`) is
             // decided by the same person under the same checks, and handed
             // to the decision owner. Any other id, a decision of another
-            // kind included, is the gating owner's.
-            if let Some((decisions, set)) = question_sets::named(runtime, pending_id) {
-                return question_sets::decide(
+            // kind included, is the gating owner's. So is the id of a set
+            // the read does not list to this caller: the branch answers
+            // nothing for it, here or when its decision commits, and it
+            // takes every later step as an id that is not pending.
+            if let Some((decisions, set)) = question_sets::named(runtime, pending_id)
+                && let Some(answer) = question_sets::decide(
                     decisions,
                     set,
                     &request.params,
-                    response_id,
+                    response_id.clone(),
                     access,
                     access_view,
                     governance,
                     authenticated_principal,
                 )
-                .await;
+                .await
+            {
+                return answer;
             }
             if let Some(view) = access_view {
                 let pending = module_runtime.lock().await.list_gating_pending();
@@ -16089,7 +16094,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                         principal: decider.principal.clone(),
                         held_approver_ids: fence
                             .as_ref()
-                            .map(|fence| fence.held_approver_ids())
+                            .map(crate::access::AccessDecisionFence::held_approver_ids)
                             .unwrap_or_default(),
                     })
                 });

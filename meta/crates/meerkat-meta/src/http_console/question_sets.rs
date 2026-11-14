@@ -9,9 +9,10 @@
 //!
 //! The decide keeps, in order, every check of an approval's decide. The
 //! arm refuses a request that names an approver before it branches. Then:
-//! the asking member must be one the read would list the set for, by that
-//! same rule (`access_denied`, "access denied to approval origin"); the
-//! caller must be a verified
+//! a set the read would not list to the caller, by that same rule, is not
+//! this branch's to answer: the arm goes on as for an id that is not
+//! pending, so the caller cannot tell such a set from an id that names
+//! nothing. For a set the caller may see, the caller must be a verified
 //! person ([`ConsoleApprovalDecider`], `approver_unauthenticated`); the
 //! decision is `approve` with answers, or `reject`/`deny`
 //! ([`console_gating_decision`]). A request the set would not take is
@@ -22,11 +23,13 @@
 //! the decision owner ([`crate::ask_user::answer_question_set`]) as one
 //! attested human decision: person authenticated, in the login it was made
 //! in, on the ingress `console`. The checks an approval's decide makes
-//! under the access fence ([`console_decide_fenced`]: the person is still
-//! current, still holds `gating.decide`, and may still view the asking
-//! member) are the eligibility the owner checks when the decision commits,
-//! with the fence held through that call, so a revocation published while
-//! the request waited is honored.
+//! under the access fence (the person is still current and still holds
+//! `gating.decide`, [`console_decide_fenced`], and may still view the
+//! asking member) are the eligibility the owner checks when the decision
+//! commits, with the fence held through that call, so a revocation
+//! published while the request waited is honored. A person who may no
+//! longer view the asking member then is answered as at the start: as for
+//! an id that is not pending.
 
 use std::sync::OnceLock;
 
@@ -96,30 +99,48 @@ pub(super) fn named(
     Some((decisions, set))
 }
 
+/// Why the person who decides was not eligible when the decision
+/// committed.
+enum Ineligible {
+    /// A check of an approval's decide failed: its refusal is the route's
+    /// answer.
+    Refused(ConsoleDecideRefusal),
+    /// The person may no longer view the asking member: the set is not
+    /// theirs to know of.
+    Hidden,
+}
+
 /// The person who decides, eligible while the checks of an approval's
-/// decide pass under the access fence. The refusal of the check that
-/// failed is kept for the route's answer.
+/// decide pass under the access fence and the person may view the asking
+/// member. What failed is kept for the route's answer.
 struct FencedPerson<'a, 'fence> {
     decider: &'a ConsoleApprovalDecider,
     fence: Option<&'a AccessDecisionFence<'fence>>,
     asker: &'a str,
-    refused: OnceLock<ConsoleDecideRefusal>,
+    ineligible: OnceLock<Ineligible>,
 }
 
 impl ConsentEligibility for FencedPerson<'_, '_> {
     fn check_current(&self) -> Result<(), ConsentIneligible> {
-        match console_decide_fenced(self.decider, self.fence, Some(self.asker)) {
-            Ok(()) => Ok(()),
-            Err(refusal) => {
-                let _ = self.refused.set(refusal);
-                Err(ConsentIneligible)
-            }
+        if let Err(refusal) = console_decide_fenced(self.decider, self.fence, None) {
+            let _ = self.ineligible.set(Ineligible::Refused(refusal));
+            return Err(ConsentIneligible);
         }
+        if self
+            .fence
+            .is_some_and(|fence| !fence.can_view_agent(self.asker))
+        {
+            let _ = self.ineligible.set(Ineligible::Hidden);
+            return Err(ConsentIneligible);
+        }
+        Ok(())
     }
 }
 
 /// `meta/gating/decide` for the question set `set`, after the arm refused a
-/// request that names an approver: see the module documentation.
+/// request that names an approver: see the module documentation. `None`
+/// for a set that is not the caller's to know of: the arm then answers the
+/// request as it answers an id that is not pending.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn decide(
     decisions: RuntimeDecisions,
@@ -130,36 +151,39 @@ pub(super) async fn decide(
     access_view: Option<&AccessView>,
     governance: &ConsoleSendGovernance,
     authenticated_principal: Option<&str>,
-) -> Value {
-    // The asking member is checked by the read's own rule: a caller the
-    // read does not list the set to cannot decide it by its id.
+) -> Option<Value> {
+    // The asking member is judged by the read's own rule: a set the read
+    // does not list to the caller is not one it decides by its id.
     if !gating_origin_visible(access_view, set.asker()) {
-        return access_denied_rpc_error(response_id, "access denied to approval origin");
+        return None;
     }
     let Some(decider) =
         ConsoleApprovalDecider::of(governance, authenticated_principal, access_view)
     else {
-        return approver_unauthenticated_rpc_error(response_id);
+        return Some(approver_unauthenticated_rpc_error(response_id));
     };
     let Some(raw_decision) = params.get("decision").and_then(Value::as_str) else {
-        return invalid_params(response_id, "decision required");
+        return Some(invalid_params(response_id, "decision required"));
     };
     let choice = match console_gating_decision(raw_decision) {
         Ok(GatingDecision::Approve) => QuestionSetChoice::Answer,
         Ok(GatingDecision::Reject) => QuestionSetChoice::Dismiss,
         Ok(GatingDecision::Escalate) => {
-            return invalid_params(response_id, "a question set cannot be escalated");
+            return Some(invalid_params(
+                response_id,
+                "a question set cannot be escalated",
+            ));
         }
-        Err(message) => return invalid_params(response_id, message),
+        Err(message) => return Some(invalid_params(response_id, message)),
     };
     let (verdict, presented_digest) = match question_set_request(choice, params) {
         Ok(request) => request,
-        Err(message) => return invalid_params(response_id, message),
+        Err(message) => return Some(invalid_params(response_id, message)),
     };
     // A request the set would not take is refused before anything is
     // recorded for it.
     if let Some(refusal) = set.refuses(&verdict, &presented_digest) {
-        return refusal_answer(response_id, &set, refusal, None);
+        return Some(refusal_answer(response_id, &set, refusal, None));
     }
     // The person, authenticated in the login the request was made in.
     let approver = decider
@@ -172,11 +196,11 @@ pub(super) async fn decide(
         });
     let approver = match approver {
         Ok(approver) => approver.with_authentication_scope(decider.human.authentication_scope()),
-        Err(_) => return approver_unauthenticated_rpc_error(response_id),
+        Err(_) => return Some(approver_unauthenticated_rpc_error(response_id)),
     };
     let observed_at_ms = match SystemDecisionClock.now_ms() {
         Ok(now_ms) => now_ms,
-        Err(error) => return internal_error(response_id, error.to_string()),
+        Err(error) => return Some(internal_error(response_id, error.to_string())),
     };
     let event = DecisionIngress::new(CONSOLE_CHANNEL).and_then(|ingress| {
         Ok((
@@ -186,7 +210,7 @@ pub(super) async fn decide(
     });
     let (ingress, event_ref) = match event {
         Ok(event) => event,
-        Err(error) => return internal_error(response_id, error.to_string()),
+        Err(error) => return Some(internal_error(response_id, error.to_string())),
     };
     // The event is bound to its decision durably before the decide input.
     match decisions
@@ -195,16 +219,16 @@ pub(super) async fn decide(
     {
         Ok(DecisionEventBinding::Own) => {}
         Ok(DecisionEventBinding::Another) => {
-            return internal_error(
+            return Some(internal_error(
                 response_id,
                 "the decision event was used by another decision".to_owned(),
-            );
+            ));
         }
         Err(error) => {
-            return internal_error(
+            return Some(internal_error(
                 response_id,
                 format!("the decision event could not be recorded: {error}"),
-            );
+            ));
         }
     }
     // Test hook: the decide waits here, after the route's last await and
@@ -235,14 +259,19 @@ pub(super) async fn decide(
         decider: &decider,
         fence: fence.as_ref(),
         asker: set.asker(),
-        refused: OnceLock::new(),
+        ineligible: OnceLock::new(),
     };
     let decided = answer_question_set(&decisions, decide, &eligibility);
-    let refused = eligibility.refused.into_inner();
+    let ineligible = eligibility.ineligible.into_inner();
     drop(fence);
-    match decided {
-        Ok(decided) => response_value(response_id, Some(decided.wire()), None),
-        Err(refusal) => refusal_answer(response_id, &set, refusal, refused),
+    match (decided, ineligible) {
+        (Ok(decided), _) => Some(response_value(response_id, Some(decided.wire()), None)),
+        // The set is no longer the person's to know of.
+        (Err(QuestionSetRefusal::NotEligible), Some(Ineligible::Hidden)) => None,
+        (Err(refusal), Some(Ineligible::Refused(fenced))) => {
+            Some(refusal_answer(response_id, &set, refusal, Some(fenced)))
+        }
+        (Err(refusal), _) => Some(refusal_answer(response_id, &set, refusal, None)),
     }
 }
 

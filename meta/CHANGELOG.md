@@ -266,6 +266,13 @@ Security, Upgrade and Changed.
 
 ### Added
 
+- Question sets (`ask_user`) and the decision methods. A decide the set
+  itself refuses (it ended, or the digest is not the set's) is answered
+  `-32602` with `data.kind = "decision_refused"` and the refusal, as the
+  decision methods answer. On the Console a question set is read through
+  `meta/decisions/list`, `get` and `rendering`, and withdrawn through
+  `meta/decisions/withdraw`, only by a caller who may view its asking agent.
+
 - `meta/identity/list`, `get` and `directory` say `roster_listing_superseded:
   true` on an agent the host's roster lists while it is served from its
   record, and `meta/identity/plan` says it on the plan of a change of such

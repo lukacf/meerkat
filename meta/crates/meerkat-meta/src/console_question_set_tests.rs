@@ -48,11 +48,17 @@ const OTHER: &str = "agent-b";
 const DECISIONS_FILE: &str = "approval_decisions.sqlite3";
 
 /// A Console send path that sends nothing: installed, it says the runtime
-/// serves a Console.
-struct NoSends;
+/// serves a Console, and whether a person can decide on it.
+struct NoSends {
+    a_person_decides: bool,
+}
 
 #[async_trait::async_trait]
 impl ConsoleScheduleDoor for NoSends {
+    fn takes_a_persons_decision(&self) -> bool {
+        self.a_person_decides
+    }
+
     async fn send(&self, _send: &ConsoleScheduledSend, _delivery_key: &str) -> Result<(), String> {
         Ok(())
     }
@@ -202,7 +208,13 @@ impl QuestionConsole {
             .await
             .expect("console runtime");
         let doors = ConsoleScheduleDoorSlot::default();
-        doors.install(Arc::new(NoSends));
+        // The Console's own fact, as its send path states it.
+        doors.install(Arc::new(NoSends {
+            a_person_decides: crate::runtime::console_takes_a_persons_decision(
+                &setup.decisions,
+                setup.access.as_ref(),
+            ),
+        }));
         runtime
             .ask_user_slot()
             .fill(AskUserSurface::new(decisions.clone(), doors.served(), name));
@@ -303,7 +315,7 @@ impl QuestionConsole {
         spawn_ask_user_driver(
             &self.decisions,
             Arc::clone(told) as Arc<dyn AskUserNotices>,
-            Duration::from_secs(3600),
+            Duration::from_hours(1),
             self.runtime
                 .ask_user_slot()
                 .held_signal()
@@ -435,7 +447,7 @@ async fn a_person_answers_a_set_and_its_asker_is_told_once() {
     let set = question_set();
     let call = AskUserRequest {
         questions: &set,
-        timeout: Duration::from_secs(3600),
+        timeout: Duration::from_hours(1),
         run_id: &run_id,
         call_id: "call-1",
     };
@@ -1619,10 +1631,26 @@ async fn a_call_without_a_human_surface_holds_nothing() {
     let name = "questions-no-surface";
     let doors = ConsoleScheduleDoorSlot::default();
     let served = ConsoleScheduleDoorSlot::default();
-    served.install(Arc::new(NoSends));
+    served.install(Arc::new(NoSends {
+        a_person_decides: true,
+    }));
+    let undecided = ConsoleScheduleDoorSlot::default();
+    undecided.install(Arc::new(NoSends {
+        a_person_decides: false,
+    }));
     let available = decisions_in(state_dir.path(), name, true);
-    let surfaces: [(&str, Option<AskUserSurface>, &str, &str); 6] = [
+    let surfaces: [(&str, Option<AskUserSurface>, &str, &str); 7] = [
         ("unfilled", None, name, ASKER),
+        (
+            "a Console nobody can decide on",
+            Some(AskUserSurface::new(
+                available.clone(),
+                undecided.served(),
+                name,
+            )),
+            name,
+            ASKER,
+        ),
         (
             "no Console served",
             Some(AskUserSurface::new(available.clone(), doors.served(), name)),
@@ -1692,7 +1720,9 @@ async fn a_call_without_a_human_surface_holds_nothing() {
     let whole = ask(&host, "call-1", 3600).await;
     served.clear();
     let cleared = ask(&host, "call-2", 3600).await;
-    served.install(Arc::new(NoSends));
+    served.install(Arc::new(NoSends {
+        a_person_decides: true,
+    }));
     slot.clear();
     let emptied = ask(&host, "call-3", 3600).await;
     let open = crate::ask_user::open_question_sets(&available).expect("read");
@@ -1755,13 +1785,13 @@ async fn a_runtime_that_holds_no_set_opens_nothing() {
     let none_unavailable = spawn_ask_user_driver(
         &RuntimeDecisions::unavailable(),
         Arc::clone(&told) as Arc<dyn AskUserNotices>,
-        Duration::from_secs(3600),
+        Duration::from_hours(1),
         Arc::default(),
     );
     let none_candidate = spawn_ask_user_driver(
         &decisions_in(state_dir.path(), "questions-lazy", false),
         Arc::clone(&told) as Arc<dyn AskUserNotices>,
-        Duration::from_secs(3600),
+        Duration::from_hours(1),
         Arc::default(),
     );
     // The first set held starts the driver.

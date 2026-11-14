@@ -159,7 +159,7 @@ impl AskingModel {
     /// The first request whose messages hold every one of `needles`, once
     /// there is one.
     async fn request_with(&self, needles: &[&str]) -> String {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
         loop {
             let found = self
                 .requests

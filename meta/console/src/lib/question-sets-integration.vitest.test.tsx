@@ -23,7 +23,7 @@ const questionSet = () => ({
 });
 
 function gateway(viewer: ConsoleWhoami, decide: (params: Record<string, unknown>) => unknown = () => ({})) {
-  let sets: unknown[] = [questionSet()];
+  let sets: unknown[] | Error = [questionSet()];
   const decided: Array<Record<string, unknown>> = [];
   const fake: MetaConsoleTransport = {
     loadExperience: async () => ({
@@ -41,7 +41,10 @@ function gateway(viewer: ConsoleWhoami, decide: (params: Record<string, unknown>
     executeCommand: async (input) => {
       if (input.command === "listGatingPending") return { command: input.command, accepted: true, result: { pending: [] } } as never;
       if (input.command === "listGatingAudit") return { command: input.command, accepted: true, result: { entries: [] } } as never;
-      if (input.command === "listQuestionSets") return { command: input.command, accepted: true, result: { question_sets: sets } } as never;
+      if (input.command === "listQuestionSets") {
+        if (sets instanceof Error) throw sets;
+        return { command: input.command, accepted: true, result: { question_sets: sets } } as never;
+      }
       if (input.command === "decideGating") {
         const params = { ...(input.params as Record<string, unknown>) };
         decided.push(params);
@@ -50,7 +53,7 @@ function gateway(viewer: ConsoleWhoami, decide: (params: Record<string, unknown>
       return { command: input.command, accepted: true, result: {} } as never;
     },
   };
-  return { fake, decided, list(next: unknown[]) { sets = next; } };
+  return { fake, decided, list(next: unknown[] | Error) { sets = next; } };
 }
 
 const person: ConsoleWhoami = { actorKind: "person", principal: "a@example.test", approverIds: [], canAdminister: false, callerScope: "caller-a" };
@@ -140,6 +143,22 @@ describe("question sets in the Console", () => {
     expect((await screen.findByTestId("question-set-notice")).textContent)
       .toBe("This question timed out before the gateway took your reply, so nothing was sent. If the answer still matters, tell the agent in its chat.");
     for (const word of SET_WORDS) expect(document.body.innerHTML.includes(word)).toBe(false);
+  });
+
+  it("says in Needs you and in the inbox that the questions could not be read, and reads them when asked to", async () => {
+    const { fake, list } = gateway(person);
+    list(new Error("gateway timeout"));
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    // No count that may be false: a placeholder, and the words say why.
+    const needsYou = await screen.findByRole("button", { name: "Needs you, 0 pending approvals, Questions unavailable" });
+    expect(screen.getByTestId("approval-attention").querySelector(".cc-approval-attention__count")?.textContent).toBe("!");
+    fireEvent.click(needsYou);
+    const notice = await screen.findByTestId("question-set-unavailable");
+    expect(notice.textContent).toContain("The questions agents asked could not be loaded.");
+    list([questionSet()]);
+    fireEvent.click(within(notice).getByRole("button", { name: "Try again" }));
+    expect(await screen.findByTestId(`question-set:${PENDING_ID}`)).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Needs you, 0 pending approvals, 1 question set" })).toBeTruthy();
   });
 
   it("shows a caller who is not a signed-in person the question and what to do, and sends nothing", async () => {

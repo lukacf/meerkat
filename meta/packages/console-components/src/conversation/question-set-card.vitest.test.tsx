@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentDirectoryProvider } from "../panel-kit";
+import { ConversationPresentationProvider, ConversationRowStateScope } from "./presentation-policy";
 import { createAgentDirectory } from "../panel-kit/agents";
 import {
   QUESTION_SET_REFUSAL_WORDS,
@@ -532,6 +533,8 @@ describe("QuestionSetCard", () => {
     ["a question it does not show", { questions: Array.from({ length: 11 }, (_, index) => ({ id: `q${index}`, prompt: `Question ${index}?`, choices: [{ id: "y", label: "Yes" }, { id: "n", label: "No" }] })) }, "1 more question is not shown."],
     ["a choice it does not show", { questions: [{ id: "q0", prompt: "Which one?", choices: Array.from({ length: 9 }, (_, index) => ({ id: `c${index}`, label: `Choice ${index}` })) }] }, "1 more choice is not shown."],
     ["text it shows shortened", { title: "T".repeat(201) }, "Some text is too long and is shown shortened."],
+    ["a label it shows shortened", { questions: [{ id: "q0", prompt: "Which one?", choices: [{ id: "y", label: "Y".repeat(257) }, { id: "n", label: "No" }] }] }, "Some text is too long and is shown shortened."],
+    ["a prompt it shows shortened", { questions: [{ id: "q0", prompt: "P".repeat(1025), choices: [{ id: "y", label: "Yes" }, { id: "n", label: "No" }] }] }, "Some text is too long and is shown shortened."],
   ] as const)("lets nobody answer or dismiss a set with %s, and says why and what to do instead", (_what, extra, line) => {
     const { view, card, onAnswer, onDismiss } = show({ set: questions(extra as Record<string, unknown>) });
     // The digest a reply sends back covers the whole set: the card showed less.
@@ -548,6 +551,42 @@ describe("QuestionSetCard", () => {
     fireEvent.click(dismiss(view));
     expect(onAnswer).not.toHaveBeenCalled();
     expect(onDismiss).not.toHaveBeenCalled();
+  });
+
+  it("says that a set is larger than the Console shows before anything about signing in", () => {
+    // Signing in would not make this set answerable here.
+    const { view, card } = show({ set: questions({ title: "T".repeat(201) }), readOnly: true, readOnlyReason: "sign_in" });
+    expect(card.dataset.state).toBe("read_only");
+    expect(view.getByRole("status").textContent).toBe("Read only");
+    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent)
+      .toBe("This set of questions is larger than the Console shows, so it cannot be answered here. Reply to Release Planner in its chat instead.");
+  });
+
+  it("remembers whether its Technical details are open by the card's place on the page, not by the set's id", () => {
+    // A pane keeps what its rows remember while they are off screen.
+    const pane = (slot: number | null) => (
+      <ConversationPresentationProvider viewportKey={{ authority: "question-set-test", identity: IDENTITY, conversation: "c", pane: "left" }}>
+        <AgentDirectoryProvider directory={directory}>
+          <ConversationRowStateScope rowId="questions">
+            {slot === null ? null : <QuestionSetCard set={questions()} slot={slot} resourceStatus="ready" onAnswer={vi.fn()} onDismiss={vi.fn()} />}
+          </ConversationRowStateScope>
+        </AgentDirectoryProvider>
+      </ConversationPresentationProvider>
+    );
+    const details = (view: ReturnType<typeof render>) => view.getByTestId(`question-set-details:${PENDING_ID}`) as HTMLDetailsElement;
+    const view = render(pane(1));
+    expect(details(view).open).toBe(false);
+    details(view).open = true;
+    fireEvent(details(view), new Event("toggle"));
+    // The same card, off screen and back: still open.
+    view.rerender(pane(null));
+    view.rerender(pane(1));
+    expect(details(view).open).toBe(true);
+    // The set left and a set with the same id is listed again, at a new
+    // place: the pane remembers nothing under the id.
+    view.rerender(pane(null));
+    view.rerender(pane(2));
+    expect(details(view).open).toBe(false);
   });
 
   it("puts names first: the identity and every id only inside the collapsed Technical details", () => {
@@ -640,10 +679,31 @@ describe("QuestionSetList", () => {
     const chat = render(<QuestionSetList view={{ snapshot: failed, onAnswer: vi.fn(), onDismiss: vi.fn(), onRefresh }} identity={IDENTITY} />);
     expect(chat.container.textContent).toBe("");
     cleanup();
-    // A read that failed after a list was read keeps the cards: no such notice.
-    const stale = render(list(listSnapshot({ status: "stale" })));
+    // A read that failed after a list was read keeps the cards: no such
+    // notice, and each card says that a read failed.
+    const stale = render(list(listSnapshot({ status: "stale", error: "network" })));
     expect(stale.queryByTestId("question-set-unavailable")).toBeNull();
     expect(stale.getByTestId(`question-set:${PENDING_ID}`).dataset.state).toBe("stale");
+    expect(stale.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent).toMatch(/^The Console could not read the questions again just now/);
+    cleanup();
+    // A list that was only not read for a while does not say that one did.
+    const waiting = render(list(listSnapshot({ status: "stale" })));
+    expect(waiting.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent).toMatch(/^The Console has not read the questions for a while/);
+  });
+
+  it("keeps the line for as long as the snapshot holds it, through every read in between", () => {
+    const left = () => listSnapshot({ sets: [billing()], slots: { [BILLING_ID]: 2 }, notices: [{ slot: 1, kind: "gone", atMs: 5 }] });
+    const view = render(list(listSnapshot()));
+    view.rerender(list(left()));
+    expect(view.getAllByTestId("question-set-notice").length).toBe(1);
+    // Later reads publish new snapshots that still hold the line (it goes a minute after its card).
+    for (let read = 0; read < 4; read++) {
+      view.rerender(list(left()));
+      expect(view.getAllByTestId("question-set-notice").length).toBe(1);
+    }
+    // The snapshot drops it: so does the list.
+    view.rerender(list(listSnapshot({ sets: [billing()], slots: { [BILLING_ID]: 2 } })));
+    expect(view.queryByTestId("question-set-notice")).toBeNull();
   });
 
   it.each(["not_open", "expired"] as const)("leaves the gateway's refusal (%s) as the one line of a card it removed", (kind) => {

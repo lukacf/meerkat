@@ -136,6 +136,17 @@ them.
 
 ### Added
 
+- `meerkat-mob`: a member binding answers where its chain of same-session
+  successors began. `MemberBinding::same_session_lineage_start(LineageSteps)`
+  is the first generation of the unbroken chain of same-session successor
+  steps that seated the binding's incarnation on its session (its own
+  generation when no such step seated it), read from the journal rows of
+  those steps alone; `LineageSteps::same_session_successors()` follows the
+  steps that kept the member's role, and `.with_role_migrations(true)` the
+  ones that seated the successor under another role too. It answers `None`
+  once the mob's journal holds a mob reset. Like the binding it is a history
+  fact and authorizes nothing by itself.
+
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
   requests themselves (see Security).
   `meerkat_core::redact::redact_credentials` removes credentials from text
@@ -225,6 +236,25 @@ them.
   afterwards. A request that names no floor keeps what the member builds
   with. Additive: `MemberRespawn` is non-exhaustive.
 
+- Mob: `MemberRespawn::with_profile_override`,
+  `MemberRespawn::with_model_override` and
+  `MemberRespawn::with_build_inputs_of` seat a member's same-session
+  successor (`MobHandle::respawn_member`) with a host's freshly composed
+  seat: the profile override and the model override the successor
+  carries (`None` seats it with none, so it follows its role's profile and
+  model), and the build inputs a lowered `SpawnMemberSpec` names (its
+  context, additional instructions, system prompt override, budget limits,
+  tool access policy, application tool policy, auth binding and web search
+  override), which the successor's builds on the kept session apply. The
+  rotation's record holds them, so a restarted mob finishes the same
+  successor. A request that names none of them keeps the member's own
+  overrides (under its own role) and what its session's builds recorded,
+  as before. The two override setters are named together: a seat holds
+  its profile override with its model override set on it, so a request
+  that names only one of them seats what the other still says (naming
+  "no model override" alone leaves the earlier model in the kept profile
+  override). Additive: `MemberRespawn` is non-exhaustive.
+
 - Mob: a store-owned identity's row records a label restamp its seat is
   owed (`CreatedIdentityRecord::label_restamp_owed`), and
   `IdentityRecordCensus::label_restamps_owed` counts the rows that do; so
@@ -234,7 +264,7 @@ them.
   update's commit writes it, in the update's own transaction, when a
   member holds the identity and its last seat row carries other labels
   than the updated row; the row lets it go once a seat row carries the
-  row's labels (the update's restamp, a retry's, a runtime-mode or role
+  row's labels (a runtime-mode or role
   restamp, a respawn with the row's labels, a rotation, a seat), and an
   archive or a removal drops it. A row that owes none carries no such key
   and is byte for byte what 0.9.14 writes. See Changed for what reads it,
@@ -485,56 +515,58 @@ them.
   document" in `docs/cli/configuration.mdx`.
 
 - Mob: a label update of a store-owned identity
-  (`update_store_owned_identity`) seats the row's labels at once: its
-  seated member is restamped on its own session at the next generation
-  (the same-session respawn a runtime-mode change makes, with
-  `MemberRespawn::with_labels`), and the update answers
-  `DeclaredEntryOutcome::Restamped`. What decides the restamp is the
-  comparison, in the commit of any update of a seated store-owned
-  identity, of its last seat row's labels with the updated row's (the
-  commit records a difference as an owed restamp, see below), not the
-  update's own label change: an update that moves no label restamps a seat that
-  carries other labels than the row, so a seat an earlier release left
-  stale is corrected by the identity's next update, and a label a
-  host-written spawn seated outside the row is dropped by it (for a member
-  a same-session successor can serve; see below). From 0.9.9 through
-  0.9.14 a label
-  update kept the member with the labels it was seated with until its host
-  respawned it (`IdentityRecordCensus::seats_stale` counted the seat).
-  With the label rule above a build must carry exactly its seat's labels,
-  and what decides on a member's labels reads its seat, so the seat
-  follows its row at the update, not at a later respawn. The restamp keeps
-  the member: the same identity entry, session and conversation, its edges
-  and its comms key; nothing is built or woken (a live idle member is
-  released, and its next delivery wakes it), no kickoff runs again, and
-  its next build resumes its session. A member that holds work is not
-  interrupted: the update commits and answers
-  `DeclaredEntryOutcome::Deferred`. A label update of a busy agent is
-  recorded in its row, and the mob's roster reads the row's labels
-  (`get_member`, the member lists) from the step that commits the row,
-  whatever the member step then answers and whether or not the update's
-  caller is still there. The running session takes them at its next build
-  (a key the row dropped stays in a resumed session's own peer metadata,
-  as at every resume). Nothing else of the member moves: the same
-  generation, fence and session, and no seat row is written. The same
-  holds when the member step fails (`Failed`), and for a member a
-  same-session successor cannot serve (a placed member, a member wired to
-  a placed member, a member on a session service that keeps no durable
-  sessions), whose update answers `Kept` as before. Such a member is not
-  left exactly as it was: its release is tried before the respawn that is
-  then refused
-  (in the three cases named it releases nothing; a member whose session
-  cannot be kept, lost or archived say, is released and then kept), and
-  its restamp stays owed. The roster is not the
-  journal: the member's last seat row keeps the labels it was seated with
-  until its restamp, and so do the readers of that row, the binding
-  journal's labels and `seats_stale`. The restamp stays owed, and the row
-  records it (`CreatedIdentityRecord::label_restamp_owed`, see Added). A
-  retry of the same update (it replays) or the identity's next update
-  carries the restamp out once the member is idle; a retry while the
-  member still holds work restamps nothing and leaves it owed. A respawn
-  with the row's labels, a rotation and a reset settle it too, as does a
-  runtime-mode or role restamp of the same update. While the restamp is
+  (`update_store_owned_identity`) keeps its seated member: no successor is
+  seated for a label, and the update of an idle member answers
+  `DeclaredEntryOutcome::Kept`. The member keeps its generation, fence,
+  session, conversation and edges, and with them whatever is bound to its
+  generation. From 0.9.9 through 0.9.14 a label update kept the member
+  too, with the labels it was seated with on its roster entry and at its
+  builds until its host respawned it (`IdentityRecordCensus::seats_stale`
+  counted the seat). Now the mob's roster reads the row's labels
+  (`get_member`, the member lists, the member filter by label) from the
+  step that commits the row, whether or not the update's caller is still
+  there, and the member's next build takes them: an idle live member is
+  released by the update (it stays seated, and its next delivery wakes
+  it), so what it was built with serves nothing more. A member that holds
+  work is not interrupted: the update commits and answers
+  `DeclaredEntryOutcome::Deferred`, and a retry of the update releases the
+  member once it is idle (going idle builds nothing: until it is released
+  it runs on what it was built with). A member the release leaves live
+  answers `Kept` and stays on what it was built with: a placed member
+  and a member wired to a placed member, which a release does not serve,
+  and a member on a session service that keeps no durable sessions, where
+  a release releases nothing. A Broken member alone is still seated again by
+  the update (`Restamped`): its build was refused for good, it serves
+  nothing and holds no live build a release could let go, and only its
+  next incarnation is built again. That holds for every Broken member
+  whose row records the owed restamp, whatever broke it and whichever
+  field the update moves. A build carries every label of the row (a key
+  the row dropped stays in a resumed session's own peer metadata, as at
+  every resume). No seat row is written. The roster is not the journal:
+  the member's last seat row keeps the labels it was seated with until
+  its next seat row, and so do the readers of that row, the binding
+  journal's labels and `seats_stale`. The row records that restamp as owed
+  (`CreatedIdentityRecord::label_restamp_owed`, see Added): the commit of
+  any update of a seated store-owned identity writes it when the member's
+  last seat row carries other labels than the updated row, whichever
+  field the update moved. The seat row is no measure of what a live
+  member was built with, so the row lets the record go once a seat row
+  carries the row's labels and no build of the member can predate them:
+  after a new seat row, or after an update or a retry whose member step
+  was done (it released the member), never after one that was deferred
+  and never while a member the release left live still runs.
+  An update that returns the row to the labels of the member's seat row
+  (a label added and removed again) therefore releases an idle member
+  and then lets the record go, and keeps it for a busy member until a
+  retry released it. No update seats a member for its labels, and
+  neither does a retry of one: while the restamp is owed, each of them
+  releases the idle member again, which costs a build at its next
+  delivery and nothing else. The member's next seat row settles the owed
+  restamp, whatever writes it: a respawn (with the row's labels,
+  `MemberRespawn::with_labels`, the host's chosen step for a seat its row
+  moved past), a runtime-mode or role restamp, a rotation or a reset. A
+  runtime-mode change and a profile move still seat the member's successor
+  on its own session, once it is idle, as before. While the restamp is
   owed, a start seats the row's labels on the member's roster entry (it
   reads the rows anyway, and builds, wakes and writes nothing), and a
   build of the member is compared with the row's labels: a label update
@@ -550,8 +582,9 @@ them.
   label it carries at a start and is compared with its own labels at a
   build, as before this release: a label a host seated outside the row is
   kept, or refused by the label rule, never dropped by a start or a
-  build. It goes at the identity's next update, which makes an idle
-  member's seat equal its row, as before. A host's own declaration of a
+  build. The identity's next update takes it off the roster entry and
+  records the owed restamp, and the member's next seat row drops it. A
+  host's own declaration of a
   store-owned identity (`apply_declared_roster` with created custody)
   restamps no label, declared or not: a label reaches a store-owned seat
   through the identity's row. The label rule is unchanged: a label the
@@ -560,7 +593,7 @@ them.
   identity's label change is unchanged: its member is kept, and its host
   labels its builds (the declared apply stores no labels). See Upgrade
   notes for seats an earlier release left with other labels than their
-  row.
+  row, and for a rollback.
 
 - Mob: the labels a store-owned member's build carries are compared with
   its seat's after the host's spawn customizer
@@ -729,6 +762,48 @@ them.
 
 ### Fixed
 
+- `meerkat-mob-mcp`: a member that created mobs with the agent mob tools
+  keeps managing them after its member is replaced by a same-session
+  successor, once or several times in a row
+  (`MobHandle::respawn_member`, a declared role migration, a runtime-mode
+  restamp, `MobHandle::respawn` of an identity entry's member). The
+  creator's manage grant was re-derived only for the member generation the
+  mob's creation record names, so a successor's session no longer listed
+  the mobs it had created and its calls on them (`mob_list_members`,
+  `mob_check_member`, `mob_retire_member`, `mob_destroy`) were refused as
+  `access_denied`, in the same process and after a restart, while those mobs
+  went on running. A same-session successor now keeps that management,
+  through any number of such steps, in the same process and after a restart;
+  the steps below say which changes of a member keep it and which end it.
+  Mobs created before this release are covered without any call. The
+  session's create capability and its current role's tools decide each call
+  as before.
+  - Keeps the creator's management: `MobHandle::respawn_member`, once or
+    many times; a declared role migration and a runtime-mode restamp of an
+    identity entry's member, a store-owned identity's profile move and
+    runtime-mode change among them; `MobHandle::respawn` of an identity
+    entry's member; and every other request that seats the member's
+    successor on its own session. A wake of the member, a restart of the
+    host and an adoption of the member change nothing.
+  - Still ends it, as before: a reset onto a fresh session
+    (`rotate_member`) and a worker's respawn, which takes a fresh session;
+    a member that was retired and later seated again on its kept session,
+    whatever seated it (a spawn or `ensure_member` that resumes the session,
+    an unlisted identity listed again, an archived identity unarchived); a
+    session binding recovery that moves the member to another session;
+    every later generation of a member of a mob that was ever reset.
+  - Not covered: a member whose own mob is stored in custom stores without
+    the built-in identity and member store. Its member history cannot be
+    read, so its successor keeps nothing, as before.
+  - Not brought back: a creator that was retired and seated again on its
+    session before the upgrade stays without its management of the mobs it
+    created; upgrading does not give back a management lost that way. Those
+    mobs end as before, with the session that owns them (see the Upgrade
+    notes).
+  The 0.9.4 Known limitation about a member "reset to its next generation,
+  over the same session" described this case; it no longer applies to a
+  same-session successor.
+
 - `meerkat-core`: a turn that fails because a provider failure outlasted the
   retries now says what failed. Its typed turn error (`error.data.error` of
   a JSON-RPC turn, `details.error` of REST, the `error=` JSON of the CLI's
@@ -754,6 +829,32 @@ them.
   event are unchanged, and no field is new: a stored turn error without the
   three fields still reads, and an earlier release reads one that has them.
   Affects 0.8.0 through 0.9.14.
+
+- `meerkat-mob`: cancelling a member spawn that resumes an existing session
+  no longer archives that session. A spawn in resume mode (JSON-RPC
+  `mob/spawn` with `launch_mode: {"mode": "resume", ...}` and the Python and
+  TypeScript SDK calls over it; for Rust embedders
+  `SpawnMemberSpec::with_resume_bridge_session_id`, also through
+  `ensure_member` of an absent member) names a session that already exists.
+  When the mob was stopped, completed, reset, shut down or destroyed (or,
+  for Rust embedders, all its members were retired with
+  `MobHandle::retire_all`) in the short interval after that spawn had
+  attached the session and before the mob had taken the spawn's result, the
+  cancelled spawn was cleaned up as if it had created the session: the
+  existing session was archived, and the mobs it owned were removed at the
+  next start of the host. A caller that had gone away did not withdraw the
+  spawn, so a stop that followed a disconnected or timed-out request could
+  meet it. The same happened when the mob refused the attached member for a
+  missing capability (an autonomous member whose session offers no
+  interaction event injector). A cancelled or refused spawn now releases a
+  session it resumed, as a failed resume spawn already did: the session
+  stays as it was and a later spawn can resume it. The fix is no wider than
+  that. A spawn that created its session is cleaned up as before. A retire
+  is unchanged in both of its cases: a retire that cancels the pending
+  spawn of a member the mob already holds ends that spawn's session, as
+  before, whether the spawn created or resumed it; a retire of an identity
+  the mob does not hold yet leaves its pending spawn alone, as before.
+  Affects 0.7.29 through 0.9.14; 0.6.0 through 0.7.28 were not checked.
 
 - `meerkat-core`: a configuration write that failed at the write itself was
   reported as saved and replaced the document with an empty file. When the
@@ -1284,6 +1385,15 @@ them.
 
 ### Upgrade notes
 
+- A member that created mobs with the agent mob tools and was then replaced
+  by a same-session successor (see Fixed) manages those mobs again after the
+  upgrade, with no call: it lists them and its calls on them are admitted.
+  The upgrade does not bring back the management of a creator that was
+  retired and seated again on its session before it: such a mob stays
+  unlisted for its creator and goes on running until the session that owns
+  it is archived (a reset or a removal of the member) and the host starts
+  again, or until the host destroys it.
+
 - A configuration document an earlier release wrote keeps its mode until
   the engine next rewrites it. To make the existing ones owner-only now, run
   `chmod 600` on each that exists: `~/.rkat/config.toml`,
@@ -1390,8 +1500,9 @@ them.
   `MemberBuildPreparer::prepare_store_owned_seat` or a spawn customizer
   that sets labels: respawn the member with its row's labels
   (`MobHandle::respawn_member` with `MemberRespawn::new().with_labels(..)`),
-  or update the identity while its member is idle (any update then makes
-  the seat equal the row). A host that answers such a member's seat from
+  or update the identity (any update then records the restamp its seat
+  row is owed, and the member's builds are compared with the row's labels
+  from then on). A host that answers such a member's seat from
   its row is otherwise refused the member's build, naming the label keys
   that differ.
 
@@ -1401,10 +1512,17 @@ them.
   Before a rollback, read `MobHandle::identity_record_census()` (or, with
   no running mob, `MobStorage::read_identity_record_rows` or
   `MobStorage::identity_record_rows`) and settle
-  every owed restamp while `label_restamps_owed` is above zero: retry the
-  update, or update the identity again, while its agent is idle, or
-  respawn its member with the row's labels (`MobHandle::respawn_member`
-  with `MemberRespawn::new().with_labels(..)`). A member no same-session
+  every owed restamp while `label_restamps_owed` is above zero: respawn
+  its member with the row's labels (`MobHandle::respawn_member`
+  with `MemberRespawn::new().with_labels(..)`), or move its profile or
+  its runtime mode. A label update never seats the member again, so
+  every seated identity whose labels were updated owes the restamp until
+  its next seat row, and a retry of the update or a later update of other
+  fields does not settle it. The respawn seats the member again on the
+  same session and cancels a turn in flight; an agent that created mobs
+  with its own tools goes on listing and managing them (see Fixed). An
+  identity left unsettled is out of service while rolled back, and
+  nothing of it is lost. A member no same-session
   successor can serve (placed, wired to a placed member, or on a session
   service that keeps no durable sessions) is settled by none of these:
   rotate it (`MobHandle::rotate_member`), or archive or remove its

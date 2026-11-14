@@ -262,8 +262,8 @@ pub trait MemberBuildPreparer: Send + Sync {
     /// The seat's labels are its row's labels: Core lowers them from the
     /// row at a fresh spawn; at a wake or a restore they are the labels the
     /// member was last seated with, or the row's labels while the row
-    /// records that the seat is owed a label restamp (an update committed
-    /// while the member held work, say: `label_restamp_owed`), read from
+    /// records that the seat is owed a label restamp (a label update
+    /// keeps the member's seat row as it was: `label_restamp_owed`), read from
     /// the row before this is called. A row the identity store cannot
     /// serve then ends the build for a retry as a store that cannot serve
     /// the member, and this is not called. The answer

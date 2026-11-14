@@ -275,17 +275,21 @@ gone after a restart. The agent mob tools now re-derive it from the mob's
 creation record, for the incarnation the mob runs at, while the session may
 still create mobs, and only for a create the session made itself with its
 `mob_create`: for `MobProvenance::OperatorSession` naming that session, and
-for `OperatorMember` only while the session is still the recorded member's
-bridge session at the recorded generation in the recorded parent incarnation.
+for `OperatorMember` while the session is the bridge session of the recorded
+member at the recorded generation, or of its same-session successor (the
+same identity at a later generation reached from the recorded one by
+same-session successor steps alone, as `respawn_member` makes them), in the
+recorded parent incarnation.
 A mob a host created for the session
 (`mob_create_definition_with_owner_bridge_session`, recorded as `Session` or
 `Member`) is owned by the session but gets no grant. `Host`, `Ambiguous` and
-`Unrecorded` records, other sessions, later generations and a session whose
-operator removed its create capability get no grant either. Known limitation: a
-creating member that was reset to its next generation over the same session no
-longer manages the mob after a restart, because the record names its earlier
-generation; before the restart the session keeps the grant its create
-returned, and an operator grant over the mob restores manage.
+`Unrecorded` records, other sessions, every other later generation and a
+session whose operator removed its create capability get no grant either.
+What ends a creating member's management: a reset onto a fresh session, a
+member that was retired and later seated again on its kept session, a session
+binding recovery that moves the member to another session, and every later
+generation once the member's own mob was reset. An operator grant over the
+mob restores manage.
 
 Quarantined stores at restore (since 0.9.9): one persisted mob store that
 does not restore no longer fails `MobMcpState`'s restore (0.9.3 to 0.9.8

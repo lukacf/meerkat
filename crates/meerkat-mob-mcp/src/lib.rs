@@ -728,6 +728,125 @@ fn session_creation_provenance(
     }
 }
 
+/// The creating member a mob's creation record names
+/// (`MobProvenance::OperatorMember`): the identity, the generation it
+/// created the mob at, and the session it created it on.
+#[derive(Debug, Clone, Copy)]
+struct RecordedCreator<'a> {
+    identity: &'a AgentIdentity,
+    generation: meerkat_mob::Generation,
+    owner_session: &'a SessionId,
+}
+
+/// How the member that serves a session now stands to a mob's recorded
+/// creator ([`RecordedCreator::seat`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreatorSeat {
+    /// The session serves the recorded identity at the recorded generation.
+    Recorded,
+    /// The session serves the recorded identity at this later generation:
+    /// the record proves it only if that generation is a same-session
+    /// successor of the recorded one ([`RecordedCreator::is_succeeded_by`]).
+    Later(meerkat_mob::Generation),
+    /// Anything else: another session, no member, another identity, or an
+    /// earlier generation. The record proves nothing.
+    Other,
+}
+
+/// Whether a same-session successor seated under ANOTHER ROLE (a declared
+/// role migration) keeps its creator's manage grant over the mobs the
+/// session created. It does: the grant is the session's, over the mobs it
+/// created, and the current role's own tools and capabilities still decide
+/// each call (a successor whose role mounts no mob tools, or whose operator
+/// removed its create capability, reaches none of them). This is the one
+/// place that decides it: `false` makes a role migration end the grant.
+const fn a_role_migration_successor_keeps_the_creators_grant() -> bool {
+    true
+}
+
+/// The steps the creator's grant follows through the parent's journal.
+fn creator_lineage_steps() -> meerkat_mob::LineageSteps {
+    meerkat_mob::LineageSteps::same_session_successors()
+        .with_role_migrations(a_role_migration_successor_keeps_the_creators_grant())
+}
+
+impl RecordedCreator<'_> {
+    /// How the member `seated` on `session` (the parent roster's member of
+    /// that session now, with its generation) stands to this creator.
+    fn seat(
+        &self,
+        session: &SessionId,
+        seated: Option<&(AgentIdentity, meerkat_mob::Generation)>,
+    ) -> CreatorSeat {
+        if session != self.owner_session {
+            return CreatorSeat::Other;
+        }
+        match seated {
+            Some((identity, generation)) if identity == self.identity => {
+                match generation.cmp(&self.generation) {
+                    std::cmp::Ordering::Equal => CreatorSeat::Recorded,
+                    std::cmp::Ordering::Greater => CreatorSeat::Later(*generation),
+                    std::cmp::Ordering::Less => CreatorSeat::Other,
+                }
+            }
+            _ => CreatorSeat::Other,
+        }
+    }
+
+    /// Whether the member that serves the creator's session at the later
+    /// `generation` is a same-session successor of this creator, by
+    /// `binding`: the binding of that session in the parent's member binding
+    /// history (`None` when the history could not be read or names no such
+    /// binding).
+    ///
+    /// It is when the journal's binding agrees with the roster (the session's
+    /// binding is live, of the same identity, at the same generation) and the
+    /// unbroken chain of same-session successor steps that seated it starts
+    /// at or before the recorded generation: every step from the creator's
+    /// incarnation to this one replaced the member by its successor on this
+    /// session. A binding that answers no chain (the parent's journal holds
+    /// a mob reset) proves nothing. Every failure answers `false`.
+    fn is_succeeded_by(
+        &self,
+        generation: meerkat_mob::Generation,
+        binding: Option<&meerkat_mob::MemberBinding>,
+    ) -> bool {
+        let Some(binding) = binding else {
+            return false;
+        };
+        let Some(chain_start) = binding.same_session_lineage_start(creator_lineage_steps()) else {
+            return false;
+        };
+        binding.is_live()
+            && binding.identity() == self.identity
+            && binding.generation() == generation
+            && chain_start <= self.generation
+    }
+}
+
+/// The binding of `session` in the member binding history `history` of the
+/// mob `parent`, for the creator's lineage. A history that could not be read
+/// answers none, so the lineage proves nothing.
+fn lineage_binding(
+    history: Result<meerkat_mob::MemberBindingHistory, MobError>,
+    parent: &MobId,
+    session: &SessionId,
+) -> Option<meerkat_mob::MemberBinding> {
+    match history {
+        Ok(history) => history.binding_for_session(session).cloned(),
+        Err(error) => {
+            // Asked once for each mob a successor's session created, at each
+            // listing: a line an operator's log takes at debug level.
+            tracing::debug!(
+                mob_id = %parent,
+                %error,
+                "a mob's member history could not be read to follow its creator's successors"
+            );
+            None
+        }
+    }
+}
+
 /// How a destroy request meets this state's record of the mobs it
 /// destroyed.
 pub(crate) enum RetiredDestroyLookup {
@@ -2784,13 +2903,19 @@ impl MobMcpState {
     ///   the mob while no hosted roster named it;
     /// - `MobProvenance::OperatorMember`: the session created the mob as the
     ///   member `creator_identity` at `creator_generation` of the parent mob
-    ///   at `parent_incarnation`. The generation rule: the record proves only
-    ///   that member incarnation, so the parent must be hosted at that
-    ///   incarnation and the session must still be the bridge session of
-    ///   exactly that member at exactly that generation. A later generation
-    ///   of the identity (a reset or a respawn), a re-created parent, or a
-    ///   parent that is not hosted proves nothing, even over the same
-    ///   session.
+    ///   at `parent_incarnation`. The generation rule: the record proves that
+    ///   member incarnation and its same-session successors, so the parent
+    ///   must be hosted at that incarnation and the session must be the
+    ///   bridge session of that member at exactly that generation, or of the
+    ///   same identity at a later generation that the parent's journal shows
+    ///   was reached from the recorded one by same-session successor steps
+    ///   alone, each on this session (`RecordedCreator::is_succeeded_by`).
+    ///   Any other later generation of the identity proves nothing, even
+    ///   over the same session: one seated on a fresh session (a reset), one
+    ///   seated after the member was retired, one whose chain of steps the
+    ///   journal does not show whole, and every one once the parent's
+    ///   journal holds a mob reset. So do a re-created parent, a parent that
+    ///   is not hosted, and a parent whose journal cannot be read.
     ///
     /// A create a host made for the session
     /// ([`Self::mob_create_definition_with_owner_bridge_session`], recorded
@@ -2825,15 +2950,35 @@ impl MobMcpState {
                 creator_generation,
                 owner_session,
             } => {
+                // Another session is refused before anything of the member's
+                // mob is read: its answer never depends on that mob.
                 if owner_session != *session_id {
                     return false;
                 }
                 let Ok(parent) = self.handle_for(&parent_mob_id).await else {
                     return false;
                 };
-                parent.incarnation() == parent_incarnation
-                    && parent.member_of_session(session_id).await
-                        == Some((creator_identity, creator_generation))
+                if parent.incarnation() != parent_incarnation {
+                    return false;
+                }
+                let creator = RecordedCreator {
+                    identity: &creator_identity,
+                    generation: creator_generation,
+                    owner_session: &owner_session,
+                };
+                let seated = parent.member_of_session(session_id).await;
+                match creator.seat(session_id, seated.as_ref()) {
+                    CreatorSeat::Recorded => true,
+                    CreatorSeat::Other => false,
+                    CreatorSeat::Later(generation) => {
+                        let binding = lineage_binding(
+                            parent.member_binding_history().await,
+                            &parent_mob_id,
+                            session_id,
+                        );
+                        creator.is_succeeded_by(generation, binding.as_ref())
+                    }
+                }
             }
             _ => false,
         }
@@ -6485,9 +6630,9 @@ impl MobMcpState {
 
     /// Rotate the supervisor bridge for the mob, returning the structured
     /// rotation report so RPC/MCP clients can inspect per-member outcomes
-    /// instead of guessing from a bare success signal. Finding C10:
-    /// `MobHandle::rotate_supervisor()` existed in the Rust API but had no
-    /// operator-facing RPC surface.
+    /// instead of guessing from a bare success signal. This is the
+    /// operator-facing entry to `MobHandle::rotate_supervisor()` that the
+    /// JSON-RPC surface calls.
     pub async fn mob_rotate_supervisor(
         &self,
         mob_id: &MobId,
@@ -7781,9 +7926,9 @@ impl MobMcpState {
     /// Submit a unit of work to a mob member through the work-lane.
     ///
     /// Thin wrapper over [`meerkat_mob::MobHandle::submit_work`] for the
-    /// mob-surface crate. Finding C4 — the work-lane Rust API
-    /// (`submit_work`/`cancel_work`/`cancel_all_work`) was Rust-only;
-    /// this exposes it to RPC/HTTP consumers such as meta.
+    /// mob-surface crate: with the two cancel calls beside it, it exposes
+    /// the work-lane Rust API (`submit_work`/`cancel_work`/`cancel_all_work`)
+    /// to surface consumers such as the JSON-RPC server.
     ///
     /// Work of [`meerkat_mob::WorkOrigin::Internal`] acts as the mob's host,
     /// which MobMachine admits to any member, an identity entry included:
@@ -7983,21 +8128,24 @@ impl MobMcpState {
             .await
     }
 
-    /// Cancel a previously submitted unit of work. Finding C4.
+    /// Always refused: per-unit cancellation is unsupported and nothing is cancelled.
+    ///
+    /// A caller the mob admits for the cancel control scope gets
+    /// [`MobError::WorkCancellationUnsupported`]; a caller it does not admit
+    /// is refused before that. Use [`MobMcpState::mob_cancel_all_work`] to
+    /// cancel a member's in-flight work.
     pub async fn mob_cancel_work(
         &self,
         mob_id: &MobId,
         work_ref: meerkat_mob::WorkRef,
     ) -> Result<(), MobError> {
-        // Per-item cancellation is intentionally unsupported, but the
-        // authorization decision still precedes that honest capability error.
         self.admitted_handle_for(mob_id, ControlScope::Cancel)
             .await?
             .cancel_work(work_ref)
             .await
     }
 
-    /// Cancel all in-flight work for a specific mob member. Finding C4.
+    /// Cancel all in-flight work for a specific mob member.
     pub async fn mob_cancel_all_work(
         &self,
         mob_id: &MobId,
@@ -10941,7 +11089,9 @@ impl MobMcpDispatcher {
             ),
             tool(
                 "mob_retire_member",
-                &format!("Retire a spawned mob member by identity. {COMMON}"),
+                &format!("Retire a spawned mob member by identity. The member's session is \
+                     archived: the mobs that member created and its delegates end with it, at \
+                     the next start of the host. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"}},"required":["mob_id","agent_identity"]}),
             ),
             tool(
@@ -11017,7 +11167,9 @@ impl MobMcpDispatcher {
                 "mob_respawn",
                 &format!("Retire and re-spawn a member with the same profile. \
                      Required: mob_id, agent_identity. Optional: initial_message. \
-                     Returns an identity-native respawn receipt. {COMMON}"),
+                     Returns an identity-native respawn receipt. A worker's successor starts on a \
+                     new session: the mobs the old member created and its delegates are not \
+                     carried over and end at the next start of the host. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"},"initial_message": content_input_schema()},"required":["mob_id","agent_identity"]}),
             ),
             tool(
@@ -19910,9 +20062,10 @@ mod tests {
     /// agent mob tools re-derive after a restart: only a session's own create
     /// with its create capability. An OperatorSession record proves the
     /// creating session. An OperatorMember record proves the creating
-    /// member's session only while that session still serves the recorded
-    /// member at the recorded generation in the recorded parent incarnation:
-    /// once the member is respawned at its next generation, neither its old
+    /// member's session while that session serves the recorded member at
+    /// the recorded generation in the recorded parent incarnation (or its
+    /// same-session successor, which other rows cover): once the member is
+    /// respawned onto a new session at its next generation, neither its old
     /// session nor its new one proves anything. A create the host made for
     /// the same session or member (`Session`, `Member`) proves nothing: the
     /// session owns that mob but did not create it. A host create, and any
@@ -20082,6 +20235,210 @@ mod tests {
                 .session_is_recorded_creator(&member_child, &respawned_session)
                 .await,
             "a later generation of the creating member proves nothing"
+        );
+    }
+
+    /// The binding of `session` a parent's member history answers for the
+    /// creator's lineage: `identity` at `generation`, standing at `state`,
+    /// with the chain of same-session successor steps that seated it
+    /// starting at `chain` (with role migrations followed, and under one
+    /// role), or answering none.
+    fn lineage_binding_of(
+        identity: &str,
+        generation: u64,
+        session: &SessionId,
+        state: meerkat_mob::MemberBindingState,
+        chain: Option<(u64, u64)>,
+    ) -> meerkat_mob::MemberBinding {
+        meerkat_mob::MemberBinding::for_test(
+            AgentIdentity::from(identity),
+            meerkat_mob::Generation::new(generation),
+            Some(session.clone()),
+            state,
+            ProfileName::from("worker"),
+            meerkat_mob::SpawnContinuityIntent::Ephemeral,
+            meerkat_mob::MemberIdentityManagement::CommandDriven,
+        )
+        .with_same_session_lineage(chain.map(|(followed, one_role)| {
+            (
+                meerkat_mob::Generation::new(followed),
+                meerkat_mob::Generation::new(one_role),
+            )
+        }))
+    }
+
+    /// How the member that serves a session stands to a mob's recorded
+    /// creator: only the creator's own session is asked, at the recorded
+    /// generation the record proves it, at a later generation of the same
+    /// identity the lineage decides, and everything else proves nothing.
+    #[test]
+    fn the_recorded_creator_is_proven_only_on_its_session_by_its_identity() {
+        let owner_session = SessionId::new();
+        let creator_identity = AgentIdentity::from("creator");
+        let creator = RecordedCreator {
+            identity: &creator_identity,
+            generation: meerkat_mob::Generation::new(2),
+            owner_session: &owner_session,
+        };
+        let seated = |identity: &str, generation: u64| {
+            Some((
+                AgentIdentity::from(identity),
+                meerkat_mob::Generation::new(generation),
+            ))
+        };
+        let verdict = |session: &SessionId, seated: Option<(AgentIdentity, _)>| {
+            creator.seat(session, seated.as_ref())
+        };
+        assert_eq!(
+            verdict(&owner_session, seated("creator", 2)),
+            CreatorSeat::Recorded
+        );
+        assert_eq!(
+            verdict(&owner_session, seated("creator", 3)),
+            CreatorSeat::Later(meerkat_mob::Generation::new(3))
+        );
+        assert_eq!(
+            verdict(&owner_session, seated("creator", 7)),
+            CreatorSeat::Later(meerkat_mob::Generation::new(7))
+        );
+        for (what, session, member) in [
+            (
+                "an earlier generation of the creator",
+                owner_session.clone(),
+                seated("creator", 1),
+            ),
+            (
+                "another identity at the recorded generation",
+                owner_session.clone(),
+                seated("other", 2),
+            ),
+            (
+                "another identity at a later generation",
+                owner_session.clone(),
+                seated("other", 3),
+            ),
+            ("no member on the session", owner_session.clone(), None),
+            (
+                "the creator at the recorded generation on another session",
+                SessionId::new(),
+                seated("creator", 2),
+            ),
+            (
+                "the creator at a later generation on another session",
+                SessionId::new(),
+                seated("creator", 3),
+            ),
+        ] {
+            assert_eq!(verdict(&session, member), CreatorSeat::Other, "{what}");
+        }
+    }
+
+    /// A later generation of the creator on its session is its same-session
+    /// successor only when the parent's journal says so: the session's
+    /// binding is live, of the creator's identity, at the roster's
+    /// generation, and the chain of same-session successor steps that seated
+    /// it starts at or before the recorded generation. A chain that starts
+    /// later (a step between the two was no same-session successor step), a
+    /// binding that answers no chain (a mob reset), a binding that disagrees
+    /// with the roster, and a history that names no binding or could not be
+    /// read each prove nothing.
+    #[test]
+    fn a_later_generation_is_the_creators_successor_only_by_an_unbroken_chain() {
+        use meerkat_mob::MemberBindingState::{Live, Moved, Retired};
+        let owner_session = SessionId::new();
+        let creator_identity = AgentIdentity::from("creator");
+        let creator = RecordedCreator {
+            identity: &creator_identity,
+            generation: meerkat_mob::Generation::new(2),
+            owner_session: &owner_session,
+        };
+        let current = meerkat_mob::Generation::new(4);
+        let binding = |identity: &str, generation: u64, state, chain| {
+            lineage_binding_of(identity, generation, &owner_session, state, chain)
+        };
+        for (what, chain) in [
+            ("the chain starts at the recorded generation", (2, 2)),
+            ("the chain starts before the recorded generation", (0, 0)),
+            (
+                "a role migration after the recorded generation is followed",
+                (2, 4),
+            ),
+            ("a role migration before the recorded generation", (0, 1)),
+        ] {
+            assert!(
+                creator.is_succeeded_by(current, Some(&binding("creator", 4, Live, Some(chain)))),
+                "{what}"
+            );
+        }
+        for (what, refused) in [
+            (
+                "the chain starts one generation after the recorded one",
+                Some(binding("creator", 4, Live, Some((3, 3)))),
+            ),
+            (
+                "the chain starts at the current generation",
+                Some(binding("creator", 4, Live, Some((4, 4)))),
+            ),
+            (
+                "the binding answers no chain",
+                Some(binding("creator", 4, Live, None)),
+            ),
+            (
+                "the binding is retired",
+                Some(binding("creator", 4, Retired, Some((2, 2)))),
+            ),
+            (
+                "the binding moved to another session",
+                Some(binding("creator", 4, Moved, Some((2, 2)))),
+            ),
+            (
+                "the binding is another identity's",
+                Some(binding("other", 4, Live, Some((2, 2)))),
+            ),
+            (
+                "the journal's binding is behind the roster",
+                Some(binding("creator", 3, Live, Some((2, 2)))),
+            ),
+            (
+                "the journal's binding is ahead of the roster",
+                Some(binding("creator", 5, Live, Some((2, 2)))),
+            ),
+            ("the history names no binding of the session", None),
+        ] {
+            assert!(
+                !creator.is_succeeded_by(current, refused.as_ref()),
+                "{what}"
+            );
+        }
+
+        // The history read's own answers: the session's binding when it
+        // reads, none when it names no such binding, and none when it could
+        // not be read.
+        let parent = MobId::from("lineage-parent");
+        let read = meerkat_mob::MemberBindingHistory::for_test(
+            [],
+            [binding("creator", 4, Live, Some((2, 2)))],
+            [],
+            7,
+        );
+        let found = lineage_binding(Ok(read.clone()), &parent, &owner_session);
+        assert!(creator.is_succeeded_by(current, found.as_ref()));
+        assert!(lineage_binding(Ok(read), &parent, &SessionId::new()).is_none());
+        let unread = lineage_binding(
+            Err(MobError::Internal("the journal cannot be read".to_string())),
+            &parent,
+            &owner_session,
+        );
+        assert!(unread.is_none());
+        assert!(!creator.is_succeeded_by(current, unread.as_ref()));
+
+        // The one decision about a role migration, as it is ruled: followed.
+        // The chain a reader that follows role migrations reads starts at 2,
+        // and the one under one role at 4.
+        assert_eq!(
+            binding("creator", 4, Live, Some((2, 4)))
+                .same_session_lineage_start(creator_lineage_steps()),
+            Some(meerkat_mob::Generation::new(2))
         );
     }
 

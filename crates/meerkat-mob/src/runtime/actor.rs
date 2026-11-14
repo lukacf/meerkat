@@ -5448,6 +5448,17 @@ fn disposal_uses_host_release_authority(host_owned: bool) -> bool {
 #[cfg(test)]
 pub(super) static SPAWN_PROVISIONED_COMMAND_DELAY_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+/// The sessions of the spawns whose completion the delay above is holding
+/// back: each is recorded once its pending slot names it, before the delay.
+#[cfg(test)]
+pub(super) static SPAWN_PROVISIONED_COMPLETIONS_HELD: std::sync::Mutex<
+    Vec<meerkat_core::types::SessionId>,
+> = std::sync::Mutex::new(Vec::new());
+/// When set, the pending spawn the retire fixture stages names a session it
+/// resumed, as a resume-mode spawn's slot does, instead of none.
+#[cfg(test)]
+pub(super) static STAGED_PENDING_SPAWN_RESUMED_ORIGIN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 #[cfg(test)]
 pub(super) static IDENTITY_RECONCILE_COMPLETION_REQUEUES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -7691,6 +7702,13 @@ enum RetirePendingSpawnVerdict {
 pub(super) struct PendingSpawnProgress {
     pub(super) bridge_session_id: Option<meerkat_core::types::SessionId>,
     pub(super) operation_id: Option<meerkat_core::ops::OperationId>,
+    /// Whether the finished provision created its session or attached one
+    /// that already existed, as its receipt reports it. Absent until the
+    /// provision returns.
+    pub(super) session_origin: Option<super::provisioner::ProvisionSessionOrigin>,
+    /// The exact attachment a provision that resumed or revived an existing
+    /// session may release, from the same receipt.
+    pub(super) rollback_authority: Option<super::provisioner::ResumedMemberRollbackAuthority>,
 }
 
 /// Honest spawn-exec observations (DEC-P3-10): a pure function over the
@@ -8115,6 +8133,54 @@ pub(super) struct PendingSpawnCleanupAnchor {
     /// pending-spawn cleanup. Generic lifecycle drains (stop/destroy) have no
     /// committed member incarnation and leave this absent.
     retire_incarnation: Option<RetirePendingSpawnCleanupIncarnation>,
+    /// Whether the provision created the session or attached one that
+    /// already existed (see [`Self::settle`]).
+    session_origin: super::provisioner::ProvisionSessionOrigin,
+    /// The exact attachment a provision that resumed or revived an existing
+    /// session may release.
+    rollback_authority: Option<super::provisioner::ResumedMemberRollbackAuthority>,
+}
+
+impl PendingSpawnCleanupAnchor {
+    /// Run this anchor's cleanup against the provisioner that owns the
+    /// provisioned session.
+    ///
+    /// An anchor that carries the machine's retire incarnation ends the
+    /// session whatever its origin: MobMachine authorized that retire to
+    /// cancel the pending spawn of a member the mob already holds, and a
+    /// retire is that member's disposal. Every other anchor comes from a
+    /// lifecycle step that cancels the spawn (stop, complete, reset, retire
+    /// all, shutdown, destroy) or from a retirement's disposal pass, which
+    /// clears the incarnation before it takes the slots still pending: such
+    /// an anchor ends a session the spawn created, and releases a session
+    /// the spawn resumed or revived exactly as a failed spawn's rollback
+    /// releases it. That session existed before the spawn and never became a
+    /// member's; it stays as it was. A release that fails keeps the anchor,
+    /// and the step that ran it reports the failure.
+    pub(super) async fn settle(
+        &self,
+        provisioner: &Arc<dyn MobProvisioner>,
+    ) -> Result<(), MobError> {
+        let member_ref = MemberRef::from_bridge_session_id(self.session_id.clone());
+        let releases_existing_session = self.retire_incarnation.is_none()
+            && self.session_origin != super::provisioner::ProvisionSessionOrigin::Fresh;
+        if releases_existing_session {
+            return PendingProvision::new(
+                member_ref,
+                self.agent_identity.clone(),
+                Arc::clone(provisioner),
+                self.operation_id.clone(),
+                self.session_origin,
+                self.rollback_authority.clone(),
+                super::provisioner::RollbackOrigin::SpawnRollback,
+            )
+            .rollback()
+            .await;
+        }
+        provisioner
+            .abort_member_provision(&member_ref, &self.operation_id, &self.reason)
+            .await
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -13538,21 +13604,6 @@ impl MobActor {
         }
     }
 
-    /// Command-deferral aggregator for every actor-owned effect lane.
-    ///
-    /// The dispatch loop and `wait_for_actor_wake` both consult this: `true`
-    /// parks the command in `deferred_commands` (bounded by
-    /// `MEMBER_ADMISSION_LANE_CAPACITY`) and re-offers it once the owning
-    /// lane settles. Each lane contributes ONE predicate over its own exact
-    /// custody — never a global mutex and never a phase guess.
-    ///
-    /// Lane owners add their predicate here as a single early-return arm
-    /// (`if self.<lane>_control_is_pending(command) { return true; }`) and
-    /// keep its body in their own module. Global lifecycle verbs are NOT
-    /// deferred here: a lane that must fence them drains its custody at the
-    /// lifecycle barrier instead — `begin_placed_completion_lifecycle_quiesce`
-    /// (Stop/Complete/Reset/Destroy/RetireAll) and the `Shutdown` arm, where
-    /// `drain_wiring_io_for_lifecycle` already runs.
     #[inline(never)]
     fn log_shutdown_admitted(&self) {
         tracing::info!(
@@ -13584,6 +13635,30 @@ impl MobActor {
         }
     }
 
+    /// Command-deferral aggregator for every actor-owned effect lane.
+    ///
+    /// The dispatch loop and `wait_for_actor_wake` both consult this: `true`
+    /// parks the command in `deferred_commands` (bounded by
+    /// `MEMBER_ADMISSION_LANE_CAPACITY`) and re-offers it once the owning
+    /// lane settles. Each lane contributes ONE predicate over its own exact
+    /// custody - never a global mutex and never a phase guess.
+    ///
+    /// Lane owners add their predicate here as a single early-return arm
+    /// (`if self.<lane>_control_is_pending(command) { return true; }`) and
+    /// keep its body in their own module. A lane's own predicate does not
+    /// defer the global lifecycle verbs. This function defers them itself, in
+    /// one place: a Stop, Complete, Reset, Destroy, RetireAll or Shutdown
+    /// waits while a spawn activation holds custody (outside an explicit
+    /// resume attempt, whose topology control parks activations instead),
+    /// while wiring I/O is in flight, and while the member effects its
+    /// barrier names are running; a Retire or a Respawn of a member waits for
+    /// that member's own activation (`retirement_control_is_pending`).
+    /// So no lifecycle step removes or re-seats a member while one of its
+    /// activation stages is in flight. What still runs at the lifecycle
+    /// barrier is each lane's drain of the custody it kept:
+    /// `begin_placed_completion_lifecycle_quiesce`
+    /// (Stop/Complete/Reset/Destroy/RetireAll) and the `Shutdown` arm, where
+    /// `drain_wiring_io_for_lifecycle` runs.
     fn resume_member_control_is_pending(&self, command: &MobCommand) -> bool {
         if self.submit_work_pump_control_is_pending(command) {
             return true;
@@ -19499,6 +19574,40 @@ impl MobActor {
             "mob shutdown report complete"
         );
         self.lifecycle_observations.store_shutdown_report(report);
+    }
+
+    /// Dispose of a provisioned member whose spawn ended before the mob took
+    /// its completion (it was refused after provisioning, or the actor is
+    /// gone).
+    ///
+    /// A session the spawn created is retired, and the typed disposal is
+    /// returned. A session the spawn resumed or revived existed before it and
+    /// never became a member's: it is released exactly as a failed spawn's
+    /// rollback releases it and stays as it was (`None`).
+    async fn dispose_unsettled_provision(
+        provisioner: &Arc<dyn MobProvisioner>,
+        agent_identity: &AgentIdentity,
+        receipt: &super::handle::MemberSpawnReceipt,
+    ) -> Result<Option<crate::machines::mob_machine::MemberSessionDisposal>, MobError> {
+        match receipt.session_origin {
+            super::provisioner::ProvisionSessionOrigin::Fresh => provisioner
+                .retire_member(&receipt.member_ref)
+                .await
+                .map(Some),
+            super::provisioner::ProvisionSessionOrigin::ResumedDurable
+            | super::provisioner::ProvisionSessionOrigin::RevivedRetired => PendingProvision::new(
+                receipt.member_ref.clone(),
+                agent_identity.clone(),
+                Arc::clone(provisioner),
+                receipt.operation_id.clone(),
+                receipt.session_origin,
+                receipt.rollback_authority.clone(),
+                super::provisioner::RollbackOrigin::SpawnRollback,
+            )
+            .rollback()
+            .await
+            .map(|()| None),
+        }
     }
 
     async fn ensure_autonomous_dispatch_capability_for_provisioner(
@@ -34662,8 +34771,20 @@ impl MobActor {
                 .bridge_session_id
                 .clone()
                 .zip(progress.operation_id.clone())
+                .map(|(session_id, operation_id)| {
+                    (
+                        session_id,
+                        operation_id,
+                        // A provision reports its origin with its session; a
+                        // slot that names a session and no origin created it.
+                        progress
+                            .session_origin
+                            .unwrap_or(super::provisioner::ProvisionSessionOrigin::Fresh),
+                        progress.rollback_authority.clone(),
+                    )
+                })
         };
-        let Some((session_id, operation_id)) = snapshot else {
+        let Some((session_id, operation_id, session_origin, rollback_authority)) = snapshot else {
             return Ok(None);
         };
         if let Some(incarnation) = retire_incarnation
@@ -34681,6 +34802,8 @@ impl MobActor {
             operation_id,
             reason: reason.to_string(),
             retire_incarnation: retire_incarnation.cloned(),
+            session_origin,
+            rollback_authority,
         }))
     }
 
@@ -34688,13 +34811,7 @@ impl MobActor {
         &self,
         anchor: &PendingSpawnCleanupAnchor,
     ) -> Result<(), MobError> {
-        self.provisioner
-            .abort_member_provision(
-                &MemberRef::from_bridge_session_id(anchor.session_id.clone()),
-                &anchor.operation_id,
-                &anchor.reason,
-            )
-            .await
+        anchor.settle(&self.provisioner).await
     }
 
     fn pending_spawn_cleanup_error(context: &str, errors: Vec<String>) -> MobError {
@@ -36967,6 +37084,10 @@ impl MobActor {
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress {
                 bridge_session_id: Some(pending_spawn_session_id),
                 operation_id: Some(operation_id),
+                session_origin: STAGED_PENDING_SPAWN_RESUMED_ORIGIN
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .then_some(super::provisioner::ProvisionSessionOrigin::ResumedDurable),
+                ..PendingSpawnProgress::default()
             })),
             pending_recipient_trust_peer_id: None,
             observations: SpawnExecObservations::default(),
@@ -39056,12 +39177,27 @@ impl MobActor {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             progress.bridge_session_id = Some(bridge_session_id);
                             progress.operation_id = Some(spawn_receipt.operation_id.clone());
+                            progress.session_origin = Some(spawn_receipt.session_origin);
+                            progress
+                                .rollback_authority
+                                .clone_from(&spawn_receipt.rollback_authority);
                         }
                         #[cfg(test)]
                         {
                             let delay_ms = SPAWN_PROVISIONED_COMMAND_DELAY_MS
                                 .load(std::sync::atomic::Ordering::Relaxed);
                             if delay_ms > 0 {
+                                // The slot names the provisioned session from
+                                // here on. A row that holds the completion
+                                // back waits for this record of the session.
+                                if let Some(held_session_id) =
+                                    spawn_receipt.member_ref.bridge_session_id()
+                                {
+                                    SPAWN_PROVISIONED_COMPLETIONS_HELD
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .push(held_session_id.clone());
+                                }
                                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                             }
                         }
@@ -39074,11 +39210,15 @@ impl MobActor {
                                 )
                                 .await
                         {
-                            if let Err(retire_error) =
-                                provisioner.retire_member(&spawn_receipt.member_ref).await
+                            if let Err(cleanup_error) = Self::dispose_unsettled_provision(
+                                &provisioner,
+                                &spawn_member_identity,
+                                &spawn_receipt,
+                            )
+                            .await
                             {
                                 return Err(MobError::Internal(format!(
-                                    "autonomous capability check failed for '{spawn_member_identity}': {capability_error}; cleanup retire failed for member '{:?}': {retire_error}",
+                                    "autonomous capability check failed for '{spawn_member_identity}': {capability_error}; cleanup failed for member '{:?}': {cleanup_error}",
                                     spawn_receipt.member_ref
                                 )));
                             }
@@ -39140,18 +39280,24 @@ impl MobActor {
                     MobCommand::SpawnProvisioned {
                         result: Ok(spawn_receipt),
                         ..
-                    } => match provisioner.retire_member(&spawn_receipt.member_ref).await {
+                    } => match Self::dispose_unsettled_provision(
+                        &provisioner,
+                        &panic_member_identity,
+                        &spawn_receipt,
+                    )
+                    .await
+                    {
                         Ok(disposal) => tracing::warn!(
                             spawn_ticket,
                             member_ref = ?spawn_receipt.member_ref,
                             disposal = ?disposal,
-                            "spawn completion dropped because the actor is gone; provisioned member was retired"
+                            "spawn completion dropped because the actor is gone; a session the spawn created was retired, one it resumed was released"
                         ),
                         Err(cleanup_error) => tracing::warn!(
                             spawn_ticket,
                             member_ref = ?spawn_receipt.member_ref,
                             error = %cleanup_error,
-                            "spawn completion dropped; failed cleanup retire for provisioned member"
+                            "spawn completion dropped; failed cleanup for provisioned member"
                         ),
                     },
                     MobCommand::SpawnProvisioned {

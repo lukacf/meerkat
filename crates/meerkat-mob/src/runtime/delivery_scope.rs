@@ -523,6 +523,10 @@ pub struct MemberBinding {
     continuity_intent: SpawnContinuityIntent,
     labels: BTreeMap<String, String>,
     identity_management: MemberIdentityManagement,
+    /// Where the chains of same-session successor steps that seated the
+    /// incarnation on its session begin; none once the journal holds a mob
+    /// reset.
+    lineage: Option<LineageStarts>,
 }
 
 impl MemberBinding {
@@ -578,8 +582,48 @@ impl MemberBinding {
         self.identity_management
     }
 
+    /// The first generation of the unbroken chain of same-session successor
+    /// steps that seated this incarnation on the binding's session, following
+    /// the steps `steps` names: the incarnation's own generation when no such
+    /// step seated it, and an earlier one when the identity's incarnations
+    /// from that generation on were each replaced by the next on this same
+    /// session in one step ([`super::MobHandle::respawn_member`], and
+    /// [`super::MobHandle::respawn`] of an identity entry's member).
+    ///
+    /// The chain is read from the journal rows of those steps alone. A
+    /// step's two rows, the retirement and the seat, are appended in one
+    /// batch and name each other (the retirement names the incarnation it
+    /// seated, on the member's own session; the seat names the incarnation
+    /// it retired), and the chain goes on only where both rows say so, for
+    /// the same session. Every other seat starts a chain of its own: a seat
+    /// on a fresh session, a seat that follows a plain retirement (a member
+    /// retired and later seated again on its kept session), a legacy member
+    /// reset, a session binding recovery that moves the member to another
+    /// session, and a seat whose rows carry no such link. A recovered-binding
+    /// row that names the
+    /// session the member already holds (an endpoint registration, the
+    /// session's first creation, an adoption) moves nothing and leaves the
+    /// chain as it is.
+    ///
+    /// `None` once the mob's journal holds a mob reset: a mob reset can
+    /// restart its members' generations, so a generation may no longer name
+    /// one incarnation, and no chain is answered.
+    ///
+    /// Like the binding, this is a history fact and authorizes nothing by
+    /// itself.
+    pub fn same_session_lineage_start(&self, steps: LineageSteps) -> Option<Generation> {
+        self.lineage.map(|lineage| {
+            if steps.role_migrations {
+                lineage.successors
+            } else {
+                lineage.one_role
+            }
+        })
+    }
+
     /// Test support: a binding as a host's test double of these reads would
-    /// answer it.
+    /// answer it. Its same-session lineage starts at its own generation
+    /// ([`Self::with_same_session_lineage`] names another).
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(
         identity: AgentIdentity,
@@ -599,7 +643,22 @@ impl MemberBinding {
             continuity_intent,
             labels: BTreeMap::new(),
             identity_management,
+            lineage: Some(LineageStarts::at(generation)),
         }
+    }
+
+    /// Test support: this binding with the same-session lineage a host's
+    /// test double answers: the chain of same-session successor steps
+    /// begins at `successors`, and its tail under one role at `one_role`;
+    /// `None` is the answer of a journal that holds a mob reset.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_same_session_lineage(mut self, starts: Option<(Generation, Generation)>) -> Self {
+        self.lineage = starts.map(|(successors, one_role)| LineageStarts {
+            successors,
+            one_role,
+        });
+        self
     }
 
     /// Test support: this binding with the spawn `labels` a host's test
@@ -609,6 +668,156 @@ impl MemberBinding {
     pub fn with_labels(mut self, labels: BTreeMap<String, String>) -> Self {
         self.labels = labels;
         self
+    }
+}
+
+/// Which steps a read of a binding's same-session lineage follows
+/// ([`MemberBinding::same_session_lineage_start`]).
+///
+/// Every read follows the same-session successor steps that kept the
+/// member's role. A reader that also follows the steps that seated the
+/// successor under another role (a declared role migration) says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LineageSteps {
+    role_migrations: bool,
+}
+
+impl LineageSteps {
+    /// The same-session successor steps that kept the member's role.
+    #[must_use]
+    pub const fn same_session_successors() -> Self {
+        Self {
+            role_migrations: false,
+        }
+    }
+
+    /// These steps, and with `follow` the same-session successor steps that
+    /// seated the successor under another role too.
+    #[must_use]
+    pub const fn with_role_migrations(mut self, follow: bool) -> Self {
+        self.role_migrations = follow;
+        self
+    }
+}
+
+/// Where the unbroken chains of same-session successor steps that seated an
+/// incarnation on its session begin.
+///
+/// The fold derives both starts from facts MobMachine's own step decided,
+/// read from the two rows that step appends in one batch, and from nothing
+/// else: the seat row's generation, session, role and seat rotation (the
+/// incarnation the step retired and the rotation's target), and the
+/// retirement row's rotation link (the rotation's target and the
+/// incarnation and role the step seated). No field a caller's request fills
+/// in (labels, a kickoff, a continuity intent, a spawner) is read; the row
+/// `the_lineage_reads_only_what_the_machines_step_journaled` pins that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LineageStarts {
+    /// The first generation of the chain of same-session successor steps.
+    successors: Generation,
+    /// The first generation of that chain's tail whose steps kept the role.
+    one_role: Generation,
+}
+
+/// What a seat's lineage reads of the incarnation the seat follows: the
+/// identity's latest incarnation before it, as its own seat and its
+/// retirement recorded it.
+#[derive(Debug, Clone, Copy)]
+struct LineagePredecessor<'a> {
+    generation: Generation,
+    session: Option<&'a SessionId>,
+    role: &'a ProfileName,
+    starts: LineageStarts,
+    /// The rotation link of the retirement row that ended it, when that row
+    /// carries one.
+    retired_by: Option<&'a crate::runtime::RetiredRotation>,
+}
+
+/// What a seat's lineage reads of the seat's own row.
+#[derive(Debug, Clone, Copy)]
+struct LineageSeat<'a> {
+    generation: Generation,
+    session: Option<&'a SessionId>,
+    role: &'a ProfileName,
+    rotation: Option<&'a crate::runtime::SeatRotation>,
+}
+
+// LINEAGE-INPUTS-BEGIN: the only reads of a journal row the lineage makes.
+// The row `the_lineage_reads_only_what_the_machines_step_journaled` fails
+// when this region reads another field.
+fn lineage_seat<'a>(
+    spawned: &'a crate::event::MemberSpawnedEvent,
+    session: Option<&'a SessionId>,
+) -> LineageSeat<'a> {
+    LineageSeat {
+        generation: spawned.agent_runtime_id.generation,
+        session,
+        role: &spawned.role,
+        rotation: spawned.seat_rotation(),
+    }
+}
+
+fn lineage_retirement(
+    facts: &crate::event::MemberRetiredFacts,
+) -> Option<crate::runtime::RetiredRotation> {
+    facts.rotation.clone()
+}
+// LINEAGE-INPUTS-END
+
+impl LineageStarts {
+    /// The starts of a seat no same-session successor step made: both
+    /// chains begin at the seat's own generation.
+    const fn at(generation: Generation) -> Self {
+        Self {
+            successors: generation,
+            one_role: generation,
+        }
+    }
+
+    /// The starts of `seat`, which follows `predecessor` (the identity's
+    /// latest incarnation since the latest mob reset, if any).
+    ///
+    /// The chain goes on only when the step's two rows name each other and
+    /// the same session: the seat's rotation says a rotation's terminal
+    /// step seated it on the member's own session and retired exactly the
+    /// predecessor, the predecessor's retirement says the same rotation
+    /// seated exactly this incarnation under this role on the member's own
+    /// session, and both incarnations hold the same session. A row that
+    /// carries no such link, or one this build cannot read, starts a chain
+    /// of its own.
+    fn of_seat(predecessor: Option<LineagePredecessor<'_>>, seat: LineageSeat<'_>) -> Self {
+        let own = Self::at(seat.generation);
+        let Some(predecessor) = predecessor else {
+            return own;
+        };
+        let Some(crate::runtime::SeatRotation::Successor {
+            predecessor: retired,
+            target: crate::runtime::RotationTarget::SameSession,
+        }) = seat.rotation
+        else {
+            return own;
+        };
+        let Some(link) = predecessor.retired_by else {
+            return own;
+        };
+        let one_step = *retired == predecessor.generation
+            && link.target == crate::runtime::RotationTarget::SameSession
+            && link.successor == seat.generation
+            && &link.successor_role == seat.role
+            && seat.session.is_some()
+            && seat.session == predecessor.session;
+        if !one_step {
+            return own;
+        }
+        Self {
+            successors: predecessor.starts.successors,
+            one_role: if predecessor.role == seat.role {
+                predecessor.starts.one_role
+            } else {
+                seat.generation
+            },
+        }
     }
 }
 
@@ -694,6 +903,9 @@ struct JournalIncarnation {
     role: ProfileName,
     continuity_intent: SpawnContinuityIntent,
     labels: BTreeMap<String, String>,
+    /// Where the chains of same-session successor steps that seated the
+    /// incarnation begin.
+    lineage: LineageStarts,
 }
 
 /// An identity's latest incarnation since the latest mob reset, and the
@@ -703,6 +915,24 @@ struct JournalHead {
     incarnation: JournalIncarnation,
     session_id: Option<SessionId>,
     live: bool,
+    /// The rotation link of the retirement row that ended the incarnation,
+    /// when that row carries one: what the lineage of the identity's next
+    /// seat reads.
+    retired_by: Option<crate::runtime::RetiredRotation>,
+}
+
+impl JournalHead {
+    /// What the lineage of the identity's next seat reads of this
+    /// incarnation.
+    fn lineage_predecessor(&self) -> LineagePredecessor<'_> {
+        LineagePredecessor {
+            generation: self.incarnation.runtime_id.generation,
+            session: self.session_id.as_ref(),
+            role: &self.incarnation.role,
+            starts: self.incarnation.lineage,
+            retired_by: self.retired_by.as_ref(),
+        }
+    }
 }
 
 /// One fold over a mob's journal, before its bindings are resolved.
@@ -721,6 +951,10 @@ struct JournalFold {
     unborn_sessions: BTreeSet<SessionId>,
     /// The sessions a binding named since the latest mob reset.
     epoch_sessions: BTreeSet<SessionId>,
+    /// Whether the journal holds a mob reset. A mob reset can restart its
+    /// members' generations, so after one a generation may name more than
+    /// one incarnation, and no binding answers a lineage.
+    mob_reset_seen: bool,
 }
 
 impl JournalFold {
@@ -758,17 +992,24 @@ impl JournalFold {
             // member).
             MobEventKind::MemberSpawned(spawned) => {
                 self.memberships = self.memberships.saturating_add(1);
+                let session_id = spawned
+                    .bridge_member_ref()
+                    .and_then(MemberRef::bridge_session_id)
+                    .cloned();
+                let lineage = LineageStarts::of_seat(
+                    self.heads
+                        .get(&spawned.agent_identity)
+                        .map(JournalHead::lineage_predecessor),
+                    lineage_seat(spawned, session_id.as_ref()),
+                );
                 let incarnation = JournalIncarnation {
                     membership: self.memberships,
                     runtime_id: spawned.agent_runtime_id.clone(),
                     role: spawned.role.clone(),
                     continuity_intent: spawned.continuity_intent.clone(),
                     labels: spawned.labels.clone(),
+                    lineage,
                 };
-                let session_id = spawned
-                    .bridge_member_ref()
-                    .and_then(MemberRef::bridge_session_id)
-                    .cloned();
                 if let Some(session_id) = &session_id {
                     self.sessions.insert(
                         session_id.clone(),
@@ -782,6 +1023,7 @@ impl JournalFold {
                         incarnation,
                         session_id,
                         live: true,
+                        retired_by: None,
                     },
                 );
             }
@@ -794,6 +1036,10 @@ impl JournalFold {
             } => {
                 if let Some(head) = self.heads.get_mut(agent_identity).filter(|head| head.live) {
                     head.incarnation.runtime_id = agent_runtime_id.clone();
+                    // A legacy member reset is no same-session successor
+                    // step: the generation it carries the membership to
+                    // starts a chain of its own.
+                    head.incarnation.lineage = LineageStarts::at(agent_runtime_id.generation);
                     if let Some(session_id) = &head.session_id {
                         self.sessions.insert(
                             session_id.clone(),
@@ -814,6 +1060,16 @@ impl JournalFold {
                         }),
                     recovered.bridge_session_id(),
                 ) {
+                    // A row that moves the incarnation to another session
+                    // starts its chain there: no same-session successor
+                    // step seated it on that session. A row that names the
+                    // session the incarnation already holds moves nothing
+                    // (an adoption journals such a row for a seated
+                    // member), and the chain goes on.
+                    if head.session_id.as_ref() != Some(session_id) {
+                        head.incarnation.lineage =
+                            LineageStarts::at(head.incarnation.runtime_id.generation);
+                    }
                     head.session_id = Some(session_id.clone());
                     self.sessions.insert(
                         session_id.clone(),
@@ -827,6 +1083,7 @@ impl JournalFold {
             MobEventKind::MemberRetired {
                 agent_identity,
                 generation,
+                facts,
                 ..
             } => {
                 if let Some(head) = self
@@ -835,6 +1092,7 @@ impl JournalFold {
                     .filter(|head| head.incarnation.runtime_id.generation == *generation)
                 {
                     head.live = false;
+                    head.retired_by = lineage_retirement(facts);
                 }
             }
             // A mob reset ends every membership, and MobMachine's unborn-seat
@@ -843,6 +1101,7 @@ impl JournalFold {
                 self.heads.clear();
                 self.unborn_sessions.clear();
                 self.epoch_sessions.clear();
+                self.mob_reset_seen = true;
             }
             _ => {}
         }
@@ -869,6 +1128,7 @@ impl JournalFold {
             continuity_intent: incarnation.continuity_intent.clone(),
             labels: incarnation.labels.clone(),
             identity_management: identity_management_of(&intent_rows, identity),
+            lineage: (!self.mob_reset_seen).then_some(incarnation.lineage),
         };
         let session_bindings = self
             .sessions
@@ -2268,5 +2528,728 @@ mod tests {
             .expect("read the new journal");
         assert_eq!(facts(&rebuilt), facts(&whole_fold(&store, &mob_id).await));
         assert!(rebuilt.journal_cursor() > cleared_cursor);
+    }
+
+    use crate::runtime::{RetiredRotation, RotationTarget, SeatRotation};
+
+    /// A seat row: `identity`'s incarnation `generation` under `role` on
+    /// `session`, seated by `rotation`.
+    fn seat(
+        identity: &AgentIdentity,
+        generation: u64,
+        session: Option<&SessionId>,
+        role: &str,
+        rotation: Option<SeatRotation>,
+    ) -> MobEventKind {
+        MobEventKind::MemberSpawned(
+            crate::event::MemberSpawnedEvent::new(
+                identity.clone(),
+                Generation::new(generation),
+                FenceToken::new(generation + 1),
+                AgentRuntimeId::new(identity.clone(), Generation::new(generation)),
+                ProfileName::from(role),
+            )
+            .with_bridge_member_ref(session.cloned().map(MemberRef::from_bridge_session_id))
+            .with_seat_rotation(rotation),
+        )
+    }
+
+    /// A retirement row: `identity`'s incarnation `generation` under `role`
+    /// ended on `session`, by `rotation`.
+    fn retirement(
+        identity: &AgentIdentity,
+        generation: u64,
+        session: Option<&SessionId>,
+        role: &str,
+        rotation: Option<RetiredRotation>,
+    ) -> MobEventKind {
+        MobEventKind::MemberRetired {
+            agent_identity: identity.clone(),
+            generation: Generation::new(generation),
+            role: ProfileName::from(role),
+            session_archived: false,
+            facts: crate::event::MemberRetiredFacts::new(session.cloned(), None, None, rotation),
+        }
+    }
+
+    /// The link the retirement row of a same-session successor step carries:
+    /// the step seated `successor` under `role` on the member's own session.
+    fn retired_into(successor: u64, role: &str) -> Option<RetiredRotation> {
+        Some(RetiredRotation::new(
+            RotationTarget::SameSession,
+            Generation::new(successor),
+            ProfileName::from(role),
+        ))
+    }
+
+    /// The link the seat row of a same-session successor step carries: the
+    /// step retired `predecessor`.
+    fn seated_after(predecessor: u64) -> Option<SeatRotation> {
+        Some(SeatRotation::successor(
+            Generation::new(predecessor),
+            RotationTarget::SameSession,
+        ))
+    }
+
+    /// The two rows one same-session successor step appends: `identity`'s
+    /// incarnation `from` under `from_role` is retired and its next one is
+    /// seated under `to_role`, both on `session`.
+    fn successor_step(
+        journal: &mut Journal,
+        identity: &AgentIdentity,
+        from: u64,
+        session: &SessionId,
+        from_role: &str,
+        to_role: &str,
+    ) {
+        journal.push(retirement(
+            identity,
+            from,
+            Some(session),
+            from_role,
+            retired_into(from + 1, to_role),
+        ));
+        journal.push(seat(
+            identity,
+            from + 1,
+            Some(session),
+            to_role,
+            seated_after(from),
+        ));
+    }
+
+    /// The lineage starts of the binding that holds `session`: with role
+    /// migrations followed, and under one role.
+    fn lineage_starts(history: &MemberBindingHistory, session: &SessionId) -> Option<(u64, u64)> {
+        let binding = history
+            .binding_for_session(session)
+            .expect("the session is bound");
+        let followed = LineageSteps::same_session_successors().with_role_migrations(true);
+        let one_role = LineageSteps::same_session_successors();
+        match (
+            binding.same_session_lineage_start(followed),
+            binding.same_session_lineage_start(one_role),
+        ) {
+            (Some(followed), Some(one_role)) => Some((followed.get(), one_role.get())),
+            (None, None) => None,
+            mixed => panic!("the two starts are answered together: {mixed:?}"),
+        }
+    }
+
+    /// A chain of same-session successor steps starts at the generation the
+    /// first of them retired, however many follow, and a seat no such step
+    /// made starts at its own generation.
+    #[test]
+    fn a_chain_of_same_session_successors_starts_at_its_first_generation() {
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let mut journal = Journal::new();
+        journal.push(seat(&member, 0, Some(&session), "worker", None));
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &session),
+            Some((0, 0))
+        );
+
+        successor_step(&mut journal, &member, 0, &session, "worker", "worker");
+        let history = journal.history(&[]);
+        let binding = history
+            .binding_for_session(&session)
+            .expect("the session is bound");
+        assert_eq!(
+            (
+                binding.generation(),
+                binding.state(),
+                lineage_starts(&history, &session)
+            ),
+            (Generation::new(1), MemberBindingState::Live, Some((0, 0))),
+            "one successor: the live incarnation's chain starts at generation 0"
+        );
+
+        successor_step(&mut journal, &member, 1, &session, "worker", "worker");
+        successor_step(&mut journal, &member, 2, &session, "worker", "worker");
+        let history = journal.history(&[]);
+        assert_eq!(
+            history
+                .binding_for_session(&session)
+                .map(MemberBinding::generation),
+            Some(Generation::new(3))
+        );
+        assert_eq!(
+            lineage_starts(&history, &session),
+            Some((0, 0)),
+            "three successors in a row"
+        );
+        assert_eq!(
+            history.last_binding(&member).and_then(|binding| binding
+                .same_session_lineage_start(LineageSteps::same_session_successors())),
+            Some(Generation::new(0)),
+            "the identity's last binding answers the same chain"
+        );
+    }
+
+    /// A same-session successor seated under another role goes on with the
+    /// chain a reader that follows role migrations reads, and starts the
+    /// chain under one role at its own generation.
+    #[test]
+    fn a_role_migration_goes_on_with_the_chain_and_starts_the_one_role_chain() {
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let mut journal = Journal::new();
+        journal.push(seat(&member, 0, Some(&session), "worker", None));
+        successor_step(&mut journal, &member, 0, &session, "worker", "worker");
+        successor_step(&mut journal, &member, 1, &session, "worker", "lead");
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &session),
+            Some((0, 2)),
+            "the migration's seat"
+        );
+        successor_step(&mut journal, &member, 2, &session, "lead", "lead");
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &session),
+            Some((0, 2)),
+            "a successor under the new role"
+        );
+    }
+
+    /// A journal whose rows lack the step's link: a retirement and a seat on
+    /// the same session one generation up, neither row naming the other. No
+    /// release wrote a same-session successor that way (each one that has
+    /// the step journals its link on both rows); it is the shape of a member
+    /// that was retired and seated again on its kept session. The seat
+    /// starts a chain of its own.
+    #[test]
+    fn a_successor_journaled_without_its_link_starts_a_chain_of_its_own() {
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let mut journal = Journal::new();
+        journal.push(seat(&member, 0, Some(&session), "worker", None));
+        journal.push(retirement(&member, 0, Some(&session), "worker", None));
+        journal.push(seat(&member, 1, Some(&session), "worker", None));
+        let history = journal.history(&[]);
+        assert_eq!(
+            history
+                .binding_for_session(&session)
+                .map(|binding| (binding.generation(), binding.state())),
+            Some((Generation::new(1), MemberBindingState::Live)),
+            "the same identity holds the same session one generation up"
+        );
+        assert_eq!(lineage_starts(&history, &session), Some((1, 1)));
+    }
+
+    /// The chain goes on only where the step's two rows name each other and
+    /// the same session. Each journal here differs from a same-session
+    /// successor step in one fact, and its seat starts a chain of its own.
+    #[test]
+    fn a_seat_whose_rows_do_not_name_one_same_session_step_starts_a_chain_of_its_own() {
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let other = SessionId::new();
+        let fresh = |target| Some(SeatRotation::successor(Generation::new(1), target));
+        type Rows = (Option<RetiredRotation>, Option<SeatRotation>);
+        let cases: Vec<(&str, Rows, Option<&SessionId>, &str)> = vec![
+            (
+                "the retirement row carries no link",
+                (None, seated_after(1)),
+                Some(&session),
+                "worker",
+            ),
+            (
+                "the seat row carries no rotation",
+                (retired_into(2, "worker"), None),
+                Some(&session),
+                "worker",
+            ),
+            (
+                "the seat follows a respawn's retirement",
+                (
+                    retired_into(2, "worker"),
+                    Some(SeatRotation::respawn_after(Generation::new(1))),
+                ),
+                Some(&session),
+                "worker",
+            ),
+            (
+                "the seat is a fresh life",
+                (
+                    retired_into(2, "worker"),
+                    Some(SeatRotation::fresh_life_after(Generation::new(1))),
+                ),
+                Some(&session),
+                "worker",
+            ),
+            (
+                "the seat's rotation took a fresh session",
+                (
+                    retired_into(2, "worker"),
+                    fresh(RotationTarget::FreshSession),
+                ),
+                Some(&session),
+                "worker",
+            ),
+            (
+                "the retirement's rotation took a fresh session",
+                (
+                    Some(RetiredRotation::new(
+                        RotationTarget::FreshSession,
+                        Generation::new(2),
+                        ProfileName::from("worker"),
+                    )),
+                    seated_after(1),
+                ),
+                Some(&session),
+                "worker",
+            ),
+            (
+                "the seat names another incarnation as the one retired",
+                (retired_into(2, "worker"), seated_after(0)),
+                Some(&session),
+                "worker",
+            ),
+            (
+                "the retirement names another incarnation as the one seated",
+                (retired_into(3, "worker"), seated_after(1)),
+                Some(&session),
+                "worker",
+            ),
+            (
+                "the retirement names another role as the one seated",
+                (retired_into(2, "lead"), seated_after(1)),
+                Some(&session),
+                "worker",
+            ),
+            (
+                "the seat is on another session",
+                (retired_into(2, "worker"), seated_after(1)),
+                Some(&other),
+                "worker",
+            ),
+            (
+                "the seat holds no session",
+                (retired_into(2, "worker"), seated_after(1)),
+                None,
+                "worker",
+            ),
+        ];
+        for (what, (retired_by, seated_by), seat_session, seat_role) in cases {
+            let mut journal = Journal::new();
+            journal.push(seat(&member, 0, Some(&session), "worker", None));
+            successor_step(&mut journal, &member, 0, &session, "worker", "worker");
+            journal.push(retirement(&member, 1, Some(&session), "worker", retired_by));
+            journal.push(seat(&member, 2, seat_session, seat_role, seated_by));
+            let history = journal.history(&[]);
+            let binding = history
+                .last_binding(&member)
+                .expect("the member has a last binding");
+            assert_eq!(binding.generation(), Generation::new(2), "{what}");
+            for steps in [
+                LineageSteps::same_session_successors(),
+                LineageSteps::same_session_successors().with_role_migrations(true),
+            ] {
+                assert_eq!(
+                    binding.same_session_lineage_start(steps),
+                    Some(Generation::new(2)),
+                    "{what}: the seat starts a chain of its own ({steps:?})"
+                );
+            }
+        }
+
+        // The same rows without the one difference are one step, and the
+        // chain goes on from generation 0.
+        let mut journal = Journal::new();
+        journal.push(seat(&member, 0, Some(&session), "worker", None));
+        successor_step(&mut journal, &member, 0, &session, "worker", "worker");
+        journal.push(retirement(
+            &member,
+            1,
+            Some(&session),
+            "worker",
+            retired_into(2, "worker"),
+        ));
+        journal.push(seat(&member, 2, Some(&session), "worker", seated_after(1)));
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &session),
+            Some((0, 0))
+        );
+
+        // A member that holds no session has no same-session successor.
+        let mut journal = Journal::new();
+        journal.push(seat(&member, 0, None, "worker", None));
+        journal.push(retirement(
+            &member,
+            0,
+            None,
+            "worker",
+            retired_into(1, "worker"),
+        ));
+        journal.push(seat(&member, 1, None, "worker", seated_after(0)));
+        assert_eq!(
+            journal
+                .history(&[])
+                .last_binding(&member)
+                .and_then(|binding| binding
+                    .same_session_lineage_start(LineageSteps::same_session_successors())),
+            Some(Generation::new(1)),
+            "two incarnations that hold no session share none"
+        );
+    }
+
+    /// A chain broken by a step that is no same-session successor step
+    /// starts again at the seat that step made, and later successors go on
+    /// from there, never from before the break.
+    #[test]
+    fn a_chain_starts_again_at_the_seat_another_step_made() {
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let mut journal = Journal::new();
+        journal.push(seat(&member, 0, Some(&session), "worker", None));
+        successor_step(&mut journal, &member, 0, &session, "worker", "worker");
+        // Retired, then seated again on the kept session.
+        journal.push(retirement(&member, 1, Some(&session), "worker", None));
+        journal.push(seat(&member, 2, Some(&session), "worker", None));
+        successor_step(&mut journal, &member, 2, &session, "worker", "worker");
+        successor_step(&mut journal, &member, 3, &session, "worker", "worker");
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &session),
+            Some((2, 2))
+        );
+    }
+
+    /// A legacy member reset and a session binding recovered onto another
+    /// session are no same-session successor steps: each starts a chain at
+    /// the generation it leaves the member at.
+    #[test]
+    fn a_legacy_member_reset_and_a_recovered_binding_each_start_a_chain() {
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let mut journal = Journal::new();
+        journal.push(seat(&member, 0, Some(&session), "worker", None));
+        successor_step(&mut journal, &member, 0, &session, "worker", "worker");
+        journal.push(member_reset(&member, 1, 2));
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &session),
+            Some((2, 2)),
+            "a legacy member reset keeps the session and starts a chain"
+        );
+
+        let moved = SessionId::new();
+        let mut journal = Journal::new();
+        journal.push(seat(&member, 0, Some(&session), "worker", None));
+        successor_step(&mut journal, &member, 0, &session, "worker", "worker");
+        journal.push(recovered(&member, 1, &moved));
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &moved),
+            Some((1, 1)),
+            "a recovered binding starts a chain on the session it moved to"
+        );
+        journal.push(recovered(&member, 1, &session));
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &session),
+            Some((1, 1)),
+            "moved back, the chain still starts at the recovery"
+        );
+    }
+
+    /// A recovered-binding row that names the session the incarnation
+    /// already holds moves nothing, and the chain goes on. MobMachine
+    /// journals such a row for a seated member in ordinary steps: when a
+    /// wake or a start registers the member's endpoint, when the seat's
+    /// session is first created, and when it adopts the member (as an
+    /// identity entry, into store custody, or with a created set). Each
+    /// shape of the row leaves both starts where they were. The same row
+    /// naming another session starts a chain of its own, and a row that
+    /// names another incarnation than the live one changes nothing.
+    #[test]
+    fn a_recovered_binding_row_that_names_the_session_already_held_goes_on_with_the_chain() {
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let endpoint: meerkat_core::comms::TrustedPeerDescriptor =
+            serde_json::from_value(serde_json::json!({
+                "address": {"endpoint": "history-mob/worker/member", "transport": "inproc"},
+                "name": "history-mob/worker/member",
+                "peer_id": "6c6d0a88-59cd-56b7-99f5-dfef28457d5c",
+                "pubkey": [
+                    67, 121, 59, 201, 109, 115, 249, 176, 182, 226, 129, 30, 48, 8, 225, 41,
+                    21, 85, 111, 231, 7, 229, 149, 85, 8, 199, 30, 151, 7, 190, 79, 225
+                ]
+            }))
+            .expect("a member endpoint");
+        // The row for `generation` on `session`, in the shape `dress` gives.
+        let row =
+            |generation: u64,
+             session: &SessionId,
+             dress: &dyn Fn(&mut crate::event::MemberSessionBindingRecoveredEvent)| {
+                let mut event = crate::event::MemberSessionBindingRecoveredEvent::new(
+                    member.clone(),
+                    AgentRuntimeId::new(member.clone(), Generation::new(generation)),
+                    session.clone(),
+                );
+                dress(&mut event);
+                MobEventKind::MemberSessionBindingRecovered(event)
+            };
+        type Dress<'a> = &'a dyn Fn(&mut crate::event::MemberSessionBindingRecoveredEvent);
+        let shapes: [(&str, Dress<'_>); 4] = [
+            ("a plain row", &|_| {}),
+            ("a row that registers the member's endpoint", &|event| {
+                event.member_peer_endpoint = Some(endpoint.clone());
+            }),
+            ("an adoption's row", &|event| {
+                event.identity_entry = Some(crate::runtime::IdentityEntryOrigin::Declared);
+            }),
+            ("the row of the session's first creation", &|event| {
+                event.seat_session_born = true;
+            }),
+        ];
+
+        // A chain with a role migration in it, so that both starts differ
+        // from the live generation: (0, 1) at generation 2.
+        let mut journal = Journal::new();
+        journal.push(seat(&member, 0, Some(&session), "worker", None));
+        successor_step(&mut journal, &member, 0, &session, "worker", "lead");
+        successor_step(&mut journal, &member, 1, &session, "lead", "lead");
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &session),
+            Some((0, 1))
+        );
+        for (what, dress) in shapes {
+            journal.push(row(2, &session, dress));
+            let history = journal.history(&[]);
+            assert_eq!(
+                history
+                    .binding_for_session(&session)
+                    .map(|binding| (binding.generation(), binding.state())),
+                Some((Generation::new(2), MemberBindingState::Live)),
+                "{what} moved nothing"
+            );
+            assert_eq!(
+                lineage_starts(&history, &session),
+                Some((0, 1)),
+                "{what}: the chain goes on"
+            );
+        }
+        successor_step(&mut journal, &member, 2, &session, "lead", "lead");
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &session),
+            Some((0, 1)),
+            "a later successor goes on with the chain"
+        );
+
+        // A row that names another incarnation than the live one (here the
+        // one before it) changes nothing, whichever session it names.
+        let other = SessionId::new();
+        journal.push(row(2, &session, &|_| {}));
+        journal.push(row(2, &other, &|_| {}));
+        let history = journal.history(&[]);
+        assert_eq!(
+            lineage_starts(&history, &session),
+            Some((0, 1)),
+            "a row for an incarnation that is no longer the live one"
+        );
+        assert!(
+            history.binding_for_session(&other).is_none(),
+            "and it binds no session"
+        );
+
+        // The same row for the live incarnation, naming another session,
+        // moves it there and starts a chain of its own.
+        journal.push(row(3, &other, &|_| {}));
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &other),
+            Some((3, 3)),
+            "a row naming another session starts a chain of its own"
+        );
+    }
+
+    /// Once the journal holds a mob reset no binding answers a lineage,
+    /// whether it was bound before the reset or after it: a mob reset can
+    /// restart its members' generations, so a generation may name more than
+    /// one incarnation. A chain that began before the reset is never
+    /// followed across it.
+    #[test]
+    fn no_lineage_is_answered_once_the_journal_holds_a_mob_reset() {
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let mut journal = Journal::new();
+        journal.push(seat(&member, 0, Some(&session), "worker", None));
+        successor_step(&mut journal, &member, 0, &session, "worker", "worker");
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &session),
+            Some((0, 0))
+        );
+
+        journal.push(MobEventKind::MobReset);
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &session),
+            None,
+            "the binding of before the reset"
+        );
+        journal.push(seat(&member, 0, Some(&session), "worker", None));
+        successor_step(&mut journal, &member, 0, &session, "worker", "worker");
+        let history = journal.history(&[]);
+        assert_eq!(
+            history
+                .binding_for_session(&session)
+                .map(|binding| (binding.generation(), binding.state())),
+            Some((Generation::new(1), MemberBindingState::Live))
+        );
+        assert_eq!(
+            lineage_starts(&history, &session),
+            None,
+            "a successor seated after the reset"
+        );
+    }
+
+    /// The lineage reads only what MobMachine's step journaled: the seat
+    /// row's generation, session, role and seat rotation, and the
+    /// retirement row's rotation link. A journal whose rows differ in every
+    /// field a caller's request fills in folds to the same lineage, and the
+    /// two functions that read a row for the lineage read no other field.
+    #[test]
+    fn the_lineage_reads_only_what_the_machines_step_journaled() {
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let plain = {
+            let mut journal = Journal::new();
+            journal.push(seat(&member, 0, Some(&session), "worker", None));
+            successor_step(&mut journal, &member, 0, &session, "worker", "lead");
+            journal
+        };
+        let mut dressed = Journal::new();
+        for event in &plain.events {
+            let mut kind = event.kind.clone();
+            match &mut kind {
+                MobEventKind::MemberSpawned(spawned) => {
+                    spawned.labels = BTreeMap::from([("tier".to_string(), "gold".to_string())]);
+                    spawned.continuity_intent = SpawnContinuityIntent::DurableIdentity {
+                        continuity_key: "another-key".to_string(),
+                    };
+                    spawned.kickoff_prompt = Some(meerkat_core::types::ContentInput::Text(
+                        "kickoff".to_string(),
+                    ));
+                    spawned.seat_session_unborn = true;
+                    spawned.identity_entry = Some(crate::runtime::IdentityEntryOrigin::Declared);
+                    spawned.resume_from_role = Some(ProfileName::from("another-role"));
+                    spawned.fence_token = FenceToken::new(99);
+                }
+                MobEventKind::MemberRetired {
+                    session_archived,
+                    facts,
+                    ..
+                } => {
+                    *session_archived = true;
+                    facts.session_id = Some(SessionId::new());
+                    facts.cause = Some(crate::runtime::MemberRetirementCause::Unlisted);
+                    facts.identity_entry = Some(crate::runtime::IdentityEntryOrigin::Declared);
+                    facts.identity_ended = true;
+                }
+                other => panic!("the journal holds seats and retirements only: {other:?}"),
+            }
+            dressed.push(kind);
+        }
+        assert_eq!(
+            lineage_starts(&plain.history(&[]), &session),
+            Some((0, 1)),
+            "the plain journal"
+        );
+        assert_eq!(
+            lineage_starts(&dressed.history(&[]), &session),
+            Some((0, 1)),
+            "the same step, with every other field of its rows changed"
+        );
+
+        // The region that reads a journal row for the lineage names these
+        // fields and no other.
+        let source = include_str!("delivery_scope.rs");
+        let region = source
+            .split("// LINEAGE-INPUTS-BEGIN")
+            .nth(1)
+            .and_then(|rest| rest.split("// LINEAGE-INPUTS-END").next())
+            .expect("the lineage's row reads are marked");
+        let reads = |receiver: &str| -> BTreeSet<String> {
+            region
+                .match_indices(receiver)
+                .map(|(at, _)| {
+                    region[at + receiver.len()..]
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect()
+                })
+                .collect()
+        };
+        let named = |fields: &[&str]| -> BTreeSet<String> {
+            fields.iter().map(|field| (*field).to_string()).collect()
+        };
+        assert_eq!(
+            reads("spawned."),
+            named(&["agent_runtime_id", "role", "seat_rotation"]),
+            "what the lineage reads of a seat row"
+        );
+        assert_eq!(
+            reads("facts."),
+            named(&["rotation"]),
+            "what the lineage reads of a retirement row"
+        );
+        assert!(
+            !region.contains("MobEventKind") && !region.contains("event."),
+            "the region reads a row through its two parameters only"
+        );
+        let fold = source
+            .split("fn apply(&mut self, kind: &MobEventKind)")
+            .nth(1)
+            .and_then(|rest| rest.split("fn resolve(").next())
+            .expect("the fold's apply");
+        assert_eq!(
+            fold.matches("lineage_seat(").count() + fold.matches("lineage_retirement(").count(),
+            2,
+            "the fold reads a row for the lineage through those two functions, once each"
+        );
+        assert_eq!(
+            fold.matches("LineageStarts::of_seat(").count(),
+            1,
+            "one place decides a seat's lineage"
+        );
+    }
+
+    /// The three rows of a member's seat and of one same-session successor
+    /// step, in their stored form, exactly as a build that read no lineage
+    /// stored them (captured from a running mob's journal; nothing in them
+    /// was written for this read). Decoded by the store's own codec and
+    /// folded, they answer the successor's chain: a store written before
+    /// the lineage was read answers it with no new row.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stored_successor_rows_written_before_the_lineage_was_read_answer_its_chain() {
+        const STORED: [&str; 3] = [
+            r#"{"event":{"cursor":2,"kind":{"agent_identity":"creator","agent_runtime_id":{"generation":0,"identity":"creator"},"bridge_member_ref":{"bridge_session_id":"01a1da41-a53f-7348-8e05-9977d6b3a921","kind":"session"},"creation":{"creation_id":"1d4a87d5-cfbd-4678-959e-a6b20958e770","provenance":{"kind":"unproven"}},"fence_token":1,"generation":0,"member_peer_endpoint":{"address":{"endpoint":"test-mob-cg-capture-47cb73309efb4ff888a4fd0f8749bc1e/worker/creator","transport":"inproc"},"name":"test-mob-cg-capture-47cb73309efb4ff888a4fd0f8749bc1e/worker/creator","peer_id":"6c6d0a88-59cd-56b7-99f5-dfef28457d5c","pubkey":[67,121,59,201,109,115,249,176,182,226,129,30,48,8,225,41,21,85,111,231,7,229,149,85,8,199,30,151,7,190,79,225]},"role":"worker","runtime_mode":"turn_driven","type":"member_spawned"},"mob_id":"test-mob-cg-capture-47cb73309efb4ff888a4fd0f8749bc1e","timestamp":"2026-11-14T13:31:37.677183549Z"},"schema_version":9}"#,
+            r#"{"event":{"cursor":4,"kind":{"agent_identity":"creator","generation":0,"retired_rotation":{"successor":1,"successor_role":"worker","target":"same_session"},"retired_session":"01a1da41-a53f-7348-8e05-9977d6b3a921","role":"worker","type":"member_retired"},"mob_id":"test-mob-cg-capture-47cb73309efb4ff888a4fd0f8749bc1e","timestamp":"2026-11-14T13:31:37.689616859Z"},"schema_version":9}"#,
+            r#"{"event":{"cursor":5,"kind":{"agent_identity":"creator","agent_runtime_id":{"generation":1,"identity":"creator"},"bridge_member_ref":{"bridge_session_id":"01a1da41-a53f-7348-8e05-9977d6b3a921","kind":"session"},"creation":{"creation_id":"1d4a87d5-cfbd-4678-959e-a6b20958e770","provenance":{"kind":"unproven"}},"fence_token":2,"generation":1,"member_peer_endpoint":{"address":{"endpoint":"test-mob-cg-capture-47cb73309efb4ff888a4fd0f8749bc1e/worker/creator","transport":"inproc"},"name":"test-mob-cg-capture-47cb73309efb4ff888a4fd0f8749bc1e/worker/creator","peer_id":"6c6d0a88-59cd-56b7-99f5-dfef28457d5c","pubkey":[67,121,59,201,109,115,249,176,182,226,129,30,48,8,225,41,21,85,111,231,7,229,149,85,8,199,30,151,7,190,79,225]},"role":"worker","runtime_mode":"turn_driven","seat_rotation":{"kind":"successor","predecessor":0,"target":"same_session"},"type":"member_spawned"},"mob_id":"test-mob-cg-capture-47cb73309efb4ff888a4fd0f8749bc1e","timestamp":"2026-11-14T13:31:37.689625752Z"},"schema_version":9}"#,
+        ];
+        let events: Vec<MobEvent> = STORED
+            .iter()
+            .map(|row| {
+                crate::event::decode_stored_mob_event(row.as_bytes())
+                    .expect("the stored row decodes")
+            })
+            .collect();
+        let mob_id = events[0].mob_id.clone();
+        let history = MemberBindingHistory::from_journal(&events, BTreeMap::new(), Some(&mob_id));
+        let session = SessionId::parse("01a1da41-a53f-7348-8e05-9977d6b3a921")
+            .expect("the stored session id parses");
+        let binding = history
+            .binding_for_session(&session)
+            .expect("the journal binds the session");
+        assert_eq!(
+            (
+                binding.identity().as_str(),
+                binding.generation(),
+                binding.state()
+            ),
+            ("creator", Generation::new(1), MemberBindingState::Live),
+            "the successor holds the session"
+        );
+        assert_eq!(
+            lineage_starts(&history, &session),
+            Some((0, 0)),
+            "its chain starts at the generation the stored step retired"
+        );
     }
 }

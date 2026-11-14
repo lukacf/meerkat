@@ -21572,11 +21572,14 @@ mod tests {
 
     /// A mob member built from a profile whose `provider_params` carry the
     /// provider-neutral reasoning effort level holds that level, though no
-    /// client request named one. So on such a member a `mob/turn_start`
-    /// that changes the model, or only replaces the provider params (a
-    /// temperature, say), while the member has a turn running, is answered
-    /// that the session is busy, with the reason in `data.kind`, at once. A
-    /// plain `mob/turn_start` is queued behind the running turn and runs.
+    /// client request named one. The profile reaches the member from the
+    /// mob's definition (`mob/create`) or from `mob/spawn`'s
+    /// `override_profile`: both seat the level. So on such a member a
+    /// `mob/turn_start` that changes the model, or only replaces the
+    /// provider params (a temperature, say), while the member has a turn
+    /// running, is answered that the session is busy, with the reason in
+    /// `data.kind`, at once. A plain `mob/turn_start` is queued behind the
+    /// running turn and runs.
     #[cfg(feature = "mob")]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_member_built_from_a_profile_with_a_level_answers_a_model_change_busy() {
@@ -21628,116 +21631,121 @@ mod tests {
             assert!(response.error.is_none(), "{what}: {:?}", response.error);
             result_value(&response)
         };
-        let member_turn = |prompt: &str| {
-            serde_json::json!({
-                "mob_id": "profile-level-mob",
-                "agent_identity": "worker-1",
-                "prompt": prompt,
-            })
-        };
-
-        // The profile carries the level; the member is built from it and
-        // takes its first turn.
-        ok(
-            call(
-                "mob/create",
-                serde_json::json!({
-                    "definition": {
-                        "id": "profile-level-mob",
-                        "profiles": {
-                            "worker": {
-                                "model": "claude-sonnet-4-5",
-                                "external_addressable": true,
-                                "tools": {"comms": true},
-                                "provider_params": {"reasoning_effort": "high"},
-                            }
-                        }
-                    }
-                }),
-            )
-            .await,
-            "the mob is created",
-        );
-        ok(
-            call(
-                "mob/spawn",
-                serde_json::json!({
-                    "mob_id": "profile-level-mob",
-                    "profile": "worker",
-                    "agent_identity": "worker-1",
-                    "runtime_mode": "turn_driven",
-                }),
-            )
-            .await,
-            "the member spawns",
-        );
-        ok(
-            call("mob/turn_start", member_turn("first")).await,
-            "the member takes its first turn",
-        );
-
-        // A turn runs on the member, held at the model.
-        let before = client.calls.load(Ordering::SeqCst);
-        client.held.store(true, Ordering::SeqCst);
-        let running = tokio::spawn(call("mob/turn_start", member_turn("running")));
-        tokio::time::timeout(Duration::from_secs(60), async {
-            while client.calls.load(Ordering::SeqCst) < before + 1 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the running turn reaches the model");
-
-        for (what, key, value) in [
+        let plain_profile = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "external_addressable": true,
+            "tools": {"comms": true},
+        });
+        let mut profile_with_the_level = plain_profile.clone();
+        profile_with_the_level["provider_params"] = serde_json::json!({"reasoning_effort": "high"});
+        // (the mob, the profile of its definition, the profile `mob/spawn`
+        // overrides it with)
+        for (mob_id, defined, overridden) in [
+            ("profile-level-mob", &profile_with_the_level, None),
             (
-                "a model change",
-                "model",
-                serde_json::json!("claude-opus-4-8"),
-            ),
-            (
-                "a change of the provider params",
-                "provider_params",
-                serde_json::json!({"temperature": 0.2}),
+                "override-level-mob",
+                &plain_profile,
+                Some(&profile_with_the_level),
             ),
         ] {
-            let mut params = member_turn("changes the member's model settings");
-            params[key] = value;
-            let busy =
-                tokio::time::timeout(Duration::from_secs(10), call("mob/turn_start", params))
-                    .await
-                    .unwrap_or_else(|_| panic!("{what}: answered while the turn runs"))
-                    .error
-                    .unwrap_or_else(|| panic!("{what}: the turn is not taken"));
-            assert_eq!(
-                (busy.code, busy.data.clone()),
-                (
-                    error::SESSION_BUSY,
-                    Some(serde_json::json!({
-                        "kind": "reasoning_effort_change_needs_idle_session"
-                    })),
-                ),
-                "{what}: {busy:?}"
-            );
-        }
+            let member_turn = |prompt: &str| {
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "agent_identity": "worker-1",
+                    "prompt": prompt,
+                })
+            };
 
-        // A plain turn is queued behind the running one, and both complete.
-        let plain = tokio::spawn(call("mob/turn_start", member_turn("plain")));
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(
-            !plain.is_finished(),
-            "a plain turn is not answered while the turn ahead runs"
-        );
-        client.held.store(false, Ordering::SeqCst);
-        for (what, turn) in [("the running turn", running), ("the plain turn", plain)] {
-            let response = tokio::time::timeout(Duration::from_secs(60), turn)
-                .await
-                .unwrap_or_else(|_| panic!("{what} is answered"))
-                .expect("the turn task");
-            assert!(
-                response.error.is_none(),
-                "{what} completes: {:?}",
-                response.error
+            // The profile carries the level; the member is built from it and
+            // takes its first turn.
+            ok(
+                call(
+                    "mob/create",
+                    serde_json::json!({
+                        "definition": {"id": mob_id, "profiles": {"worker": defined}}
+                    }),
+                )
+                .await,
+                "the mob is created",
             );
+            let mut spawn = serde_json::json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "agent_identity": "worker-1",
+                "runtime_mode": "turn_driven",
+            });
+            if let Some(overridden) = overridden {
+                spawn["override_profile"] = overridden.clone();
+            }
+            ok(call("mob/spawn", spawn).await, "the member spawns");
+            ok(
+                call("mob/turn_start", member_turn("first")).await,
+                "the member takes its first turn",
+            );
+
+            // A turn runs on the member, held at the model.
+            let before = client.calls.load(Ordering::SeqCst);
+            client.held.store(true, Ordering::SeqCst);
+            let running = tokio::spawn(call("mob/turn_start", member_turn("running")));
+            tokio::time::timeout(Duration::from_secs(60), async {
+                while client.calls.load(Ordering::SeqCst) < before + 1 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the running turn reaches the model");
+
+            for (what, key, value) in [
+                (
+                    "a model change",
+                    "model",
+                    serde_json::json!("claude-opus-4-8"),
+                ),
+                (
+                    "a change of the provider params",
+                    "provider_params",
+                    serde_json::json!({"temperature": 0.2}),
+                ),
+            ] {
+                let mut params = member_turn("changes the member's model settings");
+                params[key] = value;
+                let busy =
+                    tokio::time::timeout(Duration::from_secs(10), call("mob/turn_start", params))
+                        .await
+                        .unwrap_or_else(|_| panic!("{what}: answered while the turn runs"))
+                        .error
+                        .unwrap_or_else(|| panic!("{what}: the turn is not taken"));
+                assert_eq!(
+                    (busy.code, busy.data.clone()),
+                    (
+                        error::SESSION_BUSY,
+                        Some(serde_json::json!({
+                            "kind": "reasoning_effort_change_needs_idle_session"
+                        })),
+                    ),
+                    "{what}: {busy:?}"
+                );
+            }
+
+            // A plain turn is queued behind the running one, and both complete.
+            let plain = tokio::spawn(call("mob/turn_start", member_turn("plain")));
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(
+                !plain.is_finished(),
+                "a plain turn is not answered while the turn ahead runs"
+            );
+            client.held.store(false, Ordering::SeqCst);
+            for (what, turn) in [("the running turn", running), ("the plain turn", plain)] {
+                let response = tokio::time::timeout(Duration::from_secs(60), turn)
+                    .await
+                    .unwrap_or_else(|_| panic!("{what} is answered"))
+                    .expect("the turn task");
+                assert!(
+                    response.error.is_none(),
+                    "{what} completes: {:?}",
+                    response.error
+                );
+            }
         }
     }
 

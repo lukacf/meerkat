@@ -184,32 +184,42 @@ them.
   and left out when absent, so a client that does not send it is unaffected.
 
 - `meerkat-contracts`, behaviour: a request that 0.9.14 accepted can now
-  be refused. The flat key `provider_params.reasoning_effort` is
-  now read as the provider-neutral level and judged (see Added). 0.9.14
-  ignored the key wherever provider params are read in their wire form
-  (`WireProviderParamsOverride`): among them a REST `POST /sessions` body,
-  `mob/turn_start` and a mob profile sent to `mob/create`; the key never
-  reached a provider. A client that
-  sent the key there by mistake now sets a level: the request is accepted
-  when the value is a level the model's route accepts, a value that is not a
-  level is refused when the request is read, and a level the model's route
-  does not accept is refused with the typed `reasoning_effort_refused`
-  data. Remove the key, or send the level you mean. On `session/create`,
-  `turn/start` and the MCP tools, 0.9.14 refused the key as an unknown
-  field. The other wire paths that ignored the key are `mob/spawn`'s
-  `override_profile` and a profile or definition an agent writes with the
-  mob tools. A level set through a mob profile makes the mob's members
-  hold a level: the key beside a different provider effort, a thinking
-  budget, a raw reasoning body or reasoning turned off fails that member's
-  build with the typed refusal, and a JSON-RPC `mob/turn_start` with a
-  model or `provider_params` override on a member that has a turn running
-  or queued is answered `-32002` (`SESSION_BUSY`, data kind
-  `reasoning_effort_change_needs_idle_session`) where 0.9.14 queued it
-  (see Known limitations). A mob already stored by 0.9.14 keeps no level:
-  only a definition or request sent again sets one. Before upgrading,
-  check whether any mob definition a host sends to `mob/create`, any
-  `override_profile` or any agent-written profile carries
-  `reasoning_effort` inside `provider_params`.
+  be refused, or answered busy. The flat key
+  `provider_params.reasoning_effort` is now read as the provider-neutral
+  level and judged (see Added). 0.9.14 ignored the key wherever provider
+  params are read in their wire form (`WireProviderParamsOverride`): a
+  mob profile sent to `mob/create`, `mob/spawn`'s `override_profile`, a
+  `mob/turn_start` request, a REST `POST /sessions` body, and a profile
+  or definition an agent writes with the mob tools; the key never reached
+  a provider (`mob/create`: by a run on the published 0.9.14 binary and by
+  reading its source; the other four: by reading its source; the CLI's
+  mob verbs: not determined). A client that sent the key there by mistake
+  now sets a level: a value that is not a level is refused when the
+  request is read, a level the model's route does not accept is refused
+  with the typed `reasoning_effort_refused` data, and a level the route
+  accepts is set and held. Three things follow that 0.9.14 did not do:
+  (i) a `mob/turn_start` that carries the key, sent to a member that has
+  a turn running or queued: 0.9.14 ignored the key and queued the turn;
+  0.9.15 answers `-32002` (`SESSION_BUSY`, data kind
+  `reasoning_effort_change_needs_idle_session`), and taken on an idle
+  member it leaves the member holding the level;
+  (ii) a change of the model identity (a request that names the model,
+  the provider, the provider params or the auth binding) sent to a busy
+  member built from a profile that carries the key: 0.9.14 queued it (the
+  member held no level); 0.9.15 answers the same busy answer (see Known
+  limitations);
+  (iii) a profile that carries the key beside a different provider
+  effort, a thinking budget, a thinking type the model does not accept
+  with the level, a raw reasoning body or reasoning turned off, or for a
+  model whose route does not take the level: 0.9.14 built the member and
+  dropped the key; 0.9.15 fails that member's build with the typed
+  refusal.
+  A mob already stored by 0.9.14 keeps no level: only a definition or
+  request sent again sets one. Before upgrading, look for the key in
+  those five places; remove it, or keep it on purpose and accept the
+  level and the busy rule for those members (see the upgrade guide). On
+  `session/create`, `turn/start` and the MCP tools, 0.9.14 refused the
+  key as an unknown field.
 
 - `meerkat-rpc`: `handlers::turn::TurnOverrides` gains the field
   `reasoning_effort: Option<TurnMetadataOverride<EffortLevel>>` (see Added).
@@ -2785,17 +2795,22 @@ them.
   as on 0.9.14. "Busy" is `-32002` (`SESSION_BUSY`) with `data.kind`
   `reasoning_effort_change_needs_idle_session`, answered at once, with
   nothing stored, while the session has an unfinished turn or queued input
-  (a deferred session: while its first turn is still building it, for a
-  request that names a level):
+  (a deferred session: while its first turn is still building it):
 
   | The session | A plain turn | Repeats its level with `reasoning_effort` | Sets or changes the level | Clears the level | Changes the model, the provider, the self-hosted server, the provider params or the auth binding |
   |---|---|---|---|---|---|
   | holds a provider-neutral level | queued | queued | busy | busy | busy |
   | holds none | queued | nothing to repeat | busy | queued | queued |
 
-  A level named inside `provider_params` is never a repeat: on a busy
-  session that holds a level it is answered busy even when equal; a client
-  repeats its level with the field `reasoning_effort`. A session holds a
+  Naming a field counts as changing it: on a busy session that holds a
+  level a turn that names `model`, `provider`, `self_hosted_server_id`,
+  `provider_params` or `auth_binding` is answered busy even when the value
+  equals the session's. A level named inside `provider_params` is never a
+  repeat: on a busy session that holds a level it is answered busy even
+  when equal; a client repeats its level with the field
+  `reasoning_effort`, the only repeat. No flow step, kickoff, peer
+  message, member send, scheduled delivery or wake is answered busy; the
+  rule is on `turn/start` and `mob/turn_start`. A session holds a
   level when a request set one, when it was forked from or resumed as one
   that does, and when it is a mob member built from a profile whose
   `provider_params` carry `reasoning_effort`; no host or realm
@@ -2819,9 +2834,13 @@ them.
   (`supported_levels_unavailable`: an account's model list that is not
   loaded; confirmed by a test of this change); a request sent without
   waiting for another one, when it reaches admission in the time between
-  that other turn's admission on an idle session and its start; an input
-  that carries a model or level change and enters through the runtime
-  without a turn request; and a turn admitted on an idle session whose
+  that other turn's admission on an idle session and its start (on a
+  stored session that is not live: until that turn's rebuild ends); a
+  model-identity change carried by an input that enters through the
+  runtime without a turn request (a mob's own send, or a member turn an
+  in-process Rust host starts with a model, provider, params or binding
+  option), which is queued and judged only when it starts; and a turn
+  admitted on an idle session whose
   model, level or route is changed by something else (a host's
   reconfiguration of a mob member, a config reload, an account's model
   list) between its admission and its start (these three read from the

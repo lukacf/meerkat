@@ -4718,8 +4718,13 @@ that answer is not a level refusal, it
 carries no `reasoning_effort_refusal`, and the same request is taken once
 the session is idle. The other surfaces answer the same request in their
 own way: REST answers a level on a message for a session it holds live
-with HTTP 500 `session is busy`, and the MCP server's `meerkat_resume`
-rebuilds the session (see [REST](/api/rest) and [MCP](/api/mcp)).
+with HTTP 500 `session is busy`. The MCP server's `meerkat_resume` that
+names the level while a turn of the session runs is answered the same busy
+kind at once, by the MCP server's own rule: every resume that names the
+level then, whatever the session holds (a repeat, and a clear on a session
+that holds no level, are busy there, where the table below queues them);
+with no turn running it rebuilds the session (see [REST](/api/rest) and
+[MCP](/api/mcp)).
 
 A level is judged again when its turn starts. A `turn/start` refused
 there, after its input was stored, is a failed start: its stored input ends
@@ -4730,9 +4735,12 @@ changes this). What can still be refused at its start: a deferred create's
 first turn; a turn on a stored session that is not live whose level cannot
 be judged yet (`supported_levels_unavailable`); a request sent without
 waiting for another one, when it reaches admission in the time between
-that other turn's admission on an idle session and its start; an input
-that carries a model or level change and enters through the runtime
-without a turn request; and a turn admitted on an idle session whose
+that other turn's admission on an idle session and its start (on a stored
+session that is not live: until that turn's rebuild ends); a
+model-identity change carried by an input that enters through the runtime
+without a turn request (a mob's own send, or a member turn an in-process
+Rust host starts with such an option); and a turn admitted on an idle
+session whose
 model, level or route is changed by something else (a host's
 reconfiguration of a mob member, a config reload, an account's model list)
 between its admission and its start. A run that fails for the refusal
@@ -4754,8 +4762,7 @@ the table is `-32002` (`SESSION_BUSY`) with `error.data`
 `{"kind": "reasoning_effort_change_needs_idle_session"}`,
 answered at once, with nothing stored. It applies to `turn/start` and
 `mob/turn_start` while the session has an unfinished turn or queued input,
-and on a deferred session while its first turn is still building it (there:
-to a request that names a level).
+and on a deferred session while its first turn is still building it.
 
 | The session | A plain turn | Repeats its level with `reasoning_effort` | Sets or changes the level | Clears the level | Changes the model, the provider, the self-hosted server, the provider params or the auth binding |
 |---|---|---|---|---|---|
@@ -4765,6 +4772,11 @@ to a request that names a level).
 - The model identity is the model, the provider, the self-hosted server,
   the provider params, the auth binding, and the level itself (set, change,
   clear).
+- Naming a field counts as changing it: on a busy session that holds a
+  level, a turn that names `model`, `provider`, `self_hosted_server_id`,
+  `provider_params` or `auth_binding` is answered busy even when the value
+  equals the session's. Only the level repeated with `reasoning_effort` is
+  a repeat.
 - A level named inside `provider_params` replaces the provider params and
   is never a repeat: on a busy session that holds a level it is answered
   busy even when it equals the held level. A client repeats its level with
@@ -4784,12 +4796,11 @@ to a request that names a level).
   the change.
 - The one `kind` names the level in every busy cell, also when the request
   only changed the model.
-- The rule lives in the JSON-RPC turn requests only (`turn/start`,
-  `mob/turn_start`). What a mob sends its members by itself (flow steps,
-  kickoffs, peer messages, `mob/member_send`, a schedule's delivery, a
-  wake) enters through the runtime and is never answered busy; a model or
-  level change carried by such an input is judged only when its turn
-  starts.
+- No flow step, kickoff, peer message, member send, scheduled delivery or
+  wake is answered busy; the rule is on `turn/start` and `mob/turn_start`.
+  A model-identity change carried by such an input, or by a member turn
+  an in-process Rust host starts with a model, provider, params or
+  binding option, is queued and judged only when its turn starts.
 - A later release queues these turns.
 
 ### comms/send error data

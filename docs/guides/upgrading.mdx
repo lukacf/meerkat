@@ -458,6 +458,18 @@ under `## [0.9.15]`.
   spawned again, or destroy the mob and have it created again; the same
   where a member carries the label and the agent that created its mob
   carries none.
+- A member seated in a mob an agent created while 0.9.11 through 0.9.14
+  ran can also carry a `console.private_to` label that names another
+  person than the one the agent that created its mob is private to. It
+  is shown to that person and hidden from the person it should be private
+  to. Meta's warning does not count it: the warning counts only members
+  that carry no label. A spawn such a member asks for is refused with
+  `'<id>' is private to a person; a member private to another person may
+  not take it over`. **Do:** for each mob an agent created, compare each
+  member's `console.private_to` label with the label of the agent that
+  created the mob; where they name different people, retire the member
+  and have it spawned again, or destroy the mob and have it created
+  again.
 
 ### Rolling back to 0.9.14
 

@@ -188,6 +188,16 @@ Security, Upgrade and Changed.
   the mob and have it created again. A member that carries the label while
   the agent that created its mob carries none is hidden from people who
   should see it; the same remedy applies.
+  A member can also carry a label that names another person than the one
+  the agent that created its mob is private to: it is shown to that
+  person and hidden from the person it should be private to. The warning
+  does not count such a member: it counts only members that carry no
+  label. Compare the `console.private_to` label of each member of a mob
+  an agent created with the label of the agent that created the mob;
+  where they name different people, retire the member and have it
+  spawned again, or destroy the mob and have it created again. A spawn
+  such a member asks for is refused with `'<id>' is private to a person;
+  a member private to another person may not take it over`.
 
 - A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
   or the `bootstrap_with_*` family must complete the bootstrap before an

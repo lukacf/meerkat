@@ -1148,6 +1148,7 @@ rust_test(
         "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
+        "tests/gpt_live_public_e2e.rs",
         "tests/gpt_live_replay.rs",
         "tests/support/gpt_live_e2e.rs",
         "tests/support/gpt_live_evidence.rs",

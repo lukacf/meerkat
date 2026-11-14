@@ -2725,11 +2725,21 @@ struct SessionState {
     window_finished_user_turns: Vec<GptLiveRepresentedUserTurn>,
     /// The previous delegation's executor request, re-presented when a
     /// delegation arrives without any new user transcript in its window.
+    /// A text-chat row ends it: the spoken request before a typed turn was
+    /// asked once and is never re-presented after that turn.
     last_request: Option<String>,
     /// Provider id of the client delegation created while a user turn was
     /// open (mid-utterance): the next user turn to finish before another
-    /// client delegation continues that utterance.
+    /// client delegation continues that utterance, while the user's
+    /// sentence is still going on. A later client delegation ends it
+    /// whether it is accepted or refused for want of a request, and so does
+    /// the pause that ends a sentence
+    /// ([`Self::end_continuation_after_a_sentence_pause`]).
     continuation_of: Option<String>,
+    /// Session-timeline end of the user's speech so far: the furthest
+    /// `end_ms` of an input transcript delta. The point a sentence pause is
+    /// measured from.
+    user_speech_end_ms: Option<f64>,
     window: DelegationWindow,
     seen_delegation_ids: HashSet<String>,
     queued_observations: VecDeque<GptLiveBrokerObservation>,
@@ -2910,6 +2920,7 @@ impl Default for SessionState {
             window_finished_user_turns: Vec::new(),
             last_request: None,
             continuation_of: None,
+            user_speech_end_ms: None,
             window: DelegationWindow::default(),
             seen_delegation_ids: HashSet::new(),
             queued_observations: VecDeque::new(),
@@ -3535,11 +3546,19 @@ impl SessionState {
     /// local runs forcing that overlap). Unlike a deferred cue it does not
     /// wait for the user's floor: context typed in the chat must be in
     /// place before the model answers the user.
+    ///
+    /// A text-chat row is also a boundary for the re-present rule of client
+    /// delegations: the user's turn after the last spoken request was typed,
+    /// so a delegation the model creates next with nothing spoken has no
+    /// request of its own and must not run that earlier request again.
+    /// Speech after the typed turn fills the next delegation's window as
+    /// always.
     fn hold_or_send_text_chat(
         &mut self,
         token: GptLiveAppendToken,
         events: Vec<ClientEvent>,
     ) -> Option<Vec<ClientEvent>> {
+        self.last_request = None;
         if self.close_requested || self.closed_observed {
             // Never held past a close: sent (or refused) now, and settled
             // by the close like any in-flight append.
@@ -3711,6 +3730,7 @@ impl SessionState {
                     self.unanswered_user_input = true;
                     self.user_request_open = true;
                 }
+                self.end_continuation_after_a_sentence_pause(start_ms, end_ms);
                 self.record_transcript_delta(GptLiveTurnRole::User, delta);
                 self.measure_provider_input_latency(end_ms);
             }
@@ -4054,6 +4074,46 @@ impl SessionState {
         self.reflected_input_samples.saturating_mul(1000) / SIDEBAND_INPUT_SAMPLE_RATE_HZ
     }
 
+    /// Apply one user transcript delta's span to the continuation rule,
+    /// before the delta joins a turn.
+    ///
+    /// A delegation created at a pause inside the user's sentence is
+    /// continued by the rest of that sentence, and by nothing else: a word
+    /// that begins more than [`USER_FLOOR_SILENCE_RELEASE_MS`] after the
+    /// user's speech so far ended starts a new utterance, and from then on
+    /// what the user says is not more words for the earlier request's job
+    /// (with no such end, a question asked 18 s later, which the voice
+    /// answered itself, was reported as continuing the delegation and
+    /// steered into its job). The bound is the one that ends the user's
+    /// floor: a pause inside a sentence never reaches it.
+    ///
+    /// The pause is read from positions on the session timeline, never from
+    /// arrival or from the model's speech, so a word of the delegated
+    /// sentence that is transcribed late still continues it. It is measured
+    /// from the user's speech so far, not from the delegation, so a
+    /// sentence carried on word by word stays one sentence. A turn that
+    /// holds words from both sides of the pause is not reported at all: a
+    /// turn is reported whole.
+    fn end_continuation_after_a_sentence_pause(&mut self, start_ms: f64, end_ms: f64) {
+        #[allow(clippy::cast_precision_loss)]
+        let sentence_pause_ms = USER_FLOOR_SILENCE_RELEASE_MS as f64;
+        if self.continuation_of.is_some()
+            && self
+                .user_speech_end_ms
+                .is_some_and(|speech_end_ms| start_ms - speech_end_ms > sentence_pause_ms)
+        {
+            tracing::debug!(
+                start_ms,
+                "public Live user speech began after a sentence pause; the earlier delegation's continuation ended"
+            );
+            self.continuation_of = None;
+        }
+        self.user_speech_end_ms = Some(
+            self.user_speech_end_ms
+                .map_or(end_ms, |speech_end_ms| speech_end_ms.max(end_ms)),
+        );
+    }
+
     fn measure_provider_input_latency(&mut self, transcribed_through_ms: f64) {
         let measured_at_reflected_clock_ms = self.reflected_input_clock_ms();
         // Provider spans are non-negative milliseconds; anything else
@@ -4245,12 +4305,19 @@ impl SessionState {
         // and carry no turn boundary, so an assistant delta between two
         // parts of one request does not split it; what the assistant said
         // in the window travels separately as context. A delegation with
-        // no new user transcript re-presents the previous request.
+        // no new user transcript re-presents the previous request, unless a
+        // typed turn followed that request (`hold_or_send_text_chat` ends
+        // it): then, as on a channel that has heard no request at all, the
+        // delegation has nothing to act on.
         let request_transcript = if request_transcript.is_empty() {
             match self.last_request.as_ref() {
                 Some(previous) => previous.clone(),
                 None => {
-                    // No user input exists to become the task.
+                    // No spoken request exists to become the task. Like an
+                    // accepted client delegation (below), this one ends any
+                    // earlier continuation: the user's next turn is not
+                    // more words for the job before it.
+                    self.continuation_of = None;
                     self.queued_observations.push_back(
                         GptLiveBrokerObservation::DelegationActionableInputUnsupported {
                             delegation: reference,
@@ -9854,6 +9921,382 @@ mod tests {
         assert_eq!(markers[0].1, "dlg_two");
     }
 
+    /// The longest pause one sentence holds, on the session timeline: the
+    /// bound that ends the user's floor is the bound that ends a
+    /// continuation.
+    #[allow(clippy::cast_precision_loss)]
+    const SENTENCE_PAUSE_MS: f64 = USER_FLOOR_SILENCE_RELEASE_MS as f64;
+
+    /// Session-timeline end of the delegated words in
+    /// [`state_with_mid_utterance_delegation`].
+    const DELEGATED_WORDS_END_MS: f64 = 1200.0;
+
+    /// A spoken request whose last word ends at [`DELEGATED_WORDS_END_MS`],
+    /// delegated while its turn is still open (the model's decision point
+    /// lies inside the last word, as in the recorded streams).
+    fn state_with_mid_utterance_delegation(id: &str) -> SessionState {
+        let mut state = SessionState::default();
+        state
+            .apply_frame(frame(input_delta_span(
+                "write a note of two hundred words",
+                1000.0,
+                DELEGATED_WORDS_END_MS,
+            )))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created_at(id, "client", 1000.0)))
+            .unwrap();
+        drain(&mut state);
+        state
+    }
+
+    fn finished_user_turns(observations: &[GptLiveBrokerObservation]) -> Vec<String> {
+        observations
+            .iter()
+            .filter_map(|observation| match observation {
+                GptLiveBrokerObservation::TurnFinished {
+                    role: GptLiveTurnRole::User,
+                    transcript,
+                    ..
+                } => Some(transcript.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Words the user speaks after the delegated sentence has ended are a
+    /// new utterance: an ordinary turn, never more words for the job of the
+    /// request before it. The shape is the recorded one: the request is
+    /// delegated at its last word, the model acknowledges it, and seconds
+    /// later the user asks something the voice answers itself.
+    ///
+    /// The later words are not lost either: they finish as a user turn and
+    /// are the request of the next delegation, once.
+    #[test]
+    fn words_spoken_after_the_delegated_sentence_ended_are_an_ordinary_turn() {
+        let mut state = state_with_mid_utterance_delegation("dlg_note");
+        state
+            .apply_frame(frame(output_delta_span("On it.", 1800.0, 2200.0)))
+            .unwrap();
+        drain(&mut state);
+        // 18.4 s after the delegated words, as in the recorded stream.
+        state
+            .apply_frame(frame(input_delta_span(
+                "which venue did I mention",
+                19_600.0,
+                19_800.0,
+            )))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span("Lisbon.", 20_000.0, 20_200.0)))
+            .unwrap();
+        let observations = drain(&mut state);
+        assert_eq!(
+            finished_user_turns(&observations),
+            ["which venue did I mention"],
+            "the later words finish as a user turn: {observations:?}"
+        );
+        assert!(
+            continuation_markers(&observations).is_empty(),
+            "words spoken 18.4 s after the delegated sentence were reported as continuing its delegation: {observations:?}"
+        );
+        // The model then delegates them: they are that delegation's request.
+        state
+            .apply_frame(frame(delegation_created_at(
+                "dlg_venue",
+                "client",
+                20_300.0,
+            )))
+            .unwrap();
+        let delegated = drain(&mut state);
+        assert!(
+            delegated.iter().any(|observation| matches!(
+                observation,
+                GptLiveBrokerObservation::ClientDelegationFinal { delegation, request_transcript, .. }
+                    if delegation.0 == "dlg_venue" && request_transcript == "which venue did I mention"
+            )),
+            "the later words are the next delegation's request: {delegated:?}"
+        );
+    }
+
+    /// The bound itself. Words that begin at most the sentence pause after
+    /// the user's previous word are the same sentence and continue the
+    /// delegation; one millisecond more and they are a new utterance.
+    #[test]
+    fn the_sentence_pause_decides_whether_speech_continues_a_delegation() {
+        let continues = |pause_ms: f64| {
+            let mut state = state_with_mid_utterance_delegation("dlg_note");
+            let start_ms = DELEGATED_WORDS_END_MS + pause_ms;
+            state
+                .apply_frame(frame(input_delta_span(
+                    " into notes dot md",
+                    start_ms,
+                    start_ms + 200.0,
+                )))
+                .unwrap();
+            state
+                .apply_frame(frame(output_delta_span(
+                    "On it.",
+                    start_ms + 400.0,
+                    start_ms + 600.0,
+                )))
+                .unwrap();
+            let observations = drain(&mut state);
+            assert_eq!(
+                finished_user_turns(&observations),
+                [" into notes dot md"],
+                "the words finish as a user turn whatever the pause: {observations:?}"
+            );
+            let markers = continuation_markers(&observations);
+            assert!(
+                markers
+                    .iter()
+                    .all(|(_, delegation)| delegation == "dlg_note")
+            );
+            !markers.is_empty()
+        };
+        assert!(continues(0.0), "no pause at all");
+        assert!(
+            continues(1020.0),
+            "the longest pause inside a scripted utterance"
+        );
+        assert!(
+            continues(SENTENCE_PAUSE_MS),
+            "a pause of exactly the bound is still inside the sentence"
+        );
+        assert!(
+            !continues(SENTENCE_PAUSE_MS + 1.0),
+            "words that began after more than the sentence pause were reported as continuing the delegation"
+        );
+    }
+
+    /// The pause is measured from the user's previous word, not from the
+    /// delegation: a sentence carried on word by word stays one sentence
+    /// however long it gets, and continues its delegation as one turn.
+    #[test]
+    fn a_sentence_carried_on_word_by_word_continues_its_delegation() {
+        let mut state = state_with_mid_utterance_delegation("dlg_note");
+        // 1200 ms after the delegated words, then 1200 ms after that word:
+        // 2600 ms from the delegated words, each pause inside the bound.
+        state
+            .apply_frame(frame(input_delta_span(" into", 2400.0, 2600.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(input_delta_span(" notes dot md", 3800.0, 4000.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span("On it.", 4400.0, 4600.0)))
+            .unwrap();
+        let observations = drain(&mut state);
+        let continued: Vec<(&str, &str)> = observations
+            .iter()
+            .filter_map(|observation| match observation {
+                GptLiveBrokerObservation::UserTurnContinuesDelegation {
+                    delegation,
+                    transcript,
+                    ..
+                } => Some((delegation.0.as_str(), transcript.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            continued,
+            [("dlg_note", " into notes dot md")],
+            "{observations:?}"
+        );
+    }
+
+    /// A turn that carries on the sentence and then, after the pause that
+    /// ends a sentence, holds later words too (nobody spoke in between, so
+    /// the turn stayed open) is not reported as continuing: a turn is
+    /// reported whole, and its later words are not the delegation's.
+    #[test]
+    fn a_later_pause_inside_the_continuing_turn_ends_the_continuation() {
+        let mut state = state_with_mid_utterance_delegation("dlg_note");
+        state
+            .apply_frame(frame(input_delta_span(" into notes", 2000.0, 2200.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(input_delta_span(
+                " and what time is it",
+                9000.0,
+                9200.0,
+            )))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span("It is noon.", 9600.0, 9800.0)))
+            .unwrap();
+        let observations = drain(&mut state);
+        assert_eq!(
+            finished_user_turns(&observations),
+            [" into notes and what time is it"],
+            "every word stays in the user's turn: {observations:?}"
+        );
+        assert!(
+            continuation_markers(&observations).is_empty(),
+            "a turn holding words spoken 6.8 s later was reported as continuing the delegation: {observations:?}"
+        );
+    }
+
+    /// The boundary belongs to the delegation it ended, not to the channel:
+    /// a request spoken later and delegated at a pause in its own sentence
+    /// arms its own continuation, and the rest of that sentence continues
+    /// it.
+    #[test]
+    fn a_request_delegated_after_the_boundary_is_continued_by_its_own_sentence() {
+        let mut state = state_with_mid_utterance_delegation("dlg_note");
+        state
+            .apply_frame(frame(input_delta_span("also book a table", 9000.0, 9200.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created_at("dlg_table", "client", 9000.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(input_delta_span(" for two", 9600.0, 9800.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span("Booking.", 10_200.0, 10_400.0)))
+            .unwrap();
+        let observations = drain(&mut state);
+        let markers = continuation_markers(&observations);
+        assert_eq!(markers.len(), 1, "{observations:?}");
+        assert_eq!(markers[0].1, "dlg_table");
+    }
+
+    /// The rule reads positions on the session timeline, never the order of
+    /// arrival and never the model's speech: the last word of the delegated
+    /// sentence, transcribed late (after the model already acknowledged the
+    /// request), still continues its delegation.
+    #[test]
+    fn a_late_transcript_of_the_delegated_sentence_still_continues_it() {
+        let mut state = state_with_mid_utterance_delegation("dlg_note");
+        state
+            .apply_frame(frame(output_delta_span("On it.", 1800.0, 2200.0)))
+            .unwrap();
+        // Spoken right after the delegated words, delivered after the
+        // model's acknowledgement.
+        state
+            .apply_frame(frame(input_delta_span(" please", 1400.0, 1600.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span(" Working.", 2400.0, 2600.0)))
+            .unwrap();
+        let observations = drain(&mut state);
+        let markers = continuation_markers(&observations);
+        assert_eq!(markers.len(), 1, "{observations:?}");
+        assert_eq!(markers[0].1, "dlg_note");
+    }
+
+    /// The point a sentence pause is measured from is the furthest end of
+    /// the user's speech so far, not the end of the delta that arrived
+    /// last: an earlier word transcribed late never moves it back. Here the
+    /// sentence goes on at 2400 ms, an earlier word (1400 to 1600 ms)
+    /// arrives after it, and the next word begins at 3800 ms: 1200 ms after
+    /// the speech so far, but 2200 ms after the late word's end. The turn
+    /// still continues the delegation.
+    #[test]
+    fn a_late_earlier_word_does_not_move_the_pause_reference_back() {
+        let mut state = state_with_mid_utterance_delegation("dlg_note");
+        state
+            .apply_frame(frame(input_delta_span(" into", 2400.0, 2600.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(input_delta_span(" please", 1400.0, 1600.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(input_delta_span(" notes dot md", 3800.0, 4000.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span("On it.", 4400.0, 4600.0)))
+            .unwrap();
+        let observations = drain(&mut state);
+        let continued: Vec<(&str, &str)> = observations
+            .iter()
+            .filter_map(|observation| match observation {
+                GptLiveBrokerObservation::UserTurnContinuesDelegation {
+                    delegation,
+                    transcript,
+                    ..
+                } => Some((delegation.0.as_str(), transcript.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            continued,
+            [("dlg_note", " into please notes dot md")],
+            "a late earlier word moved the pause reference back and the sentence was cut: {observations:?}"
+        );
+    }
+
+    /// The label a continuation carries in the line the adapter writes for
+    /// every observation it hands on. The keyless replay row
+    /// `s106_replay_reports_no_later_turn_as_continuing_an_earlier_delegation`
+    /// counts that label in a replay's lines and expects none; renamed here
+    /// alone, its count would stay at zero for the wrong reason. A rename
+    /// changes this row and that one together.
+    #[test]
+    fn a_continuation_is_handed_on_under_the_label_the_replay_row_counts() {
+        let mut state = state_with_mid_utterance_delegation("dlg_note");
+        state
+            .apply_frame(frame(input_delta_span(
+                " into notes dot md",
+                1400.0,
+                1600.0,
+            )))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span("On it.", 1800.0, 2000.0)))
+            .unwrap();
+        let rendered: Vec<String> = drain(&mut state)
+            .iter()
+            .filter(|observation| {
+                matches!(
+                    observation,
+                    GptLiveBrokerObservation::UserTurnContinuesDelegation { .. }
+                )
+            })
+            .map(|observation| format!("{observation:?}"))
+            .collect();
+        assert_eq!(rendered.len(), 1, "{rendered:?}");
+        assert!(
+            rendered[0].contains("kind: \"user_turn_continues_delegation\""),
+            "{rendered:?}"
+        );
+    }
+
+    /// The released form of the defect: a typed turn between the delegated
+    /// request and the user's later words changed nothing, and the later
+    /// words, answered by the voice itself, were reported as continuing the
+    /// earlier delegation. After the pause that ends a sentence they are an
+    /// ordinary turn, with or without a typed turn in between.
+    #[test]
+    fn words_spoken_after_a_typed_turn_and_a_pause_do_not_continue_the_earlier_delegation() {
+        for typed_turn in [false, true] {
+            let mut state = state_with_spoken_delegation();
+            if typed_turn {
+                let (typed, events) =
+                    text_chat_append(&mut state, "From the text chat: make it four people");
+                assert!(state.hold_or_send_text_chat(typed, events).is_some());
+            }
+            state
+                .apply_frame(frame(input_delta_at("what time is it", 3000.0)))
+                .unwrap();
+            state
+                .apply_frame(frame(output_delta_span("It is noon.", 3500.0, 3600.0)))
+                .unwrap();
+            let observations = drain(&mut state);
+            assert_eq!(
+                finished_user_turns(&observations),
+                ["what time is it"],
+                "typed_turn={typed_turn}: {observations:?}"
+            );
+            assert!(
+                continuation_markers(&observations).is_empty(),
+                "typed_turn={typed_turn}: words spoken 3 s after the delegated request were reported as continuing its delegation: {observations:?}"
+            );
+        }
+    }
+
     #[test]
     fn thinking_ack_requires_every_exact_fragment_receipt_without_consuming_other_lanes() {
         let mut state = SessionState::default();
@@ -10428,6 +10871,349 @@ mod tests {
                 && request_transcript == "first half"
                 && assistant_context == "working on it"
         ));
+    }
+
+    /// A typed turn is not a spoken request. Its rows reach the voice as
+    /// quiet text-chat context; when the provider then creates a client
+    /// delegation and the user has said nothing since the previous spoken
+    /// request's own delegation, that earlier request must not be handed to
+    /// the executor a second time: the user asked for it once, and the turn
+    /// after it was typed. (Seen in the Live gate's fork-and-merge scenario:
+    /// after the typed correction the voice model delegated with nothing
+    /// spoken, and the doubling request ran again.)
+    #[test]
+    fn a_delegation_after_a_text_chat_row_with_nothing_spoken_does_not_rerun_the_spoken_request() {
+        let mut state = SessionState::default();
+        // The spoken request and its delegation.
+        state
+            .apply_frame(frame(input_delta("double the number")))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_spoken", "client")))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span("one moment", 1500.0, 2000.0)))
+            .unwrap();
+        drain(&mut state);
+        // The typed turn's rows on the quiet lane: the prompt row goes out,
+        // the model starts to speak, and the reply row is held behind its
+        // audible response.
+        let (prompt, events) =
+            text_chat_append(&mut state, "From the text chat: change the number to 21");
+        assert!(
+            state.hold_or_send_text_chat(prompt, events).is_some(),
+            "sent: nothing is audible"
+        );
+        model_output(&mut state, true, 3);
+        let (reply, events) =
+            text_chat_append(&mut state, "From the text chat: The numbers are 21 and 42.");
+        assert!(
+            state.hold_or_send_text_chat(reply, events).is_none(),
+            "held while the response is audible"
+        );
+        drain(&mut state);
+        // The provider creates a client delegation; the user has said
+        // nothing since the spoken request's own delegation.
+        state
+            .apply_frame(frame(delegation_created("dlg_after_typed", "client")))
+            .unwrap();
+        let observed = drain(&mut state);
+        let rerun = observed.iter().any(|observation| {
+            matches!(
+                observation,
+                GptLiveBrokerObservation::ClientDelegationFinal { request_transcript, .. }
+                    if request_transcript == "double the number"
+            )
+        });
+        assert!(
+            !rerun,
+            "the spoken request before the typed turn was handed to the executor a second time: {observed:?}"
+        );
+    }
+
+    /// What the adapter does with that delegation is what it does with one
+    /// on a channel that has heard no request at all
+    /// (`a_refused_stray_delegation_is_never_named_as_running`): the same
+    /// typed observation, nothing new outstanding, no in-progress notice.
+    #[test]
+    fn a_delegation_after_a_text_chat_row_with_nothing_spoken_is_refused_like_a_stray() {
+        let mut stray = SessionState::default();
+        stray
+            .apply_frame(frame(delegation_created("dlg_stray", "client")))
+            .unwrap();
+        assert!(matches!(
+            drain(&mut stray).as_slice(),
+            [GptLiveBrokerObservation::DelegationActionableInputUnsupported { delegation }]
+                if delegation.__opaque_provider_id() == "dlg_stray"
+        ));
+
+        let mut state = state_with_spoken_delegation();
+        let (typed, events) =
+            text_chat_append(&mut state, "From the text chat: make it four people");
+        assert!(state.hold_or_send_text_chat(typed, events).is_some());
+        let outstanding = state.outstanding_delegations.clone();
+        let due_notices = state.due_progress_notices.clone();
+        state
+            .apply_frame(frame(delegation_created("dlg_after_typed", "client")))
+            .unwrap();
+        assert!(matches!(
+            drain(&mut state).as_slice(),
+            [GptLiveBrokerObservation::DelegationActionableInputUnsupported { delegation }]
+                if delegation.__opaque_provider_id() == "dlg_after_typed"
+        ));
+        assert_eq!(
+            state.outstanding_delegations, outstanding,
+            "the refused delegation is not outstanding"
+        );
+        assert_eq!(
+            state.due_progress_notices, due_notices,
+            "no in-progress notice is owed for it"
+        );
+    }
+
+    /// The boundary ends the earlier request only. A request the user speaks
+    /// after the typed turn fills the next delegation's window and runs
+    /// once; with no typed turn after it, a later delegation with nothing
+    /// spoken re-presents it as before.
+    #[test]
+    fn a_request_spoken_after_a_text_chat_row_runs_once_and_is_re_presented_as_before() {
+        let mut state = state_with_spoken_delegation();
+        let (typed, events) =
+            text_chat_append(&mut state, "From the text chat: make it four people");
+        assert!(state.hold_or_send_text_chat(typed, events).is_some());
+        state
+            .apply_frame(frame(input_delta_at("and order a taxi", 3000.0)))
+            .unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(delegation_created_at("dlg_new", "client", 3000.5)))
+            .unwrap();
+        let first = drain(&mut state);
+        let requests: Vec<&str> = first
+            .iter()
+            .filter_map(|observation| match observation {
+                GptLiveBrokerObservation::ClientDelegationFinal {
+                    request_transcript, ..
+                } => Some(request_transcript.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            requests,
+            ["and order a taxi"],
+            "the request spoken after the typed turn runs once: {first:?}"
+        );
+        // No typed turn since: the re-present rule applies to it.
+        state
+            .apply_frame(frame(output_delta_span("on it", 3500.0, 3600.0)))
+            .unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(delegation_created_at("dlg_again", "client", 3700.0)))
+            .unwrap();
+        let again = drain(&mut state);
+        assert!(
+            again.iter().any(|observation| matches!(
+                observation,
+                GptLiveBrokerObservation::ClientDelegationFinal { request_transcript, .. }
+                    if request_transcript == "and order a taxi"
+            )),
+            "with no typed turn in between, the previous request is re-presented: {again:?}"
+        );
+    }
+
+    /// A text-chat row HELD behind an audible response is the same boundary
+    /// as one sent at once: the typed turn happened when its rows were
+    /// reserved, not when the hold lets them go. Both rows of a typed turn
+    /// arrive while the model is audible and are held; the delegation the
+    /// provider then creates with nothing spoken is refused like a stray,
+    /// and the earlier spoken request is not handed to the executor again.
+    #[test]
+    fn a_delegation_after_held_text_chat_rows_with_nothing_spoken_is_refused_like_a_stray() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        let (prompt, events) =
+            text_chat_append(&mut state, "From the text chat: make it four people");
+        assert!(
+            state.hold_or_send_text_chat(prompt, events).is_none(),
+            "held while the response is audible"
+        );
+        let (reply, events) =
+            text_chat_append(&mut state, "From the text chat: The table is for four.");
+        assert!(
+            state.hold_or_send_text_chat(reply, events).is_none(),
+            "held behind the first"
+        );
+        drain(&mut state);
+        state
+            .apply_frame(frame(delegation_created("dlg_after_typed", "client")))
+            .unwrap();
+        let observed = drain(&mut state);
+        assert!(
+            observed.iter().any(|observation| matches!(
+                observation,
+                GptLiveBrokerObservation::DelegationActionableInputUnsupported { delegation }
+                    if delegation.__opaque_provider_id() == "dlg_after_typed"
+            )),
+            "the delegation after the held typed turn is refused like a stray: {observed:?}"
+        );
+        assert!(
+            !observed.iter().any(|observation| matches!(
+                observation,
+                GptLiveBrokerObservation::ClientDelegationFinal { .. }
+            )),
+            "a held typed turn let the earlier spoken request run again: {observed:?}"
+        );
+        assert_eq!(
+            state.held_text_chat.len(),
+            2,
+            "both rows are still held: the boundary did not wait for their release"
+        );
+    }
+
+    /// The release of a held text-chat row is not a second boundary. The
+    /// typed row is held behind an audible response; the user then speaks a
+    /// new request, whose delegation runs once; the response ends and the
+    /// held row is released. That request was spoken after the typed turn,
+    /// so a later delegation with nothing spoken still re-presents it.
+    #[test]
+    fn a_request_spoken_while_a_text_chat_row_is_held_is_still_re_presented_after_its_release() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        let (typed, events) =
+            text_chat_append(&mut state, "From the text chat: make it four people");
+        assert!(
+            state.hold_or_send_text_chat(typed, events).is_none(),
+            "held while the response is audible"
+        );
+        state
+            .apply_frame(frame(input_delta_at("and order a taxi", 3000.0)))
+            .unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(delegation_created_at("dlg_new", "client", 3000.5)))
+            .unwrap();
+        let first = drain(&mut state);
+        let requests: Vec<&str> = first
+            .iter()
+            .filter_map(|observation| match observation {
+                GptLiveBrokerObservation::ClientDelegationFinal {
+                    request_transcript, ..
+                } => Some(request_transcript.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            requests,
+            ["and order a taxi"],
+            "the request spoken while the typed row was held runs once: {first:?}"
+        );
+        // The response ends; the held row goes out.
+        model_output(&mut state, false, 8);
+        assert_eq!(released_text_chat(&mut state), [typed]);
+        // Nothing typed since that request was spoken.
+        state
+            .apply_frame(frame(output_delta_span("on it", 3500.0, 3600.0)))
+            .unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(delegation_created_at("dlg_again", "client", 3700.0)))
+            .unwrap();
+        let again = drain(&mut state);
+        assert!(
+            again.iter().any(|observation| matches!(
+                observation,
+                GptLiveBrokerObservation::ClientDelegationFinal { request_transcript, .. }
+                    if request_transcript == "and order a taxi"
+            )),
+            "the release of the held row ended the re-present rule for a request spoken after the typed turn: {again:?}"
+        );
+    }
+
+    /// A refused delegation ends the earlier continuation, as an accepted
+    /// one does. A request delegated while the user's turn was still open
+    /// arms a continuation: the next user turn to finish is reported as
+    /// continuing that delegation. After a typed turn, a delegation created
+    /// with nothing spoken is refused; the turn the user speaks next, which
+    /// the voice answers itself, must then be an ordinary turn and not more
+    /// words for the earlier job.
+    ///
+    /// The same sequence WITHOUT the refused delegation still reports the
+    /// next spoken turn as continuing the earlier delegation: a typed turn
+    /// alone does not end a continuation. The next turn is spoken inside
+    /// the pause one sentence holds ([`USER_FLOOR_SILENCE_RELEASE_MS`] after
+    /// the delegated words), the only stretch in which a turn can continue
+    /// a delegation at all; past it the turn is ordinary either way
+    /// (`words_spoken_after_a_typed_turn_and_a_pause_do_not_continue_the_earlier_delegation`).
+    #[test]
+    fn a_refused_delegation_ends_the_earlier_continuation() {
+        let next_spoken_turn = |refused_delegation: bool| {
+            // Spoken request, delegated while its turn is still open.
+            let mut state = state_with_spoken_delegation();
+            let (typed, events) =
+                text_chat_append(&mut state, "From the text chat: make it four people");
+            assert!(state.hold_or_send_text_chat(typed, events).is_some());
+            if refused_delegation {
+                state
+                    .apply_frame(frame(delegation_created("dlg_after_typed", "client")))
+                    .unwrap();
+                assert!(
+                    drain(&mut state).iter().any(|observation| matches!(
+                        observation,
+                        GptLiveBrokerObservation::DelegationActionableInputUnsupported { delegation }
+                            if delegation.__opaque_provider_id() == "dlg_after_typed"
+                    )),
+                    "the delegation after the typed turn is refused"
+                );
+            }
+            // The user speaks again, one second after the delegated words,
+            // and the voice answers itself.
+            state
+                .apply_frame(frame(input_delta_at("what time is it", 1000.0)))
+                .unwrap();
+            state
+                .apply_frame(frame(output_delta_span("It is noon.", 3500.0, 3600.0)))
+                .unwrap();
+            drain(&mut state)
+        };
+        let continues_the_earlier_delegation = |observed: &[GptLiveBrokerObservation]| {
+            observed.iter().any(|observation| {
+                matches!(
+                    observation,
+                    GptLiveBrokerObservation::UserTurnContinuesDelegation { delegation, transcript, .. }
+                        if delegation.0 == "dlg_cue" && transcript == "what time is it"
+                )
+            })
+        };
+        let finished_as_a_user_turn = |observed: &[GptLiveBrokerObservation]| {
+            observed.iter().any(|observation| {
+                matches!(
+                    observation,
+                    GptLiveBrokerObservation::TurnFinished { role: GptLiveTurnRole::User, transcript, .. }
+                        if transcript == "what time is it"
+                )
+            })
+        };
+
+        let after_refusal = next_spoken_turn(true);
+        assert!(
+            finished_as_a_user_turn(&after_refusal),
+            "the next spoken turn finishes as a user turn: {after_refusal:?}"
+        );
+        assert!(
+            !continues_the_earlier_delegation(&after_refusal),
+            "after the refused delegation the next spoken turn was reported as continuing the earlier delegation: {after_refusal:?}"
+        );
+
+        let without_refusal = next_spoken_turn(false);
+        assert!(
+            finished_as_a_user_turn(&without_refusal),
+            "the next spoken turn finishes as a user turn: {without_refusal:?}"
+        );
+        assert!(
+            continues_the_earlier_delegation(&without_refusal),
+            "with no delegation in between, the next spoken turn still continues the earlier delegation: {without_refusal:?}"
+        );
     }
 
     #[test]

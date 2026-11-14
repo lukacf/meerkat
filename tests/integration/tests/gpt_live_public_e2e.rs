@@ -655,6 +655,43 @@ fn record_metric(
     Ok(())
 }
 
+/// What a scenario's own body ended with, for the line printed next to a
+/// void verdict.
+trait BodyOutcome {
+    fn body_outcome(&self) -> String;
+}
+
+impl<E: std::fmt::Display> BodyOutcome for Result<(), E> {
+    fn body_outcome(&self) -> String {
+        match self {
+            Ok(()) => "passed".to_owned(),
+            Err(error) => format!("failed error={:?}", error.to_string()),
+        }
+    }
+}
+
+impl<E: std::fmt::Display> BodyOutcome for Result<Result<(), E>, tokio::time::error::Elapsed> {
+    fn body_outcome(&self) -> String {
+        match self {
+            Ok(body) => body.body_outcome(),
+            Err(_) => "timed_out".to_owned(),
+        }
+    }
+}
+
+/// Information only: a run the provider degraded is void whatever its body
+/// did, and its verdict line says nothing about the body. This prints the
+/// body's own outcome beside the verdict, so a void run still shows whether
+/// the scenario's checks had failed. It changes no verdict: the gate's
+/// verdict script matches the degraded verdict line, which is printed as
+/// before, and the scenario returns the same error as before.
+fn print_void_body(scenario: &str, body: &impl BodyOutcome) {
+    println!(
+        "GPT_LIVE_VOID_BODY scenario={scenario} body={}",
+        body.body_outcome()
+    );
+}
+
 /// Acknowledge one published assistant output, through the member live host
 /// that owns the channel, so the machine can admit the next synthesized
 /// assistant turn.
@@ -1745,6 +1782,7 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
         Err(_) => evidence::Outcome::Failed,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S97", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result?;
@@ -3572,6 +3610,7 @@ async fn e2e_scenario_99_gpt_live_public_concurrent_context()
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
     })? {
+        print_void_body("S99", &result);
         return Err(evidence.provider_degraded_verdict(&degradation).into());
     }
     result
@@ -7006,6 +7045,7 @@ async fn e2e_scenario_100_gpt_live_public_morning_standup() -> Result<(), Box<dy
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S100", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S100 overall deadline expired")??;
@@ -8562,6 +8602,7 @@ async fn e2e_scenario_102_gpt_live_public_who_are_you() -> Result<(), Box<dyn st
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S102", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S102 overall deadline expired")??;
@@ -8933,6 +8974,7 @@ async fn e2e_scenario_103_gpt_live_public_interrupt_and_recover()
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S103", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S103 overall deadline expired")??;
@@ -9427,6 +9469,7 @@ async fn e2e_scenario_107_gpt_live_public_stuck_close_convergence()
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S107", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S107 overall deadline expired")??;
@@ -9804,6 +9847,7 @@ async fn e2e_scenario_104_gpt_live_public_handoff_voice_typed_voice()
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S104", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S104 overall deadline expired")??;
@@ -10549,6 +10593,7 @@ async fn e2e_scenario_106_gpt_live_public_long_haul() -> Result<(), Box<dyn std:
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S106", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S106 overall deadline expired")??;
@@ -11505,6 +11550,7 @@ async fn e2e_scenario_101_gpt_live_public_busy_backend() -> Result<(), Box<dyn s
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S101", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S101 overall deadline expired")??;
@@ -12026,6 +12072,7 @@ async fn e2e_scenario_105_gpt_live_public_fork_and_merge_parallel()
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S105", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S105 overall deadline expired")??;
@@ -12435,6 +12482,7 @@ async fn e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen()
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S98", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S98 overall deadline expired; no completed real-audio qualification")??;

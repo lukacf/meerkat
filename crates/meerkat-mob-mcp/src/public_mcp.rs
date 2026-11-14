@@ -430,7 +430,7 @@ static PUBLIC_TOOLS: &[PublicTool] = &[
     },
     PublicTool {
         name: "meerkat_mob_respawn",
-        description: "Respawn a mob member with topology restore. A worker's successor starts on a new session: the mobs its earlier session created and its delegates are not carried over.",
+        description: "Respawn a mob member with topology restore. A worker's successor starts on a new session: the mobs its earlier session created and its delegates are not carried over and end at the next start of the host.",
         schema: typed_schema::<MeerkatMobRespawnInput>,
     },
     PublicTool {

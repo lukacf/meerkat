@@ -124,9 +124,12 @@ This will:
 
 Then serve and open:
 ```bash
-python3 -m http.server 4173 --directory web/dist
+python3 -m http.server 4173 --bind 127.0.0.1 --directory web/dist
 open http://127.0.0.1:4173
 ```
+
+The page is served on this machine only; to show it to others, host the
+build deliberately.
 
 ### Rebuild after Rust changes
 

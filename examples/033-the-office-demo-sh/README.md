@@ -101,9 +101,12 @@ chmod +x examples.sh && ./examples.sh
 
 Then serve:
 ```bash
-python3 -m http.server 4174 --directory web/dist
+python3 -m http.server 4174 --bind 127.0.0.1 --directory web/dist
 open http://127.0.0.1:4174
 ```
+
+The page is served on this machine only; to show it to others, host the
+build deliberately.
 
 ### Dev mode (with WASM runtime):
 ```bash

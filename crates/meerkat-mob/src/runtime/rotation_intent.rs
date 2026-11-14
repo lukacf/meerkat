@@ -212,7 +212,11 @@ impl MemberRotationRecord {
 /// runtime mode and labels unless this request names others (a declared
 /// role migration, a runtime-mode restamp, a store-owned identity's row
 /// labels: Apply now for a seat its row's labels moved past, which the
-/// record census counts in `seats_stale`). Under another profile the next
+/// record census counts in `seats_stale`). It also keeps the member's
+/// profile and model overrides and what its session's builds recorded,
+/// unless this request names a host's freshly composed seat
+/// ([`Self::with_profile_override`], [`Self::with_model_override`],
+/// [`Self::with_build_inputs_of`]). Under another profile the next
 /// incarnation runs under that role's comms name: its endpoint is the
 /// member's key under that name, the member's edges end, and it is wired to
 /// the edges the definition declares for its role.
@@ -241,6 +245,24 @@ pub struct MemberRespawn {
     /// that then equals the role's profile is dropped, so the member follows
     /// its role as it did before the floor.
     pub compaction_floor: Option<Option<std::num::NonZeroU64>>,
+    /// The next incarnation's profile override; `None` keeps the member's
+    /// own, which applies under the member's own role only. `Some(None)`
+    /// seats it with no override, so it follows its role's profile.
+    #[allow(
+        clippy::option_option,
+        reason = "as `compaction_floor`: a request that names no override keeps the member's, \
+                  and one that names `None` removes it"
+    )]
+    pub(crate) profile_override: Option<Option<crate::profile::Profile>>,
+    /// The next incarnation's model override; `None` keeps the member's
+    /// own, which applies under the member's own role only. `Some(None)`
+    /// seats it with no override.
+    #[allow(
+        clippy::option_option,
+        reason = "as `compaction_floor`: a request that names no override keeps the member's, \
+                  and one that names `None` removes it"
+    )]
+    pub(crate) model_override: Option<Option<String>>,
     /// The build inputs the next incarnation's builds apply on the kept
     /// session (a declared role migration's composed build): its
     /// `MemberSpawned` row journals them, and each build of that
@@ -302,6 +324,53 @@ impl MemberRespawn {
     pub fn with_compaction_floor(mut self, floor: Option<std::num::NonZeroU64>) -> Self {
         self.compaction_floor = Some(floor);
         self
+    }
+
+    /// Seat the next incarnation with the profile override `profile`, as a
+    /// host's freshly composed seat names it; `None` seats it with no
+    /// override, so it follows its role's profile. Without this call the
+    /// next incarnation keeps the member's own profile override under the
+    /// member's own role, and takes none under another role. A compaction
+    /// floor the request also names ([`Self::with_compaction_floor`]) is
+    /// set on this override.
+    ///
+    /// Name it together with [`Self::with_model_override`]: a seat holds its
+    /// profile override with its model override set on it, so the two are a
+    /// pair. Alone, this call seats `profile` with the member's kept model
+    /// override set on it: `profile`'s own model does not apply.
+    #[must_use]
+    pub fn with_profile_override(mut self, profile: Option<crate::profile::Profile>) -> Self {
+        self.profile_override = Some(profile);
+        self
+    }
+
+    /// Seat the next incarnation with the model override `model`, as a
+    /// host's freshly composed seat names it; `None` seats it with no
+    /// override. Without this call the next incarnation keeps the member's
+    /// own model override under the member's own role, and takes none under
+    /// another role.
+    ///
+    /// Name it together with [`Self::with_profile_override`]: a seat holds
+    /// its profile override with its model override set on it, so the two
+    /// are a pair. Alone, `None` removes the model override and leaves the
+    /// member's kept profile override, which still holds the earlier model:
+    /// that model stays in force until the profile override is named too.
+    #[must_use]
+    pub fn with_model_override(mut self, model: Option<String>) -> Self {
+        self.model_override = Some(model);
+        self
+    }
+
+    /// Carry the build inputs `seat` names to the next incarnation's builds
+    /// on the kept session, as a host's freshly composed seat names them:
+    /// its context, additional instructions, system prompt override, budget
+    /// limits, tool access policy, application tool policy, auth binding and
+    /// web search override. Nothing else of `seat` is read. Without this
+    /// call the next incarnation's builds keep what the session's own
+    /// builds recorded.
+    #[must_use]
+    pub fn with_build_inputs_of(self, seat: &super::SpawnMemberSpec) -> Self {
+        self.with_build_inputs(super::SeatBuildInputs::of_spec(seat))
     }
 
     /// Carry `inputs` to the next incarnation's builds on the kept session.

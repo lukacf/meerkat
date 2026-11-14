@@ -493,7 +493,7 @@ impl IdentityRuntime {
                     .get(identity)
                     .map(|entry| entry.spec.clone())
                     .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?;
-                self.declare_identity_locked(&spec, None).await?;
+                self.declare_identity_locked(&spec, None, None).await?;
                 Ok(true)
             }
             _ => Ok(false),

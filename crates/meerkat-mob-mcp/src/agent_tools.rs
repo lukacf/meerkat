@@ -3141,7 +3141,9 @@ fn build_tool_defs_with_profile_support(
              Retirement is graceful: the member's session is archived (preserving its history) \
              and it is removed from the mob roster. The member can no longer receive messages \
              or run turns after retirement. Retiring a member also retires every member it \
-             forked (its fork_off children and their descendants), deepest first. Use \
+             forked (its fork_off children and their descendants), deepest first. The mobs the \
+             retired member created itself and its delegates end with its session, at the \
+             next start of the host. Use \
              mob_check_member first if you need the member's final output before retiring it.\n\n\
              Retired members cannot be re-spawned. To replace a retired member, spawn a new \
              one with a different member_id using the same profile.",

@@ -36,6 +36,7 @@ pub(super) mod member_wake_turn;
 mod operator_instructions;
 mod owned_edges;
 mod placed_external_routes;
+pub(super) mod quiesce_marker_fold;
 pub(super) mod reload_revival;
 mod resume_post_commit;
 mod resume_rollback;
@@ -9746,6 +9747,11 @@ pub(super) struct MobActor {
     pub(super) roster: Arc<RwLock<RosterAuthority>>,
     pub(super) events: Arc<dyn MobEventStore>,
     pub(super) placed_completion_durable_index: Arc<std::sync::Mutex<PlacedCompletionDurableIndex>>,
+    /// The journal's latest quiesce marker, for the marker's idempotency
+    /// check: a fold of the journal, caught up before every check. Holds no
+    /// lifecycle fact.
+    pub(super) placed_completion_quiesce_marker:
+        quiesce_marker_fold::PlacedCompletionQuiesceMarkerFold,
     pub(super) run_store: Arc<dyn MobRunStore>,
     pub(super) provisioner: Arc<dyn MobProvisioner>,
     /// Session-operation binding authority shared with the provisioner's
@@ -26467,8 +26473,18 @@ impl MobActor {
                 .next_back()
                 == Some(if quiescing { Some(intent) } else { None })
         };
-        let replay = self.events.replay_all().await?;
-        if latest_matches(&replay) {
+        // The journal's latest marker, from the fold caught up to the
+        // journal now: what a whole replay answers, without the replay.
+        let latest = self
+            .placed_completion_quiesce_marker
+            .refreshed(self.events.as_ref(), &self.definition.id)
+            .await?;
+        let wanted = if quiescing {
+            quiesce_marker_fold::LatestQuiesceMarker::Started(intent)
+        } else {
+            quiesce_marker_fold::LatestQuiesceMarker::Closed
+        };
+        if latest == wanted {
             return Ok(());
         }
         let append = self

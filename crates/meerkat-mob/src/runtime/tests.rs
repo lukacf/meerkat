@@ -8,6 +8,8 @@ mod created_identity_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod declared_apply_rows;
 mod ensure_convergence_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod event_log_reads;
 #[cfg(feature = "openai-live")]
 mod existing_live_delegation;
 mod historical_metadata;

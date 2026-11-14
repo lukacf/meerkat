@@ -587,6 +587,189 @@ pub(super) fn latest_actor_owned_startup_worker_count_for_test(mob_id: &MobId) -
         .unwrap_or(0)
 }
 
+/// Test seam: the journal cursors each later read of a mob's start handed
+/// its consumers, by mob and by read, in the order the reads ran.
+#[cfg(test)]
+static START_LOG_READS_FOR_TEST: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::BTreeMap<String, Vec<(&'static str, Vec<u64>)>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+
+#[cfg(test)]
+fn record_start_log_read_for_test<'a>(
+    mob_id: &MobId,
+    read: &'static str,
+    events: impl Iterator<Item = &'a crate::event::MobEvent>,
+) {
+    START_LOG_READS_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(mob_id.to_string())
+        .or_default()
+        .push((read, events.map(|event| event.cursor).collect()));
+}
+
+/// The reads [`record_start_log_read_for_test`] recorded for `mob_id` since
+/// the last take.
+#[cfg(test)]
+pub(super) fn take_start_log_reads_for_test(mob_id: &MobId) -> Vec<(&'static str, Vec<u64>)> {
+    START_LOG_READS_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(mob_id.as_str())
+        .unwrap_or_default()
+}
+
+/// What a read of the journal past an event already read found.
+///
+/// The journal is append-only and its cursors only grow, so the journal
+/// now is the events read before followed by the events after the last of
+/// them. A reader that holds that last event reads from it on, and takes
+/// what follows as the tail only when the store answers that event first,
+/// unchanged. A store that does not (its journal was cleared, and a journal
+/// written since may reuse its cursors) is read whole.
+pub(super) enum LaterLogRead {
+    /// The events appended after the last event read before, of every mob,
+    /// in cursor order.
+    Appended(Vec<crate::event::MobEvent>),
+    /// The whole journal: nothing was read before, or the store no longer
+    /// answers the last event read before where it was read.
+    Whole(Vec<crate::event::MobEvent>),
+}
+
+impl LaterLogRead {
+    const PAGE: usize = 256;
+
+    /// Read what `store` holds past `last`, the last journal event a reader
+    /// read before (`None`: it read none): the events from `last` on, in
+    /// pages, or the whole journal when `last` does not come back first.
+    pub(super) async fn after(
+        store: &dyn MobEventStore,
+        last: Option<&crate::event::MobEvent>,
+    ) -> Result<Self, crate::store::MobStoreError> {
+        let Some(last) = last else {
+            return Ok(Self::Whole(store.replay_all().await?));
+        };
+        // A poll answers the events after a cursor, so the cursor before
+        // the last event's reads that event back first.
+        let mut after_cursor = last.cursor.saturating_sub(1);
+        let mut anchored = false;
+        let mut appended = Vec::new();
+        loop {
+            let page = store.poll(after_cursor, Self::PAGE).await?;
+            let complete = page.len() < Self::PAGE;
+            let mut page = page.into_iter();
+            if !anchored {
+                match page.next() {
+                    Some(first) if super::delivery_scope::same_journal_event(&first, last) => {
+                        anchored = true;
+                        after_cursor = first.cursor;
+                    }
+                    _ => return Ok(Self::Whole(store.replay_all().await?)),
+                }
+            }
+            for event in page {
+                after_cursor = event.cursor;
+                appended.push(event);
+            }
+            if complete {
+                return Ok(Self::Appended(appended));
+            }
+        }
+    }
+}
+
+/// The mob's event log as a resume's first read decoded it, kept so that
+/// the later reads of the same start decode only the events appended since
+/// ([`LaterLogRead`]) instead of the whole log again.
+#[cfg(feature = "runtime-adapter")]
+pub(super) struct ResumeEventLog {
+    /// The last event of the first read, of any mob (`None`: an empty log).
+    last: Option<crate::event::MobEvent>,
+    /// The other mobs' events of the first read, in cursor order. The
+    /// resume keeps its own mob's events itself.
+    other_mobs: Vec<crate::event::MobEvent>,
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl ResumeEventLog {
+    /// Split `first_read`, the whole log in cursor order, into this record
+    /// and `mob_id`'s own events.
+    pub(super) fn of_first_read(
+        first_read: Vec<crate::event::MobEvent>,
+        mob_id: &MobId,
+    ) -> (Self, Vec<crate::event::MobEvent>) {
+        let last = first_read.last().cloned();
+        let (mob_events, other_mobs) = first_read
+            .into_iter()
+            .partition(|event| event.mob_id == *mob_id);
+        (Self { last, other_mobs }, mob_events)
+    }
+
+    /// Read what the store holds past the first read.
+    pub(super) async fn read_later(
+        &self,
+        store: &dyn MobEventStore,
+    ) -> Result<LaterLogRead, crate::store::MobStoreError> {
+        LaterLogRead::after(store, self.last.as_ref()).await
+    }
+
+    /// The part of `mob_events` (the resume's own vector, in cursor order)
+    /// that the first read decoded: the events up to the first read's last
+    /// cursor. What the resume appended since lies past it and is read back
+    /// from the store with everything else appended since.
+    fn first_read_part<'a>(
+        &self,
+        mob_events: &'a [crate::event::MobEvent],
+    ) -> &'a [crate::event::MobEvent] {
+        let last_cursor = self.last.as_ref().map_or(0, |last| last.cursor);
+        &mob_events[..mob_events.partition_point(|event| event.cursor <= last_cursor)]
+    }
+
+    /// `mob_id`'s events of the log as `later` read it, in cursor order: a
+    /// whole replay filtered to the mob, without decoding the first read's
+    /// events again.
+    pub(super) fn mob_events_now<'a>(
+        &self,
+        mob_events: &'a [crate::event::MobEvent],
+        later: &'a LaterLogRead,
+        mob_id: &MobId,
+    ) -> Vec<&'a crate::event::MobEvent> {
+        let (first, rest) = match later {
+            LaterLogRead::Appended(appended) => {
+                (self.first_read_part(mob_events), appended.as_slice())
+            }
+            LaterLogRead::Whole(whole) => (&[][..], whole.as_slice()),
+        };
+        first
+            .iter()
+            .chain(rest.iter().filter(|event| event.mob_id == *mob_id))
+            .collect()
+    }
+
+    /// The whole log as `later` read it, of every mob, in cursor order: what
+    /// a whole replay answers, without decoding the first read's events
+    /// again.
+    pub(super) fn whole_log_now(
+        self,
+        mut mob_events: Vec<crate::event::MobEvent>,
+        later: LaterLogRead,
+    ) -> Vec<crate::event::MobEvent> {
+        match later {
+            LaterLogRead::Whole(whole) => whole,
+            LaterLogRead::Appended(appended) => {
+                let first_read_len = self.first_read_part(&mob_events).len();
+                mob_events.truncate(first_read_len);
+                if !self.other_mobs.is_empty() {
+                    mob_events.extend(self.other_mobs);
+                    mob_events.sort_by_key(|event| event.cursor);
+                }
+                mob_events.extend(appended);
+                mob_events
+            }
+        }
+    }
+}
+
 pub(super) struct ResumeTrustMutation {
     pub(super) comms: Arc<dyn CoreCommsRuntime>,
     pub(super) operation: ResumeTrustMutationOperation,
@@ -9590,11 +9773,11 @@ impl MobBuilder {
                 .and_then(|external| external.supervisor_bridge.as_ref()),
             controlling_acceptor.as_ref(),
         )?;
+        // The one whole read of this start. Its decode is handed on: the
+        // later reads below decode only the events appended after it.
         #[allow(unused_mut)]
-        let mut mob_events: Vec<_> = all_events
-            .into_iter()
-            .filter(|event| event.mob_id == definition.id)
-            .collect();
+        let (resume_log, mut mob_events) =
+            ResumeEventLog::of_first_read(all_events, &definition.id);
         // Validate authority-operation journals before definition/spec sync
         // or any other recovery mutation/repair write.
         super::actor::validate_host_authority_anchor_epoch_boundaries(&mob_events)?;
@@ -10300,11 +10483,11 @@ impl MobBuilder {
                 // `repaired_epoch_events` was sliced. Reload so custody recovery
                 // validates the repaired public chain, never the stale pre-repair
                 // snapshot that could lose finalized privacy rows on retry.
-                let remote_turn_events = storage.events.replay_all().await?;
-                let remote_turn_mob_events = remote_turn_events
-                    .iter()
-                    .filter(|event| event.mob_id == definition.id)
-                    .collect::<Vec<_>>();
+                // The reload reads the events appended since the resume's
+                // first read; that read's own events are not decoded again.
+                let remote_turn_later = resume_log.read_later(storage.events.as_ref()).await?;
+                let remote_turn_mob_events =
+                    resume_log.mob_events_now(&mob_events, &remote_turn_later, &definition.id);
                 let remote_turn_epoch_start = remote_turn_mob_events
                     .iter()
                     .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
@@ -10314,6 +10497,12 @@ impl MobBuilder {
                     .copied()
                     .cloned()
                     .collect::<Vec<_>>();
+                #[cfg(test)]
+                record_start_log_read_for_test(
+                    &definition.id,
+                    "remote_turn_custody",
+                    remote_turn_epoch_events.iter(),
+                );
                 recover_remote_turn_outcome_custody(
                     wiring.dsl_authority.as_mut(),
                     &remote_turn_epoch_events,
@@ -10443,6 +10632,11 @@ impl MobBuilder {
             // The overlays restored members were rebuilt with, retained in the
             // map the preview handle (and so their tools) already share.
             *per_spawn_external_tools.write().await = per_spawn_external_tools_seed;
+            // The log the actor's indexes are seeded from, as the store
+            // holds it now: the first read's decode and the events appended
+            // since.
+            let boot_replay = resume_log.read_later(storage.events.as_ref()).await?;
+            let boot_replay = resume_log.whole_log_now(mob_events, boot_replay);
             Self::start_runtime_with_components(
                 definition,
                 wiring,
@@ -10490,6 +10684,7 @@ impl MobBuilder {
                 // member registration or reconciliation could execute work.
                 None,
                 start_destroy_admission,
+                Some(boot_replay),
             )
             .await
         }
@@ -11759,6 +11954,8 @@ impl MobBuilder {
                 member_live_host,
                 before_activation,
                 None,
+                // A create has no earlier read of its log to hand on.
+                None,
             )
             .await
         })
@@ -11815,6 +12012,10 @@ impl MobBuilder {
             crate::control_policy::CommandAuthority,
             StartAdmittedDestroyCustodyWatch,
         )>,
+        // The whole event log as the caller already read it for this start
+        // (a resume: its first read's decode and the events appended
+        // since); `None` reads it here.
+        boot_replay: Option<Vec<crate::event::MobEvent>>,
     ) -> RuntimeStartFuture {
         Box::pin(async move {
             // The member wake path runs the cold restore recipe, which needs
@@ -11824,7 +12025,12 @@ impl MobBuilder {
             // Recover the actor-local idempotency index from durable public events
             // before spawning any runtime-owned tasks. Private remote-turn custody
             // is then overlaid below from the validated recovery material.
-            let durable_events = events.replay_all().await?;
+            let durable_events = match boot_replay {
+                Some(replayed) => replayed,
+                None => events.replay_all().await?,
+            };
+            #[cfg(test)]
+            record_start_log_read_for_test(&definition.id, "actor_start", durable_events.iter());
             #[cfg(test)]
             let actor_runtime_id = register_actor_runtime_for_test(&definition.id);
             let next_fence_token = combine_recovered_fence_token_seeds(
@@ -11892,7 +12098,15 @@ impl MobBuilder {
                 events: events.clone(),
                 identity_member: identity_member.clone(),
                 identity: Arc::clone(&identity),
-                member_binding_fold: Arc::default(),
+                // Starts from the fold of the log this start already
+                // decoded, so the handle's first member binding history
+                // reads only the journal's tail.
+                member_binding_fold: Arc::new(
+                    super::delivery_scope::MemberBindingFoldCache::seeded(
+                        &durable_events,
+                        &definition.id,
+                    ),
+                ),
                 run_store: run_store.clone(),
                 runtime_metadata: runtime_metadata.clone(),
                 flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
@@ -12033,6 +12247,11 @@ impl MobBuilder {
                     &recovered_private_remote_turns,
                 )?,
             ));
+            let placed_completion_quiesce_marker =
+                super::actor::quiesce_marker_fold::PlacedCompletionQuiesceMarkerFold::seeded(
+                    &durable_events,
+                    &definition.id,
+                );
             let identity_reconcile_holder_id = format!("mob:{}", definition.id);
             let identity_reconcile_incarnation_id =
                 super::identity_incarnation_custody::mint_incarnation_id(
@@ -12069,6 +12288,7 @@ impl MobBuilder {
                 roster,
                 events,
                 placed_completion_durable_index,
+                placed_completion_quiesce_marker,
                 run_store,
                 provisioner,
                 session_ops_adapter,

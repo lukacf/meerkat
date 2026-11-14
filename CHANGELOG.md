@@ -1572,6 +1572,15 @@ them.
   inbox just before the member left cannot put a route to it back. An
   inbox that is only closed for peer ingress has not left and still
   registers.
+- `meerkat-mob`: a mob's start decodes its event log once. A resume
+  (`MobBuilder::resume`) used to decode the whole log four times (its first
+  read, its remote-turn custody reload, the actor's index seed and the
+  first member binding history read), the lift of a stopped mob
+  (`MobHandle::resume`) once more and once per member it rebuilt, and every
+  Stop once. After the resume's first read, each of those now reads only
+  the events appended since, so the CPU a start spends on the log no longer
+  multiplies with the log's length or with the members it rebuilds. What
+  each read sees is unchanged.
 
 - `meerkat-core`: a turn's reasoning-effort preference is judged by the
   route of the client that serves the request where that route states

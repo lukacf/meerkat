@@ -61,6 +61,14 @@ jobs:
     runs-on: windows-2025-vs2026
     timeout-minutes: 20
     steps:
+      # The registration check and the sources it compares a binary's answer
+      # with: this ref's tree, the one the binaries were built from. A full
+      # checkout, so no file the check reads can be missing from it.
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
       - name: Download artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -90,3 +98,16 @@ jobs:
           & (Join-Path extracted 'rkat.exe') --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "rkat --help exited $LASTEXITCODE" }
           Write-Host "all four Windows binaries run on windows-2025-vs2026"
+
+      # Each binary's link-time registrations run: it reports the capabilities
+      # and lists the built-in skills this tree registers. The same step, on
+      # the same runner, as release.yml's verify_windows_binaries, which runs
+      # only in a release run or a prebuild.
+      - name: Require the registrations of each binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($bin in @('rkat', 'rkat-rpc', 'rkat-rest', 'rkat-mcp')) {
+            & python scripts/check-release-binary-registrations --source-root . (Join-Path extracted "$bin.exe")
+            if ($LASTEXITCODE -ne 0) { throw "$bin.exe: the registration check exited $LASTEXITCODE" }
+          }

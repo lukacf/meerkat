@@ -4,7 +4,7 @@ description: "Combine a Meerkat mob with Meta modules into a single managed runt
 icon: "layer-group"
 ---
 
-*Mirrored from Meerkat Meta main at [abdabeb8e978](https://github.com/lukacf/meerkat/commit/abdabeb8e97805385e71d66da7e78136c4b0e68c) on 2026-11-12; Meta version 0.9.14 at that commit.*
+*Mirrored from Meerkat Meta main at [225d539132a2](https://github.com/lukacf/meerkat/commit/225d539132a2ace672400cfa432d00adb43db1a7) on 2026-11-14; Meta version 0.9.14 at that commit.*
 
 The unified runtime is the production entry point for Meta. It bootstraps a Meerkat mob and Meta's module subsystems together, merges their event streams, and manages the combined lifecycle through a single handle.
 
@@ -92,9 +92,13 @@ to its connect timeout (`connect_timeout_secs`) plus at most 0.25 s (plus the
 TERM grace for a server that ignores SIGTERM), and its first turn starts
 after that. A member is constructed when the mob builds it. At the runtime's
 start the mob builds only the members `member_restore` names: under the
-default `on_demand`, the members that hold work, owe a kickoff, have a
-network transport endpoint or a host requirement; under `eager`, every
-member. The start restores `META_IDENTITY_RESTORE_CONCURRENCY` members at a
+default `on_demand`, the members that must be live: the members that hold
+recovery work, owe a kickoff, have a network transport endpoint, are wired
+to a placed member, are an orchestrator the mob notifies on resume, have no
+durable peer endpoint on record yet, or are required by the host (the full
+list is under `member_restore` in
+[Configuration](/meta/reference/configuration#sdk-and-gateway-runtime-options));
+under `eager`, every member. The start restores `META_IDENTITY_RESTORE_CONCURRENCY` members at a
 time (16 by default, at most 16; 1 serializes them), so servers that never
 answer add about that timeout times ceil(built members / concurrency) to it.
 Every other member waits at its first wake. A failed connection completes

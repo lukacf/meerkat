@@ -16,7 +16,7 @@ use meerkat_mob::adaptive::AdaptivePolicy;
 use meerkat_mob::{MobDefinition, definition::SkillSource};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 
 /// Canonical archive path of the bundled LayerDecision schema artifact.
@@ -70,11 +70,15 @@ pub fn pack_directory_with_excludes(
     signing: Option<SigningRequest<'_>>,
     excluded_paths: &[&Path],
 ) -> Result<PackResult, PackValidationError> {
-    let mut files = scan_directory(directory)?;
-    exclude_paths_from_pack(directory, excluded_paths, &mut files)?;
+    let mut scanned = scan_directory(directory)?;
+    exclude_paths_from_pack(directory, excluded_paths, &mut scanned)?;
     if let Some(request) = signing {
-        exclude_paths_from_pack(directory, &[request.key_path], &mut files)?;
+        exclude_paths_from_pack(directory, &[request.key_path], &mut scanned)?;
     }
+    let mut files: BTreeMap<String, Vec<u8>> = scanned
+        .into_iter()
+        .map(|(path, file)| (path, file.bytes))
+        .collect();
     prepare_adaptive_build_outputs(&mut files)?;
     validate_extracted_pack_files(&files)?;
 
@@ -618,7 +622,37 @@ fn ensure_no_trust_section(files: &BTreeMap<String, Vec<u8>>) -> Result<(), Pack
     Ok(())
 }
 
-fn scan_directory(directory: &Path) -> Result<BTreeMap<String, Vec<u8>>, PackValidationError> {
+/// A regular file the scan found under the mob directory.
+struct ScannedFile {
+    bytes: Vec<u8>,
+    /// Which file it is, whatever it is called. `None` where the file system
+    /// gives none.
+    #[cfg(unix)]
+    identity: Option<FileIdentity>,
+}
+
+/// What makes two names the same file on Unix: the device and the inode.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl FileIdentity {
+    /// The identity of a regular file. An inode number of zero is no
+    /// identity: it would make every such file the same file.
+    fn of(metadata: &std::fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.is_file() && metadata.ino() != 0).then(|| Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
+
+fn scan_directory(directory: &Path) -> Result<BTreeMap<String, ScannedFile>, PackValidationError> {
     let mut files = BTreeMap::new();
     scan_directory_inner(directory, directory, &mut files)?;
     Ok(files)
@@ -627,7 +661,7 @@ fn scan_directory(directory: &Path) -> Result<BTreeMap<String, Vec<u8>>, PackVal
 fn scan_directory_inner(
     root: &Path,
     current: &Path,
-    out: &mut BTreeMap<String, Vec<u8>>,
+    out: &mut BTreeMap<String, ScannedFile>,
 ) -> Result<(), PackValidationError> {
     for entry in std::fs::read_dir(current)? {
         let entry = entry?;
@@ -644,7 +678,12 @@ fn scan_directory_inner(
             .strip_prefix(root)
             .map_err(|err| PackValidationError::Archive(err.to_string()))?;
         let rel_path = normalize_rel_path(&rel.to_string_lossy());
-        out.insert(rel_path, std::fs::read(&path)?);
+        let file = ScannedFile {
+            #[cfg(unix)]
+            identity: FileIdentity::of(&entry.metadata()?),
+            bytes: std::fs::read(&path)?,
+        };
+        out.insert(rel_path, file);
     }
     Ok(())
 }
@@ -652,49 +691,57 @@ fn scan_directory_inner(
 /// Removes the files `paths` name from the scanned set.
 ///
 /// A file is left out by what it is, not by how its path or the directory's
-/// is written: both are resolved through the file system before they are
-/// compared, so relative and absolute forms, a leading `./`, `..` and
-/// symbolic links on the way all name the same file. A path outside the
-/// directory removes nothing.
+/// is written. The directory and each path are resolved through the file
+/// system before they are compared, so relative and absolute forms, a leading
+/// `./`, `..` and symbolic links on the way all name the same file. On Unix a
+/// scanned file that is the same file as a path names (the same device and
+/// inode) is left out too, under whatever name or case the scan found it: a
+/// hard link, or another spelling on a file system that ignores case.
+///
+/// A path that names no file leaves nothing out. A path, or the directory,
+/// that cannot be resolved for any other reason is an error: it is never
+/// compared as written, which could pack the file it names.
 fn exclude_paths_from_pack(
     root: &Path,
     paths: &[&Path],
-    files: &mut BTreeMap<String, Vec<u8>>,
+    files: &mut BTreeMap<String, ScannedFile>,
 ) -> Result<(), PackValidationError> {
     if paths.is_empty() {
         return Ok(());
     }
-    let root = std::fs::canonicalize(root)?;
+    let real_root = std::fs::canonicalize(root).map_err(|err| {
+        PackValidationError::Io(format!(
+            "cannot resolve the mob directory '{}': {err}",
+            root.display()
+        ))
+    })?;
     for path in paths {
-        if let Ok(relative) = resolve_excluded_path(path).strip_prefix(&root) {
+        let unresolved = |err: std::io::Error| {
+            PackValidationError::Io(format!(
+                "cannot resolve '{}', a file the pack must leave out: {err}",
+                path.display()
+            ))
+        };
+        let real = match std::fs::canonicalize(path) {
+            Ok(real) => real,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(unresolved(err)),
+        };
+        if let Ok(relative) = real.strip_prefix(&real_root) {
             files.remove(&normalize_rel_path(&relative.to_string_lossy()));
+        }
+        #[cfg(unix)]
+        match std::fs::metadata(&real) {
+            Ok(metadata) => {
+                if let Some(identity) = FileIdentity::of(&metadata) {
+                    files.retain(|_, file| file.identity != Some(identity));
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(unresolved(err)),
         }
     }
     Ok(())
-}
-
-/// The real path of a file to leave out of a pack.
-///
-/// A file that exists resolves whole. One that does not exist yet (the output
-/// of a first pack) resolves through its directory, with its own name as
-/// written. A path whose directory does not resolve either names no file the
-/// scan can have found; it is made absolute on the current directory.
-fn resolve_excluded_path(path: &Path) -> PathBuf {
-    if let Ok(real) = std::fs::canonicalize(path) {
-        return real;
-    }
-    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
-        // A bare file name has the empty parent: the current directory.
-        let parent = if parent.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            parent
-        };
-        if let Ok(real_parent) = std::fs::canonicalize(parent) {
-            return real_parent.join(name);
-        }
-    }
-    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn normalize_rel_path(path: &str) -> String {
@@ -781,7 +828,11 @@ mod tests {
     /// `<temp>/mob` with the pack sources only.
     fn exclusion_fixture() -> TempDir {
         let temp = TempDir::new().unwrap();
-        let mob = temp.path().join("mob");
+        write_exclusion_sources(&temp.path().join("mob"));
+        temp
+    }
+
+    fn write_exclusion_sources(mob: &Path) {
         std::fs::create_dir_all(mob.join("skills")).unwrap();
         std::fs::write(
             mob.join("manifest.toml"),
@@ -790,7 +841,6 @@ mod tests {
         .unwrap();
         std::fs::write(mob.join("definition.json"), br#"{"id":"mob"}"#).unwrap();
         std::fs::write(mob.join("skills").join("notes.md"), "# Notes skill\n").unwrap();
-        temp
     }
 
     /// The same fixture with a signing key (`mob/key.hex`) and the output of
@@ -1091,15 +1141,58 @@ mod tests {
         assert_key_and_output_left_out("links to keys beside the sources", &files);
     }
 
+    /// A second name of the key file, or of the output file, is the same
+    /// file: it is left out too, in whatever directory of the pack it is.
     #[cfg(unix)]
     #[test]
-    fn test_pack_exclusion_guard_hard_link_under_another_name_is_a_second_file() {
+    fn test_pack_exclusion_hard_links_inside_the_directory_are_left_out() {
         let temp = exclusion_fixture_with_key_and_output();
         let mob = temp.path().join("mob");
-        std::fs::hard_link(mob.join("key.hex"), mob.join("key-copy.hex")).unwrap();
+        std::fs::hard_link(mob.join("key.hex"), mob.join("key-again.hex")).unwrap();
+        std::fs::hard_link(mob.join("key.hex"), mob.join("skills").join("k")).unwrap();
+        std::fs::hard_link(mob.join("out.mobpack"), mob.join("out-again.mobpack")).unwrap();
 
-        // The exclusion follows the paths it is given. No path names the
-        // second name of the key file, so it is packed like any other file.
+        let files = signed_pack_files(&mob, &mob.join("key.hex"), &mob.join("out.mobpack"));
+        assert_eq!(
+            files,
+            sorted_names(&[
+                "definition.json",
+                "manifest.toml",
+                "signature.toml",
+                "skills/notes.md"
+            ]),
+            "every name of the key file and of the output file is left out"
+        );
+    }
+
+    /// The key and the output given by names outside the directory that are
+    /// hard links to the files inside it: no path comparison can tell, the
+    /// files are the same.
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_exclusion_key_and_output_given_as_hard_links_outside_the_directory() {
+        let temp = exclusion_fixture_with_key_and_output();
+        let mob = temp.path().join("mob");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::hard_link(mob.join("key.hex"), outside.join("signing.hex")).unwrap();
+        std::fs::hard_link(mob.join("out.mobpack"), outside.join("latest.mobpack")).unwrap();
+
+        let files = signed_pack_files(
+            &mob,
+            &outside.join("signing.hex"),
+            &outside.join("latest.mobpack"),
+        );
+        assert_key_and_output_left_out("key and output given as hard links outside", &files);
+    }
+
+    /// A copy of the key is another file with the same bytes: it is packed.
+    #[test]
+    fn test_pack_exclusion_guard_copy_of_the_key_is_an_ordinary_file() {
+        let temp = exclusion_fixture_with_key_and_output();
+        let mob = temp.path().join("mob");
+        std::fs::copy(mob.join("key.hex"), mob.join("key-copy.hex")).unwrap();
+
         let files = signed_pack_files(&mob, &mob.join("key.hex"), &mob.join("out.mobpack"));
         let mut expected = EXCLUSION_SOURCES.to_vec();
         expected.extend(["key-copy.hex", "signature.toml"]);
@@ -1208,6 +1301,94 @@ mod tests {
             pack_directory_with_excludes(&through_parent, None, &[missing_parent.as_path()])
                 .unwrap();
         assert_eq!(first.archive_bytes, third.archive_bytes);
+    }
+
+    /// A path to leave out that cannot be resolved, for another reason than
+    /// that it names no file, refuses the pack. It is never compared as
+    /// written, which could pack the key.
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_exclusion_path_that_cannot_be_resolved_refuses_the_pack() {
+        use std::os::unix::fs::PermissionsExt;
+
+        /// Gives the directory its search permission back, also on a panic,
+        /// so that the temporary directory can be removed.
+        struct Searchable<'a>(&'a Path);
+        impl Drop for Searchable<'_> {
+            fn drop(&mut self) {
+                std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        let temp = TempDir::new().unwrap();
+        let guard = temp.path().join("guard");
+        let mob = guard.join("mob");
+        write_exclusion_sources(&mob);
+        write_throwaway_key(&mob.join("key.hex"));
+        std::fs::write(mob.join("out.mobpack"), b"earlier output").unwrap();
+
+        // Typed inside the mob directory, whose parent then loses its search
+        // permission: relative paths still open, real paths do not resolve.
+        let (unsearchable, with_output, key_alone, directory) = with_current_dir(&mob, || {
+            let _searchable = Searchable(&guard);
+            std::fs::set_permissions(&guard, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let unsearchable = std::fs::metadata(&mob).is_err();
+            let signing = Some(SigningRequest {
+                signer_id: "test-signer",
+                key_path: Path::new("skills/../key.hex"),
+            });
+            let with_output = pack_directory_with_excludes(
+                Path::new("."),
+                signing,
+                &[Path::new("skills/../out.mobpack")],
+            );
+            let key_alone = pack_directory(Path::new("."), signing);
+            // The directory itself written so that its real path does not
+            // resolve either.
+            let directory = pack_directory_with_excludes(
+                Path::new("skills/.."),
+                None,
+                &[Path::new("out.mobpack")],
+            );
+            (unsearchable, with_output, key_alone, directory)
+        });
+        if !unsearchable {
+            // An account that passes every permission check (root) cannot
+            // build the setting.
+            return;
+        }
+
+        for (refused, result) in [
+            (
+                "I/O error: cannot resolve 'skills/../out.mobpack', a file the pack must leave \
+                 out: Permission denied",
+                with_output,
+            ),
+            (
+                "I/O error: cannot resolve 'skills/../key.hex', a file the pack must leave out: \
+                 Permission denied",
+                key_alone,
+            ),
+            (
+                "I/O error: cannot resolve the mob directory 'skills/..': Permission denied",
+                directory,
+            ),
+        ] {
+            let refusal = match result {
+                Err(refusal) => refusal.to_string(),
+                Ok(packed) => panic!(
+                    "expected `{refused}`, yet a pack was made of {:?}",
+                    extract_targz_safe(&packed.archive_bytes)
+                        .unwrap()
+                        .into_keys()
+                        .collect::<Vec<_>>()
+                ),
+            };
+            assert!(
+                refusal.starts_with(refused),
+                "the refusal names the path and the reason: {refusal}"
+            );
+        }
     }
 
     #[test]

@@ -9,7 +9,9 @@ a release/tag, rebuilds a product, or rewrites producer records.
 Release mode scans the exact release payload for private text before attestation
 or upload: privacy-scan, and assemble-cli for its own product, run the pinned
 engine through every nested container with the private rules and exemptions
-given on the command line, and refuse without them.
+given on the command line, and refuse without them. credential-scan scans the
+same files for credential patterns with two detector builds and refuses every
+finding and every unread file that no acceptance binds to its exact bytes.
 """
 from pathlib import Path, PurePosixPath
 import argparse
@@ -1004,8 +1006,9 @@ def stage_cli(work):
     cli_producer_inputs(work)
 
 
-def assemble_cli(work, review, review_sha256, output, *, rules=None, exemptions=None, accepted_findings=None):
-    privacy = privacy_inputs(rules, exemptions, accepted_findings)
+def assemble_cli(work, review, review_sha256, output, *, rules=None, exemptions=None, accepted_findings=None,
+                 non_published_list=None):
+    privacy = privacy_inputs(rules, exemptions, accepted_findings, non_published_list)
     value, _, resources = cli_producer_inputs(work)
     cli = work / "cli"
     staged = read_json(cli / "stage/staging.json")
@@ -1060,32 +1063,72 @@ def assemble_cli(work, review, review_sha256, output, *, rules=None, exemptions=
 # without them. An accepted-findings file kept beside the rules may accept findings in exact
 # file digests; without one nothing is accepted.
 PRIVACY_SCAN = ROOT / "scripts/release-payload-privacy-scan.py"
+# Members the scan cannot read, each bound to its exact bytes and to who accepted it. Committed.
+COVERAGE_EXCEPTIONS = ROOT / "release/payload-scan-coverage-exceptions.json"
 
 
-def privacy_inputs(rules, exemptions, accepted_findings):
+def privacy_inputs(rules, exemptions, accepted_findings, non_published_list=None):
     require(rules is not None and exemptions is not None,
             "release mode requires --rules and --exemptions (private files, never committed)")
-    for path in (rules, exemptions, accepted_findings):
+    require(non_published_list is not None,
+            "release mode requires --non-published-list (the private list of members a library leaves out, "
+            "never committed)")
+    for path in (rules, exemptions, accepted_findings, non_published_list):
         require(path is None or (path.is_file() and not path.is_symlink()),
-                "privacy scan rules, exemptions and accepted findings must be regular files")
-    return rules, exemptions, accepted_findings
+                "privacy scan rules, exemptions, accepted findings and the non-published list must be regular files")
+    return rules, exemptions, accepted_findings, non_published_list
 
 
 def privacy_scan(payload, privacy, output):
     """Scan the exact payload files. The report holds counts only; the detail holds the matched
     strings and stays private (mode 0600). Refuses unless the scan is clean."""
-    rules, exemptions, accepted_findings = privacy
+    rules, exemptions, accepted_findings, non_published_list = privacy
     require(payload and all(path.is_file() and not path.is_symlink() for path in payload),
             "regular payload files required")
     require(output.is_absolute() and not output.exists(), "fresh privacy scan output required")
     output.mkdir(mode=0o700)
     command = [sys.executable, "-I", PRIVACY_SCAN, "--rules", rules, "--exemptions", exemptions,
-               "--report", output / "report.json", "--detail", output / "detail.json", "--work", output]
+               "--report", output / "report.json", "--detail", output / "detail.json",
+               "--refused", output / "refused.json", "--coverage-exceptions", COVERAGE_EXCEPTIONS,
+               "--non-published-list", non_published_list, "--work", output]
     if accepted_findings is not None:
         command += ["--accepted-findings", accepted_findings]
     code = subprocess.run([str(item) for item in [*command, *payload]], stdin=subprocess.DEVNULL).returncode
-    require(code == 0 and read_json(output / "report.json")["status"] == "clean",
+    require(code == 0 and read_json(output / "report.json")["status"] == "PASS",
             f"the release privacy scan refused the payload (exit {code}); counts in {output / 'report.json'}")
+    return read_json(output / "report.json")
+
+
+# The release credential scan: two builds of the detector (a pinned older one and a current one,
+# each given by absolute path, its default rules file gitleaks.toml beside it) through every
+# nested archive of the exact release payload. It fails closed: every finding and every file no
+# build reads refuses unless the private acceptance file binds it to its exact bytes, and a
+# pending list never accepts.
+CREDENTIAL_SCAN = ROOT / "scripts/release-payload-credential-scan.py"
+
+
+def credential_scan(payload, pinned, current, accepted_findings, pending, output, name="candidate"):
+    """Scan the exact payload files. The receipt and the report hold counts and positions only; the
+    listing of what refused stays private (mode 0600). Refuses unless the receipt says PASS."""
+    require(pinned is not None and current is not None,
+            "release mode requires --gitleaks-pinned and --gitleaks-current (absolute paths of the two detector builds)")
+    for path in (pinned, current, accepted_findings, pending):
+        require(path is None or (path.is_absolute() and path.is_file()),
+                "the detector builds, accepted findings and pending list must be files given by absolute path")
+    require(payload and all(path.is_file() and not path.is_symlink() for path in payload),
+            "regular payload files required")
+    require(output.is_absolute() and not output.exists(), "fresh credential scan output required")
+    output.mkdir(mode=0o700)
+    command = [sys.executable, "-I", CREDENTIAL_SCAN, "--name", name, "--gitleaks-pinned", pinned,
+               "--gitleaks-current", current, "--receipt", output / "receipt.txt", "--report", output / "report.json",
+               "--unaccepted", output / "unaccepted.json", "--work", output]
+    if accepted_findings is not None:
+        command += ["--accepted-findings", accepted_findings]
+    if pending is not None:
+        command += ["--pending", pending]
+    code = subprocess.run([str(item) for item in [*command, *payload]], stdin=subprocess.DEVNULL).returncode
+    require(code == 0 and (output / "report.json").is_file() and read_json(output / "report.json")["status"] == "PASS",
+            f"the release credential scan refused the payload (exit {code}); counts in {output / 'receipt.txt'}")
     return read_json(output / "report.json")
 
 
@@ -1169,8 +1212,14 @@ def read_only_environment(work):
             "GH_CONFIG_DIR": str(home), "LC_ALL": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1"}
 
 
-def command_json(argv, *, env=None, stdin=None):
-    return json.loads(subprocess.check_output([str(x) for x in argv], env=env, stdin=stdin, timeout=300),
+# Every `gh` call has COMMAND_SECONDS. The upload of a file has a bound of its own: a large archive on a
+# slow link needs longer than a read or a listing.
+COMMAND_SECONDS = 300
+UPLOAD_SECONDS = 3600
+
+
+def command_json(argv, *, env=None, stdin=None, timeout=COMMAND_SECONDS):
+    return json.loads(subprocess.check_output([str(x) for x in argv], env=env, stdin=stdin, timeout=timeout),
                       object_pairs_hook=unique)
 
 
@@ -1349,11 +1398,47 @@ def read_publication_product(root, reader, manifest, request, work, env):
     return selection, paths, evidence
 
 
-def accept_publication(request_path, candidate, reader, output):
+# The upload receipt check. No acceptance is recorded and no release asset is written unless the
+# exact files have a passing upload receipt: the reduced record that release-upload-receipt-write.py
+# writes, where the scans ran, from the private-text report and the credential report of the tools
+# of the candidate's own commit. These commands take the receipt and never a full report: a full
+# report holds category names and counts, and it stays where the scans ran. The acceptance record
+# carries the receipt, and publication checks it again before its first write.
+# What a receipt is held to (the pins of the target and the coverage exceptions file) is read by the
+# check from this checkout's commit: no caller of these commands gives a pin, and there is no option
+# for one.
+RECEIPT_CHECK = ROOT / "scripts/release-upload-receipt-check.py"
+UPLOAD_RECEIPT = "upload-receipt.json"
+
+
+def receipt_inputs(args):
+    """The caller's upload receipt for the upload receipt check, as given; checked where used."""
+    return {"upload_receipt": args.upload_receipt, "max_age_hours": args.receipt_max_age_hours}
+
+
+def upload_receipt_check(files, upload_receipt, commit, target, version, receipt=None):
+    """Refuse unless the upload receipt passes for exactly these files of target, for the tools of
+    commit, for the release's version and with the pins this checkout's commit holds. Returns the
+    check's pass line."""
+    command = [sys.executable, "-I", RECEIPT_CHECK, "--target", checked_target(target),
+               "--receipt", upload_receipt, "--release-commit", commit, "--version", version]
+    if (receipt or {}).get("max_age_hours") is not None:
+        command += ["--max-age-hours", receipt["max_age_hours"]]
+    done = subprocess.run([str(item) for item in [*command, *files]], stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True)
+    lines = done.stdout.strip().splitlines()
+    require(done.returncode == 0 and bool(lines) and lines[-1].startswith("UPLOAD-CHECK PASS "),
+            "the upload receipt check refused these files: " + "; ".join(lines[-8:] or [done.stderr.strip()[-300:]]))
+    return lines[-1]
+
+
+def accept_publication(request_path, candidate, reader, output, receipt=None):
     checked_file(request_path, MAX_METADATA)
     request = checked_publication_request(read_json(request_path))
     files = publication_files(request["target"])
     subjects = files[:2]
+    require(isinstance(receipt, dict) and receipt.get("upload_receipt") is not None,
+            "acceptance requires --upload-receipt (the upload receipt for these exact files)")
     require(not output.exists(), "fresh acceptance directory required")
     output.mkdir()
     env = read_only_environment(output)
@@ -1365,6 +1450,12 @@ def accept_publication(request_path, candidate, reader, output):
         checked_file(candidate / name, MAX_FILE if name == subjects[0] else MAX_METADATA)
         copy_exact(candidate / name, assets / name)
     manifest, rows = checked_publication_candidate(assets, request)
+    # The record carries the upload receipt, and it must pass for the retained copies before
+    # anything reads the candidate further.
+    checked_file(receipt["upload_receipt"], MAX_METADATA)
+    copy_exact(receipt["upload_receipt"], output / UPLOAD_RECEIPT)
+    upload_receipt_check([assets / name for name in files], output / UPLOAD_RECEIPT, request["source_sha"],
+                         request["target"], request["connect_version"], receipt)
     for name in subjects:
         verified = verify_publication_subject(assets / name, assets / files[2], request, env=env)
         write_new(output / (name + ".verification.json"), verified)
@@ -1386,30 +1477,42 @@ def accept_publication(request_path, candidate, reader, output):
 
 def publication_api(endpoint, *, upload=None):
     argv = ["gh", "api", endpoint, "--hostname", "github.com"]
-    if upload is not None:
-        argv += ["--method", "POST", "--header", "Content-Type: application/octet-stream", "--input", "-"]
-    return command_json(argv, stdin=upload)
+    if upload is None:
+        return command_json(argv, stdin=None)
+    argv += ["--method", "POST", "--header", "Content-Type: application/octet-stream", "--input", "-"]
+    return command_json(argv, stdin=upload, timeout=UPLOAD_SECONDS)
 
 
-def release_state(request):
+def release_asset_upload(release_id, name, upload):
+    """Add one new asset to an existing release, from an open file. The one request in this tree that
+    writes a file to a Connect release; its two callers are publish_accepted and
+    release-upload-attach.py."""
+    return publication_api(f"https://uploads.github.com/repos/{PUBLICATION_REPO}/releases/{release_id}/assets?name={name}",
+                           upload=upload)
+
+
+def release_state(request, api=None):
+    # api: the reader of another tool that shares this function (release-upload-attach.py); the
+    # commands of this tool read through publication_api.
+    api = publication_api if api is None else api
     endpoint = "repos/" + PUBLICATION_REPO
-    repository = publication_api(endpoint)
+    repository = api(endpoint)
     require(repository.get("full_name") == PUBLICATION_REPO and repository.get("private") is False
             and repository.get("visibility") == "public", "selected repository is not public")
-    release = publication_api(endpoint + "/releases/" + str(request["release_id"]))
+    release = api(endpoint + "/releases/" + str(request["release_id"]))
     require(release["id"] == request["release_id"] and release["tag_name"] == request["tag"]
             and type(release["draft"]) is bool, "selected existing release differs")
-    ref = publication_api(endpoint + "/git/ref/tags/" + request["tag"])["object"]
+    ref = api(endpoint + "/git/ref/tags/" + request["tag"])["object"]
     for _ in range(4):
         if ref["type"] == "commit":
             break
         require(ref["type"] == "tag" and SHA.fullmatch(ref["sha"]), "invalid release tag target")
-        ref = publication_api(endpoint + "/git/tags/" + ref["sha"])["object"]
+        ref = api(endpoint + "/git/tags/" + ref["sha"])["object"]
     require(ref == {"type": "commit", "sha": request["source_sha"], "url": ref.get("url")},
             "release tag does not select accepted source")
     assets = []
     for page in range(1, 7):
-        batch = publication_api(endpoint + f"/releases/{request['release_id']}/assets?per_page=100&page={page}")
+        batch = api(endpoint + f"/releases/{request['release_id']}/assets?per_page=100&page={page}")
         require(isinstance(batch, list) and len(batch) <= 100, "invalid release asset page")
         assets.extend(batch)
         require(len(assets) <= 512, "release asset inventory exceeds bound")
@@ -1637,7 +1740,7 @@ def checked_forge_delivery(directory, accepted, fragment):
             "text_files": observations}
 
 
-def publish_accepted(directory, expected_sha256, output):
+def publish_accepted(directory, expected_sha256, output, receipt=None):
     # This command deliberately has no extraction or Forge-reader call. The
     # independently selected acceptance hash is the handoff into write custody.
     acceptance_path = directory / "acceptance.json"
@@ -1677,6 +1780,14 @@ def publish_accepted(directory, expected_sha256, output):
             (assets / name).chmod(0o400)
         require(checked_publication_candidate(assets, request)[1] == accepted["assets"],
                 "accepted allowlist bytes differ")
+        # Before any API call or write: the upload receipt the acceptance carries must pass for
+        # these exact retained bytes, with the pins this checkout's commit holds.
+        require((directory / UPLOAD_RECEIPT).is_file(), "the acceptance carries no upload receipt")
+        with (output / UPLOAD_RECEIPT).open("xb") as retained:
+            copy_publication_input(directory / UPLOAD_RECEIPT, retained, MAX_METADATA)
+        report["scan_receipt"] = upload_receipt_check([assets / name for name in files], output / UPLOAD_RECEIPT,
+                                                      request["source_sha"], request["target"],
+                                                      request["connect_version"], receipt)
         fragment = {"files": forge_public_files(accepted), "selection": projected_selection,
                     "paths": accepted["paths"]}
         report["forge_delivery"] = checked_forge_delivery(directory, accepted, fragment)
@@ -1711,8 +1822,7 @@ def publish_accepted(directory, expected_sha256, output):
                     require(row == expected, "allowlist changed before upload")
                     upload.seek(0)
                     report["write_attempted"].append(name)
-                    publication_api(f"https://uploads.github.com/repos/{PUBLICATION_REPO}/releases/{request['release_id']}/assets?name={name}",
-                                    upload=upload)
+                    release_asset_upload(request["release_id"], name, upload)
                 current_release, current = release_state(request)
                 require(not current_release["draft"], "release became private during upload")
             require(name in current, "uploaded asset was not observed")
@@ -1746,19 +1856,27 @@ def publish_accepted(directory, expected_sha256, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("preflight", "build", "stage-cli", "assemble-cli", "fetch-built",
-                                            "accept-publication", "publish-accepted", "privacy-scan"))
+                                            "accept-publication", "publish-accepted", "privacy-scan",
+                                            "credential-scan"))
     for name in ("request", "candidate", "accepted", "output", "candidate-work", "shutdown-review",
-                 "rules", "exemptions", "accepted-findings"):
+                 "rules", "exemptions", "accepted-findings", "gitleaks-pinned", "gitleaks-current", "pending",
+                 "upload-receipt", "non-published-list"):
         parser.add_argument("--" + name, type=Path)
+    # The upload receipt check of accept-publication and publish-accepted takes no pin from here: it
+    # reads them from this checkout's commit. The age bound can only be made shorter.
+    parser.add_argument("--receipt-max-age-hours", type=float)
     reader = parser.add_mutually_exclusive_group()
     reader.add_argument("--forge-reader-source", type=Path, help="exact selected Forge reader checkout")
     reader.add_argument("--meta-source", type=Path, help="legacy alias for --forge-reader-source; reader selection is still checked")
     parser.add_argument("--acceptance-sha256")
     parser.add_argument("--shutdown-review-sha256")
-    parser.add_argument("payload", nargs="*", type=Path, help="privacy-scan only: the exact release payload files")
+    parser.add_argument("--name", default="candidate", help="credential-scan only: the name of the run in its receipt")
+    parser.add_argument("payload", nargs="*", type=Path,
+                        help="privacy-scan and credential-scan only: the exact release payload files")
     args = parser.parse_intermixed_args()
     command = args.command
-    require(command == "privacy-scan" or not args.payload, "payload files are taken by privacy-scan only")
+    require(command in ("privacy-scan", "credential-scan") or not args.payload,
+            "payload files are taken by privacy-scan and credential-scan only")
     if command == "preflight":
         preflight(native=True)
     elif command == "build":
@@ -1770,20 +1888,25 @@ def main():
         require(all((args.candidate_work, args.shutdown_review, args.shutdown_review_sha256, args.output)),
                 "retained producer, exact independent review and output required")
         assemble_cli(args.candidate_work, args.shutdown_review, args.shutdown_review_sha256, args.output,
-                     rules=args.rules, exemptions=args.exemptions, accepted_findings=args.accepted_findings)
+                     rules=args.rules, exemptions=args.exemptions, accepted_findings=args.accepted_findings,
+                     non_published_list=args.non_published_list)
     elif command == "privacy-scan":
-        privacy = privacy_inputs(args.rules, args.exemptions, args.accepted_findings)
+        privacy = privacy_inputs(args.rules, args.exemptions, args.accepted_findings, args.non_published_list)
         require(args.output and args.payload, "privacy scan output and payload files required")
         privacy_scan(args.payload, privacy, args.output)
+    elif command == "credential-scan":
+        require(args.output and args.payload, "credential scan output and payload files required")
+        credential_scan(args.payload, args.gitleaks_pinned, args.gitleaks_current, args.accepted_findings,
+                        args.pending, args.output, args.name)
     elif command == "fetch-built":
         fetch_built()
     elif command == "accept-publication":
         reader_source = args.forge_reader_source or args.meta_source
         require(all((args.request, args.candidate, reader_source, args.output)), "acceptance paths required")
-        accept_publication(args.request, args.candidate, reader_source, args.output)
+        accept_publication(args.request, args.candidate, reader_source, args.output, receipt=receipt_inputs(args))
     else:
         require(all((args.accepted, args.acceptance_sha256, args.output)), "selected acceptance and output required")
-        publish_accepted(args.accepted, args.acceptance_sha256, args.output)
+        publish_accepted(args.accepted, args.acceptance_sha256, args.output, receipt=receipt_inputs(args))
 
 
 if __name__ == "__main__":

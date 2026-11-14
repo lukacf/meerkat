@@ -421,8 +421,7 @@ Standard JSON-RPC 2.0 with `"jsonrpc": "2.0"` on every message. Three message ty
 ## Request cancellation
 
 <Warning>
-Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, cancelling
-a request that is still waiting behind another turn can permanently destroy
+Known issue, noted 2026-11-13: in Meerkat 0.8.0 through 0.9.14, cancelling a request that is still waiting behind another turn can permanently destroy
 the mobs of the session it was queued for. See
 the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
 for the affected releases, the cases and what to do.
@@ -1748,7 +1747,7 @@ Only a mechanical failure is `-32603`.
 </ParamField>
 
 <ParamField body="model" type="string | null" default="from session">
-  Model override for this turn. On pending (deferred) sessions this sets the model before materialization. On materialized sessions this hot-swaps the LLM client for the remainder of the session. Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, a turn that cannot be started can permanently destroy the mobs its session owns. See the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14) for the affected releases, the cases and what to do.
+  Model override for this turn. On pending (deferred) sessions this sets the model before materialization. On materialized sessions this hot-swaps the LLM client for the remainder of the session. Known issue, noted 2026-11-13: in releases up to and including 0.9.14 (the first affected release differs by case: see the release page for the range of each), a turn that cannot be started can permanently destroy the mobs its session owns. See the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14) for the affected releases, the cases and what to do.
 </ParamField>
 
 <ParamField body="provider" type="string | null" default="from session">
@@ -3104,9 +3103,12 @@ with `-32602` and `data.kind` `resume_session_bound_to_another_member`
 seated.
 
 <Warning>
-Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, a
+Known issue, noted 2026-11-13: in Meerkat 0.7.29 through 0.9.14 (0.6.0 through
+0.7.28 not established), a
 `mob/spawn` that resumes an existing session can archive that session if the
-mob is stopped or the host shuts down while the spawn is still in progress.
+mob is stopped, completed, reset or destroyed, or the host shuts down, while
+the spawn is still in progress, or if the attach itself is refused after it
+was prepared.
 Read from the source and not yet confirmed by a test: the mobs that session
 owns are then destroyed at the next start. See the
 [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)

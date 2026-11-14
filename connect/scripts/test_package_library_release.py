@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Focused archive construction and input-boundary tests, with small fixtures."""
 
+import contextlib
 import copy
+import gzip
 import hashlib
 import importlib.util
 import io
@@ -11,6 +13,7 @@ from pathlib import Path
 import shutil
 import stat
 import signal
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -58,6 +61,57 @@ def donor_archive(path, root, files):
     return sha(path.read_bytes())
 
 
+# The Linux library guide must hold this sentence, byte for byte and on one line. It names no file:
+# the shipped record states what ships and lists no member.
+DISCLOSURE = "The bound source is the exact build source except for members this library does not publish."
+RECORD = "selected/provenance/redactions.json"
+NOTE = "Build provenance records and some members of the source snapshots are not published with this library."
+SOURCE_TREE = "selected/provenance/source/"
+PUBLISHED_LIST = "release/library-published-source-members.json"
+LIST_SCHEMA = "package-library-release/source-members/1"
+PRIVATE_SCHEMA = "package-library-release/non-published-source-members/1"
+# The Linux fixture's source snapshots -> the prefix their members carry. Any other snapshot has none.
+SNAPSHOTS = {
+    "selected/provenance/canonical-mcpb/source.tar.gz": "",
+    "selected/provenance/compose-migration/source.tar.gz": "source/",
+    "selected/provenance/compose-retention/source.tar.gz": "source/",
+    "selected/provenance/linux-mcpb/source.tar.gz": "",
+}
+# Synthetic member names. The fixture checkout's committed list publishes PUBLISHED; WITHHELD are named
+# only by the private list a test passes; no list names UNLISTED.
+PUBLISHED = ("crates/sample/Cargo.toml", "crates/sample/src/empty.rs", "crates/sample/src/lib.rs",
+             "crates/sample/src/wide.rs")
+WITHHELD = ("crates/sample/NOTES.md", "crates/sample/data/listing.json", "crates/sample/tests/listed.rs")
+UNLISTED = "crates/sample/src/added.rs"
+
+
+def source_snapshot(rows, *, format=tarfile.USTAR_FORMAT, extra=None):
+    """A small source snapshot: (gzip bytes, the tar bytes inside)."""
+    plain = io.BytesIO()
+    with tarfile.open(fileobj=plain, mode="w:", format=format) as archive:
+        for index, (name, data) in enumerate(rows):
+            item = tarfile.TarInfo(name)
+            item.size, item.mode = len(data), 0o755 if index % 2 else 0o644
+            # Distinct header fields: a rewritten header would not equal the original block.
+            item.mtime, item.uid, item.gid = 1700000000 + index, 501 + index, 20
+            item.uname, item.gname = "builder", "staff"
+            archive.addfile(item, io.BytesIO(data))
+        if extra is not None:
+            extra(archive)
+    raw = plain.getvalue()
+    return gzip.compress(raw, mtime=1700000000), raw
+
+
+def member_blocks(raw):
+    """Each tar member's whole raw block (header, data and padding), in archive order."""
+    rows = []
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+        for item in archive:
+            end = item.offset_data + (item.size + 511) // 512 * 512
+            rows.append((item.name, raw[item.offset:end]))
+    return rows
+
+
 class LinuxMcpbSelectionTests(unittest.TestCase):
     def test_actual_linux_selection_binds_two_feature_enabled_tools_and_notices(self):
         linux = release.PYTHON_KITS["linux-x86_64"]
@@ -87,6 +141,9 @@ class ReleaseTests(unittest.TestCase):
         self.base = Path(self.temporary.name)
         self.root = self.base / "checkout"
         self.root.mkdir()
+        # The packager's own pins, read before any fixture replaces them.
+        self.pinned_sources = {target: set(release.PYTHON_SOURCES) | set(kit.get("sources", {}))
+                               for target, kit in release.PYTHON_KITS.items()}
         self.targets = copy.deepcopy(release.TARGETS)
         self.python_kits = copy.deepcopy(release.PYTHON_KITS)
         # Tests opt in to additions and overrides from this fixed Linux donor.
@@ -180,12 +237,114 @@ class ReleaseTests(unittest.TestCase):
             manager = patch.object(release, name, value)
             manager.start()
             self.addCleanup(manager.stop)
+        self.provenance_fixture()
+
+    def provenance_fixture(self):
+        """Give every target source snapshots, and Linux a donor source tree, that hold only members the
+        fixture checkout's committed list publishes. The Linux guide holds the disclosure sentence."""
+        target = "linux-x86_64"
+        self.published_data = dict(zip(PUBLISHED, (b"[package]\n", b"", b"r" * 512, b"w" * 513)))
+        self.snapshot_rows, self.snapshot_tars, self.private_trees = {}, {}, {}
+        self.non_published = None
+        self.donor_files[target]["provenance/source/" + PUBLISHED[2]] = (b"retained tree source\n", 0o644)
+        self.repin_donor(target)
+        self.published = {SOURCE_TREE: sorted([PUBLISHED[2], "retained.txt"])}
+        for member in SNAPSHOTS:
+            self.python_kits[target].setdefault("sources", {})[member] = (
+                "retained-inputs/" + member.removeprefix("selected/"), None)
+        for name, donor in self.python_kits.items():
+            for member in donor.get("sources", {}):
+                if member.endswith("/source.tar.gz"):
+                    prefix = SNAPSHOTS.get(member, "")
+                    # The first member differs per snapshot, so no two snapshots are the same bytes.
+                    self.snapshot_rows[member] = [
+                        (prefix + path, self.published_data[path] + (b"# " + member.encode() + b"\n" if not index else b""))
+                        for index, path in enumerate(PUBLISHED)]
+                    self.published[member] = [prefix + path for path in PUBLISHED]
+                    self.repin_snapshot(member, target=name)
+        self.write_published()
+        selection = self.targets[target]
+        guide = ("Selected release guide: " + target + "\n\n" + DISCLOSURE + "\n").encode()
+        write(self.root / selection["guide"], guide)
+        selection["guide_sha256"] = sha(guide)
+
+    def write_published(self):
+        write(self.root / PUBLISHED_LIST, (json.dumps(
+            {"schema": LIST_SCHEMA, "trees": {tree: sorted(names) for tree, names in sorted(self.published.items())}},
+            indent=1) + "\n").encode())
+
+    def private_document(self):
+        """The private list: per tree the members that are not published with their digests, and the
+        digests of the original source snapshots that hold one."""
+        originals = {}
+        for donor in self.python_kits.values():
+            for member, (_, pin) in donor.get("sources", {}).items():
+                if member in self.private_trees and self.private_trees[member]:
+                    originals.setdefault(member, set()).add(pin)
+        return {"schema": PRIVATE_SCHEMA,
+                "trees": {tree: [{"name": name, "sha256": names[name]} for name in sorted(names)]
+                          for tree, names in sorted(self.private_trees.items())},
+                "original_snapshots": {member: sorted(pins) for member, pins in sorted(originals.items())}}
+
+    def write_non_published(self, document=None):
+        self.non_published = self.base / "private" / "non-published-source-members.json"
+        write(self.non_published, (json.dumps(document or self.private_document(), indent=1) + "\n").encode(), 0o600)
+
+    def private_list(self):
+        return release.read_non_published_list(self.non_published.read_bytes())
+
+    def withhold(self):
+        """Add members that only a private list names: to the Linux donor source tree and to every source
+        snapshot of every target, between the published ones. Later builds of this test pass that list."""
+        target = "linux-x86_64"
+        self.withheld_tree = {name: ("withheld tree member: " + name + "\n").encode() for name in WITHHELD}
+        # One member differs between the donor tree and the snapshots.
+        self.withheld_snapshot = {**self.withheld_tree, WITHHELD[0]: b"withheld snapshot member: other bytes\n"}
+        for name, data in self.withheld_tree.items():
+            self.donor_files[target]["provenance/source/" + name] = (data, 0o644)
+        self.repin_donor(target)
+        self.private_trees[SOURCE_TREE] = {name: sha(data) for name, data in self.withheld_tree.items()}
+        order = (WITHHELD[0], PUBLISHED[0], PUBLISHED[1], WITHHELD[1], PUBLISHED[2], PUBLISHED[3], WITHHELD[2])
+        data = {**self.published_data, **self.withheld_snapshot}
+        for name, donor in self.python_kits.items():
+            for member in donor.get("sources", {}):
+                if member.endswith("/source.tar.gz"):
+                    prefix = SNAPSHOTS.get(member, "")
+                    self.snapshot_rows[member] = [
+                        (prefix + path, data[path] + (b"# " + member.encode() + b"\n" if path == PUBLISHED[0] else b""))
+                        for path in order]
+                    self.private_trees[member] = {prefix + path: sha(self.withheld_snapshot[path]) for path in WITHHELD}
+                    self.repin_snapshot(member, target=name)
+        self.write_non_published()
+
+    def collect(self, target):
+        return release.collect(self.root, target, non_published=None if self.non_published is None else self.private_list())
+
+    def repin_snapshot(self, member, rows=None, *, raw=None, target="linux-x86_64", **form):
+        """Write one source snapshot input (its fixture rows by default) and pin it."""
+        path = self.python_kits[target]["sources"][member][0]
+        plain = None
+        if raw is None:
+            raw, plain = source_snapshot(self.snapshot_rows[member] if rows is None else rows, **form)
+        write(self.root / path, raw)
+        self.python_kits[target]["sources"][member] = (path, sha(raw))
+        if rows is None and not form and plain is not None:
+            self.snapshot_tars[member] = plain
+        return raw
+
+    def shipped(self, result):
+        """Every regular file of a produced library archive, by its name inside the library."""
+        prefix = Path(result["archive"]).name.removesuffix(".tar.gz") + "/"
+        with tarfile.open(result["archive"]) as archive:
+            return {item.name.removeprefix(prefix): archive.extractfile(item).read()
+                    for item in archive.getmembers() if item.isfile()}
 
     def bundle(self, target="macos-arm64"):
         return self.root / self.targets[target]["bundle"]
 
     def package(self, name="output", target="macos-arm64", root=None):
-        return release.package(root or self.root, target, self.base / name)
+        return release.package(root or self.root, target, self.base / name, non_published_list=self.non_published,
+                               proof_only=self.non_published is None)
 
     def repin_bundle(self, target="macos-arm64"):
         self.targets[target].update(manifest(self.bundle(target)))
@@ -259,7 +418,8 @@ class ReleaseTests(unittest.TestCase):
         raw = (json.dumps(value, sort_keys=True) + "\n").encode()
         write(path, raw)
         return release.package(self.root, target or value["target"], self.base / name,
-            input_selection=path, input_selection_sha256=sha(raw))
+            input_selection=path, input_selection_sha256=sha(raw), non_published_list=self.non_published,
+            proof_only=self.non_published is None)
 
     def enterprise_inputs(self):
         value = self.explicit_inputs("linux-x86_64")
@@ -809,6 +969,8 @@ class ReleaseTests(unittest.TestCase):
                 for expression in (flag + " " + expected, '"' + flag + '", "' + expected + '"'):
                     with self.subTest(target=target, expression=expression):
                         raw = (expression + "\n").encode()
+                        if target == "linux-x86_64":
+                            raw += (DISCLOSURE + "\n").encode()
                         guide.write_bytes(raw)
                         selection["guide_sha256"] = sha(raw)
                         release.collect(self.root, target)
@@ -939,7 +1101,7 @@ class ReleaseTests(unittest.TestCase):
         source = "legal/new-dependency/LICENSE.md"
         raw = b"Original notice.\r\nSee [terms](COPYING) and [author](../AUTHORS.md).\r\n"
         write(self.root / source, raw)
-        self.python_kits[target]["sources"] = {destination: (source, sha(raw))}
+        self.python_kits[target]["sources"][destination] = (source, sha(raw))
         self.assertNotEqual(release.python_document(source, destination, raw, target=target), raw)
         files = release.collect(self.root, target)
         self.assertEqual(files[destination], (raw, 0o644))
@@ -1274,8 +1436,8 @@ class ReleaseTests(unittest.TestCase):
         original = release.collect
         before = (self.bundle() / "README.md").read_bytes()
 
-        def collect_then_change(root, target, *, settings=None):
-            files = original(root, target, settings=settings)
+        def collect_then_change(root, target, **options):
+            files = original(root, target, **options)
             (self.bundle() / "README.md").write_bytes(b"changed after collection")
             return files
 
@@ -1294,6 +1456,842 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse((output / "SHA256SUMS").exists())
         with self.assertRaisesRegex(release.PackageError, "output_exists"):
             self.package()
+
+    def expected_record(self, files):
+        """The shipped record: one sentence and each shipped source snapshot, nothing about what was left out."""
+        return {"schema_version": 2, "note": NOTE,
+                "snapshots": [{"member": member, "sha256": sha(files[member]), "bytes": len(files[member])}
+                              for member in sorted(files) if member.endswith("/source.tar.gz")]}
+
+    def refused_with(self, target="linux-x86_64", output="refused-unlisted", **options):
+        with self.assertRaises(release.PackageError) as refused:
+            release.package(self.root, target, self.base / output, **options)
+        self.assertFalse((self.base / output).exists())
+        return refused.exception
+
+    def command(self, *options):
+        """The packager's command line on the fixture checkout: (exit code, standard output, standard error)."""
+        out, err = io.StringIO(), io.StringIO()
+        argv = ["package-library-release.py", *map(str, options)]
+        with patch.object(release, "ROOT", self.root), patch.object(sys, "argv", argv), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = release.main()
+            except SystemExit as stop:
+                code = stop.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_the_packager_names_no_member_it_leaves_out(self):
+        # The packager holds no table of members: what is left out comes from the two lists alone. Its
+        # provenance constants are this closed set, so another one does not arrive unseen.
+        self.assertEqual(sorted(name for name in vars(release) if name.startswith("PROVENANCE_")),
+                         ["PROVENANCE_DISCLOSURE", "PROVENANCE_DISCLOSURE_TARGETS", "PROVENANCE_NOTE",
+                          "PROVENANCE_RECORD"])
+        # The committed list of this checkout is in the stated form.
+        self.assertEqual(release.PUBLISHED_LIST, PUBLISHED_LIST)
+        committed = (release.ROOT / PUBLISHED_LIST).read_bytes()
+        self.assertEqual(set(json.loads(committed)), {"schema", "trees"})
+        self.assertEqual(json.loads(committed)["schema"], LIST_SCHEMA)
+        self.assertIsInstance(release.read_source_member_lists(committed), dict)
+        # Every source snapshot either target ships is one the rule covers, and so is the donor source tree.
+        archives = sorted(name for names in self.pinned_sources.values() for name in names if "source.tar" in name)
+        self.assertTrue(set(SNAPSHOTS) <= set(archives))
+        for name in archives:
+            self.assertIsNotNone(release.SOURCE_SNAPSHOT.fullmatch(name), name)
+        self.assertEqual(release.SOURCE_TREE, SOURCE_TREE)
+        self.assertIn("provenance/source/", self.python_kits["linux-x86_64"]["provenance_trees"])
+
+    def test_every_target_publishes_only_the_listed_source_members_and_ships_the_record(self):
+        self.withhold()
+        originals = [sha((self.root / donor["sources"][member][0]).read_bytes())
+                     for donor in self.python_kits.values() for member in donor["sources"] if member.endswith("/source.tar.gz")]
+        for target in self.targets:
+            builds = (("pinned", lambda: self.package("only-pinned-" + target, target)),
+                      ("explicit", lambda: self.explicit_package(self.explicit_inputs(target), name="only-explicit-" + target)))
+            for label, build in builds:
+                with self.subTest(target=target, inputs=label):
+                    files = self.shipped(build())
+                    snapshots = [member for member in files if member.endswith("/source.tar.gz")]
+                    self.assertTrue(snapshots)
+                    for member in snapshots:
+                        names = [name for name, _ in member_blocks(gzip.decompress(files[member]))]
+                        self.assertEqual(names, [SNAPSHOTS.get(member, "") + name for name in PUBLISHED])
+                    if target == "linux-x86_64":
+                        self.assertEqual([name for name in WITHHELD if SOURCE_TREE + name in files], [])
+                        self.assertEqual(files[SOURCE_TREE + PUBLISHED[2]], b"retained tree source\n")
+                        self.assertEqual(files[SOURCE_TREE + "retained.txt"], b"retained original evidence")
+                        selection = json.loads(files["selected/provenance/selection.json"])
+                        self.assertEqual([name for name in selection["files"]
+                                          if name.removeprefix("provenance/source/") in WITHHELD], [])
+                        self.assertIn("provenance/source/" + PUBLISHED[2], selection["files"])
+                    # No withheld member's bytes remain anywhere, inside a snapshot or outside one.
+                    payload = [gzip.decompress(data) if name in snapshots else data for name, data in files.items()]
+                    for data in (*self.withheld_tree.values(), *self.withheld_snapshot.values()):
+                        self.assertFalse(any(data in item for item in payload))
+                    record = files[RECORD].decode()
+                    self.assertEqual(json.loads(record), self.expected_record(files))
+                    # The record names no member that was left out, no digest of one, and no original input.
+                    for text in (*WITHHELD, *originals, self.python_kits[target]["sha256"],
+                                 *(sha(data) for data in (*self.withheld_tree.values(), *self.withheld_snapshot.values()))):
+                        self.assertNotIn(text, record)
+                    self.assertFalse(any(key in record for key in ("omitted", "original", "donor", "reason")))
+
+    def test_a_snapshot_with_nothing_left_out_ships_as_it_is(self):
+        for target, donor in self.python_kits.items():
+            files = release.collect(self.root, target)
+            snapshots = [member for member in donor["sources"] if member.endswith("/source.tar.gz")]
+            self.assertTrue(snapshots)
+            for member in snapshots:
+                self.assertEqual(files[member], ((self.root / donor["sources"][member][0]).read_bytes(), 0o644))
+            self.assertEqual(json.loads(files[RECORD][0]), self.expected_record({name: data for name, (data, _) in files.items()}))
+
+    def test_snapshot_projection_keeps_every_published_member_block(self):
+        self.withhold()
+        for target in self.targets:
+            files = self.collect(target)
+            for member in (name for name in files if name.endswith("/source.tar.gz")):
+                with self.subTest(target=target, snapshot=member):
+                    original = self.snapshot_tars[member]
+                    data, mode = files[member]
+                    self.assertEqual(mode, 0o644)
+                    self.assertEqual(data[4:8], b"\x00" * 4)  # No build time in the gzip header.
+                    derived = gzip.decompress(data)
+                    withheld = {SNAPSHOTS.get(member, "") + name for name in WITHHELD}
+                    before = member_blocks(original)
+                    kept = [(name, block) for name, block in before if name not in withheld]
+                    self.assertEqual(len(before) - len(kept), len(WITHHELD))
+                    # Header, data and padding of every published member, in the original order.
+                    self.assertEqual(member_blocks(derived), kept)
+                    end = sum(len(block) for _, block in before)
+                    self.assertEqual(derived, b"".join(block for _, block in kept) + original[end:])
+            self.assertEqual(self.collect(target), files)
+
+    def test_a_source_member_in_neither_list_refuses_the_build(self):
+        target = "linux-x86_64"
+        self.withhold()
+        # Without the private list, the members only it names are in neither list.
+        error = self.refused_with(target, proof_only=True)
+        self.assertEqual(str(error), "unlisted_provenance_member")
+        self.assertEqual(error.unlisted, {tree: sorted(names) for tree, names in self.private_trees.items()
+                                          if tree == SOURCE_TREE or tree in SNAPSHOTS})
+        # A member neither list names, in the donor tree and in one snapshot.
+        self.donor_files[target]["provenance/source/" + UNLISTED] = (b"added source\n", 0o644)
+        self.repin_donor(target)
+        member = "selected/provenance/compose-migration/source.tar.gz"
+        self.repin_snapshot(member, [*self.snapshot_rows[member], ("source/" + UNLISTED, b"added source\n")])
+        error = self.refused_with(target, non_published_list=self.non_published)
+        self.assertEqual(str(error), "unlisted_provenance_member")
+        self.assertEqual(error.unlisted, {SOURCE_TREE: [UNLISTED], member: ["source/" + UNLISTED]})
+        # The command line names the tree and the count; the member's name only on request.
+        arguments = ("--target", target, "--output", self.base / "refused-cli", "--non-published-list", self.non_published)
+        code, out, err = self.command(*arguments)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("unlisted_provenance_member", err)
+        self.assertIn(SOURCE_TREE + ": 1 ", err)
+        self.assertIn(member + ": 1 ", err)
+        self.assertNotIn(UNLISTED, err)
+        code, out, err = self.command(*arguments, "--show-names")
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(err.count(UNLISTED), 2)
+        self.assertFalse((self.base / "refused-cli").exists())
+        # Named in the private list, both are left out and the build succeeds.
+        self.private_trees[SOURCE_TREE][UNLISTED] = sha(b"added source\n")
+        self.private_trees[member]["source/" + UNLISTED] = sha(b"added source\n")
+        self.write_non_published()
+        files = self.shipped(self.package("unlisted-named", target))
+        self.assertNotIn(SOURCE_TREE + UNLISTED, files)
+        self.assertNotIn(b"added source\n", gzip.decompress(files[member]))
+
+    def test_source_member_lists_must_be_whole_sorted_and_disjoint(self):
+        target = "linux-x86_64"
+        path = self.root / PUBLISHED_LIST
+        good = json.loads(path.read_bytes())
+        tree = "selected/provenance/linux-mcpb/source.tar.gz"
+
+        def trees(**changes):
+            return {**good, "trees": {**good["trees"], **changes}}
+
+        cases = {"not-json": b"{", "other-schema": {**good, "schema": "another/1"}, "extra-key": {**good, "note": "x"},
+                 "no-trees": {"schema": good["schema"]}, "unknown-tree": trees(**{"selected/other/": []}),
+                 "nested-snapshot": trees(**{"selected/provenance/a/b/source.tar.gz": []}),
+                 "unsorted": trees(**{tree: sorted(good["trees"][tree], reverse=True)}),
+                 "repeated": trees(**{tree: [good["trees"][tree][0]] * 2}),
+                 "unsafe-name": trees(**{tree: ["../outside"]}), "not-a-list": trees(**{tree: "crates"}),
+                 "not-a-name": trees(**{tree: [7]})}
+        for label, value in cases.items():
+            with self.subTest(committed=label):
+                path.write_bytes(value if isinstance(value, bytes) else json.dumps(value).encode())
+                self.assert_refused("invalid_source_member_list", target=target, output="list-" + label)
+        path.unlink()
+        with self.assertRaises(OSError):
+            self.package("list-absent", target)
+        self.assertFalse((self.base / "list-absent").exists())
+        # A tree the committed list has no section for refuses; an empty section publishes nothing of it.
+        del good["trees"][tree]
+        path.write_bytes(json.dumps(good).encode())
+        self.assert_refused("provenance_tree_not_listed", target=target, output="list-no-section")
+        good["trees"][tree] = []
+        path.write_bytes(json.dumps(good).encode())
+        self.assertEqual(self.refused_with(target, output="list-empty-section", proof_only=True).unlisted,
+                         {tree: list(PUBLISHED)})
+        self.write_published()
+        self.package("list-restored", target)
+        # The private list has the same form, and a name in both lists refuses.
+        self.withhold()
+        private = self.non_published
+        good = self.private_document()
+        entry = good["trees"][SOURCE_TREE][0]
+
+        def private_trees(rows):
+            return {**good, "trees": {**good["trees"], SOURCE_TREE: rows}}
+
+        cases = {"not-json": b"{", "published-form": {"schema": LIST_SCHEMA, "trees": {SOURCE_TREE: list(WITHHELD)}},
+                 "no-snapshots": {key: value for key, value in good.items() if key != "original_snapshots"},
+                 "names-only": private_trees(list(WITHHELD)), "no-digest": private_trees([{"name": entry["name"]}]),
+                 "short-digest": private_trees([{**entry, "sha256": "ab"}]),
+                 "upper-digest": private_trees([{**entry, "sha256": entry["sha256"].upper()}]),
+                 "extra-key": private_trees([{**entry, "bytes": 3}]),
+                 "unsorted": private_trees(list(reversed(good["trees"][SOURCE_TREE]))),
+                 "repeated": private_trees([entry, entry]),
+                 "snapshot-not-a-list": {**good, "original_snapshots": {tree: "0" * 64}},
+                 "snapshot-of-no-tree": {**good, "original_snapshots": {"selected/other.tar.gz": ["0" * 64]}}}
+        for label, value in cases.items():
+            with self.subTest(private=label):
+                private.write_bytes(value if isinstance(value, bytes) else json.dumps(value).encode())
+                self.assert_refused("invalid_source_member_list", target=target, output="private-" + label)
+        # A snapshot that loses members must be one whose original digest the list holds.
+        self.write_non_published({**good, "original_snapshots": {
+            member: pins for member, pins in good["original_snapshots"].items() if member != tree}})
+        self.assert_refused("original_snapshot_not_listed", target=target, output="private-no-original")
+        self.private_trees[SOURCE_TREE][PUBLISHED[2]] = "0" * 64
+        self.write_non_published()
+        self.assert_refused("provenance_lists_conflict", target=target, output="private-conflict")
+        self.non_published = self.base / "absent-private-list.json"
+        with self.assertRaises(OSError):
+            self.package("private-absent", target)
+
+    def add_source(self, name, data, target="linux-x86_64"):
+        """One more pinned source of the target, shipped under name."""
+        path = "retained-inputs/" + name.removeprefix("selected/")
+        write(self.root / path, data)
+        self.python_kits[target].setdefault("sources", {})[name] = (path, sha(data))
+
+    def reference_fixture(self):
+        """Linux records that name withheld members by path or by digest, and published members that state
+        the digests of those records and the digest and size of a source snapshot."""
+        target = "linux-x86_64"
+        self.withhold()
+        withheld = {name: sha(data) for name, data in self.withheld_tree.items()}
+        kept = sha(b"retained tree source\n")
+        # By path and by digest: rows of a list, a list of names, a map keyed by path.
+        listing = (json.dumps({"schema": 1, "files": [
+            {"path": PUBLISHED[2], "sha256": kept},
+            {"path": WITHHELD[1], "sha256": withheld[WITHHELD[1]], "bytes": 3}],
+            "names": [PUBLISHED[0], WITHHELD[0], PUBLISHED[1]],
+            "by_path": {PUBLISHED[0]: {"bytes": 10}, WITHHELD[2]: {"bytes": 7}}}, indent=2) + "\n").encode()
+        self.donor_files[target]["provenance/dependencies.json"] = (listing, 0o644)
+        self.repin_donor(target)
+        # By digest only, on one line, in upper case.
+        manifest = json.dumps({"members": [{"id": 1, "sha256": withheld[WITHHELD[0]].upper()},
+                                           {"id": 2, "sha256": kept}]}).encode()
+        # A record that states the digests of both records and the digest and size of a source snapshot, and
+        # a text file that states the digest of that record and of the snapshot.
+        self.snapshot = "selected/provenance/linux-mcpb/source.tar.gz"
+        path, self.snapshot_input_sha = self.python_kits[target]["sources"][self.snapshot]
+        self.snapshot_input_bytes = len((self.root / path).read_bytes())
+        index = json.dumps({"records": {"dependencies": sha(listing), "manifest": sha(manifest)},
+                            "snapshot": {"sha256": self.snapshot_input_sha, "bytes": self.snapshot_input_bytes,
+                                         "members": 7}, "bytes": self.snapshot_input_bytes}, indent=1).encode()
+        summary = ("index " + sha(index) + "\nsnapshot " + self.snapshot_input_sha.upper() + "\n").encode()
+        self.listing_name = "selected/provenance/dependencies.json"
+        self.manifest_name = "selected/provenance/linux-mcpb/source-manifest.json"
+        self.index_name = "selected/provenance/linux-mcpb/index.json"
+        self.summary_name = "selected/provenance/linux-mcpb/summary.txt"
+        self.record_inputs = {self.listing_name: listing, self.manifest_name: manifest, self.index_name: index,
+                              self.summary_name: summary}
+        for name in (self.manifest_name, self.index_name, self.summary_name):
+            self.add_source(name, self.record_inputs[name])
+        self.kept_digest = kept
+
+    def needles(self):
+        names = {name for names in self.private_trees.values() for name in names}
+        digests = {value for names in self.private_trees.values() for value in names.values()}
+        return [text.encode() for text in (*names, *digests, *(value.upper() for value in digests))]
+
+    def test_published_records_that_name_a_member_left_out_are_projected_and_restated(self):
+        target = "linux-x86_64"
+        self.reference_fixture()
+        report = {}
+        files = {name: data for name, (data, _) in release.collect(
+            self.root, target, non_published=self.private_list(), report=report).items()}
+        # No published member names a member that was left out, by path or by digest.
+        for name, data in files.items():
+            for needle in self.needles():
+                self.assertNotIn(needle, data, name)
+                if name.endswith("/source.tar.gz"):
+                    self.assertNotIn(needle, gzip.decompress(data), name)
+        # The rows that named one are gone, and each projected record says that it was projected.
+        self.assertEqual(json.loads(files[self.listing_name]), {
+            "schema": 1, "files": [{"path": PUBLISHED[2], "sha256": self.kept_digest}],
+            "names": [PUBLISHED[0], PUBLISHED[1]], "by_path": {PUBLISHED[0]: {"bytes": 10}},
+            "projected_for_publication": True})
+        self.assertEqual(json.loads(files[self.manifest_name]), {
+            "members": [{"id": 2, "sha256": self.kept_digest}], "projected_for_publication": True})
+        # The rows were cut out of the original text: every other line is an original line.
+        original = {line.rstrip(",") for line in self.record_inputs[self.listing_name].decode().splitlines()}
+        for line in files[self.listing_name].decode().splitlines():
+            self.assertTrue(line.rstrip(",") in original or "projected_for_publication" in line, line)
+        # Every digest a published member states about a projected member is the shipped one, and so is the
+        # snapshot's size where the same map states its digest. Any other number stays.
+        shipped = files[self.snapshot]
+        self.assertNotEqual(len(shipped), self.snapshot_input_bytes)
+        self.assertEqual(json.loads(files[self.index_name]), {
+            "records": {"dependencies": sha(files[self.listing_name]), "manifest": sha(files[self.manifest_name])},
+            "snapshot": {"sha256": sha(shipped), "bytes": len(shipped), "members": 7},
+            "bytes": self.snapshot_input_bytes})
+        self.assertEqual(files[self.summary_name], ("index " + sha(files[self.index_name]) + "\nsnapshot "
+                                                    + sha(shipped).upper() + "\n").encode())
+        selection = json.loads(files["selected/provenance/selection.json"])
+        self.assertEqual(selection["files"]["provenance/dependencies.json"], sha(files[self.listing_name]))
+        self.assertIn({"member": self.snapshot, "sha256": sha(shipped), "bytes": len(shipped)},
+                      json.loads(files[RECORD])["snapshots"])
+        # No digest of an input that was projected stays anywhere.
+        stale = [sha(data) for data in self.record_inputs.values()] + [self.snapshot_input_sha]
+        for name, data in files.items():
+            for value in stale:
+                self.assertNotIn(value.encode(), data.lower(), name)
+        # The build result says what was projected, which member was restated for which, and where to look.
+        self.assertEqual(report["projected_records"], sorted([self.listing_name, self.manifest_name]))
+        self.assertEqual(report["restated"][self.index_name], sorted([self.listing_name, self.manifest_name, self.snapshot]))
+        self.assertEqual(report["restated"][self.summary_name], sorted([self.index_name, self.snapshot]))
+        self.assertEqual(report["restated"]["selected/provenance/selection.json"], [self.listing_name])
+        self.assertEqual(report["sizes_restated"], {self.index_name: ["bytes"]})
+        self.assertEqual(report["integer_fields"], {self.listing_name: ["schema"], self.manifest_name: [],
+                                                    self.index_name: ["bytes", "members"]})
+        self.assertNotIn(str(self.snapshot_input_bytes), json.dumps(report))
+        # A second build of the same inputs is the same library, and its result carries the same report.
+        first = self.package("references-1", target)
+        self.assertEqual({key: first[key] for key in report}, report)
+        self.assertEqual((first["proof_only"], first["reference_check"]), (False, "passed"))
+        second = self.package("references-2", target)
+        self.assertEqual(Path(second["archive"]).read_bytes(), Path(first["archive"]).read_bytes())
+
+    def test_a_published_member_that_names_a_member_left_out_refuses_the_build(self):
+        target = "linux-x86_64"
+        self.reference_fixture()
+        lists = self.private_list()
+        # Without the projection the records name withheld members: the check refuses with paths and counts.
+        with patch.object(release, "project_record", side_effect=lambda raw, names, digests: raw), \
+                self.assertRaises(release.PackageError) as refused:
+            release.collect(self.root, target, non_published=lists)
+        self.assertEqual(str(refused.exception), "published_member_names_non_published")
+        self.assertEqual(refused.exception.members, {self.listing_name: 4, self.manifest_name: 1})
+        # A text file cannot be projected: it refuses, and the command line shows its path and count only.
+        log = "selected/provenance/linux-mcpb/build.log"
+        self.add_source(log, ("compiled " + WITHHELD[2] + "\nread " + WITHHELD[2] + " again\n").encode())
+        with self.assertRaises(release.PackageError) as refused:
+            release.collect(self.root, target, non_published=lists)
+        self.assertEqual((str(refused.exception), refused.exception.members),
+                         ("published_member_names_non_published", {log: 2}))
+        code, out, err = self.command("--target", target, "--output", self.base / "refused-reference",
+                                      "--non-published-list", self.non_published, "--show-names")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("published_member_names_non_published", err)
+        self.assertIn(log + ": 2 ", err)
+        for name in WITHHELD:
+            self.assertNotIn(name, err)
+        self.assertFalse((self.base / "refused-reference").exists())
+        del self.python_kits[target]["sources"][log]
+        # An original snapshot digest that restating cannot reach (mixed case here) refuses as well.
+        mixed = "".join(c.upper() if n % 2 else c for n, c in enumerate(self.snapshot_input_sha))
+        self.add_source(log, ("snapshot " + mixed + "\n").encode())
+        with self.assertRaises(release.PackageError) as refused:
+            release.collect(self.root, target, non_published=lists)
+        self.assertEqual((str(refused.exception), refused.exception.members),
+                         ("published_member_names_non_published", {log: 1}))
+        del self.python_kits[target]["sources"][log]
+        # A record whose reference is a field of the record itself, or that is no JSON object, refuses by name.
+        cases = {"field-of-the-record": json.dumps({"kind": "entry", "entry_point": WITHHELD[0]}).encode(),
+                 "not-an-object": json.dumps(["kept", WITHHELD[0]]).encode(),
+                 "not-json": b"{ " + WITHHELD[0].encode(),
+                 "only-rows": json.dumps({WITHHELD[0]: 1}).encode(),
+                 "field-taken": json.dumps({"projected_for_publication": False, "names": [WITHHELD[0]]}).encode()}
+        entry = "selected/provenance/linux-mcpb/entry.json"
+        for label, raw in cases.items():
+            with self.subTest(record=label):
+                self.add_source(entry, raw)
+                with self.assertRaises(release.PackageError) as refused:
+                    release.collect(self.root, target, non_published=lists)
+                self.assertEqual((str(refused.exception), refused.exception.members),
+                                 ("provenance_record_not_projectable", {entry: 1}))
+        del self.python_kits[target]["sources"][entry]
+        # Restating stops at its bound instead of running on.
+        with patch.object(release, "RESTATE_LIMIT", 1):
+            self.assert_refused("restatement_not_settled", target=target, output="references-bound")
+        self.package("references-restored", target)
+
+    def test_restating_refuses_a_chain_that_returns_to_an_earlier_state(self):
+        first, second, third = "a" * 64, "b" * 64, "f" * 64
+        files = {"one.txt": (b"states " + first.encode(), 0o644)}
+        # The member's digests as the two restatements see them: c -> d, then d -> c again.
+        states = iter(["c" * 64, "d" * 64, "d" * 64, "c" * 64])
+        with patch.object(release, "digest", side_effect=lambda data: next(states)), \
+                self.assertRaisesRegex(release.PackageError, "^restatement_not_settled$"):
+            release.restate_digests(files, [("x", first, second, None), ("y", second, third, None)])
+
+    def test_each_branch_of_the_row_rule_cuts_the_row_from_the_original_text(self):
+        names, digests = frozenset({"a/withheld.txt"}), frozenset({"1" * 64})
+        field = '"projected_for_publication": true'
+        cases = {
+            # a string that is a list item: that item
+            "list-string": ('{\n  "files": [\n    "a/kept.txt",\n    "a/withheld.txt"\n  ]\n}\n',
+                            '{\n  "files": [\n    "a/kept.txt"\n  ],\n  ' + field + '\n}\n'),
+            "list-string-first": ('{"files": ["a/withheld.txt", "a/kept.txt"], "n": 1}',
+                                  '{"files": ["a/kept.txt"], "n": 1, ' + field + '}'),
+            "list-string-middle": ('{"files": ["a/kept.txt", "a/withheld.txt", "b"], "n": 1}',
+                                   '{"files": ["a/kept.txt", "b"], "n": 1, ' + field + '}'),
+            "list-string-only": ('{"files": ["a/withheld.txt"], "n": 1}', '{"files": [], "n": 1, ' + field + '}'),
+            # a map key: that entry
+            "map-key": ('{"by": {"a/withheld.txt": 1, "a/kept.txt": 2}}', '{"by": {"a/kept.txt": 2}, ' + field + '}'),
+            # a string value of a map that is itself a list item: the list item, by path or by digest
+            "map-in-list-row": ('{"rows":[{"p":"k","d":"%s"},{"p":"k2","d":"%s"}]}' % ("1" * 64, "2" * 64),
+                                '{"rows":[{"p":"k2","d":"%s"}],%s}' % ("2" * 64, field.replace(": ", ":"))),
+            "map-in-list-row-path": ('{"rows": [{"p": "k"}, {"p": "a/withheld.txt", "n": 2}]}',
+                                     '{"rows": [{"p": "k"}], ' + field + '}'),
+            # a string value of any other nested map: that map entry
+            "nested-map-entry": ('{"a": {"b": {"path": "x/a/withheld.txt", "n": 1}}}', '{"a": {"b": {"n": 1}}, ' + field + '}'),
+            # everything else stays byte for byte: escapes, number forms, white space
+            "other-bytes-stay": ('{"files": ["a\\/withheld.txt", "caf\\u00e9", 1.50, null]}',
+                                 '{"files": ["caf\\u00e9", 1.50, null], ' + field + '}'),
+            "tabs": ('{\n\t"keep": {"x": [1, 2]},\n\t"files": [\n\t\t"a/withheld.txt"\n\t]\n}',
+                     '{\n\t"keep": {"x": [1, 2]},\n\t"files": [],\n\t' + field + '\n}'),
+        }
+        for label, (original, expected) in cases.items():
+            with self.subTest(branch=label):
+                projected = release.project_record(original.encode(), names, digests).decode()
+                self.assertEqual(projected, expected)
+                json.loads(projected)
+        untouched = b'{"files": ["a/kept.txt"], "sha256": "' + b"2" * 64 + b'"}'
+        self.assertEqual(release.project_record(untouched, names, digests), untouched)
+        refusals = {
+            # a string value of the document's own top-level map
+            "top-level-field": '{"entry": "a/withheld.txt"}',
+            "top-level-digest": '{"sha256": "%s", "n": [1]}' % ("1" * 64),
+            # a document that is not an object
+            "not-an-object": '["a/withheld.txt", "k"]',
+            "a-string": '"a/withheld.txt"',
+            "not-json": 'not json a/withheld.txt',
+            "nothing-remains": '{"a/withheld.txt": 1}',
+            "field-taken": '{"projected_for_publication": 1, "files": ["a/withheld.txt"]}',
+        }
+        for label, refused in refusals.items():
+            with self.subTest(refused=label), \
+                    self.assertRaisesRegex(release.PackageError, "^provenance_record_not_projectable$"):
+                release.project_record(refused.encode(), names, digests)
+
+    def test_a_path_matches_at_its_boundaries_and_a_digest_anywhere(self):
+        digest = "1" * 63 + "a"
+        count = lambda data: release.count_references(data, frozenset({"a/withheld.txt", "TOPLEVEL.md"}), frozenset({digest}))
+        for data, expected in ((b"see a/withheld.txt.", 1), (b"dir/a/withheld.txt and a/withheld.txt", 2),
+                               (b'"a\\/withheld.txt"', 1), (b"A/Withheld.TXT", 1),
+                               # another path that only holds the listed one
+                               (b"a/withheld.txt.bak", 0), (b"xa/withheld.txt", 0), (b"a/withheld.txt/child", 0),
+                               (b"a/withheld.txtx", 0), (b"a/withheld-txt", 0),
+                               # a name without a separator: a whole JSON string or a whole line only
+                               (b'{"file": "TOPLEVEL.md"}', 1), (b"first\n  TOPLEVEL.md\nlast\n", 1),
+                               (b"see TOPLEVEL.md here", 0), (b"x/TOPLEVEL.md", 0), (b'"TOPLEVEL.md.bak"', 0),
+                               # a digest: anywhere, in either case
+                               (b"xx" + digest.encode() + b"yy", 1), (digest.upper().encode(), 1),
+                               (digest[:-1].encode(), 0)):
+            with self.subTest(data=data):
+                self.assertEqual(count(data), expected)
+        self.assertEqual(release.count_references(b"anything", frozenset(), frozenset()), 0)
+
+    def git(self, *arguments, directory=None):
+        """git in the directory around the fixture checkout (or another one), with a made-up author."""
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        done = subprocess.run(["git", "-C", str(directory or self.base), "-c", "user.name=test",
+                               "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
+                               "-c", "core.hooksPath=/dev/null", *arguments],
+                              capture_output=True, text=True, env=environment)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout
+
+    def test_a_path_the_checkouts_commit_tracks_is_no_reference_to_a_member_left_out(self):
+        target = "linux-x86_64"
+        self.withhold()
+        lists = self.private_list()
+        public, other = WITHHELD[1], WITHHELD[2]
+        digest = self.private_trees[SOURCE_TREE][public]
+        # A published member names, as a map key and as a string value, a path that a member left out has too.
+        member = "selected/provenance/linux-mcpb/contents.txt"
+        text = json.dumps({"files": {public: {"kind": "catalog"}}, "catalog": public}, indent=1) + "\n"
+        self.add_source(member, text.encode())
+
+        def refused(expected):
+            with self.assertRaises(release.PackageError) as error:
+                release.collect(self.root, target, non_published=lists)
+            self.assertEqual((str(error.exception), error.exception.members),
+                             ("published_member_names_non_published", expected))
+
+        # The fixture checkout is in no repository: nothing is exempt.
+        self.assertEqual(release.tracked_paths(self.root), frozenset())
+        refused({member: 2})
+        # The file is in the checkout, and staged, but no commit holds it. The checkout is a directory of
+        # the repository, as a product root is.
+        inside = self.root.name + "/" + public
+        write(self.root / public, b"the checkout's own public file\n")
+        self.git("init", "-q")
+        self.git("add", "--", inside)
+        self.assertEqual(release.tracked_paths(self.root), frozenset())
+        refused({member: 2})
+        # The checkout's commit tracks exactly that path: both references are exempt, and counted.
+        self.git("commit", "-q", "-m", "a public file")
+        self.assertEqual(release.tracked_paths(self.root), frozenset({public}))
+        report = {}
+        files = release.collect(self.root, target, non_published=lists, report=report)
+        self.assertEqual(files[member][0], text.encode())
+        self.assertEqual(report["exempt_references"], {"public_repository_path": 2})
+        self.assertEqual(report["exempt_reference_members"], {member: 2})
+        result = self.package("exempt", target)
+        self.assertEqual((result["reference_check"], result["exempt_references"]),
+                         ("passed", {"public_repository_path": 2}))
+        self.assertIn(text.encode(), self.shipped(result)[member])
+        # The member's digest is never exempt: in the same file it refuses, and it alone is counted.
+        for stated in (digest, digest.upper()):
+            self.add_source(member, (text + "sha256 " + stated + "\n").encode())
+            refused({member: 1})
+        # Another member left out, whose path no commit tracks, refuses; so do the exempt path in another
+        # case and the name the same member has in a snapshot.
+        for line in (other, public.upper(), "source/" + public):
+            self.add_source(member, (text + line + "\n").encode())
+            refused({member: 1})
+        # Matching itself: a path is exempt only as the exact tracked path, a digest never.
+        references = release.References(frozenset({public, "TOPLEVEL.md"}), frozenset({digest}),
+                                        frozenset({public, "TOPLEVEL.md", digest, "crates/unlisted.rs"}))
+        data = ('"TOPLEVEL.md" ' + public + " " + digest + " crates/unlisted.rs " + public.title()).encode()
+        self.assertEqual(references.split(data), (2, 2))
+        self.assertEqual(references.count(data), 2)
+        self.assertEqual(release.References(frozenset({public, "TOPLEVEL.md"}), frozenset({digest})).split(data), (4, 0))
+        # A JSON provenance record is projected as before: its row for that path is cut, exempt or not.
+        record = "selected/provenance/linux-mcpb/files.json"
+        self.add_source(member, text.encode())
+        self.add_source(record, json.dumps({"files": [{"path": public}, {"path": PUBLISHED[0]}]}).encode())
+        report = {}
+        files = release.collect(self.root, target, non_published=lists, report=report)
+        self.assertEqual(json.loads(files[record][0]), {"files": [{"path": PUBLISHED[0]}], "projected_for_publication": True})
+        self.assertEqual((report["projected_records"], report["exempt_references"]),
+                         ([record], {"public_repository_path": 2}))
+        del self.python_kits[target]["sources"][record]
+        # Another repository that the environment names is not the checkout's: one that tracks the path
+        # makes nothing exempt once the checkout's own commit does not.
+        second = self.base / "second-repository"
+        write(second / public, b"another repository's file\n")
+        self.git("init", "-q", directory=second)
+        self.git("add", "-A", directory=second)
+        self.git("commit", "-q", "-m", "tracks the path", directory=second)
+        # A path that only an earlier commit tracks is not exempt: the commit the checkout is at decides.
+        self.git("rm", "-q", "--cached", "--", inside)
+        self.git("commit", "-q", "-m", "the file is no longer tracked")
+        self.assertTrue((self.root / public).is_file())
+        self.assertIn(inside, self.git("ls-tree", "-r", "--name-only", "HEAD~1"))
+        self.assertEqual(release.tracked_paths(self.root), frozenset())
+        refused({member: 2})
+        with patch.dict(os.environ, {"GIT_DIR": str(second / ".git")}):
+            self.assertEqual(release.tracked_paths(self.root), frozenset())
+            refused({member: 2})
+        # Nor is one that only another branch tracks.
+        self.git("branch", "other", "HEAD~1")
+        refused({member: 2})
+        self.assert_refused("published_member_names_non_published", target=target, output="not-tracked")
+
+    def test_a_replace_ref_makes_no_path_a_tracked_one(self):
+        # git can be told to read another object in place of one (a replace ref). The packager asks
+        # for the commit's own objects: a path that only a replacing commit tracks exempts nothing.
+        target = "linux-x86_64"
+        self.withhold()
+        lists = self.private_list()
+        public = WITHHELD[1]
+        member = "selected/provenance/linux-mcpb/contents.txt"
+        self.add_source(member, (json.dumps({"files": {public: {"kind": "catalog"}}, "catalog": public}, indent=1) + "\n").encode())
+
+        def refused(expected):
+            with self.assertRaises(release.PackageError) as error:
+                release.collect(self.root, target, non_published=lists)
+            self.assertEqual((str(error.exception), error.exception.members),
+                             ("published_member_names_non_published", expected))
+
+        write(self.root / "kept.txt", b"a file the commit tracks\n")
+        self.git("init", "-q")
+        self.git("add", "--", self.root.name + "/kept.txt")
+        self.git("commit", "-q", "-m", "one public file")
+        head = self.git("rev-parse", "HEAD").strip()
+        self.assertEqual(release.tracked_paths(self.root), frozenset({"kept.txt"}))
+        refused({member: 2})
+        inside = self.root.name + "/" + public
+        write(self.root / public, b"a file no commit of the checkout tracks\n")
+        self.git("add", "--", inside)
+        other = self.git("commit-tree", self.git("write-tree").strip(), "-m", "tracks the path").strip()
+        self.git("replace", head, other)
+        # Asked without more, git now lists the path as the checkout's commit's.
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), head)
+        self.assertIn(inside, self.git("ls-tree", "-r", "--name-only", "HEAD").splitlines())
+        self.assertEqual(release.tracked_paths(self.root), frozenset({"kept.txt"}))
+        refused({member: 2})
+
+    def test_only_a_regular_tracked_file_makes_its_path_a_tracked_one(self):
+        # What exempts a path is a file of the commit. A link or another repository's commit that the
+        # checkout's commit holds at that path is no file with that path's content: it exempts nothing.
+        target = "linux-x86_64"
+        self.withhold()
+        lists = self.private_list()
+        public = WITHHELD[1]
+        inside = self.root.name + "/" + public
+        member = "selected/provenance/linux-mcpb/contents.txt"
+        text = json.dumps({"files": {public: {"kind": "catalog"}}, "catalog": public}, indent=1) + "\n"
+        self.add_source(member, text.encode())
+
+        def refused(expected):
+            with self.assertRaises(release.PackageError) as error:
+                release.collect(self.root, target, non_published=lists)
+            self.assertEqual((str(error.exception), error.exception.members),
+                             ("published_member_names_non_published", expected))
+
+        def entry():
+            """How the checkout's commit holds the path: the mode and kind of its tree entry."""
+            rows = [row for row in self.git("ls-tree", "-r", "HEAD").splitlines() if row.endswith("\t" + inside)]
+            self.assertEqual(len(rows), 1, rows)
+            return " ".join(rows[0].split()[:2])
+
+        write(self.root / "kept.txt", b"a file the commit tracks\n")
+        self.git("init", "-q")
+        self.git("add", "--", self.root.name + "/kept.txt")
+        self.git("commit", "-q", "-m", "one public file")
+        first = self.git("rev-parse", "HEAD").strip()
+        # A link at the path, tracked as a link.
+        (self.root / public).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / public).symlink_to("kept.txt")
+        self.git("add", "--", inside)
+        self.git("commit", "-q", "-m", "a link at the path")
+        self.assertEqual(entry(), "120000 blob")
+        self.assertEqual(release.tracked_paths(self.root), frozenset({"kept.txt"}))
+        refused({member: 2})
+        # A commit of another repository at the path (a submodule's entry).
+        self.git("rm", "-q", "--cached", "--", inside)
+        (self.root / public).unlink()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + first + "," + inside)
+        self.git("commit", "-q", "-m", "a submodule at the path")
+        self.assertEqual(entry(), "160000 commit")
+        self.assertEqual(release.tracked_paths(self.root), frozenset({"kept.txt"}))
+        refused({member: 2})
+        # A regular file there, executable or not, is a tracked file: both references are exempt.
+        self.git("rm", "-q", "--cached", "--", inside)
+        for mode, expected in ((0o755, "100755 blob"), (0o644, "100644 blob")):
+            write(self.root / public, b"the checkout's own public file\n")
+            os.chmod(self.root / public, mode)
+            self.git("add", "--", inside)
+            self.git("commit", "-q", "-m", "a regular file at the path")
+            self.assertEqual(entry(), expected)
+            self.assertEqual(release.tracked_paths(self.root), frozenset({"kept.txt", public}))
+            report = {}
+            release.collect(self.root, target, non_published=lists, report=report)
+            self.assertEqual(report["exempt_references"], {"public_repository_path": 2})
+
+    def test_a_release_build_needs_the_private_list_and_a_proof_build_says_what_it_is(self):
+        target = "linux-x86_64"
+        error = self.refused_with(target, output="no-list")
+        self.assertEqual(str(error), "non_published_list_required")
+        result = release.package(self.root, target, self.base / "proof", proof_only=True)
+        self.assertEqual((result["proof_only"], result["reference_check"]), (True, "not_run"))
+        code, out, err = self.command("--target", target, "--output", self.base / "proof-cli", "--proof-only")
+        self.assertEqual((code, json.loads(out)["proof_only"], json.loads(out)["reference_check"]), (0, True, "not_run"))
+        code, out, err = self.command("--target", target, "--output", self.base / "release-cli")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("non_published_list_required", err)
+        self.assertFalse((self.base / "release-cli").exists())
+        # With the list the check runs, and the result says so; the list cannot be combined with the override.
+        self.withhold()
+        result = release.package(self.root, target, self.base / "release", non_published_list=self.non_published)
+        self.assertEqual((result["proof_only"], result["reference_check"]), (False, "passed"))
+        self.assertEqual((result["projected_records"], result["restated"]), ([], {}))
+        error = self.refused_with(target, output="both", non_published_list=self.non_published, proof_only=True)
+        self.assertEqual(str(error), "invalid_proof_request")
+        # A member the list names with another digest is not the member the list means.
+        self.private_trees[SOURCE_TREE][WITHHELD[1]] = "0" * 64
+        self.write_non_published()
+        self.assert_refused("non_published_member_digest_mismatch", target=target, output="other-digest")
+
+    def test_the_shipped_copy_of_a_submitted_selection_is_the_submission_after_restating(self):
+        target = "linux-x86_64"
+        self.reference_fixture()
+        value = self.explicit_inputs(target)
+        value["sources"][self.index_name] = {"path": self.python_kits[target]["sources"][self.index_name][0],
+                                             "sha256": sha(self.record_inputs[self.index_name])}
+        result = self.explicit_package(value, name="selection-copy")
+        files = self.shipped(result)
+        submitted = (self.base / "selection-copy-inputs.json").read_bytes()
+        shipped = files["selected/provenance/current-input-selection.json"]
+        # Equal after projection: the one digest that names a restated input is the shipped file's.
+        self.assertNotEqual(shipped, submitted)
+        self.assertEqual(shipped, submitted.replace(sha(self.record_inputs[self.index_name]).encode(),
+                                                    sha(files[self.index_name]).encode()))
+        # The submitted file's digest is in the build result, not in the library.
+        self.assertEqual(result["input_selection"]["sha256"], sha(submitted))
+        for name, data in files.items():
+            self.assertNotIn(sha(submitted).encode(), data, name)
+
+    def test_source_snapshot_outside_the_plain_ustar_form_is_refused(self):
+        target = "linux-x86_64"
+        member = "selected/provenance/linux-mcpb/source.tar.gz"
+        rows = self.snapshot_rows[member]
+        plain = self.snapshot_tars[member]
+        end = sum(len(block) for _, block in member_blocks(plain))
+
+        def directory(archive):
+            item = tarfile.TarInfo("crates/sample/assets")
+            item.type, item.mode = tarfile.DIRTYPE, 0o755
+            archive.addfile(item)
+
+        def extended(archive):
+            item = tarfile.TarInfo("crates/sample/src/extended.rs")
+            item.pax_headers = {"comment": "extended header"}
+            archive.addfile(item)
+
+        def repeated(archive):
+            archive.addfile(tarfile.TarInfo(rows[1][0]))
+
+        unsupported, invalid = "unsupported_provenance_member", "invalid_provenance_archive"
+        cases = (("gnu-format", {"format": tarfile.GNU_FORMAT}, unsupported),
+                 ("extended-header", {"format": tarfile.PAX_FORMAT, "extra": extended}, unsupported),
+                 ("directory", {"extra": directory}, unsupported),
+                 ("repeated-name", {"extra": repeated}, unsupported),
+                 ("data-after-end", {"raw": gzip.compress(plain + b"x" * 512, mtime=0)}, invalid),
+                 ("no-end-blocks", {"raw": gzip.compress(plain[:end], mtime=0)}, invalid),
+                 ("not-a-tar", {"raw": gzip.compress(b"not a tar archive\n" * 64, mtime=0)}, invalid),
+                 ("not-gzip", {"raw": plain}, invalid),
+                 ("cut-gzip", {"raw": gzip.compress(plain, mtime=0)[:-12]}, invalid))
+        for label, form, code in cases:
+            with self.subTest(form=label):
+                self.repin_snapshot(member, None if "raw" in form else rows, **form)
+                self.assert_refused(code, target=target, output="form-" + label)
+        self.repin_snapshot(member)
+        self.package("plain-form", target)
+
+    def test_snapshot_projection_check_refuses_any_difference_in_a_published_block(self):
+        self.withhold()
+        member, prefix = "selected/provenance/compose-migration/source.tar.gz", "source/"
+        original = self.snapshot_tars[member]
+        withheld = {prefix + name for name in WITHHELD}
+        blocks = member_blocks(original)
+        trailer = original[sum(len(block) for _, block in blocks):]
+        kept = [block for name, block in blocks if name not in withheld]
+        release.verify_provenance_projection(original, b"".join(kept) + trailer, withheld)
+        changed = bytearray(kept[2])
+        changed[512] ^= 1  # First data byte of a published member.
+        rewritten = source_snapshot([row for row in self.snapshot_rows[member] if row[0] not in withheld])[1]
+        cases = {"changed-data": [*kept[:2], bytes(changed), *kept[3:]],
+                 "rewritten-headers": [block for _, block in member_blocks(rewritten)],
+                 "dropped-member": kept[1:],
+                 "reordered": [kept[1], kept[0], *kept[2:]],
+                 "withheld-member-kept": [block for _, block in blocks]}
+        for label, parts in cases.items():
+            with self.subTest(case=label), \
+                    self.assertRaisesRegex(release.PackageError, "^provenance_projection_mismatch$"):
+                release.verify_provenance_projection(original, b"".join(parts) + trailer, withheld)
+        # Packaging runs the check and stops on its refusal.
+        with patch.object(release, "verify_provenance_projection",
+                          side_effect=release.PackageError("provenance_projection_mismatch")):
+            self.assert_refused("provenance_projection_mismatch", target="linux-x86_64", output="projection")
+
+    def test_linux_guide_without_the_disclosure_sentence_is_refused(self):
+        target = "linux-x86_64"
+        selection = self.targets[target]
+        guide = self.root / selection["guide"]
+        cases = {"absent": b"Selected release guide.\n",
+                 "reworded": DISCLOSURE.replace("except for", "without").encode() + b"\n",
+                 "wrapped": DISCLOSURE.replace(" except for ", " except for\n").encode() + b"\n",
+                 # A guide that points at the record for a list of members: the record lists none.
+                 "member-list": DISCLOSURE.replace("members this library does not publish",
+                                                   "the members listed in `" + RECORD + "`").encode() + b"\n"}
+        self.assertEqual(len({*cases.values(), DISCLOSURE.encode() + b"\n"}), len(cases) + 1)
+        self.assertNotIn(RECORD, DISCLOSURE)
+        for label, raw in cases.items():
+            with self.subTest(guide=label):
+                guide.write_bytes(raw)
+                selection["guide_sha256"] = sha(raw)
+                self.assert_refused("provenance_disclosure_missing", target=target, output="guide-" + label)
+        raw = b"# Guide\n\n" + DISCLOSURE.encode() + b"\n"
+        guide.write_bytes(raw)
+        selection["guide_sha256"] = sha(raw)
+        self.assertEqual(release.collect(self.root, target)["README.md"], (raw, 0o644))
+        # An explicitly selected guide is held to the same sentence.
+        value = self.explicit_inputs(target)
+        path = "docs/current-guide.md"
+        write(self.root / path, b"Current guide.\n")
+        value["sources"]["README.md"] = {"path": path, "sha256": sha(b"Current guide.\n")}
+        with self.assertRaisesRegex(release.PackageError, "^provenance_disclosure_missing$"):
+            self.explicit_package(value, name="guide-explicit")
+        self.assertFalse((self.base / "guide-explicit").exists())
+        self.assertEqual(release.PROVENANCE_DISCLOSURE, DISCLOSURE)
+        self.assertEqual(release.PROVENANCE_DISCLOSURE_TARGETS, frozenset({"linux-x86_64"}))
+        self.assertEqual(release.PROVENANCE_NOTE, NOTE)
+
+    def test_the_member_lists_are_written_from_a_library_and_from_the_inputs(self):
+        target = "linux-x86_64"
+        self.withhold()
+        library = self.package("lists-library", target)["archive"]
+        linux_trees = (SOURCE_TREE, *SNAPSHOTS)
+        published = {tree: self.published[tree] for tree in sorted(linux_trees)}
+        document = self.private_document()
+        private = {tree: document["trees"][tree] for tree in sorted(linux_trees)}
+        originals = {tree: document["original_snapshots"][tree] for tree in sorted(SNAPSHOTS)}
+
+        def write_list(name, *options, code=0, private=False):
+            path = self.base / name
+            done, out, err = self.command("--source-members", path, *options)
+            self.assertEqual(done, code, err)
+            if code:
+                self.assertFalse(path.exists())
+                return None
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            value = json.loads(path.read_bytes())
+            self.assertEqual(value["schema"], PRIVATE_SCHEMA if private else LIST_SCHEMA)
+            self.assertEqual(set(value), {"schema", "trees", "original_snapshots"} if private else {"schema", "trees"})
+            # Standard output holds counts only.
+            self.assertEqual(json.loads(out), {"trees": {tree: len(names) for tree, names in value["trees"].items()}})
+            (release.read_non_published_list if private else release.read_source_member_lists)(path.read_bytes())
+            return value
+
+        # What a library publishes of its source trees is what the committed list is to hold.
+        self.assertEqual(write_list("published.json", "--from-library", library)["trees"], published)
+        # What the inputs hold beyond it is what the private list is to hold: each member with its digest,
+        # and the digest of every original snapshot that holds one.
+        value = write_list("private.json", "--non-published", "--target", target, "--from-inputs",
+                           "--except-list", self.base / "published.json", private=True)
+        self.assertEqual((value["trees"], value["original_snapshots"]), (private, originals))
+        everything = write_list("inputs.json", "--target", target, "--from-inputs")["trees"]
+        self.assertEqual(everything, {tree: sorted([*published[tree], *(row["name"] for row in private[tree])])
+                                      for tree in published})
+        self.assertEqual(write_list("union.json", "--from-list", self.base / "published.json",
+                                    "--from-list", self.base / "private.json")["trees"], everything)
+        # Private lists add up to one private list; a published list has no digests to add.
+        value = write_list("private-again.json", "--non-published", "--from-list", self.base / "private.json", private=True)
+        self.assertEqual((value["trees"], value["original_snapshots"]), (private, originals))
+        write_list("private-from-library.json", "--non-published", "--from-library", library, code=1)
+        # The lists written this way package the same library again.
+        shutil.copyfile(self.base / "published.json", self.root / PUBLISHED_LIST)
+        self.non_published = self.base / "private.json"
+        again = self.package("lists-again", target)
+        self.assertEqual(Path(again["archive"]).read_bytes(), Path(library).read_bytes())
+        # Refusals: an existing destination, no source, inputs without a target, a library that is none.
+        before = (self.base / "private.json").read_bytes()
+        done, out, err = self.command("--source-members", self.base / "private.json", "--from-library", library)
+        self.assertEqual((done, out, (self.base / "private.json").read_bytes()), (1, "", before))
+        write_list("none.json", code=1)
+        write_list("no-target.json", "--from-inputs", code=1)
+        write(self.base / "not-a-library.tar.gz", b"not an archive")
+        write_list("not-a-library.json", "--from-library", self.base / "not-a-library.tar.gz", code=1)
+        write_list("with-output.json", "--from-library", library, "--output", self.base / "unused", code=1)
 
 
 class PackagedSelectedContractTests(unittest.TestCase):
@@ -1438,6 +2436,79 @@ class PackagedSelectedContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(backend.SetupError, "selected_invalid_selection"):
                     controller.selected_check({**request, "selection_sha256": sha(backend.encoded(invalid))})
         self.assertEqual({name: sha((root / name).read_bytes()) for name in names}, pins)
+
+
+class SourceSnapshotReferenceTests(unittest.TestCase):
+    """A published member inside a shipped source snapshot that names a member left out refuses the
+    build. A snapshot is compressed, so its own bytes do not show such a reference: the check also
+    reads what the snapshot holds. The fixture is the one of ReleaseTests; none of its rows runs here."""
+
+    setUp = ReleaseTests.setUp
+    provenance_fixture = ReleaseTests.provenance_fixture
+    write_published = ReleaseTests.write_published
+    private_document = ReleaseTests.private_document
+    write_non_published = ReleaseTests.write_non_published
+    private_list = ReleaseTests.private_list
+    withhold = ReleaseTests.withhold
+    repin_snapshot = ReleaseTests.repin_snapshot
+    repin_donor = ReleaseTests.repin_donor
+
+    def snapshot_with(self, member, target, text):
+        """Pin the snapshot again with text as the content of one published member; the private list
+        follows the new original. Returns the snapshot's bytes."""
+        holder = SNAPSHOTS.get(member, "") + PUBLISHED[2]
+        rows = [(name, text if name == holder else data) for name, data in self.snapshot_rows[member]]
+        self.assertEqual([name for name, _ in rows].count(holder), 1)
+        raw = self.repin_snapshot(member, rows, target=target)
+        self.write_non_published()
+        return raw
+
+    def refusal(self, target):
+        with self.assertRaises(release.PackageError) as refused:
+            release.collect(self.root, target, non_published=self.private_list())
+        return str(refused.exception), getattr(refused.exception, "members", None)
+
+    def test_a_published_snapshot_member_that_names_a_member_left_out_refuses_the_build(self):
+        self.withhold()
+        for target, donor in sorted(self.python_kits.items()):
+            members = sorted(name for name in donor.get("sources", {}) if name.endswith("/source.tar.gz"))
+            self.assertTrue(members, target)
+            member = members[0]
+            left_out = SNAPSHOTS.get(member, "") + WITHHELD[2]
+            digest = self.private_trees[member][left_out]
+            cases = {"digest": (b"pinned " + digest.encode() + b"\n", 1),
+                     "digest-in-upper-case": (b"pinned " + digest.upper().encode() + b"\n", 1),
+                     "path": (b"include " + left_out.encode() + b" here\n", 1),
+                     "path-and-digest": (left_out.encode() + b" " + digest.encode() + b"\n", 2)}
+            for label, (text, count) in cases.items():
+                with self.subTest(target=target, reference=label):
+                    raw = self.snapshot_with(member, target, text)
+                    lists = self.private_list()
+                    # The compressed snapshot does not show the reference; the member it holds does.
+                    self.assertEqual(release.count_references(raw, lists.names(), lists.digests()), 0)
+                    self.assertEqual(release.count_references(text, lists.names(), lists.digests()), count)
+                    self.assertIn(text, gzip.decompress(raw))
+                    self.assertEqual(self.refusal(target), ("published_member_names_non_published", {member: count}))
+            # The same member without a reference: the build's check passes.
+            with self.subTest(target=target, reference="none"):
+                self.snapshot_with(member, target, b"pinned nothing\n")
+                files = release.collect(self.root, target, non_published=self.private_list())
+                self.assertIn(b"pinned nothing\n", gzip.decompress(files[member][0]))
+
+    def test_the_refusal_names_each_snapshot_that_holds_a_reference_and_its_count(self):
+        target = "linux-x86_64"
+        self.withhold()
+        first, second = sorted(SNAPSHOTS)[:2]
+        expected = {}
+        for member, count in ((first, 1), (second, 3)):
+            digest = self.private_trees[member][SNAPSHOTS[member] + WITHHELD[1]]
+            self.snapshot_with(member, target, (digest + "\n").encode() * count)
+            expected[member] = count
+        self.assertEqual(self.refusal(target), ("published_member_names_non_published", expected))
+        output = self.base / "refused-snapshot-reference"
+        with self.assertRaisesRegex(release.PackageError, "^published_member_names_non_published$"):
+            release.package(self.root, target, output, non_published_list=self.non_published)
+        self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":

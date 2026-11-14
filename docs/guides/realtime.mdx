@@ -626,6 +626,10 @@ ordinary durable executor and returns the result as commentary that the voice
 model speaks from. The canonical conversation persists through Meerkat's normal
 transcript authority.
 
+<Warning>
+Known issue, noted 2026-11-14: in Meerkat 0.8.38 through 0.9.14, after a text turn is sent to a GPT Live voice session during a call, if the voice model then delegates without the user having said anything new, the last spoken request that was delegated can be delegated a second time, so its action can run twice. See the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14) for when it happens and what to do.
+</Warning>
+
 The path is compiled with the `openai-live` feature (`meerkat`, `meerkat-rpc`,
 `meerkat-mob`, `meerkat-mob-mcp`; `meerkat-openai/live`). The host composes
 `ExperimentalGptLiveOpenAuthority::new_public(PublicGptLiveOpenAuthorityConfig)`

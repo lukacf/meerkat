@@ -448,7 +448,8 @@ make a 0.9.14 gateway refuse to start, stored forms an earlier release
 refuses, and what it reads without a refusal but serves differently while
 rolled back or changes by what it writes.
 
-Most items have a step to take before the rollback, on 0.9.15:
+Most items have a step to take: before the rollback, on 0.9.15, unless the
+line says otherwise.
 
 - Settle every owed label restamp.
 - Bring each mob within the earlier totals of operator instruction records,
@@ -733,12 +734,14 @@ everywhere.
 - **An agent private to a person** stays private: another signed-in person who
   is no administrator is shown no entry of it, gets no read of it by name and
   nothing of its conversation, and cannot send to it, whether it is seated or
-  archived (confirmed by a run). Among these agents only one adopted from a
-  configuration that declares it private is private: a create or an update
-  that names the private label is refused (`reserved_key`; the create
-  confirmed by a run, the update read from the source).
+  archived (confirmed by a run). Through the gateway's methods, only one
+  adopted from a configuration that declares it private is private: a create
+  or an update that names the private label is refused (`reserved_key`; the
+  create confirmed by a run, the update read from the source).
 
-Not run: an agent owed its seat. Treat it the same way.
+Not run: an agent owed its seat; a private agent that awaits its preparation;
+an agent that a Rust host makes private through Core's own calls. Treat each
+as not protected and apply the step below.
 
 **Do:** before a rollback, remove each such agent that a rule by role or by
 label keeps from someone, or add a deny rule that names it (confirmed by a

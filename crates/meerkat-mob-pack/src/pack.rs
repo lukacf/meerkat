@@ -734,7 +734,7 @@ fn exclude_paths_from_pack(
         match std::fs::metadata(&real) {
             Ok(metadata) => {
                 if let Some(identity) = FileIdentity::of(&metadata) {
-                    files.retain(|_, file| file.identity != Some(identity));
+                    remove_same_file(files, identity);
                 }
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -742,6 +742,14 @@ fn exclude_paths_from_pack(
         }
     }
     Ok(())
+}
+
+/// Removes every scanned file that is the file `identity` names: the same
+/// inode on the same device. The same inode number on another device is
+/// another file.
+#[cfg(unix)]
+fn remove_same_file(files: &mut BTreeMap<String, ScannedFile>, identity: FileIdentity) {
+    files.retain(|_, file| file.identity != Some(identity));
 }
 
 fn normalize_rel_path(path: &str) -> String {
@@ -1184,6 +1192,56 @@ mod tests {
             &outside.join("latest.mobpack"),
         );
         assert_key_and_output_left_out("key and output given as hard links outside", &files);
+    }
+
+    /// The same inode number on another device is another file: it stays. A
+    /// mount point or a snapshot directory inside the mob directory can hold
+    /// such a file.
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_exclusion_same_inode_on_another_device_is_another_file() {
+        use std::os::unix::fs::MetadataExt;
+
+        let scanned = |device, inode| ScannedFile {
+            bytes: Vec::new(),
+            identity: Some(FileIdentity { device, inode }),
+        };
+        let mut files = BTreeMap::new();
+        files.insert("key.hex".to_string(), scanned(1, 7));
+        files.insert("key-again.hex".to_string(), scanned(1, 7));
+        files.insert("twin.txt".to_string(), scanned(2, 7));
+        files.insert("other.txt".to_string(), scanned(1, 8));
+        files.insert(
+            "no-identity.txt".to_string(),
+            ScannedFile {
+                bytes: Vec::new(),
+                identity: None,
+            },
+        );
+
+        remove_same_file(
+            &mut files,
+            FileIdentity {
+                device: 1,
+                inode: 7,
+            },
+        );
+        assert_eq!(
+            files.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["no-identity.txt", "other.txt", "twin.txt"]
+        );
+
+        // The identity read from the file system carries the device.
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("file");
+        std::fs::write(&path, b"x").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let identity = FileIdentity::of(&metadata).unwrap();
+        assert_eq!(
+            (identity.device, identity.inode),
+            (metadata.dev(), metadata.ino())
+        );
+        assert!(FileIdentity::of(&std::fs::metadata(temp.path()).unwrap()).is_none());
     }
 
     /// A copy of the key is another file with the same bytes: it is packed.

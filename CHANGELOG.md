@@ -50,6 +50,14 @@ them.
   `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
   read the binding file. See Security and the Upgrade notes.
 
+- Behaviour-only (not measured by the gate): `@rkat/web`: the provider proxy
+  (`npx @rkat/web proxy`, `startProxy`) listens on `127.0.0.1` by default,
+  and the proxy and `createProxyHandler` refuse a request from an origin
+  that is not allowed: loopback origins only, unless one is named. A proxy
+  reached from another machine, through a container's published port, or
+  from a page on another origin needs `--host` or `--cors-origin`
+  (`allowOrigin`). See Security and the Upgrade notes.
+
 - Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
   `meerkat-machine-kernels`: the schedule lifecycle machine gains a state
   field and two inputs, and its public types follow.
@@ -1282,6 +1290,34 @@ them.
   on the 0.9.14 release page:
   https://github.com/lukacf/meerkat/releases/tag/v0.9.14
 
+- `@rkat/web`: the provider proxy (`npx @rkat/web proxy`, and `startProxy`
+  and `createProxyHandler` of `@rkat/web/proxy`) listens on the loopback
+  interface by default and compares a request's origin before it calls the
+  provider. The standalone proxy binds `127.0.0.1`; `--host <address>`
+  (`startProxy({ host })`) binds another address, and the proxy prints the
+  address it bound, with a warning when that is not a loopback address. A
+  request that carries an `Origin` header is served only when the origin is
+  allowed and is answered 403 otherwise, preflights included, with no
+  provider call: loopback origins by default (`localhost`, any `127.x.x.x`
+  address and `[::1]`, http or https, any port), the one origin
+  `--cors-origin <origin>` (`allowOrigin`) names, or any origin with `*`; an
+  `Origin` of `null` only with `*`. While it is bound to a loopback address
+  the standalone proxy also refuses a request whose `Host` header is not a
+  loopback name or address; `createProxyHandler` offers that check as
+  `loopbackHostOnly`, off by default. Through 0.9.14 the standalone proxy
+  bound every interface, every origin was allowed by default, and
+  `--cors-origin` set the response header without comparing the request's
+  origin. A caller that reached the port over the network, or a web page
+  open in a browser on the same machine, could send requests to the
+  providers with the proxy's keys. A server that mounts `createProxyHandler`
+  itself had the same missing origin check in 0.4.1 through 0.9.14, so a
+  web page on any origin that reached that server could do the same. A
+  request without an `Origin` header is forwarded as before, except one a
+  browser marks `Sec-Fetch-Site: cross-site`, which is answered 403 unless
+  `*` allows every origin. The proxy does not check who calls it, and one
+  that listens on another address belongs behind your own authentication
+  (see Known limitations). Affects 0.4.1 through 0.9.14.
+
 ### Upgrade notes
 
 - A configuration document an earlier release wrote keeps its mode until
@@ -1498,6 +1534,41 @@ them.
   active, and `rkat run --skill <id>` loads the built-in, not the copy,
   without a message. The copy can be removed.
 
+- `@rkat/web` provider proxy (see Security). Nothing changes for a page
+  served from `localhost`, `127.0.0.1` or `[::1]` that calls a proxy on the
+  same machine, or for a tool on that machine that sends no `Origin` header.
+  Otherwise pass what applies:
+  - The proxy is reached from another machine or through a container's
+    published port: `--host <address>` (`0.0.0.0` for every interface;
+    `startProxy({ host })`). Every user and process of the machine reaches
+    a loopback address. On any other address a caller on the network that
+    sends no `Origin` header is forwarded with no check, and the `Host`
+    header is not checked: put the proxy behind your own authentication.
+  - The page that calls the proxy is not on a loopback origin:
+    `--cors-origin https://app.example.com` (`allowOrigin`).
+    `--cors-origin '*'` allows every origin, as every release through 0.9.14
+    did by default, and is the only setting that serves a page opened from
+    a file or a sandboxed frame (`Origin: null`).
+  - A server that embeds `createProxyHandler` without `allowOrigin` served
+    every origin and now serves loopback origins only. That refuses the
+    site's own pages too: a page sends an `Origin` on its POSTs to its own
+    server, so a same-origin request gets 403 until the site's origin is
+    passed as `allowOrigin` (or `allowOrigin: '*'` for the earlier
+    behaviour). `allowOrigin` is one origin as a string; a list, a pattern
+    or a function allows no origin. An `allowOrigin` the server already
+    passes is now compared with each request, so a page on any other origin
+    gets 403. The handler answers a preflight itself and no longer passes
+    the provider's `access-control-*` headers on. A dependency range such
+    as `^0.9.14` takes 0.9.15 at the next install.
+  - A client that reaches a loopback-bound standalone proxy under another
+    host name (a hosts-file alias, a local reverse proxy that keeps the
+    original `Host`) gets 403: call it as `localhost` or `127.0.0.1`. A
+    client that resolves `localhost` to `::1` only does not connect: use
+    `127.0.0.1`.
+  - The proxy prints the address and port it bound
+    (`http://127.0.0.1:3100`), and `--port 0` asks the system for a free
+    port.
+
 ### Known limitations
 
 - The owner-only rule of this release (see Security) covers the
@@ -1534,6 +1605,24 @@ them.
 
 - Mob: the schedule tools are not checked against the member tool audience
   on a host that mounts them itself.
+
+- `@rkat/web` provider proxy: the proxy does not authenticate its callers
+  (see Security for what it checks). Every user and process of the machine
+  reaches a proxy bound to a loopback address, and so does a page served
+  from any loopback origin. A proxy bound to another address with `--host`
+  forwards a caller on the network that sends no `Origin` header; it does
+  not check the `Host` header, so a GET from a page whose host name points
+  at the proxy is forwarded and the page reads the answer; and a cross-site
+  GET that carries no `Sec-Fetch-Site` header is forwarded, which is every
+  such GET over plain http to an address that is not loopback, because a
+  browser sends that header only to https and loopback addresses. On a
+  loopback-bound proxy the same holds for a browser that sends no
+  `Sec-Fetch-Site` header at all: its cross-site GET without `Origin` is
+  forwarded, and the page cannot read the answer. A tunnel or reverse proxy
+  that rewrites `Host` to a loopback name has the same effect on a
+  loopback-bound proxy. A request without `Origin` that a browser marks
+  `same-site` is forwarded. The proxy keeps no record of the requests it
+  forwards. Put the proxy behind your own authentication in those uses.
 
 - `meerkat-mob`: a spawn rollback that is still owed when the mob is
   stopped (the refused spawn answered `rollback remains owned for retry`)

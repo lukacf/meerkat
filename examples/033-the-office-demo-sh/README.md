@@ -202,7 +202,7 @@ required topology/subscriptions; roster size alone is not a healthy bootstrap.
 ### Server/Proxy Mode
 
 ```
-http://127.0.0.1:4174?proxy=http://localhost:8080&model=claude-sonnet-5-5
+http://127.0.0.1:4174?proxy=http://127.0.0.1:8080&model=claude-sonnet-5-5
 ```
 
 Provider requests are routed to the configured proxy base URL, which must own
@@ -210,6 +210,12 @@ the real credentials and expose `/anthropic`, `/openai`, and `/gemini` routes.
 The browser uses placeholder keys and auto-starts on load.
 
 Known issue, noted 2026-11-14: the proxy that ships with `@rkat/web` 0.4.1 through 0.9.14 (`npx @rkat/web proxy`) is not an authenticated proxy. It does not check who calls it, and it listens on every network interface of the machine although it prints `localhost`. See the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14) for who needs to act and what to do.
+
+The Web SDK's standalone proxy (`npx @rkat/web proxy --port 8080`) exposes
+those routes. From 0.9.15 it listens on the loopback interface (`127.0.0.1`)
+by default; `--host <address>` binds another address. It answers pages from
+loopback origins only, unless `--cors-origin <origin>` names another origin.
+Put a proxy that listens on another address behind your own authentication.
 
 ## Event Scenarios
 

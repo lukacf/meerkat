@@ -409,7 +409,7 @@ import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
 // Stock key/proxy bootstrap also loads the WASM binary.
 const runtime = await MeerkatRuntime.init(wasm, {
   anthropicApiKey: 'proxy',
-  anthropicBaseUrl: 'http://localhost:3100/anthropic',
+  anthropicBaseUrl: 'http://127.0.0.1:3100/anthropic',
 });
 
 // Register runtime-scoped tools after init

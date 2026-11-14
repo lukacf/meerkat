@@ -6200,9 +6200,9 @@ impl MobMcpState {
 
     /// Rotate the supervisor bridge for the mob, returning the structured
     /// rotation report so RPC/MCP clients can inspect per-member outcomes
-    /// instead of guessing from a bare success signal. Finding C10:
-    /// `MobHandle::rotate_supervisor()` existed in the Rust API but had no
-    /// operator-facing RPC surface.
+    /// instead of guessing from a bare success signal. This is the
+    /// operator-facing entry to `MobHandle::rotate_supervisor()` that the
+    /// JSON-RPC surface calls.
     pub async fn mob_rotate_supervisor(
         &self,
         mob_id: &MobId,
@@ -7493,9 +7493,9 @@ impl MobMcpState {
     /// Submit a unit of work to a mob member through the work-lane.
     ///
     /// Thin wrapper over [`meerkat_mob::MobHandle::submit_work`] for the
-    /// mob-surface crate. Finding C4 — the work-lane Rust API
-    /// (`submit_work`/`cancel_work`/`cancel_all_work`) was Rust-only;
-    /// this exposes it to RPC/HTTP consumers such as meta.
+    /// mob-surface crate: with the two cancel calls beside it, it exposes
+    /// the work-lane Rust API (`submit_work`/`cancel_work`/`cancel_all_work`)
+    /// to surface consumers such as the JSON-RPC server.
     ///
     /// Work of [`meerkat_mob::WorkOrigin::Internal`] acts as the mob's host,
     /// which MobMachine admits to any member, an identity entry included:
@@ -7695,11 +7695,12 @@ impl MobMcpState {
             .await
     }
 
-    /// Always refused with [`MobError::WorkCancellationUnsupported`]: per-unit
-    /// cancellation is unsupported and nothing is cancelled.
+    /// Always refused: per-unit cancellation is unsupported and nothing is cancelled.
     ///
-    /// The caller's authorization for the mob is still decided first, so a
-    /// caller without it gets that refusal and not the capability error.
+    /// A caller the mob admits for the cancel control scope gets
+    /// [`MobError::WorkCancellationUnsupported`]; a caller it does not admit
+    /// is refused before that. Use [`MobMcpState::mob_cancel_all_work`] to
+    /// cancel a member's in-flight work.
     pub async fn mob_cancel_work(
         &self,
         mob_id: &MobId,
@@ -7711,7 +7712,7 @@ impl MobMcpState {
             .await
     }
 
-    /// Cancel all in-flight work for a specific mob member. Finding C4.
+    /// Cancel all in-flight work for a specific mob member.
     pub async fn mob_cancel_all_work(
         &self,
         mob_id: &MobId,

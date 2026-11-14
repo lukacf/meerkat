@@ -44531,6 +44531,7 @@ mod tests {
      {
         use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
         use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_runtime::input_state::{InputAbandonReason, InputTerminalOutcome};
 
         let session = FailedStartSession::materialized().await;
         session
@@ -44563,6 +44564,36 @@ mod tests {
             session.client.calls.load(AtomicOrdering::SeqCst),
             requests,
             "the refused turn made no model request"
+        );
+        // The refused turn's input was admitted, and it ends as abandoned
+        // with the reason `stopped`, not with the refusal. (Its stored
+        // attempt count is printed on a failure and is not asserted here.)
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session.session_id);
+        let inputs = session
+            .runtime
+            .service
+            .runtime_store()
+            .load_input_states_strict(&runtime_id)
+            .await
+            .expect("the stored input rows are readable")
+            .into_iter()
+            .map(|row| (row.seed.terminal_outcome, row.seed.attempt_count))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|(outcome, _)| outcome)
+                .filter(|outcome| matches!(outcome, Some(InputTerminalOutcome::Abandoned { .. })))
+                .collect::<Vec<_>>(),
+            vec![&Some(InputTerminalOutcome::Abandoned {
+                reason: InputAbandonReason::Stopped,
+            })],
+            "the refused turn's stored input, among {inputs:?}"
+        );
+        assert_eq!(
+            inputs.len(),
+            2,
+            "the first turn's input and the refused turn's: {inputs:?}"
         );
         assert_eq!(
             session.holdings().await,

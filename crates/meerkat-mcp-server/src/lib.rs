@@ -5100,12 +5100,12 @@ async fn handle_meerkat_resume(
 
     // A resume that names the provider-neutral reasoning effort level
     // rebuilds the session, and the rebuild replaces the session's runtime
-    // attachment: a resume accepted behind a running turn ends with the old
-    // attachment. So such a resume is taken only when no turn is running on
-    // the session, and is otherwise answered busy at once: it does not wait,
-    // and nothing is retired, staged or stored. The level is judged by the
-    // rebuild, so a level the model refuses is answered its typed refusal
-    // when the resume is sent again once the running turn has answered.
+    // attachment: a resume accepted behind a running turn can end with the
+    // old attachment. So such a resume is taken only when no turn is running
+    // on the session, and is otherwise answered busy at once: it does not
+    // wait, and nothing is retired, staged or stored. The level is judged by
+    // the rebuild, so a level the model refuses is answered its typed
+    // refusal when the resume is sent again once the session is idle.
     if resume_names_reasoning_effort_level(&input)
         && state
             .service

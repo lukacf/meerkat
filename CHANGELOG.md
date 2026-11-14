@@ -2028,7 +2028,11 @@ them.
   such session held one of the server's session slots until the server
   restarted (it was never stored). The refused create now takes back what
   it prepared, as a create that fails before its first turn does: nothing
-  is listed, read or registered for it, and it holds no session slot. The
+  is listed, read or registered for it, and it holds no session slot. Only
+  a session that was never built is removed: when the level is refused
+  inside the first turn after the build accepted it (the route's levels
+  changed between the two), the built session stays with its transcript.
+  The
   refusal's code and data are unchanged, whichever form names the level
   (`reasoning_effort` or `provider_params.reasoning_effort`). A deferred
   create (`initial_turn: "deferred"`) is unchanged: it answers its session
@@ -2855,10 +2859,13 @@ them.
   (`reasoning_effort_refusal`).
 
 - MCP server: `meerkat_resume` rebuilds the session whenever it names a
-  reasoning effort level, and retires the live session before that build.
-  A level the route refuses therefore leaves the session not live: the
-  stored session is intact, its mobs are untouched, and the next
-  `meerkat_resume` rebuilds it (read from the source).
+  reasoning effort level and no turn is running on the session: it retires
+  the live session before that build. A level the route refuses therefore
+  leaves the session not live: the stored session is intact, its mobs are
+  untouched, and the next `meerkat_resume` rebuilds it (confirmed by a
+  test of this change). While a turn is running, such a resume is answered
+  busy at once by the MCP server's own rule and retires nothing (see Fixed
+  and the entry on its limits below).
 
 - REST: a reasoning effort level sent with `POST /sessions/{id}/messages`
   for a session the server holds live is answered HTTP 500 `session is
@@ -2886,18 +2893,25 @@ them.
   Fixed). The server judges a level only when it rebuilds the session, so
   on a busy session a level the model does not accept is answered busy
   first, and its typed refusal when the resume is sent again (confirmed by
-  a test of this change). One window stays (read from the source, not
-  run): the server reads whether a turn is running before the resume does
-  anything else; a plain resume that starts between that read and the
-  level resume's own start runs, but a request queued behind that plain
-  resume can still be ended by the level resume's rebuild. It then answers
-  `-32003` (`session_resume_required`) without running; send it again. The
-  same holds, as on 0.9.14, for a plain resume queued beside a resume that
-  rebuilds the session for another field (`model`, `max_tokens` and the
-  other build fields): it runs, or it ends with that answer when the
-  rebuild reaches the session first (confirmed by a test of this change
-  for `max_tokens`; the retire before a rebuild is the same code as on
-  0.9.14, read from the source).
+  a test of this change). Three limits stay (read from the source, not
+  run, unless said). First, a window: the server reads whether a turn is
+  running before the resume does anything else; a plain resume that starts
+  between that read and the level resume's own start runs, but a request
+  queued behind that plain resume can still be ended by the level resume's
+  rebuild. It then answers `-32003` (`session_resume_required`) without
+  running; send it again. Second, a plain resume sent at the same moment
+  as a level resume, before either turn has started (on an idle session
+  too), runs or ends with that same answer, depending on which of the two
+  reaches the session first. Third, "wait for the running turn's answer"
+  assumes the running turn is the caller's: when it is not (a peer message
+  on a keep-alive session, a scheduled run), there is no answer to wait
+  for; send the resume again later. The second limit holds, as on
+  0.9.14, for a plain resume queued beside a resume that rebuilds the
+  session for another field (`model`, `max_tokens` and the other build
+  fields): it runs, or it ends with that answer when the rebuild reaches
+  the session first (confirmed by a test of this change for `max_tokens`;
+  the retire before a rebuild is the same code as on 0.9.14, read from the
+  source).
 
 - A schedule's session spec is the one surface where the reasoning effort
   level is not accepted in this release. A schedule whose `create` spec

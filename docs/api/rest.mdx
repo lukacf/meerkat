@@ -697,8 +697,9 @@ Continue an existing session.
   The session's provider-neutral reasoning effort level from this message
   on: a level (`"high"`, or `{"action":"set","value":"high"}`) sets it,
   `{"action":"clear"}` removes it, and omission/`null` keeps the level the
-  session recorded. A level the model or its route does not accept is
-  refused exactly as on `POST /sessions`: HTTP 400, code `INVALID_PARAMS`
+  session recorded. On a session this server does not hold live, a level
+  the model or its route does not accept is refused exactly as on
+  `POST /sessions`: HTTP 400, code `INVALID_PARAMS`
   and the `reasoning_effort_refused` details. The stored session is
   unchanged. A message that names this field rebuilds the session, like
   one that names `model` or `max_tokens`: while this server holds the

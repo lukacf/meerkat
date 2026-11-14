@@ -666,6 +666,32 @@ them.
   writer had closed cleanly, so the read needs a directory SQLite can
   create them in.
 
+- `meerkat-mob`: a mob handle says which lifecycle intent the mob still
+  owes. `MobLifecycleObservation::owed_intent` (from
+  `MobHandle::lifecycle_observation` and `MobReadHandle::lifecycle_observation`)
+  is the Stop, Complete, Reset, retirement of every member or Destroy that
+  was durably begun and has not landed, read from the mob machine's
+  published state without asking the actor; it is `None` when that state
+  owes nothing, so a Stopped mob owes no Stop.
+  `MobHandle::wait_until_no_lifecycle_intent_is_owed` waits until nothing is
+  owed and returns the phase of that same state. It has no bound of its own
+  (the caller owns the bound). When the actor ends first, a waiter gets the
+  fail-stop cause or the closed-actor error `status` reports; an actor that
+  ended in a terminal phase with the intent still owed answers
+  `ActorCommandChannelClosed` although `status` answers the phase; and a
+  graceful Shutdown over an owed Stop answers `Stopped`, as `status` does
+  (the Shutdown leaves that ended actor Stopped; the Stop has not landed
+  durably, and the next resume reports and drives it). Inside a
+  pre-activation hook of a resume the read handle does not yet report an
+  intent the log leaves open: read it from the handle the resume returns.
+  A resume hands a mob back after a short bounded wait for the first
+  attempt at a recovered Stop or Complete, so the phase read right after it
+  can still be `Running` with the Stop owed: a host that acts on the phase
+  (lifting a Stopped mob, for example) waits with this method instead of
+  reading the mob's event history. The resume's own recovery decides what
+  it drives by the same rule. `MobLifecycleObservation` is non-exhaustive,
+  so code that reads it compiles unchanged.
+
 - `meerkat-core`, `meerkat-llm-core`: the vocabulary of a provider-neutral
   `reasoning_effort` option. The entries below are built from these types:
   the resolver, the route every client reports, the typed refusal and the

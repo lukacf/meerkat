@@ -9956,7 +9956,8 @@ impl MobHandle {
     }
 
     /// The mob's lifecycle as observed without asking its actor: the last
-    /// phase the actor published and, once the actor has stopped, why. See
+    /// phase the actor published, the lifecycle intent the mob still owes
+    /// and, once the actor has stopped, why. See
     /// [`MobLifecycleObservation`](super::MobLifecycleObservation).
     ///
     /// The failure is the cause the actor recorded when it fail-stopped,
@@ -9971,6 +9972,16 @@ impl MobHandle {
         // exit (Shutdown, Complete, Destroy) that published its phase first.
         let task_ended =
             self.lifecycle_observations.actor_task_end() != super::ActorTaskEnd::Running;
+        // The owed intent is read before the phase: the actor publishes a
+        // machine phase change's phase before its machine state, so the
+        // phase read here is never older than the state that answered
+        // "nothing owed". One seam publishes the machine state first: a
+        // destroy's admission turns the public phase Destroyed after its
+        // state is out, so this can show an owed Destroy beside the last
+        // live phase for an instant, which errs on the side of waiting.
+        let owed_intent = super::lifecycle_observation::owed_lifecycle_intent(
+            &self.machine_state_watch_rx.borrow(),
+        );
         let phase = self.status_observation_snapshot();
         let failure = match self.lifecycle_observations.fail_stop_cause() {
             Some(cause) => Some(cause),
@@ -9981,7 +9992,7 @@ impl MobHandle {
             }
             None => None,
         };
-        super::MobLifecycleObservation::new(phase, failure)
+        super::MobLifecycleObservation::new(phase, failure, owed_intent)
     }
 
     /// Access the mob definition.
@@ -18633,6 +18644,72 @@ impl MobHandle {
             // The actor is gone (its state watch closed) or the hang guard
             // elapsed: the refusal stands.
             Ok(Err(_)) | Err(_) => Err(refusal),
+        }
+    }
+
+    /// Wait until the mob owes no lifecycle intent, and return the phase it
+    /// then has.
+    ///
+    /// An owed intent is one
+    /// [`MobLifecycleObservation::owed_intent`](super::MobLifecycleObservation::owed_intent)
+    /// reports: a Stop, Complete, Reset, retirement of every member or
+    /// Destroy that was durably begun and has not landed, whether this
+    /// process began it or a resume recovered it. The returned phase is read
+    /// from the same machine state that owes nothing, so a caller that lifts
+    /// a Stopped mob after this wait does not race a Stop that lands later.
+    /// A mob that owes nothing returns at once.
+    ///
+    /// The wait asks the actor nothing, loads nothing and has no bound: the
+    /// caller owns the bound. An intent that nothing drives stays owed and
+    /// keeps the wait pending on a live, healthy actor:
+    /// - a Stop whose caller got a refusal back (for example at a member's
+    ///   hang guard) stays owed until a Stop is issued again;
+    /// - a Reset a resume recovered, on a mob whose admission was closed
+    ///   before the Reset ran, cannot run on that actor any more (the actor
+    ///   refuses a Reset once its admission is closed, and the recovery stops
+    ///   trying), so the wait ends only when the actor ends.
+    ///
+    /// When the actor ends first, what a waiter gets depends on how it
+    /// ended:
+    /// - the actor fail-stopped: the recorded cause in
+    ///   [`MobError::SharedLifecycleFailure`], as [`Self::status`] reports
+    ///   it;
+    /// - its task ended in a live phase with no recorded cause: the
+    ///   closed-actor error `status` reports;
+    /// - it ended in a terminal public phase with the intent still owed and
+    ///   no recorded cause (a graceful Shutdown over an owed Complete, Reset,
+    ///   retirement of every member or Destroy, or an admitted destroy whose
+    ///   cleanup did not finish): [`MobError::ActorCommandChannelClosed`],
+    ///   although `status` answers that phase;
+    /// - a graceful Shutdown over an owed Stop: `Ok(MobState::Stopped)`. The
+    ///   Shutdown leaves that actor's machine Stopped, the state a landed
+    ///   Stop leaves, so nothing is owed on that handle and `status` answers
+    ///   Stopped too. That actor admits no Resume.
+    ///
+    /// In each of these the intent stays durable, and the next resume
+    /// reports it as owed and drives it. So an `Ok(MobState::Stopped)` from
+    /// this wait is the answer of that actor: a host that records "stopped"
+    /// durably takes it from the next start's wait, not from a wait a
+    /// Shutdown may have ended.
+    pub async fn wait_until_no_lifecycle_intent_is_owed(&self) -> Result<MobState, MobError> {
+        let mut state_rx = self.machine_state_watch_rx.clone();
+        let settled = state_rx
+            .wait_for(|state| super::lifecycle_observation::owed_lifecycle_intent(state).is_none())
+            .await
+            .map(|state| super::lifecycle_observation::phase_owing_no_lifecycle_intent(&state));
+        match settled {
+            Ok(phase) => Ok(phase),
+            // The actor has ended (its state watch closed) with the intent
+            // still owed.
+            Err(_) => Err(match self.lifecycle_observations.fail_stop_cause() {
+                Some(cause) => MobError::SharedLifecycleFailure(cause),
+                None => Self::status_from_closed_actor(
+                    MobError::ActorCommandChannelClosed,
+                    self.status_observation_snapshot(),
+                )
+                .err()
+                .unwrap_or(MobError::ActorCommandChannelClosed),
+            }),
         }
     }
 

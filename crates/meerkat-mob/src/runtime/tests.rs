@@ -36,6 +36,8 @@ mod member_tool_grant_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod member_wake_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod owed_lifecycle_intent;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod parallel_resume_restore;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod poisoned_scope_rows;

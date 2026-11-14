@@ -12359,27 +12359,17 @@ impl MobBuilder {
             // destroy. Public authority is already closed by destroy_admitted,
             // but the recovered actor must automatically resume the exact member,
             // host, and storage cleanup rather than waiting for an operator verb.
+            // This picks the mechanism (the destroy retry) and cannot disagree
+            // with the rule below, which answers Destroy wherever this is true.
             let resume_destroy_cleanup = actor.dsl_authority.state().destroy_admitted
                 && actor.dsl_authority.state().lifecycle_phase
                     != crate::machines::mob_machine::MobPhase::Destroyed;
-            let recovered_lifecycle_retry_intent = match (
-                actor.dsl_authority.state().lifecycle_phase,
-                actor
-                    .dsl_authority
-                    .state()
-                    .placed_completion_lifecycle_intent,
-            ) {
-                (
-                    crate::machines::mob_machine::MobPhase::Stopped,
-                    Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Stop),
-                )
-                | (
-                    crate::machines::mob_machine::MobPhase::Completed,
-                    Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Complete),
-                )
-                | (crate::machines::mob_machine::MobPhase::Destroyed, _) => None,
-                (_, intent) => intent,
-            };
+            // What the recovered mob still owes is the one rule its handles
+            // observe (`owed_lifecycle_intent`); an admitted destroy is
+            // driven by the destroy retry below, any other owed intent by
+            // the recovery driver.
+            let recovered_lifecycle_retry_intent =
+                super::lifecycle_observation::owed_lifecycle_intent(actor.dsl_authority.state());
             // The answer to the first attempt at a recovered Stop or
             // Complete: the start waits for it before it hands the mob back
             // (see its end).

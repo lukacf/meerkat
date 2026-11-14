@@ -2093,6 +2093,30 @@ typed `failure` (`cause`, `message`, `code`, `structured_data`): present
 means the mob's actor has stopped; `status` is the last machine phase. Before
 0.9.5 the row read `Running`.
 
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+From 0.9.15 the observation also carries `owed_intent`: the Stop, Complete,
+Reset, retirement of every member or Destroy that was durably begun and has
+not landed, or `None` when the mob's machine state owes nothing. A resume waits
+only a short bounded time for the first attempt at a recovered Stop or
+Complete, so the phase read right after it can still be `Running` while the
+Stop is owed. A host that acts on the phase after a resume (lifting a Stopped
+mob, for example) first calls
+`MobHandle::wait_until_no_lifecycle_intent_is_owed()`, which returns the phase
+once nothing is owed and has no bound of its own. Two reads say "nothing
+owed" while the mob's log still owes an intent: the read handle inside a
+pre-activation hook of a resume (the open intent is applied after the hook;
+read it from the handle the resume returns), and the handles of an actor that
+a graceful Shutdown ended over an owed Stop (they read `Stopped`; the next
+resume reports the Stop as owed and drives it). When the actor ends before the
+intent lands, the wait returns a typed error: the fail-stop cause, the
+closed-actor error for a task that ended in a live phase, or
+`ActorCommandChannelClosed` for an actor that ended in a terminal phase with
+the intent still owed; after a graceful Shutdown over an owed Stop the wait
+returns `Stopped`, as those handles read. That `Stopped` is the answer of
+that actor: a host that records "stopped" durably takes it from the next
+start's wait, not from a wait a Shutdown may have ended.
+
 A member whose cleanup delivery the start cannot restore (a retiring member,
 or any member bound to a session of a Stopped or Completed mob) does not fail
 the start when the failure is the member's own and came before the restore had

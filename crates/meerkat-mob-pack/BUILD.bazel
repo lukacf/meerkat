@@ -140,7 +140,6 @@ rust_test(
     ],
     size = "medium",
     data = [
-        "//:github_workflows",
         "//:test_fixtures",
         "//tests/fixtures/machine-dsl-tests:package_runfiles",
         "//tests/fixtures/mcp-test-server:package_runfiles",

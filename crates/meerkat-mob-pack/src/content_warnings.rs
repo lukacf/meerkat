@@ -339,8 +339,8 @@ mod tests {
     #[test]
     fn test_other_hidden_entries_are_pointed_out_once_per_directory_or_file() {
         assert_eq!(
-            classify_packed_path(".github/workflows/ci.yml"),
-            Some((".github/".to_string(), PackedPathConcern::HiddenDirectory))
+            classify_packed_path(".vscode/settings.json"),
+            Some((".vscode/".to_string(), PackedPathConcern::HiddenDirectory))
         );
         assert_eq!(
             classify_packed_path("skills/.cache/a/b.bin"),
@@ -360,6 +360,34 @@ mod tests {
         assert_eq!(
             classify_packed_path(".secrets/id_rsa"),
             Some((".secrets/id_rsa".to_string(), PackedPathConcern::KeyFile))
+        );
+    }
+
+    #[test]
+    fn test_flagged_directory_names_are_matched_without_regard_to_case() {
+        assert_eq!(
+            classify_packed_path(".GIT/HEAD"),
+            Some((".GIT/".to_string(), PackedPathConcern::RepositoryMetadata))
+        );
+        assert_eq!(
+            classify_packed_path("sub/.Rkat/sessions/chat.jsonl"),
+            Some(("sub/.Rkat/".to_string(), PackedPathConcern::LocalState))
+        );
+        assert_eq!(
+            concern_of(".SSH/config"),
+            Some(PackedPathConcern::CredentialDirectory)
+        );
+    }
+
+    #[test]
+    fn test_the_top_most_hidden_directory_is_the_one_pointed_out() {
+        assert_eq!(
+            classify_packed_path(".a/.b/x"),
+            Some((".a/".to_string(), PackedPathConcern::HiddenDirectory))
+        );
+        assert_eq!(
+            classify_packed_path("s/.a/t/.b/x"),
+            Some(("s/.a/".to_string(), PackedPathConcern::HiddenDirectory))
         );
     }
 

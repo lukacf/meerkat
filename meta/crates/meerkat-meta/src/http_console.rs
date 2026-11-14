@@ -15340,8 +15340,9 @@ async fn handle_console_runtime_rpc_with_visibility(
                     .await;
                 match respawn_result {
                     Ok(scope) => {
-                        // A durable identity is retired and woken onto its
-                        // same session at a new Core generation, so the legacy
+                        // A durable identity's member is replaced by its
+                        // successor on its same session at a new Core
+                        // generation, and woken, so the legacy
                         // raw-member warning fields remain null but present. A
                         // peer-only member has no Core scope: its atoms are
                         // null.

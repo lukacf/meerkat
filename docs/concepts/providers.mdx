@@ -387,12 +387,13 @@ rkat run --model gpt-5.5 --reasoning-effort high "Plan the migration"
 | Python and TypeScript SDKs | `reasoning_effort` / `reasoningEffort` on session create, turns and mob member turns |
 | Web SDK | `SessionConfig.reasoningEffort` |
 | Mob profiles | the `reasoning_effort` key of the profile's `provider_params` |
-| Schedules | the `reasoning_effort` key of `provider_params` in a `materialize_on_demand_session` target's `create` spec; see [Scheduling](/guides/scheduling#session-targets) |
+| Schedules | not on schedules in 0.9.15: a `reasoning_effort` key in a schedule's `create` spec is refused; see [Scheduling](/guides/scheduling#session-targets) |
 | Rust | `AgentBuildConfig.provider_params.reasoning_effort` |
 
 The setting lives in the session's provider params, so
 `provider_params.reasoning_effort` is the same setting wherever provider
-params are accepted (`--param reasoning_effort=high` on the CLI). A request
+params are accepted (`--param reasoning_effort=high` on the CLI), except in a
+schedule's `create` spec, which does not take it in 0.9.15. A request
 that gives both must give the same level in both, or it is refused as invalid
 params.
 

@@ -2345,25 +2345,6 @@ them.
   mob definition, a member profile or a realm profile. The rollback note
   below says more.
 
-- Rollback: a reasoning-effort level stored in a schedule is one-way for
-  that schedule. On 0.9.14, one schedule row whose target names a level, a
-  deleted schedule's row included, makes that realm's whole schedule list
-  fail; other schedules still fire and can be read and changed by id. Before
-  rolling back, replace the target of every schedule that names a level with
-  one that names none. This restores the list only: a schedule that planned
-  an occurrence while its target named a level still fires on 0.9.14 and can
-  be read by id and paused, but cannot be revised or deleted there, and its
-  occurrence history cannot be listed. To keep a schedule you can manage
-  after a rollback, replace its target, delete it and create it again, all
-  on 0.9.15. Never delete a schedule whose target still names a level: for
-  one deleted with the level there is no repair step, and no supported read
-  lists deleted schedules. (Read from the 0.9.14 source, not run; the
-  upgrading guide has the details.) A schedule that creates its session
-  takes the level in that session's `provider_params` from this release
-  (`schedule/create`, `schedule/update`, the REST schedule routes, the
-  schedule tools an agent calls), and the level is judged when an occurrence
-  is delivered.
-
 - A client that sends `provider_params.reasoning_effort` in a REST
   `POST /sessions` body, on `mob/turn_start` or in a mob profile sent to
   `mob/create`, where 0.9.14 ignored the key: remove the key, or send the
@@ -2421,10 +2402,10 @@ them.
   that never carried the level are written exactly as before and read on
   either release. Further stored forms are in "Rolling back to 0.9.14"
   in `docs/guides/upgrading.mdx`, read from the source of both releases
-  and not run: a schedule's session spec (the note above), a session's
+  and not run: a session's
   model-routing history after a `brain_swap`, the stored record of a turn
   that failed for a refused level, and the session's stored event log;
-  for the last three no step removes what was stored, so clearing a
+  no step removes what was stored, so clearing a
   session's level does not undo them. How this was established: what
   0.9.14 does with a mob
   definition and with a realm profile that hold a level (a Core host, a
@@ -2587,6 +2568,16 @@ them.
   that request that rebuilds the session (`model`, `provider`,
   `max_tokens` and the rest). Set the level when the session is created
   (`POST /sessions`).
+
+- A schedule's session spec is the one surface where the reasoning effort
+  level is not accepted in this release. A schedule whose `create` spec
+  carries `provider_params.reasoning_effort` is refused when it is created
+  or updated (invalid params on JSON-RPC, HTTP 400 on REST, an
+  invalid-arguments error from the MCP server's and an agent's schedule
+  tools), and nothing is stored. A provider's own effort under
+  `provider_tag` is accepted there as before. The level is planned to
+  return on schedules in a later release, together with a way back for
+  stores on a rollback.
 
 - A member turn that the mob runtime itself starts with a reasoning effort
   level (a Rust host's member turn, not JSON-RPC `mob/turn_start`, which is

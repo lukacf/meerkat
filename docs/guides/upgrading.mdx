@@ -402,10 +402,9 @@ route (the four differences are listed under Changed in the changelog).
   read as the provider-neutral level and judged. 0.9.14 ignored it in a
   REST `POST /sessions` body, on `mob/turn_start` and in a mob profile sent
   to `mob/create`, so a client that sent the key there by mistake can
-  be refused from 0.9.15. A schedule that creates its session takes the
-  key in that session's `provider_params` from 0.9.15 too (0.9.14 refused
-  it there as an unknown field); the level is judged when an occurrence
-  is delivered, not when the schedule is written.
+  be refused from 0.9.15. A schedule's session settings do not take the
+  key in 0.9.15: a schedule whose `create` spec carries it is refused when
+  it is created or updated (0.9.14 refused it there as an unknown field).
 - **CLI scripts.** `rkat run --reasoning-effort <LEVEL>` exits 2 when the
   level is refused; with `--output json` stdout then ends with a failure
   document (`{"error": {...}}`) instead of a run result, so a script that
@@ -437,8 +436,7 @@ route (the four differences are listed under Changed in the changelog).
   so that it names neither (or delete it) before rolling back; an update
   of it on 0.9.14 also succeeds and drops the level. To keep the option of
   rolling back, set the level on a session or
-  a turn, not in a mob definition, a member profile, a realm profile or a
-  schedule's session spec.
+  a turn, not in a mob definition, a member profile or a realm profile.
   There is no `rkat storage doctor` finding or count for stored levels yet:
   to find affected mobs before rolling back, page each mob's stored events
   (`rkat mob logs <MOB> --json`) and list the realm profiles, and search
@@ -449,9 +447,9 @@ route (the four differences are listed under Changed in the changelog).
   with development builds of both releases; the session, accepted input,
   member snapshot and member spec cases were read from the source of both
   releases, not run; the removal on 0.9.15 before a rollback was not run.
-  Four more stored forms (a schedule's session spec, a session's
-  model-routing history, the record of a turn that failed for a refused
-  level, the stored event log) and each item's own grade are under
+  Three more stored forms (a session's model-routing history, the record
+  of a turn that failed for a refused level, the stored event log) and
+  each item's own grade are under
   [Rolling back to 0.9.14](#rolling-back-to-0-9-14).
 
 ### Meta 0.9.15
@@ -588,10 +586,6 @@ line says otherwise.
   `mob/profile/update` with the whole profile without them, or
   `mob/profile/delete`, each with the listed revision as
   `expected_revision`.
-- Replace the target of every schedule that names a reasoning effort
-  level with one that names none (`schedule/update`). Before deleting such
-  a schedule, replace its target first, then delete it: for a schedule
-  deleted while its target named a level there is no repair step.
 
 Each item below says what an earlier release does and what to do.
 
@@ -946,75 +940,6 @@ what a rollback costs (the note beside the change is under
   is the mob case above. Confirmed by a run, on the 0.9.14 side only and
   with the same two `rkat-rpc` builds: the failing list, the failing read,
   and the update that drops the level.
-- **A schedule whose session spec names a level.** A reasoning-effort
-  level stored in a schedule is one-way for that schedule. A
-  schedule that creates its session when it fires (a
-  `materialize_on_demand_session` target) stores that session's
-  `provider_params` in its target, and every occurrence stores a copy of
-  the target it was planned with. From 0.9.15 that spec takes the level
-  (`schedule/create`, `schedule/update`, the REST schedule routes and the
-  schedule tools an agent calls: an agent that has the schedule tools can
-  set a level too, so an operator may not know one was ever stored). The
-  level is judged when an occurrence is delivered, by the build of the
-  session the occurrence creates, as a session create judges it: a level
-  the route accepts is sent with the scheduled turn, and a level the route
-  refuses reaches no provider and fails the delivery: the occurrence ends
-  as `delivery_failed` with the failure class `runtime_rejected`, and its
-  failure detail carries the refusal's text and reason (a row holds both
-  outcomes).
-
-  What 0.9.14 does with one schedule row whose target names a level. A
-  deleted schedule's row counts: a delete keeps the row with its target.
-
-  - That realm's whole schedule list fails (`schedule/list`,
-    `GET /schedules`, `meerkat_schedule_list`): it decodes every row before
-    it filters.
-  - That schedule cannot be read by id, changed, paused, resumed or
-    deleted.
-  - The other schedules still fire and can be read and changed by id, and
-    new ones can be created.
-  - An active schedule left naming a level is skipped by the scheduler as
-    a faulty row, and the host applies its failure backoff to the
-    scheduler's loop. A deleted or paused schedule's row is not read by the
-    scheduler.
-  - Sessions and mobs in the same realm are not affected by it.
-
-  Before rolling back, replace the target of every schedule that names a
-  level with one that names none (`schedule/update` with the whole
-  `target`). Before deleting such a schedule, replace its target first,
-  then delete it: for a schedule
-  deleted while its target named a level there is no repair step. A
-  deleted schedule cannot be changed, and no command or method edits or
-  removes its row, so nothing restores 0.9.14's schedule list for it.
-
-  Replacing the target restores the realm's schedule list, not that
-  schedule's own records: its occurrences keep the target they were planned
-  with, so on 0.9.14 its occurrence history cannot be listed
-  (`schedule/occurrences`) and the schedule cannot be revised or deleted
-  there; it still fires and can be read by id. Of the changes, the ones
-  that fail there are a change of its trigger, its target or its policies,
-  and a delete (each reads all of the schedule's occurrences); a pause, a
-  resume and a change of its planning horizon work. The other schedules'
-  histories are read as before. Deleting it on 0.9.15, after its target is
-  replaced, leaves nothing that fails on 0.9.14 beyond the history of that
-  one schedule. To have a schedule that 0.9.14 can also revise, replace the
-  target, delete the schedule and create it anew on 0.9.15: a new schedule
-  has no occurrence planned with the level.
-
-  To find such schedules on 0.9.15, read each schedule's `target` and look
-  for `create.provider_params.reasoning_effort`: `schedule/list` and
-  `GET /schedules` return every schedule that is not deleted with its
-  whole target, and `schedule/get` returns one schedule.
-  `schedule/occurrences` shows the target each occurrence of a schedule
-  was planned with (`target_snapshot`). No supported read lists deleted
-  schedules: a deleted schedule's stored target is shown only by a read by
-  id (`schedule/get`, `GET /schedules/{id}`) of an id you already know, so
-  the one case that has no repair step cannot be checked for schedules
-  whose ids you do not have. As a precaution, keep schedules that name a
-  level in a realm of their own: the schedule list that fails on 0.9.14 is
-  that realm's. What 0.9.14 does here was read from the 0.9.14 source, and
-  what 0.9.15 keeps in the occurrence rows from its own source; none of
-  it was run against 0.9.14, the order "replace, then delete" included.
 - **A session's model-routing history.** When a model switch that the
   session's own run asked for (the `brain_swap` tool) takes effect, the
   session records the identity the switch applied, its level included, in
@@ -1042,8 +967,8 @@ what a rollback costs (the note beside the change is under
   No step removes stored events (read from the source, not run).
 
 To keep the option of rolling back, set the level on a session or a turn,
-not in a mob definition, a member profile, a realm profile or a
-schedule's session spec. Even then the session keeps what it stored while
+not in a mob definition, a member profile or a realm profile. Even then
+the session keeps what it stored while
 it held the level: its event log, and the routing history record and the
 failed turn's record where they were written; clearing the level removes
 none of them. There is no

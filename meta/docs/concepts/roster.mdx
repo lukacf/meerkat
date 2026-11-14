@@ -510,9 +510,9 @@ answer; a retry of the same request states none. The kinds:
 
 - `applies_at_next_run`: the change is recorded and reaches the agent at
   its next run (a run that starts within moments may still use the earlier
-  instructions). For an agent no build has created a conversation for,
-  nothing is recorded: its first build takes the current text, unless that
-  build was already under way when the update arrived.
+  instructions). For an agent that has no conversation yet,
+  nothing is recorded: its first run starts from the current text, unless
+  that run was already being started when the update arrived.
 - `applies_after_compaction`: the change is recorded; the agent's model
   takes a system instruction only ahead of the conversation, so the change
   waits for a compaction at the start of a run, which a short conversation
@@ -537,7 +537,8 @@ of the answer. Right after an update it reads
 `{"state": "pending", "reason": "delivery_owed"}`: the mob holds the record
 and has not recorded it in the agent's conversation yet. The mob records it
 there itself, as a rule within moments, without a run and without waking
-the agent; what happens when that write fails is under "What to know"
+the agent; while the agent is in a run, the write waits until that run has
+ended; what happens when that write fails is under "What to know"
 above. The slot then reads one of:
 `{"state": "pending", "reason": "awaiting_run_start"}`, a change that the
 agent's next run puts in effect, on a model that takes a system instruction
@@ -546,7 +547,8 @@ after conversation rows;
 that is recorded and not yet in effect, on a model that takes a system
 instruction only ahead of the conversation; `{"state": "effective"}`, in
 effect. These are not all the values: Meerkat has more reasons
-(`session_unborn` for an agent whose conversation no build has created,
+(`session_unborn` for an agent that has no conversation yet (its first run
+starts from the current instructions),
 `lowering_unavailable` for a model whose wire carries no system row besides
 its prompt), a slot can read `blocked` with a reason of its own, and the
 list of reasons can grow, so keep a reason you do not know as it is.

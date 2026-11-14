@@ -451,6 +451,10 @@ struct Recorded {
     path: String,
     /// The JSON body; `null` when the request carried none.
     body: Value,
+    /// Every credential the request carried: the values of its
+    /// `authorization`, `x-api-key` and `x-goog-api-key` headers and of a
+    /// `key` query parameter.
+    credentials: Vec<String>,
 }
 
 /// Read one whole HTTP request: its path and its JSON body.
@@ -469,6 +473,25 @@ fn read_request(socket: &mut TcpStream) -> Option<Recorded> {
     let head = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
     let target = head.lines().next()?.split_whitespace().nth(1)?;
     let path = target.split('?').next().unwrap_or(target).to_string();
+    let mut credentials: Vec<String> = target
+        .split_once('?')
+        .map(|(_, query)| query)
+        .unwrap_or_default()
+        .split('&')
+        .filter_map(|pair| pair.strip_prefix("key="))
+        .map(str::to_string)
+        .collect();
+    for line in head.lines().skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if matches!(
+            name.trim().to_ascii_lowercase().as_str(),
+            "authorization" | "x-api-key" | "x-goog-api-key"
+        ) {
+            credentials.push(value.trim().to_string());
+        }
+    }
     let content_length = head
         .to_ascii_lowercase()
         .lines()
@@ -483,7 +506,11 @@ fn read_request(socket: &mut TcpStream) -> Option<Recorded> {
     }
     let body = serde_json::from_slice(&buffer[header_end..header_end + content_length])
         .unwrap_or(Value::Null);
-    Some(Recorded { path, body })
+    Some(Recorded {
+        path,
+        body,
+        credentials,
+    })
 }
 
 /// The loopback provider: its port and every request it was sent, on any
@@ -565,7 +592,7 @@ fn roots(family: Family, port: u16) -> Roots {
     }
     let provider = family.provider_name();
     let backend = family.backend();
-    let key = format!("{}-{}", "placeholder", "key");
+    let key = placeholder_key();
     std::fs::write(
         realm.join("config.toml"),
         format!(
@@ -764,8 +791,28 @@ fn assert_ok(finished: &Finished, what: &str) {
 }
 
 /// Every request went to the family's API and named `model`.
+/// The key the realm's binding holds: a placeholder, written in the realm's
+/// own config and nowhere in the host's environment.
+fn placeholder_key() -> String {
+    format!("{}-{}", "placeholder", "key")
+}
+
 fn assert_on_the_route(family: Family, model: &str, requests: &[Recorded]) {
+    let key = placeholder_key();
     for request in requests {
+        // No key of the host is read: the request carries a credential,
+        // and every credential it carries is the realm's placeholder.
+        assert!(
+            !request.credentials.is_empty(),
+            "{family:?}: the request carries the binding's key: {}",
+            request.path
+        );
+        for credential in &request.credentials {
+            assert!(
+                *credential == key || *credential == format!("Bearer {key}"),
+                "{family:?}: a request carries a credential that is not the realm's placeholder"
+            );
+        }
         assert_eq!(
             Api::of_path(&request.path),
             Some(family.api()),

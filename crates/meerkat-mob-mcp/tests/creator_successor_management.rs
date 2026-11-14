@@ -529,6 +529,105 @@ async fn a_successor_chain_broken_by_another_step_manages_nothing_created_before
     host.fixture.teardown().await;
 }
 
+/// A same-session successor that is woken, and woken again after a restart
+/// of the host, keeps its management of the mob it created: a wake moves the
+/// member to no other session. (On this host a wake of a member whose
+/// session exists journals nothing for it; the row a wake can journal for a
+/// seated member is covered in each of its shapes by the fold's own row.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_successor_woken_before_and_after_a_restart_keeps_its_management() {
+    let mut host = Host::new().await;
+    let session = host.session_of(&creator()).await;
+    let mob = host.mob("created-before-the-wakes");
+    host.create(&session, &mob).await;
+    host.successor(MemberRespawn::new()).await;
+
+    host.parent()
+        .await
+        .ensure_member_live(&creator())
+        .await
+        .expect("the successor wakes");
+    assert_eq!(
+        host.seat_of(&session).await,
+        Some((creator(), generation(1))),
+        "the wake keeps the successor's seat and session"
+    );
+    host.assert_manages(&session, &mob, "after the successor's wake")
+        .await;
+
+    host.fixture
+        .restart_cold_with(|_| ScriptedTurn::Text("ok".to_string()), |state, _| state)
+        .await;
+    host.parent()
+        .await
+        .ensure_member_live(&creator())
+        .await
+        .expect("the successor wakes after the restart");
+    assert_eq!(
+        host.seat_of(&session).await,
+        Some((creator(), generation(1))),
+        "the restart and the wake keep the successor's seat and session"
+    );
+    host.assert_manages(&session, &mob, "after a restart and a wake")
+        .await;
+    host.assert_destroys(&session, &mob, "after a restart and a wake")
+        .await;
+    host.fixture.teardown().await;
+}
+
+/// A same-session successor that its host then adopts as an identity entry
+/// keeps its management of the mob it created: the adoption seats nothing
+/// and moves the member to no other session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_adopted_successor_keeps_its_management_of_the_mob_it_created() {
+    let host = Host::new().await;
+    // A member a host labelled with its own id, which the adoption takes.
+    let adopted = AgentIdentity::from("adopted");
+    let mut spec = SpawnMemberSpec::new(ROLE, adopted.clone());
+    spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
+    spec.labels = Some(BTreeMap::from([(
+        "agent_identity".to_string(),
+        "adopted".to_string(),
+    )]));
+    host.state()
+        .mob_spawn_spec(&host.parent, spec)
+        .await
+        .expect("seat the labelled member");
+    let session = host.session_of(&adopted).await;
+    let mob = host.mob("created-before-adoption");
+    host.create(&session, &mob).await;
+
+    host.parent()
+        .await
+        .respawn_member(adopted.clone(), MemberRespawn::new())
+        .await
+        .expect("the same-session successor is seated");
+    host.assert_manages(&session, &mob, "after the successor")
+        .await;
+
+    let adoption = host
+        .parent()
+        .await
+        .adopt_legacy_identity_entry(&adopted)
+        .await
+        .expect("the adoption answers");
+    assert_eq!(
+        adoption,
+        meerkat_mob::LegacyIdentityEntryAdoption::Adopted,
+        "the host adopts the member as an identity entry"
+    );
+    assert_eq!(
+        host.seat_of(&session).await,
+        Some((adopted, generation(1))),
+        "the adoption keeps the member's seat and session"
+    );
+    host.assert_manages(&session, &mob, "after the adoption")
+        .await;
+    host.assert_destroys(&session, &mob, "after the adoption")
+        .await;
+    host.fixture.teardown().await;
+}
+
 /// After a reset of the creator's mob no successor's chain is followed. A
 /// mob reset ends every member and restarts the mob's generations, so from
 /// then on a recorded generation is taken to name only the member that

@@ -598,8 +598,12 @@ impl MemberBinding {
     /// the same session. Every other seat starts a chain of its own: a seat
     /// on a fresh session, a seat that follows a plain retirement (a member
     /// retired and later seated again on its kept session), a legacy member
-    /// reset, a recovered session binding, and a seat whose rows carry no
-    /// such link (a journal written before 0.9.10 records none).
+    /// reset, a session binding recovery that moves the member to another
+    /// session, and a seat whose rows carry no such link (a journal written
+    /// before 0.9.10 records none). A recovered-binding row that names the
+    /// session the member already holds (an endpoint registration, the
+    /// session's first creation, an adoption) moves nothing and leaves the
+    /// chain as it is.
     ///
     /// `None` once the mob's journal holds a mob reset: a mob reset restarts
     /// its members' generations, so a generation no longer names one
@@ -1056,11 +1060,17 @@ impl JournalFold {
                         }),
                     recovered.bridge_session_id(),
                 ) {
+                    // A row that moves the incarnation to another session
+                    // starts its chain there: no same-session successor
+                    // step seated it on that session. A row that names the
+                    // session the incarnation already holds moves nothing
+                    // (an adoption journals such a row for a seated
+                    // member), and the chain goes on.
+                    if head.session_id.as_ref() != Some(session_id) {
+                        head.incarnation.lineage =
+                            LineageStarts::at(head.incarnation.runtime_id.generation);
+                    }
                     head.session_id = Some(session_id.clone());
-                    // The incarnation was not seated on this session by a
-                    // same-session successor step: its chain starts here.
-                    head.incarnation.lineage =
-                        LineageStarts::at(head.incarnation.runtime_id.generation);
                     self.sessions.insert(
                         session_id.clone(),
                         (recovered.agent_identity.clone(), head.incarnation.clone()),
@@ -2903,9 +2913,9 @@ mod tests {
         );
     }
 
-    /// A legacy member reset and a recovered session binding are no
-    /// same-session successor steps: each starts a chain at the generation
-    /// it leaves the member at.
+    /// A legacy member reset and a session binding recovered onto another
+    /// session are no same-session successor steps: each starts a chain at
+    /// the generation it leaves the member at.
     #[test]
     fn a_legacy_member_reset_and_a_recovered_binding_each_start_a_chain() {
         let member = AgentIdentity::from("member");
@@ -2935,6 +2945,116 @@ mod tests {
             lineage_starts(&journal.history(&[]), &session),
             Some((1, 1)),
             "moved back, the chain still starts at the recovery"
+        );
+    }
+
+    /// A recovered-binding row that names the session the incarnation
+    /// already holds moves nothing, and the chain goes on. MobMachine
+    /// journals such a row for a seated member in ordinary steps: when a
+    /// wake or a start registers the member's endpoint, when the seat's
+    /// session is first created, and when it adopts the member (as an
+    /// identity entry, into store custody, or with a created set). Each
+    /// shape of the row leaves both starts where they were. The same row
+    /// naming another session starts a chain of its own, and a row that
+    /// names another incarnation than the live one changes nothing.
+    #[test]
+    fn a_recovered_binding_row_that_names_the_session_already_held_goes_on_with_the_chain() {
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let endpoint: meerkat_core::comms::TrustedPeerDescriptor =
+            serde_json::from_value(serde_json::json!({
+                "address": {"endpoint": "history-mob/worker/member", "transport": "inproc"},
+                "name": "history-mob/worker/member",
+                "peer_id": "6c6d0a88-59cd-56b7-99f5-dfef28457d5c",
+                "pubkey": [
+                    67, 121, 59, 201, 109, 115, 249, 176, 182, 226, 129, 30, 48, 8, 225, 41,
+                    21, 85, 111, 231, 7, 229, 149, 85, 8, 199, 30, 151, 7, 190, 79, 225
+                ]
+            }))
+            .expect("a member endpoint");
+        // The row for `generation` on `session`, in the shape `dress` gives.
+        let row =
+            |generation: u64,
+             session: &SessionId,
+             dress: &dyn Fn(&mut crate::event::MemberSessionBindingRecoveredEvent)| {
+                let mut event = crate::event::MemberSessionBindingRecoveredEvent::new(
+                    member.clone(),
+                    AgentRuntimeId::new(member.clone(), Generation::new(generation)),
+                    session.clone(),
+                );
+                dress(&mut event);
+                MobEventKind::MemberSessionBindingRecovered(event)
+            };
+        type Dress<'a> = &'a dyn Fn(&mut crate::event::MemberSessionBindingRecoveredEvent);
+        let shapes: [(&str, Dress<'_>); 4] = [
+            ("a plain row", &|_| {}),
+            ("a row that registers the member's endpoint", &|event| {
+                event.member_peer_endpoint = Some(endpoint.clone());
+            }),
+            ("an adoption's row", &|event| {
+                event.identity_entry = Some(crate::runtime::IdentityEntryOrigin::Declared);
+            }),
+            ("the row of the session's first creation", &|event| {
+                event.seat_session_born = true;
+            }),
+        ];
+
+        // A chain with a role migration in it, so that both starts differ
+        // from the live generation: (0, 1) at generation 2.
+        let mut journal = Journal::new();
+        journal.push(seat(&member, 0, Some(&session), "worker", None));
+        successor_step(&mut journal, &member, 0, &session, "worker", "lead");
+        successor_step(&mut journal, &member, 1, &session, "lead", "lead");
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &session),
+            Some((0, 1))
+        );
+        for (what, dress) in shapes {
+            journal.push(row(2, &session, dress));
+            let history = journal.history(&[]);
+            assert_eq!(
+                history
+                    .binding_for_session(&session)
+                    .map(|binding| (binding.generation(), binding.state())),
+                Some((Generation::new(2), MemberBindingState::Live)),
+                "{what} moved nothing"
+            );
+            assert_eq!(
+                lineage_starts(&history, &session),
+                Some((0, 1)),
+                "{what}: the chain goes on"
+            );
+        }
+        successor_step(&mut journal, &member, 2, &session, "lead", "lead");
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &session),
+            Some((0, 1)),
+            "a later successor goes on with the chain"
+        );
+
+        // A row that names another incarnation than the live one (here the
+        // one before it) changes nothing, whichever session it names.
+        let other = SessionId::new();
+        journal.push(row(2, &session, &|_| {}));
+        journal.push(row(2, &other, &|_| {}));
+        let history = journal.history(&[]);
+        assert_eq!(
+            lineage_starts(&history, &session),
+            Some((0, 1)),
+            "a row for an incarnation that is no longer the live one"
+        );
+        assert!(
+            history.binding_for_session(&other).is_none(),
+            "and it binds no session"
+        );
+
+        // The same row for the live incarnation, naming another session,
+        // moves it there and starts a chain of its own.
+        journal.push(row(3, &other, &|_| {}));
+        assert_eq!(
+            lineage_starts(&journal.history(&[]), &other),
+            Some((3, 3)),
+            "a row naming another session starts a chain of its own"
         );
     }
 

@@ -146,6 +146,38 @@ mod tests {
         );
     }
 
+    /// Pins what a Rust client that deserializes this type meets when the
+    /// server answers an outcome the enum does not have: the enum has no
+    /// catch-all variant and no untagged fallback, so decoding fails with
+    /// serde's unknown-variant error. Nothing is kept and nothing is guessed.
+    #[test]
+    fn an_outcome_the_enum_does_not_have_is_a_decode_error_with_no_catch_all() {
+        let unknown = serde_json::json!({"outcome": "deferred", "input_id": "i1"});
+        let error = serde_json::from_value::<WireQueuedInputRecall>(unknown.clone())
+            .expect_err("an outcome the enum does not have must not decode");
+        let text = error.to_string();
+        assert!(
+            text.contains("unknown variant `deferred`"),
+            "the decode error names the outcome it does not know: {text}"
+        );
+        for known in ["abandoned", "not_queued", "already_terminal"] {
+            assert!(
+                text.contains(known),
+                "the decode error lists the outcomes the enum has: {text}"
+            );
+        }
+
+        // The method's result carries the enum, so the whole answer fails to
+        // decode, from JSON text as a client reads it off the transport.
+        let answer = serde_json::json!({"session_id": "s", "recall": unknown}).to_string();
+        let error = serde_json::from_str::<RecallInputResult>(&answer)
+            .expect_err("a result with an outcome the enum does not have must not decode");
+        assert!(
+            error.to_string().contains("unknown variant `deferred`"),
+            "the result's decode error names the outcome: {error}"
+        );
+    }
+
     #[test]
     fn recall_params_take_the_input_status_selector_and_refuse_unknown_fields() {
         let by_id: RecallInputParams = serde_json::from_value(serde_json::json!({

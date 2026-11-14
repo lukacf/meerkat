@@ -4148,32 +4148,29 @@ conversation of no more turns than that budget plus one, usual for a young
 agent, it folds exactly one turn, and the summary can be longer than the turn
 it replaces. Meerkat ends the turn whose compaction left the request no
 smaller, wherever the model's client reports the request's size: "compaction
-is irreducible at the configured retention" (seen on an Anthropic model in a
-run; by the source the check is the same for every such client). The call
+is irreducible at the configured retention" (seen in a run; by the source the
+check is the same for every client that reports the request's size). The call
 then answers the definite failure above with `completion_type:
 "abandoned_with_error"`, whatever `floor_tokens` it named: the floor decides
 whether a compaction is attempted, not what it folds. From 0.9.15 the
 member's threshold is restored. The compaction's rewrite is committed before
 the request is measured, so it stays: the conversation holds the summary in
 place of what the compaction folded, and the maintenance turn's input. Call
-again when the conversation is longer. An ordinary turn can end the same way,
-with no call involved, when an automatic compaction leaves its request no
-smaller: a turn whose own tool results cross the compaction threshold after
-only a few short earlier exchanges folds one short exchange into a longer
-summary (confirmed by a test of Meerkat's agent loop with a scripted summary;
-not seen in a run at the default threshold).
+again when the conversation is longer.
 
 #### A member left with the temporary threshold
 
 A member keeps the temporary threshold when no restoring rebuild ran: a
 failed terminal on 0.9.9 through 0.9.14 (the upgrade repairs nothing stored),
 and on every release a gateway that stops between the call's two rebuilds, a
-terminal that is not definite, or a restoring rebuild that failed. The
-threshold is on the member's seat, so it survives a gateway restart and does
-not end by itself: the member compacts again every third model request, and
-an ordinary turn whose compaction cannot shrink the request fails as above.
-Later calls for the identity answer `compact_member_busy` until the gateway
-restarts. What clears it:
+terminal that is not definite, a maintenance turn whose end cannot be read
+(the call answers `compact_member_observation_failed` at stage
+`terminal_pending` and goes on reading), or a restoring rebuild that failed.
+The threshold is on the member's seat, so it survives a gateway restart and
+does not end by itself: the member compacts again every third model request,
+and an ordinary turn whose compaction cannot shrink the request fails as
+above. Later calls for the identity answer `compact_member_busy` until the
+gateway restarts. What clears it:
 
 - an agent the host's configuration declares: `meta/respawn` seats it without
   the threshold and keeps its conversation;

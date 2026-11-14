@@ -1878,10 +1878,15 @@ compiling. A Meta probe that must keep the earlier rule checks
   an ordinary turn whose compaction cannot shrink the request fails
   ("compaction is irreducible at the configured retention"), and every
   later `compact_member` on that identity is refused as busy until the
-  gateway restarts. **Do:** after a failed `compact_member`, call
-  `meta/respawn` for the identity, then restart the gateway: the respawn
-  seats the member without the threshold and keeps its conversation. After
-  a gateway restart, a second `compact_member` that completes clears it
+  gateway restarts. **Do:** after a failed `compact_member`, restart the
+  gateway (this ends the busy refusal), then call `meta/respawn` for the
+  identity while its provider is available, and do not stop or restart the
+  gateway again until the identity is active on the same session: the
+  respawn seats the member without the threshold and keeps its
+  conversation. The order matters on these releases: a stop or restart
+  after a respawn, before the identity has woken on the same session, is
+  followed by the loss of the mobs its session owns. After a gateway
+  restart, a second `compact_member` that completes clears the threshold
   too, whether or not it compacts (a `floor_tokens` above the conversation's
   size completes without compacting); `meta/reset` clears it and ends the
   conversation. A restart alone does not clear it. **From 0.9.15** the call
@@ -1889,9 +1894,11 @@ compiling. A Meta probe that must keep the earlier rule checks
   (`error.data.stage` is `profile_restored`) and a second call is taken at
   once; the call still answers the failure. The upgrade repairs nothing
   stored: a member that 0.9.9 through 0.9.14 left with the threshold keeps
-  it on 0.9.15 until one of the steps above clears it. The
-  `meta/compact_member` section of Meta's RPC reference says what 0.9.15
-  still does not restore.
+  it on 0.9.15 until one of the steps above clears it. On 0.9.15 an agent
+  created at run time can be left with the threshold too, in the cases the
+  `meta/compact_member` section of Meta's RPC reference names, and a
+  respawn does not clear it for such an agent: after a gateway restart a
+  second `compact_member` that completes does, and so does `meta/reset`.
 - **Meta Forge 0.3.1** installs the matched Meta 0.9.10, Connect 0.9.10 and
   `meerkat-toolkit` 0.9.10 set on Linux x86_64 and macOS arm64. It is the
   first Forge release from this repository (tag `meta-installer-v0.3.1`);

@@ -1732,28 +1732,22 @@ Security, Upgrade and Changed.
   the compaction folds only the oldest turn into a summary that can be
   longer than the turn, and Meerkat ends a turn whose compaction left the
   request no smaller ("compaction is irreducible at the configured
-  retention"; seen on an Anthropic model in a run, and by the source the
-  same check applies wherever the client reports the request's size). The
-  member's threshold is restored; the rewrite stays in the conversation, as
-  does the maintenance turn's input. Call again when the conversation is
-  longer. An ordinary turn can end the same way, with no call involved,
-  when an automatic compaction leaves its request no smaller: a turn whose
-  own tool results cross the compaction threshold after only a few short
-  earlier exchanges folds one short exchange into a longer summary
-  (confirmed by a test of Meerkat's agent loop with a scripted summary;
-  not seen in a run at the default threshold).
+  retention"; seen in a run, and by the source the same check applies for
+  every client that reports the request's size). The member's threshold is
+  restored; the rewrite stays in the conversation, as does the maintenance
+  turn's input. Call again when the conversation is longer.
 - A member can still be left with the temporary threshold of
   `meta/compact_member` when no restoring rebuild ran: the gateway stopped
   between the call's two rebuilds, the maintenance turn's end could not be
-  proved, or the restoring rebuild failed (and a member 0.9.9 through 0.9.14
-  left with it keeps it). The threshold survives a restart and does not end
-  by itself. For an agent the host's configuration declares, `meta/respawn`
-  clears it and keeps the conversation. For an agent created at run time a
-  respawn does not clear it (read from the source, and seen in a run and in
-  a test run before this fix). For both, a second `meta/compact_member`
-  that completes clears it (after a gateway restart, which ends the busy
-  refusal), and so does `meta/reset`, which ends the conversation.
-
+  proved or could not be read, or the restoring rebuild failed (and a member
+  0.9.9 through 0.9.14 left with it keeps it). The threshold survives a
+  restart and does not end by itself. For an agent the host's configuration
+  declares, `meta/respawn` clears it and keeps the conversation. For an
+  agent created at run time a respawn does not clear it (read from the
+  source, and seen in a run and in a test run before this fix). For both, a
+  second `meta/compact_member` that completes clears it (after a gateway
+  restart, which ends the busy refusal), and so does `meta/reset`, which
+  ends the conversation.
 - An update cannot hand an agent's runtime mode back to its profile: to
   change how such an agent runs, set the other explicit value
   (`autonomous_host` or `turn_driven`); clearing an override is not offered

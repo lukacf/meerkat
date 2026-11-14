@@ -4074,6 +4074,11 @@ next reconcile retries it. Every call that completes leaves two rows in the
 member's conversation, whether or not it compacted: the maintenance turn's
 input and the member's acknowledgement.
 
+For an identity that created mobs, a completed call has a cost of its own.
+After the call has completed, the identity no longer lists a mob it created and its calls that name the mob are refused; the mobs' stores are kept (seen in runs on 0.9.14 and on 0.9.15's code).
+Before the call, have the identity stop or destroy a mob it created whose
+members act on their own (not run).
+
 <Warning>
 Known issue, noted 2026-11-13, read from the source and not yet confirmed by
 a test: on Meta 0.9.9 through 0.9.14, `meta/compact_member` on a gateway that keeps its state on disk, or on an embedding host that keeps its state on disk and uses identities, rebuilds the identity as a respawn does, and can destroy the mobs the identity created and its delegates in the same way. The Console's RPC route does not forward `meta/compact_member`. See the
@@ -4155,8 +4160,10 @@ then answers the definite failure above with `completion_type:
 whether a compaction is attempted, not what it folds. From 0.9.15 the
 member's threshold is restored. The compaction's rewrite is committed before
 the request is measured, so it stays: the conversation holds the summary in
-place of what the compaction folded, and the maintenance turn's input. Call
-again when the conversation is longer.
+place of what the compaction folded, and the maintenance turn's input, and an
+instruction change that was waiting for the conversation's next compaction is
+in effect afterwards (seen in a run). Call again when the conversation is
+longer.
 
 #### A member left with the temporary threshold
 
@@ -4172,17 +4179,35 @@ and an ordinary turn whose compaction cannot shrink the request fails as
 above. Later calls for the identity answer `compact_member_busy` until the
 gateway restarts. What clears it:
 
+- either kind of agent: after a gateway restart, a second
+  `meta/compact_member` that completes, whether or not it compacts (a
+  `floor_tokens` above the conversation's size completes without compacting);
 - an agent the host's configuration declares: `meta/respawn` seats it without
   the threshold and keeps its conversation;
 - an agent created at run time: a respawn does not clear it (its successor
   takes the member's own seat, threshold included; read from the source, and
   seen in a run and in a test run before this fix);
-- either kind: after a gateway restart, a second `meta/compact_member` that
-  completes, whether or not it compacts (a `floor_tokens` above the
-  conversation's size completes without compacting);
 - either kind: `meta/reset`, which ends the conversation.
 
 A gateway restart alone clears only the busy refusal.
+
+For an identity that created mobs each clearing step has a cost of its own:
+
+- a respawn on 0.9.9 through 0.9.14: a stop or restart after it, before the
+  identity has woken on the same session, is followed by the loss of the mobs
+  its session owns. Restart first (that ends the busy refusal), respawn while
+  the identity's provider is available, and do not stop or restart again
+  until the identity is active on the same session;
+- a respawn on every release, 0.9.15 included: after it has completed, the
+  identity no longer lists a mob it created, and the calls tried that name
+  the mob were refused, while the mob's members can go on running; the mobs'
+  stores stay. A completed `meta/compact_member` has the same cost (see the
+  top of this section). If the identity must go on managing those mobs,
+  weigh that against the failing messages before you respawn: none of the
+  three steps above is known to keep it.
+
+Before either step, have the identity stop or destroy a mob it created whose
+members act on their own (not run).
 
 ### `meta/bound_member_transcript`
 

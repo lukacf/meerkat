@@ -196,6 +196,14 @@ Security, Upgrade and Changed.
   another way: see Changed, the entry on the inputs a respawn hands to the
   member's successor.
 
+- A host that matches on the `stage` of a failed `meta/compact_member`: a
+  call whose maintenance turn ended for good without completing is now
+  answered at `stage: "profile_restored"`, with the member's threshold
+  restored, where 0.9.14 answered `stage: "terminal"`. The `kind`, the
+  `completion_type` and the typed error are unchanged, and `terminal`
+  remains for an outcome that restores nothing. Match on the `kind`, or
+  take both stages: see Fixed.
+
 - The published 0.9.14 Meta Python and TypeScript SDKs (the source of tag
   `meta-v0.9.14`) were run against a development build of this release's
   gateway with no provider key: every row of their own suites that starts a
@@ -1728,8 +1736,8 @@ Security, Upgrade and Changed.
   Only an agent the host's configuration declares could be left with the
   threshold by a release (0.9.9 through 0.9.14 refuse the call for an agent
   created at run time), and nothing stored is repaired: such a member keeps
-  the threshold until `meta/respawn` clears it (see Known limitations and
-  the `meta/compact_member` section of the RPC reference).
+  the threshold until it is cleared (see Known limitations and the
+  `meta/compact_member` section of the RPC reference).
 
 ### Known limitations
 
@@ -1748,13 +1756,25 @@ Security, Upgrade and Changed.
   between the call's two rebuilds, the maintenance turn's end could not be
   proved or could not be read, or the restoring rebuild failed (and a member
   0.9.9 through 0.9.14 left with it keeps it). The threshold survives a
-  restart and does not end by itself. For an agent the host's configuration
-  declares, `meta/respawn` clears it and keeps the conversation. For an
-  agent created at run time a respawn does not clear it (read from the
-  source, and seen in a run and in a test run before this fix). For both, a
-  second `meta/compact_member` that completes clears it (after a gateway
-  restart, which ends the busy refusal), and so does `meta/reset`, which
-  ends the conversation.
+  restart and does not end by itself. A second `meta/compact_member` that
+  completes clears it, for every agent (after a gateway restart, which ends
+  the busy refusal). For an agent the host's configuration declares,
+  `meta/respawn` clears it too and keeps the conversation; for an agent
+  created at run time a respawn does not clear it (read from the source,
+  and seen in a run and in a test run before this fix). `meta/reset` clears
+  it and ends the conversation. For an identity that created mobs each of
+  these steps has a cost: on 0.9.9 through 0.9.14 a stop or restart after a
+  respawn, before the identity has woken on the same session, is followed
+  by the loss of the mobs its session owns; and on every release, this one
+  included, after a respawn has completed the identity no longer lists a
+  mob it created, and the calls tried that name the mob were refused, while
+  the mob's members can go on running; the mobs' stores stay. A completed
+  `meta/compact_member` has the same cost (the RPC reference's
+  `meta/compact_member` section). If the identity must go on managing those
+  mobs, weigh that against the failing messages before you respawn: none of
+  the three steps is known to keep it. Before either step, have the
+  identity stop or destroy a mob it created whose members act on their own
+  (not run).
 - An update cannot hand an agent's runtime mode back to its profile: to
   change how such an agent runs, set the other explicit value
   (`autonomous_host` or `turn_driven`); clearing an override is not offered

@@ -437,6 +437,19 @@ turn, not zero usage. Read
 
 ### Error handling
 
+Use this dependency set for the sample. The explicit `meerkat-core`
+dependency supplies `TurnTerminalCauseKind` and `TurnTerminalOutcome`, which
+`meerkat` does not re-export; transitive dependencies are not available as
+direct crate imports. The `meerkat_core` imports under
+[Core types](#core-types) need the same dependency.
+
+```toml
+[dependencies]
+meerkat = "=0.9.14"
+meerkat-core = "=0.9.14"
+tokio = { version = "1", features = ["full"] }
+```
+
 ```rust
 use meerkat::AgentError;
 use meerkat_core::{TurnTerminalCauseKind, TurnTerminalOutcome};

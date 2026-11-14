@@ -167,7 +167,7 @@ WASM client uses per-provider base URLs to point at the proxy natively — no fe
 ```typescript
 const runtime = await MeerkatRuntime.init(wasm, {
   anthropicApiKey: 'proxy',  // dummy, proxy replaces it
-  anthropicBaseUrl: 'http://localhost:3100/anthropic',
+  anthropicBaseUrl: 'http://127.0.0.1:3100/anthropic',
 });
 ```
 

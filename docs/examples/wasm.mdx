@@ -102,7 +102,7 @@ authentication, and do not expose it to a network you do not trust.
 ```typescript
 const runtime = await MeerkatRuntime.init(wasm, {
   anthropicApiKey: "proxy",
-  anthropicBaseUrl: "http://localhost:3100/anthropic",
+  anthropicBaseUrl: "http://127.0.0.1:3100/anthropic",
   model: "claude-sonnet-4-6",
 });
 ```

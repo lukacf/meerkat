@@ -202,7 +202,7 @@ required topology/subscriptions; roster size alone is not a healthy bootstrap.
 ### Server/Proxy Mode
 
 ```
-http://127.0.0.1:4174?proxy=http://localhost:8080&model=claude-sonnet-5-5
+http://127.0.0.1:4174?proxy=http://127.0.0.1:8080&model=claude-sonnet-5-5
 ```
 
 Provider requests are routed to the configured proxy base URL, which must own

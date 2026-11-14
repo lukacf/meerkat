@@ -711,11 +711,14 @@ them.
   which it wrote a pack before, because a path it cannot resolve is never
   compared as written (see Security). When the real path of the signing
   key or of the output file, or the identity of the file there, cannot be
-  read for another reason than that the file does not exist (a directory on
-  the way that the account may not search, a symbolic link loop), the
+  read although the files themselves can be opened (the known case: the
+  command is run below a directory that the account may not search), the
   command writes no pack, exits with status 1 and prints one line on
   standard error, with the path as it was written:
   `Error: mob pack failed: I/O error: cannot resolve '<path>', a file the pack must leave out: <system error>`.
+  A key or output path that could not be opened at all (a symbolic link
+  loop, a path through a regular file) wrote no pack before either; it now
+  fails with this message.
   When the real path of the mob directory cannot be resolved, it exits with
   status 1 and prints:
   `Error: mob pack failed: I/O error: cannot resolve the mob directory '<directory>': <system error>`.
@@ -1255,11 +1258,12 @@ them.
 
 - `rkat`, `meerkat-mob-pack`: `rkat mob pack` now leaves the signing key
   and its own output file out of the pack however their paths are written.
-  Before, each was left out only when its path was written with the mob
-  directory argument, exactly as typed, as its prefix:
+  Before, each was left out only when its path, component by component,
+  was the mob directory argument's path followed by the file's own (a
+  trailing or doubled separator made no difference):
   `rkat mob pack mob -o mob/out.mobpack --sign mob/key.hex --signer-id <id>`
-  left both out, and so did `.` with `./out.mobpack` and `./key.hex`. In
-  every other spelling a signing key kept in the mob directory was packed,
+  left both out, and so did `.` with `./out.mobpack` and `./key.hex`. With
+  any other components a signing key kept in the mob directory was packed,
   and so was the output of an earlier pack. Inside the mob directory,
   `rkat mob pack . -o out.mobpack --sign key.hex --signer-id <id>` packed
   the key, and from the second run on the output of the run before. So did

@@ -6896,9 +6896,10 @@ fn unmasked_resume_divergence(
 /// floor itself is persisted all the same: Core journals a spawn's override
 /// profile on the seat's `MemberSpawned` row and replays it at a restart, so
 /// a member seated with the floor builds with it until a later seat is made
-/// without it (the verb's restoring rebuild; a respawn of an identity the
-/// host's roster declares). A crash mid-verb therefore leaves the member
-/// compacting at the floor after the next boot, with no entry here.
+/// without it (the verb's restoring rebuild; a reset; a respawn of an
+/// identity the host's roster declares). A crash mid-verb therefore leaves
+/// the member compacting at the floor after the next boot, with no entry
+/// here.
 #[derive(Debug, Default)]
 pub struct CompactionFloorRegistry {
     floors: std::sync::Mutex<std::collections::BTreeMap<String, CompactionFloorEntry>>,

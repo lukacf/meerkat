@@ -3655,14 +3655,26 @@ comms = true
         }
     }
 
+    /// What [`compact_with_a_substituted_terminal`] observed.
+    struct SubstitutedCall {
+        /// The call's response.
+        response: Value,
+        /// The registry's floor after the call.
+        registry: Option<u64>,
+        /// The seat's threshold after the call.
+        seat: Option<u64>,
+        /// What a second, ordinary call right after it answered.
+        second: Value,
+    }
+
     /// One compaction call (floor 256) on a seeded member whose maintenance
-    /// turn's terminal the call reads as `substitute` of the real one.
-    /// Answers the call's response, the registry's floor and the seat's
-    /// threshold afterwards.
+    /// turn's terminal the call reads as `substitute` of the real one, and a
+    /// second, ordinary call right after it. The registry's floor and the
+    /// seat's threshold are read between the two.
     async fn compact_with_a_substituted_terminal(
         mob_id: &str,
         substitute: SubstituteTerminal,
-    ) -> (Value, Option<u64>, Option<u64>) {
+    ) -> SubstitutedCall {
         let harness = operator_verb_harness("worker:main", mob_id).await;
         let fat = "seeded transcript ballast ".repeat(160);
         for turn in 0..4 {
@@ -3697,15 +3709,30 @@ comms = true
         let response = serde_json::to_value(response).expect("a json-rpc response");
         let registry = harness.floors.get(&harness.identity).map(NonZeroU64::get);
         let seat = harness.seat_threshold().await;
+        let second = rpc(
+            &harness,
+            "meta/compact_member",
+            serde_json::json!({
+                "identity": harness.member_alias,
+                "floor_tokens": 256,
+                "timeout_ms": 30_000,
+            }),
+        )
+        .await;
         harness.teardown().await;
-        (response, registry, seat)
+        SubstitutedCall {
+            response,
+            registry,
+            seat,
+            second,
+        }
     }
 
     /// A definite terminal of the maintenance input that is not its
     /// completion (abandoned, or consumed with no result) is answered as an
     /// error with the profile restored, like the failed terminal of the rows
     /// above: the input ended for good, so nothing of it runs on the
-    /// rebuilt member.
+    /// rebuilt member. A second call right after it is taken.
     ///
     /// RED before the call restored the profile on a definite terminal: each
     /// class answered stage `terminal` and left the floor (256).
@@ -3727,16 +3754,16 @@ comms = true
             ),
         ];
         for (class, mob_id, substitute) in classes {
-            let (response, registry, seat) =
-                compact_with_a_substituted_terminal(mob_id, substitute).await;
-            let data = &response["error"]["data"];
+            let call = compact_with_a_substituted_terminal(mob_id, substitute).await;
+            let data = &call.response["error"]["data"];
             assert_eq!(
                 (
                     data["kind"].as_str(),
                     data["completion_type"].as_str(),
                     data["stage"].as_str(),
-                    registry,
-                    seat,
+                    call.registry,
+                    call.seat,
+                    call.second["error"]["data"]["kind"].as_str() == Some("compact_member_busy"),
                 ),
                 (
                     Some("compact_member_completion_failed"),
@@ -3744,19 +3771,23 @@ comms = true
                     Some("profile_restored"),
                     None,
                     None,
+                    false,
                 ),
-                "(kind, completion type, stage, the registry's floor, the seat's threshold): \
-                 {response:#}"
+                "(kind, completion type, stage, the registry's floor, the seat's threshold, a \
+                 second call is refused busy): {:#}; the second call: {:#}",
+                call.response,
+                call.second
             );
         }
     }
 
     /// A terminal that is not definite still restores nothing: the answer
-    /// is the error at stage `terminal`, the call's registry entry stays
-    /// (later calls are refused busy) and the member's seat keeps the
-    /// floor. Nothing proves the maintenance input ended for good on the
-    /// captured session, so a rebuild could act under work that still runs
-    /// or runs again.
+    /// is the error at stage `terminal`, the call's registry entry stays,
+    /// the member's seat keeps the floor, and a second call is refused busy
+    /// at its admission for that entry. Nothing proves the maintenance
+    /// input ended for good on the captured session, so a rebuild, the
+    /// second call's included, could act under work that still runs or runs
+    /// again.
     #[tokio::test(flavor = "multi_thread")]
     async fn compact_member_restores_nothing_on_each_terminal_that_is_not_definite() {
         let classes: [SubstitutedClass; 6] = [
@@ -3812,16 +3843,19 @@ comms = true
             }),
         ];
         for (class, mob_id, substitute) in classes {
-            let (response, registry, seat) =
-                compact_with_a_substituted_terminal(mob_id, substitute).await;
-            let data = &response["error"]["data"];
+            let call = compact_with_a_substituted_terminal(mob_id, substitute).await;
+            let data = &call.response["error"]["data"];
+            let second = &call.second["error"];
             assert_eq!(
                 (
                     data["kind"].as_str(),
                     data["completion_type"].as_str(),
                     data["stage"].as_str(),
-                    registry,
-                    seat,
+                    call.registry,
+                    call.seat,
+                    second["data"]["kind"].as_str(),
+                    second["data"]["stage"].as_str(),
+                    second["message"].as_str(),
                 ),
                 (
                     Some("compact_member_completion_failed"),
@@ -3829,11 +3863,101 @@ comms = true
                     Some("terminal"),
                     Some(256),
                     Some(256),
+                    Some("compact_member_busy"),
+                    Some("admission"),
+                    Some("a prior compaction floor remains unsettled"),
                 ),
-                "(kind, completion type, stage, the registry's floor, the seat's threshold): \
-                 {response:#}"
+                "(kind, completion type, stage, the registry's floor, the seat's threshold, the \
+                 second call's kind, stage and message): {:#}; the second call: {:#}",
+                call.response,
+                call.second
             );
         }
+    }
+
+    /// A definite failed terminal whose restoring rebuild fails: here the
+    /// host refuses the build the rebuild composes. The call answers the
+    /// rebuild's failure at stage `profile_restore`, with the terminal's
+    /// class and typed error, and says the temporary threshold may still be
+    /// on the member. Here it is: the member is the same member on the same
+    /// session, its seat and the registry keep the floor, and a second call
+    /// is refused busy.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_member_whose_restoring_rebuild_fails_answers_it_with_the_terminals_class() {
+        let harness = held_compaction_harness("operator-restore-refused").await;
+        harness.fail_maintenance.store(true, Ordering::SeqCst);
+        let caller = start_held_compaction_with_timeout(&harness, 30_000);
+        wait_for_held_compaction(&harness).await;
+        let before = harness
+            .identity_runtime
+            .status(&harness.identity)
+            .await
+            .expect("status");
+        // The first rebuild is done and the maintenance turn is held: from
+        // here the host refuses every build, the restoring rebuild's too.
+        harness
+            .identity_runtime
+            .set_agent_customizer(Some(Arc::new(RefusesBuilds)
+                as Arc<dyn crate::identity_first::contracts::AgentCustomizer>))
+            .await;
+        release_compaction_and_join(&harness).await;
+        let response = caller.await.expect("caller result");
+        let after = harness
+            .identity_runtime
+            .status(&harness.identity)
+            .await
+            .expect("status");
+        let registry = harness.floors.get(&harness.identity).map(NonZeroU64::get);
+        let seat = harness.seat_threshold().await;
+        harness.identity_runtime.set_agent_customizer(None).await;
+        let second = rpc(
+            &harness,
+            "meta/compact_member",
+            serde_json::json!({
+                "identity": harness.member_alias,
+                "floor_tokens": 256,
+                "timeout_ms": 30_000,
+            }),
+        )
+        .await;
+        let data = &response["error"]["data"];
+        assert_eq!(
+            (
+                data["kind"].as_str(),
+                data["completion_type"].as_str(),
+                data["stage"].as_str(),
+                data["error"]["kind"].as_str(),
+                response["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| {
+                        message.contains("exact input ended as abandoned_with_error")
+                            && message
+                                .contains("the temporary threshold may still be on the member")
+                    }),
+                registry,
+                seat,
+                after.agent_runtime_id == before.agent_runtime_id,
+                after.session_id == before.session_id,
+                second["error"]["data"]["kind"].as_str(),
+            ),
+            (
+                Some("compact_member_rebuild_failed"),
+                Some("abandoned_with_error"),
+                Some("profile_restore"),
+                Some("llm_failure"),
+                true,
+                Some(256),
+                Some(256),
+                true,
+                true,
+                Some("compact_member_busy"),
+            ),
+            "(kind, completion type, stage, the typed error's kind, the message names the \
+             terminal and the threshold, the registry's floor, the seat's threshold, the same \
+             member, the same session, the second call's kind): {response:#}; the second call: \
+             {second:#}"
+        );
+        harness.teardown().await;
     }
 
     /// The identity pairs Core's roster holds wired, either directed half,

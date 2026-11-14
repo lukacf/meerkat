@@ -2154,39 +2154,69 @@ fn the_mount_leaves_the_builds_catalog_as_it_was() {
     let slot = AskUserSlot::default();
     let beside = || Declared::of(&["beside_one", "beside_two"], true, true, &[]);
     let mut differing = Vec::new();
-    for (case, external, builtins) in [
-        ("no external tools, no builtin surface", None, false),
-        ("no external tools, builtins on", None, true),
+    // Each build: its own external tools, and the one tool category its
+    // options switch on. Builtins and shell make the factory's base its
+    // builtin composite. Image generation and web search do so only with
+    // their backends, which an ordinary member build does not have: its
+    // base stays the empty dispatcher with the switch on.
+    for (case, external, switch) in [
+        ("no external tools, no switch on", None, None),
+        ("no external tools, builtins on", None, Some("builtins")),
+        ("no external tools, shell on", None, Some("shell")),
+        (
+            "no external tools, image generation on",
+            None,
+            Some("image_generation"),
+        ),
+        ("no external tools, web search on", None, Some("web_search")),
         (
             "exact external tools",
             Some(Declared::of(&["probe"], true, false, &[])),
-            false,
+            None,
         ),
         (
             "external tools that are not exact",
             Some(Named::of(&["probe"])),
-            false,
+            None,
         ),
         (
             "exact external tools with deferred entries, builtins on",
             Some(Declared::of(&["later_one", "later_two"], true, true, &[])),
-            true,
+            Some("builtins"),
         ),
         (
             "exact external tools still connecting",
             Some(Declared::of(&["probe"], true, false, &["server-a"])),
-            false,
+            None,
         ),
     ] {
         let mut request = build_request(Some("agent-a"), external.clone());
-        if builtins {
+        {
+            let build = request.build.as_mut().expect("build options");
+            let on = meerkat_core::ToolCategoryOverride::Enable;
+            match switch {
+                Some("builtins") => build.override_builtins = on,
+                Some("shell") => build.override_shell = on,
+                Some("image_generation") => build.override_image_generation = on,
+                Some("web_search") => build.override_web_search = on,
+                _ => {}
+            }
+        }
+        let builtins = matches!(switch, Some("builtins" | "shell"));
+        // What Meta's capability invariant judges of the dispatchers the
+        // build supplies, without the tool and with it.
+        let supplied = |request: &meerkat_core::service::CreateSessionRequest| {
             request
                 .build
-                .as_mut()
-                .expect("build options")
-                .override_builtins = meerkat_core::ToolCategoryOverride::Enable;
-        }
+                .as_ref()
+                .and_then(
+                    crate::capability_invariant::MemberCapabilityInvariantContext::from_build_options,
+                )
+                .map(|context| context.catalog_exactness)
+        };
+        let supplied_without = supplied(&request);
         slot.mount(&mut request);
+        let supplied_with = supplied(&request);
         let mounted = request
             .build
             .as_ref()
@@ -2215,6 +2245,12 @@ fn the_mount_leaves_the_builds_catalog_as_it_was() {
             differing.push(format!(
                 "{case}: with the tool {judgement_with} {names_with:?}; without it \
                  {judgement_without} {names_without:?} (the tool added)"
+            ));
+        }
+        if supplied_with != supplied_without || supplied_without.is_none() {
+            differing.push(format!(
+                "{case}: the capability invariant judges the build's supplied dispatchers \
+                 {supplied_with:?} with the tool and {supplied_without:?} without it"
             ));
         }
     }

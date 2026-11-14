@@ -285,6 +285,17 @@ async fn resolve_account(
     config: &Config,
     environment: ResolverEnvironment,
 ) -> Result<CopilotResolvedAuth, String> {
+    resolve_account_typed(config, environment)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// [`resolve_account`] with its failure typed, for a row that names the
+/// failure's class and never its text.
+async fn resolve_account_typed(
+    config: &Config,
+    environment: ResolverEnvironment,
+) -> Result<CopilotResolvedAuth, meerkat_providers::ProviderAuthError> {
     let binding_ref = auth_binding(CopilotProviderRoute::OpenAi);
     let realm = RealmConnectionSet::from_config(
         "global",
@@ -310,7 +321,6 @@ async fn resolve_account(
     CopilotRuntime::new()
         .resolve(&validated, &environment)
         .await
-        .map_err(|error| error.to_string())
 }
 
 /// The RPC session runtime the live rows run turns through: in-memory
@@ -1731,5 +1741,283 @@ async fn copilot_live_openai_continuity_across_services() {
     eprintln!(
         "RI-LIVE phase={phase} done requests={}",
         probe.requests.get()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The provider-neutral reasoning effort level on the account's routes (live)
+// ---------------------------------------------------------------------------
+//
+// One cell per provider family and endpoint the account serves a catalog
+// model on (OpenAI family on Responses and on Chat Completions, Claude on
+// Messages, Gemini on Chat Completions). A cell takes the first catalog
+// model whose account entry states effort levels and sends ONE request for
+// it: a streamed turn at one stated level, with a tool offered, through a
+// session the factory builds on the route's binding and the route's own
+// client, so the body is the one a session sends. Before that, and without
+// any request, it checks that a level outside the stated set and a model
+// whose entry states no levels are refused.
+//
+// The rules live in `meerkat_integration_tests::live_reasoning_matrix`,
+// where rows that need no account pin them: at most one inference request
+// per cell, counted by a gate in front of the route's client; the run ends
+// at the first 401, 403, 429, exhausted quota or policy stop a client
+// reports, and sends nothing after it; no cell starts after the run's
+// deadline; every printed line is built from typed fields (route, model id,
+// body shape, levels, failure class, HTTP status), never from a provider's
+// text, and passes a redactor that holds the account's login, plan and API
+// host. The account's model list is never printed: a line names the one
+// catalog model its cell used.
+//
+// Beside the lines people read (stderr), every cell the run reaches is
+// printed on stdout as one line for the reasoning effort execution receipt:
+// `reasoning-effort-receipt-observation ` and one JSON object of typed
+// fields (row, provider family, backend, API, model, requested level,
+// outcome, result). A failed cell also carries `http_status`, the HTTP
+// status of its failure class when the class has one, and `error_code`, the
+// failure class itself: one of the harness's fixed words, never a provider's
+// text or code.
+//
+// What a run costs is in the row's doc comment.
+
+/// The provider API of an account endpoint.
+fn endpoint_api(endpoint: meerkat_copilot::CopilotEndpoint) -> Option<meerkat_core::ModelApi> {
+    use meerkat_copilot::CopilotEndpoint;
+    use meerkat_core::ModelApi;
+    match endpoint {
+        CopilotEndpoint::Responses => Some(ModelApi::Responses),
+        CopilotEndpoint::ChatCompletions => Some(ModelApi::ChatCompletions),
+        CopilotEndpoint::Messages => Some(ModelApi::Messages),
+        CopilotEndpoint::Unknown => None,
+    }
+}
+
+/// Live matrix of the provider-neutral `reasoning_effort` level on a GitHub
+/// Copilot account; see the notes above. The token is read only by the
+/// routes' own `env` source, from `COPILOT_LIVE_USER_TOKEN`, inside this
+/// process. Run by hand with the repository's Cargo wrapper (`repo-cargo`),
+/// with every provider key unset:
+///
+/// ```text
+/// COPILOT_LIVE_USER_TOKEN=<token> repo-cargo test -p meerkat-integration-tests \
+///     --features integration-real-tests --test copilot_live_e2e \
+///     copilot_live_reasoning_effort_matrix -- --ignored --exact --nocapture
+/// ```
+///
+/// Requests of one run, counted from the code:
+///
+/// - account, four when all goes well: one identity lookup and one model
+///   list for this row's own resolution (`resolve_account_typed`), and one
+///   of each again when the factory builds the first route client, on its
+///   own Copilot runtime. A model list that answers 408, 502, 503 or 504,
+///   or not at all, is asked for once more at once.
+/// - inference, at most one per cell and so at most four: the gate refuses
+///   the next one before it reaches the client. The agent loop's own
+///   retries are set to none.
+/// - a 401 on an inference request, three more for that request: the
+///   Copilot client itself looks the account up again (one identity lookup,
+///   one model list) and sends the request a second time before any
+///   failure reaches the gate. When the second answer is a 401 too, the
+///   run stops there, so those three are paid once: at most 11 requests
+///   when it is the last cell. When the second answer succeeds, the gate
+///   never sees the 401 and a later cell can pay the three again: the
+///   ceiling of a run is 4 + 4 * (1 + 3) = 20 requests. Without any 401 a
+///   run sends at most 8.
+/// - a 429, or any other status: nothing is sent again.
+///
+/// No cell starts later than 200 seconds after the first route client was
+/// built and a turn is given 60 seconds, so every request is authorized
+/// before the account's model list is due for its background refresh (300
+/// seconds), which would be one more request.
+///
+/// Without the variable the row prints a skip and passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "lane:e2e-live; set COPILOT_LIVE_USER_TOKEN to a GitHub token with Copilot access"]
+async fn copilot_live_reasoning_effort_matrix() {
+    use meerkat_integration_tests::live_reasoning_matrix::{
+        self as matrix, CellModel, FailureClass, Lane, MatrixLine, MatrixRun, Redactor,
+        RequestBudget,
+    };
+
+    /// End the row on an account that is not usable, naming the class only.
+    fn account_stop(class: &'static str) -> ! {
+        let line = MatrixLine::AccountStop { class }.render(Lane::Copilot);
+        eprintln!("{}", Redactor::default().redact(&line));
+        panic!("STOP: the Copilot account is not usable ({class}); no inference request was sent");
+    }
+
+    let token_set = std::env::var(OPERATOR_TOKEN_VAR).is_ok_and(|token| !token.trim().is_empty());
+    if !token_set {
+        eprintln!("SKIP copilot-live reasoning: {OPERATOR_TOKEN_VAR} is not set");
+        return;
+    }
+    let mut config = Config::default();
+    config
+        .realm
+        .insert("global".to_string(), operator_token_routes(None));
+    config.model_fallback.enabled = Some(false);
+    let persistence = ProviderAuthPersistence::new(
+        Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+        Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+    );
+
+    // The account. A failure is printed as its class, never as its text.
+    let resolved = match timeout(
+        Duration::from_secs(90),
+        resolve_account_typed(
+            &config,
+            ResolverEnvironment::with_process_env()
+                .with_provider_auth_persistence(persistence.clone()),
+        ),
+    )
+    .await
+    {
+        Ok(Ok(resolved)) => resolved,
+        Ok(Err(error)) => account_stop(matrix::account_failure_class(&error)),
+        Err(_) => account_stop("timed_out"),
+    };
+    let redactor = resolved
+        .concrete_authorizer()
+        .account_identity()
+        .map_or_else(Redactor::default, |identity| {
+            Redactor::for_account(
+                identity.login.as_deref(),
+                identity.plan.as_deref(),
+                Some(identity.api_base.as_str()),
+            )
+        });
+    let Some(snapshot) = resolved.model_snapshot() else {
+        account_stop("model_list_not_loaded");
+    };
+
+    // Per family and endpoint: the first catalog model whose entry states
+    // levels and takes tool calls (the probe request offers a tool, and the
+    // account gate refuses one for a model that takes none), and the first
+    // whose entry states no levels. `stated` counts the models of each cell
+    // that state levels.
+    let mut picks: Vec<(RouteModel, meerkat_core::ModelApi, bool)> = Vec::new();
+    let mut stated: Vec<((Provider, meerkat_core::ModelApi), u32)> = Vec::new();
+    for target in route_models(&config, &snapshot) {
+        let Some(api) = account_id_for(&snapshot, target.provider, &target.model)
+            .and_then(|id| snapshot.model(id))
+            .and_then(|offering| offering.route_for(target.provider))
+            .and_then(endpoint_api)
+        else {
+            continue;
+        };
+        let supports = &target.capabilities.supports;
+        let states_levels = supports
+            .stated_effort_levels()
+            .is_some_and(|levels| !levels.is_empty());
+        if states_levels {
+            let cell = (target.provider, api);
+            match stated.iter_mut().find(|(key, _)| *key == cell) {
+                Some((_, count)) => *count += 1,
+                None => stated.push((cell, 1)),
+            }
+            if !target.supports_tools() {
+                continue;
+            }
+        } else if supports.reasoning_effort.is_some() {
+            // An entry that states an empty set, or only words that name no
+            // level, is neither a model to probe nor one that states nothing.
+            continue;
+        }
+        if !picks.iter().any(|(picked, at, picked_states)| {
+            picked.provider == target.provider && *at == api && *picked_states == states_levels
+        }) {
+            picks.push((target, api, states_levels));
+        }
+    }
+    if picks.is_empty() {
+        skip_or_fail(
+            "the account exposes no streaming model that is also present in the effective Meerkat model registry",
+        );
+        return;
+    }
+    let max_tokens = picks
+        .iter()
+        .map(|(target, _, _)| target.max_tokens())
+        .min()
+        .unwrap_or(DEFAULT_MAX_TOKENS);
+
+    // The route clients, built the way a session's is. The first build
+    // resolves the account on the factory's own Copilot runtime; the clients
+    // stay alive for the whole run, so no later build asks the account again.
+    let temp = TempDir::new().expect("Copilot live temp directory");
+    let factory = AgentFactory::new(temp.path().join("factory-store"))
+        .runtime_root(temp.path().join("runtime"))
+        .with_provider_auth_persistence(persistence);
+    let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+    let started = std::time::Instant::now();
+    let mut candidates = Vec::new();
+    for (target, api, _) in &picks {
+        let binding = auth_binding(target.route);
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: target.model.clone(),
+            provider: target.provider,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(binding.clone()),
+        };
+        let Ok(client) = factory
+            .build_llm_client_for_identity_with_auth_lease(
+                &config,
+                &identity,
+                Some(machine.generated_auth_lease_handle()),
+            )
+            .await
+        else {
+            let line = MatrixLine::Fail {
+                route: format!("copilot/{api}"),
+                model: target.model.clone(),
+                shape: None,
+                level: None,
+                class: FailureClass::BuildFailed,
+                status: None,
+                detail: Some("route_client"),
+            }
+            .render(Lane::Copilot);
+            eprintln!("{}", redactor.redact(&line));
+            panic!("STOP: a route client did not build; no inference request was sent");
+        };
+        candidates.push((
+            target.provider,
+            CellModel {
+                model: target.model.clone(),
+                client,
+                auth_binding: Some(binding),
+                config: config.clone(),
+            },
+        ));
+    }
+    let mut cells = matrix::assemble_cells(candidates);
+    for cell in &mut cells {
+        cell.stated_models = stated
+            .iter()
+            .find(|(key, _)| *key == (cell.key.provider, cell.key.api))
+            .map_or(0, |(_, count)| *count);
+    }
+
+    let run = MatrixRun {
+        lane: Lane::Copilot,
+        state_root: temp.path().join("matrix"),
+        budget: RequestBudget::new(matrix::REQUESTS_PER_CELL),
+        redactor,
+        turn_timeout: Duration::from_secs(60),
+        deadline: started + Duration::from_secs(200),
+        max_tokens,
+        max_retries: 0,
+    };
+    let summary = matrix::run_matrix(&run, &cells, &matrix::print_line).await;
+
+    assert!(
+        summary.stopped.is_none(),
+        "STOP: a provider failure ended the run; see its STOP line"
+    );
+    assert_eq!(summary.fail, 0, "a cell failed; see its FAIL line");
+    assert!(
+        summary.pass > 0,
+        "no cell passed: the account states effort levels for no catalog model it serves, or every turn was cut"
     );
 }

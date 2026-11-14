@@ -30,7 +30,8 @@ use meerkat_runtime::SessionServiceRuntimeExt;
 
 /// Parameters for `turn/start`.
 ///
-/// `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
+/// `provider_params`, `reasoning_effort` and `auth_binding` carry the
+/// canonical Inherit/Set/Clear
 /// tri-state via [`TurnMetadataOverride`]: `None` keeps the session's current
 /// value, `Some(Set)` overrides it, `Some(Clear)` removes it. Unknown fields
 /// (including the retired `clear_*` split wire form) fail closed at the serde
@@ -80,6 +81,17 @@ pub struct StartTurnParams {
     pub provider_params: Option<
         TurnMetadataOverride<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     >,
+    /// Set, clear, or keep the session's provider-neutral reasoning effort
+    /// level, for this turn and the turns after it: a level (or
+    /// `{"action":"set","value":<level>}`) sets it, `{"action":"clear"}`
+    /// removes it, and omission keeps it. It is its own field: a turn that
+    /// replaces or clears `provider_params` keeps the level unless it also
+    /// names this field, or its new params name the nested
+    /// `reasoning_effort` key. Since 0.9.15; an older server refuses the
+    /// field.
+    #[serde(default)]
+    pub reasoning_effort:
+        Option<TurnMetadataOverride<meerkat_core::model_profile::capabilities::EffortLevel>>,
     #[serde(default)]
     pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
     /// Host-attached injected context for this turn. Each entry materializes
@@ -99,6 +111,27 @@ pub struct StartTurnParams {
     /// an older server refuses the field.
     #[serde(default)]
     pub session_events: Option<bool>,
+}
+
+impl StartTurnParams {
+    /// Move the turn's identity and build overrides out of the params, in
+    /// the form the runtime carries them.
+    fn take_turn_overrides(&mut self) -> TurnOverrides {
+        TurnOverrides {
+            keep_alive: self.keep_alive,
+            model: self.model.take(),
+            provider: self.provider.take(),
+            self_hosted_server_id: self.self_hosted_server_id.take(),
+            max_tokens: self.max_tokens,
+            system_prompt: self.system_prompt.take(),
+            output_schema: self.output_schema.take(),
+            structured_output_retries: self.structured_output_retries,
+            provider_params: self.provider_params.take(),
+            reasoning_effort: self.reasoning_effort.take(),
+            auth_binding: self.auth_binding.take(),
+            transient_turn_context: self.transient_turn_context.take(),
+        }
+    }
 }
 
 /// Where a session's build settings are set, for a refusal on a turn.
@@ -221,6 +254,12 @@ pub struct TurnOverrides {
     pub provider_params: Option<
         TurnMetadataOverride<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     >,
+    /// The session's provider-neutral reasoning effort level for this turn
+    /// and the turns after it, as the runtime input's turn metadata carries
+    /// it: the `reasoning_effort` parameter of `turn/start` and
+    /// `mob/turn_start`.
+    pub reasoning_effort:
+        Option<TurnMetadataOverride<meerkat_core::model_profile::capabilities::EffortLevel>>,
     pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
     pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
 }
@@ -236,6 +275,7 @@ impl TurnOverrides {
             && self.output_schema.is_none()
             && self.structured_output_retries.is_none()
             && self.provider_params.is_none()
+            && self.reasoning_effort.is_none()
             && self.auth_binding.is_none()
             && self.transient_turn_context.is_none()
     }
@@ -275,7 +315,7 @@ pub async fn handle_start(
 /// wire `turn/start` refuses it while parsing, and a typed caller here.
 pub async fn start_turn_with_params(
     id: Option<RpcId>,
-    params: StartTurnParams,
+    mut params: StartTurnParams,
     runtime: Arc<SessionRuntime>,
     notification_sink: &NotificationSink,
     _runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
@@ -320,6 +360,7 @@ pub async fn start_turn_with_params(
         }
     });
 
+    let overrides = params.take_turn_overrides();
     let skill_refs = match canonical_skill_ids(&runtime, params.skill_refs) {
         Ok(r) => r,
         Err(e) => {
@@ -329,20 +370,6 @@ pub async fn start_turn_with_params(
                 format!("Invalid skill_refs: {e}"),
             );
         }
-    };
-
-    let overrides = TurnOverrides {
-        keep_alive: params.keep_alive,
-        model: params.model,
-        provider: params.provider,
-        self_hosted_server_id: params.self_hosted_server_id,
-        max_tokens: params.max_tokens,
-        system_prompt: params.system_prompt,
-        output_schema: params.output_schema,
-        structured_output_retries: params.structured_output_retries,
-        provider_params: params.provider_params,
-        auth_binding: params.auth_binding,
-        transient_turn_context: params.transient_turn_context,
     };
 
     // The turn's session/event copies go to this request's connection.
@@ -520,6 +547,72 @@ mod start_turn_params_tests {
             serde_json::from_value::<StartTurnParams>(inherit)
                 .expect("an explicit null keeps inheriting the session's setting");
         }
+    }
+
+    /// `turn/start` takes the provider-neutral `reasoning_effort` level as a
+    /// field of its own: a level sets it, `{"action": "clear"}` removes it,
+    /// and leaving it out keeps the session's level. The turn's overrides
+    /// carry it to the runtime unchanged.
+    #[test]
+    fn start_turn_params_read_the_reasoning_effort_tri_state() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let parse = |reasoning_effort: Option<serde_json::Value>| {
+            let mut params = serde_json::json!({
+                "session_id": "session-1",
+                "prompt": "hello"
+            });
+            if let Some(value) = reasoning_effort {
+                params["reasoning_effort"] = value;
+            }
+            serde_json::from_value::<StartTurnParams>(params)
+        };
+        for (value, expected) in [
+            (
+                Some(serde_json::json!("low")),
+                Some(TurnMetadataOverride::Set(EffortLevel::Low)),
+            ),
+            (
+                Some(serde_json::json!({"action": "set", "value": "xhigh"})),
+                Some(TurnMetadataOverride::Set(EffortLevel::Xhigh)),
+            ),
+            (
+                Some(serde_json::json!({"action": "clear"})),
+                Some(TurnMetadataOverride::Clear),
+            ),
+            (None, None),
+        ] {
+            let mut params = parse(value.clone()).expect("turn/start reads the tri-state");
+            let overrides = params.take_turn_overrides();
+            assert_eq!(
+                overrides.reasoning_effort, expected,
+                "{value:?} reaches the turn's overrides"
+            );
+            assert_eq!(
+                overrides.is_empty(),
+                expected.is_none(),
+                "a turn that names the level carries overrides: {value:?}"
+            );
+        }
+        for not_a_level in ["x_high", "extreme"] {
+            let error = parse(Some(serde_json::json!(not_a_level)))
+                .map(|_| ())
+                .expect_err("a word outside the level vocabulary is refused")
+                .to_string();
+            assert!(error.contains("`xhigh`"), "{not_a_level}: {error}");
+        }
+        // The level beside it does not open the type to other unknown fields.
+        let error = serde_json::from_value::<StartTurnParams>(serde_json::json!({
+            "session_id": "session-1",
+            "prompt": "hello",
+            "reasoning_effort": "low",
+            "reasoning_level": "low"
+        }))
+        .map(|_| ())
+        .expect_err("an unknown field is still refused")
+        .to_string();
+        assert!(error.contains("reasoning_level"), "{error}");
     }
 }
 

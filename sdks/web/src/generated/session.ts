@@ -6,6 +6,8 @@ export type AppendSystemContextStatus = "applied" | "duplicate";
 
 export type CapabilityId = string;
 
+export type EffortLevel = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 export type ExtractionError = {
   attempts: number;
   last_output: string;
@@ -15,6 +17,8 @@ export type ExtractionError = {
 export type InjectSystemContextResult = {
   status: AppendSystemContextStatus;
 };
+
+export type ModelApi = "responses" | "chat_completions" | "messages" | "generate_content" | "realtime";
 
 export type PresentedTokenConvention = "anthropic_disjoint_input_components" | "open_ai_input_includes_cached_subset" | "gemini_prompt_includes_cached_subset" | "open_ai_compatible_prompt_includes_cache_details" | "host_declared_inclusive_input_total";
 
@@ -31,6 +35,31 @@ export type ProviderTokenAccounting = {
 export type QuarantinedSkillIdentity = {
   raw_id: string;
   source_uuid: SourceUuid;
+};
+
+export type ReasoningEffortDecidedBy = "request" | "preference";
+
+export type ReasoningEffortReport = {
+  requested: EffortLevel;
+  sent: ReasoningEffortSent[];
+};
+
+export type ReasoningEffortSent = {
+  decided_by: ReasoningEffortDecidedBy;
+  facts: ReasoningFactsSource;
+  fields: string[];
+  level: EffortLevel;
+  model: string;
+  provider: Provider;
+  requests: number;
+  route: ReasoningRoute;
+};
+
+export type ReasoningFactsSource = "catalog" | "account" | "operator";
+
+export type ReasoningRoute = {
+  api: ModelApi;
+  backend: string;
 };
 
 export type RuntimeProfileCapability = "in_memory_persistence" | "durable_persistence" | "foreground_execution" | "background_execution" | "keep_alive" | "comms" | "transient_turn_context" | "shell" | "process_spawn" | "mcp_stdio" | "remote_member_placement" | "hooks" | "runtime_skills" | "file_schema_resolution" | "embedded_skills" | "schedule" | "work_graph" | "semantic_memory" | "image_generation" | "fallback_web_search" | "mcp_client" | "tcp_comms" | "uds_comms";
@@ -168,6 +197,7 @@ export type WireResolvedModelCapabilities = {
 
 export type WireRunResult = {
   extraction_error?: ExtractionError | null;
+  reasoning_effort?: ReasoningEffortReport | null;
   request_usage?: WireTurnUsage[];
   run_usage?: WireUsage | null;
   schema_warnings?: SchemaWarning[] | null;

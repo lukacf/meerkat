@@ -95,6 +95,7 @@ impl SessionAgent for MockAgent {
 
         let _ = event_tx
             .send(AgentEvent::RunStarted {
+                reasoning_effort: None,
                 request_reasoning: None,
                 identity: Default::default(),
                 session_id: self.session_id.clone(),
@@ -131,6 +132,7 @@ impl SessionAgent for MockAgent {
             .await;
 
         Ok(RunResult {
+            reasoning_effort: None,
             text: "Hello from mock".to_string(),
             session_id: self.session_id.clone(),
             usage,
@@ -227,6 +229,7 @@ impl SessionAgent for SnapshotAgent {
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         Ok(RunResult {
+            reasoning_effort: None,
             text: "snapshot".to_string(),
             session_id: self.session_id.clone(),
             usage: Usage::default(),
@@ -477,6 +480,7 @@ impl SessionAgent for RecordingTurnAgent {
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         Ok(RunResult {
+            reasoning_effort: None,
             text: "recorded".to_string(),
             session_id: self.session_id.clone(),
             usage: Usage::default(),
@@ -505,6 +509,7 @@ impl SessionAgent for RecordingTurnAgent {
                 render_metadata: input.render_metadata,
             });
         Ok(RunResult {
+            reasoning_effort: None,
             text: "recorded".to_string(),
             session_id: self.session_id.clone(),
             usage: Usage::default(),

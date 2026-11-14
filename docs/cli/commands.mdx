@@ -211,6 +211,38 @@ rkat -m claude-sonnet-4-6 \
   "triage this incident"
 ```
 
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+`--reasoning-effort <LEVEL>` sets the provider-neutral
+[reasoning effort](/concepts/providers#reasoning-effort) of the session:
+`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. Meerkat checks
+the level against the model on the route that serves the request and writes
+the provider's own field; a level the model or route does not accept is
+refused before any provider request with
+[exit status 2](/cli/configuration#reasoning-effort-refusal). It composes with
+tools, `--schema` and `--stream`, and `--output json` reports what was sent in
+the result's `reasoning_effort` block:
+
+```bash
+rkat run -m gpt-5.5 --reasoning-effort high "plan the migration"
+rkat run -m gpt-5.5 --reasoning-effort high -t workspace \
+  --schema ./plan.schema.json --stream --output json "plan the migration"
+```
+
+On `--resume` the flag changes the session's level from that turn on,
+`--no-reasoning-effort` removes it, and neither keeps the level the session
+recorded:
+
+```bash
+rkat run --resume last --reasoning-effort low "now the short version"
+rkat run --resume last --no-reasoning-effort "continue"
+```
+
+`--param reasoning_effort=high` is the same setting; a command that gives
+both must give the same level. Otherwise the command exits 2 (an invalid
+request), and with `--output json` its failure document has the code
+`INVALID_PARAMS`.
+
 Structured output is file-friendly:
 
 ```bash

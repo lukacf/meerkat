@@ -346,6 +346,7 @@ fn wire_resume_override_field(field: &ResumeOverrideField) -> WireMobResumeOverr
         ResumeOverrideField::Model => WireMobResumeOverrideField::Model,
         ResumeOverrideField::Provider => WireMobResumeOverrideField::Provider,
         ResumeOverrideField::ProviderParams => WireMobResumeOverrideField::ProviderParams,
+        ResumeOverrideField::ReasoningEffort => WireMobResumeOverrideField::ReasoningEffort,
     }
 }
 
@@ -354,6 +355,7 @@ fn domain_resume_override_field(field: &WireMobResumeOverrideField) -> ResumeOve
         WireMobResumeOverrideField::Model => ResumeOverrideField::Model,
         WireMobResumeOverrideField::Provider => ResumeOverrideField::Provider,
         WireMobResumeOverrideField::ProviderParams => ResumeOverrideField::ProviderParams,
+        WireMobResumeOverrideField::ReasoningEffort => ResumeOverrideField::ReasoningEffort,
     }
 }
 

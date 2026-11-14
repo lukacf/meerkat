@@ -2561,6 +2561,17 @@ impl LlmClient for GeminiClient {
         )
     }
 
+    /// The `generateContent` API on the backend this client was built for.
+    /// No account list and no operator levels are this client's to state.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        Some(meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::Google(self.google_backend_kind),
+            api: meerkat_core::ModelApi::GenerateContent,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        })
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         project_gemini_replay_messages(messages)
     }
@@ -4802,6 +4813,87 @@ mod tests {
                     body["generationConfig"]["thinkingConfig"]["thinkingLevel"], wire,
                     "{model} (nested: {nested})"
                 );
+            }
+        }
+    }
+
+    /// The Gemini family: the generateContent client reports the
+    /// backend it was built for. No account list and no operator levels are
+    /// its to state.
+    #[test]
+    fn every_adapter_reports_its_route() {
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        let observation = |backend: GoogleBackendKind| ReasoningRouteObservation {
+            backend: ReasoningBackend::Google(backend),
+            api: ModelApi::GenerateContent,
+            account: AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        };
+        assert_eq!(
+            GeminiClient::new("test-key".to_string()).reasoning_route(),
+            Some(observation(GoogleBackendKind::GoogleGenAi)),
+            "a client built directly serves the Gemini API"
+        );
+        for backend in [
+            GoogleBackendKind::GoogleGenAi,
+            GoogleBackendKind::VertexAi,
+            GoogleBackendKind::GoogleCodeAssist,
+        ] {
+            assert_eq!(
+                GeminiClient::new("test-key".to_string())
+                    .with_google_backend_kind(backend)
+                    .reasoning_route(),
+                Some(observation(backend)),
+                "{backend:?}"
+            );
+        }
+        assert_eq!(
+            GeminiClient::new("test-key".to_string())
+                .with_code_assist_wire()
+                .reasoning_route(),
+            Some(observation(GoogleBackendKind::GoogleCodeAssist)),
+            "the Code Assist wire"
+        );
+    }
+
+    /// generateContent: the level Core writes on the tag reaches the
+    /// wire as `generationConfig.thinkingConfig.thinkingLevel`, in the flat
+    /// field and in the nested config, on every backend, and no thinking
+    /// budget is written with it.
+    #[test]
+    fn translated_level_reaches_the_wire() {
+        for backend in [
+            GoogleBackendKind::GoogleGenAi,
+            GoogleBackendKind::VertexAi,
+            GoogleBackendKind::GoogleCodeAssist,
+        ] {
+            let client =
+                GeminiClient::new("test-key".to_string()).with_google_backend_kind(backend);
+            for (model, level, wire) in [
+                (
+                    "gemini-3.5-flash-lite",
+                    GeminiThinkingLevel::Minimal,
+                    "minimal",
+                ),
+                ("gemini-3.8-flash", GeminiThinkingLevel::Low, "low"),
+                ("gemini-3.8-flash", GeminiThinkingLevel::Medium, "medium"),
+                ("gemini-3.8-flash", GeminiThinkingLevel::High, "high"),
+            ] {
+                for nested in [false, true] {
+                    let body = client
+                        .build_request_body(&thinking_level_request(model, level, nested))
+                        .unwrap_or_else(|error| {
+                            panic!("{backend:?} {model} (nested: {nested}): {error}")
+                        });
+                    assert_eq!(
+                        body["generationConfig"]["thinkingConfig"],
+                        serde_json::json!({"thinkingLevel": wire}),
+                        "{backend:?} {model} (nested: {nested})"
+                    );
+                }
             }
         }
     }

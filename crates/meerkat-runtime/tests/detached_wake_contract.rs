@@ -99,6 +99,7 @@ impl CoreExecutor for ResultExecutor {
             },
             None,
             RunResult {
+                reasoning_effort: None,
                 text: "done".into(),
                 session_id: SessionId::new(),
                 usage: Usage::default(),
@@ -149,6 +150,7 @@ async fn choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_
                 },
                 None,
                 RunResult {
+                    reasoning_effort: None,
                     text: "done".into(),
                     session_id: SessionId::new(),
                     usage: Usage::default(),
@@ -499,6 +501,7 @@ async fn choke_004_completion_during_running_defers_wake() {
                 },
                 None,
                 RunResult {
+                    reasoning_effort: None,
                     text: "done".into(),
                     session_id: SessionId::new(),
                     usage: Usage::default(),
@@ -643,6 +646,7 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_count.fetch_add(1, Ordering::SeqCst);
             let run_result = RunResult {
+                reasoning_effort: None,
                 text: "done".into(),
                 session_id: SessionId::new(),
                 usage: Usage::default(),

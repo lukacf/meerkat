@@ -143,7 +143,35 @@ Security, Upgrade and Changed.
   receives both as before.
 - On a console that can identify a person, a gating audit entry or pending
   request whose origin is an agent the console does not know is shown to an
-  administrator only, like every other record the console cannot attribute.
+  administrator only, like every other record the console cannot attribute,
+  and only an administrator decides such a request. A decide by the id of a
+  request the pending list withholds from its caller (`meta/gating/decide`
+  on the Console) is answered as a decide of an id that is not pending, and
+  the request stays pending. That also holds for a request whose origin an
+  access rule or a private owner keeps from the caller, which was answered
+  `access_denied`. Through 0.9.14 the pending list, the audit read and the
+  decide all asked only whether the caller may view the agent that holds
+  the origin's name, so a person who is not an administrator and may view
+  that agent was shown such a request and could decide it. Only a host
+  supplies a request's origin. On a Console that requires sign-in and has
+  no access configuration, a person's decide by id could in a narrow window
+  be applied to a request whose origin is an agent private to another
+  person; a request is now judged at the moment its decision is applied.
+  Affects 0.9.11 through 0.9.14 (read from the released sources; a run on
+  the development source showed the window). The Console's delivery history
+  (`meta/delivery/history`) follows the pending list as well: the record
+  of an approval notification carries the request's id and action text, and
+  is withheld from a caller the list would not show the request, and, on a
+  console that can identify a person, from everyone but an administrator
+  once the request is no longer held. A page of that history holds the
+  newest records its caller may read, up to its limit. Through 0.9.14 that
+  record was shown to every caller who may read the delivery history,
+  whatever the request's origin (from 0.9.11, unless the record itself
+  names an agent private to another person). On a Console that requires
+  sign-in and has no access configuration there is no administrator: a
+  request whose origin the Console does not know is shown to nobody there
+  and decided by nobody there. Its host decides or withdraws it, or it runs
+  into its timeout.
 - In 0.9.11 through 0.9.14, on a console that does not require sign-in and
   whose access rules are off, a caller who sent no token could read the
   conversation of a private side chat after that side chat had ended.
@@ -263,6 +291,19 @@ Security, Upgrade and Changed.
   caller is answered "access denied: the session has no established owner"
   where access rules are enforced, and as for a session that does not
   exist otherwise.
+- A reasoning effort level in a mob definition is a one-way step with
+  respect to 0.9.14. A Meta gateway on 0.9.14 does not start on the state
+  directory of a mob whose stored definition holds a level
+  (`provider_params.reasoning_effort` in a profile) or lists
+  `reasoning_effort` in a profile's `resume_overrides`: the start is
+  refused at the state check, and removing the level from the definition
+  file does not help, because the stored history holds it. The refused
+  starts write nothing to the mob's store, and a 0.9.15 gateway starts on
+  it again with the level. To roll back, destroy the mob on 0.9.15 and
+  create it anew without the level first. A mob whose definition never
+  held a level starts and serves on 0.9.14 as before. Measured with
+  development builds of both releases. See Meerkat's changelog (Upgrade
+  notes) for sessions, Core hosts and realm profiles.
 
 ### Added
 
@@ -823,8 +864,12 @@ Security, Upgrade and Changed.
   once more as the one standing entry of the record. A removal still
   revokes the record, and a fork that holds the entry is told so at its
   next run. A model that takes a system instruction only ahead of the
-  conversation applies the change after a compaction or with a fresh
-  conversation. A fork of the agent follows the record by Meerkat's rule for
+  conversation applies the change after a compaction at the start of a run
+  or with a fresh
+  conversation. A short conversation may never reach that compaction by
+  itself: `meta/reset` brings the change into effect and gives the agent's
+  conversation up, and `meta/instruction_status` says whether a change is
+  in effect. A fork of the agent follows the record by Meerkat's rule for
   a member and its forks: a fork that is live when the change is recorded
   gets the entry at its next run, once; a fork taken afterwards has the
   record in its own snapshot, which a durable fork has recorded in its
@@ -931,6 +976,24 @@ Security, Upgrade and Changed.
   (`runtime_options.member_comms_address`), as TypeScript `memberCommsTcp`
   does: what a member of another gateway needs to reach them.
 
+- A spawn whose draft sets one provider param keeps the
+  `reasoning_effort` level its profile declares in `provider_params`, as it
+  keeps the profile's other declared params, and a draft's own level wins.
+  The level is Meerkat's new provider-neutral setting
+  (`ProviderParamsOverride.reasoning_effort`; see Meerkat's changelog):
+  Meerkat resolves it for the route that serves each of the member's
+  requests, and a level that route does not accept refuses the member's
+  build or its turn before any provider request. See Known limitations for
+  what a resume does with a profile's level.
+
+- A member's LLM client reports the reasoning route of the provider client
+  it is built on (`AgentLlmClient::reasoning_route()` and
+  `LlmClient::reasoning_route()`, new in Meerkat; see its changelog). Meta's
+  client wrappers (the mob-wide default client, the two replay sanitizers
+  and the dispatch taint observer) now forward the call. A wrapper that kept
+  the default would report no route for the members it decorates, whatever
+  the provider client states.
+
 ### Changed
 
 - A host that labels its members in its customizer must put those labels
@@ -957,6 +1020,19 @@ Security, Upgrade and Changed.
   sets no labels refuses nothing. An archive and a removal of a refused
   agent are served.
 
+- From 0.9.15 a gating decide on the Console (`meta/gating/decide`)
+  follows the pending list (see Security): a decide of a request the list
+  does not show its caller is answered as a decide of an id that is not
+  pending is. Two answers change with it. New in 0.9.15: on a console that
+  can identify a person, a decide of a request whose origin is an agent the
+  console does not know gets that answer unless the caller is an
+  administrator; through 0.9.14 such a decide was applied for a person who
+  may view that agent. And a decide of a request whose origin an access
+  rule or a private owner keeps from the caller is no longer answered
+  `access_denied`: it gets that answer too. A client that handled
+  `access_denied` on this call now gets the answer for an id that is not
+  pending; `access_denied` still answers a caller without the
+  `gating.decide` grant.
 - A declared definition update (`runtime_options.declare_spec_update` on
   the stdio gateway, `spec_update_ceremony` from Rust) that drops a profile
   agents were created on, or renames it, is refused: Meerkat answers the
@@ -1633,6 +1709,20 @@ Security, Upgrade and Changed.
   the access controller it passes: they read no roster and no agent
   record.
 
+- An update of an agent's instructions that arrives while the agent's
+  first run is being started can answer `applies_at_next_run` although
+  that run, and the conversation it starts, use the earlier instructions
+  (read from the source; not seen in a run). It takes two callers at the
+  same moment: the first delivery to an agent that was created without a
+  first message, and an update of its instructions. The new text is in the
+  agent's record (`meta/identity/get`), and `meta/instruction_status` shows
+  no record and no slot for the agent, not a pending change: nothing was
+  recorded for the conversation. The change reaches the conversation at
+  the next change of the agent's instructions (another update), at a reset
+  of the agent, or at the agent's first delivery after the next gateway
+  start, as a change made while the gateway was down does. An agent created
+  with a first message is not affected: its create answers once its
+  conversation exists.
 - An agent whose instructions were edited while the gateway was down, whose
   conversation was built through 0.9.14 and that has no instruction record
   yet, may keep the text of its first prompt until the running gateway
@@ -1698,6 +1788,14 @@ Security, Upgrade and Changed.
   rule.
 - Gating: an audit entry or pending request is decided by the agent that
   holds the name of its origin now. Only a host supplies an entry's origin.
+
+- A profile's `reasoning_effort` level and members that resume: on resume
+  Meta re-applies the `provider_params` of a profile that declares params,
+  and does not re-apply the level by itself. A member that resumes takes a
+  level its profile names (a new or changed level takes effect), and keeps
+  the level its session recorded when the profile names none: removing the
+  level from a profile does not remove it from a member that resumes. A
+  member turn with `reasoning_effort` `{"action":"clear"}` removes it.
 
 - Until Connect 0.9.15 is published, Connect 0.9.14 is the Connect release
   for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in

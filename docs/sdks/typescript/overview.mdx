@@ -454,6 +454,7 @@ interface SessionOptions {
   peerMeta?: Record<string, unknown>;
   budgetLimits?: Record<string, unknown>;
   providerParams?: Record<string, unknown>;
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"; // from 0.9.15
   preloadSkills?: SkillRef[];
   skillRefs?: SkillRef[];
   labels?: Record<string, string>;
@@ -474,6 +475,52 @@ The turn options also carry `maxTokens`, `outputSchema`, and
 `structuredOutputRetries`, but the server refuses them on a turn with
 `INVALID_PARAMS`: they are build settings, so set them on `createSession(...)`
 or `createDeferredSession(...)`.
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+`reasoningEffort` sets the session's provider-neutral
+[reasoning effort](/concepts/providers#reasoning-effort) level. On
+`createSession(...)` (and the streaming and deferred variants) it is a level.
+On `turn(...)`, `stream(...)`, `startTurn(...)` and `mobTurnStart(...)` it is
+the turn's tri-state: a level sets it from that turn on,
+`{ action: "clear" }` removes it, and leaving it out keeps it. The client
+sends it only to a server whose contract is 0.9.15 or later and throws
+`CapabilityUnavailableError` otherwise, before anything is written: an older
+server ignores it on `session/create` and refuses it on a turn. A level
+the model or its route does not accept rejects the call with a
+`MeerkatError` whose `code` is `"-32602"` (invalid params);
+`reasoningEffortRefusal(error)` returns the typed refusal
+(`requested`, `provider`, `model`, `route`, `reason`, `supported`, `facts`,
+`conflictingParam`, `conflictingLevel`, `transient`), or `undefined` for any
+other error:
+
+```typescript
+import { reasoningEffortRefusal } from "@rkat/sdk";
+
+try {
+  await client.createSession("Plan it", { model: "gpt-5.5", reasoningEffort: "max" });
+} catch (error) {
+  const refusal = reasoningEffortRefusal(error);
+  if (!refusal) throw error;
+  if (refusal.transient) {
+    // The account's model list is not loaded yet: ask again later.
+  } else {
+    console.log(refusal.reason, refusal.supported);
+  }
+}
+```
+
+`reason` is one of the eight closed reasons
+(`REASONING_EFFORT_REFUSAL_REASONS`); `transient` is true only for
+`supported_levels_unavailable`. A refusal with a reason this SDK does not
+know is not parsed, and `error.details` keeps the data as sent. The route's
+names and `facts` are advisory and kept as strings. `route`, `supported` and
+`facts` are always present in the refusal data: `null` when they have no
+value, never left out. `reasoningEffortReport(result)`
+reads the `reasoning_effort` block of a run result (the level requested and
+one `sent` row per distinct resolution), and
+`parseReasoningEffortResolution(...)` the resolution `run_started`,
+`run_resumed` and `request_reasoning_effort_resolved` carry.
 
 `grantGatedTools` gates built-in tool families and tool names: the session
 mounts them hidden and refuses their calls until `grantTool(sessionId, { family

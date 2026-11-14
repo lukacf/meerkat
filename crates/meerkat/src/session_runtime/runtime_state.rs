@@ -165,12 +165,46 @@ pub trait ArchiveRuntimeMobState: Send + Sync {
     ) -> Result<(), meerkat_core::service::SessionError>;
 }
 
+/// What a runtime cleanup knows about the session whose live runtime it
+/// retires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeCleanupScope {
+    /// The session was archived: the cleanup also runs the owner-archive
+    /// hook, which destroys the mobs the session owns.
+    ArchivedSession,
+    /// The session stays (a turn start, a recovery or another apply step
+    /// failed, or its runtime ended without an archive): the cleanup
+    /// retires the session's live runtime only. What the session owns
+    /// stays with it.
+    KeptSession,
+}
+
+impl RuntimeCleanupScope {
+    /// The scope of a cleanup the generated completion cleanup authority
+    /// asked for. `archived_by_authority` is that authority's own archive
+    /// fact (the `archived_by_authority` field of the value
+    /// `MeerkatMachine::resolve_runtime_completion_cleanup` answers): only
+    /// the generated `ResolveRuntimeCompletionCleanupArchived` transition
+    /// asks for the cleanup of an archived session, so every other cleanup
+    /// is of a session that stays.
+    #[must_use]
+    pub fn of_completion_cleanup(archived_by_authority: bool) -> Self {
+        if archived_by_authority {
+            Self::ArchivedSession
+        } else {
+            Self::KeptSession
+        }
+    }
+}
+
 /// Surface-agnostic archive cleanup orchestrator.
 ///
 /// Composes the runtime adapter, the per-session pending event-stream
 /// map, and the optional MCP / Mob cleanup hooks. Surfaces build one of
 /// these per archive call and either invoke `archive_service` followed
 /// by `run`, or just `run` when the service step has already happened.
+/// A cleanup of a session that was not archived goes through
+/// [`Self::run_scoped`] with [`RuntimeCleanupScope::KeptSession`].
 #[derive(Clone)]
 pub struct ArchiveRuntimeCleanup {
     /// Runtime adapter; used to unregister the session and abort comms
@@ -227,11 +261,24 @@ impl ArchiveRuntimeCleanup {
         &self,
         session_id: &SessionId,
     ) -> Result<(), meerkat_core::service::SessionError> {
+        self.run_scoped(session_id, RuntimeCleanupScope::ArchivedSession)
+            .await
+    }
+
+    /// [`Self::run`] for `scope`: the same unregister, event-stream, MCP
+    /// and comms-drain steps, and the owner-archive mob hook only for
+    /// [`RuntimeCleanupScope::ArchivedSession`]. A session that stays keeps
+    /// the mobs it owns; its next turn builds its live runtime again.
+    pub async fn run_scoped(
+        &self,
+        session_id: &SessionId,
+        scope: RuntimeCleanupScope,
+    ) -> Result<(), meerkat_core::service::SessionError> {
         self.runtime_adapter
             .unregister_current_session_registration_until_terminal(session_id)
             .await
             .map_err(Self::runtime_cleanup_error)?;
-        self.run_after_runtime_unregistered(session_id).await
+        self.run_after_runtime_unregistered(session_id, scope).await
     }
 
     /// Run terminal cleanup when generated completion authority proves that
@@ -242,10 +289,33 @@ impl ArchiveRuntimeCleanup {
     /// cleanup: both the typed, session-bound observation and an already-absent
     /// registration are required, so the completion relay never treats bare
     /// registry absence as terminal proof.
+    ///
+    /// This form is the cleanup of an archived session: it destroys the mobs
+    /// the session owns. A completion cleanup says what became of the session
+    /// with [`Self::run_after_runtime_termination_scoped`].
+    #[deprecated(
+        note = "use `run_after_runtime_termination_scoped`; this form is the cleanup of an archived session and destroys the mobs the session owns"
+    )]
     pub async fn run_after_runtime_termination(
         &self,
         session_id: &SessionId,
         cleanup_observation: &meerkat_runtime::CompletionCleanupObservation,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.run_after_runtime_termination_scoped(
+            session_id,
+            cleanup_observation,
+            RuntimeCleanupScope::ArchivedSession,
+        )
+        .await
+    }
+
+    /// [`Self::run_after_runtime_termination`] for `scope`, as
+    /// [`Self::run_scoped`] is to [`Self::run`].
+    pub async fn run_after_runtime_termination_scoped(
+        &self,
+        session_id: &SessionId,
+        cleanup_observation: &meerkat_runtime::CompletionCleanupObservation,
+        scope: RuntimeCleanupScope,
     ) -> Result<(), meerkat_core::service::SessionError> {
         if !cleanup_observation.proves_runtime_termination_for(session_id) {
             return Err(Self::runtime_cleanup_error(format!(
@@ -259,12 +329,13 @@ impl ArchiveRuntimeCleanup {
             )));
         }
 
-        self.run_after_runtime_unregistered(session_id).await
+        self.run_after_runtime_unregistered(session_id, scope).await
     }
 
     async fn run_after_runtime_unregistered(
         &self,
         session_id: &SessionId,
+        scope: RuntimeCleanupScope,
     ) -> Result<(), meerkat_core::service::SessionError> {
         if let Some(streams) = self.pending_session_event_streams.as_ref() {
             streams.lock().await.remove(session_id);
@@ -272,7 +343,11 @@ impl ArchiveRuntimeCleanup {
         if let Some(mcp_state) = self.mcp_state.as_ref() {
             mcp_state.cleanup(session_id).await;
         }
-        if let Some(mob_state) = self.mob_state.as_ref() {
+        // The mob hook destroys the mobs the session owns: it belongs to
+        // the session's archive, never to a cleanup of a session that stays.
+        if scope == RuntimeCleanupScope::ArchivedSession
+            && let Some(mob_state) = self.mob_state.as_ref()
+        {
             mob_state.cleanup(session_id).await?;
         }
         #[cfg(feature = "comms")]

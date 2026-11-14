@@ -402,6 +402,7 @@ async fn checkpoint_apply_with_run_result_uses_run_authority_live_and_after_rest
         let fixture = Fixture::with_initial_input(false).await;
         let input_id = old_input_id();
         let terminal = CoreApplyTerminal::RunResult(Box::new(meerkat_core::types::RunResult {
+            reasoning_effort: None,
             text: "queued Steer produced a full run result".to_string(),
             session_id: fixture.session_id.clone(),
             usage: Default::default(),
@@ -492,6 +493,7 @@ async fn earlier_release_pending_run_result_finalizes_after_cold_restart() {
     let fixture = Fixture::with_initial_input(false).await;
     let input_id = old_input_id();
     let terminal = CoreApplyTerminal::RunResult(Box::new(meerkat_core::types::RunResult {
+        reasoning_effort: None,
         text: "an earlier release committed this result".to_string(),
         session_id: fixture.session_id.clone(),
         usage: Default::default(),
@@ -613,6 +615,7 @@ async fn commit_budget_terminal_batch(
 
 fn budget_run_result(session_id: &SessionId) -> meerkat_core::types::RunResult {
     meerkat_core::types::RunResult {
+        reasoning_effort: None,
         text: String::new(),
         session_id: session_id.clone(),
         usage: Default::default(),

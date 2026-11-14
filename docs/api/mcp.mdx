@@ -1128,6 +1128,24 @@ extraction calls.
   Max retries for structured output validation. Omit / `null` to use the product default on run or inherit the persisted session value on resume.
 </ParamField>
 
+<ParamField body="reasoning_effort" type="string | object | null" default="null">
+  From 0.9.15. The session's provider-neutral reasoning effort level (see
+  [Reasoning effort](/concepts/providers#reasoning-effort)). On
+  `meerkat_run`: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or
+  `max`. On `meerkat_resume`: a level sets it from this turn on,
+  `{"action":"clear"}` removes it, and omission keeps the level the session
+  recorded. It is the same setting as `provider_params.reasoning_effort`; an
+  input that gives both must ask for one outcome (refused as invalid params
+  otherwise). A level the model or its route does not accept is refused
+  before any provider request: the tool call fails with a typed tool error
+  in the shape JSON-RPC uses, code `-32602` (invalid params) with the data
+  `{"kind": "reasoning_effort_refused", "retryable": <bool>, "reasoning_effort_refusal": {...}}`
+  (see [Reasoning effort refusal data](/api/rpc#reasoning-effort-refusal-data)).
+  After a call created its session, the data also names the session
+  (`session_id`, `session_ref`, `session_created`, `resumable`). Read the
+  data, never the message.
+</ParamField>
+
 <ParamField body="stream" type="bool" default="false">
   Stream agent events via `notifications/message`; see
   [event streaming](#event-streaming) for the envelope and pull-stream tools.

@@ -1456,6 +1456,7 @@ impl ContractSessionService {
 
 fn run_result(session_id: SessionId, text: &str) -> RunResult {
     RunResult {
+        reasoning_effort: None,
         text: text.to_string(),
         session_id,
         usage: Usage::default(),

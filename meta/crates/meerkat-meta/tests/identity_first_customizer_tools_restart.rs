@@ -5945,12 +5945,14 @@ async fn a_created_agent_still_manages_the_mob_it_created_after_a_label_only_upd
         Some("beta"),
         "the roster reads the keeper's new label at once"
     );
+    let after_relabel = keeper_reach(&runtime, &model, "2-relabelled", &child).await;
+    // Then, in a turn of its own, the keeper destroys the mob it created.
     model.queue(
         "reach-destroy",
         "mob_destroy",
         serde_json::json!({ "mob_id": child }),
     );
-    let after_relabel = keeper_reach(&runtime, &model, "2-relabelled", &child).await;
+    keeper_turn(&runtime, "3-destroy").await;
     let destroyed = model.result("reach-destroy");
     println!(
         "LU-REACH [2-relabelled] mob_destroy: is_error={} {}",

@@ -579,8 +579,8 @@ fn web_build(root: &std::path::Path) -> Result<Output, Box<dyn std::error::Error
 fn pack_note(pack: &str) -> String {
     format!(
         "note\tthe warnings come from a short list of names and from one content form (a file \
-         that is exactly a 64-digit hex key), not from a reading of the files; list every file \
-         in the pack with: rkat mob inspect {pack}\n"
+         whose text, trimmed, is exactly 64 hex digits), not from a reading of the files; list \
+         every file in the pack with: rkat mob inspect {pack}\n"
     )
 }
 

@@ -716,8 +716,8 @@ them.
   U+061C, U+180E, U+200B to U+200F, U+202A to U+202E, U+2060 to U+2064,
   U+2066 to U+206F, U+FEFF, U+FFF9 to U+FFFB, U+E0001 and U+E0020 to
   U+E007F; every other character is printed as it is. The files are
-  flagged by name, and for one form by content (a file that is exactly a
-  64-digit hex key). What is flagged:
+  flagged by name, and for one form by content (a file whose text,
+  trimmed, is exactly 64 hex digits). What is flagged:
   - a file that `--sign` would accept as a key: its text, with the white
     space around it trimmed, is exactly 64 hex digits. It is flagged
     whatever it is called, unless it lies under one of the directories

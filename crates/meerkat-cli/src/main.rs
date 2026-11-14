@@ -3816,10 +3816,10 @@ enum MobCommands {
     /// Prints the pack's digest on standard output. On standard error it
     /// reports how many files it packed and warns, by path, about packed
     /// files that look like secrets, repository metadata, local state or an
-    /// earlier pack: by name, and for one form by content (a file that is
-    /// exactly a 64-digit hex key). The list is a heuristic: no warning does
-    /// not mean the pack is clean. `rkat mob inspect <pack>` lists every file
-    /// in a pack.
+    /// earlier pack: by name, and for one form by content (a file whose
+    /// text, trimmed, is exactly 64 hex digits). The list is a heuristic: no
+    /// warning does not mean the pack is clean. `rkat mob inspect <pack>`
+    /// lists every file in a pack.
     Pack {
         /// Mob directory to pack
         dir: PathBuf,
@@ -4370,10 +4370,10 @@ enum MobWebCommands {
     /// The bundle serves the whole pack to everyone who can load the page.
     /// The command warns on standard error, by path, about files in the pack
     /// that look like secrets, repository metadata, local state or an earlier
-    /// pack: by name, and for one form by content (a file that is exactly a
-    /// 64-digit hex key). The list is a heuristic: no warning does not mean
-    /// the pack is clean. `rkat mob inspect <pack>` lists every file in a
-    /// pack.
+    /// pack: by name, and for one form by content (a file whose text,
+    /// trimmed, is exactly 64 hex digits). The list is a heuristic: no
+    /// warning does not mean the pack is clean. `rkat mob inspect <pack>`
+    /// lists every file in a pack.
     Build {
         /// Path to a .mobpack archive
         pack: PathBuf,
@@ -23622,9 +23622,9 @@ fn write_report_to_standard_error(report: &str) {
 
 /// The `warning` lines for the files of a pack that look like secrets,
 /// repository metadata, local state or an earlier pack: by name, and for one
-/// form by content (a file that is exactly a 64-digit hex key). A line names
-/// a path and never holds a byte of a file. Empty when the list knows none of
-/// the files, which says nothing about what they hold.
+/// form by content (a file whose text, trimmed, is exactly 64 hex digits). A
+/// line names a path and never holds a byte of a file. Empty when the list
+/// knows none of the files, which says nothing about what they hold.
 #[cfg(feature = "mob")]
 fn mobpack_content_warning_lines(files: &std::collections::BTreeMap<String, Vec<u8>>) -> String {
     meerkat_mob_pack::content_warnings::pack_content_warnings(
@@ -23653,8 +23653,8 @@ fn mob_pack_report(
         report.push_str(&warnings);
         report.push_str(&format!(
             "note\tthe warnings come from a short list of names and from one content form (a \
-             file that is exactly a 64-digit hex key), not from a reading of the files; list \
-             every file in the pack with: rkat mob inspect {}\n",
+             file whose text, trimmed, is exactly 64 hex digits), not from a reading of the \
+             files; list every file in the pack with: rkat mob inspect {}\n",
             pack.display()
         ));
     }

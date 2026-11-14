@@ -3,8 +3,9 @@
 //! A pack holds every regular file under its mob directory. This module
 //! points out the packed files that look like secrets, repository metadata,
 //! local state or an earlier pack: by their names, and for one form by their
-//! content (a file that is exactly a 64-digit hex key, the form of a mobpack
-//! signing key). A warning names a path; it never carries a byte of a file.
+//! content (a file whose text, trimmed, is exactly 64 hex digits, the form
+//! of a mobpack signing key). A warning names a path; it never carries a
+//! byte of a file.
 //! The list is a heuristic: a pack without a warning is not thereby clean.
 //! The full list of a pack's files is what
 //! [`inspect_archive_bytes`](crate::pack::inspect_archive_bytes) returns.
@@ -22,8 +23,8 @@ pub enum PackedPathConcern {
     LocalState,
     /// A `.ssh`, `.aws` or `.gnupg` directory.
     CredentialDirectory,
-    /// A file whose whole content is 64 hex digits: the form of a mobpack
-    /// signing key, whatever the file is called.
+    /// A file whose text, trimmed, is exactly 64 hex digits: the form of a
+    /// mobpack signing key, whatever the file is called.
     SigningKeyForm,
     /// `.env`, `.env.<name>` other than the template forms, or `<name>.env`.
     EnvFile,
@@ -597,6 +598,10 @@ mod tests {
             format!(" {key}"),
             format!("\t{key}"),
             format!("\n{key}"),
+            // The key reader trims all white space, not the ASCII kind alone:
+            // a no-break space (U+00A0), a vertical tab.
+            format!("{key}\u{a0}"),
+            format!("{key}\u{b}"),
         ] {
             assert!(has_signing_key_form(content.as_bytes()), "{content:?}");
         }

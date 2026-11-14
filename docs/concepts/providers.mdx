@@ -501,7 +501,8 @@ what is queued behind it go on. A turn that sets or changes the
 provider-neutral level, or changes the model of a session that holds one,
 is taken when the session is idle; while another turn runs or is queued it
 is answered `SESSION_BUSY` (retryable, data kind
-`reasoning_effort_change_needs_idle_session`) and changes nothing: wait
+`reasoning_effort_change_needs_idle_session` for either cause, a model
+change on a session that holds a level included) and changes nothing: wait
 for the running turn's answer, then send it again. That answer is not a
 level refusal. A session that holds no provider-neutral level queues its
 turns as before, a model change and a provider's own effort parameter

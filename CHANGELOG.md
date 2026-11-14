@@ -1551,7 +1551,9 @@ them.
   turn that sets or changes the provider-neutral level, or changes the
   model of a session that holds one, is taken only when the session has
   no unfinished turn or queued input; wait for the running turn's answer,
-  then send it again (see Known limitations). A session that holds no
+  then send it again (see Known limitations). The one `kind` answers both
+  causes: a turn that only changes the model of a session that holds the
+  level is answered the kind that names the level. A session that holds no
   provider-neutral level queues its turns as in 0.9.14, a model change
   and a provider's own effort parameter (`provider_tag`) included. On a
   stored session that is not live (after a restart) a

@@ -3815,10 +3815,11 @@ enum MobCommands {
     ///
     /// Prints the pack's digest on standard output. On standard error it
     /// reports how many files it packed and warns, by path, about packed
-    /// files whose names look like secrets, repository metadata, local state
-    /// or an earlier pack. The name list is a heuristic: no warning does not
-    /// mean the pack is clean. `rkat mob inspect <pack>` lists every file in
-    /// a pack.
+    /// files that look like secrets, repository metadata, local state or an
+    /// earlier pack: by name, and for one form by content (a file that is
+    /// exactly a 64-digit hex key). The list is a heuristic: no warning does
+    /// not mean the pack is clean. `rkat mob inspect <pack>` lists every file
+    /// in a pack.
     Pack {
         /// Mob directory to pack
         dir: PathBuf,
@@ -4368,8 +4369,9 @@ enum MobWebCommands {
     ///
     /// The bundle serves the whole pack to everyone who can load the page.
     /// The command warns on standard error, by path, about files in the pack
-    /// whose names look like secrets, repository metadata, local state or an
-    /// earlier pack. The name list is a heuristic: no warning does not mean
+    /// that look like secrets, repository metadata, local state or an earlier
+    /// pack: by name, and for one form by content (a file that is exactly a
+    /// 64-digit hex key). The list is a heuristic: no warning does not mean
     /// the pack is clean. `rkat mob inspect <pack>` lists every file in a
     /// pack.
     Build {
@@ -23597,42 +23599,62 @@ async fn execute_mob_pack(
 ) -> anyhow::Result<String> {
     let result = pack_directory_with_excludes(dir, signing, &[output])
         .map_err(|err| anyhow::anyhow!("mob pack failed: {err}"))?;
-    let packed = inspect_archive_bytes(&result.archive_bytes)
+    // The pack's own files, read back as every reader of the pack reads them.
+    let packed = extract_targz_safe(&result.archive_bytes)
         .map_err(|err| anyhow::anyhow!("mob pack failed: {err}"))?;
     tokio::fs::write(output, &result.archive_bytes)
         .await
         .map_err(|err| anyhow::anyhow!("failed writing archive '{}': {err}", output.display()))?;
     // Standard output stays the digest alone: scripts read it.
-    eprint!("{}", mob_pack_report(&packed.files, output));
+    write_report_to_standard_error(&mob_pack_report(&packed, output));
     Ok(result.digest.to_string())
 }
 
-/// The `warning` lines for the files of a pack whose names look like secrets,
-/// repository metadata, local state or an earlier pack. A line names a path
-/// and never holds a file's content. Empty when no name is known to the list,
-/// which says nothing about what the files hold.
+/// Writes a report to standard error. The report is a courtesy: a standard
+/// error that cannot be written to (a closed pipe) must not fail the command,
+/// change its exit status or keep its standard output from being printed, so
+/// a failed write is dropped.
 #[cfg(feature = "mob")]
-fn mobpack_content_warning_lines<'a>(files: impl IntoIterator<Item = &'a str>) -> String {
-    meerkat_mob_pack::content_warnings::pack_content_warnings(files)
-        .iter()
-        .fold(String::new(), |mut lines, warning| {
-            lines.push_str(&format!("warning\t{warning}\n"));
-            lines
-        })
+fn write_report_to_standard_error(report: &str) {
+    use std::io::Write as _;
+    let _ = std::io::stderr().write_all(report.as_bytes());
+}
+
+/// The `warning` lines for the files of a pack that look like secrets,
+/// repository metadata, local state or an earlier pack: by name, and for one
+/// form by content (a file that is exactly a 64-digit hex key). A line names
+/// a path and never holds a byte of a file. Empty when the list knows none of
+/// the files, which says nothing about what they hold.
+#[cfg(feature = "mob")]
+fn mobpack_content_warning_lines(files: &std::collections::BTreeMap<String, Vec<u8>>) -> String {
+    meerkat_mob_pack::content_warnings::pack_content_warnings(
+        files
+            .iter()
+            .map(|(path, content)| (path.as_str(), content.as_slice())),
+    )
+    .iter()
+    .fold(String::new(), |mut lines, warning| {
+        lines.push_str(&format!("warning\t{warning}\n"));
+        lines
+    })
 }
 
 /// What a successful `rkat mob pack` writes to standard error: how many files
-/// the pack holds, a warning for each flagged name, and after any warning
+/// the pack holds, a warning for each flagged file, and after any warning
 /// where to list every file.
 #[cfg(feature = "mob")]
-fn mob_pack_report(files: &[String], pack: &std::path::Path) -> String {
+fn mob_pack_report(
+    files: &std::collections::BTreeMap<String, Vec<u8>>,
+    pack: &std::path::Path,
+) -> String {
     let mut report = format!("packed\t{} files\n", files.len());
-    let warnings = mobpack_content_warning_lines(files.iter().map(String::as_str));
+    let warnings = mobpack_content_warning_lines(files);
     if !warnings.is_empty() {
         report.push_str(&warnings);
         report.push_str(&format!(
-            "note\tthe warnings come from a short list of names, not from the files' contents; \
-             list every file in the pack with: rkat mob inspect {}\n",
+            "note\tthe warnings come from a short list of names and from one content form (a \
+             file that is exactly a 64-digit hex key), not from a reading of the files; list \
+             every file in the pack with: rkat mob inspect {}\n",
             pack.display()
         ));
     }
@@ -23900,7 +23922,7 @@ async fn execute_mob_web_build(
     let pack_content_warnings = {
         let files = extract_targz_safe(&verified.bytes)
             .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
-        mobpack_content_warning_lines(files.keys().map(String::as_str))
+        mobpack_content_warning_lines(&files)
     };
     if let Some(requires) = &verified.archive.manifest.requires {
         for cap in &requires.capabilities {
@@ -24030,14 +24052,14 @@ async fn execute_mob_web_build(
         rendered.push_str(&format!("\nwarning\t{warning}"));
     }
     // The bundle publishes the pack as it is. Standard output stays as it
-    // was; what the pack holds by name goes to standard error.
+    // was; what the pack holds goes to standard error.
     if !pack_content_warnings.is_empty() {
-        eprintln!(
+        write_report_to_standard_error(&format!(
             "{pack_content_warnings}note\tthe bundle serves the whole pack, these files included, \
              to everyone who can load the page; list every file in the pack with: rkat mob \
-             inspect {}",
+             inspect {}\n",
             pack.display()
-        );
+        ));
     }
     Ok(rendered)
 }

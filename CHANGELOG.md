@@ -700,28 +700,44 @@ them.
   No tool's behavior or schema changes.
 
 - `rkat`: `rkat mob pack` now reports on standard error how many files it
-  packed (`packed<TAB><n> files`) and warns about packed files whose names
-  look like secrets, repository metadata, local state or an earlier pack:
-  one `warning<TAB><path> is in the pack: <why>` line for each, then one
-  `note` line that points at `rkat mob inspect <pack>`. `rkat mob web
-  build` repeats the warnings for the pack it copies into the bundle, which
-  serves the whole pack to everyone who can load the page. The pack's
-  contents and digest are unchanged, and so are the standard output of both
-  commands (the digest alone for `mob pack`) and their exit status; nothing
-  is refused. The one thing a script can notice is new lines on standard
-  error. A warning names a path and never prints a file's content. The
-  names are a short heuristic list: env files (`.env`, `.env.<name>`),
-  key-like names (`id_rsa` and the other SSH key names, `*.pem`, `*.key`,
-  `*.p12`, `*.pfx`, and a name that is `key` or ends in `-key`, `_key` or
-  `.key` before its extension), `.npmrc`, `.netrc`, `.pypirc`,
-  `.git-credentials`, `.htpasswd`, `*.mobpack` and `mobpack.bin`, the
-  directories `.git/`, `.rkat/`, `.ssh/`, `.aws/` and `.gnupg/` (one line
-  each, with the number of files), and every other hidden file or
-  directory. No warning does not mean the pack is clean: `rkat mob inspect
-  <pack>` lists every file in it and is the check. New in
-  `meerkat-mob-pack` for the same names:
-  `content_warnings::pack_content_warnings`, `classify_packed_path`,
-  `PackContentWarning` and `PackedPathConcern`.
+  packed (`packed<TAB><n> files`) and warns about packed files that look
+  like secrets, repository metadata, local state or an earlier pack: one
+  `warning<TAB><path> is in the pack: <why>` line for each, then one `note`
+  line that points at `rkat mob inspect <pack>`. `rkat mob web build`
+  repeats the warnings for the pack it copies into the bundle, which serves
+  the whole pack to everyone who can load the page. The pack's contents and
+  digest are unchanged, and so are the standard output of both commands
+  (the digest alone for `mob pack`) and their exit status, also when
+  standard error cannot be written to; nothing is refused. The one thing a
+  script can notice is new lines on standard error. A warning names a path
+  and never prints a byte of a file; control characters and the characters
+  that reorder a line on screen are printed as escapes. The files are
+  flagged by name, and for one form by content (a file that is exactly a
+  64-digit hex key). What is flagged:
+  - a file whose whole content is 64 hex digits, with at most one line end
+    after them: the form of a signing key, whatever the file is called;
+  - env files: `.env`, `.env.<name>` and `<name>.env`. The three template
+    names `.env.example`, `.env.sample` and `.env.template` get the line of
+    a hidden file instead;
+  - key-like names: `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `*.pem`,
+    `*.key`, `*.p12`, `*.pfx`, and a name that is `key` or ends in `-key`,
+    `_key` or `.key` before its extension (`key.hex`). A `.pub` file is not
+    flagged;
+  - `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, `.htpasswd`;
+  - `*.mobpack` and `mobpack.bin`;
+  - the directories `.git/`, `.rkat/`, `.ssh/`, `.aws/` and `.gnupg/`, in
+    any case and at any depth, one line each with the number of files
+    under it, and a `.git` file;
+  - every other hidden file, and every other hidden directory (the
+    top-most one, one line with the number of files under it).
+
+  The list is a heuristic and misses much: `credentials.json`,
+  `terraform.tfstate`, `secrets.yaml`, `*.jks` and `*.ppk`, for example,
+  get no warning. No warning does not mean the pack is clean:
+  `rkat mob inspect <pack>` lists every file in it and is the check. New in
+  `meerkat-mob-pack` for the same rules, in `content_warnings`:
+  `pack_content_warnings`, `classify_packed_file`, `classify_packed_path`,
+  `has_signing_key_form`, `PackContentWarning` and `PackedPathConcern`.
 
 - `meerkat-comms`: for a sender with no namespace, two live registrations
   of the SAME inbox under one key are one route (a member's own, and the
@@ -1633,9 +1649,10 @@ them.
   its own output file, and nothing else. A copy of the key, a key file the
   pack is not signed with (an unsigned pack, or another key) and a pack
   written earlier under another name are packed like every other file in
-  the mob directory. `rkat mob pack` now warns about key-like names and
-  about `.mobpack` files among the packed files (see Changed); the warning
-  goes by the name alone and removes nothing. On Windows the two files are
+  the mob directory. `rkat mob pack` now warns about key-like names, about
+  a file that has the form of a signing key and about `.mobpack` files
+  among the packed files (see Changed); a warning removes nothing. On
+  Windows the two files are
   recognized by their resolved paths only, so a hard link to the key under
   another name is packed there. Whether Windows recognizes a key or an
   output typed in another case than it is stored is not established: the
@@ -1700,7 +1717,8 @@ them.
   signed with, `.git/`, and `.rkat/` with its stored conversations and
   configuration all go into the pack when they are in the directory, and a
   web bundle serves the pack whole. This release warns about a short list
-  of names (see Changed) and removes nothing. Keep such files out of the
+  of names and one content form (see Changed), which misses much, and
+  removes nothing. Keep such files out of the
   mob directory, and read `rkat mob inspect <pack>` before a pack leaves
   your machine.
 

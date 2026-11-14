@@ -15841,6 +15841,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
+                    reasoning_effort: None,
                     keep_alive: None,
                     comms_name: None,
                     peer_meta: None,

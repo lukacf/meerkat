@@ -25,7 +25,9 @@ limit on the next request's tokens. Missing accounting does not advance the
 token counter. Do not use this threshold as a guaranteed billing ceiling.
 
 Token exhaustion can return `Ok(RunResult)` with the typed
-`terminal_cause_kind = BudgetExhausted`. The example reports that separately
+`terminal_cause_kind = BudgetExhausted`. The answer of the call that crossed
+the budget is not returned: `text` is empty, so read `terminal_cause_kind`
+before `text`. The example reports that separately
 from normal completion, handles only typed time-budget errors as expected, and
 propagates unrelated failures. The response preview counts Unicode scalar
 values, not bytes, and adds an ellipsis only when truncated.

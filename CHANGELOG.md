@@ -1067,6 +1067,12 @@ them.
   [0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
   says what to do on an affected release.
 
+- Examples: `examples/005-streaming-events-rs` now gives one event channel
+  to the model adapter and to the run, and prints streamed text (a live run
+  printed none); `examples/009-budget-and-retry-rs` reads
+  `terminal_cause_kind` before the text and uses a token budget above its
+  own first call (its first part printed an empty answer).
+
 ### Security
 
 - Examples: a build of `examples/032-wasm-webcm-agent` no longer contains

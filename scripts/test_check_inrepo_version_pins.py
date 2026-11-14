@@ -408,7 +408,8 @@ class AllowlistTests(GuardTest):
                         "add-on 1.4.1 was made with.\n\n"
                         f"Install [Demo Core 1.4.1]({url}) first.\n")
         self.repo.allow(path="docs/pair.md", match=r"^lukacf/meerkat release v1\.4\.1$",
-                        context=r"/tag/v1\.4\.1\), the release the add-on 1\.4\.1 was made with",
+                        context=r"\[Demo Core 1\.4\.1\]\([^)]*/tag/v1\.4\.1\), "
+                                r"the release the add-on 1\.4\.1 was made with",
                         reason="The page of the add-on names the release it was made with.")
         err = self.assertFindings("docs/pair.md:4: release lukacf/meerkat release v1.4.1", "docs/old.md:1:")
         self.assertNotIn("docs/pair.md:1:", err)
@@ -420,6 +421,49 @@ class AllowlistTests(GuardTest):
         self.assertNotIn("docs/pair.md:1:", err)
         self.repo.allow(path="docs/pair.md", context="(", reason="Not a regular expression at all.")
         self.assertFindings(code=2)
+
+    def test_a_context_entry_covers_only_the_pin_inside_its_text(self):
+        # The entry names a sentence. A pin that only stands near that sentence (on its
+        # line, or on the line before it) is not the sentence's pin and is still reported.
+        releases = "https://github.com/lukacf/meerkat/releases"
+        held = f"Use [Demo Core 1.4.1]({releases}/tag/v1.4.1), the release the add-on 1.4.1 was made with"
+        entry = {"path": "docs/pair.md", "match": r"^lukacf/meerkat release v1\.4\.1$",
+                 "context": r"\[Demo Core 1\.4\.1\]\([^)]*/tag/v1\.4\.1\), "
+                            r"the release the add-on 1\.4\.1 was made with",
+                 "reason": "The page of the add-on names the release it was made with."}
+        for label, page, line in (
+                ("a download address on the sentence's line",
+                 f"{held}; fetch {releases}/download/v1.4.1/sums.txt\n", 1),
+                ("a second link on the sentence's line", f"{held}, or see the [page]({releases}/tag/v1.4.1).\n", 1),
+                ("a link on the line before the sentence", f"Get it from {releases}/tag/v1.4.1 first.\n{held}.\n", 1)):
+            with self.subTest(label):
+                self.repo.config["allow"] = [entry]
+                self.repo.save_config()
+                self.repo.write("docs/pair.md", page)
+                err = self.assertFindings(f"docs/pair.md:{line}: release lukacf/meerkat release v1.4.1")
+                self.assertEqual(err.count("docs/pair.md:"), 1, err)
+                self.assertNotIn("covers nothing", err)
+        # The sentence alone is covered, and so is one whose words begin on the line before the pin.
+        self.repo.write("docs/pair.md", f"{held}.\n")
+        self.repo.write("docs/old.md", "")
+        self.assertClean()
+        self.repo.config["allow"] = [dict(entry, match=r"^demo-meta==1\.4\.1$",
+                                          context=r"the add-on requires `demo-meta==1\.4\.1`\. Nothing newer")]
+        self.repo.save_config()
+        self.repo.write("docs/pair.md",
+                        "Until then the add-on\nrequires `demo-meta==1.4.1`. Nothing\nnewer works with it.\n")
+        self.assertClean()
+
+    def test_a_context_entry_covers_no_pin_read_from_a_structure(self):
+        # A dependency read from a manifest's structure has no place in a line of prose.
+        self.repo.write("docs/old.md", "")
+        self.repo.write("connect/sdk/package.json", json.dumps({
+            "name": "@rkat/demo-connect", "version": "1.4.2",
+            "dependencies": {"@rkat/demo": "1.4.1"}}, indent=2) + "\n")
+        self.repo.allow(path="connect/sdk/package.json", context="@rkat/demo",
+                        reason="A context names prose, not a manifest.")
+        err = self.assertFindings("connect/sdk/package.json:5: dependencies @rkat/demo@1.4.1")
+        self.assertIn("covers nothing", err)
 
 
 class HoldTests(GuardTest):
@@ -441,7 +485,9 @@ class HoldTests(GuardTest):
         self.repo = Repo(self.repo.root, version=version)
         self.repo.write("connect/README.md", page)
         entry = {"path": "connect/README.md", "match": r"^lukacf/meerkat release v1\.4\.2$",
-                 "context": r"/tag/v1\.4\.2\), the Core release Connect 1\.4\.2 was released with\b", "at": "1.4.3",
+                 "context": r"\[Demo Core 1\.4\.2\]\([^)]*/tag/v1\.4\.2\), "
+                            r"the Core release Connect 1\.4\.2 was released with\b",
+                 "at": "1.4.3",
                  "reason": "The page describes the Connect release that was made with Core 1.4.2."}
         entry.update(changes)
         self.repo.allow(**{name: value for name, value in entry.items() if value is not None})
@@ -492,6 +538,39 @@ class HoldTests(GuardTest):
         err = self.assertFindings("connect/README.md:3: release lukacf/meerkat release meta-v1.4.2: pins meta 1.4.2")
         self.assertIn("1 pin(s) below", err)
         self.assertIn("0 stale allow entries", err)
+
+    def test_a_hold_on_a_requirement_reads_the_sentence_in_its_paragraph(self):
+        # The words that make the sentence a statement about a published release stand
+        # lines before the pin: the context is read in the pin's paragraph.
+        page = ("Until Connect 1.4.3 is published, use Connect 1.4.2. An environment\n"
+                "with the `host` extra of Connect 1.4.2's `demo-kit` cannot\n"
+                "take `demo-meta` 1.4.3 until Connect 1.4.3 is published: the extra\n"
+                "requires `demo-meta==1.4.2`. In that pairing:\n\n- nothing else changes.\n")
+        hold = {"match": r"^demo-meta==1\.4\.2$",
+                "context": r"Connect 1\.4\.2's `demo-kit` cannot take `demo-meta` 1\.4\.3 until Connect 1\.4\.3 is "
+                           r"published: the extra requires `demo-meta==1\.4\.2`\."}
+        stale = "allow entry 0 connect/README.md (^demo-meta==1\\.4\\.2$) [at 1.4.3] covers nothing; delete it"
+        self.tree("1.4.2", page, **hold)
+        self.assertClean()
+        self.tree("1.4.3", page, **hold)
+        self.assertClean()
+        # A bare install command on the same page is not the sentence.
+        self.tree("1.4.3", page + "\nRun `pip install demo-meta==1.4.2`.\n", **hold)
+        err = self.assertFindings("connect/README.md:8: requirement demo-meta==1.4.2: pins demo-meta 1.4.2")
+        self.assertIn("1 pin(s) below", err)
+        self.assertIn("0 stale allow entries", err)
+        # The same sentence with another pin is not the held one.
+        self.tree("1.4.3", page.replace("==1.4.2", "==1.4.1"), **hold)
+        err = self.assertFindings("connect/README.md:4: requirement demo-meta==1.4.1: pins demo-meta 1.4.1", stale)
+        self.assertIn("1 pin(s) below", err)
+        # Other words around the pin are not the held sentence.
+        self.tree("1.4.3", page.replace("the extra\nrequires", "the extra\nneeds"), **hold)
+        self.assertFindings("connect/README.md:4: requirement demo-meta==1.4.2: pins demo-meta 1.4.2", stale)
+        # The next version ends the hold.
+        self.tree("1.4.4", page, **hold)
+        err = self.assertFindings("connect/README.md:4: requirement demo-meta==1.4.2: pins demo-meta 1.4.2", stale)
+        self.assertIn("1 pin(s) below", err)
+        self.assertIn("1 stale allow entry.", err)
 
     def test_a_hold_names_a_version_and_the_pins_it_holds(self):
         for changes, needle in (({"at": "next"}, "at must be a version"),

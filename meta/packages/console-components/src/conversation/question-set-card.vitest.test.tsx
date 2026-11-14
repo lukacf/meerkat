@@ -440,6 +440,28 @@ describe("QuestionSetCard", () => {
     expect(usual.view.queryByText(/not shown/)).toBeNull();
   });
 
+  it.each([
+    ["a question it does not show", { questions: Array.from({ length: 11 }, (_, index) => ({ id: `q${index}`, prompt: `Question ${index}?`, choices: [{ id: "y", label: "Yes" }, { id: "n", label: "No" }] })) }, "1 more question is not shown."],
+    ["a choice it does not show", { questions: [{ id: "q0", prompt: "Which one?", choices: Array.from({ length: 9 }, (_, index) => ({ id: `c${index}`, label: `Choice ${index}` })) }] }, "1 more choice is not shown."],
+    ["text it shows shortened", { title: "T".repeat(201) }, "Some text is too long and is shown shortened."],
+  ] as const)("lets nobody answer or dismiss a set with %s, and says why and what to do instead", (_what, extra, line) => {
+    const { view, card, onAnswer, onDismiss } = show({ set: questions(extra as Record<string, unknown>) });
+    // The digest a reply sends back covers the whole set: the card showed less.
+    expect(card.dataset.state).toBe("read_only");
+    expect(view.getByRole("status").textContent).toBe("Read only");
+    expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent)
+      .toBe("This set of questions is larger than the Console shows, so it cannot be answered here. Reply to Release Planner in its chat instead.");
+    expect(card.textContent).toContain(line);
+    expect(view.getAllByRole("radio").length).toBeGreaterThan(0);
+    expect((view.getAllByRole("radio") as HTMLInputElement[]).every((input) => input.disabled)).toBe(true);
+    expect(send(view).disabled).toBe(true);
+    expect(dismiss(view).disabled).toBe(true);
+    fireEvent.click(send(view));
+    fireEvent.click(dismiss(view));
+    expect(onAnswer).not.toHaveBeenCalled();
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
+
   it("puts names first: the identity and every id only inside the collapsed Technical details", () => {
     const { view, card } = show();
     const details = view.getByTestId(`question-set-details:${PENDING_ID}`);

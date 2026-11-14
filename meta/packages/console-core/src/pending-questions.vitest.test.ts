@@ -11,6 +11,7 @@ import {
   questionSetDismissParams,
   questionSetEntries,
   questionSetRefusal,
+  questionSetShownWhole,
   utf8ByteLength,
   type QuestionSet,
 } from "./pending-questions";
@@ -633,6 +634,36 @@ describe("createQuestionSetResource", () => {
       c.advance(60_000); await tick(); expect(reads).toBe(1);
       resource.dispose();
     }
+  });
+
+  it("sends neither an answer nor a dismissal for a set it does not show whole", async () => {
+    const yesNo = [{ id: "y", label: "Yes" }, { id: "n", label: "No" }];
+    const cut: Array<[string, Record<string, unknown>]> = [
+      ["questions", { questions: Array.from({ length: 11 }, (_, index) => ({ id: `q${index}`, prompt: `Question ${index}?`, choices: yesNo })) }],
+      ["choices", { questions: [{ id: "q0", prompt: "Which one?", choices: Array.from({ length: 9 }, (_, index) => ({ id: `c${index}`, label: `Choice ${index}` })) }] }],
+      ["text", { title: "T".repeat(201), questions: [{ id: "q0", prompt: "Proceed?", choices: yesNo }] }],
+    ];
+    for (const [what, extra] of cut) {
+      const c = clock(); let decides = 0;
+      const resource = createQuestionSetResource({
+        scopeKey: "a", environment: c.environment,
+        load: async () => ({ question_sets: [wire(PENDING_ID, extra)] }),
+        decide: async () => { decides++; return accepted("answered"); },
+      });
+      await tick();
+      const listed = resource.getSnapshot().sets[0];
+      // The set is listed and read: only a reply is withheld, since its digest
+      // would cover what the card did not show.
+      expect(listed.pendingId).toBe(PENDING_ID);
+      const choice = listed.questions[0].choices[0].id;
+      await resource.answer(PENDING_ID, { q0: { kind: "choice", choiceId: choice } });
+      await resource.dismiss(PENDING_ID);
+      expect([what, decides]).toEqual([what, 0]);
+      expect(resource.getSnapshot().decisions).toEqual({});
+      expect([what, questionSetShownWhole(listed)]).toEqual([what, false]);
+      resource.dispose();
+    }
+    expect(questionSetShownWhole(set())).toBe(true);
   });
 
   it("says a first read failed, with its error, keeps reading, and lists the sets once a read succeeds", async () => {

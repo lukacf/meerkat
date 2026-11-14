@@ -44516,6 +44516,78 @@ mod tests {
         );
     }
 
+    /// A turn that names a reasoning effort level on a stored session that
+    /// is not live is judged when it starts: the turn's recovery builds the
+    /// session and the level is applied inside the turn's start. The client
+    /// reports no route, so the level is refused there (nothing states the
+    /// levels the route accepts). The refused start is that one turn's
+    /// failure and no archive of the session: the session keeps the child
+    /// mob it owns with its member, and its implicit mob. The refused start
+    /// retires the session's live runtime (its registration and its MCP
+    /// adapter), which the next turn builds again; that turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_level_refused_at_the_start_of_a_turn_on_a_stored_session_keeps_what_the_session_owns()
+     {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let session = FailedStartSession::materialized().await;
+        session
+            .runtime
+            .service
+            .discard_live_session(&session.session_id)
+            .await
+            .expect("the session is stored and no longer live");
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+
+        let refused = session
+            .spawn_turn(
+                "names a level",
+                Some(level_overrides(TurnMetadataOverride::Set(
+                    EffortLevel::High,
+                ))),
+            )
+            .await
+            .unwrap()
+            .expect_err("the level is refused at the turn's start");
+        assert_eq!(
+            refused
+                .data
+                .as_ref()
+                .and_then(|data| data.pointer("/reasoning_effort_refusal/reason")),
+            Some(&serde_json::json!("supported_levels_unknown")),
+            "the turn is answered with the typed refusal: {refused:?}"
+        );
+        assert_eq!(
+            session.client.calls.load(AtomicOrdering::SeqCst),
+            requests,
+            "the refused turn made no model request"
+        );
+        assert_eq!(
+            session.holdings().await,
+            (true, 1, true, true, false, false, true),
+            "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+             runtime registration, stored session) after the refused start"
+        );
+
+        // The next turn builds the session's live runtime again and runs.
+        let next = session.spawn_turn("next", None);
+        if session
+            .request_entered(requests + 1, Duration::from_secs(5))
+            .await
+        {
+            session.client.release.notify_one();
+        }
+        assert_eq!(FailedStartSession::turn_answer(next).await, Ok(()));
+        assert_eq!(
+            session.holdings().await,
+            (true, 1, true, true, true, true, true),
+            "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+             runtime registration, stored session) after the next turn"
+        );
+    }
+
     #[tokio::test]
     async fn materialized_hot_swap_updates_durable_identity_for_recovery() {
         let temp = tempfile::tempdir().unwrap();

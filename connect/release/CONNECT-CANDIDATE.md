@@ -673,10 +673,12 @@ Where the pins come from:
   release goes on only when every one is equal. They can differ only when the
   release branch changed the converter, the packager, a left-out source member
   or an input pin of the library, or when the library input set was built
-  again; then a second pins commit follows, after the release commit and
-  before the lane builds what it uploads. Until a target's pins are set they
-  are `null` and every upload of that target refuses. The pass line names the
-  target, the pins file's sha256 and the commit the pins were read from.
+  again, or when a lane input itself changed (the name list, a detector build
+  or the rules file beside it); then a second pins commit follows, after the
+  release commit and before the lane builds what it uploads. Until a target's
+  pins are set they are `null` and every upload of that target refuses. The
+  pass line names the target, the pins file's sha256 and the commit the pins
+  were read from.
 - A target whose pins are `null` cannot be uploaded. The pins of
   `macos-arm64` are `null` until the change that binds that target's uploads
   to this check sets them. The pins of `linux-x86_64` and of `release` are

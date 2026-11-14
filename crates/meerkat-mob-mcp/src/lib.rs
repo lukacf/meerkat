@@ -783,12 +783,10 @@ impl RecordedCreator<'_> {
         }
         match seated {
             Some((identity, generation)) if identity == self.identity => {
-                if *generation == self.generation {
-                    CreatorSeat::Recorded
-                } else if *generation > self.generation {
-                    CreatorSeat::Later(*generation)
-                } else {
-                    CreatorSeat::Other
+                match generation.cmp(&self.generation) {
+                    std::cmp::Ordering::Equal => CreatorSeat::Recorded,
+                    std::cmp::Ordering::Greater => CreatorSeat::Later(*generation),
+                    std::cmp::Ordering::Less => CreatorSeat::Other,
                 }
             }
             _ => CreatorSeat::Other,

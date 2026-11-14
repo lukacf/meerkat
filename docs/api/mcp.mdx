@@ -1129,7 +1129,7 @@ extraction calls.
 </ParamField>
 
 <ParamField body="reasoning_effort" type="string | object | null" default="null">
-  The session's provider-neutral reasoning effort level (see
+  From 0.9.15. The session's provider-neutral reasoning effort level (see
   [Reasoning effort](/concepts/providers#reasoning-effort)). On
   `meerkat_run`: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or
   `max`. On `meerkat_resume`: a level sets it from this turn on,
@@ -1143,7 +1143,7 @@ extraction calls.
   (see [Reasoning effort refusal data](/api/rpc#reasoning-effort-refusal-data)).
   After a call created its session, the data also names the session
   (`session_id`, `session_ref`, `session_created`, `resumable`). Read the
-  data, never the message. From 0.9.15.
+  data, never the message.
 </ParamField>
 
 <ParamField body="stream" type="bool" default="false">

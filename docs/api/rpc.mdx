@@ -860,6 +860,7 @@ During execution, `session/event` notifications are emitted (see
 </ParamField>
 
 <ParamField body="reasoning_effort" type="string | null" default="null">
+  From 0.9.15; an older server ignores the field.
   The session's provider-neutral reasoning effort level: `none`, `minimal`,
   `low`, `medium`, `high`, `xhigh` or `max` (see
   [Reasoning effort](/concepts/providers#reasoning-effort)). It is the same
@@ -868,8 +869,7 @@ During execution, `session/event` notifications are emitted (see
   model or its route does not accept fails the session's build with invalid
   params whose `data` is
   `{"kind": "reasoning_effort_refused", "retryable": false, "reasoning_effort_refusal": {...}}`,
-  before any provider request. From 0.9.15; an older server ignores the
-  field.
+  before any provider request.
 </ParamField>
 
 <ParamField body="grant_gated_tools" type="object | null" default="null">
@@ -1780,6 +1780,7 @@ Only a mechanical failure is `-32603`.
 </ParamField>
 
 <ParamField body="reasoning_effort" type="TurnMetadataOverride | null" default="preserve">
+  From 0.9.15; an older server refuses the field.
   The session's provider-neutral reasoning effort level from this turn on
   (see [Reasoning effort](/concepts/providers#reasoning-effort)). A level
   (`"high"`, or `{"action":"set","value":"high"}`) sets it,
@@ -1790,8 +1791,7 @@ Only a mechanical failure is `-32603`.
   two different levels, or a clear beside a nested level, are refused as
   invalid params. A level the model or its route does not accept is refused
   with the `reasoning_effort_refused` data of `session/create`, and the
-  session keeps its identity. `mob/turn_start` takes the same field. From
-  0.9.15; an older server refuses the field.
+  session keeps its identity. `mob/turn_start` takes the same field.
 </ParamField>
 
 <ParamField body="auth_binding" type="TurnMetadataOverride | null" default="preserve">

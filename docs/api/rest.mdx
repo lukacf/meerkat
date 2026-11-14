@@ -413,6 +413,7 @@ Create and run a new session.
 </ParamField>
 
 <ParamField body="reasoning_effort" type="string | null" default="null">
+  From 0.9.15; an older server ignores the field.
   The session's provider-neutral reasoning effort level: `none`, `minimal`,
   `low`, `medium`, `high`, `xhigh` or `max` (see
   [Reasoning effort](/concepts/providers#reasoning-effort)). It is the same
@@ -420,8 +421,7 @@ Create and run a new session.
   must give the same level. A level the model or its route does not accept
   is refused with HTTP 400, code `INVALID_PARAMS` and details
   `{"kind": "reasoning_effort_refused", "retryable": false, "reasoning_effort_refusal": {...}}`,
-  before any provider request. From 0.9.15; an older server ignores the
-  field.
+  before any provider request.
 </ParamField>
 
 <ParamField body="verbose" type="bool" default="false">
@@ -691,6 +691,7 @@ Continue an existing session.
 </ParamField>
 
 <ParamField body="reasoning_effort" type="TurnMetadataOverride | null" default="preserve">
+  From 0.9.15; an older server ignores the field.
   The session's provider-neutral reasoning effort level from this message
   on: a level (`"high"`, or `{"action":"set","value":"high"}`) sets it,
   `{"action":"clear"}` removes it, and omission/`null` keeps the level the
@@ -700,7 +701,7 @@ Continue an existing session.
   unchanged. A message that names this field rebuilds the session, like
   one that names `model` or `max_tokens`: while this server holds the
   session live, such a message is answered HTTP 500 `session is busy` and
-  changes nothing. From 0.9.15; an older server ignores the field.
+  changes nothing.
 </ParamField>
 
 <ParamField body="verbose" type="bool" default="false">

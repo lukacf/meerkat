@@ -441,10 +441,12 @@ route (the four differences are listed under Changed in the changelog).
   both for `reasoning_effort`.
   Sessions and mobs that never carried a level are written exactly as
   before and read on either release. What 0.9.14 does with a mob
-  definition and a realm profile that hold a level was measured with
-  development builds of both releases; the session, accepted input, member
-  snapshot and member spec cases are stated from the code of both
-  releases, not from a run of 0.9.14.
+  definition and a realm profile that hold a level was confirmed by runs
+  with development builds of both releases; the session, accepted input,
+  member snapshot and member spec cases were read from the source of both
+  releases, not run; the removal on 0.9.15 before a rollback was not run.
+  Each item's own grade is under
+  [Rolling back to 0.9.14](#rolling-back-to-0-9-14).
 
 ### Meta 0.9.15
 
@@ -535,10 +537,11 @@ under `## [0.9.15]`.
 ### Rolling back to 0.9.14
 
 What this subsection says an earlier release does was established by reading
-the 0.9.14 source, except where an item says it was confirmed by a run. Such a
-run was made with a 0.9.14 gateway built from the release tag, over state
-written by a gateway built from the development source for 0.9.15 (main on 13
-November), with a scripted model in place of a provider.
+the 0.9.14 source, except where an item says it was confirmed by a run. Unless
+an item names the builds of its own run, such a run was made with a 0.9.14
+gateway built from the release tag, over state written by a gateway built from
+the development source for 0.9.15 (main on 13 November), with a scripted model
+in place of a provider.
 
 0.9.14 and earlier releases read most of what 0.9.15 writes without a
 refusal. The items below are where a rollback differs: configurations that
@@ -568,10 +571,11 @@ line says otherwise.
 - Clear the reasoning effort level from every session that set it, and let
   accepted turns that carry it finish.
 - Destroy every mob whose definition or a member profile ever stored a
-  reasoning effort level and create it anew without the level (its members
-  and history are not kept): to find them, page each mob's stored events
-  with `rkat mob logs <MOB> --json` and search for `reasoning_effort`; no
-  `rkat storage doctor` finding lists them yet.
+  reasoning effort level, or listed `reasoning_effort` in `resume_overrides`,
+  and create it anew without them (its members and history are not kept): to
+  find them, page each mob's stored events with `rkat mob logs <MOB> --json`
+  and search for `reasoning_effort`; no `rkat storage doctor` finding lists
+  them yet.
 - Replace or delete every realm profile that holds
   `provider_params.reasoning_effort` or lists `reasoning_effort` in
   `resume_overrides`: list them with `mob/profile/list`, then send
@@ -899,7 +903,7 @@ what a rollback costs (the note beside the change is under
   --no-reasoning-effort`, or a turn with `reasoning_effort`
   `{"action":"clear"}`), and let accepted turns that carry it finish.
   Replacing or clearing `provider_params` does not remove the level. This
-  item was not run: it is stated from the code of both releases.
+  item was read from the source of both releases, not run.
 - **A mob whose definition or a member profile ever stored a level.**
   Storing a level in a mob is a one-way step: its event history records
   every definition and each member's profile snapshot, and 0.9.14 reads
@@ -927,8 +931,8 @@ what a rollback costs (the note beside the change is under
   of that profile fails; an update of that profile on 0.9.14 succeeds and
   drops the level. Before rolling back, replace the profile on 0.9.15 with
   one that holds neither, or delete it; a profile keeps no history, so the
-  replaced row is all 0.9.14 reads (stated from the store's code, not from
-  a run). A member that was spawned from the profile while it held a level
+  replaced row is all 0.9.14 reads (read from the source, not run). A
+  member that was spawned from the profile while it held a level
   is the mob case above. Confirmed by a run, on the 0.9.14 side only and
   with the same two `rkat-rpc` builds: the failing list, the failing read,
   and the update that drops the level.
@@ -941,10 +945,10 @@ affected mobs before rolling back, page each mob's stored events
 both for `reasoning_effort`. Sessions and mobs that never carried a level
 are written exactly as before and read on either release. What 0.9.14
 does with a mob definition and a realm profile that hold a level was
-measured with development builds of both releases; the session, accepted
-input, member snapshot and member spec cases are stated from the code of
-both releases, not from a run of 0.9.14; the removal on 0.9.15 before a
-rollback was not run.
+confirmed by runs with development builds of both releases; the session,
+accepted input, member snapshot and member spec cases were read from the
+source of both releases, not run; the removal on 0.9.15 before a rollback
+was not run.
 
 ## Upgrading to 0.9.14
 

@@ -21,6 +21,7 @@ mod models;
 mod operator_instruction;
 mod params;
 mod portable_spec;
+pub mod queued_input_recall;
 mod realtime;
 mod rest;
 mod result;
@@ -114,6 +115,7 @@ pub use operator_instruction::{
     WireMemberInstructionSlot, WireMemberInstructionStatus, WireMobInstructionDisposition,
     WireSessionInstructionDisposition, WireSessionInstructionSlot,
 };
+pub use queued_input_recall::{RecallInputParams, RecallInputResult, WireQueuedInputRecall};
 pub use rpc_surface::{
     ArchiveSessionParams, BlobGetParams, CallbackToolDefinition, DeferredCreateResult,
     ExportAtifParams, InjectSystemContextParams, InjectSystemContextResult, InterruptParams,

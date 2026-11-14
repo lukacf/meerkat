@@ -220,6 +220,37 @@ stopped, is stopped without waiting: `stopped` with no `contributors`, and
 its inputs end cancelled when the runtime settles it (once the store takes
 writes again, after a gap).
 
+### `recall_input`
+
+From 0.9.15.
+
+```python
+result = await session.recall_input(input_id=input_id)
+result = await session.recall_input(idempotency_key="inbox:msg-1")
+```
+
+Withdraws one input of the session, only while it is still queued
+(`session/recall_input`). Name it by the `input_id` its submit answered or by
+the `idempotency_key` it was submitted under (exactly one). Returns
+`RecallInputResult` whose `recall["outcome"]` is `abandoned` (the input was
+queued and is now withdrawn: its terminal is `cancelled` and no run will take
+it; `attempt_count` is `0` when no run attempt was counted for it),
+`not_queued` (a run holds
+it: nothing was touched and the run is not interrupted; `phase` says where
+it is and `run_id`, when the runtime has one, names the run that holds it) or `already_terminal` (it already ended; `terminal` is its
+terminal class, `cancelled` for a second recall). The list of outcomes can
+grow: keep an outcome you do not know as it is (the method returns it
+unchanged and raises nothing). An input the session does
+not hold raises `MeerkatError` with the invalid-params code. The recall is
+session-level (any queued input of the session, whoever submitted it) and
+withdraws everything the queue coalesced into the input; see
+[`session/recall_input`](/api/rpc#session%2Frecall_input). A server that
+does not serve the method (0.9.0 through 0.9.14; an older server is refused
+when the SDK connects) answers method not found, and
+the call raises `MeerkatError` with the code `"-32601"`; the method does not
+read the server's contract version or capabilities first, and the refused
+call changes nothing.
+
 ### `compact`
 
 ```python

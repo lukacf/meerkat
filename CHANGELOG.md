@@ -81,6 +81,91 @@ them.
   `State`: only an embedder that serializes it itself is affected. For a
   rollback with schedules paused for their target, see the Upgrade notes.
 
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`:
+  the MeerkatMachine abandons one input only while it is still queued (see
+  Added). `MeerkatMachineInput` and `MeerkatMachineInputVariant`
+  (meerkat-runtime `meerkat_machine::dsl` and meerkat-machine-schema
+  `catalog::dsl::meerkat_machine`), `MeerkatMachineRuntimeInternalInput`
+  (meerkat-runtime) and the kernel
+  `generated::meerkat::Input` and `InputKind` gain
+  `AbandonQueuedInput { input_id, reason }`. `MeerkatMachineEffect` and
+  `MeerkatMachineEffectVariant` (the same two modules) and the kernel
+  `Effect` and `EffectKind` gain
+  `QueuedInputAbandonResolved { input_id, disposition, phase }`. The kernel
+  `generated::meerkat::TransitionId` gains the input's 26 arms:
+  `AbandonQueuedInputIdle`, `AbandonQueuedInputAttached`,
+  `AbandonQueuedInputRunning`, `AbandonQueuedInputRetired`,
+  `AbandonQueuedInputStopped`,
+  `AbandonQueuedInputNotQueuedInitializing`,
+  `AbandonQueuedInputNotQueuedIdle`, `AbandonQueuedInputNotQueuedAttached`,
+  `AbandonQueuedInputNotQueuedRunning`, `AbandonQueuedInputNotQueuedRetired`,
+  `AbandonQueuedInputNotQueuedStopped`,
+  `AbandonQueuedInputNotQueuedDestroyed`,
+  `AbandonQueuedInputAlreadyTerminalInitializing`,
+  `AbandonQueuedInputAlreadyTerminalIdle`,
+  `AbandonQueuedInputAlreadyTerminalAttached`,
+  `AbandonQueuedInputAlreadyTerminalRunning`,
+  `AbandonQueuedInputAlreadyTerminalRetired`,
+  `AbandonQueuedInputAlreadyTerminalStopped`,
+  `AbandonQueuedInputAlreadyTerminalDestroyed`,
+  `AbandonQueuedInputUntrackedInitializing`,
+  `AbandonQueuedInputUntrackedIdle`, `AbandonQueuedInputUntrackedAttached`,
+  `AbandonQueuedInputUntrackedRunning`, `AbandonQueuedInputUntrackedRetired`,
+  `AbandonQueuedInputUntrackedStopped` and
+  `AbandonQueuedInputUntrackedDestroyed`. Every new variant is appended last,
+  so no existing variant's implicit discriminant moves. Every enum named
+  here is exhaustive, so a downstream exhaustive match needs the new arms, or
+  a wildcard arm.
+
+- Rust API of `meerkat-machine-kernels` and `meerkat-machine-codegen`: the
+  kernel `generated::meerkat::TransitionId` gains four variants, appended
+  last: `ResolveRuntimeCompletionCleanupInputTerminatedWhileServingIdle`,
+  `ResolveRuntimeCompletionCleanupInputTerminatedWhileServingAttached`,
+  `ResolveRuntimeCompletionCleanupInputTerminatedWhileServingRunning` and
+  `ResolveRuntimeCompletionCleanupInputTerminatedWhileDrainingRetired`. The
+  completion cleanup rule now answers one terminated input by the runtime's
+  phase (see Fixed): its arm
+  `ResolveRuntimeCompletionCleanupRuntimeTerminated` exists in the phases
+  Initializing, Retired and Stopped only, and the new arm
+  `ResolveRuntimeCompletionCleanupInputTerminatedWhileServing` holds Idle,
+  Attached and Running. In Retired the rule reads the machine's own queue
+  state: `ResolveRuntimeCompletionCleanupRuntimeTerminated` answers there
+  only when nothing is left to drain (no run bound and no input queued), and
+  the new arm `ResolveRuntimeCompletionCleanupInputTerminatedWhileDraining`
+  answers for a retired runtime that still has work to drain (no shipped
+  relay reaches the Retired cells: see Fixed). The three
+  variants
+  `ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle`,
+  `ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached` and
+  `ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning` stay in the enum
+  at their places as retired variants: they stay matchable and are never
+  fired from this release on, and the generated documentation says so on
+  each. No existing variant's implicit discriminant moves. An exhaustive
+  match on the enum needs the four new arms, or a wildcard arm. The split
+  itself changes no input, effect, enum value or state field of the machine.
+  `meerkat_machine_codegen::MachineKernelRenderError` gains
+  `RetiredTransitionStillLive { transition }` and
+  `RetiredTransitionFollowsUnknown { transition, follows }`: rendering
+  refuses a retired name that a schema transition still has, and a retired
+  name whose predecessor the enum does not have. The enum is exhaustive, so
+  a downstream exhaustive match needs the two new arms, or a wildcard arm.
+
+- Rust API of `meerkat-runtime`, `meerkat-machine-schema` and
+  `meerkat-machine-kernels`: the machine now says which cleanup follows a
+  completion, so no surface chooses it. `RuntimeCompletionCleanupAction`
+  (meerkat-runtime `meerkat_machine::dsl`, meerkat-machine-schema
+  `catalog::dsl::meerkat_machine`, and the kernel's copy) gains
+  `CleanupArchivedSession`, appended last: the cleanup of an archived
+  session, the only one that ends the mobs the session owns. The archived
+  arm of the completion cleanup rule answers it; `CleanupRuntime` now always
+  means the cleanup of a session that stays. The enum is exhaustive, so a
+  downstream exhaustive match needs the new arm, or a wildcard arm.
+  `RuntimeCompletionCleanupAuthority::requires_runtime_cleanup()` is
+  removed: it answered a boolean that let a caller retire a runtime without
+  saying which cleanup it ran. Match `RuntimeCompletionCleanupAuthority::action`
+  instead, or hand it to `RuntimeCleanupScope::of_completion_action` (see
+  Added).
+
 - Rust API of `meerkat-mob`: `DiagnosticCode` gains the variant
   `ProfileHeldByIdentity` (wire `profile_held_by_identity`), appended last,
   so no existing variant's implicit discriminant moves. `DiagnosticCode` is
@@ -291,16 +376,98 @@ them.
 
 ### Added
 
+- `meerkat-runtime`, `meerkat-contracts`, `meerkat-rpc`,
+  `meerkat-web-runtime` and the Python, TypeScript and Web SDKs: recall of
+  one queued input. A caller withdraws exactly one queued input of a
+  session, and only while no run has taken it; a run that has taken the
+  input is never interrupted. Until now a caller could interrupt or stop a
+  run, or abandon everything queued (retire, reset, stop), but not withdraw
+  one selected input only if it had not started. The recall is
+  session-level: any caller that can act on the session can recall any
+  queued input of it, also one another client queued, and by an idempotency
+  key it did not mint. Recalling an input withdraws everything the queue
+  coalesced into it, and the answer names only the recalled input.
+  - The MeerkatMachine owns the decision: the new input
+    `AbandonQueuedInput { input_id, reason }` is guarded on the input's phase
+    being `Queued`, the fact a run reads when it takes the input
+    (`StageForRun`, a durable steer's join), so exactly one of the two
+    commits, and concurrent recalls withdraw the input once. Its three other
+    arms change nothing and answer through `QueuedInputAbandonResolved` with
+    the new `QueuedInputAbandonDisposition` (`Abandoned`, `NotQueued`,
+    `AlreadyTerminal`, `Untracked`). The runtime's internal queued-input
+    cancel points now ask the machine through this input as well, in place
+    of a phase read in the driver followed by the unconditional
+    `AbandonInput`, and each acts on the machine's answer: for an input the
+    machine says is not queued the cancel point records and publishes no
+    terminal and answers an internal error, and a persistent session is
+    then reloaded from its store before it serves again. The read and the
+    machine's answer come from the same state under one hold, so no caller
+    is known to reach this. `AbandonInput` and the bulk and teardown paths are
+    unchanged.
+  - Rust: `MeerkatMachine::recall_queued_input(session_id, input_id)`
+    answers `Option<QueuedInputRecall>`: `Abandoned { input_id,
+    attempt_count }` (the input is `Abandoned` with reason `Cancelled`,
+    durably on a persistent machine, and its completion waiter is answered
+    `RuntimeTerminated`; `attempt_count` is 0 when no run attempt was
+    counted for it),
+    `NotQueued { input_id, phase, run_id }` (a run holds it; nothing is
+    touched), `AlreadyTerminal { input_id, terminal }` (nothing is touched; a
+    second recall answers this, also after a restart), and `None` for an
+    input the session does not hold. The call never loads or wakes a
+    session. The projection onto the wire answer is public too: the module
+    `meerkat_runtime::queued_input_recall_wire` with
+    `wire_queued_input_recall` and `parse_wire_input_id`, re-exported as
+    `meerkat::surface::wire_queued_input_recall` and
+    `meerkat::surface::parse_wire_input_id`.
+  - JSON-RPC: `session/recall_input` with `RecallInputParams { session_id,
+    selector }`, where `selector` is `session/input_status`'s (by `input_id`
+    or by `idempotency_key`), answers `RecallInputResult { session_id, recall
+    }`. `recall` is the new `WireQueuedInputRecall`, tagged `outcome`:
+    `abandoned` (`attempt_count`), `not_queued` (`phase`, `run_id`),
+    `already_terminal` (`terminal`). An input the session does not hold and
+    a malformed input id are `-32602`; an unknown session is `-32001`; a
+    session with no live runtime whose input has not ended is `-32003`. No
+    error code is added and no existing vocabulary gains a token.
+  - Browser runtime: the export `recall_session_input(handle, input_id)`
+    resolves to the `WireQueuedInputRecall` JSON.
+  - SDKs: Python `Session.recall_input(input_id=...)` or
+    `(idempotency_key=...)`, TypeScript `session.recallInput({ inputId })` or
+    `({ idempotencyKey })`, Web `session.recallInput(inputId)`. Each
+    validates the answer on its `outcome` discriminator. The list of
+    outcomes can grow: an outcome an SDK does not know is returned as it
+    is, with no error, and a caller keeps it as it is. On `not_queued`,
+    `run_id` is there when the runtime has one.
+  - Against a server without the method (0.9.0 through 0.9.14; an older
+    server is refused when the SDK connects): the server
+    answers method not found (`-32601`), and the Python and TypeScript
+    methods raise `MeerkatError` with the code `"-32601"` and the server's
+    message. Neither method reads the server's contract version or
+    capabilities first; the refused call changes nothing on the server. The
+    Web SDK calls the runtime that ships in its own package, so there is no
+    older server to meet: an older runtime module fails when it is
+    initialised, with a plain error, and a runtime binding of the same
+    version that lacks the export rejects with `MeerkatError` code
+    `CAPABILITY_UNAVAILABLE`.
+  - Not in it: a REST route, and a mob-level method that reaches a member
+    hosted on another host. Call `session/recall_input` on the host that
+    serves the session.
+
 - `meerkat`: `session_runtime::runtime_state::RuntimeCleanupScope`
   (`ArchivedSession`, `KeptSession`) says what became of the session whose
   live runtime a cleanup retires, and
   `ArchiveRuntimeCleanup::run_scoped` and
   `run_after_runtime_termination_scoped` take it: the mob hook, which
   destroys the mobs a session owns, runs for an archived session only.
-  `RuntimeCleanupScope::of_completion_cleanup` reads the scope from the
-  completion cleanup authority's archive fact. `ArchiveRuntimeCleanup::run`
-  stays the archive's cleanup; `run_after_runtime_termination` is deprecated
-  in favour of the scoped form (see Deprecated and Fixed).
+  `ArchiveRuntimeCleanup::run` stays the archive's cleanup;
+  `run_after_runtime_termination` is deprecated in favour of the scoped form
+  (see Deprecated and Fixed).
+
+- `meerkat`: `RuntimeCleanupScope::of_completion_action` maps the machine's
+  completion cleanup action to the cleanup a surface runs: none for
+  `RetainRuntime`, `KeptSession` for `CleanupRuntime`, `ArchivedSession` for
+  `CleanupArchivedSession`. `ArchiveRuntimeCleanup::run_runtime_only` is the
+  cleanup of a session that stays, for a caller that is never an archive
+  (taking back the runtime registration a failed recovery or create made).
 
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
   requests themselves (see Security).
@@ -1530,6 +1697,44 @@ them.
 
 ### Fixed
 
+- `meerkat-runtime`, `meerkat-rpc`, `meerkat-rest`, `meerkat-mcp-server`:
+  ending one queued input of a session no longer ends the session's other
+  work. A request cancelled while its turn was queued behind a running turn
+  (the JSON-RPC cancel notification, a client that closed its connection to
+  a shared runtime, REST `POST /requests/{id}/cancel`) ended that one
+  request, and with it the turn that was running on the session and the
+  session's other queued requests: each was answered an internal error
+  (`-32603`; REST `500`) and was not completed, the cancelled REST request
+  was answered only once the running turn had ended, and the session's MCP
+  adapter and pending event streams went with its runtime registration.
+  `mob/cancel_all_work` on a member whose session held a queued turn request
+  also retired that session's runtime registration, with what was attached
+  to it. Now only the one input ends: the
+  running turn completes and its request is answered its result, the other
+  queued requests run in the order they were queued (measured with two of
+  them), the cancelled request is answered at
+  once, and the session keeps its runtime registration and what is attached
+  to it. `mob/cancel_all_work` itself still ends the member's running run
+  and its queued inputs, as it is meant to: the member's queued turn
+  request is refused, and the member's session now keeps its runtime
+  registration (see Known limitations for the member's next turn). The recall of one queued input, new in this release, behaves the
+  same way. Measured by tests on JSON-RPC and REST, and at the MCP server's
+  completion cleanup. A request's cancel has ended its exact queued input
+  since 0.8.0 and `mob/cancel_all_work` has abandoned a member's queued
+  inputs since 0.8.51 (read at the release tags). The machine's completion
+  cleanup rule now answers one terminated input by the runtime's phase: a
+  runtime that serves is kept, and one that was stopped is cleaned up as
+  before (see Breaking for the kernel's transition names). For a retired
+  runtime the rule itself now keeps the runtime while an input is still
+  queued for its drain, and answers the cleanup when the input that ended
+  was the last one queued (rows at the rule and at the runtime). No shipped
+  surface reaches those two cells: the JSON-RPC, REST and MCP server relays
+  read a retired runtime as an archived session and clean it up as before,
+  and `session/recall_input` answers `-32001` for such a session. They are
+  the rule for a Rust host whose own relay asks the machine about a session
+  it does not read as archived. A stopped runtime with inputs still queued
+  is cleaned up as before.
+
 - `meerkat-rpc`, `meerkat-rest`, `meerkat`: a session that was cleaned up
   without being archived no longer loses the agents it created to the
   cleanup that the JSON-RPC and REST servers run after a turn. That cleanup
@@ -1586,8 +1791,8 @@ them.
   commands and the browser runtime (by reading the source). A failed start
   still retires the session's runtime registration and its live MCP
   connections, which the next turn builds again (see Known limitations for
-  an input queued behind the failed turn, and for a request cancelled while
-  its turn is queued). Affects 0.6.0 through 0.9.14 on JSON-RPC and REST:
+  an input queued behind the failed turn). Affects 0.6.0 through 0.9.14 on
+  JSON-RPC and REST:
   since 0.6.0 for a turn whose result could not be saved and for a stored
   session whose rebuild fails, since 0.6.2 for a realtime open of a stored
   session that cannot be rebuilt (JSON-RPC only), since 0.7.0 for any turn
@@ -2573,18 +2778,21 @@ them.
   again. Event streams that were pending on the session close with the
   registration and have to be opened again (read from the source). The
   session's next turn builds
-  the runtime again.
+  the runtime again. A turn fails at its start also when the server
+  refuses, while it applies the turn, something the turn's own request
+  asked for (for example a reasoning effort level the model does not
+  accept): that request is answered its typed refusal, and what is queued
+  behind it ends in the same way.
 
-- Cancelling a request whose turn is still queued also ends the turn that
-  is running on that session and the session's other queued requests. The
-  cancelled request is answered as cancelled (a row asserts this on REST; on
-  JSON-RPC it is read from the source); the running turn's request
-  and each other queued request are answered with an internal error
-  (`-32603`) and are not completed (measured by a test on JSON-RPC, on
-  0.9.14's cleanup and on this release's). The session and everything it
-  owns stay, and its next turn runs. Do not cancel a request while its
-  turn is queued: let it start, or interrupt the running turn
-  (`turn/interrupt`).
+- After `mob/cancel_all_work` ended a member's running run, the first turn
+  a client then starts on that member's session (`turn/start`) is answered
+  an internal error (`-32603`, "turn abandoned") and is not run; the turn
+  after it runs. Send the turn again. It is the same with and without a
+  turn request queued on the member (measured by a test on JSON-RPC, on
+  this release and on the tree before the fix above). Before that fix a
+  member with a turn request queued did not show it: the cleanup the fix
+  removes had retired the member's runtime, and the member's next turn
+  built it again.
 
 - A mob that belongs to a session which never became durable stays until
   that session id is archived. Before this release the cleanup of a failed

@@ -2088,6 +2088,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Requested", "AlreadyRequested", "NotServing"],
             ),
             NamedTypeBinding::string_enum(
+                "QueuedInputAbandonDisposition",
+                &["Abandoned", "NotQueued", "AlreadyTerminal", "Untracked"],
+            ),
+            NamedTypeBinding::string_enum(
                 "InputPhase",
                 &[
                     "Queued",
@@ -2859,7 +2863,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "RuntimeCompletionCleanupAction",
-                &["RetainRuntime", "CleanupRuntime"],
+                &["RetainRuntime", "CleanupRuntime", "CleanupArchivedSession"],
             ),
             NamedTypeBinding::string_enum(
                 "RuntimeCompletionPreAdmissionAction",
@@ -3599,6 +3603,10 @@ runtime_internal_inputs!(
         // through the session's turn-state handle.
         RequestCompaction,
         ConsumeCompactionRequest,
+        // The exact queued-input abandon, applied by the session's driver
+        // (`abandon_queued_input`, and `MeerkatMachine::recall_queued_input`
+        // through it), which reads the machine's answer.
+        AbandonQueuedInput,
     ]
 );
 

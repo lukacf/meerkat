@@ -176,6 +176,7 @@ of this full catalog.
 | `session/peer_response_terminal` | Session | `SessionPeerResponseTerminalParams` | `RuntimeAcceptResult` | Admit a correlated terminal peer response through the typed runtime ingress |
 | `session/inject_context` | Session | `InjectSystemContextParams` | `InjectSystemContextResult` | Append one ordinary durable ordered System message at the admitted transcript boundary |
 | `session/input_status` | Session | `SessionInputStateParams` | `SessionInputStateResult` | Read an input's stored runtime state (terminal outcome, run association) by input id or idempotency key |
+| `session/recall_input` | Session | `RecallInputParams` | `RecallInputResult` | Withdraw one input only while it is still queued; a run that has taken it is never interrupted (from 0.9.15) |
 | `session/compact` | Session | `CompactSessionParams` | `CompactSessionResult` | Ask a live session's next compaction check to compact, without a rebuild |
 | `turn/start` | Turn | `StartTurnParams` | `WireRunResult` | Start a new turn on existing session |
 | `turn/interrupt` | Turn | `InterruptParams` | `InterruptResult` | Cancel in-flight turn |
@@ -1994,6 +1995,140 @@ caller checks the `contract_version` from `initialize` before relying on it.
 `{"by": "idempotency_key", "value": "<key>"}` reads the input back by the key
 the caller supplied; a server older than contract 0.9.12 finds no input that
 way, so read it there by the `input_id` the call answered.
+
+### session/recall_input
+
+From 0.9.15. Withdraw one queued input of a session, only if no run has taken it yet. The
+session's runtime decides in one step whether the input is still queued, the
+same fact a run reads when it takes the input: either the recall withdraws
+the input or a run runs it, never both. A recall never interrupts started
+work; to stop a run, use `turn/stop_run`.
+
+The recall is session-level: any caller that can act on the session can
+recall any queued input of it, also one another caller submitted, and also
+by an idempotency key it did not mint. Recalling an input withdraws
+everything the queue coalesced into it: when a later input took a queued
+earlier one in (the earlier one's terminal is `coalesced`), recalling the
+later one withdraws both contents. The answer names only the recalled input
+and does not say that other content went with it. A recall of the earlier
+input answers `already_terminal` with `coalesced` and withdraws nothing.
+
+`selector` names the input exactly as `session/input_status` does: by the
+`input_id` the submit answered, or by the `idempotency_key` you submitted it
+under.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":9,"method":"session/recall_input","params":{"session_id":"01936f8a-7b2c-7000-8000-000000000001","selector":{"by":"input_id","value":"01936f8b-0000-7000-8000-0000000000a1"}}}
+```
+
+```json Response (abandoned)
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "result": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "recall": {
+      "outcome": "abandoned",
+      "input_id": "01936f8b-0000-7000-8000-0000000000a1",
+      "attempt_count": 0
+    }
+  }
+}
+```
+
+```json Response (a run holds it)
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "result": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "recall": {
+      "outcome": "not_queued",
+      "input_id": "01936f8b-0000-7000-8000-0000000000a1",
+      "phase": "staged",
+      "run_id": "01936f8b-0000-7000-8000-000000000042"
+    }
+  }
+}
+```
+
+```json Response (second recall)
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "result": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "recall": {
+      "outcome": "already_terminal",
+      "input_id": "01936f8b-0000-7000-8000-0000000000a1",
+      "terminal": "cancelled"
+    }
+  }
+}
+```
+</CodeGroup>
+
+`recall.outcome` is one of:
+
+- `abandoned`: the input was still queued and is now withdrawn. Its terminal
+  is `cancelled` (durably, on a persistent runtime), no run will take it, and a
+  caller waiting on it is answered that the runtime ended it before a run
+  (a `turn/start` request that waits on it is answered `-32603` with
+  `runtime terminated: input recalled before it started`).
+  `attempt_count` is the number of run attempts counted for the input before
+  it was withdrawn (a failed attempt that returned the input to the queue to
+  be retried); `0` means no attempt was counted. It is not proof that no run
+  ever saw the input: a steer that joined a running turn and went back to
+  the queue because that turn discarded what it had appended counts no
+  attempt.
+- `not_queued`: a run has taken the input and it has not ended. Nothing was
+  touched and the run is not interrupted. `phase` is the input's lifecycle
+  state (`staged`, `applied` or `applied_pending_consumption`) and `run_id`,
+  when the runtime has one, the run that holds it.
+- `already_terminal`: the input already ended. Nothing was touched.
+  `terminal` is its terminal class (`completed`, `cancelled`, `abandoned`,
+  `superseded` or `coalesced`). A second recall of a recalled input answers
+  `cancelled` here, also after a restart.
+
+The list of outcomes can grow: keep an outcome you do not know as it is.
+
+Refusals use the existing error codes. An input this session does not hold
+(another session's input, an unknown key) and a malformed `input_id` are
+`-32602`; nothing is touched. An unknown or archived session is `-32001`. The
+recall never loads or wakes a session: one with no live runtime in the server
+answers `already_terminal` from its stored row when the input has ended, and
+is otherwise refused with `-32003` (session not running), so recall the input
+once the session runs again. A runtime without a store has only its live
+state to answer from. A server that does not serve the method (0.9.14 and
+earlier) answers method not found (`-32601`) and changes nothing.
+
+The session's ordinary refusals apply too: a session that is being torn down,
+or whose durable state needs a reload after a failed write, refuses the
+recall as it refuses its other mutations. An error is never an outcome: it
+does not say whether the input was withdrawn. After a durability refusal no
+call reloads the session: the runtime reloads it from its store the next
+time it prepares the session for a turn, and when the server restarts. So
+start the session's next turn, or restart the server, then read the input's
+status (`session/input_status`) or recall again: an input the failed call did withdraw is `cancelled` (a recall
+answers `already_terminal`), and one it did not withdraw is queued again and
+can be recalled, or is held by its run. Do not take `session/input_status` as
+that answer before the reload: until then it reads the live runtime, which
+can be ahead of the store after a failed write.
+
+There is no REST route for the recall, and no mob-level method that reaches
+a member hosted on another host: call `session/recall_input` on the host that
+serves the session (for a mob member, its member session, with the `input_id`
+the send answered).
+
+<ParamField body="session_id" type="string" required>
+  Session ID.
+</ParamField>
+
+<ParamField body="selector" type="object" required>
+  `{"by": "input_id", "value": "<input id>"}` or
+  `{"by": "idempotency_key", "value": "<key>"}`.
+</ParamField>
 
 ### mob/member_send admission
 

@@ -673,6 +673,38 @@ run, including durable steers that joined it. `receipt.outcome` is `stopped`
 was touched), or `not_stoppable`. `mob.stopMemberRun(agentIdentity, runId,
 reason)` does the same for one mob member.
 
+### recallInput()
+
+From 0.9.15.
+
+```typescript
+async recallInput(
+  selector: { inputId: string } | { idempotencyKey: string },
+): Promise<RecallInputResult>
+```
+
+Sends `session/recall_input`. It withdraws one input of the session, only
+while it is still queued: name it by the `inputId` its submit answered or by
+the `idempotencyKey` it was submitted under. `recall.outcome` is `abandoned`
+(the input was queued and is now withdrawn: its terminal is `cancelled` and no
+run will take it; `attempt_count` is `0` when no run attempt was counted for
+it), `not_queued`
+(a run holds it: nothing was touched and the run is not interrupted; `phase`
+says where it is and `run_id`, when the runtime has one, names the run that
+holds it) or `already_terminal` (it already ended;
+`terminal` is its terminal class, `cancelled` for a second recall). The list
+of outcomes can grow: keep an outcome you do not know as it is (the method
+resolves with it unchanged and does not reject). An input
+the session does not hold rejects with the invalid-params code. The recall is
+session-level (any queued input of the session, whoever submitted it) and
+withdraws everything the queue coalesced into the input; see
+[`session/recall_input`](/api/rpc#session%2Frecall_input). A server that
+does not serve the method (0.9.0 through 0.9.14; an older server is refused
+when the SDK connects) answers method not found, and
+the call rejects with `MeerkatError` whose `code` is `"-32601"`; the method
+does not read the server's contract version or capabilities first, and the
+refused call changes nothing.
+
 ### compact()
 
 ```typescript

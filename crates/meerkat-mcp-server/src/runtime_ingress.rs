@@ -1534,11 +1534,16 @@ impl McpRuntimeIngressContext {
                 if runtime_termination_cleanup
                     && !self.runtime_adapter.contains_session(session_id).await
                 {
+                    // No generated authority and the registration is gone:
+                    // the runtime's cleanup, as a constant. An archived
+                    // session never gets here: its live session is not
+                    // observed, so it has no termination proof of this kind
+                    // and returned in the branch above.
                     self.clear_runtime_session_state_after_verified_termination_locked(
                         session_id,
                         attachment,
                         &runtime_termination_proof,
-                        archived_now,
+                        false,
                     )
                     .await
                     .map_err(|cleanup_error| {
@@ -1562,7 +1567,23 @@ impl McpRuntimeIngressContext {
             }
         };
         let release_pre_admission = cleanup_authority.releases_pre_admission();
-        if cleanup_authority.requires_runtime_cleanup() {
+        // The machine names the cleanup: none, the runtime's only, or the
+        // archive's. This surface matches the action and chooses nothing.
+        // Both cleanup actions retire the session's runtime attachment; only
+        // the archive's also forgets the session's logical identity. This
+        // surface has no owner-archive step for mobs.
+        let archive_cleanup = match cleanup_authority.action {
+            meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionCleanupAction::RetainRuntime => {
+                None
+            }
+            meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionCleanupAction::CleanupRuntime => {
+                Some(false)
+            }
+            meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionCleanupAction::CleanupArchivedSession => {
+                Some(true)
+            }
+        };
+        if let Some(archive_cleanup) = archive_cleanup {
             if runtime_termination_cleanup
                 && !self.runtime_adapter.contains_session(session_id).await
             {
@@ -1570,7 +1591,7 @@ impl McpRuntimeIngressContext {
                     session_id,
                     attachment,
                     &runtime_termination_proof,
-                    archived_now,
+                    archive_cleanup,
                 )
                 .await
                 .map_err(|error| {
@@ -1599,7 +1620,7 @@ impl McpRuntimeIngressContext {
                     // registration, sidecar, or returned completion result.
                     return Ok(McpRuntimeCompletionCleanup::stale());
                 }
-                if archived_now {
+                if archive_cleanup {
                     self.detach_exact(session_id, attachment.witness()).await;
                     if let Some((incarnation, revision)) = archived_logical_identity {
                         self.remove_unattached_logical_exact(session_id, incarnation, revision)
@@ -1609,7 +1630,7 @@ impl McpRuntimeIngressContext {
                     self.detach_exact(session_id, attachment.witness()).await;
                 }
             }
-            if archived_now {
+            if archive_cleanup {
                 self.detach_exact(session_id, attachment.witness()).await;
                 if let Some((incarnation, revision)) = archived_logical_identity {
                     self.remove_unattached_logical_exact(session_id, incarnation, revision)
@@ -4082,6 +4103,117 @@ mod tests {
         context
             .discard_runtime_pre_admission(&attachment, &unrelated_input_id)
             .await;
+    }
+
+    /// The relay of an input that was recalled while its session's runtime
+    /// serves answers the request and retires nothing: the session's
+    /// attachment stays current and its runtime stays registered.
+    #[tokio::test]
+    async fn mcp_runtime_completion_cleanup_keeps_a_serving_runtime_after_a_recalled_input() {
+        use meerkat_runtime::input::{
+            ExternalEventInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context_with_capacity(&temp, 3).await;
+        let session_id =
+            create_deferred_session_with_generated_authority(&context, "recalled input target")
+                .await;
+        let attachment = context
+            .ensure_session(&session_id)
+            .await
+            .expect("attach the session");
+
+        // An external event queued on the idle session: nothing runs it
+        // before the session's next turn.
+        let input = Input::ExternalEvent(ExternalEventInput {
+            objective_id: None,
+            header: InputHeader {
+                ingress_context: None,
+                retained_resume: None,
+                authority_association: None,
+                id: InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::External {
+                    source_name: "inbox.item".to_string(),
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+                requester: None,
+            },
+            event_type: "inbox.item".to_string(),
+            payload: serde_json::json!({ "body": "recalled before any turn" }),
+            blocks: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+        });
+        let queued_input = input.id().clone();
+        let (_accepted, completion_handle) = context
+            .runtime_adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("the event is accepted");
+        let completion_handle = completion_handle.expect("the event has a completion handle");
+        let recall = context
+            .runtime_adapter
+            .recall_queued_input(&session_id, &queued_input)
+            .await
+            .expect("the recall answers");
+        assert!(
+            matches!(
+                recall,
+                Some(meerkat_runtime::QueuedInputRecall::Abandoned { .. })
+            ),
+            "the queued event is recalled: {recall:?}"
+        );
+
+        let requested_input_id = InputId::new();
+        let admission = context
+            .service
+            .reserve_create_session_admission()
+            .await
+            .expect("reserve active admission");
+        context
+            .insert_runtime_pre_admission(
+                &attachment,
+                session_id.clone(),
+                requested_input_id.clone(),
+                admission,
+            )
+            .await
+            .expect("insert pending pre-admission");
+        let handle = wrap_mcp_runtime_pre_admission_cleanup(
+            context.clone(),
+            session_id.clone(),
+            Arc::clone(&attachment),
+            requested_input_id,
+            queued_input,
+            completion_handle,
+        );
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait())
+            .await
+            .expect("cleanup handle should finish")
+            .expect("the recalled input's outcome is released");
+        assert!(
+            matches!(
+                outcome,
+                meerkat_runtime::CompletionOutcome::RuntimeTerminated { .. }
+            ),
+            "the recalled input is answered terminated: {outcome:?}"
+        );
+        assert_eq!(
+            (
+                context.current_attachment_witness(&session_id).await
+                    == Some(attachment.witness().clone()),
+                context.runtime_adapter.contains_session(&session_id).await,
+            ),
+            (true, true),
+            "(the session's attachment still current, its runtime still registered) after the \
+             relay of a recalled input"
+        );
     }
 
     #[tokio::test]

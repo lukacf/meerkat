@@ -7107,6 +7107,11 @@ fn extract_live_websocket_token_admission(
 /// Machine-generated authority for runtime cleanup after a completion waiter
 /// resolves. The action is projected from a generated DSL effect; surfaces use
 /// this wrapper instead of matching completion outcomes locally.
+///
+/// A surface matches [`Self::action`] exhaustively: the action says whether
+/// the runtime is kept, retired, or retired as the runtime of an archived
+/// session. There is no boolean form of that answer, so a surface cannot
+/// retire a runtime without saying which cleanup it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeCompletionCleanupAuthority {
     pub action: crate::meerkat_machine::dsl::RuntimeCompletionCleanupAction,
@@ -7117,13 +7122,6 @@ pub struct RuntimeCompletionCleanupAuthority {
 }
 
 impl RuntimeCompletionCleanupAuthority {
-    pub fn requires_runtime_cleanup(self) -> bool {
-        matches!(
-            self.action,
-            crate::meerkat_machine::dsl::RuntimeCompletionCleanupAction::CleanupRuntime
-        )
-    }
-
     pub fn releases_pre_admission(self) -> bool {
         matches!(
             self.pre_admission_action,
@@ -17963,13 +17961,27 @@ impl MeerkatMachine {
                                 let reason = "tracked input cancelled before run".to_string();
                                 let prepared = driver_guard
                                     .prepare_sole_runless_runtime_termination(&input_id, reason)?;
-                                if let Err(error) = driver_guard
+                                match driver_guard
                                     .abandon_queued_input(&input_id, InputAbandonReason::Cancelled)
                                     .await
                                 {
-                                    driver_guard
-                                        .rollback_prepared_sole_runless_termination(prepared);
-                                    return Err(error);
+                                    Ok(true) => {}
+                                    // The machine decides: an input it says
+                                    // is not queued is not cancelled here.
+                                    Ok(false) => {
+                                        driver_guard
+                                            .rollback_prepared_sole_runless_termination(prepared);
+                                        return Err(
+                                            crate::meerkat_machine::driver::DriverEntry::queued_read_contradicted(
+                                                &input_id,
+                                            ),
+                                        );
+                                    }
+                                    Err(error) => {
+                                        driver_guard
+                                            .rollback_prepared_sole_runless_termination(prepared);
+                                        return Err(error);
+                                    }
                                 }
                                 runless_terminal.owe();
                                 let candidate_owner_input_id =
@@ -18273,12 +18285,25 @@ impl MeerkatMachine {
                     Some(stored) if stored.seed.phase == InputLifecycleState::Queued => {
                         let prepared = driver_guard
                             .prepare_sole_runless_runtime_termination(input_id, reason.clone())?;
-                        if let Err(error) = driver_guard
+                        match driver_guard
                             .abandon_queued_input(input_id, InputAbandonReason::Cancelled)
                             .await
                         {
-                            driver_guard.rollback_prepared_sole_runless_termination(prepared);
-                            return Err(error);
+                            Ok(true) => {}
+                            // The machine decides: an input it says is not
+                            // queued is not cancelled here.
+                            Ok(false) => {
+                                driver_guard.rollback_prepared_sole_runless_termination(prepared);
+                                return Err(
+                                    crate::meerkat_machine::driver::DriverEntry::queued_read_contradicted(
+                                        input_id,
+                                    ),
+                                );
+                            }
+                            Err(error) => {
+                                driver_guard.rollback_prepared_sole_runless_termination(prepared);
+                                return Err(error);
+                            }
                         }
                         runless_terminal.owe();
                         let candidate_owner_input_id =

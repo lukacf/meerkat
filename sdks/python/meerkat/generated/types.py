@@ -923,6 +923,25 @@ WireInputTerminalOutcome = Literal['completed', 'abandoned', 'superseded', 'coal
 # check compacts once.
 WireCompactionRequestOutcome = Literal['requested', 'already_requested']
 
+# Typed answer of a queued-input recall.
+class WireQueuedInputRecallAbandoned(TypedDict, total=False):
+    attempt_count: NotRequired[int]
+    input_id: Required[str]
+    outcome: Required[Literal['abandoned']]
+
+class WireQueuedInputRecallNotQueued(TypedDict, total=False):
+    input_id: Required[str]
+    outcome: Required[Literal['not_queued']]
+    phase: Required[Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned']]
+    run_id: NotRequired[Optional[str]]
+
+class WireQueuedInputRecallAlreadyTerminal(TypedDict, total=False):
+    input_id: Required[str]
+    outcome: Required[Literal['already_terminal']]
+    terminal: Required[WireInputTerminalOutcome]
+
+WireQueuedInputRecall = WireQueuedInputRecallAbandoned | WireQueuedInputRecallNotQueued | WireQueuedInputRecallAlreadyTerminal
+
 # `auth/login/device_complete` success body.
 class WireDeviceCompleteResultPending(TypedDict, total=False):
     state: Required[Literal['pending']]
@@ -2097,6 +2116,24 @@ class SessionInputStateSelector:
 class SessionInputStateResult:
     """Result for `session/input_status`."""
     state: Optional[dict[str, Any]] = None
+
+
+@dataclass
+class RecallInputParams:
+    """Parameters for `session/recall_input`.
+
+`selector` names the input exactly as `session/input_status` does: by the
+runtime input id the submit answered, or by the idempotency key the caller
+submitted it under."""
+    selector: SessionInputStateSelector
+    session_id: str
+
+
+@dataclass
+class RecallInputResult:
+    """Result for `session/recall_input`."""
+    recall: WireQueuedInputRecall
+    session_id: str
 
 
 @dataclass

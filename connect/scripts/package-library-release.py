@@ -1,20 +1,52 @@
 #!/usr/bin/env python3
-"""Package exact accepted consumer inputs with Python 3.11+; no installation or publication."""
+"""Package exact accepted consumer inputs with Python 3.11+; no installation or publication.
+
+  python3 package-library-release.py --target TARGET --output NEW_DIRECTORY
+      [--input-selection FILE --input-selection-sha256 HEX] [--non-published-list FILE] [--show-names]
+
+The retained build source (the donor tree `provenance/source/`, shipped as
+`selected/provenance/source/`, and every source snapshot
+`selected/provenance/<name>/source.tar.gz`) is published by a positive rule, on every target:
+  - `release/library-published-source-members.json` in this checkout (schema
+    package-library-release/source-members/1: {"schema": ..., "trees": {TREE: [member names, sorted]}})
+    names what the library publishes of each tree. A tree without a section refuses the build.
+  - A member the list does not name is not published. It must be named by the private list given with
+    --non-published-list (the same form; kept outside the repository, never committed): such a member
+    is left out. A member in neither list refuses the build. The refusal names the tree and the count;
+    --show-names adds the member names on standard error (send it to a private file).
+  - A snapshot keeps every published member's original header, data and padding bytes in order and
+    is compressed again without a build time; one with nothing left out ships as it is.
+  - The library ships `selected/provenance/redactions.json`: one sentence and the digest and size of
+    each shipped source snapshot. It names nothing that was left out.
+
+  python3 package-library-release.py --source-members NEW_LIST.json
+      [--from-library LIBRARY.tar.gz ...] [--target TARGET --from-inputs [--input-selection ...]]
+      [--from-list LIST.json ...] [--except-list LIST.json ...]
+
+writes such a list (a new file, mode 0600): the member names of the source trees of the given
+libraries, of the target's inputs and of the given lists, without the names of the --except-list
+lists. Standard output holds the count per tree only. A list written from the inputs can name
+members that are not published: it is private until it is the published list.
+"""
 
 from __future__ import annotations
 
 import argparse
+import collections
 import copy
 import gzip
 import hashlib
 import io
 import json
+import json.decoder
 import os
 from pathlib import Path, PurePosixPath
 import posixpath
 import re
 import stat
+import subprocess
 import tarfile
+import zlib
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +57,25 @@ MAX_ENTRIES = 4096
 MAX_DONOR_ENTRIES = 5000
 HEX = re.compile(r"[0-9a-f]{64}")
 SAFE_PART = re.compile(r"[A-Za-z0-9@_+.,() -]+")
+
+# The retained build source: the donor tree `provenance/source/`, shipped under SOURCE_TREE, and every
+# source snapshot. The library publishes of them exactly the members PUBLISHED_LIST names.
+SOURCE_TREE = "selected/provenance/source/"
+SOURCE_SNAPSHOT = re.compile(r"selected/provenance/[A-Za-z0-9_.-]+/source\.tar\.gz")
+PUBLISHED_LIST = "release/library-published-source-members.json"
+SCHEMA_SOURCE_MEMBERS = "package-library-release/source-members/1"
+SCHEMA_NON_PUBLISHED = "package-library-release/non-published-source-members/1"
+# The field a provenance record gains when rows that named a member that is not published were cut from it.
+PROJECTED_FIELD = "projected_for_publication"
+# How many restatements one build may make before it refuses.
+RESTATE_LIMIT = 4096
+PROVENANCE_RECORD = "selected/provenance/redactions.json"
+PROVENANCE_NOTE = ("Build provenance records and some members of the source snapshots are not published "
+                   "with this library.")
+# The guide (`README.md`) of these targets must hold this sentence, byte for byte and on one line. It names
+# no file: the record above states what ships and lists no member.
+PROVENANCE_DISCLOSURE_TARGETS = frozenset({"linux-x86_64"})
+PROVENANCE_DISCLOSURE = "The bound source is the exact build source except for members this library does not publish."
 
 # Build-time input pins, not a replacement for either consumer's runtime manifest.
 TARGETS = {
@@ -1958,7 +2009,16 @@ PYTHON_KITS["linux-x86_64"]["sources"].update({
 
 
 class PackageError(Exception):
-    """A fixed, value-free packaging failure."""
+    """A fixed, value-free packaging failure. `unlisted` holds, for unlisted_provenance_member, the
+    member names per tree that neither list names; they are shown only on request. `members` holds
+    published member paths with a count: the members that name one that is not published, or the
+    records that cannot be projected."""
+
+    def __init__(self, code: str, unlisted: dict[str, list[str]] | None = None,
+                 members: dict[str, int] | None = None):
+        super().__init__(code)
+        self.unlisted = unlisted or {}
+        self.members = members or {}
 
 
 def digest(data: bytes) -> str:
@@ -1981,6 +2041,593 @@ def unique_object(pairs: list[tuple[str, object]]) -> dict:
             raise PackageError("duplicate_metadata_key")
         result[key] = value
     return result
+
+
+def provenance_members(raw: bytes) -> list[tuple[tarfile.TarInfo, bytes, bytes]]:
+    """Read a pinned plain USTAR snapshot, keeping each member's complete raw block.
+
+    Extended headers and entries other than regular files are outside the pinned
+    inputs. Refusing them leaves no archive-wide metadata for an omission to change.
+    """
+    if len(raw) > MAX_TOTAL_BYTES:
+        raise PackageError("provenance_archive_too_large")
+    rows, names, end = [], set(), 0
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+            for member in archive:
+                relative_path(member.name)
+                if (member.name in names or not member.isfile() or member.sparse is not None
+                        or member.pax_headers or archive.pax_headers
+                        or member.offset != end or member.offset_data != end + 512
+                        or raw[end + 257:end + 265] != b"ustar\x0000"
+                        or member.size < 0 or member.size > MAX_FILE_BYTES):
+                    raise PackageError("unsupported_provenance_member")
+                names.add(member.name)
+                if len(names) > MAX_ENTRIES:
+                    raise PackageError("provenance_archive_too_large")
+                start = end
+                end = member.offset_data + ((member.size + 511) // 512) * 512
+                data = raw[member.offset_data:member.offset_data + member.size]
+                if end > len(raw) or len(data) != member.size:
+                    raise PackageError("invalid_provenance_archive")
+                rows.append((member, data, raw[start:end]))
+    except (tarfile.TarError, EOFError, OSError, ValueError):
+        raise PackageError("invalid_provenance_archive") from None
+    # Only the end-of-archive zero blocks may follow the last member.
+    if len(raw) - end < 1024 or any(raw[end:]):
+        raise PackageError("invalid_provenance_archive")
+    return rows
+
+
+def verify_provenance_projection(original: bytes, derived: bytes, omitted: set[str]) -> None:
+    """Require every retained member's raw block, in order, and nothing else."""
+    before = [(item.name, block) for item, _, block in provenance_members(original)
+              if item.name not in omitted]
+    after = [(item.name, block) for item, _, block in provenance_members(derived)]
+    if before != after:
+        raise PackageError("provenance_projection_mismatch")
+
+
+def read_source_member_lists(raw: bytes) -> dict[str, frozenset[str]]:
+    """A source member list (the published list or the private one): {tree: member names}."""
+    try:
+        value = json.loads(raw, object_pairs_hook=unique_object)
+    except (ValueError, RecursionError, PackageError):
+        raise PackageError("invalid_source_member_list") from None
+    if (not isinstance(value, dict) or set(value) != {"schema", "trees"}
+            or value["schema"] != SCHEMA_SOURCE_MEMBERS or not isinstance(value["trees"], dict)):
+        raise PackageError("invalid_source_member_list")
+    lists = {}
+    for tree, names in value["trees"].items():
+        if ((tree != SOURCE_TREE and not SOURCE_SNAPSHOT.fullmatch(tree)) or not isinstance(names, list)
+                or not all(isinstance(name, str) for name in names) or names != sorted(set(names))):
+            raise PackageError("invalid_source_member_list")
+        try:
+            for name in names:
+                relative_path(name)
+        except PackageError:
+            raise PackageError("invalid_source_member_list") from None
+        lists[tree] = frozenset(names)
+    return lists
+
+
+class NonPublished:
+    """The private list: per tree the members that are not published, each with its sha256, and the
+    sha256 of every original source snapshot that holds one."""
+
+    def __init__(self, trees: dict[str, dict[str, str]], snapshots: dict[str, frozenset[str]]):
+        self.trees, self.snapshots = trees, snapshots
+
+    def names(self) -> frozenset[str]:
+        return frozenset(name for members in self.trees.values() for name in members)
+
+    def digests(self) -> frozenset[str]:
+        """Every listed digest: the members' and the original snapshots'."""
+        return frozenset([value for members in self.trees.values() for value in members.values()]
+                         + [value for values in self.snapshots.values() for value in values])
+
+
+def read_non_published_list(raw: bytes) -> NonPublished:
+    """The private list (never committed): {"schema": ..., "trees": {TREE: [{"name": N, "sha256": H}]},
+    "original_snapshots": {SNAPSHOT: [H]}}, names and digests sorted."""
+    try:
+        value = json.loads(raw, object_pairs_hook=unique_object)
+    except (ValueError, RecursionError, PackageError):
+        raise PackageError("invalid_source_member_list") from None
+    if (not isinstance(value, dict) or set(value) != {"schema", "trees", "original_snapshots"}
+            or value["schema"] != SCHEMA_NON_PUBLISHED or not isinstance(value["trees"], dict)
+            or not isinstance(value["original_snapshots"], dict)):
+        raise PackageError("invalid_source_member_list")
+    trees, snapshots = {}, {}
+    for tree, rows in value["trees"].items():
+        if (tree != SOURCE_TREE and not SOURCE_SNAPSHOT.fullmatch(tree)) or not isinstance(rows, list):
+            raise PackageError("invalid_source_member_list")
+        members = {}
+        for row in rows:
+            if (not isinstance(row, dict) or set(row) != {"name", "sha256"} or not isinstance(row["name"], str)
+                    or not isinstance(row["sha256"], str) or not HEX.fullmatch(row["sha256"]) or row["name"] in members):
+                raise PackageError("invalid_source_member_list")
+            try:
+                relative_path(row["name"])
+            except PackageError:
+                raise PackageError("invalid_source_member_list") from None
+            members[row["name"]] = row["sha256"]
+        if list(members) != sorted(members):
+            raise PackageError("invalid_source_member_list")
+        trees[tree] = members
+    for member, digests in value["original_snapshots"].items():
+        if (not SOURCE_SNAPSHOT.fullmatch(member) or not isinstance(digests, list) or not digests
+                or not all(isinstance(item, str) and HEX.fullmatch(item) for item in digests)
+                or digests != sorted(set(digests))):
+            raise PackageError("invalid_source_member_list")
+        snapshots[member] = frozenset(digests)
+    return NonPublished(trees, snapshots)
+
+
+def encode_source_member_lists(trees: dict[str, dict[str, str | None]], snapshots: dict[str, set[str]] | None) -> bytes:
+    """The published form (names only), or with snapshots the private form (names with digests)."""
+    if snapshots is None:
+        value = {"schema": SCHEMA_SOURCE_MEMBERS,
+                 "trees": {tree: sorted(names) for tree, names in sorted(trees.items())}}
+    else:
+        value = {"schema": SCHEMA_NON_PUBLISHED,
+                 "trees": {tree: [{"name": name, "sha256": names[name]} for name in sorted(names)]
+                           for tree, names in sorted(trees.items())},
+                 "original_snapshots": {member: sorted(digests) for member, digests in sorted(snapshots.items())}}
+    return (json.dumps(value, indent=1) + "\n").encode()
+
+
+class SourceMembers:
+    """The positive rule for the retained build source: a member is published when the published list
+    names it under its tree, left out when the private list does, and refuses the build otherwise."""
+
+    def __init__(self, published: dict[str, frozenset[str]], non_published: NonPublished | None):
+        self.published = published
+        self.non_published = non_published
+        self.private = non_published.trees if non_published is not None else {}
+        if any(set(names) & self.published.get(tree, frozenset()) for tree, names in self.private.items()):
+            raise PackageError("provenance_lists_conflict")
+        self.unlisted: dict[str, list[str]] = {}
+        # Each source snapshot that lost members: (the original's sha256 and size, the shipped one's).
+        self.projected: dict[str, tuple[str, int, str, int]] = {}
+
+    def publishes(self, tree: str, name: str, data: bytes) -> bool:
+        if tree not in self.published:
+            raise PackageError("provenance_tree_not_listed")
+        if name in self.published[tree]:
+            return True
+        expected = self.private.get(tree, {}).get(name)
+        if expected is None:
+            self.unlisted.setdefault(tree, []).append(name)
+        elif digest(data) != expected:
+            raise PackageError("non_published_member_digest_mismatch")
+        return False
+
+    def check(self) -> None:
+        if self.unlisted:
+            raise PackageError("unlisted_provenance_member",
+                               {tree: sorted(names) for tree, names in sorted(self.unlisted.items())})
+        # The private list must hold the original of every snapshot that lost members: the payload scan
+        # looks for those digests with that list.
+        if self.non_published is not None and any(
+                original not in self.non_published.snapshots.get(tree, ()) for tree, (original, *_) in self.projected.items()):
+            raise PackageError("original_snapshot_not_listed")
+
+
+PATH_BEFORE = r"(?<![A-Za-z0-9_.@+~-])"
+PATH_AFTER = r"(?![A-Za-z0-9_@+~/-]|\.[A-Za-z0-9_])"
+
+
+class References:
+    """What names a member that is not published: a listed digest anywhere, in either case; a listed
+    path (with a separator) where no path character stands before it and none continues it, so a longer
+    path that only holds it is no match; a listed name without a separator only as a whole JSON string
+    or a whole line.
+
+    public: paths that are files of this repository (tracked_paths). A reference by path is exempt when
+    it is, letter for letter, a listed name that is such a path: the string names the repository's own
+    file. A digest is never exempt."""
+
+    def __init__(self, names: frozenset[str], digests: frozenset[str], public: frozenset[str] = frozenset()):
+        self.whole = frozenset(name for name in names if "/" not in name)
+        self.public = frozenset(names & public)
+        stated = [re.escape(value) for value in sorted(digests)]
+        paths = [PATH_BEFORE + re.escape(name) + PATH_AFTER for name in sorted(names - self.whole)]
+        whole = [r'(?<=")' + re.escape(name) + r'(?=")|(?m:^[ \t]*' + re.escape(name) + r'[ \t\r]*$)'
+                 for name in sorted(self.whole)]
+        self.text = re.compile("|".join(stated + paths), re.IGNORECASE) if stated or paths else None
+        # Digests first, then paths, as two groups: a match says which kind it is.
+        kinds = [f"(?P<{kind}>{'|'.join(parts)})" for kind, parts in (("digest", stated), ("path", paths + whole)) if parts]
+        self.raw = re.compile("|".join(kinds).encode(), re.IGNORECASE) if kinds else None
+
+    def in_string(self, value: str) -> bool:
+        """Whether one decoded JSON string names such a member."""
+        return value in self.whole or (self.text is not None and self.text.search(value) is not None)
+
+    def split(self, data: bytes) -> tuple[int, int]:
+        """(references, exempt references by path) in raw bytes; JSON's escaped separator is read as the
+        separator."""
+        if self.raw is None:
+            return 0, 0
+        if b"\\/" in data:
+            data = data.replace(b"\\/", b"/")
+        found = exempt = 0
+        for match in self.raw.finditer(data):
+            if match.lastgroup == "path" and match.group().strip(b" \t\r").decode("utf-8", "replace") in self.public:
+                exempt += 1
+            else:
+                found += 1
+        return found, exempt
+
+    def count(self, data: bytes) -> int:
+        """References in raw bytes that are not exempt."""
+        return self.split(data)[0]
+
+
+def tracked_paths(root: Path) -> frozenset[str]:
+    """The regular files that the commit of the checkout around root holds under root, as paths relative
+    to root. Read from git, never from a list kept by hand; no variable of the caller's environment
+    names another repository, and git is told to read the commit's own objects, not objects a replace
+    ref puts in their place. Empty when root is in no checkout, when the checkout has no commit and
+    when git does not run: nothing is exempt then."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    try:
+        done = subprocess.run(["git", "--no-replace-objects", "-C", str(root), "ls-tree", "-r", "-z", "HEAD"],
+                              stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=environment, check=False)
+    except OSError:
+        return frozenset()
+    if done.returncode != 0:
+        return frozenset()
+    paths = set()
+    for row in done.stdout.split(b"\0"):
+        entry, _, name = row.partition(b"\t")
+        if entry.startswith((b"100644 blob ", b"100755 blob ")):
+            try:
+                paths.add(name.decode("utf-8"))
+            except UnicodeDecodeError:
+                pass
+    return frozenset(paths)
+
+
+def count_references(data: bytes, names: frozenset[str], digests: frozenset[str]) -> int:
+    return References(names, digests).count(data)
+
+
+JSON_SPACE = re.compile(r"[ \t\n\r]*")
+JSON_SCALAR = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null")
+JSON_INTEGER = re.compile(r"-?(?:0|[1-9][0-9]*)\Z")
+
+
+def json_spans(text: str, start: int = 0, depth: int = 0) -> tuple:
+    """One JSON value with the position of every part: ("s", start, end, value) for a string,
+    ("n", start, end, text) for a number or literal, ("a", start, end, [items]) and
+    ("o", start, end, [(key, key start, key end, value)]). Raises ValueError for anything else."""
+    if depth > 200:
+        raise ValueError("nesting")
+    start = JSON_SPACE.match(text, start).end()
+    opener = text[start:start + 1]
+    if opener == '"':
+        value, end = json.decoder.scanstring(text, start + 1)
+        return ("s", start, end, value)
+    if opener in ("[", "{"):
+        closer, rows = ("]", []) if opener == "[" else ("}", [])
+        position = JSON_SPACE.match(text, start + 1).end()
+        if text[position:position + 1] == closer:
+            return ("a" if opener == "[" else "o", start, position + 1, rows)
+        while True:
+            if opener == "[":
+                item = json_spans(text, position, depth + 1)
+                rows.append(item)
+            else:
+                position = JSON_SPACE.match(text, position).end()
+                if text[position:position + 1] != '"':
+                    raise ValueError("key")
+                key, key_end = json.decoder.scanstring(text, position + 1)
+                colon = JSON_SPACE.match(text, key_end).end()
+                if text[colon:colon + 1] != ":":
+                    raise ValueError("colon")
+                item = json_spans(text, colon + 1, depth + 1)
+                rows.append((key, position, key_end, item))
+            position = JSON_SPACE.match(text, item[2]).end()
+            if text[position:position + 1] == closer:
+                return ("a" if opener == "[" else "o", start, position + 1, rows)
+            if text[position:position + 1] != ",":
+                raise ValueError("separator")
+            position += 1
+    scalar = JSON_SCALAR.match(text, start)
+    if scalar is None:
+        raise ValueError("value")
+    return ("n", start, scalar.end(), scalar.group())
+
+
+def json_document(raw: bytes) -> tuple[str, tuple] | None:
+    """The text and the positioned value of a whole JSON document, or None when raw is none."""
+    try:
+        text = raw.decode("utf-8")
+        root = json_spans(text)
+        if JSON_SPACE.match(text, root[2]).end() != len(text):
+            return None
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    return text, root
+
+
+def row_spans(node: tuple) -> list[tuple[int, int]]:
+    return [(row[1], row[3][2]) for row in node[3]] if node[0] == "o" else [(item[1], item[2]) for item in node[3]]
+
+
+def project_record(raw: bytes, names: frozenset[str], digests: frozenset[str]) -> bytes:
+    """A JSON provenance record without the rows that name a member that is not published. The rows are
+    cut out of the original text; nothing else is encoded again. The row of a reference is:
+      - the list item, for a string that is a list item;
+      - the map entry, for a map key;
+      - the list item, for a string value of a map that is itself a list item (a record in a list);
+      - the map entry, for a string value of any other nested map.
+    A reference in a string value of the document's own map, a document that is not a JSON object, one
+    that already has PROJECTED_FIELD and one of which nothing would remain cannot be projected
+    (PackageError provenance_record_not_projectable). A projected record gains PROJECTED_FIELD: true as
+    its last field. A record without a reference is returned as it is."""
+    references = References(names, digests)
+    document = json_document(raw)
+    unprojectable = PackageError("provenance_record_not_projectable")
+    if document is None:
+        if references.count(raw):
+            raise unprojectable
+        return raw
+    text, root = document
+    dropped: dict[int, tuple[tuple, set[int]]] = {}
+
+    def drop(container: tuple, index: int) -> None:
+        dropped.setdefault(id(container), (container, set()))[1].add(index)
+
+    def walk(node: tuple, row: tuple | None) -> None:
+        """row: (container, index, whether the container is a list) of the row that holds node."""
+        if node[0] == "a":
+            for index, item in enumerate(node[3]):
+                if item[0] == "s":
+                    if references.in_string(item[3]):
+                        drop(node, index)
+                elif item[0] in ("a", "o"):
+                    walk(item, (node, index, True))
+        elif node[0] == "o":
+            for index, (key, _, _, value) in enumerate(node[3]):
+                if references.in_string(key):
+                    drop(node, index)
+                elif value[0] == "s":
+                    if references.in_string(value[3]):
+                        if row is None:
+                            raise unprojectable
+                        if row[2]:
+                            drop(row[0], row[1])
+                            return
+                        drop(node, index)
+                elif value[0] in ("a", "o"):
+                    walk(value, (node, index, False))
+
+    if root[0] != "o":
+        if root[0] == "s" and references.in_string(root[3]):
+            raise unprojectable
+        walk(root, None)
+        if dropped or references.count(raw):
+            raise unprojectable
+        return raw
+    walk(root, None)
+    if not dropped:
+        if references.count(raw):
+            raise unprojectable  # a reference the walk does not reach
+        return raw
+    spans = row_spans(root)
+    lost = dropped.get(id(root), (root, set()))[1]
+    kept = [index for index in range(len(spans)) if index not in lost]
+    if not kept or any(row[0] == PROJECTED_FIELD for row in root[3]):
+        raise unprojectable
+    cuts = []
+    for container, indexes in dropped.values():
+        rows = row_spans(container)
+        remaining = [index for index in range(len(rows)) if index not in indexes]
+        if not remaining:
+            cuts.append((container[1] + 1, container[2] - 1))
+            continue
+        last = remaining[-1]
+        cuts += [(rows[index][0], rows[index + 1][0]) for index in sorted(indexes) if index < last]
+        if last < len(rows) - 1:
+            cuts.append((rows[last][1], rows[-1][1]))
+    # A cut inside a larger cut is already gone with it.
+    cuts = [span for span in cuts if not any(other != span and other[0] <= span[0] and span[1] <= other[1]
+                                             for other in cuts)]
+    first = root[3][0]
+    between = text[first[2]:first[3][1]]
+    if len(spans) > 1:
+        separator = text[spans[0][1]:spans[1][0]]
+    else:
+        lead = text[root[1] + 1:spans[0][0]]
+        separator = "," + lead if lead else ("," if between == ":" else ", ")
+    field = separator + json.dumps(PROJECTED_FIELD) + between + "true"
+    end = spans[kept[-1]][1]
+    edits = [(start, stop, field if start == end else "") for start, stop in cuts]
+    if not any(start == end for start, _ in cuts):
+        edits.append((end, end, field))
+    for start, stop, replacement in sorted(edits, reverse=True):
+        text = text[:start] + replacement + text[stop:]
+    projected = text.encode("utf-8")
+    if json_document(projected) is None or references.count(projected):
+        raise unprojectable
+    return projected
+
+
+def integer_fields(node: tuple) -> list[str]:
+    return [key for key, _, _, value in node[3] if value[0] == "n" and JSON_INTEGER.match(value[3])]
+
+
+def maps_with(node: tuple, digests: set[str]):
+    """Every map of a positioned JSON value that has a string value holding one of the digests."""
+    if node[0] == "o":
+        if any(value[0] == "s" and any(item in value[3].lower() for item in digests) for _, _, _, value in node[3]):
+            yield node
+        for _, _, _, value in node[3]:
+            yield from maps_with(value, digests)
+    elif node[0] == "a":
+        for item in node[3]:
+            yield from maps_with(item, digests)
+
+
+def restate_size(data: bytes, old: str, sizes: tuple[int, int]) -> tuple[bytes, list[str]]:
+    """In a JSON member, the integer fields equal to a projected snapshot's original size that stand in a
+    map which states that snapshot's digest: the shipped size. Returns the new bytes and the field names."""
+    document = json_document(data)
+    if document is None:
+        return data, []
+    text, root = document
+    edits, names = [], []
+    for node in maps_with(root, {old}):
+        for key, _, _, value in node[3]:
+            if value[0] == "n" and value[3] == str(sizes[0]):
+                edits.append((value[1], value[2]))
+                names.append(key)
+    for start, stop in sorted(edits, reverse=True):
+        text = text[:start] + str(sizes[1]) + text[stop:]
+    return text.encode("utf-8"), names
+
+
+def restate_digests(files: dict[str, tuple[bytes, int]], changes: list[tuple]) -> tuple[dict, dict, dict]:
+    """Every digest a published member states about a member that changed in this build becomes the
+    shipped member's digest: the hex string is replaced, in lower or upper case, in every member that
+    holds it, and a member that changes this way is itself restated where its own digest is stated, until
+    nothing stale is left. changes: (member, old sha256, new sha256, (old size, new size) or None).
+    Returns ({member: members it was restated for}, {member: size fields restated}, {member: the new
+    digests written into it}). Refuses past RESTATE_LIMIT steps and when a member returns to an earlier
+    state (PackageError restatement_not_settled)."""
+    queue = collections.deque(changes)
+    history: dict[str, set[str]] = {}
+    restated: dict[str, set[str]] = {}
+    sized: dict[str, set[str]] = {}
+    written: dict[str, set[str]] = {}
+    steps = 0
+    while queue:
+        steps += 1
+        if steps > RESTATE_LIMIT:
+            raise PackageError("restatement_not_settled")
+        name, old, new, sizes = queue.popleft()
+        for other in sorted(files):
+            data, mode = files[other]
+            if other == name or (old.encode() not in data and old.upper().encode() not in data):
+                continue
+            changed, fields = restate_size(data, old, sizes) if sizes is not None else (data, [])
+            changed = changed.replace(old.encode(), new.encode()).replace(old.upper().encode(), new.upper().encode())
+            before, after = digest(data), digest(changed)
+            states = history.setdefault(other, {before})
+            if after in states:
+                raise PackageError("restatement_not_settled")
+            states.add(after)
+            files[other] = (changed, mode)
+            restated.setdefault(other, set()).add(name)
+            written.setdefault(other, set()).add(new)
+            if fields:
+                sized.setdefault(other, set()).update(fields)
+            queue.append((other, before, after, None))
+    return restated, sized, written
+
+
+def settle_references(files: dict[str, tuple[bytes, int]], members: "SourceMembers", report: dict,
+                      public: frozenset[str] = frozenset()) -> None:
+    """After assembly: no published member may name a member that is not published, by path or by
+    digest. JSON provenance records are projected, every digest stated about a projected member is
+    restated, and anything that still holds a reference refuses the build. Of what is left, a reference
+    by a path in public (the repository's own files, tracked_paths) is exempt and counted in the report;
+    a digest never is."""
+    private = members.non_published
+    names = private.names()
+    # Rows are cut for a member's path or digest. An original snapshot's digest is restated instead, and
+    # none may be left afterwards.
+    member_digests = frozenset(value for rows in private.trees.values() for value in rows.values())
+    digests = private.digests() | {original for original, *_ in members.projected.values()}
+    changes = [(tree, original, shipped, (size, shipped_size))
+               for tree, (original, size, shipped, shipped_size) in sorted(members.projected.items())]
+    projected, failed = [], {}
+    for name in sorted(files):
+        data, mode = files[name]
+        if name.startswith("selected/provenance/") and name.endswith(".json") and name != PROVENANCE_RECORD:
+            try:
+                changed = project_record(data, names, member_digests)
+            except PackageError:
+                failed[name] = 1
+                continue
+            if changed != data:
+                files[name] = (changed, mode)
+                projected.append(name)
+                changes.append((name, digest(data), digest(changed), None))
+    if failed:
+        raise PackageError("provenance_record_not_projectable", members=failed)
+    restated, sized, written = restate_digests(files, changes)
+    references = References(names, digests, public)
+    found, exempt = {}, {}
+    for name in sorted(files):
+        data = files[name][0]
+        count, spared = references.split(data)
+        if SOURCE_SNAPSHOT.fullmatch(name):
+            inside = references.split(read_source_snapshot(data)[0])
+            count, spared = count + inside[0], spared + inside[1]
+        if count:
+            found[name] = count
+        if spared:
+            exempt[name] = spared
+    if found:
+        raise PackageError("published_member_names_non_published", members=found)
+    # Where the lane owner may have to look: numbers stay as they were, apart from a snapshot's size
+    # beside its restated digest.
+    fields: dict[str, set[str]] = {name: set() for name in projected}
+    for name in sorted({*projected, *written}):
+        document = json_document(files[name][0])
+        if document is None:
+            continue
+        if name in projected and document[1][0] == "o":
+            fields[name].update(integer_fields(document[1]))
+        for node in maps_with(document[1], written.get(name, set())):
+            fields.setdefault(name, set()).update(integer_fields(node))
+    report.update({
+        "projected_records": projected,
+        # References by a path that is a file of this repository: not refused, counted here by reason.
+        "exempt_references": {"public_repository_path": sum(exempt.values())},
+        "exempt_reference_members": exempt,
+        "restated": {name: sorted(sources) for name, sources in sorted(restated.items())},
+        "sizes_restated": {name: sorted(names) for name, names in sorted(sized.items())},
+        "integer_fields": {name: sorted(names) for name, names in sorted(fields.items())
+                           if names or name in projected}})
+
+
+def read_source_snapshot(raw: bytes) -> tuple[bytes, list[tuple[tarfile.TarInfo, bytes, bytes]]]:
+    """A source snapshot's tar bytes and its members (plain USTAR, regular files only)."""
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(raw), mode="rb") as stream:
+            original = stream.read(MAX_TOTAL_BYTES + 1)
+    except (EOFError, OSError, zlib.error):
+        raise PackageError("invalid_provenance_archive") from None
+    return original, provenance_members(original)
+
+
+def project_source_snapshot(raw: bytes, tree: str, members: SourceMembers) -> bytes:
+    """One source snapshot with only its published members, without rewriting a retained header. A
+    snapshot with nothing left out is returned as it is."""
+    original, rows = read_source_snapshot(raw)
+    blocks, left_out = [], set()
+    for item, content, block in rows:
+        if members.publishes(tree, item.name, content):
+            blocks.append(block)
+        else:
+            left_out.add(item.name)
+    if not left_out:
+        return raw
+    # Member order, headers, data, padding and the end-of-archive blocks stay as they were.
+    trailer = original[sum(len(block) for _, _, block in rows):]
+    output = io.BytesIO()
+    with gzip.GzipFile(filename="", fileobj=output, mode="wb", mtime=0) as stream:
+        stream.write(b"".join(blocks) + trailer)
+    data = output.getvalue()
+    # Check the bytes that ship, read back from the compressed form.
+    verify_provenance_projection(original, gzip.decompress(data), left_out)
+    members.projected[tree] = (digest(raw), len(raw), digest(data), len(data))
+    return data
 
 
 class Inputs:
@@ -2399,7 +3046,8 @@ def require_explicit_official_family(files: dict[str, tuple[bytes, int]]) -> Non
         raise PackageError("explicit_official_family_requires_uncomposed_routes")
 
 
-def collect_python(inputs: Inputs, target: str, *, settings: dict | None = None) -> dict[str, tuple[bytes, int]]:
+def collect_python(inputs: Inputs, target: str, members: SourceMembers, *,
+                   settings: dict | None = None) -> dict[str, tuple[bytes, int]]:
     """Select accepted Python tools from an exact donor, without extracting it.
 
     The whole archive pin identifies the prior accepted distribution. Its
@@ -2442,6 +3090,9 @@ def collect_python(inputs: Inputs, target: str, *, settings: dict | None = None)
                     raise PackageError("python_tool_digest_mismatch")
             elif member.mode != 0o644:
                 raise PackageError("invalid_python_donor_member")
+            if name.startswith("provenance/source/") and not members.publishes(
+                    SOURCE_TREE, name.removeprefix("provenance/source/"), data):
+                continue  # Not in the published list: not shipped, not recorded.
             # Name the whole-kit record as historical donor provenance. It
             # deliberately describes more capabilities than this selection.
             output = "provenance/donor-kit.json" if name == "provenance/kit.json" else name
@@ -2566,13 +3217,15 @@ def python_document(source: str, destination: str, raw: bytes, *, target: str | 
     return re.sub(r"\[([^\]]*)\]\(([^)]+)\)", replace, raw.decode("utf-8")).encode("utf-8")
 
 
-def collect(root: Path, target: str, *, settings: dict | None = None) -> dict[str, tuple[bytes, int]]:
+def collect(root: Path, target: str, *, settings: dict | None = None,
+            non_published: NonPublished | None = None, report: dict | None = None) -> dict[str, tuple[bytes, int]]:
     if target not in TARGETS:
         raise PackageError("unsupported_target")
     selection = settings["selection"] if settings is not None else TARGETS[target]
     donor = settings["donor"] if settings is not None else PYTHON_KITS[target]
     python_sources = settings["python_sources"] if settings is not None else PYTHON_SOURCES | donor.get("sources", {})
     inputs = Inputs(root)
+    members = SourceMembers(read_source_member_lists(inputs.read(PUBLISHED_LIST)), non_published)
     consumer = collect_bundle(inputs, selection)
     result = {"consumers/" + name: value for name, value in consumer.items()}
     if settings is not None and "input_selection" in settings:
@@ -2580,7 +3233,7 @@ def collect(root: Path, target: str, *, settings: dict | None = None) -> dict[st
             selected_consumer_closure(inputs, consumer, selection, target), 0o644)
     if selection.get("official") is not None:
         result.update({"official/" + name: value for name, value in collect_official(inputs, selection["official"], target).items()})
-    result.update(collect_python(inputs, target, settings=settings))
+    result.update(collect_python(inputs, target, members, settings=settings))
     sources = settings["sources"] if settings is not None else setup_sources(selection)
     for name, (path, expected) in sources.items():
         if name == "selected/bin/install-library-consumer.py":
@@ -2598,10 +3251,14 @@ def collect(root: Path, target: str, *, settings: dict | None = None) -> dict[st
         result[name] = (data, mode)
         document_sources[name] = {"donor_member": name.removeprefix("selected/"),
                                   "source_sha256": digest(original), "output_sha256": digest(data)}
+    snapshots = []
     for name, (path, expected) in python_sources.items():
         data = inputs.read(path)
         if digest(data) != expected:
             raise PackageError("selected_source_digest_mismatch")
+        if SOURCE_SNAPSHOT.fullmatch(name):
+            data = project_source_snapshot(data, name, members)
+            snapshots.append({"member": name, "sha256": digest(data), "bytes": len(data)})
         if name.endswith(".md") and (name.startswith("selected/contracts/")
                                     or name == "selected/agent/instructions.md"):
             original = data
@@ -2615,6 +3272,17 @@ def collect(root: Path, target: str, *, settings: dict | None = None) -> dict[st
         # Exact producer submission, not a replacement for historical records or
         # a claim that these inputs have completed execution qualification.
         result["selected/provenance/current-input-selection.json"] = (settings["input_selection_raw"], 0o644)
+    # Every member of the retained build source was either published or named by the private list.
+    members.check()
+    if snapshots or "provenance/source/" in donor["provenance_trees"]:
+        # What ships of the source snapshots; nothing about what was left out.
+        if PROVENANCE_RECORD in result:
+            raise PackageError("provenance_record_collision")
+        record = {"schema_version": 2, "note": PROVENANCE_NOTE,
+                  "snapshots": sorted(snapshots, key=lambda row: row["member"])}
+        result[PROVENANCE_RECORD] = ((json.dumps(record, indent=2, sort_keys=True) + "\n").encode(), 0o644)
+    if target in PROVENANCE_DISCLOSURE_TARGETS and PROVENANCE_DISCLOSURE.encode() not in result["README.md"][0]:
+        raise PackageError("provenance_disclosure_missing")
     # Static serving is fixed to this directory. Do not silently ship new assets.
     static_files, static_dirs = inputs.file_set("sdk/consumer-setup/static")
     if static_files != {"index.html", "app.js", "form.js", "style.css"} or static_dirs:
@@ -2623,6 +3291,10 @@ def collect(root: Path, target: str, *, settings: dict | None = None) -> dict[st
         require_explicit_official_family(result)
     else:
         compose_official_routes(result, OFFICIAL_ROUTE_BINDINGS[target])
+    if non_published is not None:
+        # With the private list: no published member may name a member that is not published. A path
+        # that the commit of this checkout tracks under root names the repository's own file.
+        settle_references(result, members, report if report is not None else {}, tracked_paths(root))
     # Raw reads, donor expansion and final payload have separate bounded totals.
     if (any(len(data) > MAX_FILE_BYTES for data, _ in result.values())
             or sum(len(data) for data, _ in result.values()) > MAX_TOTAL_BYTES):
@@ -2642,8 +3314,18 @@ def validate_guide_commands(guide: bytes, files: dict) -> None:
             raise PackageError("guide_command_digest_mismatch")
 
 
+def read_list_file(path: Path) -> bytes:
+    """A member list outside the checkout."""
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_FILE_BYTES + 1)
+    if len(raw) > MAX_FILE_BYTES:
+        raise PackageError("invalid_source_member_list")
+    return raw
+
+
 def package(root: Path, target: str, output: Path, *, input_selection: Path | None = None,
-            input_selection_sha256: str | None = None) -> dict:
+            input_selection_sha256: str | None = None, non_published_list: Path | None = None,
+            proof_only: bool = False) -> dict:
     if target not in TARGETS or not output.is_absolute() or output.name in {"", ".", ".."}:
         raise PackageError("invalid_output_or_target")
     if output.exists() or output.is_symlink():
@@ -2661,7 +3343,16 @@ def package(root: Path, target: str, output: Path, *, input_selection: Path | No
         protected.append(settings["selection"]["official"]["bundle"])
     if any(output.is_relative_to(root / path) for path in protected):
         raise PackageError("output_inside_input")
-    files = collect(root, target, settings=settings if input_selection is not None else None)
+    if non_published_list is not None and proof_only:
+        raise PackageError("invalid_proof_request")
+    report: dict = {}
+    files = collect(root, target, settings=settings if input_selection is not None else None,
+                    non_published=None if non_published_list is None else read_non_published_list(
+                        read_list_file(non_published_list)), report=report)
+    # Without the private list nothing was checked for references to members that are not published:
+    # that is a proof build, never a release build, and its result says so.
+    if non_published_list is None and not proof_only:
+        raise PackageError("non_published_list_required")
     edition = settings["selection"].get("edition", EDITION)
     root_name = f"toolkit-library-{edition}-{target}"
     archive_name = root_name + ".tar.gz"
@@ -2690,7 +3381,8 @@ def package(root: Path, target: str, output: Path, *, input_selection: Path | No
         checksum = hashlib.file_digest(stream, "sha256").hexdigest()
     with (output / "SHA256SUMS").open("x", encoding="ascii", newline="\n") as stream:
         stream.write(f"{checksum}  {archive_name}\n")
-    result = {"target": target, "archive": str(destination), "sha256": checksum, "files": len(files)}
+    result = {"target": target, "archive": str(destination), "sha256": checksum, "files": len(files),
+              "proof_only": proof_only, "reference_check": "not_run" if proof_only else "passed", **report}
     if input_selection is not None:
         if digest(Path(__file__).read_bytes()) != source_sha256:
             raise PackageError("packager_source_changed")
@@ -2703,18 +3395,163 @@ def package(root: Path, target: str, output: Path, *, input_selection: Path | No
     return result
 
 
+def library_source_members(path: Path) -> dict[str, dict[str, str | None]]:
+    """The member names of the source trees a library archive ships."""
+    trees: dict[str, dict[str, str | None]] = {}
+    try:
+        with tarfile.open(path, mode="r:gz") as archive:
+            for count, member in enumerate(archive, start=1):
+                _, _, name = member.name.partition("/")
+                if count > MAX_ENTRIES + MAX_DONOR_ENTRIES:
+                    raise PackageError("library_too_large")
+                if not member.isfile() or not name:
+                    continue
+                if name.startswith(SOURCE_TREE):
+                    trees.setdefault(SOURCE_TREE, {})[relative_path(name.removeprefix(SOURCE_TREE))] = None
+                elif SOURCE_SNAPSHOT.fullmatch(name):
+                    if member.size > MAX_FILE_BYTES:
+                        raise PackageError("library_too_large")
+                    with archive.extractfile(member) as stream:
+                        _, rows = read_source_snapshot(stream.read(MAX_FILE_BYTES + 1))
+                    trees.setdefault(name, {}).update({item.name: None for item, _, _ in rows})
+    except (tarfile.TarError, EOFError, zlib.error):
+        raise PackageError("invalid_library_archive") from None
+    return trees
+
+
+def input_source_members(root: Path, target: str, settings: dict) -> tuple[dict, dict]:
+    """The members of the source trees in a target's pinned or selected inputs, published or not, each
+    with its sha256; and the sha256 of each source snapshot input."""
+    donor, inputs = settings["donor"], Inputs(root)
+    trees: dict[str, dict[str, str | None]] = {}
+    snapshots: dict[str, set[str]] = {}
+    if "provenance/source/" in donor["provenance_trees"]:
+        raw = inputs.read(donor["archive"])
+        if digest(raw) != donor["sha256"]:
+            raise PackageError("python_donor_digest_mismatch")
+        prefix = donor["root"] + "/provenance/source/"
+        trees[SOURCE_TREE] = {}
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
+            for member in archive:
+                if member.isfile() and member.name.startswith(prefix):
+                    if member.size > MAX_FILE_BYTES:
+                        raise PackageError("python_donor_too_large")
+                    with archive.extractfile(member) as stream:
+                        data = stream.read(MAX_FILE_BYTES + 1)
+                    trees[SOURCE_TREE][relative_path(member.name.removeprefix(prefix))] = digest(data)
+    for name, (path, expected) in settings["python_sources"].items():
+        if SOURCE_SNAPSHOT.fullmatch(name):
+            data = inputs.read(path)
+            if digest(data) != expected:
+                raise PackageError("selected_source_digest_mismatch")
+            trees[name] = {item.name: digest(content) for item, content, _ in read_source_snapshot(data)[1]}
+            snapshots[name] = {expected}
+    return trees, snapshots
+
+
+def write_source_members(root: Path, args: argparse.Namespace) -> dict:
+    """Write a member list from libraries, a target's inputs and other lists: the published form (names),
+    or with --non-published the private form (names with digests, and the original snapshots' digests)."""
+    output, request = args.source_members, PackageError("invalid_source_member_request")
+    if (not output.is_absolute() or args.output is not None or args.non_published_list is not None
+            or args.show_names or args.proof_only):
+        raise request
+    if not (args.from_library or args.from_inputs or args.from_list):
+        raise request
+    if args.from_inputs != (args.target is not None) or (args.input_selection is not None and not args.from_inputs):
+        raise request
+    trees: dict[str, dict[str, str | None]] = {}
+    snapshots: dict[str, set[str]] = {}
+
+    def add(found: dict, originals: dict) -> None:
+        for tree, names in found.items():
+            known = trees.setdefault(tree, {})
+            for name, value in names.items():
+                if known.get(name) not in (None, value) and value is not None:
+                    raise request  # one member of one tree with two digests
+                known[name] = known.get(name) or value
+        for tree, digests in originals.items():
+            snapshots.setdefault(tree, set()).update(digests)
+
+    for path in args.from_library:
+        add(library_source_members(path), {})
+    if args.from_inputs:
+        add(*input_source_members(root, args.target, selected_inputs(
+            root, args.target, args.input_selection, args.input_selection_sha256)))
+    for path in (*args.from_list, *args.except_list):
+        # Either form of list; an --except-list takes names away.
+        raw = read_list_file(path)
+        try:
+            found, originals = {tree: dict.fromkeys(names) for tree, names in read_source_member_lists(raw).items()}, {}
+        except PackageError:
+            private = read_non_published_list(raw)
+            found, originals = private.trees, private.snapshots
+        if path in args.from_list:
+            add(found, originals)
+        else:
+            for tree, names in found.items():
+                for name in names:
+                    trees.get(tree, {}).pop(name, None)
+    if args.non_published:
+        # Every member with its digest, and the original of every snapshot that holds one.
+        if any(value is None for names in trees.values() for value in names.values()) or any(
+                tree not in snapshots for tree, names in trees.items() if names and tree != SOURCE_TREE):
+            raise request
+        raw = encode_source_member_lists(trees, {tree: snapshots[tree] for tree, names in trees.items()
+                                                 if names and tree != SOURCE_TREE})
+        read_non_published_list(raw)  # What is written is a list the packager accepts.
+    else:
+        raw = encode_source_member_lists(trees, None)
+        read_source_member_lists(raw)
+    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(raw)
+    return {"trees": {tree: len(names) for tree, names in sorted(trees.items())}}
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument("--target", choices=tuple(TARGETS), required=True)
-    parser.add_argument("--output", type=Path, required=True, help="New absolute output directory; its parent must exist")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     allow_abbrev=False)
+    parser.add_argument("--target", choices=tuple(TARGETS))
+    parser.add_argument("--output", type=Path, help="New absolute output directory; its parent must exist")
     parser.add_argument("--input-selection", type=Path)
     parser.add_argument("--input-selection-sha256")
+    parser.add_argument("--non-published-list", type=Path,
+                        help="the private list of source members that are not published (never committed)")
+    parser.add_argument("--show-names", action="store_true",
+                        help="on a refusal, name the members in neither list on standard error")
+    parser.add_argument("--proof-only", action="store_true",
+                        help="package without the private list: not a release build, and the result says so")
+    parser.add_argument("--source-members", type=Path, metavar="NEW_LIST",
+                        help="write a source member list instead of packaging (a new file, mode 0600)")
+    parser.add_argument("--from-library", type=Path, action="append", default=[], metavar="LIBRARY")
+    parser.add_argument("--from-inputs", action="store_true", help="the source trees of --target's inputs")
+    parser.add_argument("--from-list", type=Path, action="append", default=[], metavar="LIST")
+    parser.add_argument("--except-list", type=Path, action="append", default=[], metavar="LIST")
+    parser.add_argument("--non-published", action="store_true",
+                        help="with --source-members: write the private form, each member with its sha256")
     args = parser.parse_args()
     try:
-        result = package(ROOT, args.target, args.output, input_selection=args.input_selection,
-                         input_selection_sha256=args.input_selection_sha256)
+        if args.source_members is not None:
+            result = write_source_members(ROOT, args)
+        else:
+            if (args.target is None or args.output is None or args.from_library or args.from_inputs
+                    or args.from_list or args.except_list or args.non_published):
+                raise PackageError("invalid_output_or_target")
+            result = package(ROOT, args.target, args.output, input_selection=args.input_selection,
+                             input_selection_sha256=args.input_selection_sha256,
+                             non_published_list=args.non_published_list, proof_only=args.proof_only)
     except PackageError as error:
-        parser.exit(1, f"Packaging refused: {error}. Inputs and earlier outputs were not replaced.\n")
+        lines = [f"Packaging refused: {error}. Inputs and earlier outputs were not replaced."]
+        for tree, names in error.unlisted.items():
+            lines.append(f"  {tree}: {len(names)} member(s) in neither the published list nor the private list")
+            if args.show_names:
+                lines.extend(f"    {tree}\t{name}" for name in names)
+        for member, count in error.members.items():
+            lines.append(f"  {member}: {count} " + (
+                "record that cannot be projected" if str(error) == "provenance_record_not_projectable"
+                else "reference(s) to a member that is not published"))
+        parser.exit(1, "\n".join(lines) + "\n")
     except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
         parser.exit(1, "Packaging refused: input_or_output_unavailable. Inputs and earlier outputs were not replaced.\n")
     print(json.dumps(result, sort_keys=True))

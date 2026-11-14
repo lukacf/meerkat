@@ -43,7 +43,7 @@ jobs:
         run: |
           python3 -B -m unittest discover -s scripts -p 'test_package_connect_resource*.py' -v
           python3 -B -m unittest -v scripts.test_assemble_connect_product
-          python3 -B -m unittest -v scripts.test_package_library_release.ReleaseTests scripts.test_package_github_enterprise
+          python3 -B -m unittest -v scripts.test_package_library_release.ReleaseTests scripts.test_package_library_release.SourceSnapshotReferenceTests scripts.test_package_github_enterprise
       - name: Install candidate, preparation and native-host test dependencies
         run: python3 -m pip install --disable-pip-version-check pytest==9.0.2 mcp==2.2.0 meerkat-meta==0.9.7
       - name: Check candidate producer and publication contracts without native builds

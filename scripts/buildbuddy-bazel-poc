@@ -504,11 +504,21 @@ case "${command}" in
     # every supported Intel Mac can start these binaries.
     extra_args+=(--compilation_mode=opt --define=meerkat_release_build=1 --remote_download_outputs=toplevel --platforms=//tools/bazel/platforms:macos_x86_64 --macos_minimum_os=11.0)
     ;;
+  # The Linux cases link with GNU ld (bfd), not the cc toolchain's default
+  # gold. The lane's actions run in the Bullseye image, whose gold (binutils
+  # 2.35.2) writes the `#[used]` constructors rustc marks SHF_GNU_RETAIN into
+  # a second `.init_array` table that process start never runs: every
+  # link-time registration (`inventory::submit!`: the capabilities and the
+  # built-in skills) was linked and never ran, so the Linux x86_64 release
+  # binaries through 0.9.14 reported no capabilities and carried no built-in
+  # skill. scripts/check-release-binary-registrations asks each built binary;
+  # scripts/check-bazel-release-features.py fails a Linux case without the
+  # option.
   release-build-linux-x86)
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-linux-rbe}"
     default_target="//crates/meerkat-cli:rkat //crates/meerkat-rpc:rkat_rpc_bin //crates/meerkat-rest:rkat_rest_bin //crates/meerkat-mcp-server:rkat_mcp_bin"
-    extra_args+=(--compilation_mode=opt --define=meerkat_release_build=1 --remote_download_outputs=toplevel)
+    extra_args+=(--compilation_mode=opt --define=meerkat_release_build=1 --remote_download_outputs=toplevel --linkopt=-fuse-ld=bfd)
     ;;
   release-build-linux-arm64)
     command="build"

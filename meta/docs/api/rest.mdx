@@ -170,9 +170,9 @@ member tokens name it, which is Meta's comms-safe encoding of the identity and
 starts with `mk--` when the identity has a `:`; absent when Core holds no
 binding of the identity and on records of raw runtime members),
 `visibility`, `addressable`, `health`, `labels`, and
-`topology_peers` when non-empty. `labels.role` is the member's role, and for
-an identity with no live member its profile unless its declared labels name a
-role. Use
+`topology_peers` when non-empty. `labels.role` is the member's role, and, from
+0.9.15, for an identity with no live member its profile unless its declared
+labels name a role. Use
 [`meta/console/inspect_identity`](/api/rpc#meta%2Fconsole%2Finspect_identity)
 for identity/peer inspection and `/console/experience` for affordances;
 neither identities nor inspection records contain an affordances field.

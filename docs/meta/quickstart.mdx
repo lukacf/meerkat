@@ -4,7 +4,7 @@ description: "Start a Meta application runtime with a matching gateway and SDK, 
 icon: "rocket"
 ---
 
-*Mirrored from Meerkat Meta main at [abdabeb8e978](https://github.com/lukacf/meerkat/commit/abdabeb8e97805385e71d66da7e78136c4b0e68c) on 2026-11-12; Meta version 0.9.14 at that commit.*
+*Mirrored from Meerkat Meta main at [225d539132a2](https://github.com/lukacf/meerkat/commit/225d539132a2ace672400cfa432d00adb43db1a7) on 2026-11-14; Meta version 0.9.14 at that commit.*
 
 This guide starts with the Meta application runtime. If you only need to run an
 agent or a mob, [Core's quickstart](https://docs.rkat.ai/quickstart) is enough.
@@ -233,7 +233,13 @@ for `autonomous_host`; that exception does not cover arbitrary external
 bindings. See [Runtime modes](/meta/concepts/roster#runtime-modes).
 </Note>
 
-Use `respawn()` for non-destructive recovery that keeps continuity, and `reset()` only when the app intentionally wants a destructive new generation and session.
+Use `respawn()` for recovery that keeps the identity, its history and its memory, and `reset()` only when the app intentionally wants a destructive new generation and session.
+
+<Warning>
+Known issue, noted 2026-11-13: on Meta 0.9.9 through 0.9.14, respawning an identity on a gateway that keeps its state on disk, or on an embedding host that keeps its state on disk and uses identities, can destroy the mobs it created and its delegates. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases, how it happens and what to do.
+</Warning>
 
 If you change a durable identity's role in the roster, its resume fails closed
 until that boot declares the migration with `.role_migrations([...])`. See the

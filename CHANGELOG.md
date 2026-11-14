@@ -1551,12 +1551,16 @@ them.
   start rebuilds it from the run store (read from the source). A mob that
   an earlier release stopped while one of its flow runs was still active
   holds that run as not terminal; at its first start under this release
-  recovery ends the run as `Canceled`, as it does for every run it finds
-  without a live task, and the mob starts with no run counted (read from
-  the source; the recovery of a run without a live task is confirmed by a
-  test for a mob that resumes running). Rollback: this change stores
-  nothing new and changes no stored form, so 0.9.14 reads a store written
-  with it as it reads its own (read from the source).
+  recovery ends the run as `Canceled` and the mob starts with no run
+  counted (read from the source; the recovery of a run without a live task
+  is confirmed by a test for a mob that resumes running). This holds for a
+  run on a member this host runs. A run whose step was owed by a member
+  placed on another host is not ended at the start (see Known
+  limitations); by the source, the start of a mob stopped over such a run
+  is refused while that run is counted (not confirmed by a run). Rollback:
+  this change stores nothing new and changes no stored form, so 0.9.14
+  reads a store written with it as it reads its own (read from the
+  source).
 
 ### Known limitations
 

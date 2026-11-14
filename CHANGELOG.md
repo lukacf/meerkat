@@ -248,7 +248,7 @@ them.
   the field `reasoning_effort: Option<ReasoningEffortResolution>`, `RunResult`
   gains the public field `reasoning_effort: Option<ReasoningEffortReport>`,
   and `ProviderParamsOverride` gains the public request-local field
-  `reasoning_route_witness: Option<ReasoningRouteObservation>` (see Added).
+  `reasoning_route_witness: Option<Box<ReasoningRouteObservation>>` (see Added).
   Code that builds these values with a struct literal, or matches the two
   event variants without `..`, must add the member; `None` keeps the earlier
   behaviour. `AgentEvent` gains the variant `RequestReasoningEffortResolved`

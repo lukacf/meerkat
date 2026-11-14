@@ -1810,9 +1810,13 @@ Only a mechanical failure is `-32603`.
   (`SESSION_BUSY`, retryable) with the data
   `{"kind": "reasoning_effort_change_needs_idle_session"}`
   at once, and nothing is stored. Wait for the running turn's answer, then
-  send it again; do not poll. A later release queues such a turn. A turn
-  that repeats the session's level, clears it or names none queues like
-  any turn, and so does every turn on a session that holds no
+  send it again; do not poll. A later release queues such a turn. On a
+  session that holds a level, "changes the model" covers every turn that
+  names `model`, `provider`, `self_hosted_server_id`, `provider_params` or
+  `auth_binding`, also when the same turn clears the level. A deferred
+  session counts as busy while its first turn is still building it. A turn
+  that repeats the session's level, only clears it or names none queues
+  like any turn, and so does every turn on a session that holds no
   provider-neutral level. `mob/turn_start` takes the same field and is
   answered the same.
 </ParamField>
@@ -4722,12 +4726,15 @@ the session is idle. Its one `kind` names the level also when the turn
 only changed the model of a session that holds a level. The other surfaces answer the same request in their
 own way: REST answers a level on a message for a session it holds live
 with HTTP 500 `session is busy`, and the MCP server's `meerkat_resume`
-rebuilds the session (see [REST](/api/rest) and [MCP](/api/mcp)). Two
+rebuilds the session (see [REST](/api/rest) and [MCP](/api/mcp)). Three
 turns are judged when they start, after their input was stored: a deferred
-create's first turn, and a turn on a stored session that is not live whose
-level cannot be judged yet (`supported_levels_unavailable`). Such a turn's
-stored input ends as abandoned with the reason `stopped`, not with the
-refusal (see Known limitations in the changelog). A run that fails for the refusal
+create's first turn; a turn on a stored session that is not live whose
+level cannot be judged yet (`supported_levels_unavailable`); and a turn
+that repeats the session's level and is queued behind a turn that clears
+it, which sets the level again when it starts and is refused there only if
+the route's answer for the same model changed while it waited. Such a
+turn's stored input ends as abandoned with the reason `stopped`, not with
+the refusal (see Known limitations in the changelog). A run that fails for the refusal
 reports it in `run_failed` as the `error_report` reason
 `{"reason_type": "reasoning_effort_refused", "refusal": {...}}` with class
 `config`. No provider request is made for a refused level. The MCP server

@@ -2711,8 +2711,12 @@ them.
   stored session that is not live. A turn that sets or changes the
   provider-neutral level (`reasoning_effort`, direct or inside
   `provider_params`), or changes the model of a session that holds one, is
-  not queued behind unfinished work: while another turn of the session
-  runs or an input is queued it is answered `-32002` (`SESSION_BUSY`,
+  not queued behind unfinished work (on a session that holds a level that
+  is every turn that names `model`, `provider`, `self_hosted_server_id`,
+  `provider_params` or `auth_binding`, also when the same turn clears the
+  level; a turn that only clears the level, or repeats it, queues): while
+  another turn of the session runs or an input is queued, or while a
+  deferred session's first turn is building it, it is answered `-32002` (`SESSION_BUSY`,
   retryable, data `{"kind": "reasoning_effort_change_needs_idle_session"}`)
   at once and nothing is stored; wait for the running turn's answer, then
   send it again (confirmed by tests of this change, on a session and on a
@@ -2720,13 +2724,19 @@ them.
   level is judged again when its turn starts, anything queued ahead can
   change the session's model, and a level refused at a turn's start still
   ends the turn as a failed start.
-  Three turns are judged when they start: a deferred create's first turn;
-  a turn on a stored session that is not live whose level cannot be judged
-  yet (`supported_levels_unavailable`: an account's model list that is not
-  loaded; confirmed by a test of this change); and a turn whose route
-  changes in the moment between its admission on an idle session and its
-  start (read from the source). Its stored input ends as abandoned with
-  the reason `stopped`, not with the refusal. The
+  These turns are still judged when they start, after their input was
+  stored: a deferred create's first turn; a turn on a stored session that
+  is not live whose level cannot be judged yet
+  (`supported_levels_unavailable`: an account's model list that is not
+  loaded; confirmed by a test of this change); a turn that repeats the
+  session's level and is queued behind a turn that clears it: it sets the
+  level again at its start and is refused there only if the route's answer
+  for the same model changed while it waited (a reload of the operator's
+  levels, an account's model list changing); and a turn admitted on an
+  idle session whose model, level or route is changed by something else
+  in the moment before it starts (the last two read from the source). Its
+  stored input ends as abandoned with the reason `stopped`, not with the
+  refusal. The
   refused start costs the session
   that one turn and nothing it owns: its mobs and their members stay. The
   runtime retires the session's live runtime (its registration and its

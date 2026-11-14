@@ -504,7 +504,10 @@ is answered `SESSION_BUSY` (retryable, data kind
 `reasoning_effort_change_needs_idle_session` for either cause, a model
 change on a session that holds a level included) and changes nothing: wait
 for the running turn's answer, then send it again. That answer is not a
-level refusal. A session that holds no provider-neutral level queues its
+level refusal. On a session that holds a level this covers every turn that
+names the model, the provider, the provider params or the auth binding,
+also when the same turn clears the level; a turn that only clears the
+level, or repeats it, queues. A session that holds no provider-neutral level queues its
 turns as before, a model change and a provider's own effort parameter
 (`provider_tag`) included. REST answers such a message for a session it
 holds live with `session is busy`. A run refused inside a turn fails with `run_failed` reason

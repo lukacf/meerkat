@@ -5641,15 +5641,6 @@ impl DriverEntry {
         }
     }
 
-    /// Whether the machine holds any of `input_ids` as queued work (in a
-    /// lane, or in the queued phase).
-    pub(crate) fn has_queued_input_among(&self, input_ids: &[InputId]) -> bool {
-        match self {
-            DriverEntry::Ephemeral(d) => d.has_queued_input_among(input_ids),
-            DriverEntry::Persistent(d) => d.has_queued_input_among(input_ids),
-        }
-    }
-
     pub(crate) fn defer_queued_inputs_behind_backlog(
         &mut self,
         input_ids: &[InputId],

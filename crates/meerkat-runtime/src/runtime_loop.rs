@@ -7401,17 +7401,6 @@ async fn resolve_failed_batch_backlog(
             // terminalizes it as MaxAttemptsExhausted.
             return FailedBatchBacklogOutcome::ContinueProcessing;
         }
-        if !d.has_queued_input_among(input_ids) {
-            // The machine holds none of the failed batch as queued work: its
-            // failure realization ended every member (a refused request ends
-            // its contributors with the run, and a persistent driver has
-            // archived them with their receipt, so the machine no longer
-            // tracks them). Nothing of the batch is there to put behind the
-            // backlog, and what is queued runs next. This is read from the
-            // machine's own state, like the two decisions above, never from
-            // the failure's kind.
-            return FailedBatchBacklogOutcome::ContinueProcessing;
-        }
         d.defer_queued_inputs_behind_backlog(input_ids, cancelled_run_id)
             .err()
     };
@@ -15042,11 +15031,13 @@ mod tests {
 
     /// A failed apply whose typed reason is the reasoning effort refusal is
     /// a refused request, whatever kind the executor gave it: the machine's
-    /// cause for it is `RequestRefused` and its contributors end with it.
-    /// The same failure without that reason, and a failure that carries
-    /// another typed reason, keep the executor's kind and are replayed.
+    /// cause for it is `RequestRefused`. The same failure without that
+    /// reason, and a failure that carries another typed reason, keep the
+    /// executor's kind. The loop does not decide the refused run's end from
+    /// the error: it hands every answered failure over as replayable, and
+    /// the failed-run realization reads the cause the machine recorded.
     #[test]
-    fn a_refused_reasoning_effort_level_is_a_refused_request_and_ends_its_contributors() {
+    fn a_refused_reasoning_effort_level_is_a_refused_request_for_the_machine_only() {
         use crate::meerkat_machine::FailedRunContributorDisposition;
         use crate::meerkat_machine::dsl::RuntimeApplyFailureCause;
         use meerkat_core::lifecycle::core_executor::{
@@ -15078,7 +15069,7 @@ mod tests {
             );
             assert_eq!(
                 failed_run_contributor_disposition(&CoreExecutorError::apply_failed(refused)),
-                FailedRunContributorDisposition::Refused,
+                FailedRunContributorDisposition::Replayed,
                 "{}",
                 kind.as_str()
             );

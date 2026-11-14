@@ -42733,23 +42733,39 @@ async fn a_never_started_resumed_run_consumes_the_inputs_its_rounds_applied() {
 /// never began executing does: the same realization, so the same durable
 /// rows. Each input's stored terminal record is the same byte for byte (the
 /// staged input never executed, the one a committed round applied consumed),
-/// and neither run leaves an input in a lane or bound to the run.
+/// and neither run leaves an input in a lane or bound to the run. The
+/// refused run's end is not the caller's choice: the caller hands the
+/// failure over as replayable, and the realization reads the cause the
+/// machine recorded for the failed run. The same failure without the
+/// refusal is replayed.
 #[tokio::test]
 async fn a_refused_run_stores_for_its_inputs_what_a_never_started_run_stores() {
+    use crate::meerkat_machine::FailedRunContributorDisposition;
+
+    let refusal: meerkat_core::ReasoningEffortRefusal = serde_json::from_value(serde_json::json!({
+        "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+        "route": {"backend": "anthropic_api", "api": "messages"},
+        "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+        "facts": "catalog",
+    }))
+    .expect("a reasoning effort refusal");
+    let refused = CoreApplyFailureCause::runtime_turn(refusal.to_string()).with_reason(
+        meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+            refusal: Box::new(refusal.clone()),
+        },
+    );
     let mut stored = Vec::new();
-    for disposition in [
-        crate::meerkat_machine::FailedRunContributorDisposition::Terminalized,
-        crate::meerkat_machine::FailedRunContributorDisposition::Refused,
+    for (failure, disposition) in [
+        (
+            CoreApplyFailureCause::executor_stopped(),
+            FailedRunContributorDisposition::Terminalized,
+        ),
+        (refused, FailedRunContributorDisposition::Replayed),
     ] {
         let run = resumed_run_with_applied_inputs(1, 1, false).await;
-        fail_runtime_loop_run(
-            &run.driver,
-            run.run_id.clone(),
-            CoreApplyFailureCause::executor_stopped(),
-            disposition,
-        )
-        .await
-        .expect("the run ends its inputs");
+        fail_runtime_loop_run(&run.driver, run.run_id.clone(), failure, disposition)
+            .await
+            .expect("the run ends its inputs");
         let records: Vec<(crate::input_state::InputLifecycleState, Vec<u8>)> =
             ended_run_input_outcomes(&run)
                 .await
@@ -42784,6 +42800,21 @@ async fn a_refused_run_stores_for_its_inputs_what_a_never_started_run_stores() {
             ),
         ],
         "the refused run's inputs: the one a committed round applied, the staged one"
+    );
+
+    // The control: the same failure without the refusal is replayed.
+    let run = resumed_run_with_applied_inputs(1, 1, false).await;
+    fail_runtime_loop_run(
+        &run.driver,
+        run.run_id.clone(),
+        CoreApplyFailureCause::runtime_turn(refusal.to_string()),
+        FailedRunContributorDisposition::Replayed,
+    )
+    .await
+    .expect("the failed run is replayed");
+    assert!(
+        run.driver.lock().await.has_queued_input_in_any_lane(),
+        "a failed run that was not refused returns its inputs to a lane"
     );
 }
 

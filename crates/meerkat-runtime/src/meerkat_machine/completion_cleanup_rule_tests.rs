@@ -1412,15 +1412,26 @@ fn effort_refusal() -> meerkat_core::ReasoningEffortRefusal {
     .expect("a reasoning effort refusal")
 }
 
+/// How the marked turn's apply fails at its start.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartFailure {
+    /// Refused for its reasoning effort level: nothing was applied.
+    Refused,
+    /// A failed apply of the same kind and text that carries no refusal.
+    NotARefusal,
+}
+
 /// Executor whose first apply waits for one permit. An apply that carries
-/// the input `refused` names is refused for its reasoning effort level, as
-/// the reconfiguration before a turn refuses it: nothing was applied. Every
-/// other apply answers a result.
+/// the input `refused` names fails at its start: refused for its reasoning
+/// effort level, as the reconfiguration before a turn refuses it (nothing
+/// was applied), or, for the control rows, with the same failure without
+/// the refusal. Every other apply answers a result.
 struct RefusingExecutor {
     session_id: SessionId,
     first_apply: Arc<crate::tokio::sync::Semaphore>,
     batches: Arc<std::sync::Mutex<Vec<Vec<InputId>>>>,
     refused: Arc<std::sync::Mutex<Option<InputId>>>,
+    failure: StartFailure,
 }
 
 #[async_trait::async_trait]
@@ -1453,16 +1464,17 @@ impl CoreExecutor for RefusingExecutor {
             .clone();
         if refused.is_some_and(|refused| contributors.contains(&refused)) {
             let refusal = effort_refusal();
-            return Err(CoreExecutorError::apply_failed(
-                meerkat_core::lifecycle::core_executor::CoreApplyFailureCause::runtime_turn(
-                    refusal.to_string(),
-                )
-                .with_reason(
+            let cause = meerkat_core::lifecycle::core_executor::CoreApplyFailureCause::runtime_turn(
+                refusal.to_string(),
+            );
+            return Err(CoreExecutorError::apply_failed(match self.failure {
+                StartFailure::Refused => cause.with_reason(
                     meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
                         refusal: Box::new(refusal),
                     },
                 ),
-            ));
+                StartFailure::NotARefusal => cause,
+            }));
         }
         Ok(CoreApplyOutput::with_run_result(
             RunBoundaryReceiptDraft {
@@ -1544,6 +1556,47 @@ fn answer_name(answer: &Result<CompletionOutcome, String>) -> String {
 }
 
 async fn a_turn_refused_at_its_start(persistent: bool) -> RefusedStart {
+    a_turn_failing_at_its_start(persistent, StartFailure::Refused, false).await
+}
+
+/// A directed peer message in the queue lane: an input with an interaction
+/// of its own, whose terminal is published through that interaction.
+fn directed_message() -> Input {
+    let mut header = crate::input::PromptInput::new("", None).header;
+    let interaction_id = meerkat_core::interaction::InteractionId(header.id.0);
+    header.source = crate::input::InputOrigin::Peer {
+        peer_id: "completion-cleanup-rule-peer".into(),
+        display_identity: None,
+        runtime_id: Some(LogicalRuntimeId::new("completion-cleanup-rule-peer")),
+    };
+    header.idempotency_key = Some(crate::identifiers::IdempotencyKey::new(
+        interaction_id.to_string(),
+    ));
+    header.correlation_id = Some(crate::identifiers::CorrelationId::from_uuid(header.id.0));
+    Input::Peer(crate::input::PeerInput {
+        header,
+        directed_interaction_id: Some(interaction_id),
+        objective_id: None,
+        system_prompts: Vec::new(),
+        injected_context: Vec::new(),
+        sender_taint: None,
+        convention: Some(crate::input::PeerConvention::Message),
+        content: "the directed message".into(),
+        payload: None,
+        handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+        in_reply_to: None,
+    })
+}
+
+/// One turn runs, the marked turn and one more are queued behind it, the
+/// marked turn's apply fails at its start as `failure` says, and a last turn
+/// is accepted once the one queued behind was answered. `directed` makes the
+/// marked input a directed peer message instead of an operator prompt.
+async fn a_turn_failing_at_its_start(
+    persistent: bool,
+    failure: StartFailure,
+    directed: bool,
+) -> RefusedStart {
     let machine = if persistent {
         persistent_machine()
     } else {
@@ -1561,6 +1614,7 @@ async fn a_turn_refused_at_its_start(persistent: bool) -> RefusedStart {
                 first_apply: Arc::clone(&first_apply),
                 batches: Arc::clone(&batches),
                 refused: Arc::clone(&refused_input),
+                failure,
             }),
         )
         .await
@@ -1573,11 +1627,10 @@ async fn a_turn_refused_at_its_start(persistent: bool) -> RefusedStart {
 
     // One turn runs; two are queued behind it. The first of the two is the
     // one that will be refused at its start.
-    let accept_prompt = |key: &'static str| {
+    let accept_input = |input: Input| {
         let machine = Arc::clone(&machine);
         let session_id = session_id.clone();
         async move {
-            let input = keyed_prompt(key);
             let input_id = input.id().clone();
             let (outcome, handle) = machine
                 .accept_input_with_completion(&session_id, input)
@@ -1590,6 +1643,7 @@ async fn a_turn_refused_at_its_start(persistent: bool) -> RefusedStart {
             )
         }
     };
+    let accept_prompt = |key: &'static str| accept_input(keyed_prompt(key));
     let (running, running_handle) = accept_prompt("running").await;
     tokio::time::timeout(BOUND, async {
         while batches
@@ -1603,7 +1657,12 @@ async fn a_turn_refused_at_its_start(persistent: bool) -> RefusedStart {
     .await
     .expect("the first turn starts");
     let binding = binding_of(&authority, &session_id);
-    let (refused, refused_handle) = accept_prompt("refused").await;
+    let (refused, refused_handle) = accept_input(if directed {
+        directed_message()
+    } else {
+        keyed_prompt("refused")
+    })
+    .await;
     let (behind, behind_handle) = accept_prompt("behind").await;
     *refused_input
         .lock()
@@ -1841,6 +1900,88 @@ async fn a_refused_run_leaves_none_of_its_inputs_in_a_lane() {
                 .count(),
             1,
             "persistent {persistent}: the starts that carried the refused input"
+        );
+    }
+}
+
+/// The control: the same turn failing at its start with the same failure
+/// that carries no refusal is still a failed apply. Its relay is told to
+/// clean the runtime up whatever it observed of the session, and the input
+/// goes back to the queue and is started again.
+#[tokio::test]
+async fn a_start_that_fails_without_a_refusal_is_still_cleaned_up_and_started_again() {
+    for persistent in [true, false] {
+        let end = a_turn_failing_at_its_start(persistent, StartFailure::NotARefusal, false).await;
+        assert_eq!(
+            end.relay,
+            vec![
+                Ok((Outcome::RuntimeApplyFailed, Action::CleanupRuntime)),
+                Ok((Outcome::RuntimeApplyFailed, Action::CleanupRuntime)),
+                Ok((Outcome::RuntimeApplyFailed, Action::CleanupRuntime)),
+            ],
+            "persistent {persistent}: what the failed turn's relay is told, with the live \
+             session present, not observed and absent"
+        );
+        let starts = end
+            .batches
+            .iter()
+            .filter(|batch| batch.contains(&end.refused))
+            .count();
+        assert!(
+            starts >= 2,
+            "persistent {persistent}: the failed input is started again, it was started \
+             {starts} time(s): {:?}",
+            end.batches
+        );
+        assert_ne!(
+            end.stored.1,
+            serde_json::json!({"outcome_type": "abandoned", "reason": "never_executed"}),
+            "persistent {persistent}: the failed input's stored terminal record"
+        );
+    }
+}
+
+/// A directed input (one with an interaction of its own) refused at its
+/// start is answered through the run's own result, not through the result
+/// of an abandoned input: its relay is told to keep the runtime as well,
+/// it is started once, and the turn queued behind it runs.
+#[tokio::test]
+async fn a_directed_input_refused_at_its_start_keeps_the_runtime_too() {
+    for persistent in [true, false] {
+        let end = a_turn_failing_at_its_start(persistent, StartFailure::Refused, true).await;
+        assert_eq!(
+            end.relay,
+            vec![
+                Ok((Outcome::Abandoned, Action::RetainRuntime)),
+                Ok((Outcome::Abandoned, Action::RetainRuntime)),
+                Ok((Outcome::Abandoned, Action::CleanupRuntime)),
+            ],
+            "persistent {persistent}: what the refused directed input's relay is told, with \
+             the live session present, not observed and absent"
+        );
+        assert_eq!(
+            (
+                end.batches,
+                end.behind_answer.as_str(),
+                end.later_answer.as_str()
+            ),
+            (
+                vec![
+                    vec![end.running.clone()],
+                    vec![end.refused.clone()],
+                    vec![end.behind.clone()],
+                    vec![end.later.clone()]
+                ],
+                "completed",
+                "completed"
+            ),
+            "persistent {persistent}: (the inputs of each start, the turn queued behind, a \
+             turn accepted later)"
+        );
+        assert_eq!(
+            end.stored.1,
+            serde_json::json!({"outcome_type": "abandoned", "reason": "never_executed"}),
+            "persistent {persistent}: the refused directed input's stored terminal record"
         );
     }
 }

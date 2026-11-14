@@ -3935,22 +3935,6 @@ impl EphemeralRuntimeDriver {
         self.with_dsl_state(|state| !state.input_lane.is_empty())
     }
 
-    /// Whether the machine holds any of `input_ids` as queued work: in a
-    /// lane, or in the queued phase. A failed batch none of whose members
-    /// the machine holds so has nothing to put behind the backlog: the
-    /// machine's failure realization ended every member. A member the
-    /// machine tracks as queued without a lane entry still counts, so the
-    /// defer sweep meets it and refuses that corrupt projection as before.
-    pub(crate) fn has_queued_input_among(&self, input_ids: &[InputId]) -> bool {
-        self.with_dsl_state(|state| {
-            input_ids.iter().any(|input_id| {
-                let key = Self::dsl_key(input_id);
-                state.input_lane.contains_key(&key)
-                    || state.input_phases.get(&key).copied() == Some(mm_dsl::InputPhase::Queued)
-            })
-        })
-    }
-
     pub(crate) fn defer_queued_inputs_behind_backlog(
         &mut self,
         input_ids: &[InputId],

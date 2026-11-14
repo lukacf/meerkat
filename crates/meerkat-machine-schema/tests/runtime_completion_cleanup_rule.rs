@@ -439,8 +439,10 @@ fn a_refused_request_is_answered_abandoned_and_every_other_failed_apply_as_a_fai
     }
 }
 
-/// The cause is read where a failed apply's result is answered and nowhere
-/// else: only those arms read it, and no arm of the cleanup rule does.
+/// The cause is read where a failed apply's result is answered, and by the
+/// one arm that lets the defer sweep pass over an input that ended with a
+/// refused run (its own pin is `defer_input_totality.rs`). No other arm
+/// reads it, and no arm of the cleanup rule does.
 #[test]
 fn only_the_arms_that_answer_a_failed_apply_read_its_cause() {
     let reads_the_cause = |arm: &TransitionSchema| {
@@ -459,6 +461,11 @@ fn only_the_arms_that_answer_a_failed_apply_read_its_cause() {
         .iter()
         .flat_map(|result| [result.failed, result.refused])
         .flat_map(|arm| ARM_PHASES.iter().map(move |phase| format!("{arm}{phase}")))
+        .chain(
+            ["Idle", "Attached", "Running", "Retired", "Stopped"]
+                .iter()
+                .map(|phase| format!("DeferInputBehindBacklogEndedWithRefusedRun{phase}")),
+        )
         .collect();
     expected.sort();
     assert_eq!(
@@ -471,6 +478,27 @@ fn only_the_arms_that_answer_a_failed_apply_read_its_cause() {
             "{}: the cleanup rule reads the outcome it is asked about, never the cause",
             arm.name.as_ref()
         );
+    }
+}
+
+/// The stored cause is the cause of the run whose result the machine holds
+/// open. A recovery that adopts another run's result when the machine holds
+/// none drops the stored cause with its message, so a recovered failed
+/// apply is never answered as a refused request; a recovery of the run the
+/// machine already holds keeps it.
+#[test]
+fn a_recovered_result_of_another_run_drops_the_stored_cause() {
+    let arms = arms_on("RecoverRuntimeCompletionResultCorrelation");
+    assert_eq!(arms.len(), ARM_PHASES.len(), "one recovery arm per phase");
+    for arm in arms {
+        let updates = format!("{:?}", arm.updates);
+        for field in [APPLY_FAILURE_CAUSE, "last_runtime_apply_failure_message"] {
+            assert!(
+                updates.contains(field),
+                "{}: the recovery writes {field}, got {updates}",
+                arm.name.as_ref()
+            );
+        }
     }
 }
 

@@ -161,6 +161,7 @@ pub mod realm_admission;
 pub mod realtime_transcript;
 pub mod realtime_transcript_revision;
 pub mod realtime_transcript_sidecar;
+pub mod reasoning_effort;
 pub mod redact;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
@@ -541,6 +542,13 @@ pub use realtime_transcript_sidecar::{
     RealtimeTranscriptSidecarError, RealtimeTranscriptSidecarRecord,
     RealtimeTranscriptSnapshotReasonV1,
 };
+pub use reasoning_effort::{
+    AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningEffortDecidedBy,
+    ReasoningEffortRefusal, ReasoningEffortRefusalReason, ReasoningEffortReport,
+    ReasoningEffortResolution, ReasoningEffortSent, ReasoningFactsSource, ReasoningLevelFacts,
+    ReasoningResolveInput, ReasoningResolveMode, ReasoningRoute, ReasoningRouteObservation,
+    direct_route_observation, resolve_reasoning_effort, supported_reasoning_levels,
+};
 pub use retry::{
     DEFAULT_STREAM_INACTIVITY_TIMEOUT, LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan,
     LlmRetrySchedule, MIN_MODEL_STREAM_INACTIVITY_TIMEOUT, RetryPolicy, select_retry_delay,
@@ -620,8 +628,9 @@ pub use session::{
     WitnessedToolFilter, audited_endpoint_divergence,
     capability_base_filter_for_image_tool_results, extend_transcript_rewrite_prefix_accumulator,
     import_released_0810_session, released_0810_transcript_serialized_rows_digest,
-    resolve_resumed_session_auth_binding, resolve_resumed_session_llm_identity,
-    resolve_session_auth_binding, resolve_session_llm_identity_override,
+    resolve_build_provider_params, resolve_resumed_session_auth_binding,
+    resolve_resumed_session_llm_identity, resolve_session_auth_binding,
+    resolve_session_llm_identity_override, resolve_session_provider_params,
     session_metadata_document_from_slice, session_metadata_schema_version, session_version,
     tool_call_digest, transcript_history_full_body_materializations, transcript_messages_digest,
     transcript_rewrite_prefix_digest, try_lifecycle_terminal_from_map,

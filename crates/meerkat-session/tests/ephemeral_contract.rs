@@ -76,6 +76,7 @@ impl SessionAgent for MockAgent {
 
         let _ = event_tx
             .send(AgentEvent::RunStarted {
+                reasoning_effort: None,
                 request_reasoning: None,
                 identity: Default::default(),
                 session_id: self.session_id.clone(),
@@ -97,6 +98,7 @@ impl SessionAgent for MockAgent {
         self.message_count += 2; // user + assistant
 
         Ok(RunResult {
+            reasoning_effort: None,
             text: "Hello from mock".to_string(),
             session_id: self.session_id.clone(),
             usage: Usage {
@@ -392,6 +394,7 @@ fn session_snapshot(session: &Session) -> SessionSnapshot {
 
 fn successful_run_result(session: &Session, text: impl Into<String>) -> RunResult {
     RunResult {
+        reasoning_effort: None,
         text: text.into(),
         session_id: session.id().clone(),
         usage: Usage::default(),

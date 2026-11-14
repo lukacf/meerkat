@@ -162,7 +162,20 @@ struct DeferredBrainSwapClient {
     /// that actually served the call.
     provider: Provider,
     route: RouteSpec,
+    /// The route this client reports for the provider-neutral reasoning
+    /// effort option; `None` (the default) reports no route.
+    reasoning_route: ScriptedReasoningRoute,
+    /// Whether calls 4 to 6 are scripted: the model asks to switch back to
+    /// A. Off (the default), a call past call 3 is unscripted.
+    switch_back: ScriptedSwitchBack,
 }
+
+/// A route observation a row scripts for every client of its environment.
+type ScriptedReasoningRoute = Arc<StdMutex<Option<meerkat_core::ReasoningRouteObservation>>>;
+
+/// Whether a row scripted the switch back to A for every client of its
+/// environment.
+type ScriptedSwitchBack = Arc<std::sync::atomic::AtomicBool>;
 
 impl DeferredBrainSwapClient {
     fn record(&self, model: &str) -> usize {
@@ -196,6 +209,13 @@ fn done_event(stop_reason: StopReason) -> LlmEvent {
 
 #[async_trait]
 impl LlmClient for DeferredBrainSwapClient {
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.reasoning_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     fn project_replay_messages(
         &self,
         messages: &[meerkat_core::Message],
@@ -249,6 +269,36 @@ impl LlmClient for DeferredBrainSwapClient {
             3 => vec![
                 Ok(LlmEvent::TextDelta {
                     delta: SECOND_NEXT_TURN_TEXT.to_string(),
+                    meta: None,
+                }),
+                Ok(usage_event(self.provider, &request.model)),
+                Ok(done_event(StopReason::EndTurn)),
+            ],
+            // Calls 4 to 6 are scripted only by the second-switch proof: the
+            // model, by then B, asks to switch back to A; its turn completes;
+            // the turn after it is answered by whatever model the runtime
+            // routed it to.
+            4 if self.switch_back.load(std::sync::atomic::Ordering::SeqCst) => vec![
+                Ok(LlmEvent::ToolCallComplete {
+                    id: "toolu_brain_swap_back".to_string(),
+                    name: BRAIN_SWAP_TOOL_NAME.to_string(),
+                    args: serde_json::json!({ "target_model": self.route.model_a }),
+                    meta: None,
+                }),
+                Ok(usage_event(self.provider, &request.model)),
+                Ok(done_event(StopReason::ToolUse)),
+            ],
+            5 if self.switch_back.load(std::sync::atomic::Ordering::SeqCst) => vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: AUTHORING_TEXT.to_string(),
+                    meta: None,
+                }),
+                Ok(usage_event(self.provider, &request.model)),
+                Ok(done_event(StopReason::EndTurn)),
+            ],
+            6 if self.switch_back.load(std::sync::atomic::Ordering::SeqCst) => vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: NEXT_TURN_TEXT.to_string(),
                     meta: None,
                 }),
                 Ok(usage_event(self.provider, &request.model)),
@@ -464,6 +514,8 @@ fn brain_swap_discovery_requires_configured_routes_without_foreign_auth() {
                 requested_calls: Arc::new(StdMutex::new(Vec::new())),
                 provider: route.provider_b,
                 route,
+                reasoning_route: ScriptedReasoningRoute::default(),
+                switch_back: ScriptedSwitchBack::default(),
             }),
             availability,
             client_build_models: Arc::clone(&client_build_models),
@@ -580,9 +632,31 @@ struct AbEnvironment {
     availability: Arc<ModelAvailability>,
     client_build_models: Arc<StdMutex<Vec<String>>>,
     resolved_auth_bindings: Arc<StdMutex<Vec<AuthBindingRef>>>,
+    reasoning_route: ScriptedReasoningRoute,
+    switch_back: ScriptedSwitchBack,
+    /// Whether the configuration enables model fallback, with the route's
+    /// model B as the one chain target.
+    fallback_to_b: bool,
 }
 
 impl AbHarness {
+    /// The route every client of this environment reports from now on.
+    fn set_reasoning_route(&self, route: Option<meerkat_core::ReasoningRouteObservation>) {
+        *self
+            .environment
+            .reasoning_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = route;
+    }
+
+    /// From now on every client of this environment answers calls 4 to 6:
+    /// the model asks to switch back to A.
+    fn script_a_switch_back(&self) {
+        self.environment
+            .switch_back
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     fn requested_models(&self) -> Vec<String> {
         self.environment
             .requested_calls
@@ -772,6 +846,16 @@ async fn build_harness_seeded(
 }
 
 fn new_environment(profile: PersistenceProfile, route: RouteSpec) -> Arc<AbEnvironment> {
+    new_environment_with(profile, route, false)
+}
+
+/// [`new_environment`]; with `fallback_to_b` the configuration enables model
+/// fallback and names the route's model B as the one chain target.
+fn new_environment_with(
+    profile: PersistenceProfile,
+    route: RouteSpec,
+    fallback_to_b: bool,
+) -> Arc<AbEnvironment> {
     Arc::new(AbEnvironment {
         profile,
         route,
@@ -780,6 +864,9 @@ fn new_environment(profile: PersistenceProfile, route: RouteSpec) -> Arc<AbEnvir
         availability: Arc::new(ModelAvailability::default()),
         client_build_models: Arc::new(StdMutex::new(Vec::new())),
         resolved_auth_bindings: Arc::new(StdMutex::new(Vec::new())),
+        reasoning_route: ScriptedReasoningRoute::default(),
+        switch_back: ScriptedSwitchBack::default(),
+        fallback_to_b,
     })
 }
 
@@ -824,6 +911,8 @@ async fn try_attach_harness(
             requested_calls: Arc::clone(&environment.requested_calls),
             provider,
             route,
+            reasoning_route: Arc::clone(&environment.reasoning_route),
+            switch_back: Arc::clone(&environment.switch_back),
         });
         registry = registry.with_runtime(Arc::new(DeferredBrainSwapProviderRuntime {
             provider,
@@ -835,7 +924,15 @@ async fn try_attach_harness(
     }
     factory.provider_registry = Arc::new(registry);
 
-    let config = ab_test_config(route, environment.availability.as_ref());
+    let mut config = ab_test_config(route, environment.availability.as_ref());
+    if environment.fallback_to_b {
+        config.model_fallback.enabled = Some(true);
+        config.model_fallback.chain = vec![meerkat_core::config::ModelFallbackTarget {
+            model: route.model_b.to_string(),
+            provider: Some(route.provider_b),
+            auth_binding: Some(expected_auth_binding_named(route.binding_b)),
+        }];
+    }
     if environment.availability.is_available(route.model_a) {
         meerkat_core::resolve_explicit_auth_binding_target(
             &config,
@@ -1830,6 +1927,1182 @@ async fn head_canonical_a_restart_bootstraps_no_client_for_a_target_that_cannot_
 {
     a_restart_bootstraps_no_client_for_a_target_that_cannot_carry_own_entries(
         PersistenceProfile::HeadCanonical,
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// The session's reasoning effort level
+// ---------------------------------------------------------------------------
+
+/// An account route whose model list states `levels` for the selected model.
+fn account_route_stating(
+    levels: &[meerkat_core::model_profile::capabilities::EffortLevel],
+) -> meerkat_core::ReasoningRouteObservation {
+    meerkat_core::ReasoningRouteObservation {
+        backend: meerkat_core::ReasoningBackend::OpenAi(
+            meerkat_core::provider_matrix::OpenAiBackendKind::Copilot,
+        ),
+        api: meerkat_core::ModelApi::Responses,
+        account: meerkat_core::AccountLevelStatement::Stated(levels.to_vec()),
+        operator_levels: None,
+    }
+}
+
+fn level_request(
+    model: Option<&str>,
+    level: Option<
+        meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<
+            meerkat_core::model_profile::capabilities::EffortLevel,
+        >,
+    >,
+) -> meerkat_runtime::SessionLlmReconfigureRequest {
+    meerkat_runtime::SessionLlmReconfigureRequest {
+        model: model.map(str::to_string),
+        provider: None,
+        self_hosted_server_id: None,
+        provider_params: None,
+        auth_binding: None,
+        reasoning_effort: level,
+    }
+}
+
+/// A committed `brain_swap` handoff is not judged against the session's
+/// reasoning effort level; only a caller's reconfiguration is.
+///
+/// The session takes a level its route accepts while a handoff to B is
+/// committed. A caller's hot swap to B is refused typed (B's route does not
+/// accept the level) and leaves the session whole. The handoff to the same
+/// model is then realized at the next input as before, keeping the level, and
+/// that input's request is refused before it reaches the provider. Clearing
+/// the level makes the next request run on B.
+#[tokio::test]
+async fn a_brain_swap_keeps_the_level_and_requests_are_refused_until_it_is_cleared() {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let harness = build_harness(PersistenceProfile::WholeBlob).await;
+    let route = harness.environment.route;
+    let _committed = commit_brain_swap_request(&harness).await;
+
+    // A's entry of the account's list states `high`: the session takes it.
+    harness.set_reasoning_route(Some(account_route_stating(&[EffortLevel::High])));
+    harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(None, Some(TurnMetadataOverride::Set(EffortLevel::High))),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("a level the route accepts is applied: {error}"));
+    let before_durable = harness.durable_identity().await;
+    let before_live = harness.live_identity().await;
+    assert_eq!(before_live, before_durable);
+    assert_eq!(before_live.model, route.model_a);
+    assert_eq!(
+        before_live
+            .provider_params
+            .as_ref()
+            .and_then(|params| params.reasoning_effort),
+        Some(EffortLevel::High)
+    );
+
+    // B's entry states only `low`. A caller's hot swap to B is refused typed
+    // and changes nothing, live or stored.
+    harness.set_reasoning_route(Some(account_route_stating(&[EffortLevel::Low])));
+    let error = harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(Some(route.model_b), None),
+        )
+        .await
+        .expect_err("a caller's swap to a route that refuses the level is refused");
+    let meerkat_runtime::RuntimeDriverError::ReasoningEffortRefused(refusal) = &error else {
+        panic!("expected the typed reasoning effort refusal, got: {error:?}");
+    };
+    assert_eq!(
+        serde_json::to_value(&**refusal).expect("a refusal serializes"),
+        serde_json::json!({
+            "requested": "high", "provider": "openai", "model": route.model_b,
+            "route": {"backend": "copilot", "api": "responses"},
+            "reason": "unsupported_level", "supported": ["low"], "facts": "account",
+        })
+    );
+    assert_eq!(harness.durable_identity().await, before_durable);
+    assert_eq!(harness.live_identity().await, before_live);
+    assert_eq!(harness.realized_terminal_count().await, 0);
+    let calls_before = harness.requested_models();
+    assert_eq!(
+        calls_before,
+        vec![route.model_a.to_string(), route.model_a.to_string()]
+    );
+
+    // The committed handoff to the same model is realized at the next input,
+    // not judged: the session moves to B and keeps its level. The input's
+    // own request is then refused before any provider call.
+    let refused = harness.run_prompt("the next input, after the swap").await;
+    assert_eq!(
+        harness.realized_terminal_count().await,
+        1,
+        "the handoff is realized as before: {refused:?}"
+    );
+    let swapped = harness.live_identity().await;
+    assert_eq!(swapped.model, route.model_b);
+    assert_eq!(
+        swapped
+            .provider_params
+            .as_ref()
+            .and_then(|params| params.reasoning_effort),
+        Some(EffortLevel::High),
+        "the handoff keeps the session's level"
+    );
+    assert_eq!(harness.durable_identity().await, swapped);
+    assert_eq!(
+        harness.requested_models(),
+        calls_before,
+        "the refused request reached no provider"
+    );
+    // The per-request check refuses it typed and names the level and the
+    // route: no other outcome passes.
+    let CompletionOutcome::AbandonedWithError { error, .. } = &refused else {
+        panic!("a request whose level the route refuses must fail typed: {refused:?}");
+    };
+    let Some(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { refusal }) =
+        &error.reason
+    else {
+        panic!("the request must be refused for its level, typed: {refused:?}");
+    };
+    assert_eq!(refusal.requested, EffortLevel::High);
+    assert_eq!(refusal.model, route.model_b);
+    assert_eq!(
+        refusal.route.as_ref().map(ToString::to_string).as_deref(),
+        Some("copilot/responses")
+    );
+
+    // Clearing the level makes the next request run, on B.
+    harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(None, Some(TurnMetadataOverride::Clear)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("clearing the level is applied: {error}"));
+    let next = harness
+        .run_prompt("the input after the level is cleared")
+        .await;
+    assert!(
+        matches!(next, CompletionOutcome::Completed(ref run) if run.text == NEXT_TURN_TEXT),
+        "the request runs once the level is cleared: {next:?}"
+    );
+    assert_eq!(
+        harness.requested_calls().last(),
+        Some(&ProviderCall {
+            provider: route.provider_b,
+            model: route.model_b.to_string(),
+        })
+    );
+    assert_eq!(
+        harness
+            .live_identity()
+            .await
+            .provider_params
+            .and_then(|params| params.reasoning_effort),
+        None
+    );
+}
+
+/// A session's fallback client is built for the level the session holds at
+/// that build: its chain target carries that level. A caller's change of the
+/// level, and a clear, each build the session's own client alone, so no
+/// fallback client, and no chain target that carries the earlier level,
+/// outlives the change. The session's next build (here a cold restart)
+/// builds the chain target again, for the level the session holds then.
+#[tokio::test]
+async fn a_level_change_or_clear_replaces_the_fallback_client() {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let route = SAME_PROVIDER_ROUTE;
+    let mut harness = attach_harness(
+        new_environment_with(PersistenceProfile::WholeBlob, route, true),
+        None,
+    )
+    .await;
+    // The account's list states both levels for every model of the route.
+    harness.set_reasoning_route(Some(account_route_stating(&[
+        EffortLevel::Low,
+        EffortLevel::High,
+    ])));
+
+    for (step, level) in [
+        ("set", Some(EffortLevel::High)),
+        ("change", Some(EffortLevel::Low)),
+        ("clear", None),
+    ] {
+        // The session as it was built: its own client and the chain
+        // target's, the fallback client's two candidates.
+        let built = harness.client_build_models();
+        assert!(
+            built.iter().any(|model| model == route.model_a)
+                && built.iter().any(|model| model == route.model_b),
+            "{step}: a session build builds the fallback chain target too: {built:?}"
+        );
+
+        harness.clear_client_build_models();
+        let change = match level {
+            Some(level) => TurnMetadataOverride::Set(level),
+            None => TurnMetadataOverride::Clear,
+        };
+        harness
+            .adapter
+            .reconfigure_session_llm_identity(
+                &harness.session_id,
+                level_request(None, Some(change)),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{step}: the level change is applied: {error}"));
+        let rebuilt = harness.client_build_models();
+        assert!(
+            !rebuilt.is_empty() && rebuilt.iter().all(|model| model == route.model_a),
+            "{step}: the change builds the session's own client alone, no chain target: \
+             {rebuilt:?}"
+        );
+        assert_eq!(
+            harness
+                .live_identity()
+                .await
+                .provider_params
+                .and_then(|params| params.reasoning_effort),
+            level,
+            "{step}: the session holds the new level"
+        );
+
+        // The session's next build is for the level it holds now.
+        harness.clear_client_build_models();
+        harness = harness.cold_restart().await;
+    }
+}
+
+/// The model-routing history is part of the session's head, which the SQLite
+/// store holds twice: in the session store's head row and, as a copy, in
+/// the runtime store's boundary head. An earlier release decodes a head
+/// typed when it loads that session; its provider params have no member for
+/// the provider-neutral reasoning effort level. So the realized record of a
+/// `brain_swap` holds the applied identity WITHOUT the level: it names the
+/// model that was installed, and neither stored copy of the head names a
+/// level. The session's
+/// own settings keep the level, live, stored and after a cold restart. A
+/// record in the earlier form, with the level inside, still decodes.
+#[tokio::test]
+async fn a_brain_swap_under_a_level_records_its_applied_identity_without_the_level() {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+    use meerkat_core::session_store::IncrementalSessionStore as _;
+
+    let level_of = |identity: &SessionLlmIdentity| {
+        identity
+            .provider_params
+            .as_ref()
+            .and_then(|params| params.reasoning_effort)
+    };
+    let harness = build_harness(PersistenceProfile::HeadCanonical).await;
+    let route = harness.environment.route;
+    let _committed = commit_brain_swap_request(&harness).await;
+
+    // Both models' entries of the account's list state `high`: the session
+    // takes the level, and the request after the switch runs at it.
+    harness.set_reasoning_route(Some(account_route_stating(&[EffortLevel::High])));
+    harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(None, Some(TurnMetadataOverride::Set(EffortLevel::High))),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("a level the route accepts is applied: {error}"));
+    assert_eq!(
+        level_of(&harness.live_identity().await),
+        Some(EffortLevel::High)
+    );
+
+    // The committed handoff is realized at the next input.
+    let completion = harness.run_prompt("the next input, after the swap").await;
+    assert_eq!(
+        harness.realized_terminal_count().await,
+        1,
+        "the handoff is realized: {completion:?}"
+    );
+    let swapped = harness.live_identity().await;
+    assert_eq!(swapped.model, route.model_b);
+    assert_eq!(
+        level_of(&swapped),
+        Some(EffortLevel::High),
+        "the session keeps its level across the switch"
+    );
+    assert_eq!(harness.durable_identity().await, swapped);
+
+    // The realized record: the installed model, and no level.
+    let records = harness.durable_routing_records().await;
+    let realized: Vec<&SessionLlmIdentity> = records
+        .iter()
+        .filter_map(|record| match record {
+            SessionModelRoutingControlRecord::ModelRoutingIntentRealized {
+                applied_identity,
+                ..
+            } => Some(&**applied_identity),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(realized.len(), 1, "one realized record: {records:?}");
+    assert_eq!(realized[0].model, route.model_b);
+    assert_eq!(
+        level_of(realized[0]),
+        None,
+        "the routing history records the applied identity without the level"
+    );
+    let stored_records = serde_json::to_string(&records).expect("the stored records");
+    assert!(
+        !stored_records.contains("reasoning_effort"),
+        "the stored routing history names no level: {stored_records}"
+    );
+
+    // The whole head row, as the session store holds it: what an earlier
+    // release decodes when it looks a session of the realm up.
+    let session_store = meerkat_store::SqliteSessionStore::open(
+        harness.environment.temp.path().join("sessions.sqlite3"),
+    )
+    .expect("open the sqlite session store");
+    let head = session_store
+        .load_head(&harness.session_id)
+        .await
+        .expect("load the stored head")
+        .expect("the session has a head row");
+    let stored_head = serde_json::to_string(&head).expect("the stored head row's form");
+    assert!(
+        stored_head.contains("model_routing_intent_realized"),
+        "the head row holds the realized record: {stored_head}"
+    );
+    assert!(
+        !stored_head.contains("reasoning_effort"),
+        "the stored head row names no level: {stored_head}"
+    );
+
+    // Both stored copies of the head, as the SQLite file holds them: the
+    // session store's head row and the runtime store's boundary head. Each
+    // holds the realized record, and neither names a level.
+    for (table, column) in STORED_HEAD_COLUMNS {
+        let stored = stored_head_column(
+            &harness.environment.temp.path().join("sessions.sqlite3"),
+            table,
+            column,
+            &harness.session_id,
+        )
+        .unwrap_or_else(|| panic!("`{table}.{column}` holds the session's head"));
+        assert!(
+            stored.contains("model_routing_intent_realized"),
+            "`{table}.{column}` holds the realized record: {stored}"
+        );
+        assert!(
+            !stored.contains("reasoning_effort"),
+            "`{table}.{column}` names no level: {stored}"
+        );
+    }
+    assert!(
+        assert_the_stored_head_has_the_previous_releases_shape(
+            &harness.environment.temp.path().join("sessions.sqlite3"),
+            &harness.session_id,
+            "after the run's own switch under a level",
+        )
+        .await,
+        "the runtime store holds a boundary head after the switch"
+    );
+
+    // A record in the earlier form, with the level inside, still decodes.
+    let mut earlier = serde_json::to_value(&records).expect("the records as a value");
+    let earlier_record = earlier
+        .as_array_mut()
+        .expect("the records are a list")
+        .iter_mut()
+        .find(|record| record["record"] == "model_routing_intent_realized")
+        .expect("the realized record");
+    earlier_record["applied_identity"]["provider_params"] =
+        serde_json::json!({"reasoning_effort": "high"});
+    let decoded: Vec<SessionModelRoutingControlRecord> =
+        serde_json::from_value(earlier).expect("a record with the level inside decodes");
+    assert!(decoded.iter().any(|record| matches!(
+        record,
+        SessionModelRoutingControlRecord::ModelRoutingIntentRealized { applied_identity, .. }
+            if level_of(applied_identity) == Some(EffortLevel::High)
+    )));
+
+    // After a cold restart the session still holds its level.
+    let harness = harness.cold_restart().await;
+    assert_eq!(
+        level_of(&harness.durable_identity().await),
+        Some(EffortLevel::High),
+        "the session's own settings keep the level"
+    );
+}
+
+/// After a `brain_swap` under a level the history holds a realized record
+/// without the level, and the session's settings hold the level. Nothing
+/// compares the two. A restart gives a fresh machine the realized record
+/// from the stored history (it reads the installed model's name), and the
+/// next input runs on B at the level without a second realization. A second
+/// switch, back to A, is committed and realized as the first was. The
+/// history then holds both realized records, neither with a level, in both
+/// stored copies of the head, and a restart after it finds the session on A
+/// at its level.
+#[tokio::test]
+async fn a_restart_and_a_second_brain_swap_after_one_under_a_level_run_and_record_no_level() {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let level_of = |identity: &SessionLlmIdentity| {
+        identity
+            .provider_params
+            .as_ref()
+            .and_then(|params| params.reasoning_effort)
+    };
+    let harness = build_harness(PersistenceProfile::HeadCanonical).await;
+    let route = harness.environment.route;
+    let _committed = commit_brain_swap_request(&harness).await;
+    harness.set_reasoning_route(Some(account_route_stating(&[EffortLevel::High])));
+    harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(None, Some(TurnMetadataOverride::Set(EffortLevel::High))),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("a level the route accepts is applied: {error}"));
+    let first = harness.run_prompt("the next input, after the swap").await;
+    assert_eq!(
+        harness.realized_terminal_count().await,
+        1,
+        "the first handoff is realized: {first:?}"
+    );
+    let after_first = harness.durable_routing_records().await;
+
+    // A restart: the fresh machine takes the realized record from the stored
+    // history, and the next input runs on B at the level.
+    let harness = harness.cold_restart().await;
+    let resumed = harness.run_prompt("the input after the restart").await;
+    assert!(
+        matches!(resumed, CompletionOutcome::Completed(ref run) if run.text == SECOND_NEXT_TURN_TEXT),
+        "the input after the restart runs: {resumed:?}"
+    );
+    assert_eq!(
+        harness.requested_calls().last(),
+        Some(&ProviderCall {
+            provider: route.provider_b,
+            model: route.model_b.to_string(),
+        })
+    );
+    assert_eq!(
+        harness.durable_routing_records().await,
+        after_first,
+        "the restart and the input after it add nothing to the history"
+    );
+    let on_b = harness.live_identity().await;
+    assert_eq!(on_b.model, route.model_b);
+    assert_eq!(level_of(&on_b), Some(EffortLevel::High));
+
+    // A second switch, asked for by the run on B: back to A.
+    harness.script_a_switch_back();
+    let authoring = harness
+        .run_prompt("please switch back after this turn")
+        .await;
+    assert!(
+        matches!(authoring, CompletionOutcome::Completed(ref run) if run.text == AUTHORING_TEXT),
+        "the second authoring turn completes on B: {authoring:?}"
+    );
+    let staged = harness.durable_routing_records().await;
+    assert_eq!(staged.len(), after_first.len() + 1, "{staged:?}");
+    assert!(
+        matches!(
+            staged.last(),
+            Some(SessionModelRoutingControlRecord::ModelRoutingIntentRequested { intent, .. })
+                if intent.target_model.as_str() == route.model_a
+        ),
+        "the second request is committed: {staged:?}"
+    );
+    let back = harness.run_prompt("the input after the second swap").await;
+    assert_eq!(
+        harness.realized_terminal_count().await,
+        2,
+        "the second handoff is realized: {back:?}"
+    );
+    assert!(
+        matches!(back, CompletionOutcome::Completed(ref run) if run.text == NEXT_TURN_TEXT),
+        "the input after the second swap runs: {back:?}"
+    );
+    assert_eq!(
+        harness.requested_calls().last(),
+        Some(&ProviderCall {
+            provider: route.provider_a,
+            model: route.model_a.to_string(),
+        })
+    );
+    let on_a = harness.live_identity().await;
+    assert_eq!(on_a.model, route.model_a);
+    assert_eq!(
+        level_of(&on_a),
+        Some(EffortLevel::High),
+        "the session keeps its level across both switches"
+    );
+    assert_eq!(harness.durable_identity().await, on_a);
+
+    // Both realized records name the model installed, and no level.
+    let records = harness.durable_routing_records().await;
+    let realized: Vec<&SessionLlmIdentity> = records
+        .iter()
+        .filter_map(|record| match record {
+            SessionModelRoutingControlRecord::ModelRoutingIntentRealized {
+                applied_identity,
+                ..
+            } => Some(&**applied_identity),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        realized
+            .iter()
+            .map(|identity| (identity.model.as_str(), level_of(identity)))
+            .collect::<Vec<_>>(),
+        vec![(route.model_b, None), (route.model_a, None)],
+        "{records:?}"
+    );
+    let store_path = harness.environment.temp.path().join("sessions.sqlite3");
+    for (table, column) in STORED_HEAD_COLUMNS {
+        let stored = stored_head_column(&store_path, table, column, &harness.session_id)
+            .unwrap_or_else(|| panic!("`{table}.{column}` holds the session's head"));
+        assert_eq!(
+            stored.matches("\"model_routing_intent_realized\"").count(),
+            2,
+            "`{table}.{column}` holds both realized records: {stored}"
+        );
+    }
+    assert!(
+        assert_the_stored_head_has_the_previous_releases_shape(
+            &store_path,
+            &harness.session_id,
+            "after a second switch under the level",
+        )
+        .await,
+        "the runtime store holds a boundary head after the second switch"
+    );
+
+    // A restart after the second switch: the session is on A at its level.
+    let harness = harness.cold_restart().await;
+    assert_eq!(harness.durable_identity().await, on_a);
+    assert_eq!(harness.realized_terminal_count().await, 2);
+}
+
+// ---------------------------------------------------------------------------
+// The rollback fixture for the session's head row
+// ---------------------------------------------------------------------------
+
+/// The JSON shape of a stored value as the previous release decodes it.
+enum Shape {
+    /// The previous release keeps this value untyped.
+    Any,
+    /// A string, a number, a boolean or null.
+    Leaf,
+    /// An object with exactly these members.
+    Object(&'static [(&'static str, Shape)]),
+    /// A list of values of one shape.
+    List(&'static Shape),
+    /// An object whose member `.0` names one of the variants `.1`, each with
+    /// its own members.
+    Tagged(
+        &'static str,
+        &'static [(&'static str, &'static [(&'static str, Shape)])],
+    ),
+}
+
+const ROW_PREFIX: Shape = Shape::Object(&[
+    ("version", Shape::Leaf),
+    ("row_count", Shape::Leaf),
+    ("digest", Shape::Leaf),
+]);
+const REWRITE_PREFIX: Shape =
+    Shape::Object(&[("occurrence_count", Shape::Leaf), ("digest", Shape::Leaf)]);
+const SYSTEM_TIME: Shape = Shape::Object(&[
+    ("secs_since_epoch", Shape::Leaf),
+    ("nanos_since_epoch", Shape::Leaf),
+]);
+const REASON_DISPOSITION: Shape = Shape::Tagged(
+    "disposition",
+    &[
+        ("not_provided", &[]),
+        (
+            "provided",
+            &[("reason", Shape::Object(&[("content", Shape::Leaf)]))],
+        ),
+    ],
+);
+const SWITCH_INTENT: Shape = Shape::Object(&[
+    ("target_model", Shape::Leaf),
+    (
+        "duration",
+        Shape::Tagged(
+            "duration_type",
+            &[
+                (
+                    "finite",
+                    &[(
+                        "duration",
+                        Shape::Tagged(
+                            "duration",
+                            &[("one_turn", &[]), ("turns", &[("turns", Shape::Leaf)])],
+                        ),
+                    )],
+                ),
+                ("until_changed", &[]),
+            ],
+        ),
+    ),
+    (
+        "origin",
+        Shape::Tagged(
+            "origin",
+            &[
+                ("user", &[("reason", REASON_DISPOSITION)]),
+                ("model", &[("reason", REASON_DISPOSITION)]),
+                ("system_policy", &[("reason", Shape::Leaf)]),
+            ],
+        ),
+    ),
+]);
+/// A provider's own tag: the member names of each provider's tag at the
+/// previous release; their values are that provider's own settings.
+const PROVIDER_TAG: Shape = Shape::Tagged(
+    "provider",
+    &[
+        (
+            "anthropic",
+            &[
+                ("thinking", Shape::Any),
+                ("thinking_budget_tokens", Shape::Leaf),
+                ("web_search", Shape::Leaf),
+                ("top_k", Shape::Leaf),
+                ("effort", Shape::Leaf),
+                ("structured_output", Shape::Any),
+                ("inference_geo", Shape::Any),
+                ("compaction", Shape::Any),
+                ("context", Shape::Leaf),
+                ("cache_control", Shape::Leaf),
+                ("cache_ttl", Shape::Leaf),
+                ("supports_temperature_override", Shape::Leaf),
+            ],
+        ),
+        (
+            "open_ai",
+            &[
+                ("reasoning_effort", Shape::Leaf),
+                ("reasoning_mode", Shape::Leaf),
+                ("reasoning_context", Shape::Leaf),
+                ("text_verbosity", Shape::Leaf),
+                ("seed", Shape::Leaf),
+                ("frequency_penalty", Shape::Leaf),
+                ("presence_penalty", Shape::Leaf),
+                ("web_search", Shape::Leaf),
+                ("structured_output", Shape::Any),
+                ("reasoning", Shape::Leaf),
+                ("chat_template_kwargs", Shape::Leaf),
+                ("thinking", Shape::Leaf),
+                ("store", Shape::Leaf),
+                ("prompt_cache_enabled", Shape::Leaf),
+                ("prompt_cache_key", Shape::Leaf),
+                ("prompt_cache_retention", Shape::Leaf),
+                (
+                    "prompt_cache_options",
+                    Shape::Object(&[("mode", Shape::Leaf), ("ttl", Shape::Leaf)]),
+                ),
+                ("supports_temperature_override", Shape::Leaf),
+                ("supports_reasoning_override", Shape::Leaf),
+            ],
+        ),
+        (
+            "gemini",
+            &[
+                (
+                    "thinking",
+                    Shape::Object(&[
+                        ("include_thoughts", Shape::Leaf),
+                        ("thinking_level", Shape::Leaf),
+                        ("thinking_budget", Shape::Leaf),
+                    ]),
+                ),
+                ("thinking_budget", Shape::Leaf),
+                ("thinking_level", Shape::Leaf),
+                ("top_k", Shape::Leaf),
+                ("top_p", Shape::Leaf),
+                ("structured_output", Shape::Any),
+                ("google_search", Shape::Leaf),
+                ("candidate_count", Shape::Leaf),
+                ("cached_content_name", Shape::Leaf),
+            ],
+        ),
+        ("unknown", &[("bag", Shape::Any)]),
+    ],
+);
+/// The identity a realized routing record holds. Its provider params are
+/// the previous release's: six members, and no provider-neutral
+/// `reasoning_effort`.
+const RECORDED_IDENTITY: Shape = Shape::Object(&[
+    ("model", Shape::Leaf),
+    ("provider", Shape::Leaf),
+    ("self_hosted_server_id", Shape::Leaf),
+    (
+        "provider_params",
+        Shape::Object(&[
+            ("temperature", Shape::Leaf),
+            ("top_p", Shape::Leaf),
+            ("max_output_tokens", Shape::Leaf),
+            ("reasoning", Shape::Leaf),
+            ("thinking_budget_tokens", Shape::Leaf),
+            ("provider_tag", PROVIDER_TAG),
+        ]),
+    ),
+    (
+        "auth_binding",
+        Shape::Object(&[
+            ("realm", Shape::Leaf),
+            ("binding", Shape::Leaf),
+            ("profile", Shape::Leaf),
+            ("origin", Shape::Leaf),
+        ]),
+    ),
+]);
+const ROUTING_RECORD: Shape = Shape::Tagged(
+    "record",
+    &[
+        (
+            "model_routing_intent_requested",
+            &[
+                ("request_id", Shape::Leaf),
+                ("originating_run_id", Shape::Leaf),
+                ("intent", SWITCH_INTENT),
+            ],
+        ),
+        (
+            "model_routing_intent_realized",
+            &[
+                ("request_id", Shape::Leaf),
+                ("originating_run_id", Shape::Leaf),
+                ("intent", SWITCH_INTENT),
+                ("applied_identity", RECORDED_IDENTITY),
+            ],
+        ),
+        (
+            "model_routing_intent_denied",
+            &[
+                ("request_id", Shape::Leaf),
+                ("originating_run_id", Shape::Leaf),
+                ("intent", SWITCH_INTENT),
+                (
+                    "reason",
+                    Shape::Tagged(
+                        "reason",
+                        &[
+                            ("unsupported_model", &[]),
+                            ("capability_policy", &[]),
+                            ("cost_policy", &[]),
+                            ("safety_policy", &[]),
+                            ("approval_required_but_unavailable", &[]),
+                            ("scoped_override_conflict", &[]),
+                            ("realtime_transport_conflict", &[]),
+                            ("projection_unsupported", &[]),
+                            ("denied_during_approval", &[("approvable", Shape::Leaf)]),
+                        ],
+                    ),
+                ),
+            ],
+        ),
+        (
+            "model_routing_intent_abandoned",
+            &[
+                ("request_id", Shape::Leaf),
+                ("originating_run_id", Shape::Leaf),
+                ("intent", SWITCH_INTENT),
+            ],
+        ),
+    ],
+);
+/// THE ROLLBACK FIXTURE of the session's head row: the head's shape as
+/// 0.9.14 decodes it, record by record and member by member, copied from
+/// that release's types (`SessionHead` and what it reaches in
+/// `meerkat-core`: the row and rewrite prefix accumulators, the lineage
+/// anchor, the graph prefix, the realtime event prefix, the metadata
+/// identity, `Usage` with its provider accounting, and the model-routing
+/// records with their intent and applied identity). 0.9.14 decodes a
+/// session's head typed when it loads that session, and it recomputes the
+/// head's token from what it decoded: a member it does not know either
+/// fails the decode or changes the token, and either way that session
+/// cannot be loaded there (the other sessions of the realm are loaded). A
+/// change that adds a member or a value to anything the head holds fails
+/// here until both stored copies of the head stay readable by the previous
+/// release (the rule is written at `RunResult::reasoning_effort` and at
+/// `InputTerminalCompletion::outcome` for the input row; this is its
+/// counterpart for the head row).
+const TAG_HEAD_SHAPE: Shape = Shape::Object(&[
+    ("id", Shape::Leaf),
+    ("version", Shape::Leaf),
+    ("strand", Shape::Leaf),
+    ("head_revision", Shape::Leaf),
+    ("message_count", Shape::Leaf),
+    ("message_row_prefix", ROW_PREFIX),
+    (
+        "row_lineage_anchor",
+        Shape::Object(&[
+            ("rewrite_count", Shape::Leaf),
+            ("rewrite_prefix", REWRITE_PREFIX),
+            ("strand", Shape::Leaf),
+            ("message_count", Shape::Leaf),
+            ("materialized_prefix", ROW_PREFIX),
+            ("prefix", ROW_PREFIX),
+        ]),
+    ),
+    ("rewrite_count", Shape::Leaf),
+    ("rewrite_prefix", REWRITE_PREFIX),
+    (
+        "graph_prefix",
+        Shape::Object(&[("occurrence_count", Shape::Leaf), ("digest", Shape::Leaf)]),
+    ),
+    (
+        "realtime_event_prefix",
+        Shape::Object(&[
+            ("version", Shape::Leaf),
+            ("session_id", Shape::Leaf),
+            ("component", Shape::Leaf),
+            ("event_count", Shape::Leaf),
+            ("root_digest", Shape::Leaf),
+        ]),
+    ),
+    ("created_at", SYSTEM_TIME),
+    ("updated_at", SYSTEM_TIME),
+    (
+        "usage",
+        Shape::Object(&[
+            ("input_tokens", Shape::Leaf),
+            ("output_tokens", Shape::Leaf),
+            ("cache_creation_tokens", Shape::Leaf),
+            ("cache_read_tokens", Shape::Leaf),
+            ("reasoning_tokens", Shape::Leaf),
+            (
+                "provider_accounting",
+                Shape::Object(&[
+                    ("provider", Shape::Leaf),
+                    ("model", Shape::Leaf),
+                    ("presented_tokens", Shape::Leaf),
+                    ("convention", Shape::Leaf),
+                    ("aggregation", Shape::Leaf),
+                ]),
+            ),
+        ]),
+    ),
+    (
+        "metadata_identity",
+        Shape::Object(&[
+            ("format_version", Shape::Leaf),
+            ("entry_count", Shape::Leaf),
+            ("exact_root_digest", Shape::Leaf),
+        ]),
+    ),
+    // The previous release keeps the inline metadata map untyped.
+    ("metadata", Shape::Any),
+    ("model_routing_control", Shape::List(&ROUTING_RECORD)),
+]);
+
+/// Every place under `value` that `shape` does not know, as a path.
+fn unknown_to_shape(value: &serde_json::Value, shape: &Shape, path: &str, found: &mut Vec<String>) {
+    let members = |object: &serde_json::Map<String, serde_json::Value>,
+                   fields: &[(&'static str, Shape)],
+                   tag: Option<&str>,
+                   found: &mut Vec<String>| {
+        for (key, member) in object {
+            if tag == Some(key.as_str()) {
+                continue;
+            }
+            match fields.iter().find(|(name, _)| name == key) {
+                Some((_, member_shape)) => {
+                    unknown_to_shape(member, member_shape, &format!("{path}.{key}"), found);
+                }
+                None => found.push(format!("{path}.{key}")),
+            }
+        }
+    };
+    match (shape, value) {
+        (Shape::Any, _) | (_, serde_json::Value::Null) => {}
+        (Shape::Leaf, serde_json::Value::Object(_) | serde_json::Value::Array(_)) => {
+            found.push(format!("{path}: a structure where a plain value is read"));
+        }
+        (Shape::Leaf, _) => {}
+        (Shape::Object(fields), serde_json::Value::Object(object)) => {
+            members(object, fields, None, found);
+        }
+        (Shape::List(item), serde_json::Value::Array(items)) => {
+            for (index, member) in items.iter().enumerate() {
+                unknown_to_shape(member, item, &format!("{path}[{index}]"), found);
+            }
+        }
+        (Shape::Tagged(tag, variants), serde_json::Value::Object(object)) => {
+            let named = object.get(*tag).and_then(serde_json::Value::as_str);
+            match variants.iter().find(|(name, _)| Some(*name) == named) {
+                Some((_, fields)) => members(object, fields, Some(tag), found),
+                None => found.push(format!("{path}.{tag} = {named:?}")),
+            }
+        }
+        (_, other) => found.push(format!("{path}: {other} where another form is read")),
+    }
+}
+
+/// The two places of the SQLite file that store a session's head: the
+/// session store's head row, and the runtime store's boundary head, which is
+/// a copy of the head at the session's last committed boundary.
+pub(super) const STORED_HEAD_COLUMNS: [(&str, &str); 2] = [
+    ("session_heads", "head_json"),
+    ("runtime_session_authority", "boundary_head_json"),
+];
+
+/// The text one of [`STORED_HEAD_COLUMNS`] holds for `session_id`, read from
+/// the SQLite file itself. `None` when the table or the session's row is
+/// absent.
+pub(super) fn stored_head_column(
+    store_path: &std::path::Path,
+    table: &str,
+    column: &str,
+    session_id: &SessionId,
+) -> Option<String> {
+    let conn = meerkat_sqlite::Connection::open(store_path).expect("open the sqlite file");
+    conn.busy_timeout(std::time::Duration::from_secs(10))
+        .expect("set the busy timeout");
+    let tables: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .expect("look the table up");
+    if tables == 0 {
+        return None;
+    }
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT {column} FROM {table} WHERE session_id = ?1"
+        ))
+        .expect("prepare the column read");
+    let mut rows = statement
+        .query([session_id.to_string()])
+        .expect("read the column");
+    rows.next().expect("step the column read").map(|row| {
+        let bytes = row
+            .get::<_, meerkat_sqlite::JsonColumnBytes>(0)
+            .expect("the column holds JSON bytes")
+            .into_bytes();
+        String::from_utf8(bytes).expect("the column holds UTF-8")
+    })
+}
+
+/// The stored head of `session_id` in the SQLite store at `store_path` holds
+/// nothing the previous release's head does not know, and names no reasoning
+/// effort (these sessions use no provider's own effort setting). Three reads:
+/// the head as the session store loads it, and the stored bytes of both
+/// [`STORED_HEAD_COLUMNS`]. `step` names where the session is in its life.
+/// Returns whether the runtime store holds a boundary head for the session.
+pub(super) async fn assert_the_stored_head_has_the_previous_releases_shape(
+    store_path: &std::path::Path,
+    session_id: &SessionId,
+    step: &str,
+) -> bool {
+    use meerkat_core::session_store::IncrementalSessionStore as _;
+
+    let store = meerkat_store::SqliteSessionStore::open(store_path.to_path_buf())
+        .expect("open the sqlite session store");
+    let head = store
+        .load_head(session_id)
+        .await
+        .expect("load the stored head")
+        .unwrap_or_else(|| panic!("{step}: the session has a head row"));
+    let mut found = Vec::new();
+    let mut check = |place: String, stored: &serde_json::Value, text: &str| {
+        let mut unknown = Vec::new();
+        unknown_to_shape(stored, &TAG_HEAD_SHAPE, "head", &mut unknown);
+        found.extend(unknown.into_iter().map(|what| format!("{place}: {what}")));
+        if text.contains("reasoning_effort") {
+            found.push(format!("{place}: names a reasoning effort in {text}"));
+        }
+    };
+    let loaded = serde_json::to_value(&head).expect("the loaded head's form");
+    check(
+        "the head the session store loads".to_string(),
+        &loaded,
+        &loaded.to_string(),
+    );
+    let mut boundary_head_stored = false;
+    for (table, column) in STORED_HEAD_COLUMNS {
+        let Some(text) = stored_head_column(store_path, table, column, session_id) else {
+            assert_ne!(table, "session_heads", "{step}: the session has a head row");
+            continue;
+        };
+        boundary_head_stored |= table == "runtime_session_authority";
+        let stored: serde_json::Value = serde_json::from_str(&text).expect("the column holds JSON");
+        check(format!("`{table}.{column}`"), &stored, &text);
+    }
+    assert!(
+        found.is_empty(),
+        "{step}: the stored head holds what the previous release's head does not know: \
+         {found:#?}"
+    );
+    boundary_head_stored
+}
+
+/// The fixture refuses what it must: a head whose realized routing record
+/// carries the provider-neutral level, and a head with a member of its own
+/// that the previous release does not have.
+#[test]
+fn the_head_shape_fixture_refuses_a_level_in_a_routing_record_and_an_unknown_member() {
+    let identity = serde_json::json!({
+        "model": "model-b", "provider": "openai",
+        "provider_params": {"reasoning_effort": "high"},
+    });
+    let head = |params: serde_json::Value, extra: Option<&str>| {
+        let mut identity = identity.clone();
+        identity["provider_params"] = params;
+        let mut head = serde_json::json!({
+            "id": "018f7b9a-1c2d-7e3f-8a4b-5c6d7e8f9a0b", "version": 1, "strand": "root",
+            "head_revision": "r", "message_count": 1, "rewrite_count": 0,
+            "created_at": {"secs_since_epoch": 1, "nanos_since_epoch": 0},
+            "updated_at": {"secs_since_epoch": 1, "nanos_since_epoch": 0},
+            "usage": {"input_tokens": 1, "output_tokens": 1,
+                      "cache_creation_tokens": null, "cache_read_tokens": null},
+            "metadata": {"anything": {"reasoning_effort": "high"}},
+            "model_routing_control": [{
+                "record": "model_routing_intent_realized",
+                "request_id": "018f7b9a-1c2d-7e3f-8a4b-5c6d7e8f9a0c",
+                "originating_run_id": "018f7b9a-1c2d-7e3f-8a4b-5c6d7e8f9a0d",
+                "intent": {"target_model": "model-b",
+                           "duration": {"duration_type": "until_changed"},
+                           "origin": {"origin": "model",
+                                      "reason": {"disposition": "not_provided"}}},
+                "applied_identity": identity,
+            }],
+        });
+        if let Some(member) = extra {
+            head[member] = serde_json::json!(true);
+        }
+        head
+    };
+    let unknown = |head: &serde_json::Value| {
+        let mut found = Vec::new();
+        unknown_to_shape(head, &TAG_HEAD_SHAPE, "head", &mut found);
+        found
+    };
+    assert_eq!(
+        unknown(&head(
+            serde_json::json!({"provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}}),
+            None
+        )),
+        Vec::<String>::new(),
+        "a provider's own effort and an untyped metadata map are known"
+    );
+    assert_eq!(
+        unknown(&head(serde_json::json!({"reasoning_effort": "high"}), None)),
+        vec![
+            "head.model_routing_control[0].applied_identity.provider_params.reasoning_effort"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        unknown(&head(
+            serde_json::json!({}),
+            Some("a_member_of_a_later_release")
+        )),
+        vec!["head.a_member_of_a_later_release".to_string()]
+    );
+}
+
+/// The level's paths through the production SQLite store, with the stored
+/// head (the session store's head row and the runtime store's boundary head,
+/// read from the file) checked against the previous release's shape after each: a
+/// session without a level; a level set on it (the reconfiguration a turn's
+/// override makes); a turn at the level; the run's own permanent model
+/// switch under the level; the level cleared; a cold restart. (A session
+/// created with a level, and an ordinary model fallback under it, are
+/// checked the same way by
+/// `a_skipped_fallback_target_under_a_level_stores_its_reason_in_no_input_row`.)
+#[tokio::test]
+async fn the_stored_head_row_keeps_the_previous_releases_shape_on_every_level_path() {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let harness = build_harness(PersistenceProfile::HeadCanonical).await;
+    let store_path = harness.environment.temp.path().join("sessions.sqlite3");
+    let session_id = harness.session_id.clone();
+    let check = |step: &'static str| {
+        let store_path = store_path.clone();
+        let session_id = session_id.clone();
+        async move {
+            assert_the_stored_head_has_the_previous_releases_shape(&store_path, &session_id, step)
+                .await
+        }
+    };
+    check("a session without a level").await;
+
+    // The authoring turn commits the switch request (a requested record).
+    let _committed = commit_brain_swap_request(&harness).await;
+    check("after the turn that asks for the switch").await;
+
+    harness.set_reasoning_route(Some(account_route_stating(&[EffortLevel::High])));
+    harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(None, Some(TurnMetadataOverride::Set(EffortLevel::High))),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("a level the route accepts is applied: {error}"));
+    check("a level set on the session").await;
+
+    // A turn at the level, which also realizes the permanent switch.
+    let completion = harness.run_prompt("the next input, after the swap").await;
+    assert_eq!(
+        harness.realized_terminal_count().await,
+        1,
+        "the handoff is realized: {completion:?}"
+    );
+    assert_eq!(
+        harness
+            .live_identity()
+            .await
+            .provider_params
+            .and_then(|params| params.reasoning_effort),
+        Some(EffortLevel::High)
+    );
+    assert!(
+        check("a turn at the level and the run's own permanent switch").await,
+        "the runtime store holds a boundary head after the switch"
+    );
+
+    harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(None, Some(TurnMetadataOverride::Clear)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("clearing the level is applied: {error}"));
+    check("the level cleared").await;
+
+    let harness = harness.cold_restart().await;
+    assert_the_stored_head_has_the_previous_releases_shape(
+        &harness.environment.temp.path().join("sessions.sqlite3"),
+        &harness.session_id,
+        "a cold restart",
     )
     .await;
 }

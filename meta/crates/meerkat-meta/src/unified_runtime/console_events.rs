@@ -4302,6 +4302,7 @@ mod tests {
         assert!(identity.requester.is_some(), "the run serves a requester");
         let session_id = meerkat_core::types::SessionId::new();
         let started = AgentEvent::RunStarted {
+            reasoning_effort: None,
             session_id: session_id.clone(),
             identity: identity.clone(),
             input: meerkat_core::types::RunInput::Content {

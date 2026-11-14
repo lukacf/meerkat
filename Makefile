@@ -353,6 +353,8 @@ ci-lanes-selftest:
 	@node scripts/ci-gate-consistency-selftest.mjs
 	@echo "$(GREEN)Self-testing the product-scoped CI evidence the release gates read...$(NC)"
 	@node scripts/ci-product-evidence-selftest.mjs
+	@echo "$(GREEN)Self-testing the reasoning effort execution receipt (generator, schemas, row manifest)...$(NC)"
+	@node scripts/reasoning-effort-receipt-selftest.mjs
 	@echo "$(GREEN)Self-testing the main push's diff base (last green, attested main run)...$(NC)"
 	@node scripts/ci-push-base-selftest.mjs
 	@echo "$(GREEN)Checking the non-Rust reader inventory against the Rust sources...$(NC)"
@@ -363,6 +365,18 @@ ci-lanes-selftest:
 	@scripts/test-setup-sccache-ci.sh
 	@scripts/test-ci-release-downloads.sh
 	@scripts/test-install-ripgrep.sh
+
+# The reasoning effort execution receipt: one JSON document and its Markdown
+# rendering, from the leg results recorded in RESULTS (one `<leg>.json` per
+# leg of scripts/reasoning-effort-receipt-rows.json, written by the script's
+# `record` command), into OUT. The version, the row manifest and the test
+# sources are read from COMMIT (default HEAD), not from the working tree.
+# CHECK=1 then judges the receipt it wrote (the script's --check): it fails
+# on a failed entry and on a gap of the in-process and built-binary legs.
+.PHONY: reasoning-effort-receipt
+reasoning-effort-receipt:
+	@test -n "$(RESULTS)" && test -n "$(OUT)" || { echo "usage: make reasoning-effort-receipt RESULTS=<leg results directory> OUT=<output directory> [COMMIT=<revision>] [CHECK=1]"; exit 2; }
+	@node scripts/reasoning-effort-receipt.mjs generate --results "$(RESULTS)" --output-dir "$(OUT)" --commit "$(or $(COMMIT),HEAD)" $(if $(CHECK),--check)
 
 .PHONY: native-cost-analysis-selftest
 native-cost-analysis-selftest:
@@ -758,6 +772,7 @@ bench:
 # Hard gate: Rust workspace, Python SDK, TypeScript SDK, and contract versions must match
 verify-version-parity:
 	@$(PYTHON) scripts/test_check_inrepo_version_pins.py
+	@$(PYTHON) scripts/test_check_reasoning_effort_gate.py
 	@scripts/verify-version-parity.sh
 
 # Verify committed schema artifacts match freshly emitted ones
@@ -1199,6 +1214,7 @@ help:
 	@echo "  $(GREEN)verify-sdk-event-inventory$(NC)- Check generated SDK event inventories cover schema event types"
 	@echo "  $(GREEN)verify-machine-poster-coverage$(NC)- Check posters cover every canonical machine and advertise only canonical states/triggers"
 	@echo "  $(GREEN)path-classifier-selftest$(NC)- Check the shell path classifiers still route gate inputs"
+	@echo "  $(GREEN)reasoning-effort-receipt$(NC)- Write the reasoning effort execution receipt from recorded leg results (RESULTS=, OUT=; CHECK=1 judges it)"
 	@echo "  $(GREEN)check-rust-release-config$(NC)- Verify release Rust crate list and binary metadata"
 	@echo "  $(GREEN)check-crate-license-files$(NC)- Verify every release crate packages exactly the license texts its license field names"
 	@echo "  $(GREEN)verify-lock-consistency$(NC)- Verify Cargo.lock resolves under --locked (merge danglers)"

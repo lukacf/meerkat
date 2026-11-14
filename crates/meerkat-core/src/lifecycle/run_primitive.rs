@@ -748,6 +748,15 @@ pub struct OpenAiProviderTag {
     /// request (used by client_compatible endpoints).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_reasoning_override: Option<bool>,
+    /// Request-local marker: `reasoning_effort` on this copy of the tag was
+    /// written from the provider-neutral `reasoning_effort` option after it
+    /// was resolved for the request's route. Set only on one request's own
+    /// copy. Never serialized: it cannot be persisted into session params or
+    /// sent on a wire, and a serialized form that names it is refused. Never
+    /// merged from defaults.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub reasoning_effort_resolved: bool,
 }
 
 /// Gemini 3 reasoning levels accepted by the API.
@@ -1090,6 +1099,14 @@ pub struct ProviderParamsOverride {
     pub thinking_budget_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_tag: Option<ProviderTag>,
+    /// Provider-neutral reasoning effort level for the session's requests:
+    /// `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one
+    /// spelling each). It is not a provider setting itself: a request that
+    /// still carries it when it reaches a provider client is refused, so the
+    /// level is never sent as it is and never dropped. A session keeps it
+    /// across a replacement of its other provider params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<EffortLevel>,
     /// Request-local tool choice for one provider call. The agent loop sets
     /// it on each request's own copy from the turn's tool-choice plan
     /// (`TurnToolOverlay::tool_choice_plan`) and replaces any value that
@@ -1098,17 +1115,35 @@ pub struct ProviderParamsOverride {
     #[serde(skip)]
     #[cfg_attr(feature = "schema", schemars(skip))]
     pub tool_choice: Option<ToolChoice>,
+    /// Request-local route witness of a resolved `reasoning_effort` level:
+    /// what the client that serves the request observed about its route
+    /// when the level was resolved for it. The agent loop writes it on a
+    /// request's own copy beside the route's typed field; the provider
+    /// adapter compares it with the route the request is bound to and asks
+    /// for a new preparation when they differ. Never serialized: it cannot
+    /// be persisted into session defaults or sent on a wire. Boxed: these
+    /// params are held inline by a session's identity, by a turn's metadata
+    /// and by the events that carry an identity, and at opt-level 0 every
+    /// temporary of one of those has its own stack slot; only a request's
+    /// own copy ever sets this field.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub reasoning_route_witness: Option<Box<crate::ReasoningRouteObservation>>,
 }
 
 impl ProviderParamsOverride {
     /// Whether these params set a reasoning knob explicitly: the generic
-    /// reasoning mode or thinking budget, or any provider tag's effort,
-    /// thinking or reasoning field (nested or flat). Unrelated knobs
+    /// reasoning mode or thinking budget, the provider-neutral reasoning
+    /// effort level, or any provider tag's effort, thinking or reasoning
+    /// field (nested or flat). Unrelated knobs
     /// (temperature, sampling, limits, caching, search) do not count; an
     /// untyped tag bag counts, since it may carry one.
     #[must_use]
     pub fn sets_reasoning(&self) -> bool {
-        if self.reasoning.is_some() || self.thinking_budget_tokens.is_some() {
+        if self.reasoning.is_some()
+            || self.thinking_budget_tokens.is_some()
+            || self.reasoning_effort.is_some()
+        {
             return true;
         }
         match &self.provider_tag {
@@ -1140,7 +1175,9 @@ impl ProviderParamsOverride {
             && self.reasoning.is_none()
             && self.thinking_budget_tokens.is_none()
             && self.provider_tag.is_none()
+            && self.reasoning_effort.is_none()
             && self.tool_choice.is_none()
+            && self.reasoning_route_witness.is_none()
     }
 
     /// Clear any provider-native web-search / grounding tool body from this
@@ -1345,6 +1382,9 @@ impl ProviderTag {
                     supports_temperature_override: target_supports_temperature_override,
                     supports_reasoning_override: target_supports_reasoning_override,
                     prompt_cache_options: target_prompt_cache_options,
+                    // Request-local: the target keeps its own marker and a
+                    // default's marker is ignored.
+                    reasoning_effort_resolved: _,
                 } = target;
                 let OpenAiProviderTag {
                     reasoning_effort: default_reasoning_effort,
@@ -1366,6 +1406,7 @@ impl ProviderTag {
                     supports_temperature_override: default_supports_temperature_override,
                     supports_reasoning_override: default_supports_reasoning_override,
                     prompt_cache_options: default_prompt_cache_options,
+                    reasoning_effort_resolved: _,
                 } = default;
                 fill(target_reasoning_effort, default_reasoning_effort);
                 fill(target_reasoning_mode, default_reasoning_mode);
@@ -1545,6 +1586,9 @@ impl ProviderTag {
                     supports_temperature_override: target_supports_temperature_override,
                     supports_reasoning_override: target_supports_reasoning_override,
                     prompt_cache_options: target_prompt_cache_options,
+                    // Request-local: no build default sets the marker, so
+                    // there is nothing to clear and the target keeps its own.
+                    reasoning_effort_resolved: _,
                 } = target;
                 let OpenAiProviderTag {
                     reasoning_effort: default_reasoning_effort,
@@ -1566,6 +1610,7 @@ impl ProviderTag {
                     supports_temperature_override: default_supports_temperature_override,
                     supports_reasoning_override: default_supports_reasoning_override,
                     prompt_cache_options: default_prompt_cache_options,
+                    reasoning_effort_resolved: _,
                 } = default;
                 clear(target_reasoning_effort, default_reasoning_effort);
                 clear(target_reasoning_mode, default_reasoning_mode);
@@ -1922,6 +1967,13 @@ pub struct RuntimeTurnMetadata {
     /// (typed; no Value).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
+    /// Set, clear, or preserve the session's provider-neutral reasoning
+    /// effort level, for this turn and the turns after it. It is its own
+    /// field: a turn that replaces or clears `provider_params` keeps the
+    /// level unless it also names this field, or its new params name the
+    /// nested `reasoning_effort` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<TurnMetadataOverride<EffortLevel>>,
     /// Override, clear, or preserve the auth binding reference this turn must
     /// resolve against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1990,6 +2042,7 @@ impl RuntimeTurnMetadata {
             && self.provider.is_none()
             && self.self_hosted_server_id.is_none()
             && self.provider_params.is_none()
+            && self.reasoning_effort.is_none()
             && self.auth_binding.is_none()
             && self.keep_alive.is_none()
             && self.render_metadata.is_none()
@@ -2040,6 +2093,9 @@ impl RuntimeTurnMetadata {
             provider,
             self_hosted_server_id,
             provider_params,
+            // The reasoning effort level is model routing, like
+            // `provider_params`: only a fresh turn applies it.
+            reasoning_effort,
             auth_binding,
             keep_alive,
             render_metadata,
@@ -2061,6 +2117,7 @@ impl RuntimeTurnMetadata {
             && provider.is_none()
             && self_hosted_server_id.is_none()
             && provider_params.is_none()
+            && reasoning_effort.is_none()
             && auth_binding.is_none()
             && keep_alive.is_none()
             && render_metadata.is_none()
@@ -2119,6 +2176,11 @@ impl RuntimeTurnMetadata {
             &mut self.provider_params,
             other.provider_params,
             "provider_params",
+        )?;
+        merge_override(
+            &mut self.reasoning_effort,
+            other.reasoning_effort,
+            "reasoning_effort",
         )?;
         merge_override(&mut self.auth_binding, other.auth_binding, "auth_binding")?;
         merge_scalar(&mut self.keep_alive, other.keep_alive, "keep_alive")?;
@@ -3448,6 +3510,95 @@ mod tests {
         assert_eq!(foreign, before, "another family shares no defaults");
     }
 
+    /// The resolved marker lives on one request's own copy of the tag: it is
+    /// never written to a serialized form, never read from one, and never
+    /// taken from a default during a merge.
+    #[test]
+    fn the_resolved_marker_is_request_local() {
+        let marked = OpenAiProviderTag {
+            reasoning_effort: Some(ReasoningEffort::High),
+            reasoning_effort_resolved: true,
+            ..Default::default()
+        };
+        assert!(!OpenAiProviderTag::default().reasoning_effort_resolved);
+
+        let serialized = serde_json::to_value(&marked).expect("the tag serializes");
+        assert_eq!(serialized, serde_json::json!({"reasoning_effort": "high"}));
+        let read_back: OpenAiProviderTag =
+            serde_json::from_value(serialized).expect("the tag reads back");
+        assert!(!read_back.reasoning_effort_resolved);
+        assert_eq!(read_back.reasoning_effort, Some(ReasoningEffort::High));
+
+        let via_params = serde_json::to_value(ProviderParamsOverride {
+            provider_tag: Some(ProviderTag::OpenAi(marked.clone())),
+            ..Default::default()
+        })
+        .expect("params serialize");
+        assert_eq!(
+            via_params,
+            serde_json::json!({
+                "provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}
+            })
+        );
+
+        assert!(
+            serde_json::from_value::<OpenAiProviderTag>(serde_json::json!({
+                "reasoning_effort": "high",
+                "reasoning_effort_resolved": true
+            }))
+            .is_err(),
+            "a serialized form cannot carry the marker"
+        );
+
+        // A default's marker is ignored: the target keeps its own.
+        let marked_default = ProviderTag::OpenAi(marked.clone());
+        let mut unmarked_target = ProviderTag::OpenAi(OpenAiProviderTag {
+            seed: Some(7),
+            ..Default::default()
+        });
+        unmarked_target
+            .merge_missing_from(&marked_default)
+            .expect("same provider family merges");
+        assert_eq!(
+            unmarked_target,
+            ProviderTag::OpenAi(OpenAiProviderTag {
+                seed: Some(7),
+                reasoning_effort: Some(ReasoningEffort::High),
+                reasoning_effort_resolved: false,
+                ..Default::default()
+            })
+        );
+
+        let unmarked_default = ProviderTag::OpenAi(OpenAiProviderTag {
+            seed: Some(7),
+            ..Default::default()
+        });
+        let mut marked_target = ProviderTag::OpenAi(marked.clone());
+        marked_target
+            .merge_missing_from(&unmarked_default)
+            .expect("same provider family merges");
+        assert_eq!(
+            marked_target,
+            ProviderTag::OpenAi(OpenAiProviderTag {
+                seed: Some(7),
+                reasoning_effort: Some(ReasoningEffort::High),
+                reasoning_effort_resolved: true,
+                ..Default::default()
+            })
+        );
+
+        // Clearing build defaults leaves the target's marker alone too.
+        let mut cleared = ProviderTag::OpenAi(marked);
+        cleared.clear_matching_defaults(&marked_default);
+        assert_eq!(
+            cleared,
+            ProviderTag::OpenAi(OpenAiProviderTag {
+                reasoning_effort_resolved: true,
+                ..Default::default()
+            })
+        );
+    }
+
     /// Anthropic cache knobs live on the typed provider tag. The nested form is
     /// the documented profile / request shape; a flat `cache_control` key is
     /// rejected by `deny_unknown_fields` before any agent boots.
@@ -3796,5 +3947,130 @@ mod tests {
                 assert!(parsed.as_set().is_some_and(xhigh), "{spelling}");
             }
         }
+    }
+
+    #[test]
+    fn reasoning_effort_round_trips_through_params_identity_and_wire() {
+        let params = ProviderParamsOverride {
+            temperature: Some(0.5),
+            reasoning_effort: Some(EffortLevel::Xhigh),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"temperature": 0.5, "reasoning_effort": "xhigh"})
+        );
+        assert_eq!(
+            serde_json::from_value::<ProviderParamsOverride>(json).unwrap(),
+            params
+        );
+
+        // Params written without the level read as no level and write the
+        // same JSON again.
+        let stored = serde_json::json!({"temperature": 0.5});
+        let read: ProviderParamsOverride = serde_json::from_value(stored.clone()).unwrap();
+        assert_eq!(read.reasoning_effort, None);
+        assert_eq!(serde_json::to_value(&read).unwrap(), stored);
+
+        // The level is an explicit reasoning setting, and a params value
+        // that holds only the level is not empty.
+        let level_only = ProviderParamsOverride {
+            reasoning_effort: Some(EffortLevel::Low),
+            ..Default::default()
+        };
+        assert!(level_only.sets_reasoning());
+        assert!(!level_only.is_empty());
+        assert!(!ProviderParamsOverride::default().sets_reasoning());
+        assert!(ProviderParamsOverride::default().is_empty());
+
+        // `x_high` is not a level; the refusal lists the levels.
+        let error = serde_json::from_value::<ProviderParamsOverride>(
+            serde_json::json!({"reasoning_effort": "x_high"}),
+        )
+        .expect_err("`x_high` is not a level")
+        .to_string();
+        assert!(error.contains("`xhigh`"), "{error}");
+
+        // The turn field: set, clear and absent, each through JSON.
+        for (turn, json) in [
+            (
+                Some(TurnMetadataOverride::Set(EffortLevel::Medium)),
+                serde_json::json!({"reasoning_effort": {"action": "set", "value": "medium"}}),
+            ),
+            (
+                Some(TurnMetadataOverride::Clear),
+                serde_json::json!({"reasoning_effort": {"action": "clear"}}),
+            ),
+            (None, serde_json::json!({})),
+        ] {
+            let metadata = RuntimeTurnMetadata {
+                reasoning_effort: turn,
+                ..Default::default()
+            };
+            assert_eq!(serde_json::to_value(&metadata).unwrap(), json);
+            assert_eq!(
+                serde_json::from_value::<RuntimeTurnMetadata>(json).unwrap(),
+                metadata
+            );
+            assert_eq!(metadata.is_empty(), metadata.reasoning_effort.is_none());
+        }
+        let error = serde_json::from_value::<RuntimeTurnMetadata>(
+            serde_json::json!({"reasoning_effort": "x_high"}),
+        )
+        .expect_err("`x_high` is not a level on a turn either")
+        .to_string();
+        assert!(error.contains("`xhigh`"), "{error}");
+    }
+
+    #[test]
+    fn batch_and_join_rules() {
+        let level = |level: Option<TurnMetadataOverride<EffortLevel>>| RuntimeTurnMetadata {
+            reasoning_effort: level,
+            ..Default::default()
+        };
+        let set = |value| Some(TurnMetadataOverride::Set(value));
+        let clear = Some(TurnMetadataOverride::Clear);
+
+        // Two different turn levels in one batch conflict.
+        let mut merged = level(set(EffortLevel::Low));
+        let conflict = merged
+            .merge(level(set(EffortLevel::High)))
+            .expect_err("two levels in one batch conflict");
+        assert_eq!(conflict.field, "reasoning_effort");
+        // A set and a clear conflict too.
+        let mut merged = level(set(EffortLevel::Low));
+        let conflict = merged
+            .merge(level(clear.clone()))
+            .expect_err("a set and a clear in one batch conflict");
+        assert_eq!(conflict.field, "reasoning_effort");
+
+        // Equal levels merge, and an input without the field takes the
+        // other's.
+        let mut merged = level(set(EffortLevel::High));
+        merged.merge(level(set(EffortLevel::High))).unwrap();
+        assert_eq!(merged.reasoning_effort, set(EffortLevel::High));
+        let mut merged = level(None);
+        merged.merge(level(clear.clone())).unwrap();
+        assert_eq!(merged.reasoning_effort, clear);
+        let mut merged = level(set(EffortLevel::High));
+        merged.merge(level(None)).unwrap();
+        assert_eq!(merged.reasoning_effort, set(EffortLevel::High));
+
+        // The level is independent of `provider_params`: a batch may carry
+        // both, each merged by its own field.
+        let mut merged = RuntimeTurnMetadata {
+            provider_params: Some(TurnMetadataOverride::Clear),
+            ..Default::default()
+        };
+        merged.merge(level(set(EffortLevel::High))).unwrap();
+        assert_eq!(merged.provider_params, Some(TurnMetadataOverride::Clear));
+        assert_eq!(merged.reasoning_effort, set(EffortLevel::High));
+
+        // An input that carries the field is model routing: it takes its own
+        // turn and never joins a running one.
+        assert!(level(None).joins_running_turn());
+        assert!(!level(set(EffortLevel::High)).joins_running_turn());
+        assert!(!level(clear).joins_running_turn());
     }
 }

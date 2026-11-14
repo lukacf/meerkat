@@ -56,6 +56,7 @@ class WireRunResult:
     extraction_error: Optional[dict[str, Any]] = None
     schema_warnings: Optional[list[Any]] = None
     skill_diagnostics: Optional[dict] = None
+    reasoning_effort: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -1882,6 +1883,7 @@ class HelpResponse:
     turns: int
     usage: WireUsage
     extraction_error: Optional[dict[str, Any]] = None
+    reasoning_effort: Optional[dict[str, Any]] = None
     request_usage: Optional[list[dict[str, Any]]] = None
     run_usage: Optional[WireUsage] = None
     schema_warnings: Optional[list[dict[str, Any]]] = None
@@ -4124,6 +4126,7 @@ retired `clear_*` split wire form) fail closed at the serde boundary via
     output_schema: Optional[Any] = None
     provider: Optional[str] = None
     provider_params: Optional[dict[str, Any]] = None
+    reasoning_effort: Optional[dict[str, Any]] = None
     self_hosted_server_id: Optional[str] = None
     session_events: Optional[bool] = None
     skill_refs: Optional[list[SkillKey]] = None
@@ -5209,6 +5212,7 @@ class WireProviderParamsOverride:
     max_output_tokens: Optional[int] = None
     provider_tag: Optional[WireProviderTag] = None
     reasoning: Optional[WireReasoningMode] = None
+    reasoning_effort: Optional[Any] = None
     temperature: Optional[float] = None
     thinking_budget_tokens: Optional[int] = None
     top_p: Optional[float] = None
@@ -7545,6 +7549,7 @@ class WireModelProfile:
     image_tool_results: Optional[bool] = None
     inline_video: Optional[bool] = None
     realtime: Optional[bool] = None
+    reasoning_effort_levels: Optional[list[Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']]] = None
     release_stage: Optional[Literal['stable', 'experimental', 'operator_defined']] = None
     supports_mid_conversation_system_messages: Optional[bool] = None
     supports_web_search: Optional[bool] = None
@@ -7993,7 +7998,7 @@ WireMobBackendKind = Literal['session', 'external']
 #
 # Wire twin of `meerkat_mob::ResumeOverrideField`; closed snake_case
 # vocabulary, parsed fail-closed at the wire boundary.
-WireMobResumeOverrideField = Literal['model', 'provider', 'provider_params']
+WireMobResumeOverrideField = Literal['model', 'provider', 'provider_params', 'reasoning_effort']
 
 # Runtime binding for spawn requests.
 #

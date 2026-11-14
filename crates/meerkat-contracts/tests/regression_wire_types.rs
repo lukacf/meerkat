@@ -82,6 +82,7 @@ fn rewrite_record_fixture() -> TranscriptRewriteRecord {
 #[test]
 fn wire_run_result_required_fields() {
     let wire = WireRunResult {
+        reasoning_effort: None,
         session_id: SessionId::new(),
         session_ref: None,
         text: "hello".to_string(),
@@ -112,6 +113,7 @@ fn wire_run_result_required_fields() {
 #[test]
 fn wire_run_result_optional_omitted() {
     let wire = WireRunResult {
+        reasoning_effort: None,
         session_id: SessionId::new(),
         session_ref: None,
         text: "ok".to_string(),
@@ -153,6 +155,7 @@ fn wire_run_result_optional_omitted() {
 #[test]
 fn wire_run_result_roundtrip() {
     let wire = WireRunResult {
+        reasoning_effort: None,
         session_id: SessionId::new(),
         session_ref: Some("ref-1".to_string()),
         text: "result text".to_string(),
@@ -431,6 +434,7 @@ fn agent_event_all_variants_roundtrip() {
     // Variants that can be constructed without chrono or uuid (direct construction).
     let direct_variants: Vec<AgentEvent> = vec![
         AgentEvent::RunStarted {
+            reasoning_effort: None,
             request_reasoning: None,
             identity: Default::default(),
             session_id: session_id.clone(),
@@ -758,6 +762,7 @@ fn agent_event_all_variants_roundtrip() {
 fn documented_event_catalog_covers_core_agent_event_discriminators() {
     let events = vec![
         AgentEvent::RunStarted {
+            reasoning_effort: None,
             request_reasoning: None,
             identity: Default::default(),
             session_id: SessionId::new(),
@@ -996,6 +1001,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             input_ids: vec![meerkat_core::lifecycle::InputId::new()],
         }),
         AgentEvent::RunResumed {
+            reasoning_effort: None,
             session_id: SessionId::new(),
             run_id: meerkat_core::lifecycle::RunId::new(),
             round: 2,
@@ -1171,6 +1177,7 @@ fn emitted_rpc_catalog_type_names_resolve_to_schema_artifacts() {
 fn wire_run_result_from_run_result_conversion() {
     let session_id = SessionId::new();
     let run = RunResult {
+        reasoning_effort: None,
         text: "result".to_string(),
         session_id: session_id.clone(),
         usage: Usage {

@@ -142,6 +142,7 @@ impl SessionAgentBuilder for ProbeBuilder {
 impl ProbeAgent {
     fn ok_result(&self) -> RunResult {
         RunResult {
+            reasoning_effort: None,
             text: "ok".to_string(),
             session_id: self.session_id.clone(),
             usage: Usage::default(),

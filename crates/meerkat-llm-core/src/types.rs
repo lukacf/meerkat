@@ -108,6 +108,35 @@ pub trait LlmClient: Send + Sync {
         Err(meerkat_core::ControllerFactsUnavailable)
     }
 
+    /// Request-free observation of the route this client serves requests on,
+    /// for the provider-neutral `reasoning_effort` option: the backend, the
+    /// provider API, and what the account and the operator state about the
+    /// effort levels of the selected model. No I/O, no credential resolution,
+    /// no model request. `None` reports no route. A wrapper that sends its
+    /// client's requests on unchanged delegates to the client it wraps. A
+    /// client that chooses the route itself (an account router, an adapter
+    /// between provider families) answers for that route or reports none,
+    /// never the wrapped client's answer as its own.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        None
+    }
+
+    /// The route observation of the route `projection` is bound to: what
+    /// [`Self::reasoning_route`] reported for the route this client
+    /// projected the request on. A client whose route can change between
+    /// two requests answers from the projection's own route witness, so a
+    /// request prepared on an earlier route is told apart from the route
+    /// served now; every other client's route is the one it reports. A
+    /// wrapper that sends its client's requests on unchanged delegates to
+    /// the client it wraps. No I/O.
+    fn reasoning_route_of(
+        &self,
+        projection: &LlmReplayProjection,
+    ) -> Option<meerkat_core::ReasoningRouteObservation> {
+        let _ = projection;
+        self.reasoning_route()
+    }
+
     /// Prepare replay messages together with any opaque, request-scoped route
     /// witness required to keep later lowering and dispatch coherent.
     fn project_replay_request(
@@ -282,6 +311,14 @@ impl LlmReplayProjection {
     pub fn with_route_witness(mut self, witness: LlmRequestRouteWitness) -> Self {
         self.route_witness = Some(witness);
         self
+    }
+
+    /// The route witness a wrapper attached with
+    /// [`Self::with_route_witness`], read as `T`.
+    pub fn route_witness<T: Any>(&self) -> Option<&T> {
+        self.route_witness
+            .as_ref()
+            .and_then(LlmRequestRouteWitness::downcast_ref)
     }
 
     /// Attach the projecting client's own evidence of what it decided for

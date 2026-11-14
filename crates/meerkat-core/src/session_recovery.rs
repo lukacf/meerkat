@@ -28,6 +28,11 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub self_hosted_server_id: Option<String>,
     pub provider_params:
         Option<TurnMetadataOverride<crate::lifecycle::run_primitive::ProviderParamsOverride>>,
+    /// The session's provider-neutral reasoning effort level, decided on its
+    /// own beside `provider_params`
+    /// (see [`crate::session::resolve_session_provider_params`]).
+    pub reasoning_effort:
+        Option<TurnMetadataOverride<crate::model_profile::capabilities::EffortLevel>>,
     pub auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
     pub max_tokens: Option<u32>,
     pub output_schema: Option<OutputSchema>,
@@ -286,6 +291,7 @@ pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides
         || overrides.provider.is_some()
         || overrides.self_hosted_server_id.is_some()
         || overrides.provider_params.is_some()
+        || overrides.reasoning_effort.is_some()
         || overrides.auth_binding.is_some()
         || has_build_only_turn_overrides(overrides)
         || overrides.hooks_override.is_some()
@@ -482,6 +488,7 @@ pub fn resolve_effective_turn_config(
         structured_output_retries: overrides.structured_output_retries.is_some(),
         // `Some(_)` is the explicit intent (Set or Clear); `None` inherits.
         provider_params: overrides.provider_params.is_some(),
+        reasoning_effort: overrides.reasoning_effort.is_some(),
         auth_binding: overrides.auth_binding.is_some(),
         override_builtins: overrides.override_builtins.is_some(),
         override_shell: overrides.override_shell.is_some(),
@@ -501,6 +508,18 @@ pub fn resolve_effective_turn_config(
         tool_access_policy: false,
         application_tool_policy: false,
     };
+
+    // The params this build seats follow the one rule every identity change
+    // uses, the persisted reasoning effort level included.
+    let provider_params = crate::session::resolve_session_provider_params(
+        metadata.provider_params.as_ref(),
+        overrides
+            .provider_params
+            .as_ref()
+            .map(TurnMetadataOverride::as_ref),
+        overrides.reasoning_effort.clone(),
+    )
+    .map_err(|error| SurfaceSessionRecoveryError::InvalidOverride(error.to_string()))?;
 
     let model = overrides
         .model
@@ -559,11 +578,7 @@ pub fn resolve_effective_turn_config(
             .budget_limits
             .clone()
             .or_else(|| build_state.budget_limits.clone()),
-        provider_params: match &overrides.provider_params {
-            Some(TurnMetadataOverride::Clear) => None,
-            Some(TurnMetadataOverride::Set(value)) => Some(value.clone()),
-            None => metadata.provider_params.clone(),
-        },
+        provider_params,
         external_tools: context.external_tools,
         // The owning service decides hosting when it creates the actor.
         hosting: crate::session_hosting::SessionHostingIntent::default(),
@@ -1703,5 +1718,358 @@ mod tests {
             !session_allows_first_turn_build_overrides(&session),
             "consumed deferred phase should reject build-only overrides"
         );
+    }
+
+    use crate::lifecycle::run_primitive::ProviderParamsOverride;
+    use crate::model_profile::capabilities::EffortLevel;
+
+    fn level_params(
+        temperature: Option<f32>,
+        level: Option<EffortLevel>,
+    ) -> ProviderParamsOverride {
+        ProviderParamsOverride {
+            temperature,
+            reasoning_effort: level,
+            ..Default::default()
+        }
+    }
+
+    fn session_storing(provider_params: Option<ProviderParamsOverride>) -> Session {
+        let mut session = sample_session();
+        let mut metadata = session.session_metadata().expect("session metadata");
+        metadata.provider_params = provider_params;
+        session
+            .set_session_metadata(metadata)
+            .expect("updated session metadata");
+        session
+    }
+
+    /// The level is sticky and field-level on a session that is not live
+    /// too: a recovered build keeps it across a `provider_params`
+    /// replacement or clear, sets it from the turn field or the nested key,
+    /// and clears it only when the turn says so.
+    #[test]
+    fn turn_reasoning_effort_is_field_level_and_sticky() {
+        use EffortLevel::{High, Low, Medium};
+        use TurnMetadataOverride::{Clear, Set};
+
+        let recover =
+            |stored: Option<ProviderParamsOverride>,
+             provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
+             reasoning_effort: Option<TurnMetadataOverride<EffortLevel>>| {
+                build_recovered_session(
+                    session_storing(stored),
+                    &SurfaceSessionRecoveryOverrides {
+                        provider_params,
+                        reasoning_effort,
+                        ..Default::default()
+                    },
+                    SurfaceSessionRecoveryContext::default(),
+                )
+            };
+        let stored = || Some(level_params(Some(0.2), Some(Medium)));
+
+        // Inherit.
+        let recovered = recover(stored(), None, None).expect("recovered");
+        assert_eq!(recovered.build.provider_params, stored());
+        assert!(!recovered.build.resume_override_mask.provider_params);
+        assert!(!recovered.build.resume_override_mask.reasoning_effort);
+
+        // Set and clear by the turn field, the other params untouched.
+        let recovered = recover(stored(), None, Some(Set(High))).expect("recovered");
+        assert_eq!(
+            recovered.build.provider_params,
+            Some(level_params(Some(0.2), Some(High)))
+        );
+        assert!(recovered.build.resume_override_mask.reasoning_effort);
+        assert!(!recovered.build.resume_override_mask.provider_params);
+        let recovered = recover(stored(), None, Some(Clear)).expect("recovered");
+        assert_eq!(
+            recovered.build.provider_params,
+            Some(level_params(Some(0.2), None))
+        );
+        assert!(recovered.build.resume_override_mask.reasoning_effort);
+        // A session that had no params gets a params value that holds only
+        // the level; clearing it again drops the params value.
+        let recovered = recover(None, None, Some(Set(High))).expect("recovered");
+        assert_eq!(
+            recovered.build.provider_params,
+            Some(level_params(None, Some(High)))
+        );
+        let recovered =
+            recover(Some(level_params(None, Some(High))), None, Some(Clear)).expect("recovered");
+        assert_eq!(recovered.build.provider_params, None);
+
+        // `provider_params` replaced without the key, and cleared: the level
+        // stays.
+        let recovered =
+            recover(stored(), Some(Set(level_params(Some(0.7), None))), None).expect("recovered");
+        assert_eq!(
+            recovered.build.provider_params,
+            Some(level_params(Some(0.7), Some(Medium)))
+        );
+        assert!(recovered.build.resume_override_mask.provider_params);
+        assert!(!recovered.build.resume_override_mask.reasoning_effort);
+        let recovered = recover(stored(), Some(Clear), None).expect("recovered");
+        assert_eq!(
+            recovered.build.provider_params,
+            Some(level_params(None, Some(Medium)))
+        );
+        assert!(recovered.build.resume_override_mask.provider_params);
+
+        // The nested key sets the level; equal spellings are accepted;
+        // different spellings are refused, and so is a clear beside a
+        // nested level.
+        let recovered =
+            recover(stored(), Some(Set(level_params(None, Some(Low)))), None).expect("recovered");
+        assert_eq!(
+            recovered.build.provider_params,
+            Some(level_params(None, Some(Low)))
+        );
+        let recovered = recover(
+            stored(),
+            Some(Set(level_params(None, Some(High)))),
+            Some(Set(High)),
+        )
+        .expect("recovered");
+        assert_eq!(
+            recovered.build.provider_params,
+            Some(level_params(None, Some(High)))
+        );
+        let refused = recover(
+            stored(),
+            Some(Set(level_params(None, Some(Low)))),
+            Some(Set(High)),
+        )
+        .expect_err("two spellings with different levels are refused");
+        assert!(
+            matches!(
+                &refused,
+                SurfaceSessionRecoveryError::InvalidOverride(message)
+                    if message.contains("high") && message.contains("low")
+            ),
+            "{refused:?}"
+        );
+        // A clear beside a nested level is refused the same way.
+        let refused = recover(
+            stored(),
+            Some(Set(level_params(None, Some(Low)))),
+            Some(Clear),
+        )
+        .expect_err("a clear beside a nested level is refused");
+        assert!(
+            matches!(
+                &refused,
+                SurfaceSessionRecoveryError::InvalidOverride(message)
+                    if message.contains("cleared") && message.contains("low")
+            ),
+            "{refused:?}"
+        );
+
+        // A turn that carries only the level needs the recovered build.
+        assert!(has_materialization_overrides(
+            &SurfaceSessionRecoveryOverrides {
+                reasoning_effort: Some(Clear),
+                ..Default::default()
+            }
+        ));
+    }
+
+    /// The three seams that change a session's provider params agree: the
+    /// live identity override, the recovered build of a session that is not
+    /// live, and the resumed-build merge. Each case is one stored params
+    /// value with one params tri-state and one level tri-state; every seam
+    /// must produce the params the rule function produces.
+    #[test]
+    fn the_identity_seams_agree_on_provider_params_and_the_level() {
+        use EffortLevel::{High, Low, Medium};
+        use TurnMetadataOverride::{Clear, Set};
+
+        let registry = crate::ModelRegistry::from_config(
+            &crate::Config::default(),
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        )
+        .expect("test registry");
+        let stored_values = [
+            None,
+            Some(ProviderParamsOverride::default()),
+            Some(level_params(Some(0.2), None)),
+            Some(level_params(Some(0.2), Some(Medium))),
+            Some(level_params(None, Some(High))),
+        ];
+        let params_overrides = [
+            None,
+            Some(Clear),
+            Some(Set(ProviderParamsOverride::default())),
+            Some(Set(level_params(Some(0.7), None))),
+            Some(Set(level_params(Some(0.7), Some(Low)))),
+            Some(Set(level_params(None, Some(High)))),
+        ];
+        let level_overrides = [None, Some(Clear), Some(Set(High)), Some(Set(Low))];
+
+        let mut cases = 0;
+        let mut refused = 0;
+        let mut merge_alone = 0;
+        for stored in &stored_values {
+            for params_override in &params_overrides {
+                for level_override in &level_overrides {
+                    cases += 1;
+                    let case = format!("{stored:?} / {params_override:?} / {level_override:?}");
+                    let borrowed = || params_override.as_ref().map(TurnMetadataOverride::as_ref);
+                    let rule = crate::session::resolve_session_provider_params(
+                        stored.as_ref(),
+                        borrowed(),
+                        level_override.clone(),
+                    );
+
+                    let session = session_storing(stored.clone());
+                    let durable = session
+                        .session_metadata()
+                        .expect("session metadata")
+                        .llm_identity();
+
+                    // Seam 1: the live identity override.
+                    let live = crate::session::resolve_session_llm_identity_override(
+                        &durable,
+                        &registry,
+                        crate::session::SessionLlmIdentityOverride {
+                            model: None,
+                            provider: None,
+                            self_hosted_server_id: None,
+                            provider_params: borrowed(),
+                            reasoning_effort: level_override.clone(),
+                            auth_binding: None,
+                        },
+                    )
+                    .map(|identity| identity.provider_params);
+                    assert_eq!(live, rule, "live identity override: {case}");
+
+                    // Seam 2: the recovered build of a session that is not
+                    // live.
+                    let recovered = build_recovered_session(
+                        session,
+                        &SurfaceSessionRecoveryOverrides {
+                            provider_params: params_override.clone(),
+                            reasoning_effort: level_override.clone(),
+                            ..Default::default()
+                        },
+                        SurfaceSessionRecoveryContext::default(),
+                    );
+                    let expected = match (&rule, recovered) {
+                        (Ok(expected), Ok(recovered)) => {
+                            assert_eq!(
+                                &recovered.build.provider_params, expected,
+                                "recovered build: {case}"
+                            );
+                            let mask = recovered.build.resume_override_mask;
+                            assert_eq!(mask.provider_params, params_override.is_some(), "{case}");
+                            assert_eq!(mask.reasoning_effort, level_override.is_some(), "{case}");
+                            // Seam 3, fed by the recovered build as the
+                            // factory feeds it: the merge keeps what the
+                            // recovery decided.
+                            let merged = crate::session::resolve_resumed_session_llm_identity(
+                                crate::SessionLlmIdentity {
+                                    provider_params: recovered.build.provider_params.clone(),
+                                    ..durable.clone()
+                                },
+                                &durable,
+                                &mask,
+                            );
+                            assert_eq!(
+                                &merged.provider_params, expected,
+                                "resume merge of the recovered build: {case}"
+                            );
+                            expected.clone()
+                        }
+                        (Err(rule_error), Err(recovery_error)) => {
+                            refused += 1;
+                            assert!(
+                                matches!(
+                                    &recovery_error,
+                                    SurfaceSessionRecoveryError::InvalidOverride(message)
+                                        if *message == rule_error.to_string()
+                                ),
+                                "{case}: {recovery_error:?}"
+                            );
+                            continue;
+                        }
+                        (rule, recovered) => {
+                            // One side refused and the other did not.
+                            assert_eq!(
+                                rule.is_ok(),
+                                recovered.is_ok(),
+                                "the recovered build and the rule disagree on refusal: {case}: \
+                                 {rule:?} / {:?}",
+                                recovered.map(|recovered| recovered.build.provider_params)
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Seam 3 alone: a resumed build that names its own
+                    // params and claims the fields it sets. A build holds the
+                    // level in one place (its params), so a case that gives
+                    // both spellings has no build form.
+                    let names_nested_key = matches!(
+                        params_override,
+                        Some(Set(params)) if params.reasoning_effort.is_some()
+                    );
+                    if names_nested_key && level_override.is_some() {
+                        continue;
+                    }
+                    merge_alone += 1;
+                    let mut mask = crate::service::ResumeOverrideMask {
+                        provider_params: params_override.is_some(),
+                        reasoning_effort: level_override.is_some(),
+                        ..Default::default()
+                    };
+                    let mut build_params = match params_override {
+                        Some(Set(params)) => Some(params.clone()),
+                        Some(Clear) => None,
+                        None => stored.clone(),
+                    };
+                    match level_override {
+                        Some(Set(level)) => {
+                            build_params
+                                .get_or_insert_with(ProviderParamsOverride::default)
+                                .reasoning_effort = Some(*level);
+                        }
+                        Some(Clear) => {
+                            if let Some(params) = build_params.as_mut() {
+                                params.reasoning_effort = None;
+                            }
+                        }
+                        None => {}
+                    }
+                    let merged = crate::session::resolve_resumed_session_llm_identity(
+                        crate::SessionLlmIdentity {
+                            provider_params: build_params.clone(),
+                            ..durable.clone()
+                        },
+                        &durable,
+                        &mask,
+                    );
+                    assert_eq!(merged.provider_params, expected, "resume merge: {case}");
+                    // The merge reads the build's params only for a field the
+                    // build claims.
+                    mask.provider_params = false;
+                    mask.reasoning_effort = false;
+                    let unclaimed = crate::session::resolve_resumed_session_llm_identity(
+                        crate::SessionLlmIdentity {
+                            provider_params: build_params,
+                            ..durable.clone()
+                        },
+                        &durable,
+                        &mask,
+                    );
+                    assert_eq!(&unclaimed.provider_params, stored, "unclaimed: {case}");
+                }
+            }
+        }
+        assert_eq!(cases, 120);
+        // Two nested levels, each against the one different turn level and
+        // against a clear, for every stored value.
+        assert_eq!(refused, 20);
+        assert_eq!(merge_alone, 90);
     }
 }

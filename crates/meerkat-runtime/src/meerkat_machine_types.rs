@@ -48,10 +48,11 @@ use crate::traits::{
 
 /// Per-turn LLM hot-swap reconfigure request.
 ///
-/// `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
-/// tri-state via [`TurnMetadataOverride`]: `None` preserves the durable value,
-/// `Some(Set)` overrides it, and `Some(Clear)` removes it. The illegal
-/// "set and clear" fourth state is structurally unrepresentable.
+/// `provider_params`, `reasoning_effort` and `auth_binding` carry the
+/// canonical Inherit/Set/Clear tri-state via [`TurnMetadataOverride`]: `None`
+/// preserves the durable value, `Some(Set)` overrides it, and `Some(Clear)`
+/// removes it. The illegal "set and clear" fourth state is structurally
+/// unrepresentable.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionLlmReconfigureRequest {
@@ -67,6 +68,12 @@ pub struct SessionLlmReconfigureRequest {
     pub provider_params: Option<
         TurnMetadataOverride<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     >,
+    /// The session's provider-neutral reasoning effort level, decided on its
+    /// own beside `provider_params`: `Some(Set)` sets it, `Some(Clear)`
+    /// removes it, `None` keeps it, across a `provider_params` change too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort:
+        Option<TurnMetadataOverride<meerkat_core::model_profile::capabilities::EffortLevel>>,
     /// Optional realm-scoped connection override resolved through the tri-state:
     /// `Some(Set)` swaps the binding, `Some(Clear)` removes it, `None` preserves
     /// the session's existing `SessionLlmIdentity.auth_binding`.
@@ -349,6 +356,33 @@ pub trait SessionLlmReconfigureHost: Send + Sync {
     /// retriable hold at that boundary, not permission to consume the pending
     /// input on the old identity.
     async fn preflight_target_session_llm_identity(
+        &self,
+        _session_id: &SessionId,
+        _target_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        Ok(())
+    }
+
+    /// Judge the target a caller asked `session_id` to be reconfigured to
+    /// (`SessionServiceRuntimeExt::reconfigure_session_llm_identity` and its
+    /// under-boundary form), after the target is resolved and before
+    /// anything is staged.
+    ///
+    /// It is a pre-stage judgement and nothing more. An `Err` refuses the
+    /// caller's request with nothing staged, applied or persisted: the
+    /// session keeps its identity, its client and its stored params. An `Ok`
+    /// promises nothing about the apply that follows. It decides nothing
+    /// about the lifecycle of a committed model-routing handoff, which the
+    /// routing machine owns: a handoff's realization and a switch-turn
+    /// request do not ask it, and their targets are judged by the checks
+    /// that run before each provider request.
+    ///
+    /// A host that builds real clients judges the target's
+    /// `reasoning_effort` level against the route of the client it builds
+    /// for the target, and refuses a level the route does not accept with
+    /// [`RuntimeDriverError::ReasoningEffortRefused`]. The default accepts
+    /// every target.
+    async fn judge_requested_target_session_llm_identity(
         &self,
         _session_id: &SessionId,
         _target_identity: &meerkat_core::SessionLlmIdentity,

@@ -252,6 +252,51 @@ refused when the agent is built and before each request.
 Rust `AgentBuildConfig.provider_params`. A realm-level
 `[agent] provider_params` table is a configuration error.
 
+### Reasoning effort (provider-neutral, 0.9.15)
+
+`reasoning_effort` is one setting for every provider: `none`, `minimal`,
+`low`, `medium`, `high`, `xhigh` or `max` (one spelling each; `x_high` is not
+accepted here). Set it with CLI `rkat run --reasoning-effort <LEVEL>` (on
+`--resume` also `--no-reasoning-effort` to remove it); RPC `session/create`
+(a level) and `turn/start` / `mob/turn_start` (a level, `{"action":"clear"}`,
+or absent to keep); REST `POST /sessions` and `POST /sessions/{id}/messages`;
+MCP `meerkat_run` and `meerkat_resume`; Python `reasoning_effort=` and
+TypeScript `reasoningEffort` on create and turns; Web
+`SessionConfig.reasoningEffort`; a mob profile's
+`provider_params = { reasoning_effort = "high" }`. It is the same setting as
+`provider_params.reasoning_effort`; both given must be equal. Not on
+schedules in 0.9.15: a schedule's `create` spec that carries it is refused.
+
+```bash
+rkat run -m gpt-5.5 --reasoning-effort high "Plan the migration"
+rkat run --resume last --no-reasoning-effort "Continue"
+```
+
+Meerkat checks the level against the model on the route that serves the
+request and writes the provider's own field (`reasoning.effort` on OpenAI
+Responses, `reasoning_effort` and `reasoning.effort` on Chat Completions,
+`output_config.effort` on Anthropic, `thinkingConfig.thinkingLevel` on
+Gemini). The supported levels come from the model catalog on direct provider
+routes, from the account's model list on GitHub Copilot, and from the
+operator's `reasoning_effort_levels` for a self-hosted model. A level the
+model or route does not accept, levels no source states, and a conflict with
+a provider-specific effort, a thinking budget or `reasoning: off` are refused
+before any provider request: `INVALID_PARAMS` (CLI exit status 2) with data
+`{"kind": "reasoning_effort_refused", "retryable": <bool>,
+"reasoning_effort_refusal": {requested, provider, model, route, reason,
+supported, facts}}`. Reasons: `unsupported_level`,
+`supported_levels_unknown`, `supported_levels_unavailable` (the only
+transient one: the Copilot account's list is not loaded yet),
+`conflicting_provider_effort`, `conflicting_thinking_budget`,
+`conflicting_thinking_type`, `conflicting_reasoning_body`,
+`conflicting_reasoning_mode`. Meerkat never lowers the level, changes the
+model or moves to another route. The level is sticky on the session and
+independent of the other provider params. Runs report it: `run_started` /
+`run_resumed` `reasoning_effort`, the event
+`request_reasoning_effort_resolved` per provider request, and the run
+result's `reasoning_effort` block (`requested`, `sent[]`). `models/catalog`
+lists a model's direct-route levels as `reasoning_effort_levels`.
+
 `provider_tag` fields:
 
 - Anthropic (`"provider": "anthropic"`): `thinking` (`{"type": "adaptive"}`,

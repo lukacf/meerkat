@@ -54,6 +54,9 @@ fn runtime_driver_error_to_session_error(err: meerkat_runtime::RuntimeDriverErro
     if let Some(in_progress) = err.teardown_in_progress_session_error() {
         return in_progress;
     }
+    if let Some(refused) = err.reasoning_effort_refused_session_error() {
+        return refused;
+    }
     SessionError::Agent(meerkat_core::error::AgentError::InternalError(
         err.to_string(),
     ))
@@ -841,6 +844,15 @@ pub struct MeerkatRunInput {
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
     pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    /// The session's provider-neutral reasoning effort level: `none`,
+    /// `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. Meerkat checks it
+    /// against the model on the route that serves the request and writes the
+    /// provider's own field; a level the model or route does not accept is
+    /// refused before any provider request. The same setting as
+    /// `provider_params.reasoning_effort`; an input that gives both must give
+    /// the same level.
+    #[serde(default)]
+    pub reasoning_effort: Option<meerkat_core::model_profile::capabilities::EffortLevel>,
     /// Explicit budget limits for this run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
@@ -879,6 +891,40 @@ pub struct MeerkatRunInput {
     pub auth_binding: Option<meerkat_contracts::WireAuthBindingRef>,
 }
 
+/// The provider params a `meerkat_run` session's build seats: the input's
+/// params with its `reasoning_effort` level folded in by Core's one rule. An
+/// input that names the level twice with two different levels is refused.
+fn run_build_provider_params(
+    input: &MeerkatRunInput,
+) -> Result<Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>, ToolCallError> {
+    meerkat_core::resolve_build_provider_params(
+        input.provider_params.as_ref(),
+        input
+            .reasoning_effort
+            .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set),
+    )
+    .map_err(|error| ToolCallError::invalid_params(error.to_string()))
+}
+
+/// The provider params a `meerkat_resume` rebuild names. A resume that sets
+/// or clears `reasoning_effort` also claims the session's level
+/// (`ResumeOverrideMask::reasoning_effort`), so the rebuilt session holds
+/// that level, or none; a resume that names none keeps the recorded level,
+/// also when it replaces the other params. A clear beside params that name
+/// a level, and two different levels, are refused.
+fn resume_build_provider_params(
+    input: &MeerkatResumeInput,
+) -> Result<Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>, ToolCallError> {
+    use meerkat_contracts::wire::runtime::WireTurnMetadataOverride;
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    let level = input.reasoning_effort.clone().map(|level| match level {
+        WireTurnMetadataOverride::Set(level) => TurnMetadataOverride::Set(level),
+        WireTurnMetadataOverride::Clear => TurnMetadataOverride::Clear,
+    });
+    meerkat_core::resolve_build_provider_params(input.provider_params.as_ref(), level)
+        .map_err(|error| ToolCallError::invalid_params(error.to_string()))
+}
+
 fn mcp_resume_requires_rebuild(input: &MeerkatResumeInput) -> bool {
     !input.tool_results.is_empty()
         || !input.tools.is_empty()
@@ -888,6 +934,7 @@ fn mcp_resume_requires_rebuild(input: &MeerkatResumeInput) -> bool {
         || input.output_schema.is_some()
         || input.structured_output_retries.is_some()
         || input.provider_params.is_some()
+        || input.reasoning_effort.is_some()
         || input.hooks_override.is_some()
         || input.enable_builtins.is_some()
         || input
@@ -2171,6 +2218,17 @@ pub struct MeerkatResumeInput {
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
     pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    /// Set, clear, or keep the session's provider-neutral reasoning effort
+    /// level from this turn on: a level (`"high"`) sets it,
+    /// `{"action": "clear"}` removes it, and omitting the field keeps the
+    /// level the session recorded. It is its own setting: `provider_params`
+    /// that name no level keep the recorded one.
+    #[serde(default)]
+    pub reasoning_effort: Option<
+        meerkat_contracts::wire::runtime::WireTurnMetadataOverride<
+            meerkat_core::model_profile::capabilities::EffortLevel,
+        >,
+    >,
     /// Explicit budget limits for this resumed run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
@@ -2655,6 +2713,29 @@ fn format_agent_result(
     }
 }
 
+/// A refused `reasoning_effort` level as a tool error, in the form JSON-RPC
+/// answers it: the session transport's code (invalid params, -32602), the
+/// refusal's message, and the typed data `{"kind":
+/// "reasoning_effort_refused", "retryable": <bool>,
+/// "reasoning_effort_refusal": {...}}`. A host reads the refusal from the
+/// data and never from the text. `None` for any other error.
+fn reasoning_effort_refused_tool_error(error: &SessionError) -> Option<ToolCallError> {
+    let SessionError::Agent(agent_error) = error.primary_error() else {
+        return None;
+    };
+    if !matches!(
+        agent_error.primary_error(),
+        meerkat::AgentError::ReasoningEffortRefused(_)
+    ) {
+        return None;
+    }
+    Some(ToolCallError::new(
+        meerkat_contracts::error::session_transport_error_code(error).jsonrpc_code(),
+        error.to_string(),
+        meerkat_contracts::error::session_error_details(error),
+    ))
+}
+
 fn format_agent_result_tool(
     result: Result<meerkat_core::types::RunResult, SessionError>,
     session_id: &meerkat::SessionId,
@@ -2663,6 +2744,10 @@ fn format_agent_result_tool(
         Err(SessionError::Agent(meerkat::AgentError::Cancelled)) => {
             Err(request_cancelled_tool_error())
         }
+        Err(error) => match reasoning_effort_refused_tool_error(&error) {
+            Some(refused) => Err(refused),
+            None => format_agent_result(Err(error), session_id).map_err(ToolCallError::internal),
+        },
         result => format_agent_result(result, session_id).map_err(ToolCallError::internal),
     }
 }
@@ -2719,6 +2804,18 @@ fn post_commit_session_created_error(
                 "resumable": true,
             })),
         );
+    }
+
+    // A refused reasoning effort level keeps its typed form; the data also
+    // names the session this call created, as its other failures do.
+    if let Some(mut refused) = reasoning_effort_refused_tool_error(err) {
+        if let Some(Value::Object(data)) = refused.data.as_mut() {
+            data.insert("session_id".to_string(), json!(session_id.to_string()));
+            data.insert("session_ref".to_string(), json!(session_id.to_string()));
+            data.insert("session_created".to_string(), json!(true));
+            data.insert("resumable".to_string(), json!(true));
+        }
+        return refused;
     }
 
     ToolCallError::internal_with_data(
@@ -4470,6 +4567,7 @@ async fn handle_meerkat_help(
         enable_mob: Some(false),
         enable_web_search: Some(false),
         provider_params: None,
+        reasoning_effort: None,
         budget_limits: None,
         preload_skills: None,
         skill_refs: None,
@@ -4522,6 +4620,9 @@ async fn handle_meerkat_run_with_help_tools(
     )>,
 ) -> Result<Value, ToolCallError> {
     validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
+    // The level has one home, the build's provider params: both spellings
+    // of it must agree before anything is built.
+    let build_provider_params = run_build_provider_params(&input)?;
     let ingress = state.runtime_ingress_context();
     let keep_alive_override =
         resolve_keep_alive(input.keep_alive).map_err(ToolCallError::invalid_params)?;
@@ -4690,7 +4791,7 @@ async fn handle_meerkat_run_with_help_tools(
                 // `session` only claims the new session's id.
                 resume_session_intent: meerkat_core::SessionBuildIntent::Mint,
                 budget_limits: input.budget_limits.clone().map(Into::into),
-                provider_params: input.provider_params.clone(),
+                provider_params: build_provider_params.clone(),
                 call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
                 external_tools,
                 // The session service decides hosting when it creates the actor.
@@ -4756,6 +4857,7 @@ async fn handle_meerkat_run_with_help_tools(
                     max_tokens: input.max_tokens.is_some(),
                     structured_output_retries: input.structured_output_retries.is_some(),
                     provider_params: input.provider_params.is_some(),
+                    reasoning_effort: input.reasoning_effort.is_some(),
                     preload_skills: input.preload_skills.is_some(),
                     keep_alive: keep_alive_override.is_some(),
                     comms_name: input.comms_name.is_some(),
@@ -4865,6 +4967,9 @@ async fn handle_meerkat_resume(
     request_context: Option<RequestContext>,
 ) -> Result<Value, ToolCallError> {
     validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
+    // The level a rebuild seats, by Core's one rule: a resume that names
+    // `reasoning_effort` claims the session's level below.
+    let resume_provider_params = resume_build_provider_params(&input)?;
     let ingress = state.runtime_ingress_context();
     // A ConfigError is a TRUE fault and must not be laundered into a default config.
     let config = state
@@ -5184,7 +5289,7 @@ async fn handle_meerkat_resume(
             resume_session: Some(session.clone()),
             resume_session_intent: meerkat_core::SessionBuildIntent::Resume,
             budget_limits: input.budget_limits.clone().map(Into::into),
-            provider_params: input.provider_params.clone(),
+            provider_params: resume_provider_params.clone(),
             call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
             external_tools,
             // The session service decides hosting when it creates the actor.
@@ -5262,6 +5367,7 @@ async fn handle_meerkat_resume(
                 max_tokens: input.max_tokens.is_some(),
                 structured_output_retries: input.structured_output_retries.is_some(),
                 provider_params: input.provider_params.is_some(),
+                reasoning_effort: input.reasoning_effort.is_some(),
                 preload_skills: input.preload_skills.is_some(),
                 keep_alive: keep_alive_override.is_some(),
                 comms_name: input.comms_name.is_some(),
@@ -7518,6 +7624,7 @@ mod tests {
             enable_mob: None,
             enable_web_search: None,
             provider_params: None,
+            reasoning_effort: None,
             budget_limits: None,
             preload_skills: None,
             skill_refs: None,
@@ -9581,6 +9688,180 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         assert!(!input.verbose);
     }
 
+    /// `meerkat_run` takes the provider-neutral `reasoning_effort` level and
+    /// `meerkat_resume` its tri-state. A resume that names it rebuilds the
+    /// session, as a resume that names `provider_params` does.
+    #[test]
+    fn meerkat_run_and_resume_inputs_read_the_reasoning_effort() {
+        let run: MeerkatRunInput = serde_json::from_value(json!({
+            "prompt": "Hello",
+            "reasoning_effort": "high"
+        }))
+        .expect("meerkat_run reads a level");
+        assert!(
+            format!("{run:?}").contains("reasoning_effort: Some(High)"),
+            "the level is read, not ignored: {run:?}"
+        );
+        let run: MeerkatRunInput =
+            serde_json::from_value(json!({"prompt": "Hello"})).expect("meerkat_run");
+        assert!(format!("{run:?}").contains("reasoning_effort: None"));
+
+        let resume = |reasoning_effort: Option<serde_json::Value>| {
+            let mut input = json!({
+                "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+                "prompt": "Continue"
+            });
+            if let Some(value) = reasoning_effort {
+                input["reasoning_effort"] = value;
+            }
+            serde_json::from_value::<MeerkatResumeInput>(input)
+        };
+        for (value, expected) in [
+            (json!("low"), "reasoning_effort: Some(Set(Low))"),
+            (
+                json!({"action": "set", "value": "xhigh"}),
+                "reasoning_effort: Some(Set(Xhigh))",
+            ),
+            (json!({"action": "clear"}), "reasoning_effort: Some(Clear)"),
+        ] {
+            let input = resume(Some(value.clone()))
+                .unwrap_or_else(|error| panic!("meerkat_resume reads {value}: {error}"));
+            assert!(
+                format!("{input:?}").contains(expected),
+                "{value} reads as {expected}: {input:?}"
+            );
+            assert!(
+                mcp_resume_requires_rebuild(&input),
+                "a resume that names the level rebuilds the session: {value}"
+            );
+        }
+        let keep = resume(None).expect("meerkat_resume without a level");
+        assert!(format!("{keep:?}").contains("reasoning_effort: None"));
+        assert!(!mcp_resume_requires_rebuild(&keep));
+
+        for not_a_level in ["x_high", "extreme"] {
+            let error = serde_json::from_value::<MeerkatRunInput>(json!({
+                "prompt": "Hello",
+                "reasoning_effort": not_a_level
+            }))
+            .expect_err("meerkat_run refuses a word outside the level vocabulary")
+            .to_string();
+            assert!(error.contains("`xhigh`"), "{not_a_level}: {error}");
+            let error = resume(Some(json!(not_a_level)))
+                .expect_err("meerkat_resume refuses a word outside the level vocabulary")
+                .to_string();
+            assert!(error.contains("`xhigh`"), "{not_a_level}: {error}");
+        }
+    }
+
+    /// The level of `meerkat_run` reaches the build inside its provider
+    /// params, and `meerkat_resume` folds its tri-state the same way: a
+    /// level beside params that name none is added, a clear leaves the
+    /// params without one, and two different outcomes are refused.
+    #[test]
+    fn mcp_reasoning_effort_build_params_and_resume_claim() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let run = |input: serde_json::Value| {
+            let input: MeerkatRunInput = serde_json::from_value(input).expect("run input");
+            run_build_provider_params(&input)
+        };
+        let Ok(folded) = run(json!({
+            "prompt": "Hello",
+            "reasoning_effort": "high",
+            "provider_params": {"temperature": 0.2}
+        })) else {
+            panic!("a level beside other params is folded");
+        };
+        let folded = folded.expect("params");
+        assert_eq!(folded.reasoning_effort, Some(EffortLevel::High));
+        assert_eq!(folded.temperature, Some(0.2));
+        let Ok(nested) = run(json!({
+            "prompt": "Hello",
+            "reasoning_effort": "low",
+            "provider_params": {"reasoning_effort": "low"}
+        })) else {
+            panic!("the same level in both is accepted");
+        };
+        assert_eq!(
+            nested.and_then(|params| params.reasoning_effort),
+            Some(EffortLevel::Low)
+        );
+        let Ok(none) = run(json!({"prompt": "Hello"})) else {
+            panic!("an input without a level builds");
+        };
+        assert_eq!(none, None);
+        assert!(
+            run(json!({
+                "prompt": "Hello",
+                "reasoning_effort": "high",
+                "provider_params": {"reasoning_effort": "low"}
+            }))
+            .is_err(),
+            "two different levels are refused"
+        );
+
+        let resume = |reasoning_effort: Option<serde_json::Value>,
+                      provider_params: Option<serde_json::Value>| {
+            let mut input = json!({
+                "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+                "prompt": "Continue"
+            });
+            if let Some(value) = reasoning_effort {
+                input["reasoning_effort"] = value;
+            }
+            if let Some(value) = provider_params {
+                input["provider_params"] = value;
+            }
+            let input: MeerkatResumeInput = serde_json::from_value(input).expect("resume input");
+            resume_build_provider_params(&input)
+        };
+        let level_of = |result: Result<
+            Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+            ToolCallError,
+        >| match result {
+            Ok(params) => params.and_then(|params| params.reasoning_effort),
+            Err(error) => panic!("the resume input asks for one outcome: {error:?}"),
+        };
+        assert_eq!(
+            level_of(resume(Some(json!("medium")), None)),
+            Some(EffortLevel::Medium)
+        );
+        assert_eq!(
+            level_of(resume(Some(json!({"action": "clear"})), None)),
+            None
+        );
+        assert_eq!(level_of(resume(None, None)), None);
+        assert_eq!(
+            level_of(resume(
+                Some(json!("medium")),
+                Some(json!({"temperature": 0.5}))
+            )),
+            Some(EffortLevel::Medium)
+        );
+        // Params that name no level keep the recorded one: nothing is named.
+        assert_eq!(
+            level_of(resume(None, Some(json!({"temperature": 0.5})))),
+            None
+        );
+        assert!(
+            resume(
+                Some(json!({"action": "clear"})),
+                Some(json!({"reasoning_effort": "low"}))
+            )
+            .is_err(),
+            "a clear beside params that name a level is refused"
+        );
+        assert!(
+            resume(
+                Some(json!("high")),
+                Some(json!({"reasoning_effort": "low"}))
+            )
+            .is_err(),
+            "two different levels are refused"
+        );
+    }
+
     #[test]
     fn test_meerkat_run_input_with_tools() {
         let input_json = json!({
@@ -9671,6 +9952,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
     fn test_format_agent_result_includes_skill_diagnostics() {
         let session_id = meerkat::SessionId::new();
         let result = meerkat_core::types::RunResult {
+            reasoning_effort: None,
             text: "ok".to_string(),
             session_id: session_id.clone(),
             usage: Default::default(),
@@ -10362,6 +10644,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -10417,6 +10700,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -10811,6 +11095,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -10896,6 +11181,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -10965,6 +11251,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -11088,6 +11375,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -11229,6 +11517,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -11363,6 +11652,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -11471,6 +11761,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -11577,6 +11868,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -11693,6 +11985,63 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             data.get("session_id").and_then(Value::as_str),
             Some(session_id_string.as_str())
         );
+    }
+
+    /// A refused reasoning effort level is a typed tool error, as JSON-RPC
+    /// answers it: invalid params with the typed refusal as the error's
+    /// data, never an internal error whose text a host would have to read.
+    /// After the call created its session the data also names the session.
+    #[test]
+    fn test_a_refused_reasoning_effort_is_a_typed_tool_error() {
+        let session_id = meerkat::SessionId::new();
+        for (reason, retryable) in [
+            ("unsupported_level", false),
+            ("supported_levels_unavailable", true),
+        ] {
+            let document = json!({
+                "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                "route": {"backend": "anthropic_api", "api": "messages"},
+                "reason": reason, "supported": null, "facts": null,
+            });
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document.clone()).expect("a refusal document reads");
+            let refused = || {
+                SessionError::Agent(meerkat::AgentError::ReasoningEffortRefused(Box::new(
+                    refusal.clone(),
+                )))
+            };
+            let typed = json!({
+                "kind": "reasoning_effort_refused",
+                "retryable": retryable,
+                "reasoning_effort_refusal": document,
+            });
+
+            let err = format_agent_result_tool(Err(refused()), &session_id)
+                .expect_err("a refused level is a tool error");
+            assert_eq!(err.code, -32602, "{reason}");
+            assert_eq!(err.message, format!("agent error: {refusal}"), "{reason}");
+            assert_eq!(err.data, Some(typed.clone()), "{reason}");
+
+            let err = post_commit_session_created_error(&session_id, &refused());
+            assert_eq!(err.code, -32602, "{reason}");
+            let data = err.data.expect("the typed data");
+            for (key, value) in typed.as_object().expect("an object") {
+                assert_eq!(&data[key], value, "{reason}: {key}");
+            }
+            assert_eq!(data["session_id"], session_id.to_string(), "{reason}");
+            assert_eq!(data["session_created"], true, "{reason}");
+            assert_eq!(data["resumable"], true, "{reason}");
+
+            // A reconfiguration's refusal reaches the same answer.
+            let from_driver = runtime_driver_error_to_session_error(
+                meerkat_runtime::RuntimeDriverError::ReasoningEffortRefused(Box::new(
+                    refusal.clone(),
+                )),
+            );
+            let err = format_agent_result_tool(Err(from_driver), &session_id)
+                .expect_err("a refused level is a tool error");
+            assert_eq!((err.code, err.data), (-32602, Some(typed)), "{reason}");
+        }
     }
 
     #[test]

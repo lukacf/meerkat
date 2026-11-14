@@ -739,6 +739,16 @@ where
         metadata.terminal = true;
         metadata.outcome = Some(snapshot.terminal_outcome);
         metadata.detail = Some(error.to_string());
+        // A turn that failed for a refused reasoning effort level keeps the
+        // typed refusal: the session runtime hands this witness to the
+        // surface as the failed turn's error, and a surface reads the
+        // refusal from its reason to answer the turn as it answers a
+        // refused build.
+        if metadata.reason.is_none()
+            && matches!(error.primary_error(), AgentError::ReasoningEffortRefused(_))
+        {
+            metadata.reason = crate::event::AgentErrorReason::from_agent_error(error);
+        }
         self.runtime_terminal_failure_witness = Some(Ok(metadata));
     }
 
@@ -2166,6 +2176,7 @@ where
     pub(super) async fn emit_run_started_event(
         &self,
         input: RunInput,
+        reasoning_effort: Option<crate::ReasoningEffortResolution>,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
         self.run_lifecycle_publication.announce_start();
@@ -2177,6 +2188,7 @@ where
                 identity: self.live_run_identity(),
                 input,
                 request_reasoning: self.active_turn_request_reasoning,
+                reasoning_effort,
             },
         )
         .await;
@@ -2189,6 +2201,7 @@ where
         &self,
         run_id: &crate::lifecycle::RunId,
         cursor: &crate::SessionRunCursor,
+        reasoning_effort: Option<crate::ReasoningEffortResolution>,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
         self.run_lifecycle_publication.announce_start();
@@ -2200,6 +2213,7 @@ where
                 run_id: run_id.clone(),
                 round: cursor.round,
                 resume_point: crate::event::RunResumePointKind::from(&cursor.resume_point),
+                reasoning_effort,
             },
         )
         .await;
@@ -2457,6 +2471,7 @@ where
         let saved_last_input_tokens = self.last_input_tokens;
         let saved_run_usage_baseline = self.run_usage_baseline.clone();
         let saved_run_request_usage = std::mem::take(&mut self.run_request_usage);
+        let saved_run_reasoning_effort = self.run_reasoning_effort.take();
         let saved_run_usage_suspended_run = self.run_usage_suspended_run.take();
         let saved_compaction_cadence = self.compaction_cadence.clone();
         let saved_pending_compaction_boundary_index = self.pending_compaction_boundary_index.take();
@@ -2560,6 +2575,7 @@ where
         self.last_input_tokens = saved_last_input_tokens;
         self.run_usage_baseline = saved_run_usage_baseline;
         self.run_request_usage = saved_run_request_usage;
+        self.run_reasoning_effort = saved_run_reasoning_effort;
         self.run_usage_suspended_run = saved_run_usage_suspended_run;
         self.compaction_cadence = saved_compaction_cadence;
         self.pending_compaction_boundary_index = saved_pending_compaction_boundary_index;
@@ -3799,6 +3815,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             last_input_tokens: self.last_input_tokens,
             run_usage_baseline: crate::types::Usage::default(),
             run_request_usage: Vec::new(),
+            run_reasoning_effort: None,
             run_usage_suspended_run: None,
             compaction_cadence: self.compaction_cadence.clone(),
             pending_compaction_boundary_index: None,
@@ -8113,6 +8130,7 @@ mod skill_activation_effect_tests {
                 RunInput::Content {
                     content: "go".to_string().into(),
                 },
+                None,
                 Some(&tx),
             )
             .await;
@@ -8161,6 +8179,7 @@ mod skill_activation_effect_tests {
                 RunInput::Content {
                     content: "go".to_string().into(),
                 },
+                None,
                 Some(&tx),
             );
             tokio::pin!(started);

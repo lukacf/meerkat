@@ -5,4 +5,6 @@ pub mod e2e_lanes;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fixtures;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod live_reasoning_matrix;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod voice_fixtures;

@@ -147,7 +147,9 @@ exited 1 for nearly every other failure. `rkat-rpc`, `rkat-rest` and
 `rkat run --output json` failure document. A failed JSON run ends stdout
 with `{"error": {"code", "category", "message", "details"}}` (the
 `WireError` envelope; `WireRunFailure` in `meerkat-contracts`), where stdout
-used to be empty. A failed turn still exits 1, and the document carries what
+used to be empty. A failed turn still exits 1, except a turn refused for its
+reasoning effort level, which exits 2 like the refused build (see Reasoning
+effort refusal in the CLI configuration reference), and the document carries what
 the exit status does not: `code` by the turn error's `kind` (the code
 JSON-RPC answers for the same turn: `PROVIDER_ERROR`, `BUDGET_EXHAUSTED`,
 `HOOK_DENIED` or `INTERNAL_ERROR`) and the typed turn error as

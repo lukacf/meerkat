@@ -45,6 +45,7 @@ impl MockSessionAgent {
             std::future::pending::<()>().await;
         }
         Ok(RunResult {
+            reasoning_effort: None,
             text: "ok".to_string(),
             session_id: self.session.id().clone(),
             usage: Usage::default(),

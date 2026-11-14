@@ -38,6 +38,7 @@ modules = [
     "agent::brain_swap_promotion_tests",
     "agent::budget_warning_tests",
     "agent::hooks_behavior_tests",
+    "agent::reasoning_effort_guard_tests",
     "agent::state::tests::governed_authorization::moved_consent",
     "agent::state::tests::governed_authorization::observation_infrastructure_tool_siblings",
     "agent::structured_output_tests",

@@ -4807,6 +4807,7 @@ async fn dedup_terminal_input_returns_none_handle() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             let run_result = RunResult {
+                reasoning_effort: None,
                 text: "done".into(),
                 session_id: SessionId::new(),
                 usage: Usage::default(),
@@ -4922,6 +4923,7 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
             // Simulate slow execution so duplicate arrives while in-flight
             tokio::time::sleep(Duration::from_millis(200)).await;
             let run_result = RunResult {
+                reasoning_effort: None,
                 text: "slow done".into(),
                 session_id: SessionId::new(),
                 usage: Usage::default(),

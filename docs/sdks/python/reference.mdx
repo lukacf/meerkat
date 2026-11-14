@@ -344,6 +344,61 @@ authorize, or execute an action. Records persist when the RPC bundle exposes a
 store path and otherwise remain process-local. See
 [JSON-RPC approvals](/api/rpc#approvals).
 
+### Reasoning effort
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+`create_session(..., reasoning_effort="high")` (and the streaming and deferred
+variants) sets the session's provider-neutral
+[reasoning effort](/concepts/providers#reasoning-effort) level: `"none"`,
+`"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"` or `"max"`
+(`meerkat.REASONING_EFFORT_LEVELS`). `Session.turn(...)`,
+`Session.stream(...)`, `DeferredSession.start_turn(...)` and
+`client.mob_turn_start(...)` take the turn's tri-state: a level sets it from
+that turn on, `meerkat.REASONING_EFFORT_CLEAR` (`{"action": "clear"}`)
+removes it, and omitting it keeps it. The client sends the field only to a
+server whose contract is 0.9.15 or later and raises
+`CapabilityUnavailableError` otherwise, before anything is written: an older
+server ignores it on `session/create` and refuses it on a turn.
+
+A level the model or its route does not accept fails the call with a
+`MeerkatError` whose `code` is `"-32602"` (invalid params) and whose
+`details` hold the refusal data. `meerkat.reasoning_effort_refusal(error)` returns the typed
+`ReasoningEffortRefusal` (`requested`, `provider`, `model`, `route`,
+`reason`, `supported`, `facts`, `conflicting_param`, `conflicting_level`,
+`retryable`, and the `transient` property), or
+`None` for any other error:
+
+```python
+from meerkat import MeerkatError, reasoning_effort_refusal
+
+try:
+    session = await client.create_session("Plan it", model="gpt-5.5", reasoning_effort="max")
+except MeerkatError as error:
+    refusal = reasoning_effort_refusal(error)
+    if refusal is None:
+        raise
+    if refusal.transient:
+        ...  # the account's model list is not loaded yet: ask again later
+    else:
+        print(refusal.reason, refusal.supported)
+```
+
+`reason` is one of the eight closed reasons
+(`meerkat.REASONING_EFFORT_REFUSAL_REASONS`). `transient` is true only for
+`supported_levels_unavailable`; every other reason is permanent until the
+request or the configuration changes. A refusal with a reason this SDK does
+not know is not parsed (`None`), and `error.details` keeps the data as sent.
+The route's names and `facts` are advisory: a value this SDK does not know is
+kept as a string. `route`, `supported` and `facts` are always present in the
+refusal data: `None` when they have no value, never left out.
+
+`parse_reasoning_effort_report(...)` reads the `reasoning_effort` block of a
+run result (`requested`, and one `sent` row per distinct resolution: `level`,
+`provider`, `model`, `route`, `fields`, `facts`, `decided_by`, `requests`),
+and `parse_reasoning_effort_resolution(...)` the resolution `run_started`,
+`run_resumed` and `request_reasoning_effort_resolved` carry.
+
 ### Scoped tool grants
 
 `create_session(..., grant_gated_tools={"families": ["shell"]})` (and the
@@ -571,6 +626,14 @@ use the raw-preserving `UnknownEvent` path, as do `reasoning_delta`,
 `tool_results_bounded_for_request`, `requested_compaction_skipped`, and
 `operator_instructions_applied`. See the
 [RPC event reference](/api/rpc#notifications) for their wire contracts.
+
+From 0.9.15, `request_reasoning_effort_resolved` has a handwritten parser
+class and arrives as a typed `RequestReasoningEffortResolved` event:
+`resolution`, `turn_number` and `fallback_attempt`. It is published once
+for each request handed to the provider client with the session's
+reasoning effort level; `parse_reasoning_effort_resolution(...)` reads its
+`resolution` (see [Reasoning effort](#reasoning-effort)). An SDK older than
+0.9.15 raises `UNKNOWN_EVENT_TYPE` on it.
 
 `live_channel_closed` has a handwritten parser class and arrives as a typed
 `LiveChannelClosed` event: `session_id`, `channel_id`, `reason` and

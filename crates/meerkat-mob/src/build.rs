@@ -4719,6 +4719,99 @@ mod tests {
         );
     }
 
+    /// A resumed member build is checked like a new one. A profile edit that
+    /// moves the member to another model keeps the member's durable
+    /// `reasoning_effort` level through the mob's resume merge, and the
+    /// agent factory refuses the build typed when the new model's route does
+    /// not accept that level; a level the route accepts builds.
+    #[tokio::test]
+    async fn test_a_resumed_member_build_keeps_the_durable_level_and_is_checked() {
+        use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let level = |level| {
+            Some(ProviderParamsOverride {
+                reasoning_effort: Some(level),
+                ..Default::default()
+            })
+        };
+        // Durable: a member on a model whose row accepts `max`, at `max`.
+        let metadata = metadata_for_identity(&SessionLlmIdentity {
+            model: "claude-sonnet-4-6".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: level(EffortLevel::Max),
+            auth_binding: None,
+        });
+        // The profile now names a model whose row accepts `high` at most.
+        let mut resumed = AgentBuildConfig::new("claude-opus-4-5");
+        resumed.provider = Some(meerkat_core::Provider::Anthropic);
+        resumed.comms_name = Some("mob.m/lead/lead-1".to_string());
+        resumed.resume_override_mask = ResumeOverrideMask {
+            model: true,
+            ..ResumeOverrideMask::default()
+        };
+        apply_resumed_session_metadata(&mut resumed, &metadata).expect("metadata applies");
+        assert_eq!(resumed.model, "claude-opus-4-5");
+        assert_eq!(
+            resumed
+                .provider_params
+                .as_ref()
+                .and_then(|params| params.reasoning_effort),
+            Some(EffortLevel::Max),
+            "the model change keeps the member's durable level"
+        );
+
+        // The agent factory judges the identity the merge seated, against the
+        // route of the client it builds with.
+        let temp = tempfile::tempdir().expect("temp agent factory dir");
+        let factory = meerkat::AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let direct_route =
+            meerkat_core::direct_route_observation(meerkat_core::Provider::Anthropic)
+                .expect("the family has a direct route");
+        let build_with = |params: Option<ProviderParamsOverride>| {
+            let mut build = AgentBuildConfig::new(resumed.model.clone());
+            build.provider = resumed.provider;
+            build.provider_params = params;
+            build.llm_client_override = Some(Arc::new(
+                TestClient::for_provider(meerkat_core::Provider::Anthropic)
+                    .with_reasoning_route(direct_route.clone()),
+            ));
+            build
+        };
+        match factory
+            .build_agent(
+                build_with(resumed.provider_params.clone()),
+                &meerkat_core::Config::default(),
+            )
+            .await
+        {
+            Err(meerkat::BuildAgentError::ReasoningEffortRefused(refusal)) => {
+                assert_eq!(
+                    serde_json::to_value(&*refusal).expect("a refusal serializes"),
+                    serde_json::json!({
+                        "requested": "max", "provider": "anthropic",
+                        "model": "claude-opus-4-5",
+                        "route": {"backend": "anthropic_api", "api": "messages"},
+                        "reason": "unsupported_level",
+                        "supported": ["low", "medium", "high"], "facts": "catalog",
+                    })
+                );
+            }
+            Err(other) => panic!("expected the typed reasoning effort refusal, got: {other}"),
+            Ok(_) => panic!("the resumed member build must be refused"),
+        }
+        if let Err(error) = factory
+            .build_agent(
+                build_with(level(EffortLevel::High)),
+                &meerkat_core::Config::default(),
+            )
+            .await
+        {
+            panic!("a level the new model accepts builds: {error}");
+        }
+    }
+
     #[test]
     fn test_resumed_metadata_accepts_legacy_raw_alias_comms_name() {
         let mut config = AgentBuildConfig::new("gpt-5.4");

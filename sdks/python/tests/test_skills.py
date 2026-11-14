@@ -69,6 +69,7 @@ class _MockClient:
         output_schema=None,
         structured_output_retries=None,
         provider_params=None,
+        reasoning_effort=None,
         auth_binding=None,
     ):
         self._calls.append({

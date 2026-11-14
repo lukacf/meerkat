@@ -176,6 +176,7 @@ async fn happy_path_drives_hydrate_resolve_apply_persist_in_order() {
         self_hosted_server_id: None,
         provider_params: None,
         auth_binding: None,
+        reasoning_effort: None,
     };
 
     adapter
@@ -212,6 +213,7 @@ async fn persist_failure_triggers_rollback_to_previous_identity() {
         self_hosted_server_id: None,
         provider_params: None,
         auth_binding: None,
+        reasoning_effort: None,
     };
 
     let err = adapter

@@ -220,6 +220,7 @@ test("WebCM regressions run actual browser modules and local synthetic shell inp
         await wasm.default({ module_or_path: bytes });
         const { buildMobDefinition, resolveModels } = await import("/src/mob.ts");
         let accepted = 0, legacyRejected = 0;
+        const levelAnswers = [];
         for (const keys of [{ anthropic: "unused" }, { openai: "unused" }, { gemini: "unused" }, { anthropic: "unused", openai: "unused", gemini: "unused" }]) {
           await wasm.init_runtime_from_config(JSON.stringify({ anthropic_api_key: "unused", openai_api_key: "unused", gemini_api_key: "unused" }));
           const def = buildMobDefinition(resolveModels(keys));
@@ -227,15 +228,20 @@ test("WebCM regressions run actual browser modules and local synthetic shell inp
           for (const skill of Object.values(def.skills)) {
             if (skill.content.includes("send_message(to:") || !skill.content.includes("peer_id") || !skill.content.includes('handling_mode: "queue"')) throw Error("obsolete addressing");
           }
+          // The control pins that an unknown flat provider param is rejected. The example's earlier shape, a flat
+          // `reasoning_effort` in a profile's provider params, is valid again as the provider-neutral level (from 0.9.15).
           const legacy = structuredClone(def);
-          for (const profile of Object.values(legacy.profiles)) profile.provider_params = { reasoning_effort: "low" };
+          for (const profile of Object.values(legacy.profiles)) profile.provider_params = { cache_control: "disabled" };
           await wasm.mob_create(JSON.stringify(legacy)).then(() => { throw Error("legacy should fail"); }, () => { legacyRejected++; });
+          const leveled = structuredClone(def); leveled.id = `offline-level-${accepted}`;
+          for (const profile of Object.values(leveled.profiles)) profile.provider_params = { reasoning_effort: "low" };
+          levelAnswers.push(await wasm.mob_create(JSON.stringify(leveled)).then(() => "accepted", error => String(error?.message ?? error)));
           await wasm.mob_create(JSON.stringify(def)); accepted++;
           await wasm.destroy_runtime();
         }
-        return { version: wasm.runtime_version(), accepted, legacyRejected };
+        return { version: wasm.runtime_version(), accepted, legacyRejected, levelAnswers };
       }, repo);
-      assert.deepEqual(result, { version: runtimeVersion, accepted: 4, legacyRejected: 4 });
+      assert.deepEqual(result, { version: runtimeVersion, accepted: 4, legacyRejected: 4, levelAnswers: ["accepted", "accepted", "accepted", "accepted"] });
     });
 
     await t.test("real WASM MobOrchestrator startup, all six wires, subscriptions and successful typed events", { timeout: 45_000 }, async () => {

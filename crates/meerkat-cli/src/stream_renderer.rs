@@ -1217,6 +1217,7 @@ mod tests {
 
     fn run_started() -> AgentEvent {
         AgentEvent::RunStarted {
+            reasoning_effort: None,
             request_reasoning: None,
             identity: Default::default(),
             session_id: meerkat_core::SessionId::new(),

@@ -35,6 +35,11 @@ import type {
   WireToolFilter,
 } from "./generated/types.js";
 import type * as Generated from "./generated/types.js";
+import type {
+  ReasoningEffortLevel,
+  ReasoningEffortReport,
+  ReasoningEffortTurnOverride,
+} from "./reasoning-effort.js";
 import type { RealtimeMessageOrigin, TurnTerminalCauseKind, Usage } from "./events.js";
 
 export type { ProviderTokenAccounting, TurnTerminalCauseKind, Usage } from "./events.js";
@@ -234,6 +239,12 @@ export interface RunResult {
   /** One row per provider request this run made, in order, each with its
    * `accounting` (tool-loop calls, extraction and compaction summaries). */
   readonly requestUsage?: readonly Usage[];
+  /**
+   * What the run did with the session's reasoning effort level: the level
+   * requested and each distinct resolution sent. Absent when the session
+   * has no level.
+   */
+  readonly reasoningEffort?: ReasoningEffortReport;
   readonly terminalCauseKind?: TurnTerminalCauseKind;
   readonly structuredOutput?: unknown;
   readonly extractionError?: ExtractionError;
@@ -730,6 +741,14 @@ export interface TurnOptions {
   readonly structuredOutputRetries?: number;
   readonly providerParams?: Record<string, unknown>;
   /**
+   * The session's provider-neutral reasoning effort level from this turn
+   * on: a level sets it, `{ action: "clear" }` removes it, and leaving the
+   * option out keeps it. It is its own setting: a turn that replaces
+   * `providerParams` keeps the level. Sent only to a server whose contract
+   * carries the option (`REASONING_EFFORT_MIN_CONTRACT` in `client.ts`).
+   */
+  readonly reasoningEffort?: ReasoningEffortTurnOverride;
+  /**
    * Switch the session's credential binding from this turn on; omit it to
    * keep the current one. See {@link TurnAuthBindingOverride}.
    */
@@ -990,6 +1009,13 @@ export interface MobTurnStartOptions {
    * `{ action: "clear" }`, or omit the option to inherit.
    */
   readonly providerParams?: Record<string, unknown>;
+  /**
+   * The member session's provider-neutral reasoning effort level from this
+   * turn on: a level sets it, `{ action: "clear" }` removes it, and leaving
+   * the option out keeps it. Sent only to a server whose contract carries
+   * the option (`REASONING_EFFORT_MIN_CONTRACT` in `client.ts`).
+   */
+  readonly reasoningEffort?: ReasoningEffortTurnOverride;
   /**
    * Auth-binding override for this turn, carried exactly as the wire's
    * canonical Inherit/Set/Clear tri-state: pass `{ action: "set", value }`
@@ -1319,6 +1345,15 @@ export interface ModelProfile {
   readonly webSearch: boolean;
   readonly imageGeneration: boolean;
   readonly paramsSchema: unknown;
+  /**
+   * The levels the provider-neutral `reasoningEffort` option accepts for the
+   * model on its provider's own API, lowest first; empty when the model
+   * takes no level there. Absent when no source states them (a self-hosted
+   * model, a model with no catalog row). A route that answers for itself (a
+   * GitHub Copilot account's model list) can accept other levels: a refused
+   * request names that route's own.
+   */
+  readonly reasoningEffortLevels?: readonly string[];
 }
 
 export interface CatalogModel {
@@ -1573,6 +1608,16 @@ export interface SessionOptions {
   peerMeta?: Record<string, unknown>;
   budgetLimits?: Record<string, unknown>;
   providerParams?: Record<string, unknown>;
+  /**
+   * The session's provider-neutral reasoning effort level (`none`,
+   * `minimal`, `low`, `medium`, `high`, `xhigh` or `max`). Meerkat checks
+   * it against the model on the route that serves the request and writes
+   * the provider's own field; a level the model or route does not accept is
+   * refused before any provider request (see `reasoningEffortRefusal`).
+   * Sent only to a server whose contract carries the option
+   * (`REASONING_EFFORT_MIN_CONTRACT` in `client.ts`).
+   */
+  reasoningEffort?: ReasoningEffortLevel;
   authBinding?: WireAuthBindingRef;
   preloadSkills?: SkillRef[];
   skillRefs?: SkillRef[];

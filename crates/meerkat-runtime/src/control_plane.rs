@@ -73,8 +73,11 @@ impl RunlessTerminalConvergenceError {
             | RuntimeDriverError::DurableResumeHeld { .. }
             | RuntimeDriverError::StaleAuthority { .. }) => Self::StaleAuthority { context, error },
             // A receipt-less terminal is a legitimate read verdict, but a
-            // runless terminal convergence expects the receipt it staged.
+            // runless terminal convergence expects the receipt it staged. A
+            // refused reconfiguration is the request's own content, like a
+            // failed validation: never retryable here.
             error @ (RuntimeDriverError::ValidationFailed { .. }
+            | RuntimeDriverError::ReasoningEffortRefused(_)
             | RuntimeDriverError::QueuedInputsRefused(_)
             | RuntimeDriverError::ScopedContextGenerationNotAdvanced { .. }
             | RuntimeDriverError::InputRefused { .. }

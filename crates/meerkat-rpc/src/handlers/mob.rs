@@ -254,6 +254,9 @@ fn resume_override_field_from_wire(
         meerkat_contracts::WireMobResumeOverrideField::ProviderParams => {
             meerkat_mob::ResumeOverrideField::ProviderParams
         }
+        meerkat_contracts::WireMobResumeOverrideField::ReasoningEffort => {
+            meerkat_mob::ResumeOverrideField::ReasoningEffort
+        }
     }
 }
 
@@ -3155,6 +3158,7 @@ pub async fn handle_mob_turn_start(
         output_schema: mob_params.output_schema,
         structured_output_retries: mob_params.structured_output_retries,
         provider_params: lower_turn_metadata_override(mob_params.provider_params),
+        reasoning_effort: lower_turn_metadata_override(mob_params.reasoning_effort),
         auth_binding: lower_turn_metadata_override(mob_params.auth_binding),
         injected_context,
         transient_turn_context: mob_params.transient_turn_context,
@@ -4987,6 +4991,7 @@ mod tests {
             output_schema: mob_params.output_schema,
             structured_output_retries: mob_params.structured_output_retries,
             provider_params: lower_turn_metadata_override(mob_params.provider_params),
+            reasoning_effort: lower_turn_metadata_override(mob_params.reasoning_effort),
             auth_binding: lower_turn_metadata_override(mob_params.auth_binding),
             injected_context: None,
             transient_turn_context: mob_params.transient_turn_context,
@@ -5017,6 +5022,34 @@ mod tests {
             panic!("auth_binding should be a Set override");
         };
         assert_eq!(auth_binding.binding.as_str(), "default_openai");
+        // No level named: the member session keeps its own.
+        assert_eq!(turn_params.reasoning_effort, None);
+
+        // `mob/turn_start` hands the reasoning effort tri-state to
+        // `turn/start` unchanged.
+        type Level = meerkat_core::model_profile::capabilities::EffortLevel;
+        for (value, expected) in [
+            (
+                serde_json::json!("high"),
+                TurnMetadataOverride::Set(Level::High),
+            ),
+            (
+                serde_json::json!({"action": "clear"}),
+                TurnMetadataOverride::Clear,
+            ),
+        ] {
+            let mob_params: meerkat_contracts::MobTurnStartParams =
+                serde_json::from_value(serde_json::json!({
+                    "mob_id": "m1",
+                    "agent_identity": "w1",
+                    "prompt": "continue",
+                    "reasoning_effort": value,
+                }))
+                .expect("the level tri-state deserializes");
+            let lowered: Option<TurnMetadataOverride<Level>> =
+                lower_turn_metadata_override(mob_params.reasoning_effort);
+            assert_eq!(lowered, Some(expected));
+        }
     }
 
     #[test]

@@ -423,3 +423,98 @@ async fn sqlite_stored_large_ack_set_loads_and_the_next_revise_drops_it()
     assert_eq!(reloaded.superseded_ack_ids, next.superseded_ack_ids);
     Ok(())
 }
+
+/// A schedule whose session spec carries a reasoning effort level, as a
+/// store written without the schedule service's refusal holds it: the
+/// lifecycle authority (`Schedule::apply`) takes the request as it is; the
+/// service's public-API validation, where the level is refused, is not part
+/// of it. The stored schedule reads back with the level, its due occurrence
+/// is claimed, and the claimed occurrence's target snapshot equals the
+/// stored target, the level included.
+#[tokio::test]
+async fn sqlite_stored_session_spec_level_reaches_the_claimed_occurrence_unchanged()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let store = SqliteScheduleStore::open(dir.path().join("schedule.sqlite3"))?;
+
+    let spec: meerkat_schedule::SessionMaterializationSpec =
+        serde_json::from_value(serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "provider_params": {"reasoning_effort": "high"}
+        }))?;
+    let mut request = sample_schedule_request();
+    request.target = TargetBinding::session(SessionTargetBinding::materialize_on_demand(
+        spec,
+        ScheduledSessionAction::Prompt {
+            prompt: ContentInput::from("scheduled prompt"),
+            system_prompt: None,
+            render_metadata: None,
+            skill_refs: Vec::new(),
+            additional_instructions: Vec::new(),
+        },
+    ));
+    let stored_target = request.target.clone();
+    assert_eq!(
+        serde_json::to_value(&stored_target)?["create"]["provider_params"]["reasoning_effort"],
+        serde_json::json!("high"),
+        "the target carries the level"
+    );
+
+    let create_mutator = Schedule::apply(None, ScheduleLifecycleInput::Create(request))
+        .expect("the lifecycle authority takes the request as it is");
+    let schedule = create_mutator.schedule().clone();
+    let _commit = store
+        .commit_schedule_write(create_mutator.into_authorized_write())
+        .await?;
+    let occurrence_write = Occurrence::planned_write_from_schedule(
+        &schedule,
+        OccurrenceOrdinal(0),
+        Utc::now() - Duration::seconds(1),
+    )
+    .expect("due occurrence planning should pass generated authority");
+    let _planned = store.commit_occurrence_write(occurrence_write).await?;
+
+    let read_back = store
+        .get_schedule(&schedule.schedule_id)
+        .await?
+        .expect("the stored schedule");
+    assert_eq!(
+        read_back.target, stored_target,
+        "the stored schedule holds the level"
+    );
+
+    let executor_lease = match store
+        .acquire_executor_lease(meerkat_schedule::AcquireScheduleExecutorLeaseRequest {
+            owner_id: "stored-level-executor".into(),
+            lease_duration: Duration::minutes(5),
+        })
+        .await?
+    {
+        meerkat_schedule::AcquireScheduleExecutorLeaseOutcome::Acquired(lease) => lease,
+        meerkat_schedule::AcquireScheduleExecutorLeaseOutcome::Busy { .. } => unreachable!(),
+    };
+    let claimed = store
+        .claim_due_occurrences(
+            &executor_lease,
+            ClaimDueRequest {
+                owner_id: "stored-level-claim".to_string(),
+                limit: 1,
+                lease_duration: Duration::minutes(5),
+            },
+        )
+        .await?;
+    assert!(claimed.row_faults.is_empty(), "{:?}", claimed.row_faults);
+    let claimed_targets = claimed
+        .transitions
+        .iter()
+        .map(|commit| commit.successor())
+        .filter(|occurrence| occurrence.phase == OccurrencePhase::Claimed)
+        .map(|occurrence| occurrence.target_snapshot.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        claimed_targets,
+        vec![stored_target],
+        "the claimed occurrence carries the stored spec, its level included"
+    );
+    Ok(())
+}

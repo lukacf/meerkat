@@ -904,6 +904,15 @@ pub enum AgentError {
         "run {run_id} was suspended by a requeueing stop or a store fence gap; it resumes from its last round commit"
     )]
     RunSuspended { run_id: crate::lifecycle::RunId },
+
+    /// The requested `reasoning_effort` level was refused for the model and
+    /// route that would serve the request: at a build, at a reconfiguration
+    /// or before a provider request. No provider request was made for it.
+    /// The message is the refusal's own text; read the refusal's fields.
+    /// Never retried and never a model fallback trigger. Boxed to keep
+    /// `AgentError` small.
+    #[error("{0}")]
+    ReasoningEffortRefused(Box<crate::ReasoningEffortRefusal>),
 }
 
 impl From<crate::OperationAuthorizationError> for AgentError {

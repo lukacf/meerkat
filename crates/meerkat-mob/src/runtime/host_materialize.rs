@@ -547,6 +547,9 @@ fn wire_resume_override_to_domain(
         meerkat_contracts::wire::WireMobResumeOverrideField::ProviderParams => {
             ResumeOverrideField::ProviderParams
         }
+        meerkat_contracts::wire::WireMobResumeOverrideField::ReasoningEffort => {
+            ResumeOverrideField::ReasoningEffort
+        }
     }
 }
 
@@ -924,6 +927,9 @@ fn resumed_preflight_identity(
             }
             meerkat_contracts::wire::WireMobResumeOverrideField::ProviderParams => {
                 mask.provider_params = true;
+            }
+            meerkat_contracts::wire::WireMobResumeOverrideField::ReasoningEffort => {
+                mask.reasoning_effort = true;
             }
         }
     }

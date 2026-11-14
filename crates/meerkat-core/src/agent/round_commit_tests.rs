@@ -58,15 +58,25 @@ struct ScriptedClient {
     calls: AtomicUsize,
     requests: Mutex<Vec<Vec<Message>>>,
     hung: Notify,
+    /// The route this client reports; none unless a row gives it one.
+    route: Option<meerkat_core::ReasoningRouteObservation>,
 }
 
 impl ScriptedClient {
     fn new(steps: Vec<Step>) -> Arc<Self> {
+        Self::on_route(steps, None)
+    }
+
+    fn on_route(
+        steps: Vec<Step>,
+        route: Option<meerkat_core::ReasoningRouteObservation>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             steps: Mutex::new(steps.into()),
             calls: AtomicUsize::new(0),
             requests: Mutex::new(Vec::new()),
             hung: Notify::new(),
+            route,
         })
     }
 
@@ -81,6 +91,10 @@ impl ScriptedClient {
 
 #[async_trait]
 impl AgentLlmClient for ScriptedClient {
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.route.clone()
+    }
+
     async fn stream_response(
         &self,
         messages: &[Message],
@@ -729,6 +743,102 @@ async fn a_run_resumed_after_its_second_commit_asks_the_model_next() {
             })
         ),
         "{events:?}"
+    );
+}
+
+/// A run resumed from its durable run cursor resolves the session's
+/// `reasoning_effort` level for the session's route as it is at the resume
+/// and announces it on `run_resumed`. Its report counts the requests it
+/// sends from the resume on: what the run sent before the restart is not
+/// carried in the cursor.
+#[tokio::test]
+async fn a_resumed_run_reports_its_reasoning_effort_from_the_resume_on() {
+    use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+    use meerkat_core::provider_matrix::SelfHostedBackendKind;
+
+    let route = meerkat_core::ReasoningRouteObservation {
+        backend: meerkat_core::ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
+        api: meerkat_core::ModelApi::ChatCompletions,
+        account: meerkat_core::AccountLevelStatement::NotApplicable,
+        operator_levels: Some(vec![EffortLevel::High]),
+    };
+    let build = |session: Session,
+                 client: &Arc<ScriptedClient>,
+                 tools: &Arc<RecordingTools>,
+                 checkpointer: Arc<RecordingCheckpointer>,
+                 content_turn: bool| {
+        let mut builder = AgentBuilder::new()
+            .resume_session(session)
+            .with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            ))
+            .provider_params(ProviderParamsOverride {
+                reasoning_effort: Some(EffortLevel::High),
+                ..Default::default()
+            })
+            .with_checkpointer(checkpointer);
+        if content_turn {
+            builder = builder.with_runtime_execution_kind_for_test(
+                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+            );
+        }
+        builder.build_standalone(Arc::clone(client), Arc::clone(tools), Arc::new(NoopStore))
+    };
+
+    // Two requests before the stop: the first settles, the second hangs.
+    let client = ScriptedClient::on_route(
+        vec![Step::Tools(vec![("call-1", "probe", "{}")]), Step::Hang],
+        Some(route.clone()),
+    );
+    let tools = RecordingTools::new(RecordingTools::probes(), None);
+    let checkpointer = RecordingCheckpointer::new();
+    let mut agent = build(
+        fresh_session(),
+        &client,
+        &tools,
+        Arc::clone(&checkpointer),
+        true,
+    )
+    .await;
+    run_until_stopped(agent.run("start".into()), &client.hung).await;
+    let (tail, receipt) = checkpointer.tail();
+    let cursor = cursor_of(&tail).expect("the second commit wrote a cursor");
+
+    let client = ScriptedClient::on_route(vec![Step::Answer("done")], Some(route.clone()));
+    let tools = RecordingTools::new(RecordingTools::probes(), None);
+    let mut agent = build(tail, &client, &tools, RecordingCheckpointer::new(), false).await;
+    let (tx, mut rx) = mpsc::channel(1024);
+    let result = agent
+        .resume_run(cursor, receipt, Some(tx), None, Vec::new())
+        .await
+        .expect("the resumed run completes");
+    assert_eq!(client.calls(), 1);
+
+    let events = drain(&mut rx);
+    let Some(AgentEvent::RunResumed {
+        reasoning_effort: Some(resumed_with),
+        ..
+    }) = events.first()
+    else {
+        panic!("the resumed run opens with RunResumed and its resolution: {events:?}")
+    };
+    assert_eq!(resumed_with.requested, EffortLevel::High);
+    assert_eq!(resumed_with.level, EffortLevel::High);
+    assert_eq!(resumed_with.route, route.route());
+    assert_eq!(
+        resumed_with.decided_by,
+        meerkat_core::ReasoningEffortDecidedBy::Request
+    );
+
+    let report = result
+        .reasoning_effort
+        .expect("the resumed run reports its level");
+    assert_eq!(report.requested, EffortLevel::High);
+    assert_eq!(report.sent.len(), 1);
+    assert_eq!(
+        report.sent[0].requests, 1,
+        "the report counts the requests sent from the resume on"
     );
 }
 

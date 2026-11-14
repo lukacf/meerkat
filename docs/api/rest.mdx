@@ -412,6 +412,19 @@ Create and run a new session.
   Max retries for structured output validation. `null`/omitted uses the server default on create and inherits the persisted session value on continue.
 </ParamField>
 
+<ParamField body="reasoning_effort" type="string | null" default="null">
+  From 0.9.15; an older server ignores the field. The 0.9.15 Python and TypeScript SDKs refuse to send it to an
+  older server, so nothing is sent.
+  The session's provider-neutral reasoning effort level: `none`, `minimal`,
+  `low`, `medium`, `high`, `xhigh` or `max` (see
+  [Reasoning effort](/concepts/providers#reasoning-effort)). It is the same
+  setting as `provider_params.reasoning_effort`; a request that gives both
+  must give the same level. A level the model or its route does not accept
+  is refused with HTTP 400, code `INVALID_PARAMS` and details
+  `{"kind": "reasoning_effort_refused", "retryable": false, "reasoning_effort_refusal": {...}}`,
+  before any provider request.
+</ParamField>
+
 <ParamField body="verbose" type="bool" default="false">
   Enable verbose event logging (server-side).
 </ParamField>
@@ -676,6 +689,21 @@ Continue an existing session.
 
 <ParamField body="structured_output_retries" type="u32 | null" default="null">
   Max retries for structured output validation. Omit / `null` to inherit the persisted session value on continue.
+</ParamField>
+
+<ParamField body="reasoning_effort" type="TurnMetadataOverride | null" default="preserve">
+  From 0.9.15; an older server ignores the field. The 0.9.15 Python and TypeScript SDKs refuse to send it to an
+  older server, so nothing is sent.
+  The session's provider-neutral reasoning effort level from this message
+  on: a level (`"high"`, or `{"action":"set","value":"high"}`) sets it,
+  `{"action":"clear"}` removes it, and omission/`null` keeps the level the
+  session recorded. A level the model or its route does not accept is
+  refused exactly as on `POST /sessions`: HTTP 400, code `INVALID_PARAMS`
+  and the `reasoning_effort_refused` details. The stored session is
+  unchanged. A message that names this field rebuilds the session, like
+  one that names `model` or `max_tokens`: while this server holds the
+  session live, such a message is answered HTTP 500 `session is busy` and
+  changes nothing.
 </ParamField>
 
 <ParamField body="verbose" type="bool" default="false">
@@ -1669,6 +1697,21 @@ maps to `BAD_REQUEST`/`400`, not a universal `SESSION_BUSY`/`409`.
 Do not require this envelope on every failure. Auth routes may return only
 `{"error":"..."}`; webhook admission has route-specific error projections,
 and framework JSON/path extraction errors can use different bodies.
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+A `reasoning_effort` level that the model's route does not accept answers
+HTTP `400` with code `INVALID_PARAMS` and `details`
+`{"kind": "reasoning_effort_refused", "retryable": <bool>, "reasoning_effort_refusal": {...}}`,
+the object JSON-RPC carries as `error.data` (see
+[Reasoning effort refusal data](/api/rpc#reasoning-effort-refusal-data)). A
+refused session build and a turn that failed for the refusal answer the same
+way, on `POST /sessions` and on `POST /sessions/{id}/messages` alike. The
+refusal's `route`, `supported` and `facts` are always present and are `null`
+when they have no value; they are never left out. When a refused turn
+belongs to the request that created its session,
+`details` also carries `session_id`, `session_ref`, `session_created: true`
+and `resumable: true`.
 
 For a session that was durably created but whose first turn failed, the server
 returns `SESSION_CREATED_WITH_TURN_FAILURE` with resumable session identity in

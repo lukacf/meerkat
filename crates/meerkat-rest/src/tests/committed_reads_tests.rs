@@ -197,6 +197,7 @@ pub(crate) fn continue_request(session_id: &SessionId, prompt: &str) -> Continue
         system_prompt: None,
         output_schema: None,
         structured_output_retries: None,
+        reasoning_effort: None,
         keep_alive: None,
         comms_name: None,
         peer_meta: None,

@@ -392,6 +392,7 @@ fn self_hosted_model(server: &str, remote_model: &str) -> meerkat_core::SelfHost
         supports_web_search: false,
         call_timeout_secs: Some(60),
         stream_inactivity_timeout_secs: None,
+        reasoning_effort_levels: None,
     }
 }
 

@@ -426,6 +426,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
                 provider: None,
                 self_hosted_server_id: None,
                 provider_params: None,
+                reasoning_effort: None,
                 render_metadata: dispatch.render_metadata.clone(),
                 execution_kind: None,
                 peer_response_terminal_apply_intent: None,

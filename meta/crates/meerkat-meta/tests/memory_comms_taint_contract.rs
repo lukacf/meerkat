@@ -32,6 +32,7 @@ fn comms_message(from_peer: &str, content: CommsContent) -> CommsMessage {
 
 fn run_started(session: &SessionId, text: String) -> AgentEvent {
     AgentEvent::RunStarted {
+        reasoning_effort: None,
         identity: Default::default(),
         session_id: session.clone(),
         input: meerkat_core::types::RunInput::Content {

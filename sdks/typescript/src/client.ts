@@ -463,6 +463,7 @@ import {
 } from "./instructions.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
 import { parseUsage } from "./events.js";
+import { parseReasoningEffortReport } from "./reasoning-effort.js";
 import type { RealtimeMessageOrigin } from "./events.js";
 import { EventSubscription, type SubscriptionEvent, type SubscriptionItem } from "./subscription.js";
 import type {
@@ -659,6 +660,17 @@ const PEER_INGRESS_TERMINAL_OUTCOMES = {
  * with (`decision/notice`). This client has no listener for it and drops it.
  */
 const DECISION_NOTICE_NOTIFICATION = "decision/notice";
+/**
+ * The first server contract that takes the provider-neutral
+ * `reasoning_effort` parameter: the release that carries the option. This is
+ * the one place the SDK names that release: the gate
+ * (`requireReasoningEffortSupport`) and every doc comment refer to this
+ * constant, and if the option's release moves, this constant moves with it.
+ */
+const REASONING_EFFORT_MIN_CONTRACT: readonly number[] = [0, 9, 15];
+// Read by the SDK's own tests, which derive their server contracts from it.
+// The package's entry point does not export it.
+export { REASONING_EFFORT_MIN_CONTRACT };
 const MEERKAT_REPO = "lukacf/meerkat";
 const MEERKAT_RELEASE_BINARY = "rkat-rpc";
 const MEERKAT_BINARY_CACHE_ROOT = path.join(
@@ -1078,6 +1090,11 @@ function mobTurnStartPayload(
   setIfDefined(payload, "output_schema", options?.outputSchema);
   setIfDefined(payload, "structured_output_retries", options?.structuredOutputRetries);
   setIfDefined(payload, "provider_params", options?.providerParams);
+  setIfDefined(
+    payload,
+    "reasoning_effort",
+    options?.reasoningEffort as MobTurnStartParams["reasoning_effort"],
+  );
   setIfDefined(
     payload,
     "auth_binding",
@@ -1563,6 +1580,7 @@ export class MeerkatClient {
     options?: SessionOptions,
   ): Promise<Session> {
     this.requireGrantGateSupport(options);
+    this.requireReasoningEffortSupport(options?.reasoningEffort);
     const params = MeerkatClient.buildCreateParams(prompt, options);
     this.optOutOfTurnSessionEvents(params);
     const raw = await this.request("session/create", params);
@@ -1584,6 +1602,7 @@ export class MeerkatClient {
     }
 
     this.requireGrantGateSupport(options);
+    this.requireReasoningEffortSupport(options?.reasoningEffort);
     const params = MeerkatClient.buildCreateParams(prompt, options);
     this.requestId++;
     const requestId = this.requestId;
@@ -1642,6 +1661,7 @@ export class MeerkatClient {
     options?: SessionOptions,
   ): Promise<DeferredSession> {
     this.requireGrantGateSupport(options);
+    this.requireReasoningEffortSupport(options?.reasoningEffort);
     const params = MeerkatClient.buildCreateParams(prompt, options);
     params.initial_turn = "deferred";
     const raw = await this.request("session/create", params);
@@ -1744,6 +1764,25 @@ export class MeerkatClient {
       throw new CapabilityUnavailableError(
         "CAPABILITY_UNAVAILABLE",
         `grantGatedTools needs a server contract >= ${minimum.join(".")}; `
+          + `this server reports ${this._serverContractVersion || "none"}`,
+      );
+    }
+  }
+
+  /**
+   * Refuse a reasoning effort level before sending it to a server that
+   * would drop it: before the contract that carries the option
+   * (`REASONING_EFFORT_MIN_CONTRACT`) `session/create` ignores
+   * `reasoning_effort` (the session then runs with no level, silently) and
+   * `turn/start` and `mob/turn_start` refuse it.
+   */
+  private requireReasoningEffortSupport(reasoningEffort: unknown): void {
+    if (reasoningEffort == null) return;
+    const minimum = REASONING_EFFORT_MIN_CONTRACT;
+    if (!this.serverContractAtLeast(minimum)) {
+      throw new CapabilityUnavailableError(
+        "CAPABILITY_UNAVAILABLE",
+        `reasoningEffort needs a server contract >= ${minimum.join(".")}; `
           + `this server reports ${this._serverContractVersion || "none"}`,
       );
     }
@@ -4005,6 +4044,7 @@ export class MeerkatClient {
     prompt: ContentInput,
     options?: MobTurnStartOptions,
   ): Promise<Record<string, unknown>> {
+    this.requireReasoningEffortSupport(options?.reasoningEffort);
     const payload = mobTurnStartPayload(mobId, agentIdentity, prompt, options);
     // A non-streaming member turn: opt out of its session/event copies, as
     // `optOutOfTurnSessionEvents` does for `turn/start`.
@@ -5049,6 +5089,7 @@ export class MeerkatClient {
     prompt: string | ContentBlock[],
     options?: TurnOptions,
   ): Promise<RunResult> {
+    this.requireReasoningEffortSupport(options?.reasoningEffort);
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
     if (options?.injectedContext != null) {
       params.injected_context = options.injectedContext;
@@ -5081,6 +5122,7 @@ export class MeerkatClient {
       params.structured_output_retries = options.structuredOutputRetries;
     }
     if (options?.providerParams) params.provider_params = options.providerParams;
+    if (options?.reasoningEffort != null) params.reasoning_effort = options.reasoningEffort;
     if (options?.authBinding != null) params.auth_binding = options.authBinding;
     this.optOutOfTurnSessionEvents(params);
     const raw = await this.request("turn/start", params);
@@ -5097,6 +5139,7 @@ export class MeerkatClient {
     if (!this.process?.stdin) {
       throw new MeerkatError("NOT_CONNECTED", "Client not connected");
     }
+    this.requireReasoningEffortSupport(options?.reasoningEffort);
 
     this.requestId++;
     const requestId = this.requestId;
@@ -5137,6 +5180,7 @@ export class MeerkatClient {
       params.structured_output_retries = options.structuredOutputRetries;
     }
     if (options?.providerParams) params.provider_params = options.providerParams;
+    if (options?.reasoningEffort != null) params.reasoning_effort = options.reasoningEffort;
     if (options?.authBinding != null) params.auth_binding = options.authBinding;
 
     const rpcRequest = { jsonrpc: "2.0", id: requestId, method: "turn/start", params };
@@ -7730,6 +7774,7 @@ export class MeerkatClient {
     };
     const usage = parseUsageField(data.usage, "usage");
     const runUsage = data.run_usage == null ? undefined : parseUsageField(data.run_usage, "run_usage");
+    const reasoningEffort = parseReasoningEffortReport(data.reasoning_effort);
     const requestUsage = data.request_usage == null
       ? undefined
       : MeerkatClient.requireRecordArray(data.request_usage, context).map((row, index) =>
@@ -7784,6 +7829,7 @@ export class MeerkatClient {
       usage,
       ...(runUsage !== undefined ? { runUsage } : {}),
       ...(requestUsage !== undefined ? { requestUsage } : {}),
+      ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
       terminalCauseKind:
         typeof data.terminal_cause_kind === "string"
           ? (data.terminal_cause_kind as RunResult["terminalCauseKind"])
@@ -8178,6 +8224,15 @@ export class MeerkatClient {
           profileContext,
         ),
         paramsSchema: profile.params_schema,
+        // Advisory: the levels of the model's direct provider route; absent
+        // when no source states them.
+        ...(Array.isArray(profile.reasoning_effort_levels)
+          ? {
+            reasoningEffortLevels: profile.reasoning_effort_levels.filter(
+              (level): level is string => typeof level === "string",
+            ),
+          }
+          : {}),
       };
     };
 
@@ -9683,6 +9738,7 @@ export class MeerkatClient {
     if (options.peerMeta != null) params.peer_meta = options.peerMeta;
     if (options.budgetLimits != null) params.budget_limits = options.budgetLimits;
     if (options.providerParams != null) params.provider_params = options.providerParams;
+    if (options.reasoningEffort != null) params.reasoning_effort = options.reasoningEffort;
     if (options.authBinding != null) params.auth_binding = options.authBinding;
     if (options.preloadSkills != null) {
       params.preload_skills = skillKeysToWire(options.preloadSkills);

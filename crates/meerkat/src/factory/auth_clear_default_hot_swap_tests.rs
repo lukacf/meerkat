@@ -403,6 +403,7 @@ async fn clear_swap_keeps_the_resolved_account(attach: Attach<'_>) {
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: Some(TurnMetadataOverride::Clear),
+                reasoning_effort: None,
             },
         )
         .await

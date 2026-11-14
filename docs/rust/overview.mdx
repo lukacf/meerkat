@@ -466,6 +466,8 @@ tokens are counted. The result's `text` is then the latest assistant text
 the session already held: text from an earlier step of the same run, else the
 answer of an earlier turn, else empty. Check `terminal_cause_kind` before
 using `text`: on `BudgetExhausted` the text is not this call's answer.
+A streaming caller has by then received the discarded answer's text deltas;
+no `TextComplete` and no `TurnCompleted` follow them.
 
 ---
 

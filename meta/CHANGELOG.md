@@ -568,7 +568,7 @@ Security, Upgrade and Changed.
 
 - Behaviour of `identity_creation::render_v1`: the rendering of an update and
   of a removal no longer has the line `Expected spec digest`, so the subject
-  digest of such a request differs from the one 0.9.13 computed for it. No
+  digest of such a request differs from the one 0.9.14 computed for it. No
   rendering shows that digest; the request digest still covers it. Nothing
   stored a rendering before this release.
 

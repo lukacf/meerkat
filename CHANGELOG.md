@@ -2386,7 +2386,7 @@ them.
     from any position
     (``unknown variant `request_reasoning_effort_resolved` ``), and no
     step ends that on 0.9.14. The status of a finished turn that ran
-    with a level answers there (confirmed by a test of this change),
+    with a level answers there (confirmed by a run),
     with one exception: an input that was admitted and then refused for
     its level (a turn on a session whose model does not support the
     level). The status call for such an input fails on 0.9.14, also

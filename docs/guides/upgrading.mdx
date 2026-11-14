@@ -920,10 +920,9 @@ Before rolling back, on 0.9.15:
   ```
 
   The query's places and the four finished states are read from the
-  source. A narrower form of it, which finds an input only when the level
-  is the first member of its turn settings, was run: it returned no row
-  on a store whose turns had finished and one row right after a host was
-  killed during a turn.
+  source. It is confirmed by a run for the first place: one row on each
+  of three stores with an unfinished level turn, none on three stores
+  without one; the second place is read from the source.
 - **Then clear the level from every session that holds one**, a mob
   member's session included:
   `rkat run --resume <SESSION> --no-reasoning-effort "<PROMPT>"`, or a
@@ -1067,7 +1066,7 @@ On 0.9.14 after the rollback:
   0.9.14, also after the level is cleared (confirmed by a run); the
   session's other calls answer. For every other finished turn the stored
   record verifies on a release that does not know the level's report
-  (confirmed by a test of this change).
+  (confirmed by a run and by a test of this change).
 - **A turn that carries a level and has not finished** is neither run nor
   refused by 0.9.14: its status call fails there, and the input waits
   unchanged and runs again at the session's next turn on 0.9.15
@@ -1174,8 +1173,8 @@ What no step removes (beside the event replay above):
   inputs of every session in the store. The row stays stored, 0.9.15
   reads it again, and no step removes it. A read-only query finds such
   rows, on `sessions.sqlite3` in the realm's directory (`runtime.sqlite3`
-  for a JSONL realm, not run). It was run on a store with such rows and
-  returned them (confirmed by a run):
+  for a JSONL realm, not run). It was run on a store with two such rows
+  and returned both (confirmed by a run):
 
   ```sql
   SELECT runtime_id, input_id FROM runtime_input_states

@@ -1957,11 +1957,9 @@ fn build_request(
     }
 }
 
-fn tool_names(request: &meerkat_core::service::CreateSessionRequest) -> Vec<String> {
-    let mut names: Vec<String> = request
-        .build
-        .as_ref()
-        .and_then(|build| build.external_tools.as_ref())
+/// The names a dispatcher lists, sorted; none for no dispatcher.
+fn names_of(tools: Option<&Arc<dyn meerkat_core::AgentToolDispatcher>>) -> Vec<String> {
+    let mut names: Vec<String> = tools
         .map(|tools| {
             tools
                 .tools()
@@ -1974,72 +1972,32 @@ fn tool_names(request: &meerkat_core::service::CreateSessionRequest) -> Vec<Stri
     names
 }
 
-/// Every member build mounts the tool over the tools it already has; a
-/// request that is not a member build gets none, and a build whose tools
-/// already name `ask_user` keeps its own.
-#[test]
-fn every_member_build_mounts_the_tool() {
-    let slot = AskUserSlot::default();
-    let mut bare = build_request(Some("agent-a"), None);
-    let mut over = build_request(Some("agent-a"), Some(Named::of(&["memory", "probe"])));
-    let mut plain = build_request(None, Some(Named::of(&["probe"])));
-    let mut own = build_request(Some("agent-a"), Some(Named::of(&[ASK_USER_TOOL])));
-    let own_before = own
-        .build
-        .as_ref()
-        .and_then(|build| build.external_tools.clone());
-    for request in [&mut bare, &mut over, &mut plain, &mut own] {
-        slot.mount(request);
-    }
-    // The mounted tool answers through the slot, read at the call.
-    let mounted = bare
-        .build
-        .as_ref()
-        .and_then(|build| build.external_tools.clone())
-        .expect("mounted");
-
-    assert_eq!(tool_names(&bare), vec![ASK_USER_TOOL.to_string()]);
-    assert_eq!(
-        tool_names(&over),
-        vec![
-            ASK_USER_TOOL.to_string(),
-            "memory".to_string(),
-            "probe".to_string()
-        ]
-    );
-    assert_eq!(tool_names(&plain), vec!["probe".to_string()]);
-    assert_eq!(tool_names(&own), vec![ASK_USER_TOOL.to_string()]);
-    assert!(
-        Arc::ptr_eq(
-            own.build
-                .as_ref()
-                .and_then(|build| build.external_tools.as_ref())
-                .expect("its own tool"),
-            own_before.as_ref().expect("its own tool")
-        ),
-        "a build with its own ask_user keeps it"
-    );
-    // Alone on a build without a builtin surface, the tool takes the place
-    // of the factory's empty base and reads as that base reads
-    // (`the_mount_leaves_the_builds_catalog_as_it_was`).
-    assert_eq!(
-        mounted.tool_catalog_capabilities().exact_catalog,
-        meerkat_core::AgentToolDispatcher::tool_catalog_capabilities(
-            &meerkat_tools::EmptyToolDispatcher
-        )
-        .exact_catalog
-    );
+/// The build options of `request`.
+fn build_of(
+    request: &meerkat_core::service::CreateSessionRequest,
+) -> &meerkat_core::service::SessionBuildOptions {
+    request.build.as_ref().expect("build options")
 }
 
-/// A dispatcher with a declared catalog. `deferred` makes its tools
-/// deferred-eligible session entries, as a surface the factory composes
-/// beside a build's own tools declares them (the WorkGraph surface, for
-/// one); `pending` names sources it is still connecting.
+/// Whether both are the same dispatcher, or both none.
+fn same_dispatcher(
+    left: Option<&Arc<dyn meerkat_core::AgentToolDispatcher>>,
+    right: Option<&Arc<dyn meerkat_core::AgentToolDispatcher>>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// A dispatcher with a declared catalog: `exact` or not, its tools inline
+/// entries or, with `deferred`, deferred ones (which it does not list as
+/// tools: they are names of its catalog only).
 struct Declared {
     tools: Arc<[Arc<meerkat_core::types::ToolDef>]>,
     exact: bool,
     deferred: bool,
-    pending: Vec<String>,
 }
 
 impl Declared {
@@ -2047,7 +2005,6 @@ impl Declared {
         names: &[&str],
         exact: bool,
         deferred: bool,
-        pending: &[&str],
     ) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
         Arc::new(Self {
             tools: names
@@ -2055,14 +2012,13 @@ impl Declared {
                 .map(|name| {
                     Arc::new(meerkat_core::types::ToolDef::new(
                         *name,
-                        "a declared tool with a description long enough to count",
-                        json!({"type": "object", "properties": {"value": {"type": "string"}}}),
+                        "a declared tool",
+                        json!({"type": "object"}),
                     ))
                 })
                 .collect(),
             exact,
             deferred,
-            pending: pending.iter().map(ToString::to_string).collect(),
         })
     }
 }
@@ -2070,7 +2026,11 @@ impl Declared {
 #[async_trait::async_trait]
 impl meerkat_core::AgentToolDispatcher for Declared {
     fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
-        Arc::clone(&self.tools)
+        if self.deferred {
+            Vec::new().into()
+        } else {
+            Arc::clone(&self.tools)
+        }
     }
 
     async fn dispatch(
@@ -2108,193 +2068,12 @@ impl meerkat_core::AgentToolDispatcher for Declared {
             .collect::<Vec<_>>()
             .into()
     }
-
-    fn pending_catalog_sources(&self) -> Arc<[String]> {
-        self.pending.clone().into()
-    }
 }
 
-/// What Core judges of a composed tool surface: whether its catalog is
-/// exact and may need the catalog's control plane, the catalog mode, whether
-/// the control plane is composed, the sources still connecting, and the
-/// tool names.
-fn judged(tools: &dyn meerkat_core::AgentToolDispatcher) -> (String, Vec<String>) {
-    let capabilities = tools.tool_catalog_capabilities();
-    let mut names: Vec<String> = tools
-        .tools()
-        .iter()
-        .map(|tool| tool.name.to_string())
-        .collect();
-    names.sort();
-    (
-        format!(
-            "exact={} may_require_control_plane={} mode={:?} control_plane_composed={} pending={:?}",
-            capabilities.exact_catalog,
-            capabilities.may_require_catalog_control_plane,
-            meerkat_core::select_tool_catalog_mode(tools),
-            meerkat_core::should_compose_tool_catalog_control_plane(tools),
-            tools.pending_catalog_sources(),
-        ),
-        names,
-    )
-}
-
-/// Mounting the tool changes nothing about a member's tool catalog but the
-/// one tool: the catalog reads exact or not, inline or deferred, with or
-/// without the catalog's control tools and with the same sources still
-/// connecting, as the same build without the tool, and the tool list is the
-/// same list plus `ask_user`. Judged as Core judges a build: the build's
-/// base tools composed with a surface beside them that declares two
-/// deferred-eligible tools. Without external tools the factory's base is
-/// its builtin composite when the build composes a builtin surface (exact
-/// when its external tools are, or when it has none) and its empty
-/// dispatcher otherwise (not exact).
-#[test]
-fn the_mount_leaves_the_builds_catalog_as_it_was() {
-    let slot = AskUserSlot::default();
-    let beside = || Declared::of(&["beside_one", "beside_two"], true, true, &[]);
-    let receiver = Arc::new(Receiver::default());
-    let mut differing = Vec::new();
-    // Each build: its own external tools, and the one tool category its
-    // options switch on. Builtins and shell make the factory's base its
-    // builtin composite. Image generation and web search do so only with
-    // their backends, which these builds do not have: the base stays the
-    // empty dispatcher with the switch on. External tools that only observe
-    // bindings (the mob runtime's receiver on a build with no external
-    // tools of its own, which every local member build carries) are
-    // composed by the factory as none.
-    for (case, external, switch) in [
-        ("no external tools, no switch on", None, None),
-        ("no external tools, builtins on", None, Some("builtins")),
-        ("no external tools, shell on", None, Some("shell")),
-        (
-            "no external tools, image generation on",
-            None,
-            Some("image_generation"),
-        ),
-        ("no external tools, web search on", None, Some("web_search")),
-        (
-            "exact external tools",
-            Some(Declared::of(&["probe"], true, false, &[])),
-            None,
-        ),
-        (
-            "external tools that are not exact",
-            Some(Named::of(&["probe"])),
-            None,
-        ),
-        (
-            "exact external tools with deferred entries, builtins on",
-            Some(Declared::of(&["later_one", "later_two"], true, true, &[])),
-            Some("builtins"),
-        ),
-        (
-            "exact external tools still connecting",
-            Some(Declared::of(&["probe"], true, false, &["server-a"])),
-            None,
-        ),
-        (
-            "a receiver that only observes bindings, no switch on",
-            Some(Arc::clone(&receiver) as Arc<dyn meerkat_core::AgentToolDispatcher>),
-            None,
-        ),
-        (
-            "a receiver that only observes bindings, builtins on",
-            Some(Arc::clone(&receiver) as Arc<dyn meerkat_core::AgentToolDispatcher>),
-            Some("builtins"),
-        ),
-    ] {
-        let mut request = build_request(Some("agent-a"), external.clone());
-        {
-            let build = request.build.as_mut().expect("build options");
-            let on = meerkat_core::ToolCategoryOverride::Enable;
-            match switch {
-                Some("builtins") => build.override_builtins = on,
-                Some("shell") => build.override_shell = on,
-                Some("image_generation") => build.override_image_generation = on,
-                Some("web_search") => build.override_web_search = on,
-                _ => {}
-            }
-        }
-        let builtins = matches!(switch, Some("builtins" | "shell"));
-        // What Meta's capability invariant judges of the dispatchers the
-        // build supplies, without the tool and with it.
-        let supplied = |request: &meerkat_core::service::CreateSessionRequest| {
-            request
-                .build
-                .as_ref()
-                .and_then(
-                    crate::capability_invariant::MemberCapabilityInvariantContext::from_build_options,
-                )
-                .map(|context| context.catalog_exactness)
-        };
-        let supplied_without = supplied(&request);
-        slot.mount(&mut request);
-        let supplied_with = supplied(&request);
-        let mounted = request
-            .build
-            .as_ref()
-            .and_then(|build| build.external_tools.clone())
-            .expect("mounted");
-        // The factory binds the session's mob operator authority to the
-        // build's external tools: a receiver below the tool still gets it.
-        mounted.bind_session_mob_tool_authority(None);
-        // The base the factory builds without the tool. External tools that
-        // only observe bindings compose as none. A builtin composite reads
-        // as its external tools do, and as exact without any: an exact
-        // dispatcher of no tools stands in for it here.
-        let own = external
-            .as_ref()
-            .filter(|external| !external.observes_bindings_only());
-        let base_without: Arc<dyn meerkat_core::AgentToolDispatcher> = match (own, builtins) {
-            (Some(external), _) => Arc::clone(external),
-            (None, true) => Declared::of(&[], true, false, &[]),
-            (None, false) => Arc::new(meerkat_tools::EmptyToolDispatcher),
-        };
-        let (judgement_without, mut names_without) =
-            judged(&meerkat_core::DynamicToolComposite::new(vec![
-                base_without,
-                beside(),
-            ]));
-        let (judgement_with, names_with) = judged(&meerkat_core::DynamicToolComposite::new(vec![
-            mounted,
-            beside(),
-        ]));
-        names_without.push(ASK_USER_TOOL.to_string());
-        names_without.sort();
-        if judgement_with != judgement_without || names_with != names_without {
-            differing.push(format!(
-                "{case}: with the tool {judgement_with} {names_with:?}; without it \
-                 {judgement_without} {names_without:?} (the tool added)"
-            ));
-        }
-        if supplied_with != supplied_without || supplied_without.is_none() {
-            differing.push(format!(
-                "{case}: the capability invariant judges the build's supplied dispatchers \
-                 {supplied_with:?} with the tool and {supplied_without:?} without it"
-            ));
-        }
-    }
-    assert!(
-        differing.is_empty(),
-        "mounting the tool leaves the build's catalog as it was:\n{}",
-        differing.join("\n")
-    );
-    assert_eq!(
-        receiver.bound.load(Ordering::Relaxed),
-        2,
-        "the receiver below the tool is bound in both of its builds"
-    );
-}
-
-/// The mob runtime's receiver of a session's mob operator authority, as a
-/// build with no external tools of its own carries it: no tools, an exact
-/// catalog, and it only observes the bindings the factory gives a build's
-/// external tools.
-#[derive(Default)]
-struct Receiver {
-    bound: AtomicU64,
-}
+/// External tools as the mob runtime gives a build with none of its own:
+/// they list nothing and only observe the bindings the factory gives a
+/// build's external tools.
+struct Receiver;
 
 #[async_trait::async_trait]
 impl meerkat_core::AgentToolDispatcher for Receiver {
@@ -2316,16 +2095,178 @@ impl meerkat_core::AgentToolDispatcher for Receiver {
         }
     }
 
-    fn bind_session_mob_tool_authority(
-        &self,
-        _authority: Option<Arc<std::sync::RwLock<meerkat_core::service::MobToolAuthorityContext>>>,
-    ) {
-        self.bound.fetch_add(1, Ordering::Relaxed);
-    }
-
     fn observes_bindings_only(&self) -> bool {
         true
     }
+}
+
+/// Every member build gets the tool in its host tools, and nothing else of
+/// the build changes: its external tools are the very dispatcher they were
+/// (or still none), whatever they are, so the factory binds and judges them
+/// as it does without the tool. A request that is not a member build gets
+/// none. The tool's own catalog is exact, of one inline entry, with nothing
+/// still connecting: what leaves a build's tool catalog as it is.
+#[test]
+fn every_member_build_gets_the_tool_in_its_host_tools() {
+    let slot = AskUserSlot::default();
+    for (case, external) in [
+        ("no external tools", None),
+        (
+            "external tools that are not exact",
+            Some(Named::of(&["memory", "probe"])),
+        ),
+        (
+            "exact external tools",
+            Some(Declared::of(&["probe"], true, false)),
+        ),
+        (
+            "exact external tools with deferred entries",
+            Some(Declared::of(&["later_one", "later_two"], true, true)),
+        ),
+        (
+            "external tools that only observe bindings",
+            Some(Arc::new(Receiver) as Arc<dyn meerkat_core::AgentToolDispatcher>),
+        ),
+    ] {
+        let mut request = build_request(Some("agent-a"), external.clone());
+        slot.mount(&mut request);
+        let build = build_of(&request);
+        assert!(
+            same_dispatcher(build.external_tools.as_ref(), external.as_ref()),
+            "{case}: the build's external tools are the dispatcher they were"
+        );
+        let mounted = build.host_tools.as_ref().expect("the tool is mounted");
+        assert_eq!(
+            names_of(Some(mounted)),
+            vec![ASK_USER_TOOL.to_string()],
+            "{case}"
+        );
+        let capabilities = mounted.tool_catalog_capabilities();
+        assert!(
+            capabilities.exact_catalog && !capabilities.may_require_catalog_control_plane,
+            "{case}: the tool's catalog is exact and needs no control tools"
+        );
+        assert!(mounted.pending_catalog_sources().is_empty(), "{case}");
+        assert!(
+            !mounted.observes_bindings_only(),
+            "{case}: a dispatcher with a tool is no observer"
+        );
+    }
+
+    let mut plain = build_request(None, Some(Named::of(&["probe"])));
+    slot.mount(&mut plain);
+    assert!(
+        build_of(&plain).host_tools.is_none(),
+        "a request that is not a member build gets no tool"
+    );
+    assert_eq!(
+        names_of(build_of(&plain).external_tools.as_ref()),
+        vec!["probe".to_string()]
+    );
+}
+
+/// A build that already names `ask_user` keeps its own, and Meta mounts
+/// none: in its external tools as a tool they list or as an entry of their
+/// catalog that is not listed now, or in host tools a host layer put on the
+/// build before. Host tools of the host's own under other names stay, beside
+/// the tool.
+#[test]
+fn a_build_that_names_ask_user_keeps_its_own() {
+    let slot = AskUserSlot::default();
+
+    let mut listed = build_request(Some("agent-a"), Some(Named::of(&[ASK_USER_TOOL])));
+    let listed_before = build_of(&listed).external_tools.clone();
+    slot.mount(&mut listed);
+    assert!(build_of(&listed).host_tools.is_none());
+    assert!(same_dispatcher(
+        build_of(&listed).external_tools.as_ref(),
+        listed_before.as_ref()
+    ));
+
+    let mut deferred = build_request(
+        Some("agent-a"),
+        Some(Declared::of(&[ASK_USER_TOOL], true, true)),
+    );
+    slot.mount(&mut deferred);
+    assert!(
+        build_of(&deferred).host_tools.is_none(),
+        "a catalog entry named ask_user that is not listed now is the build's own too"
+    );
+
+    let own = Named::of(&[ASK_USER_TOOL]);
+    let mut hosted = build_request(Some("agent-a"), None);
+    hosted.build.as_mut().expect("build options").host_tools = Some(Arc::clone(&own));
+    slot.mount(&mut hosted);
+    assert!(
+        same_dispatcher(build_of(&hosted).host_tools.as_ref(), Some(&own)),
+        "host tools that name ask_user stay as they are"
+    );
+
+    let mut beside = build_request(Some("agent-a"), None);
+    beside.build.as_mut().expect("build options").host_tools = Some(Named::of(&["host_probe"]));
+    slot.mount(&mut beside);
+    assert_eq!(
+        names_of(build_of(&beside).host_tools.as_ref()),
+        vec![ASK_USER_TOOL.to_string(), "host_probe".to_string()],
+        "the host's own host tools stay, beside the tool"
+    );
+}
+
+/// Meta's capability invariant judges the dispatchers a build supplies to
+/// the factory. The tool's dispatcher is exact, so the invariant judges
+/// every build with the tool as it judges it without. The build's host
+/// tools are a supplied participant like the others: a dispatcher a host
+/// put there that does not declare an exact catalog makes the build's
+/// judgement not exact, with the tool beside it or without.
+#[test]
+fn the_capability_invariant_judges_a_build_with_the_tool_as_without_it() {
+    use crate::capability_invariant::{
+        CapabilityCatalogExactness, MemberCapabilityInvariantContext,
+    };
+    let slot = AskUserSlot::default();
+    let judged = |request: &meerkat_core::service::CreateSessionRequest| {
+        MemberCapabilityInvariantContext::from_build_options(build_of(request))
+            .expect("a member build is judged")
+            .catalog_exactness
+    };
+    for (case, external, expected) in [
+        ("no external tools", None, CapabilityCatalogExactness::Exact),
+        (
+            "exact external tools",
+            Some(Declared::of(&["probe"], true, false)),
+            CapabilityCatalogExactness::Exact,
+        ),
+        (
+            "external tools that are not exact",
+            Some(Named::of(&["probe"])),
+            CapabilityCatalogExactness::NonExactActualDispatcher,
+        ),
+        (
+            "external tools that only observe bindings",
+            Some(Arc::new(Receiver) as Arc<dyn meerkat_core::AgentToolDispatcher>),
+            CapabilityCatalogExactness::Exact,
+        ),
+    ] {
+        let mut request = build_request(Some("agent-a"), external);
+        let without = judged(&request);
+        slot.mount(&mut request);
+        assert_eq!(without, expected, "{case}: without the tool");
+        assert_eq!(judged(&request), expected, "{case}: with the tool");
+    }
+
+    let mut hosted = build_request(Some("agent-a"), None);
+    hosted.build.as_mut().expect("build options").host_tools = Some(Named::of(&["host_probe"]));
+    assert_eq!(
+        judged(&hosted),
+        CapabilityCatalogExactness::NonExactActualDispatcher,
+        "host tools that are not exact are a supplied participant"
+    );
+    slot.mount(&mut hosted);
+    assert_eq!(
+        judged(&hosted),
+        CapabilityCatalogExactness::NonExactActualDispatcher,
+        "and stay one with the tool beside them"
+    );
 }
 
 /// The pins this feature leaves as they are, named for the record: the

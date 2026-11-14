@@ -234,23 +234,20 @@ impl MemberCapabilityInvariantContext {
         // the trait default is the remaining legitimate source of
         // `NonExactCatalog`, and that is a steady state, not a defect.
         //
-        // The stock `ask_user` tool Meta mounts on every member build is not
-        // a dispatcher the build supplied. For the dispatcher the mount
-        // built (known by identity) the judgement is the one of the build's
-        // own external tools before the mount, which the mount recorded:
-        // the invariant judges a build as it does without the tool.
-        let external_exact = build.external_tools.as_ref().is_none_or(|tools| {
-            crate::ask_user::exact_before_mount(tools)
-                .unwrap_or_else(|| tools.tool_catalog_capabilities().exact_catalog)
-        });
-        let catalog_exactness = if external_exact
-            && [
-                build.schedule_tools.as_ref(),
-                build.workgraph_tools.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            .all(|dispatcher| dispatcher.tool_catalog_capabilities().exact_catalog)
+        // The build's host tools are a supplied participant too: the factory
+        // composes them into the same final composite. The stock `ask_user`
+        // tool Meta puts there declares an exact catalog, so it changes no
+        // build's judgement; a dispatcher a host puts there that does not
+        // makes the composite non-exact like any other participant.
+        let catalog_exactness = if [
+            build.external_tools.as_ref(),
+            build.schedule_tools.as_ref(),
+            build.workgraph_tools.as_ref(),
+            build.host_tools.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .all(|dispatcher| dispatcher.tool_catalog_capabilities().exact_catalog)
         {
             CapabilityCatalogExactness::Exact
         } else {

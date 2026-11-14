@@ -7,9 +7,12 @@
 //! of its own. Meta is the host:
 //!
 //! - **Mount.** Every member build passes the base session layer's hook
-//!   ([`AskUserSlot::after_hook`]), which composes the tool over the build's
-//!   external tools ([`crate::tool_compose::ComposedExternalTools`]) with a
-//!   [`MemberAskUserHost`] for that member. A build whose tools already name
+//!   ([`AskUserSlot::after_hook`]), which puts the tool, with a
+//!   [`MemberAskUserHost`] for that member, into the build's host tools
+//!   (`SessionBuildOptions::host_tools`): Core's factory composes them as
+//!   one more part of the build's tool surface, beside whatever its base
+//!   is, so the build's own tools and its tool catalog are what they are
+//!   without the tool. A build whose tools already name
 //!   `ask_user` (a host's own tool of that name) keeps its own, and Meta
 //!   mounts none: the questions that tool asks are that tool's, so no
 //!   decision is held for them, the read lists none of them and no notice
@@ -245,10 +248,22 @@ impl AskUserSlot {
         })
     }
 
-    /// Compose the `ask_user` tool over the external tools of a member
-    /// build, with a host for that member. Nothing changes for a request
-    /// that is not a member build, and for a build whose tools already name
-    /// `ask_user` (the host's own tool of that name stays reachable).
+    /// Put the `ask_user` tool, with a host for that member, into the host
+    /// tools of a member build (`SessionBuildOptions::host_tools`), beside a
+    /// dispatcher a host layer already put there. Core's factory composes
+    /// the build's host tools as one more part of its tool surface, beside
+    /// whatever base it builds for the build, so the mount adds the one tool
+    /// and changes nothing else: the build's external tools are not touched
+    /// (the factory binds and judges them as it does without the tool), and
+    /// the tool's own catalog is exact and inline, so the build's catalog
+    /// reads exact or not, with or without the catalog's control tools, as
+    /// it does without the tool.
+    ///
+    /// Nothing changes for a request that is not a member build, and for a
+    /// build whose external tools or host tools already name `ask_user`, as
+    /// a tool they list or an entry of their catalog (the host's own tool of
+    /// that name stays reachable: a name two parts of a build's surface list
+    /// is offered by neither).
     pub(crate) fn mount(&self, req: &mut CreateSessionRequest) {
         let Some(build) = req.build.as_mut() else {
             return;
@@ -256,12 +271,11 @@ impl AskUserSlot {
         let Some(binding) = build.mob_member_binding.as_ref() else {
             return;
         };
-        if build.external_tools.as_ref().is_some_and(|tools| {
-            tools
-                .tools()
-                .iter()
-                .any(|tool| tool.name.as_ref() == ASK_USER_TOOL)
-        }) {
+        if [build.external_tools.as_ref(), build.host_tools.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|tools| names_ask_user(tools.as_ref()))
+        {
             tracing::debug!(
                 member = %binding.member,
                 "the member's build already has a tool named ask_user: Meta mounts none"
@@ -275,98 +289,25 @@ impl AskUserSlot {
         );
         let tool: Arc<dyn meerkat_core::AgentToolDispatcher> =
             Arc::new(AskUserDispatcher::new(Arc::new(host)));
-        // The mount adds the one tool and leaves the build's tool catalog
-        // as it is judged without it (exact or not, so inline or deferred,
-        // with or without the catalog's control tools).
-        //
-        // A build's own external tools that only observe bindings (the mob
-        // runtime's receiver of the session's mob operator authority, on a
-        // build with no external tools of its own: every local member
-        // build carries one) count as none, as they do for the factory,
-        // which binds them and then composes the build as one with no
-        // external tools. They stay wrapped below the tool, so the binding
-        // still reaches them.
-        //
-        // Over external tools of the build's own the composition is exact
-        // only when they are. Without any, the tool takes the place of the
-        // factory's base: its builtin composite, which is exact without
-        // external tools, when the build composes a builtin surface, and
-        // its empty dispatcher, which is not, otherwise. The tool is then
-        // composed over that same empty dispatcher and reads as it reads.
-        let own = build.external_tools.take();
-        let before = own
-            .as_ref()
-            .is_none_or(|own| own.tool_catalog_capabilities().exact_catalog);
-        let has_tools = own
-            .as_ref()
-            .is_some_and(|own| !own.observes_bindings_only());
-        let below = if has_tools || composes_builtin_surface(build) {
-            own
-        } else {
-            let empty: Arc<dyn meerkat_core::AgentToolDispatcher> =
-                Arc::new(meerkat_tools::EmptyToolDispatcher);
-            Some(match own {
-                Some(observer) => {
-                    crate::tool_compose::ComposedExternalTools::over(observer, Some(empty))
-                }
-                None => empty,
-            })
-        };
-        let mounted = crate::tool_compose::ComposedExternalTools::over(tool, below);
-        remember_mounted(&mounted, before);
-        build.external_tools = Some(mounted);
+        build.host_tools = Some(match build.host_tools.take() {
+            Some(already) => Arc::new(meerkat_core::DynamicToolComposite::new(vec![already, tool])),
+            None => tool,
+        });
     }
 }
 
-/// The dispatchers [`AskUserSlot::mount`] built, held weakly and known by
-/// identity (the very dispatcher the hook built, never a tool name a host
-/// could use too), each with what the build's own external tools read as
-/// before the mount: whether their catalog was exact (a build without any
-/// supplies none, which reads as exact).
-static MOUNTED: std::sync::Mutex<
-    Vec<(std::sync::Weak<dyn meerkat_core::AgentToolDispatcher>, bool)>,
-> = std::sync::Mutex::new(Vec::new());
-
-fn remember_mounted(mounted: &Arc<dyn meerkat_core::AgentToolDispatcher>, exact_before: bool) {
-    let mut known = MOUNTED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    known.retain(|(dispatcher, _)| dispatcher.strong_count() > 0);
-    known.push((Arc::downgrade(mounted), exact_before));
-}
-
-/// For a dispatcher this module's mount built: whether the catalog of the
-/// build's own external tools was exact before the mount. `None` for any
-/// other dispatcher. The tool is not a dispatcher the build supplied, so
-/// what judges the dispatchers a build supplies (the capability invariant)
-/// reads this in place of the mounted dispatcher's own declaration: its
-/// judgement of a build is the one it has without the tool.
-pub(crate) fn exact_before_mount(
-    tools: &Arc<dyn meerkat_core::AgentToolDispatcher>,
-) -> Option<bool> {
-    MOUNTED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// Whether `tools` names `ask_user`: as a tool it lists now, or as an entry
+/// of its catalog (one that is deferred or not callable now is still its
+/// name).
+fn names_ask_user(tools: &dyn meerkat_core::AgentToolDispatcher) -> bool {
+    tools
+        .tools()
         .iter()
-        .find_map(|(known, exact_before)| {
-            known
-                .upgrade()
-                .is_some_and(|known| Arc::ptr_eq(&known, tools))
-                .then_some(*exact_before)
-        })
-}
-
-/// Whether the factory's base for `build` is its builtin composite: the
-/// build's options switch builtins or shell on, the two switches the
-/// factory resolves from the build alone (a member build sets both
-/// explicitly). Image generation and the fallback web search also make the
-/// factory compose that composite, but only with their backends, which the
-/// build's options do not show. A build the factory composes the composite
-/// for by those alone reads here as having the empty base, and its catalog
-/// then reads not exact (nothing of it is deferred).
-fn composes_builtin_surface(build: &meerkat_core::service::SessionBuildOptions) -> bool {
-    [build.override_builtins, build.override_shell]
-        .contains(&meerkat_core::ToolCategoryOverride::Enable)
+        .any(|tool| tool.name.as_ref() == ASK_USER_TOOL)
+        || tools
+            .tool_catalog()
+            .iter()
+            .any(|entry| entry.tool.name.as_ref() == ASK_USER_TOOL)
 }
 
 /// The principal a question set names as its requester: the asking agent,

@@ -192,6 +192,10 @@ Security, Upgrade and Changed.
 - Hosts whose customizer has side effects: see Known limitations, respawn
   during a pending role move.
 
+- A host that used a respawn to discard queued prompts must withdraw them
+  another way: see Changed, the entry on the inputs a respawn hands to the
+  member's successor.
+
 - The published 0.9.14 Meta Python and TypeScript SDKs (the source of tag
   `meta-v0.9.14`) were run against a development build of this release's
   gateway with no provider key: every row of their own suites that starts a
@@ -1258,56 +1262,59 @@ Security, Upgrade and Changed.
   customizer and ask Core once to seat them from their records (see
   Upgrade).
 
-- A respawn of an identity keeps the mobs its session owns, for the
-  served members named below. In Meta 0.9.9 through 0.9.14, on a gateway
-  or a host that keeps its state on disk, a
+- A respawn of an identity is no longer followed by the loss of the mobs
+  its session owns, for the served members named below. In Meta 0.9.9
+  through 0.9.14, on a gateway or a host that keeps its state on disk, a
   respawn whose wake failed (the provider or a credential was unavailable,
   or the host's build refused it), or whose process ended before the
   identity had woken again, was followed at the next start by the loss of
   the mobs the identity's session owned: the child mobs its agent created
   with `mob_create`, with their members, and its implicit mob, which holds
   its delegates and forks. The identity, its conversation and its memory
-  were kept. A respawn that completed lost nothing, and neither did one
-  whose identity woke again on its session before the process stopped.
+  were kept. A respawn that completed removed no mobs, and neither did one
+  whose identity woke again on its session before the process stopped. This
+  entry is about whether the mobs exist: what a respawned identity's own
+  tools list and manage of the mobs it created is not changed by this fix.
   Mobs lost this way are not restored by the upgrade. `meta/respawn`
   (`MetaRuntime.respawn` in both SDKs, `IdentityRuntime::respawn`), the
   Console's respawn and the two rebuilds of `meta/compact_member` were
   affected: all of them end the member's incarnation through one shared
   step. For the respawn the loss and the fix are confirmed by a test. For
-  the compact call, that its rebuild takes the shared step is confirmed
-  by a test (`a_roster_identitys_incarnation_ends_through_cores_one_step_successor`,
-  and `compact_member_whose_rebuild_the_host_refuses_keeps_the_member_on_its_session`,
+  the compact call, that its rebuild takes the shared step is confirmed by
+  a test
+  (`a_roster_identitys_incarnation_ends_through_cores_one_step_successor`,
+  and
+  `compact_member_whose_rebuild_the_host_refuses_keeps_the_member_on_its_session`,
   which runs the call and reads that the member stays on its session and
   the session does not read archived); the loss of mobs across a restart
-  through the compact call is read from the source. Every identity of
-  0.9.9 through 0.9.14 is a configured one, so every identity of those
-  releases was affected. Agents created at run time are new in 0.9.15
-  and were never affected: their respawn and the compact call's rebuilds
-  have used the one step since they exist. On 0.9.9 and 0.9.10 a gateway could enter the state by
-  itself: at each roster compile it respawned, once, every listed
+  through the compact call is read from the source. Every identity of 0.9.9
+  through 0.9.14 is a configured one, so every identity of those releases
+  was affected. Agents created at run time are new in 0.9.15 and were never
+  affected: their respawn and the compact call's rebuilds have used the one
+  step since they exist. On 0.9.9 and 0.9.10 a gateway could enter the
+  state by itself: at each roster compile it respawned, once, every listed
   identity whose live member had been created before an upgrade from an
-  older release and had not been respawned since. A respawn, the
-  Console's and the rebuilds now replace the member by its successor on
-  the same session in one step in Core, as they already did for an agent
-  created at run time: the identity is never without a member, and after
-  a failed wake it stays seated on the session it had, its next delivery
-  wakes it, and a restart keeps what its session owns. The host's
-  customizer is asked as before: once for the successor's seat, whose
-  build is composed before Core is asked (a build the host refuses now
-  refuses the respawn before anything changes, where it used to leave the
-  identity without a member), and once for its build; `after_create` is
-  told once, of the session the respawn keeps. That is the count of
-  0.9.14 (two calls: confirmed by a test for a served member; Known
-  limitations names one case that can differ). The successor is seated
-  with the customizer's current answer, as the seat of 0.9.14 was: its
-  labels and its profile and model overrides. A session a build already
-  created keeps the context, the instructions and the system prompt its
-  builds recorded, as in 0.9.14, and a member that was seated and never
-  built takes the current answer whole at its first build (its system
-  prompt, instructions and context: confirmed by a test; the inputs that
-  live in the process, such as a compaction curator, reach that build
-  through the build preparation, as after a restart: read from the
-  source).
+  older release and had not been respawned since. A respawn, the Console's
+  and the rebuilds now replace the member by its successor on the same
+  session in one step in Core, as they already did for an agent created at
+  run time: the identity is never without a member, and after a failed wake
+  it stays seated on the session it had, its next delivery wakes it, and a
+  restart does not remove the mobs its session owns. The host's customizer
+  is asked as before: once for the successor's seat, whose build is
+  composed before Core is asked (a build the host refuses now refuses the
+  respawn before anything changes, where it used to leave the identity
+  without a member), and once for its build; `after_create` is told once,
+  of the session the respawn keeps. That is the count of 0.9.14 (two calls:
+  confirmed by a test for a served member; Known limitations names one case
+  that can differ). The successor is seated with the customizer's current
+  answer, as the seat of 0.9.14 was: its labels and its profile and model
+  overrides. A session a build already created keeps the context, the
+  instructions and the system prompt its builds recorded, as in 0.9.14, and
+  a member that was seated and never built takes the current answer whole
+  at its first build (its system prompt, instructions and context:
+  confirmed by a test; the inputs that live in the process, such as a
+  compaction curator, reach that build through the build preparation, as
+  after a restart: read from the source).
   - Served members: every configured identity whose member runs in this
     process on a session the gateway's store keeps, over the stock
     session bridge. That is the stock composition over a persistent state
@@ -1787,10 +1794,11 @@ Security, Upgrade and Changed.
     The two session bridge causes are exposed when that host keeps
     sessions and child mobs on disk. For the causes of this group, as in
     0.9.14: do not respawn the identity while its provider is
-    unavailable; after a respawn, do not stop or restart the gateway
-    until the identity has woken on the same session; and if a respawn's
-    wake failed, wake the identity successfully, on the same session,
-    before any restart. One of Core's reasons names a member placed on
+    unavailable; after a respawn, do not stop or restart the gateway until the
+    identity has woken on the same session (the call has answered without an
+    error and the identity has then answered one message); and if a respawn's
+    wake failed, wake the identity successfully, on the same session, before
+    any restart. One of Core's reasons names a member placed on
     another host whose spec names no placement: its line is this warning,
     and its exposure is not established, as for the next group.
   - Not established. `its member is placed on another host`: the line is

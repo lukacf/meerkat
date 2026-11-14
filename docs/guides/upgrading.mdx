@@ -459,7 +459,9 @@ line says otherwise.
 - End every change of an agent that waits for approval.
 - Let every member respawn that is under way complete: wait until its call
   (`meta/respawn`, the Console's respawn or `meta/compact_member`) has
-  answered, and after a crash during one, start 0.9.15 once more so that it
+  answered without an error, and for a member the respawn fix does not serve
+  (a warning names it at the respawn) until the identity has then answered one
+  message; after a crash during a respawn, start 0.9.15 once more so that it
   finishes the rotation.
 - Remove the new agent actions from the access rules, and `archive` and
   `adopt` from the identity policy.
@@ -774,8 +776,11 @@ in that state has not been run, and whether 0.9.14 finishes it is not
 established.
 
 **Do:** before a rollback, on 0.9.15, let every member respawn that is under
-way complete: a respawn whose call has answered is complete, and after a
-crash during one, start 0.9.15 once more so that it finishes the rotation.
+way complete: a respawn whose call has answered without an error is complete
+for a member the fix serves; for one it does not serve, see Known limitations
+in the Meta changelog: do not stop the process before the identity has
+answered one message. After a crash during a respawn, start 0.9.15 once more
+so that it finishes the rotation.
 
 **A schedule paused for its target.** Nothing is refused, and the pause is
 not lost. 0.9.14 has no such mark: it ignores `paused_for_target` and reads

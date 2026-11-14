@@ -658,6 +658,12 @@ async fn the_host_answers_a_members_set_through_the_stdio_dispatcher() {
         }),
     )
     .await;
+    // Judged before the member is waited for: an answer that is not the
+    // question set's is named here, not as a member that is never told.
+    if decided["result"]["kind"] != json!("question_set") {
+        runtime.shutdown().await;
+        panic!("the stdio decide of a question set's id is the question set's: {decided}");
+    }
     let told = model
         .request_with(&[
             "ask_user_result\\n",
@@ -668,11 +674,6 @@ async fn the_host_answers_a_members_set_through_the_stdio_dispatcher() {
     let listed_after = stdio_rpc(&runtime, "meta/gating/questions", json!({})).await;
     runtime.shutdown().await;
 
-    assert_eq!(
-        decided["result"]["kind"],
-        json!("question_set"),
-        "the stdio decide of a question set's id is the question set's: {decided}"
-    );
     assert_eq!(decided["result"]["pending_id"], json!(pending_id));
     assert_eq!(decided["result"]["outcome"], json!("answered"));
     assert!(told.contains(&pending_id), "{told}");

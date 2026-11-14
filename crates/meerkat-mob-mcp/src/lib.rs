@@ -22755,9 +22755,9 @@ mod tests {
         assert!(!restore_has_run(&state).await);
         drop(state);
 
-        // A store under the id `moved-b` that holds the mob `moved-a`.
-        let moved_a = a_stored_mob_before_a_restart(&svc, root.path(), "moved-a").await;
-        let moved_b = MobId::from("moved-b");
+        // A store under the id `update-moved-b` that holds the mob `update-moved-a`.
+        let moved_a = a_stored_mob_before_a_restart(&svc, root.path(), "update-moved-a").await;
+        let moved_b = MobId::from("update-moved-b");
         let from = MobMcpState::storage_file_paths(&stored_mob_path(root.path(), &moved_a));
         let to = MobMcpState::storage_file_paths(&stored_mob_path(root.path(), &moved_b));
         for (from, to) in from.iter().zip(&to) {
@@ -22770,7 +22770,7 @@ mod tests {
         }
         let state = restored_state(&svc, root.path());
         let other_mob = state
-            .mob_update_stored_definition(&moved_b, 1, definition_with_reviewer("moved-a"))
+            .mob_update_stored_definition(&moved_b, 1, definition_with_reviewer("update-moved-a"))
             .await
             .expect_err("the definition names another mob than the call addresses");
         assert!(
@@ -22789,7 +22789,7 @@ mod tests {
             .expect("the moved store holds a definition");
         assert_eq!(
             (held.definition(), held.epoch()),
-            (&explicit_definition("moved-a"), 1),
+            (&explicit_definition("update-moved-a"), 1),
             "the store under the addressed id is left alone"
         );
     }
@@ -27452,7 +27452,8 @@ mod tests {
         let svc = Arc::new(MockSessionSvc::new());
         let root = tempfile::tempdir().expect("tempdir");
         let (state, unnamed) = state_that_holds_a_mob_no_call_names(&svc, root.path()).await;
-        let outcome = council_outcome_over_a_shown_worker(&svc, &state, "council-source").await;
+        let outcome =
+            council_outcome_over_a_shown_worker(&svc, &state, "council-source-unnamed").await;
         assert!(
             outcome.contains("participant_seating_failed")
                 && outcome.contains("temporary mob creation failed")

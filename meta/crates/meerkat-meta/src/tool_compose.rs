@@ -298,6 +298,20 @@ impl AgentToolDispatcher for ComposedExternalTools {
         merged.into()
     }
 
+    /// The sources either half is still connecting: the composition
+    /// connects none of its own. Left on the trait default (none), it hid a
+    /// half's connecting sources from the catalog's judgement, which keeps
+    /// an exact catalog in the deferred mode while a source connects.
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        let mut pending: Vec<String> = self.primary.pending_catalog_sources().to_vec();
+        for source in self.fallback.pending_catalog_sources().iter() {
+            if !pending.contains(source) {
+                pending.push(source.clone());
+            }
+        }
+        pending.into()
+    }
+
     /// A composition supports ops-lifecycle binding when either half does: it
     /// adds no tools of its own, so hiding a half's capability would leave
     /// that half's ops (detached jobs, async operations) unbound from the

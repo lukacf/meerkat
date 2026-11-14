@@ -2019,7 +2019,16 @@ fn every_member_build_mounts_the_tool() {
         ),
         "a build with its own ask_user keeps it"
     );
-    assert!(mounted.tool_catalog_capabilities().exact_catalog);
+    // Alone on a build without a builtin surface, the tool takes the place
+    // of the factory's empty base and reads as that base reads
+    // (`the_mount_leaves_the_builds_catalog_as_it_was`).
+    assert_eq!(
+        mounted.tool_catalog_capabilities().exact_catalog,
+        meerkat_core::AgentToolDispatcher::tool_catalog_capabilities(
+            &meerkat_tools::EmptyToolDispatcher
+        )
+        .exact_catalog
+    );
 }
 
 /// A dispatcher with a declared catalog. `deferred` makes its tools

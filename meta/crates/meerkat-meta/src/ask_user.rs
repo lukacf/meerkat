@@ -275,11 +275,42 @@ impl AskUserSlot {
         );
         let tool: Arc<dyn meerkat_core::AgentToolDispatcher> =
             Arc::new(AskUserDispatcher::new(Arc::new(host)));
+        // The mount adds the one tool and leaves the build's tool catalog
+        // as it is judged without it (exact or not, so inline or deferred,
+        // with or without the catalog's control tools). Over the build's
+        // own external tools the composition is exact only when they are.
+        // As the build's first external dispatcher the tool takes the place
+        // of the factory's base: its builtin composite, which is exact
+        // without external tools, when the build composes a builtin
+        // surface, and its empty dispatcher, which is not, otherwise. The
+        // tool is then composed over that same empty dispatcher and reads
+        // as it reads.
+        let below = match build.external_tools.take() {
+            Some(external) => Some(external),
+            None if composes_builtin_surface(build) => None,
+            None => Some(Arc::new(meerkat_tools::EmptyToolDispatcher)
+                as Arc<dyn meerkat_core::AgentToolDispatcher>),
+        };
         build.external_tools = Some(crate::tool_compose::ComposedExternalTools::over(
-            tool,
-            build.external_tools.take(),
+            tool, below,
         ));
     }
+}
+
+/// Whether the factory composes its builtin tool surface for `build`: the
+/// build's options switch builtins, shell, image generation or web search
+/// on. A member build sets the first three explicitly. Read from the build's
+/// own options, not from what the factory resolves: a build that switches
+/// image generation or web search on while the factory composes neither
+/// reads as composing one.
+fn composes_builtin_surface(build: &meerkat_core::service::SessionBuildOptions) -> bool {
+    [
+        build.override_builtins,
+        build.override_shell,
+        build.override_image_generation,
+        build.override_web_search,
+    ]
+    .contains(&meerkat_core::ToolCategoryOverride::Enable)
 }
 
 /// The principal a question set names as its requester: the asking agent,

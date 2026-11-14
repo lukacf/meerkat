@@ -242,6 +242,26 @@ describe("Workbench nav (B14)", () => {
       .toBe("Needs you, 2 pending approvals, Questions may be out of date");
   });
 
+  it("shows Needs you for a question read that failed or may be out of date where nothing else is shown, and no row for any other state", () => {
+    const row = (view: ReturnType<typeof render>) => view.queryByTestId("approval-attention");
+    const name = (view: ReturnType<typeof render>) => row(view)?.querySelector("button")?.getAttribute("aria-label");
+    const shown = (view: ReturnType<typeof render>) => row(view)?.querySelector(".cc-approval-attention__count")?.textContent;
+    // No approvals on this connection, no host item, no reply, no open set.
+    const failed = render(<Sidebar {...props} questionSetStatus="unavailable" />);
+    expect(name(failed)).toBe("Needs you, Questions unavailable");
+    expect(shown(failed)).toBe("!");
+    cleanup();
+    const stale = render(<Sidebar {...props} questionSetStatus="stale" />);
+    expect(name(stale)).toBe("Needs you, Questions may be out of date");
+    expect(shown(stale)).toBe("!");
+    cleanup();
+    for (const status of ["loading", "ready", "forbidden", "unsupported", undefined] as const) {
+      const view = render(<Sidebar {...props} questionSetStatus={status} />);
+      expect(row(view) === null).toBe(true);
+      cleanup();
+    }
+  });
+
   it("lists views with exact names, describes their attention badges and marks the focused pane's view", () => {
     const view = render(<Sidebar {...withAttention} visibleControls={[...withAttention.visibleControls]} />);
     const nav = view.getByRole("navigation", { name: "Workbench" });

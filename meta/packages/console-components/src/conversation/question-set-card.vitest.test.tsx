@@ -916,6 +916,17 @@ describe("Needs you with question sets", () => {
     expect(name(noRead)).toBe("Needs you, Approvals unavailable");
   });
 
+  it.each(["forbidden", "unsupported"] as const)("shows nothing of question sets for a question read that is %s, whatever count it is given", (status) => {
+    const view = render(<ApprovalAttention snapshot={approvals} questionSets={2} questionStatus={status} onOpen={vi.fn()} />);
+    expect(count(view)).toBe("1");
+    expect(within(view.getByTestId("approval-attention")).getByRole("button").getAttribute("aria-label")).toBe("Needs you, 1 pending approval");
+    expect(view.getByRole("status").textContent).toBe("1 pending approval");
+    cleanup();
+    // With nothing else to show there is no row.
+    const alone = render(<ApprovalAttention questionSets={2} questionStatus={status} onOpen={vi.fn()} />);
+    expect(alone.queryByTestId("approval-attention") === null).toBe(true);
+  });
+
   it("opens the list, not the one approval, while the question sets are not read", () => {
     const onOpen = vi.fn();
     const view = render(<ApprovalAttention snapshot={approvals} questionSets={0} questionStatus="unavailable" onOpen={onOpen} />);

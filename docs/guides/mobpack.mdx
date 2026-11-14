@@ -221,7 +221,9 @@ tar -xzf ./dist/release-triage.mobpack -O signature.toml
 
 A host trusts a signer once a trust store lists it. `rkat` reads two files,
 each optional: `~/.rkat/trusted-signers.toml` for the user, and
-`.rkat/trusted-signers.toml` in the directory `rkat` is run from. Each lists
+`.rkat/trusted-signers.toml` in the directory `rkat` is run from. A `.rkat/`
+in a directory above is not read for this; to use a project's file from
+elsewhere, pass `--context-root <project directory>`. Each file lists
 signers by id, with the `public_key` value from `signature.toml`:
 
 ```toml

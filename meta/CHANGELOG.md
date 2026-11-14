@@ -263,6 +263,9 @@ Security, Upgrade and Changed.
   caller is answered "access denied: the session has no established owner"
   where access rules are enforced, and as for a session that does not
   exist otherwise.
+- Python Meta SDK: `build()` and twelve `MobHandle` methods are now visible
+  to type checkers; a project that runs mypy or pyright may report errors
+  that were hidden before. Nothing changes at run time.
 
 ### Added
 

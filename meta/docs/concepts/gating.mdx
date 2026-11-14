@@ -214,7 +214,8 @@ sets are read with [`meta/gating/questions`](/api/rpc#metagatingquestions).
   dismissed, withdrawn or timed out already), `subject_changed` (the
   `presented_digest` is not the set's: read the set again), `expired` (the
   deadline passed as the decision was applied) or `not_eligible`. Nothing
-  is decided, and the Console says each in words on the set's card.
+  is decided, and the Console says each in words: on the set's card, or,
+  for `not_open` and `expired`, in the one line that replaces the card.
 - **How a set ends.** The agent receives one of `answered`, `dismissed`,
   `timed_out` (nobody answered before the deadline) or `withdrawn` (the host
   or an administrator ended it). A free-text answer is the person's own

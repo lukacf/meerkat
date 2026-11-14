@@ -964,8 +964,12 @@ Security, Upgrade and Changed.
   reply and still lists the set, and why nobody can answer when the caller
   is not signed in or may not decide. A set the gateway no longer lists
   leaves the screen whole; where its card was, one line says that the
-  question is no longer waiting for an answer. The deadline shown is the
-  gateway's, and the card never ends a set by the browser's clock. Python
+  question is no longer listed here. The deadline shown is the gateway's,
+  and the card never ends a set by the browser's clock. The Console reads
+  at most the gateway's own limits of a set (10 questions, 8 choices each,
+  the text lengths); a set larger than that is shown up to them, says
+  what is not shown, and takes no answer and no dismissal from the
+  Console, since a reply attests the whole set. Python
   `MobHandle.gating_questions`, `gating_answer` and `gating_dismiss` and
   TypeScript `gatingQuestions`, `gatingAnswer` and `gatingDismiss` wrap the
   two methods. An SDK or Console older than this release does not list

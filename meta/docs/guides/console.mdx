@@ -464,7 +464,12 @@ asking agent's chat, with that chat's approvals. Both read the same set, and
 the Pending tab's count includes the open sets. **Needs you** counts them
 with the approvals ("1 pending approval, 2 question sets"), and so does the
 badge of **Approvals** in the sidebar; with a question set waiting, **Needs
-you** opens the Pending list.
+you** opens the Pending list. **Needs you** shows a count only when the
+approvals and the question sets were both read: while either is still being
+read it shows "...", and when a list is out of date or could not be read it
+shows "!", with words for each ("Checking questions", "Questions may be out
+of date", "Questions unavailable"). The **Approvals** badge counts question
+sets only from a list that was read.
 
 The card names the set (its title, or "Questions from" the agent), who asked,
 its status and its deadline, and says what to do: "Pick one choice per
@@ -492,9 +497,9 @@ calls a set timed out by the browser's clock.
 | **Sending** | Your answers, or your dismissal, are on their way; both buttons are disabled |
 | **Answered** ("Your answers were sent to" the agent, "which continues with them.") | The gateway confirmed your answers; the card lists what was chosen for each question |
 | **Dismissed** ("Dismissed: no answer is coming, and" the agent "was told so.") | The gateway confirmed your dismissal |
-| **Not sent**, with one sentence that says why and what to do | The gateway refused the reply and still lists the set; nothing reached the agent, and you can change the answers and send again. The sentences: the questions changed after you opened them (read them again, then answer); you are not one of the people who can answer this question; only a signed-in person can answer (sign in as yourself, then send again); you no longer have permission to answer questions here (ask an administrator for the permission to decide); this browser is now signed in as someone else, or your sign-in ended (nothing was changed); the gateway did not accept, or did not take, the reply (its own message is under **Details**) |
-| **Not confirmed** | The gateway's answer was lost: the Console could not confirm that your answer arrived. If the question is still listed after the next refresh, send it again |
-| **May be out of date** | The Console could not read the questions again just now; it keeps trying, and you can answer once it has read them |
+| **Not sent**, with one sentence that says why and what to do | The reply did not reach the agent and the set is still listed. You can change the answers and send again as soon as the card offers Send: at once, except after "only a signed-in person can answer" and "you no longer have permission", when every card stays locked until the Console has read the questions again (its next successful read; it reads every 15 seconds while the page is visible). The sentences: the questions changed after you opened them (read them again, then answer); you are not one of the people who can answer this question; only a signed-in person can answer (sign in as yourself, then send again); you no longer have permission to answer questions here (ask an administrator for the permission to decide); this browser is now signed in as someone else, or your sign-in ended (nothing was changed); the Console could not confirm your sign-in and did not send the reply; the gateway did not accept the reply (its own sentence is under **Details**) or did not take it (the kind of its refusal is under **Details**) |
+| **Not confirmed** | The gateway's answer was lost: the Console could not confirm that your answer, or your dismissal, arrived. If the question is still listed after the next refresh, send or dismiss it again. A caller who can no longer reply on the card is told why instead |
+| **May be out of date** | The list is not current. Either a read failed ("The Console could not read the questions again just now ... It keeps trying"), or no list was read for a while, as while a reply is on its way or when the tab just came back ("The Console has not read the questions for a while ... It is reading them again"). A caller who can answer is told they can once it has |
 | **Sign in to answer** | The caller is not a signed-in person: the questions are shown and nothing can be sent. Sign in as yourself |
 | **No permission** | The gateway said you may no longer decide: no card offers Send until the Console has read the questions again. Ask an administrator for the permission to decide |
 | **Read only** | Your access to this Console is read-only: you can read the questions but not answer them |
@@ -502,11 +507,12 @@ calls a set timed out by the browser's clock.
 A set the gateway no longer lists leaves the screen with everything of it,
 whatever the reason: the Console keeps none of its text. Where its card was,
 one line stays for about a minute:
-"This question is no longer waiting for an answer." When the gateway refused
+"This question is no longer listed here." When the gateway refused
 your reply because the set had just closed or timed out, that line says so
 and that nothing was sent; when the set left after a send the Console could
-not confirm, it says that too. Only a set you answered or dismissed here
-keeps its card, as **Answered** or **Dismissed**.
+not confirm, it says that too. If the focus was inside the card, it moves
+to the line. Only a set you answered or dismissed here keeps its card, as
+**Answered** or **Dismissed**.
 
 The console reads the open sets every 15 seconds while the page is visible,
 like the approvals, and again after each of its own replies. If the first

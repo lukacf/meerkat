@@ -277,59 +277,82 @@ impl AskUserSlot {
             Arc::new(AskUserDispatcher::new(Arc::new(host)));
         // The mount adds the one tool and leaves the build's tool catalog
         // as it is judged without it (exact or not, so inline or deferred,
-        // with or without the catalog's control tools). Over the build's
-        // own external tools the composition is exact only when they are.
-        // As the build's first external dispatcher the tool takes the place
-        // of the factory's base: its builtin composite, which is exact
-        // without external tools, when the build composes a builtin
-        // surface, and its empty dispatcher, which is not, otherwise. The
-        // tool is then composed over that same empty dispatcher and reads
-        // as it reads.
+        // with or without the catalog's control tools).
+        //
+        // A build's own external tools that only observe bindings (the mob
+        // runtime's receiver of the session's mob operator authority, on a
+        // build with no external tools of its own: every local member
+        // build carries one) count as none, as they do for the factory,
+        // which binds them and then composes the build as one with no
+        // external tools. They stay wrapped below the tool, so the binding
+        // still reaches them.
+        //
+        // Over external tools of the build's own the composition is exact
+        // only when they are. Without any, the tool takes the place of the
+        // factory's base: its builtin composite, which is exact without
+        // external tools, when the build composes a builtin surface, and
+        // its empty dispatcher, which is not, otherwise. The tool is then
+        // composed over that same empty dispatcher and reads as it reads.
         let own = build.external_tools.take();
-        let alone = own.is_none();
-        let below = match own {
-            Some(external) => Some(external),
-            None if composes_builtin_surface(build) => None,
-            None => Some(Arc::new(meerkat_tools::EmptyToolDispatcher)
-                as Arc<dyn meerkat_core::AgentToolDispatcher>),
+        let before = own
+            .as_ref()
+            .is_none_or(|own| own.tool_catalog_capabilities().exact_catalog);
+        let has_tools = own
+            .as_ref()
+            .is_some_and(|own| !own.observes_bindings_only());
+        let below = if has_tools || composes_builtin_surface(build) {
+            own
+        } else {
+            let empty: Arc<dyn meerkat_core::AgentToolDispatcher> =
+                Arc::new(meerkat_tools::EmptyToolDispatcher);
+            Some(match own {
+                Some(observer) => {
+                    crate::tool_compose::ComposedExternalTools::over(observer, Some(empty))
+                }
+                None => empty,
+            })
         };
         let mounted = crate::tool_compose::ComposedExternalTools::over(tool, below);
-        if alone {
-            remember_mounted_alone(&mounted);
-        }
+        remember_mounted(&mounted, before);
         build.external_tools = Some(mounted);
     }
 }
 
-/// The dispatchers [`AskUserSlot::mount`] built with none of a build's own
-/// external tools below them, held weakly and known by identity: the very
-/// dispatcher the hook built, never a tool name a host could use too.
-static MOUNTED_ALONE: std::sync::Mutex<
-    Vec<std::sync::Weak<dyn meerkat_core::AgentToolDispatcher>>,
+/// The dispatchers [`AskUserSlot::mount`] built, held weakly and known by
+/// identity (the very dispatcher the hook built, never a tool name a host
+/// could use too), each with what the build's own external tools read as
+/// before the mount: whether their catalog was exact (a build without any
+/// supplies none, which reads as exact).
+static MOUNTED: std::sync::Mutex<
+    Vec<(std::sync::Weak<dyn meerkat_core::AgentToolDispatcher>, bool)>,
 > = std::sync::Mutex::new(Vec::new());
 
-fn remember_mounted_alone(mounted: &Arc<dyn meerkat_core::AgentToolDispatcher>) {
-    let mut known = MOUNTED_ALONE
+fn remember_mounted(mounted: &Arc<dyn meerkat_core::AgentToolDispatcher>, exact_before: bool) {
+    let mut known = MOUNTED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    known.retain(|dispatcher| dispatcher.strong_count() > 0);
-    known.push(Arc::downgrade(mounted));
+    known.retain(|(dispatcher, _)| dispatcher.strong_count() > 0);
+    known.push((Arc::downgrade(mounted), exact_before));
 }
 
-/// Whether `tools` is a dispatcher this module's mount built with none of a
-/// build's own external tools below it. Such a dispatcher is not one the
-/// build supplied: it stands where the factory's base stands. What judges
-/// the dispatchers a build supplies (the capability invariant) leaves it
-/// out, so its judgement of a build is the one it has without the tool.
-pub(crate) fn mounted_alone(tools: &Arc<dyn meerkat_core::AgentToolDispatcher>) -> bool {
-    MOUNTED_ALONE
+/// For a dispatcher this module's mount built: whether the catalog of the
+/// build's own external tools was exact before the mount. `None` for any
+/// other dispatcher. The tool is not a dispatcher the build supplied, so
+/// what judges the dispatchers a build supplies (the capability invariant)
+/// reads this in place of the mounted dispatcher's own declaration: its
+/// judgement of a build is the one it has without the tool.
+pub(crate) fn exact_before_mount(
+    tools: &Arc<dyn meerkat_core::AgentToolDispatcher>,
+) -> Option<bool> {
+    MOUNTED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .any(|known| {
+        .find_map(|(known, exact_before)| {
             known
                 .upgrade()
                 .is_some_and(|known| Arc::ptr_eq(&known, tools))
+                .then_some(*exact_before)
         })
 }
 
@@ -338,10 +361,9 @@ pub(crate) fn mounted_alone(tools: &Arc<dyn meerkat_core::AgentToolDispatcher>) 
 /// factory resolves from the build alone (a member build sets both
 /// explicitly). Image generation and the fallback web search also make the
 /// factory compose that composite, but only with their backends, which the
-/// build's options do not show: an ordinary member build has such a switch
-/// on while the factory composes neither. A build the factory composes the
-/// composite for by those alone reads here as having the empty base, and
-/// its catalog then reads not exact (nothing of it is deferred).
+/// build's options do not show. A build the factory composes the composite
+/// for by those alone reads here as having the empty base, and its catalog
+/// then reads not exact (nothing of it is deferred).
 fn composes_builtin_surface(build: &meerkat_core::service::SessionBuildOptions) -> bool {
     [build.override_builtins, build.override_shell]
         .contains(&meerkat_core::ToolCategoryOverride::Enable)

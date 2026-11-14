@@ -235,23 +235,22 @@ impl MemberCapabilityInvariantContext {
         // `NonExactCatalog`, and that is a steady state, not a defect.
         //
         // The stock `ask_user` tool Meta mounts on every member build is not
-        // a dispatcher the build supplied. Mounted with none of the build's
-        // own external tools below it, it stands where the factory's base
-        // stands and reads as that base reads, so that dispatcher (known by
-        // identity, as the one the mount built) is left out here: the
-        // judgement of a build's own dispatchers is the one it has without
-        // the tool.
-        let catalog_exactness = if [
-            build
-                .external_tools
-                .as_ref()
-                .filter(|tools| !crate::ask_user::mounted_alone(tools)),
-            build.schedule_tools.as_ref(),
-            build.workgraph_tools.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .all(|dispatcher| dispatcher.tool_catalog_capabilities().exact_catalog)
+        // a dispatcher the build supplied. For the dispatcher the mount
+        // built (known by identity) the judgement is the one of the build's
+        // own external tools before the mount, which the mount recorded:
+        // the invariant judges a build as it does without the tool.
+        let external_exact = build.external_tools.as_ref().is_none_or(|tools| {
+            crate::ask_user::exact_before_mount(tools)
+                .unwrap_or_else(|| tools.tool_catalog_capabilities().exact_catalog)
+        });
+        let catalog_exactness = if external_exact
+            && [
+                build.schedule_tools.as_ref(),
+                build.workgraph_tools.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .all(|dispatcher| dispatcher.tool_catalog_capabilities().exact_catalog)
         {
             CapabilityCatalogExactness::Exact
         } else {

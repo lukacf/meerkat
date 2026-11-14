@@ -1021,6 +1021,19 @@ them.
   is built again when its declaration changes, when a member of the mob is
   retired, or when a spawn in the mob is rolled back. Its convergence status
   carries the refusal.
+- `meerkat-openai`: on a GPT Live voice channel, a typed message no longer
+  causes the previous spoken request to run again when the model then
+  delegates with nothing spoken. The voice model can create a delegation
+  without the user having said anything new; the adapter then hands the
+  executor the previous spoken request again, which is right while the
+  conversation is still about that request, and was also done when the
+  user's turn since then had been typed in the text chat. The executor then
+  did the earlier spoken work a second time and the voice read its result
+  out. A typed turn now ends that: a delegation created after it with
+  nothing spoken is refused like one on a channel that has heard no request
+  (nothing runs for it and the call continues), and a request spoken after
+  the typed turn runs once, as before. Affects 0.8.38 through 0.9.14, every
+  release with the public GPT Live channel.
 
 ### Security
 

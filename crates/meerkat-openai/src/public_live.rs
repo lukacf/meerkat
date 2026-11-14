@@ -2725,6 +2725,8 @@ struct SessionState {
     window_finished_user_turns: Vec<GptLiveRepresentedUserTurn>,
     /// The previous delegation's executor request, re-presented when a
     /// delegation arrives without any new user transcript in its window.
+    /// A text-chat row ends it: the spoken request before a typed turn was
+    /// asked once and is never re-presented after that turn.
     last_request: Option<String>,
     /// Provider id of the client delegation created while a user turn was
     /// open (mid-utterance): the next user turn to finish before another
@@ -3535,11 +3537,19 @@ impl SessionState {
     /// local runs forcing that overlap). Unlike a deferred cue it does not
     /// wait for the user's floor: context typed in the chat must be in
     /// place before the model answers the user.
+    ///
+    /// A text-chat row is also a boundary for the re-present rule of client
+    /// delegations: the user's turn after the last spoken request was typed,
+    /// so a delegation the model creates next with nothing spoken has no
+    /// request of its own and must not run that earlier request again.
+    /// Speech after the typed turn fills the next delegation's window as
+    /// always.
     fn hold_or_send_text_chat(
         &mut self,
         token: GptLiveAppendToken,
         events: Vec<ClientEvent>,
     ) -> Option<Vec<ClientEvent>> {
+        self.last_request = None;
         if self.close_requested || self.closed_observed {
             // Never held past a close: sent (or refused) now, and settled
             // by the close like any in-flight append.
@@ -4245,12 +4255,15 @@ impl SessionState {
         // and carry no turn boundary, so an assistant delta between two
         // parts of one request does not split it; what the assistant said
         // in the window travels separately as context. A delegation with
-        // no new user transcript re-presents the previous request.
+        // no new user transcript re-presents the previous request, unless a
+        // typed turn followed that request (`hold_or_send_text_chat` ends
+        // it): then, as on a channel that has heard no request at all, the
+        // delegation has nothing to act on.
         let request_transcript = if request_transcript.is_empty() {
             match self.last_request.as_ref() {
                 Some(previous) => previous.clone(),
                 None => {
-                    // No user input exists to become the task.
+                    // No spoken request exists to become the task.
                     self.queued_observations.push_back(
                         GptLiveBrokerObservation::DelegationActionableInputUnsupported {
                             delegation: reference,
@@ -10485,6 +10498,97 @@ mod tests {
         assert!(
             !rerun,
             "the spoken request before the typed turn was handed to the executor a second time: {observed:?}"
+        );
+    }
+
+    /// What the adapter does with that delegation is what it does with one
+    /// on a channel that has heard no request at all
+    /// (`a_refused_stray_delegation_is_never_named_as_running`): the same
+    /// typed observation, nothing new outstanding, no in-progress notice.
+    #[test]
+    fn a_delegation_after_a_text_chat_row_with_nothing_spoken_is_refused_like_a_stray() {
+        let mut stray = SessionState::default();
+        stray
+            .apply_frame(frame(delegation_created("dlg_stray", "client")))
+            .unwrap();
+        assert!(matches!(
+            drain(&mut stray).as_slice(),
+            [GptLiveBrokerObservation::DelegationActionableInputUnsupported { delegation }]
+                if delegation.__opaque_provider_id() == "dlg_stray"
+        ));
+
+        let mut state = state_with_spoken_delegation();
+        let (typed, events) =
+            text_chat_append(&mut state, "From the text chat: make it four people");
+        assert!(state.hold_or_send_text_chat(typed, events).is_some());
+        let outstanding = state.outstanding_delegations.clone();
+        let due_notices = state.due_progress_notices.clone();
+        state
+            .apply_frame(frame(delegation_created("dlg_after_typed", "client")))
+            .unwrap();
+        assert!(matches!(
+            drain(&mut state).as_slice(),
+            [GptLiveBrokerObservation::DelegationActionableInputUnsupported { delegation }]
+                if delegation.__opaque_provider_id() == "dlg_after_typed"
+        ));
+        assert_eq!(
+            state.outstanding_delegations, outstanding,
+            "the refused delegation is not outstanding"
+        );
+        assert_eq!(
+            state.due_progress_notices, due_notices,
+            "no in-progress notice is owed for it"
+        );
+    }
+
+    /// The boundary ends the earlier request only. A request the user speaks
+    /// after the typed turn fills the next delegation's window and runs
+    /// once; with no typed turn after it, a later delegation with nothing
+    /// spoken re-presents it as before.
+    #[test]
+    fn a_request_spoken_after_a_text_chat_row_runs_once_and_is_re_presented_as_before() {
+        let mut state = state_with_spoken_delegation();
+        let (typed, events) =
+            text_chat_append(&mut state, "From the text chat: make it four people");
+        assert!(state.hold_or_send_text_chat(typed, events).is_some());
+        state
+            .apply_frame(frame(input_delta_at("and order a taxi", 3000.0)))
+            .unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(delegation_created_at("dlg_new", "client", 3000.5)))
+            .unwrap();
+        let first = drain(&mut state);
+        let requests: Vec<&str> = first
+            .iter()
+            .filter_map(|observation| match observation {
+                GptLiveBrokerObservation::ClientDelegationFinal {
+                    request_transcript, ..
+                } => Some(request_transcript.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            requests,
+            ["and order a taxi"],
+            "the request spoken after the typed turn runs once: {first:?}"
+        );
+        // No typed turn since: the re-present rule applies to it.
+        state
+            .apply_frame(frame(output_delta_span("on it", 3500.0, 3600.0)))
+            .unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(delegation_created_at("dlg_again", "client", 3700.0)))
+            .unwrap();
+        let again = drain(&mut state);
+        assert!(
+            again.iter().any(|observation| matches!(
+                observation,
+                GptLiveBrokerObservation::ClientDelegationFinal { request_transcript, .. }
+                    if request_transcript == "and order a taxi"
+            )),
+            "with no typed turn in between, the previous request is re-presented: {again:?}"
         );
     }
 

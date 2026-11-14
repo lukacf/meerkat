@@ -119,6 +119,17 @@ describe("GatingInboxPanel question sets", () => {
     expect(onRefresh).toHaveBeenCalledTimes(1);
     expect(view.getByTestId("gating-pending:p1")).toBeTruthy();
     expect(view.getByTestId("gating-tab:pending").textContent).toContain("1");
+    cleanup();
+    // With no approval waiting, "No pending approvals." sits small beside the
+    // notice: the tab is not the clear inbox's large picture.
+    const empty = render(
+      <GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={approvals([])}
+        questions={{ snapshot: sets({ status: "unavailable", sets: [], slots: {}, error: "gateway timeout" }), onAnswer: vi.fn(), onDismiss: vi.fn(), onRefresh }} />,
+    );
+    expect(empty.getByTestId("question-set-unavailable")).toBeTruthy();
+    const none = empty.getByText("No pending approvals.").closest(".cc-panel-empty");
+    expect(none?.classList.contains("cc-panel-empty--inline")).toBe(true);
+    expect(none?.classList.contains("cc-panel-empty--art")).toBe(false);
   });
 
   it("is unchanged without the question sets prop", () => {

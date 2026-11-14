@@ -301,6 +301,21 @@ describe("QuestionSetCard", () => {
     }
   });
 
+  it("says the list may be out of date before what an earlier reply said of the set", () => {
+    const sentence = QUESTION_SET_REFUSAL_WORDS.not_accepted;
+    const { view, card } = show({
+      resourceStatus: "stale",
+      decision: { phase: "refused", action: "answer", error: sentence, refusal: { kind: "not_accepted", words: sentence, detail: "gating decision failed" } },
+    });
+    expect(card.dataset.state).toBe("stale");
+    expect(view.getByRole("status").textContent).toBe("May be out of date");
+    expect(visibleText(card)).not.toContain(sentence);
+    expect(view.queryByTestId(`question-set-refusal:${PENDING_ID}`)).toBeNull();
+    expect(card.textContent).not.toContain("gating decision failed");
+    expect(send(view).disabled).toBe(true);
+    expect(dismiss(view).disabled).toBe(true);
+  });
+
   it("offers nothing to send on a refused card while the cards are read-only, and still says why it was not sent", () => {
     const sentence = QUESTION_SET_REFUSAL_WORDS.access_denied;
     const { view, card } = show({

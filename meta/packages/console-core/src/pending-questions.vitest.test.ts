@@ -775,6 +775,181 @@ describe("createQuestionSetResource", () => {
     resource.dispose();
   });
 
+  it("never lists a set as open again from a read that started before its decision", async () => {
+    const c = clock(); let reads = 0; let open = true; let release: (value: unknown) => void = () => {};
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: () => {
+        reads++;
+        // The second read is slow: it saw the set listed and answers late.
+        if (reads === 2) return new Promise((resolve) => { release = resolve; });
+        return Promise.resolve({ question_sets: open ? [wire()] : [] });
+      },
+      decide: async () => { open = false; return accepted("answered"); },
+    });
+    await tick();
+    c.advance(15_000); await tick();
+    expect(reads).toBe(2);
+    const seen: Array<[string, number]> = [];
+    resource.subscribe(() => { seen.push([resource.getSnapshot().decisions[PENDING_ID]?.phase ?? "none", resource.getSnapshot().sets.length]); });
+    const job = resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    await tick();
+    expect(resource.getSnapshot().decisions[PENDING_ID].phase).toBe("answered");
+    release({ question_sets: [wire()] });
+    await job;
+    // The late list is not applied; the list is read again instead.
+    expect(reads).toBe(3);
+    const answeredFrom = seen.findIndex(([phase]) => phase === "answered");
+    expect(answeredFrom).toBeGreaterThanOrEqual(0);
+    expect(seen.slice(answeredFrom).every(([phase, listed]) => phase === "answered" && listed === 0)).toBe(true);
+    expect(resource.getSnapshot().closed.map((entry) => entry.outcome)).toEqual(["answered"]);
+    resource.dispose();
+  });
+
+  it("reads as stale once the list has not been read for 30 seconds, and sends nothing meanwhile", async () => {
+    const c = clock(); let reads = 0; let decides = 0;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      // Every read after the first one never answers.
+      load: () => (++reads === 1 ? Promise.resolve({ question_sets: [wire()] }) : new Promise(() => {})),
+      decide: async () => { decides++; return accepted("answered"); },
+    });
+    await tick();
+    c.advance(15_000); await tick();
+    expect(resource.getSnapshot().status).toBe("ready");
+    c.advance(14_999); await tick();
+    expect(resource.getSnapshot().status).toBe("ready");
+    c.advance(1); await tick();
+    expect(resource.getSnapshot().status).toBe("stale");
+    expect(resource.getSnapshot().sets.map((entry) => entry.pendingId)).toEqual([PENDING_ID]);
+    await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    expect(decides).toBe(0);
+    resource.dispose();
+  });
+
+  it("holds nothing after dispose: no set, closed card, decision, line or place", async () => {
+    const other = `decision:${"c".repeat(64)}`;
+    const c = clock(); let listed: unknown[] = [wire(), wire(other)];
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: listed }),
+      decide: async () => { listed = []; return accepted("answered"); },
+    });
+    await tick();
+    await resource.answer(PENDING_ID, { q2: { kind: "free_text", text: "After the freeze" } });
+    const before = resource.getSnapshot();
+    expect(before.closed.length).toBe(1);
+    expect(before.notices.length).toBe(1);
+    expect(Object.keys(before.decisions)).toEqual([PENDING_ID]);
+    resource.dispose();
+    expect(resource.getSnapshot()).toEqual({ scopeKey: "a", status: "unavailable", sets: [], closed: [], decisions: {}, notices: [], slots: {}, readOnly: true });
+    expect(nothingKept(resource.getSnapshot())).toBe(true);
+    expect(JSON.stringify(resource.getSnapshot())).not.toContain("After the freeze");
+    // Nothing is published or read after it.
+    c.advance(60_000); await tick(); await resource.refresh();
+    expect(resource.getSnapshot().sets).toEqual([]);
+  });
+
+  it("reads nothing in a hidden tab, and when the tab comes back drops a set that left meanwhile without calling it timed out", async () => {
+    const c = clock(); let reads = 0; let listed = true;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => { reads++; return { question_sets: listed ? [wire()] : [] }; },
+      decide: async () => ({}),
+    });
+    await tick();
+    c.visible(false);
+    // Hours pass, the deadline with them, and the gateway stops listing the set.
+    listed = false; c.advance(4 * 3_600_000); await tick();
+    expect(reads).toBe(1);
+    expect(resource.getSnapshot().sets.length).toBe(1);
+    c.visible(true); await tick();
+    expect(reads).toBe(2);
+    const snapshot = resource.getSnapshot();
+    expect(snapshot.sets).toEqual([]);
+    expect(snapshot.closed).toEqual([]);
+    expect(snapshot.notices.map((notice) => notice.kind)).toEqual(["gone"]);
+    expect(nothingKept(snapshot)).toBe(true);
+    resource.dispose();
+  });
+
+  it("settles a refusal that waits for the list by the read after the last decision, never before", async () => {
+    const other = `decision:${"c".repeat(64)}`;
+    const c = clock(); let listed: unknown[] = [wire(), wire(other)]; let accept: (value: unknown) => void = () => {}; let refused = 0;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: listed }),
+      decide: (params) => {
+        if (params.pending_id !== PENDING_ID) return new Promise((resolve) => { accept = resolve; });
+        refused++;
+        return Promise.reject(rpcError(-32602, undefined, "gating decision failed"));
+      },
+    });
+    await tick();
+    const phases: string[] = [];
+    resource.subscribe(() => { phases.push(resource.getSnapshot().decisions[PENDING_ID]?.phase ?? "none"); });
+    const slow = resource.dismiss(other);
+    await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    // The other decision is still on its way: no list was applied, and the
+    // first set still reads as sending. It takes no second send meanwhile.
+    expect(resource.getSnapshot().decisions[PENDING_ID].phase).toBe("submitting");
+    await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "us" } });
+    expect(refused).toBe(1);
+    listed = [];
+    accept(accepted("dismissed", other)); await slow;
+    const snapshot = resource.getSnapshot();
+    expect(snapshot.sets).toEqual([]);
+    expect(snapshot.closed.map((entry) => [entry.set.pendingId, entry.outcome])).toEqual([[other, "dismissed"]]);
+    expect(snapshot.notices.map((notice) => notice.kind)).toEqual(["gone"]);
+    expect(phases).not.toContain("refused");
+    resource.dispose();
+  });
+
+  it("lets the last list stand when the read after a refused reply fails, and drops the set once a read no longer lists it", async () => {
+    const c = clock(); let stage = 0;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => {
+        if (stage === 1) throw new Error("network");
+        return { question_sets: stage === 0 ? [wire()] : [] };
+      },
+      decide: async () => { stage = 1; throw rpcError(-32602, undefined, "gating decision failed"); },
+    });
+    await tick(); await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    // The list could not be read: it reads as out of date, with the set and
+    // the refusal that waits for the next list.
+    let snapshot = resource.getSnapshot();
+    expect(snapshot.status).toBe("stale");
+    expect(snapshot.sets.length).toBe(1);
+    expect(snapshot.decisions[PENDING_ID]).toMatchObject({ phase: "refused", refusal: { kind: "not_accepted" } });
+    stage = 2; await resource.refresh();
+    snapshot = resource.getSnapshot();
+    expect(snapshot.sets).toEqual([]);
+    expect(snapshot.decisions).toEqual({});
+    expect(snapshot.notices.map((notice) => notice.kind)).toEqual(["gone"]);
+    expect(nothingKept(snapshot)).toBe(true);
+    resource.dispose();
+  });
+
+  it("keeps no line and no place once the read is denied", async () => {
+    const c = clock(); let stage = 0;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => {
+        if (stage === 2) throw rpcError(-32030, "access_denied");
+        return { question_sets: stage === 0 ? [wire(), wire(`decision:${"c".repeat(64)}`)] : [wire()] };
+      },
+      decide: async () => ({}),
+    });
+    await tick(); stage = 1; await resource.refresh();
+    expect(resource.getSnapshot().notices.length).toBe(1);
+    expect(Object.keys(resource.getSnapshot().slots)).toEqual([PENDING_ID]);
+    stage = 2; await resource.refresh();
+    expect(resource.getSnapshot()).toMatchObject({ status: "forbidden", sets: [], closed: [], decisions: {}, notices: [], slots: {}, readOnly: true });
+    expect(nothingKept(resource.getSnapshot())).toBe(true);
+    resource.dispose();
+  });
+
   it("lists the entries of one asking agent, open sets before closed ones", async () => {
     const c = clock(); const other = `decision:${"c".repeat(64)}`;
     const resource = createQuestionSetResource({

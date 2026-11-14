@@ -76,4 +76,80 @@ describe("question sets in the Console", () => {
     await waitFor(() => expect(screen.getByTestId("nav-badge:gating").textContent).toBe("1"));
     expect(screen.getByTestId("approval-attention").querySelector(".cc-approval-attention__count")?.textContent).toBe("1");
   });
+
+  const openInbox = async () => {
+    fireEvent.click(await screen.findByRole("button", { name: /^Needs you/ }));
+    return screen.findByTestId(`question-set:${PENDING_ID}`);
+  };
+  /** The words and ids of the set: none may be left on the page once the
+   * gateway no longer lists it. (The agent's name stays: it is the roster's.) */
+  const SET_WORDS = [PENDING_ID, DIGEST, "Release plan", "Which region goes first?", "Europe", "United States", "q-region", "c-eu", "c-us"];
+  const rpcRefusal = (code: number, message: string, data?: Record<string, unknown>) => Object.assign(new Error(message), {
+    rpcError: { code, message, ...(data ? { data } : {}) },
+  });
+
+  it("answers a set from the inbox through the decide command: the digest, the answers and no approver", async () => {
+    const { fake, decided, list } = gateway(person, (params) => {
+      list([]);
+      return { pending_id: params.pending_id, kind: "question_set", outcome: "answered", decided_at_ms: Date.now() };
+    });
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    const card = await openInbox();
+    await waitFor(() => expect((within(card).getByRole("radio", { name: "Europe" }) as HTMLInputElement).disabled).toBe(false));
+    fireEvent.click(within(card).getByRole("radio", { name: "Europe" }));
+    fireEvent.click(within(card).getByRole("button", { name: "Send answers" }));
+    await waitFor(() => expect(screen.getByTestId(`question-set:${PENDING_ID}`).dataset.state).toBe("answered"));
+    expect(decided.length).toBe(1);
+    expect(decided[0]).toMatchObject({
+      pending_id: PENDING_ID, decision: "approve", presented_digest: DIGEST,
+      answers: [{ question_id: "q-region", answer: { kind: "choice", choice_id: "c-eu" } }],
+    });
+    expect("approver_id" in decided[0]).toBe(false);
+    // Answered: it no longer counts as needing the person.
+    await waitFor(() => expect(screen.queryByTestId("nav-badge:gating") === null).toBe(true));
+  });
+
+  it("takes a set off the page, with nothing of it left, when its decide is answered as an id that is not pending", async () => {
+    const { fake, list } = gateway(person, () => {
+      list([]);
+      throw rpcRefusal(-32602, "gating decision failed");
+    });
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    const card = await openInbox();
+    await waitFor(() => expect((within(card).getByRole("radio", { name: "Europe" }) as HTMLInputElement).disabled).toBe(false));
+    fireEvent.click(within(card).getByRole("radio", { name: "Europe" }));
+    fireEvent.click(within(card).getByRole("button", { name: "Send answers" }));
+    await waitFor(() => expect(screen.queryAllByTestId(`question-set:${PENDING_ID}`).length).toBe(0));
+    expect((await screen.findByTestId("question-set-notice")).textContent).toBe("This question is no longer waiting for an answer.");
+    for (const word of SET_WORDS) expect(document.body.innerHTML.includes(word)).toBe(false);
+    expect(document.body.textContent?.includes("gating decision failed")).toBe(false);
+    expect(/not permitted|timed out/i.test(document.body.textContent ?? "")).toBe(false);
+    await waitFor(() => expect(screen.queryByTestId("nav-badge:gating") === null).toBe(true));
+  });
+
+  it("says the gateway's typed refusal in the one line of a set that expired at its decide", async () => {
+    const { fake, list } = gateway(person, () => {
+      list([]);
+      throw rpcRefusal(-32602, `decision ${PENDING_ID} refused the input: expired`, { kind: "decision_refused", decision_refusal: { kind: "expired" } });
+    });
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    const card = await openInbox();
+    await waitFor(() => expect((within(card).getByRole("button", { name: "Dismiss" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(within(card).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(screen.queryAllByTestId(`question-set:${PENDING_ID}`).length).toBe(0));
+    expect((await screen.findByTestId("question-set-notice")).textContent)
+      .toBe("This question timed out before the gateway took your reply, so nothing was sent. If the answer still matters, tell the agent in its chat.");
+    for (const word of SET_WORDS) expect(document.body.innerHTML.includes(word)).toBe(false);
+  });
+
+  it("shows a caller who is not a signed-in person the question and what to do, and sends nothing", async () => {
+    const { fake, decided } = gateway({ actorKind: "anonymous", approverIds: [], canAdminister: false, callerScope: "caller-open" });
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    const card = await openInbox();
+    await waitFor(() => expect(card.dataset.state).toBe("read_only"));
+    expect(within(card).getByText("Which region goes first?")).toBeVisible();
+    expect((within(card).getByRole("button", { name: "Send answers" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((within(card).getByRole("button", { name: "Dismiss" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(decided.length).toBe(0);
+  });
 });

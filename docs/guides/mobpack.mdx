@@ -66,6 +66,14 @@ an env file placed there (`.env`, `.env.local`) is in the pack with its
 contents, and so is the whole `.git` directory when the mob directory is a
 repository of its own.
 
+rkat's own state directory is packed like any other. A command such as
+`rkat run` that is started inside the mob directory creates `.rkat/` there
+when no directory above it has one, also when the run fails. It holds the
+stored conversations of those runs, the prompts included, and all of it goes
+into the pack. With a `.rkat/` in a directory above, the state goes there and
+is not packed. `rkat mob pack`, `rkat mob inspect` and `rkat mob validate` do
+not create the directory.
+
 A pack is a gzip-compressed tar archive: anyone who has the file can read
 every file in it. A web build copies the pack into its bundle as
 `mobpack.bin`, so everyone who can load the hosted page can download it.
@@ -75,8 +83,13 @@ Before you share a pack or host a bundle:
 - Keep env files, keys and repository metadata out of the mob directory.
 - Keep the signing key and the pack output outside the mob directory, as the
   commands in this guide do.
+- Keep rkat's state out of the mob directory: run `rkat` from another
+  directory, or pass `--state-root <directory outside the mob directory>`. If
+  the mob directory already holds a `.rkat/` directory, move it out.
 - List what the pack holds: `rkat mob inspect <pack>` prints one `file` line
   for each archived file. It also reads the `mobpack.bin` of a built bundle.
+  Lines that begin `.rkat/`, `.git/` or `.env` name files that should not be
+  there.
 - Move out everything that is not the manifest, the definition and the assets
   you meant to ship, then pack again.
 

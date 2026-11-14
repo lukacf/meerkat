@@ -438,14 +438,35 @@ What this subsection says an earlier release does was established by
 reading the 0.9.14 source, not by running a 0.9.14 binary over state that
 0.9.15 wrote.
 
-0.9.14 and earlier releases read what 0.9.15 writes without a refusal (a
-record written with `include_forks` reads there as its member's alone, see
-above), with two exceptions: a created agent's row that records an owed
-label restamp, and a mob whose operator instruction records are past what
-an earlier release holds in one mob. Check for both on 0.9.15, before the
-rollback. A third stored form is read without a refusal and is changed by
-what the earlier release writes: a schedule paused for its target, at the
-end of this subsection.
+0.9.14 and earlier releases read most of what 0.9.15 writes without a
+refusal. The ten items below are where a rollback differs:
+
+- Two configurations make a 0.9.14 gateway refuse to start: access rules
+  that name the new agent actions, and an identity policy that names
+  `archive` or `adopt`.
+- Two stored forms are refused: a created agent's row that records an owed
+  label restamp, and a mob whose operator instruction records are past what
+  an earlier release holds in one mob.
+- Six are read without a refusal and behave differently while rolled back,
+  or are changed by what the earlier release writes: operator instruction
+  records written with `include_forks`, agents' instruction records,
+  changes of agents that wait for approval, agents created at run time,
+  access rules for agents without a seated member, and a schedule paused
+  for its target.
+
+Before you roll back, on 0.9.15:
+
+- settle every owed label restamp;
+- bring each mob within the earlier totals of operator instruction records,
+  counting the agents' instruction records;
+- for a mob kept in a host store, list the records written with
+  `include_forks`;
+- end every change of an agent that waits for approval;
+- remove the new agent actions from the access rules, and `archive` and
+  `adopt` from the identity policy;
+- unarchive, settle or remove each agent that must not stay as it is.
+
+Each item below says what an earlier release does and what to do.
 
 **A created agent's row that records an owed label restamp.** The row of a
 store-owned identity carries the key `label_restamp_owed` while an update
@@ -538,6 +559,104 @@ record keeps its slot. For each listed mob, do one of these first:
   1 MiB in total;
 - destroy the mob, or move its database out of the mob root, as for a mob
   an earlier release refuses.
+
+**Operator instruction records written with `include_forks`.** 0.9.14 reads
+such a record as its member's alone and a fork's spawn row without its lineage
+root, so while rolled back the record does not select the forks; nothing is
+refused. On the SQLite store nothing is rewritten and the return to 0.9.15
+restores both. On a host store 0.9.14 writes the journal again without the
+fork scope and the lineage roots, and they do not come back. **Do:** before a
+rollback of a mob kept in a host store, list the records written with
+`include_forks` (`mob/instruction_status`,
+`MobHandle::operator_instruction_status`); after the return to 0.9.15, write
+each of them again at a new revision with `include_forks`. They then select
+the forks seated from then on; forks seated before the rollback keep no
+lineage root and are not selected. A fork seated while rolled back has no
+lineage root on either store, and no such record selects it.
+
+**Agents' instruction records.** An agent whose instructions changed on 0.9.15
+has one operator instruction record that holds them (namespace
+`meerkat.identity.instructions`, keyed by the agent's name). On 0.9.14 the
+record stays Active: the agent's conversation keeps the entry it has, and a
+new conversation of the agent gets the record's text as an entry beside its
+first prompt. Each such record is a record of the mob: it counts toward the 64
+records and the 1 MiB of Active bodies that 0.9.14 holds in one mob, and past
+either total 0.9.14 cannot serve that mob (see "Operator instruction records
+past an earlier release's totals" above). A 0.9.14 gateway does not bring the
+record up to date when the agent's instructions change, and its
+`meta/set_instruction` and `meta/revoke_instruction` accept the namespace.
+**Do:** before a rollback, count the mob's records on 0.9.15: read
+`meta/instruction_status` without `namespace` and `key`
+(`mob/instruction_status`, `MobHandle::operator_instruction_status`), count
+the entries of `desired`, the revoked ones included, and add up `body_bytes`
+of the entries whose `effect` is `active`; or run `rkat storage doctor`, which
+names a mob database past either total (`operator-instruction-mob-totals`,
+with its record count and its Active bytes). A mob past either total is
+handled as that section says. While rolled back, do not change an agent's
+instructions and write no record under `meerkat.identity.`: a conversation
+started after such a change holds the earlier text as well as the new one.
+After the return, update the instructions of an agent that was changed while
+rolled back once more: 0.9.15 then writes its record again.
+
+**Changes of agents that wait for approval.** A change of an agent that the
+identity policy holds for approval is a pending decision of kind
+`identity.create`, `identity.update`, `identity.archive`,
+`identity.unarchive`, `identity.remove` or `identity.adopt`. A 0.9.14 gateway
+lists such a decision and lets an approver decide it or the host withdraw it,
+but carries no change out. A decision that reaches its deadline (by default a
+day for a creation and four hours for any other change, seven days at most) is
+recorded expired. An approval given while rolled back is recorded, and the
+change is carried out only after the return to 0.9.15, if the decision has not
+expired, its approver may still decide it and the request still reads as the
+approver was shown it. The requester is told nothing until the return. **Do:**
+before a rollback, list the decisions of these kinds that are `open` or
+`approved` (`meta/decisions/list` with `kind` and `phase`) and end each one:
+have it decided and wait until it reads `executed`, or withdraw it
+(`meta/identity/withdraw`, or `meta/decisions/withdraw` as the host). While
+rolled back, decide none of them.
+
+**Access rules for changes of agents.** 0.9.15 adds the actions
+`agent.identity.create`, `agent.identity.manage` and `agent.identity.remove`.
+A 0.9.14 gateway refuses an access configuration in which a rule names one of
+them (or `agent.identity.*`) as `unknown_action`, and does not start with it.
+**Do:** before a rollback, remove those actions from the rules of
+`access.toml` (or of the file `runtime_options.access_config_path` names); add
+them again after the return. A rule that grants `*` or `agent.*` needs no
+change.
+
+**Identity policy.** A policy that sets `approval.timeouts_ms.archive` or
+`approval.timeouts_ms.adopt`, or whose approval rule lists `archive` or
+`adopt` under `change`, is refused by a 0.9.14 gateway at init, enabled or
+not. **Do:** before a rollback, remove those keys and values from
+`runtime_options.identity_creation`; add them again after the return.
+
+**Agents created at run time.** A 0.9.14 gateway starts on a state that holds
+agents created on 0.9.15 and serves the seated ones: a send and a schedule
+fire reach their members. Of the `meta/identity` methods it serves
+`resolved_tools`, `routing_status` and `warm` only. It serves none of the
+fourteen that are new in 0.9.15, so such an agent is not created, updated,
+archived, unarchived, removed or adopted there, and is not listed or read
+through them; its lifecycle verbs refuse it (`identity_store_owned`). An
+archived agent, and one that awaits its preparation, stay as they are while
+rolled back. A send to an archived agent is refused, and a 0.9.14 gateway has
+no method that unarchives it. A send to an agent that awaits its preparation
+is refused as retryable, and a 0.9.14 gateway has no method that settles the
+preparation: it waits for the return to 0.9.15. A send to an agent that is
+owed its seat is refused as retryable until the mob next starts (a restart of
+the gateway, or the resume of a stopped mob), which seats it; nothing seats it
+while the mob runs. **Do:** before a rollback, on 0.9.15, unarchive, remove or
+settle each agent that must not stay as it is.
+
+**Access rules and agents without a seated member.** A 0.9.14 Console takes an
+agent's role and labels for its access decision from the agent's seated
+member. An agent that has no seated member (archived, awaiting its
+preparation, or owed its seat) has none there, so a rule that names a role or
+a label, and the rule for an agent private to a person, may not apply to its
+entry in the Console's list of agents or to a read of it by name
+(`meta/console/inspect_identity`, `meta/identity/resolved_tools`,
+`meta/identity/routing_status`). A rule that names the agent applies. **Do:**
+before a rollback, unarchive, settle or remove such an agent, or add a deny
+rule that names it.
 
 **A schedule paused for its target.** Nothing is refused, and the pause is
 not lost. 0.9.14 has no such mark: it ignores `paused_for_target` and reads

@@ -517,8 +517,8 @@ pub enum LifecycleEffectVerb {
     /// over (it lives in memory only, or no wake created it).
     RoleMove,
     /// A replacement on the identity's own session (a reload, a respawn, a
-    /// compaction owner's rebuild): Core retires the member and the identity
-    /// is seated again on the same session. It owes no side effect.
+    /// compaction owner's rebuild): Core ends the member's incarnation and
+    /// the identity is seated on the same session. It owes no side effect.
     Reload,
 }
 

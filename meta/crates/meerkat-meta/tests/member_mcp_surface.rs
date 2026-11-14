@@ -889,6 +889,103 @@ args = [{server:?}]
     let _ = runtime.handle().shutdown().await;
 }
 
+/// A member with builtins and shell off whose tools come from one server its
+/// profile configures is offered `ask_user` beside the tool list the same
+/// member has without it, and nothing else changes: the server's tool, the
+/// comms tools and the tool catalog's two control tools are all there. The
+/// catalog of such a member is exact (its base is the build's own MCP
+/// adapter), so its control tools are composed; a mount that made the
+/// catalog read not exact would take them away and leave every server tool
+/// inline for good.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_with_a_profile_mcp_server_keeps_its_tool_list_beside_ask_user() {
+    // The first-turn list of this member without `ask_user`.
+    const WITHOUT_ASK_USER: [&str; 8] = [
+        "lookup",
+        "peers",
+        "reply_to_peer",
+        "send_message",
+        "send_request",
+        "send_response",
+        "tool_catalog_load",
+        "tool_catalog_search",
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let server = listing_server(dir.path());
+    let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "member-mcp-surface-catalog"
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "autonomous_host"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true
+
+[[profiles.worker.tools.mcp_servers]]
+name = "{LISTING}"
+command = "/bin/sh"
+args = [{server:?}]
+"#,
+        server = server.display().to_string(),
+    ))
+    .expect("mob definition");
+    let client = CaptureClient::default();
+    let spec = meerkat_meta::MobBootstrapSpec::ephemeral(
+        definition,
+        meerkat_mob::MobStorage::in_memory(),
+        dir.path().join("store"),
+        4,
+        None,
+    )
+    .expect("plain ephemeral spec")
+    .with_options(meerkat_meta::MobBootstrapOptions {
+        allow_ephemeral_sessions: true,
+        notify_orchestrator_on_resume: false,
+        default_llm_client: Some(Arc::new(client.clone())),
+    });
+    let runtime = meerkat_meta::MobRuntime::bootstrap(spec)
+        .await
+        .expect("bootstrap");
+    Box::pin(
+        runtime
+            .handle()
+            .spawn_spec(meerkat_mob::SpawnMemberSpec::host_root(
+                "worker",
+                meerkat_mob::AgentIdentity::from("worker-1"),
+            )),
+    )
+    .await
+    .expect("spawn");
+    meerkat_meta::send_message_on_mob(&runtime.handle(), "worker-1", "hello".to_string())
+        .await
+        .expect("send");
+    let first = client.first_request().await;
+    let mut offered: Vec<&str> = first
+        .tools
+        .iter()
+        .map(|tool| tool.split('=').next().unwrap_or(tool))
+        .collect();
+    offered.sort_unstable();
+    let mut expected: Vec<&str> = WITHOUT_ASK_USER.to_vec();
+    expected.push("ask_user");
+    expected.sort_unstable();
+    assert_eq!(
+        offered, expected,
+        "the member is offered its own tool list and ask_user, the catalog's control tools \
+         included: {first:?}"
+    );
+    let lookup = format!("{LOOKUP}=Mcp:{LISTING}");
+    assert!(
+        first.tools.contains(&lookup),
+        "the server's tool keeps its MCP provenance: {first:?}"
+    );
+    let _ = runtime.handle().shutdown().await;
+}
+
 /// A server that never answers its handshake.
 const SILENT: &str = "silent";
 /// Its own connect timeout.

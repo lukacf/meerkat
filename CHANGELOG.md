@@ -699,6 +699,54 @@ them.
   Meerkat Meta mounts that tool where the host's identity policy enables it.
   No tool's behavior or schema changes.
 
+- `rkat`: `rkat mob pack` now reports on standard error how many files it
+  packed (`packed<TAB><n> files`) and warns about packed files that look
+  like secrets, repository metadata, local state or an earlier pack: one
+  `warning<TAB><path> is in the pack: <why>` line for each, then one `note`
+  line that points at `rkat mob inspect <pack>`. `rkat mob web build`
+  repeats the warnings for the pack it copies into the bundle, which serves
+  the whole pack to everyone who can load the page. The pack's contents and
+  digest are unchanged, and so are the standard output of both commands
+  (the digest alone for `mob pack`) and their exit status, also when
+  standard error cannot be written to; nothing is refused. The one thing a
+  script can notice is new lines on standard error. A warning names a path
+  and never prints a byte of a file. In the path, these characters are
+  printed as escapes: the control characters, the line and paragraph
+  separators (U+2028, U+2029), and the invisible characters U+00AD,
+  U+061C, U+180E, U+200B to U+200F, U+202A to U+202E, U+2060 to U+2064,
+  U+2066 to U+206F, U+FEFF, U+FFF9 to U+FFFB, U+E0001 and U+E0020 to
+  U+E007F; every other character is printed as it is. The files are
+  flagged by name, and for one form by content (a file whose text,
+  trimmed, is exactly 64 hex digits). What is flagged:
+  - a file that `--sign` would accept as a key: its text, with the white
+    space around it trimmed, is exactly 64 hex digits. It is flagged
+    whatever it is called, unless it lies under one of the directories
+    below, whose own line then stands for it. Any file that is only a
+    64-digit hex value is flagged, a key or not: this command's own digest
+    saved to a file, for example;
+  - env files: `.env`, `.env.<name>` and `<name>.env`. The three template
+    names `.env.example`, `.env.sample` and `.env.template` get the line of
+    a hidden file instead;
+  - key-like names: `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `*.pem`,
+    `*.key`, `*.p12`, `*.pfx`, and a name that is `key` or ends in `-key`,
+    `_key` or `.key` before its extension (`key.hex`). A `.pub` file is not
+    flagged;
+  - `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, `.htpasswd`;
+  - `*.mobpack` and `mobpack.bin`;
+  - the directories `.git/`, `.rkat/`, `.ssh/`, `.aws/` and `.gnupg/`, in
+    any case and at any depth, one line each with the number of files
+    under it, and a `.git` file;
+  - every other hidden file, and every other hidden directory (the
+    top-most one, one line with the number of files under it).
+
+  The list is a heuristic and misses much: `credentials.json`,
+  `terraform.tfstate`, `secrets.yaml`, `*.jks` and `*.ppk`, for example,
+  get no warning. No warning does not mean the pack is clean:
+  `rkat mob inspect <pack>` lists every file in it and is the check. New in
+  `meerkat-mob-pack` for the same rules, in `content_warnings`:
+  `pack_content_warnings`, `classify_packed_file`, `classify_packed_path`,
+  `has_signing_key_form`, `PackContentWarning` and `PackedPathConcern`.
+
 - `meerkat-comms`: for a sender with no namespace, two live registrations
   of the SAME inbox under one key are one route (a member's own, and the
   route a host that links two namespaces holds to that inbox in the linked
@@ -706,6 +754,32 @@ them.
   registration under the key made it ambiguous and the send was refused.
   Registrations of different inboxes under one key are still ambiguous:
   nothing is handed off. Sends scoped to a namespace are unchanged.
+
+- `rkat`, `meerkat-mob-pack`: `rkat mob pack` now fails in two cases in
+  which it wrote a pack before, because a path it cannot resolve is never
+  compared as written (see Security). When the real path of the signing
+  key or of the output file, or the identity of the file there, cannot be
+  read although the files themselves can be opened (the known case: the
+  command is run below a directory that the account may not search), the
+  command writes no pack, exits with status 1 and prints one line on
+  standard error, with the path as it was written:
+  `Error: mob pack failed: I/O error: cannot resolve '<path>', a file the pack must leave out: <system error>`.
+  A key or output path that could not be opened at all (a symbolic link
+  loop, a path through a regular file) wrote no pack before either; it now
+  fails with this message.
+  When the real path of the mob directory cannot be resolved, it exits with
+  status 1 and prints:
+  `Error: mob pack failed: I/O error: cannot resolve the mob directory '<directory>': <system error>`.
+  `<system error>` is the operating system's text, such as
+  `Permission denied (os error 13)`. A path that names no file, such as an
+  output that is not written yet, is not an error. The refusal for an
+  identity that cannot be read is read from the source: no test could
+  build that case without privileges; the refusal for a path is run. In
+  Rust, `pack_directory` and `pack_directory_with_excludes` return
+  `PackValidationError::Io` with the text after `I/O error: `. Also changed
+  against 0.9.14, on Linux and macOS: a hard link to the signing key or to
+  the output file under another name is now left out of the pack; 0.9.14
+  packed it.
 
 - `meerkat-comms`: a route never outlives its inbox. When a runtime's
   in-process inbox leaves the registry (`CommsRuntime::retire_inproc_route`,
@@ -1230,6 +1304,47 @@ them.
   a name the mob does not hold, and nothing is forked. Before, `council`
   was not held to the audience. Affects 0.9.11 through 0.9.14.
 
+- `rkat`, `meerkat-mob-pack`: `rkat mob pack` now leaves the signing key
+  and its own output file out of the pack however their paths are written.
+  Before, each was left out only when its path, component by component, was
+  the mob directory argument's path followed by the file's own:
+  `rkat mob pack mob -o mob/out.mobpack --sign mob/key.hex --signer-id <id>`
+  left both out, and so did `.` with `./out.mobpack` and `./key.hex`. A
+  single or doubled separator at the end of the directory argument, or a
+  doubled one right after the directory in the file's path, made no
+  difference; a doubled separator or a `.` further inside the file's path
+  did, and the key was packed. With any other components a signing key kept
+  in the mob directory was packed, and so was the output of an earlier pack.
+  Inside the mob directory,
+  `rkat mob pack . -o out.mobpack --sign key.hex --signer-id <id>` packed
+  the key, and from the second run on the output of the run before. So did
+  `./mob` with `mob/key.hex`, `mob` with `./mob/key.hex`, an absolute
+  directory with a relative path or the reverse, a `..` in a path, and a
+  path through a symbolic link. A pack that holds its signing key
+  hands the key to everyone who receives the pack, and whoever has the key
+  can sign packs as that signer. The key and the output file are now left
+  out as the files their paths name, wherever the command is run from; a
+  symbolic link given as `--sign` or `-o` names the file it points to, and
+  an output file that does not exist yet is nothing to leave out. What is
+  left out is the file that is this pack's signing key and the file this
+  run writes: by its resolved path, and on Linux and macOS also by file
+  identity (device and inode), so another name of the same file, a hard
+  link or another case on a file system that ignores case, is left out
+  too. On Windows the comparison is by resolved path only (read from the
+  source, not run). No file system that ignores case was run on any
+  platform: that case rests on the source, and the identity comparison is
+  run through hard links. A path that cannot be resolved is never compared
+  as written: the pack is refused (see Changed). Nothing else about what
+  is packed changes. A copy of the key is another file and is still
+  packed, and so are a key file this pack is not signed with (an unsigned
+  pack, or another key) and a pack written earlier under another name.
+  Keep the key and the output outside the mob directory, and check a pack
+  with `rkat mob inspect <pack>`. The Rust functions
+  `meerkat_mob_pack::pack::pack_directory` and
+  `pack_directory_with_excludes` follow the same rule, with unchanged
+  signatures. If a pack that left your machine holds its signing key, the
+  key is exposed: see the Upgrade notes. Affects 0.4.1 through 0.9.14.
+
 - Mob: a `mob_destroy` refused by the mob tells an agent nothing of a
   member the host's member tool audience
   (`MobBuilder::with_member_tool_audience`) hides from that agent. Before,
@@ -1338,6 +1453,33 @@ them.
     write (`chmod`, or an ACL on the file): the file is a new one every
     time, so a grant on the older file does not carry over. The descriptor
     file of `rkat mob host --descriptor-out` is owner-only in the same way.
+
+- Packs signed by 0.4.1 through 0.9.14 can hold their signing key (see
+  Security). `rkat mob inspect <pack>` lists every file of a pack on a
+  `file` line: look at each pack you signed. If the signing key file is
+  among the `file` lines of a pack that left your machine (a copy sent to
+  someone, a deploy target, a web bundle `rkat mob web build` made from it,
+  which serves the whole pack), the key is exposed and there is no
+  revocation. Make a new key (32 random bytes written as 64 hexadecimal
+  characters), sign the packs again with it, and have everyone who trusts
+  the signer replace the signer's public key in their
+  `.rkat/trusted-signers.toml`, or in the trusted signers their host
+  passes. Until they do, a pack signed with the old key still verifies for
+  them. Remove the copies of the packs that hold the key where you can.
+
+- `rkat mob pack` of a directory that holds the signing key or the output
+  of an earlier pack, or a hard link to either under another name, now
+  gives a pack without those files, so its digest differs from the digest
+  of a pack an earlier release made from the same directory with them in
+  it. Where such a pack's digest is pinned, pin the new one; a signature is
+  over the digest, so the pack is signed again when it is packed. A pack an
+  earlier release made without those files has the same digest as before,
+  and existing pack files are not changed: they verify as they did.
+
+- A script that runs `rkat mob pack` in a place where the signing key's or
+  the output's real path cannot be read (see Changed) now gets exit status
+  1 and no pack where it got a pack before. Run it where the paths resolve,
+  or give paths that do.
 
 - A script that runs `rkat run --output json` (or `--json`) must not read
   non-empty stdout as success, nor parse the last stdout document as a run
@@ -1511,6 +1653,19 @@ them.
   permissions the manifest had). Keep the directories that hold them closed
   to other accounts, or run under a umask of 077.
 
+- `rkat mob pack` leaves out the file that is the pack's signing key and
+  its own output file, and nothing else. A copy of the key, a key file the
+  pack is not signed with (an unsigned pack, or another key) and a pack
+  written earlier under another name are packed like every other file in
+  the mob directory. On Windows the two files are recognized by their
+  resolved paths only, so a hard link to the key under another name is
+  packed there. Whether Windows recognizes a key or an output typed in
+  another case than it is stored is not established: the standard library
+  resolves a path there by opening it and asking the system for the final
+  path of the handle, and what case that answer has was neither run nor
+  found in the sources at hand. Keep keys and packs outside the mob
+  directory, and check a pack with `rkat mob inspect <pack>`.
+
 - Mob: an explicit resume of a stopped mob (`MobHandle::resume`) rebuilds
   each member from its seat as the host's spawn customizer makes it and
   takes the customizer's labels into the rebuilt member without comparing
@@ -1559,6 +1714,18 @@ them.
   completes the retirement, and the next start is clean. A host that lifts a
   stopped mob when it starts (the Meta gateways do) always meets this: retire
   the member, then restart the host.
+
+- `rkat mob pack` still packs every regular file under the mob directory,
+  hidden files included, except the key the pack is signed with and its own
+  output file. Env files and other secrets, key files the pack is not
+  signed with, `.git/`, and `.rkat/` with its stored conversations and
+  configuration all go into the pack when they are in the directory, and a
+  web bundle serves the pack whole. `rkat mob pack` now warns about a
+  short list of names and one content form (see Changed): key-like names,
+  a file that has the form of a signing key and `.mobpack` files among
+  them. The list misses much, and a warning removes nothing. Keep such
+  files out of the mob directory, and read `rkat mob inspect <pack>`
+  before a pack leaves your machine.
 
 - Read from the source: a preloaded skill that cannot be resolved (a mistyped
   name, a skill the build does not have, or a skill whose required

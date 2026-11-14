@@ -4,7 +4,7 @@
 # process. The source's own Dockerfile is a release build (pinned images, static
 # ONNX Runtime and a local embedding feature); this one builds only the storage
 # feature it needs on top of the defaults.
-FROM rust:1.94-bookworm AS build
+FROM rust:1.100-bookworm AS build
 WORKDIR /app
 RUN apt-get update && apt-get install -y clang libclang-dev cmake pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 COPY . .

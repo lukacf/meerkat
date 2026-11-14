@@ -1582,24 +1582,6 @@ them.
   permissions the manifest had). Keep the directories that hold them closed
   to other accounts, or run under a umask of 077.
 
-- `@rkat/web` provider proxy: the proxy does not authenticate its callers
-  (see Security for what it checks). Every user and process of the machine
-  reaches a proxy bound to a loopback address, and so does a page served
-  from any loopback origin. A proxy bound to another address with `--host`
-  forwards a caller on the network that sends no `Origin` header; it does
-  not check the `Host` header, so a GET from a page whose host name points
-  at the proxy is forwarded and the page reads the answer; and a cross-site
-  GET that carries no `Sec-Fetch-Site` header is forwarded, which is every
-  such GET over plain http to an address that is not loopback, because a
-  browser sends that header only to https and loopback addresses. On a
-  loopback-bound proxy the same holds for a browser that sends no
-  `Sec-Fetch-Site` header at all: its cross-site GET without `Origin` is
-  forwarded, and the page cannot read the answer. A tunnel or reverse proxy
-  that rewrites `Host` to a loopback name has the same effect on a
-  loopback-bound proxy. A request without `Origin` that a browser marks
-  `same-site` is forwarded. The proxy keeps no record of the requests it
-  forwards. Put the proxy behind your own authentication in those uses.
-
 - Mob: an explicit resume of a stopped mob (`MobHandle::resume`) rebuilds
   each member from its seat as the host's spawn customizer makes it and
   takes the customizer's labels into the rebuilt member without comparing
@@ -1623,6 +1605,24 @@ them.
 
 - Mob: the schedule tools are not checked against the member tool audience
   on a host that mounts them itself.
+
+- `@rkat/web` provider proxy: the proxy does not authenticate its callers
+  (see Security for what it checks). Every user and process of the machine
+  reaches a proxy bound to a loopback address, and so does a page served
+  from any loopback origin. A proxy bound to another address with `--host`
+  forwards a caller on the network that sends no `Origin` header; it does
+  not check the `Host` header, so a GET from a page whose host name points
+  at the proxy is forwarded and the page reads the answer; and a cross-site
+  GET that carries no `Sec-Fetch-Site` header is forwarded, which is every
+  such GET over plain http to an address that is not loopback, because a
+  browser sends that header only to https and loopback addresses. On a
+  loopback-bound proxy the same holds for a browser that sends no
+  `Sec-Fetch-Site` header at all: its cross-site GET without `Origin` is
+  forwarded, and the page cannot read the answer. A tunnel or reverse proxy
+  that rewrites `Host` to a loopback name has the same effect on a
+  loopback-bound proxy. A request without `Origin` that a browser marks
+  `same-site` is forwarded. The proxy keeps no record of the requests it
+  forwards. Put the proxy behind your own authentication in those uses.
 
 - `meerkat-mob`: a spawn rollback that is still owed when the mob is
   stopped (the refused spawn answered `rollback remains owned for retry`)

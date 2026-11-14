@@ -1282,7 +1282,11 @@ Security, Upgrade and Changed.
   build is composed before Core is asked (a build the host refuses now
   refuses the respawn before anything changes, where it used to leave the
   identity without a member), and once for its build; `after_create` is
-  told once, of the session the respawn keeps. The successor is seated
+  told once, of the session the respawn keeps. That is the count of
+  0.9.14 (two calls: confirmed by a test for a served member). One case
+  can differ, by reading and not by a run: a respawn that meets a role
+  move of the identity which its declaration has not carried out yet can
+  ask the customizer a third time. The successor is seated
   with the customizer's current answer, as the seat of 0.9.14 was: its
   labels and its profile and model overrides. A session a build already
   created keeps the context, the instructions and the system prompt its

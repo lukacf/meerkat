@@ -7695,14 +7695,16 @@ impl MobMcpState {
             .await
     }
 
-    /// Cancel a previously submitted unit of work. Finding C4.
+    /// Always refused with [`MobError::WorkCancellationUnsupported`]: per-unit
+    /// cancellation is unsupported and nothing is cancelled.
+    ///
+    /// The caller's authorization for the mob is still decided first, so a
+    /// caller without it gets that refusal and not the capability error.
     pub async fn mob_cancel_work(
         &self,
         mob_id: &MobId,
         work_ref: meerkat_mob::WorkRef,
     ) -> Result<(), MobError> {
-        // Per-item cancellation is intentionally unsupported, but the
-        // authorization decision still precedes that honest capability error.
         self.admitted_handle_for(mob_id, ControlScope::Cancel)
             .await?
             .cancel_work(work_ref)

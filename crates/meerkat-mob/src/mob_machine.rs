@@ -94,7 +94,8 @@ pub(crate) enum MobMachineCommand {
     /// `MobHandle::execute_machine_command` call site captures this enum in
     /// a future).
     SubmitWork(Box<SubmitWorkCommand>),
-    /// Cancel a previously submitted unit of work.
+    /// Always refused with `MobError::WorkCancellationUnsupported`: per-unit
+    /// cancellation is unsupported and nothing is cancelled.
     CancelWork {
         work_ref: WorkRef,
     },

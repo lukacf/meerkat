@@ -508,7 +508,12 @@ file or `MobStorage::identity_record_rows` for a storage). While
 - respawn its member with the row's labels (`MobHandle::respawn_member`
   with `MemberRespawn::new().with_labels(..)`). The respawn seats the agent
   again on the same conversation and cancels a turn in flight; an agent
-  that created mobs with its own tools goes on listing and managing them.
+  that created mobs with its own tools goes on listing and managing them
+  on 0.9.15. While an earlier release runs it does not: 0.9.9 through
+  0.9.14 give that management only to the member generation that created
+  the mob, so an agent seated again since lists and manages none of its
+  mobs until the return to 0.9.15, which restores it with no call; the mobs
+  go on running meanwhile.
   An agent you leave unsettled is out of service while rolled back, and
   nothing of it is lost;
 - a profile move or a runtime-mode change of the agent
@@ -517,9 +522,11 @@ file or `MobStorage::identity_record_rows` for a storage). While
 - a member no same-session successor can serve (a placed member, a member
   wired to a placed member, a member on a session service that keeps no
   durable sessions) is settled by none of these: rotate it
-  (`MobHandle::rotate_member`), or archive or remove its agent (an archive
-  removes the mobs the agent created at the next start: have it destroy
-  them first, or rotate the member instead).
+  (`MobHandle::rotate_member`), or archive or remove its agent. None of the
+  three keeps the mobs the agent created with its own tools: a rotation
+  takes a fresh session, so the agent no longer manages them, and the mobs
+  of a session its mob archived are removed at the host's next start. Have
+  the agent destroy them first.
 
 `rkat storage doctor` and Meta's storage doctor do not report this count,
 and a host that uses only the SDKs has no read for it in 0.9.15: the Rust
@@ -535,6 +542,22 @@ sqlite3 -readonly <store> "SELECT mob_id, agent_identity FROM mob_identity_inten
 It prints one line per agent whose row carries the key (`<mob>|<agent>`),
 and nothing when none does. A Meta host settles one with `meta/respawn` of
 that agent, at the cost named above.
+
+**Agents that created mobs and were seated again on 0.9.15.** From 0.9.15 an
+agent that created mobs with its own tools goes on listing and managing them
+when it is seated again on its conversation (a respawn, a profile move, a
+runtime-mode change). 0.9.9 through 0.9.14 give that management only to the
+member generation that created the mob. While an earlier release runs, an
+agent seated again since lists and manages none of the mobs it created; the
+mobs and their members go on running. The return to 0.9.15 restores its
+management with no call (read from the source). An agent that an earlier
+release retires and seats again while rolled back (a respawn through a
+0.9.14 Meta gateway does so) is not restored by the return (read from the
+source).
+
+**Do:** no step before the rollback. While rolled back, do not respawn such
+an agent through Meta; have it manage its mobs before the rollback or after
+the return.
 
 **Operator instruction records past an earlier release's totals.** An
 earlier release bounds the mob as a whole at 64

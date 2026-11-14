@@ -220,8 +220,15 @@ Security, Upgrade and Changed.
   exist, the console reads none of its history, and a frame a console
   stored for one with its member attributes is served to nobody, in a
   timeline read by its name too; one stored without them is read as any
-  such frame is (see above). A council's mob is known from the council's
-  own record; a stored
+  such frame is (see above).
+  Such a frame of a participant (every one a release that stored no member
+  attributes wrote, 0.8.27 through 0.8.49, and a record first written after
+  its council ended) can hold the participant's replies and, from those
+  releases, the copied earlier turns of its source. It is read only by that
+  frame's own name in the Console timeline: by an administrator on a Console
+  that can identify a person, and by the one anonymous operator on a Console
+  that can identify nobody. A council's mob is known from the council's own
+  record; a stored
   frame whose mob id has a council mob's form (`council--...`) and names no
   mob the runtime holds is treated the same, so those frames stay unserved
   on a host that does not keep council records across a restart. Limits: an

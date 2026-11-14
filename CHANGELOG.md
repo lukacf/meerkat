@@ -50,6 +50,14 @@ them.
   `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
   read the binding file. See Security and the Upgrade notes.
 
+- Behaviour-only (not measured by the gate): `@rkat/web`: the provider proxy
+  (`npx @rkat/web proxy`, `startProxy`) listens on `127.0.0.1` by default,
+  and the proxy and `createProxyHandler` refuse a request from an origin
+  that is not allowed: loopback origins only, unless one is named. A proxy
+  reached from another machine, through a container's published port, or
+  from a page on another origin needs `--host` or `--cors-origin`
+  (`allowOrigin`). See Security and the Upgrade notes.
+
 - Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
   `meerkat-machine-kernels`: the schedule lifecycle machine gains a state
   field and two inputs, and its public types follow.
@@ -1188,6 +1196,27 @@ them.
   that uses `xattr`, calls it only to set attributes while unpacking, so
   Meerkat's own use is not known to be affected.
 
+- `@rkat/web`: the provider proxy (`npx @rkat/web proxy`, and `startProxy`
+  and `createProxyHandler` of `@rkat/web/proxy`) listens on the loopback
+  interface by default and compares a request's origin before it calls the
+  provider. The standalone proxy binds `127.0.0.1`; `--host <address>`
+  (`startProxy({ host })`) binds another address, and the proxy prints the
+  address it bound, with a warning when that is not a loopback address. A
+  request that carries an `Origin` header is served only when the origin is
+  allowed and is answered 403 otherwise, preflights included, with no
+  provider call: loopback origins by default (`localhost`, `127.0.0.1` and
+  `[::1]`, http or https, any port), the one origin `--cors-origin <origin>`
+  (`allowOrigin`) names, or any origin with `*`; an `Origin` of `null` only
+  with `*`. While it is bound to a loopback address the standalone proxy
+  also refuses a request whose `Host` header is not a loopback name or
+  address; `createProxyHandler` offers that check as `loopbackHostOnly`, off
+  by default. Through 0.9.14 the standalone proxy bound every interface,
+  every origin was allowed by default, and `--cors-origin` set the response
+  header without comparing the request's origin. A request without an
+  `Origin` header is forwarded as before: the proxy does not check who calls
+  it, and one that listens on another address belongs behind your own
+  authentication. Affects 0.4.1 through 0.9.14.
+
 ### Upgrade notes
 
 - A configuration document an earlier release wrote keeps its mode until
@@ -1369,6 +1398,37 @@ them.
   the forks seated before have no lineage. Write the records again, at a
   new revision, with `include_forks`; they then select the forks seated
   from then on.
+
+- `@rkat/web` provider proxy (see Security). Nothing changes for a page
+  served from `localhost`, `127.0.0.1` or `[::1]` that calls a proxy on the
+  same machine, or for a tool on that machine that sends no `Origin` header.
+  Otherwise pass what applies:
+  - The proxy is reached from another machine or through a container's
+    published port: `--host <address>` (`0.0.0.0` for every interface;
+    `startProxy({ host })`). Every user and process of the machine reaches
+    a loopback address. On any other address a caller on the network that
+    sends no `Origin` header is forwarded with no check, and the `Host`
+    header is not checked: put the proxy behind your own authentication.
+  - The page that calls the proxy is not on a loopback origin:
+    `--cors-origin https://app.example.com` (`allowOrigin`).
+    `--cors-origin '*'` allows every origin, as every release through 0.9.14
+    did by default, and is the only setting that serves a page opened from
+    a file or a sandboxed frame (`Origin: null`).
+  - A server that embeds `createProxyHandler` without `allowOrigin` served
+    every origin and now serves loopback origins only: pass the site's
+    origin, or `allowOrigin: '*'` for the earlier behaviour. An
+    `allowOrigin` it already passes is now compared with each request, so a
+    page on any other origin gets 403. The handler answers a preflight
+    itself and no longer passes the provider's `access-control-*` headers
+    on.
+  - A client that reaches a loopback-bound standalone proxy under another
+    host name (a hosts-file alias, a local reverse proxy that keeps the
+    original `Host`) gets 403: call it as `localhost` or `127.0.0.1`. A
+    client that resolves `localhost` to `::1` only does not connect: use
+    `127.0.0.1`.
+  - The proxy prints the address and port it bound
+    (`http://127.0.0.1:3100`), and `--port 0` asks the system for a free
+    port.
 
 ### Known limitations
 

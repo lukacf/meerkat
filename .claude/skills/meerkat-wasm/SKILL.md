@@ -126,7 +126,9 @@ Keep these unless a test deliberately pins another model. WASM mob flows use the
 same current identity-first mob runtime, including helper/fork/respawn
 controls, run-fenced stop, and runtime-committed session projection behavior.
 
-**Provider proxy** (`sdks/web/proxy/`): Node.js auth-injecting reverse proxy. Sits between browser WASM and LLM providers so API keys stay server-side. Strips `Origin`/`Referer`/`Accept-Encoding` headers from forwarded requests. The package bin is `rkat-web-proxy` (`proxy/cli.mjs`; `--port`, default `PORT` or 3100; `--cors-origin`, default `*`). It serves `/anthropic/*`, `/openai/*`, and `/gemini/*` for each of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GEMINI_API_KEY` that is set.
+**Provider proxy** (`sdks/web/proxy/`): Node.js auth-injecting reverse proxy. Sits between browser WASM and LLM providers so API keys stay server-side. Strips `Origin`/`Referer`/`Accept-Encoding` headers from forwarded requests. The package bin is `rkat-web-proxy` (`proxy/cli.mjs`; `--port`, default `PORT` or 3100; `--host`, default `127.0.0.1`; `--cors-origin`, default loopback origins only). It serves `/anthropic/*`, `/openai/*`, and `/gemini/*` for each of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GEMINI_API_KEY` that is set.
+
+The standalone proxy listens on the loopback interface by default; `--host <address>` binds another address. Before it calls the provider it compares a request's `Origin` header with the allowed origin (loopback origins by default; `--cors-origin <origin>` names one, `*` allows any) and answers 403 for any other origin, preflights included; bound to a loopback address it also refuses a `Host` header that is not a loopback name or address. The proxy does not check who calls it in any other way: a request without an `Origin` header is forwarded, so put a proxy that listens on another address behind your own authentication.
 
 ```bash
 # Standalone proxy
@@ -135,12 +137,18 @@ ANTHROPIC_API_KEY=sk-... npx @rkat/web proxy --port 3100
 
 For a server with Fetch-style routing, set `ANTHROPIC_API_KEY` in that server's
 environment. Pass a `Request` and the path with the provider prefix removed,
-then return the resulting `Response`:
+then return the resulting `Response`. The handler applies the same origin
+rule: name the site's origin with `allowOrigin` (loopback origins only when it
+is not given, `'*'` for any); `loopbackHostOnly: true` adds the `Host` check.
+It does not authenticate callers, so the server does that before it calls the
+handler:
 
 ```typescript
 import { createProxyHandler } from '@rkat/web/proxy';
 
-const anthropicProxy = createProxyHandler('anthropic');
+const anthropicProxy = createProxyHandler('anthropic', {
+  allowOrigin: 'https://app.example.com',
+});
 
 export function handleRequest(request: Request): Promise<Response> {
   const { pathname } = new URL(request.url);

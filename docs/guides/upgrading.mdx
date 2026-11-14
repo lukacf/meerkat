@@ -346,6 +346,41 @@ store:
   lineage. Write the records again, at a new revision, with
   `include_forks`; they then select the forks seated from then on.
 
+### The Web SDK's provider proxy listens on loopback and compares origins
+
+The standalone proxy of `@rkat/web` (`npx @rkat/web proxy`, `startProxy`)
+listens on the loopback interface (`127.0.0.1`) by default; through 0.9.14
+it bound every interface. The proxy, and a `createProxyHandler` embedded in
+your own server, now compare a request's `Origin` header before the
+provider is called and answer 403 when the origin is not allowed: loopback
+origins by default (`localhost`, `127.0.0.1` and `[::1]`, http or https,
+any port), the one origin `--cors-origin <origin>` (`allowOrigin`) names,
+or any origin with `*`. Through 0.9.14 every origin was allowed by default
+and the option set the response header only. A request without an `Origin`
+header is forwarded as before: the proxy does not check who calls it. See
+[the proxy example](/examples/wasm).
+
+Nothing changes for a page served from a loopback origin that calls a proxy
+on the same machine, or for a local tool that sends no `Origin` header.
+
+**Do**, where one of these applies:
+
+- The proxy is reached from another machine or through a container's
+  published port: pass `--host <address>` (`0.0.0.0` for every interface).
+  On such an address a caller on the network that sends no `Origin` header
+  is forwarded with no check, so put the proxy behind your own
+  authentication.
+- The page that calls the proxy is not on a loopback origin: pass
+  `--cors-origin https://app.example.com`. `--cors-origin '*'` allows every
+  origin and is the only setting that serves a page opened from a file or a
+  sandboxed frame (`Origin: null`).
+- Your server embeds `createProxyHandler` without `allowOrigin`: pass the
+  site's origin, or `allowOrigin: '*'` for the earlier behaviour. An
+  `allowOrigin` it already passes is now compared with each request.
+- A client reaches a loopback-bound standalone proxy under another host
+  name (a hosts-file alias, a local reverse proxy that keeps the original
+  `Host`): it gets 403, so call the proxy as `localhost` or `127.0.0.1`.
+
 ### Meta 0.9.15
 
 Meta 0.9.15 pins Core `=0.9.15`. The full list is in `meta/CHANGELOG.md`

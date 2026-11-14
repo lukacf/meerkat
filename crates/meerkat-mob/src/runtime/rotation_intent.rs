@@ -333,6 +333,11 @@ impl MemberRespawn {
     /// member's own role, and takes none under another role. A compaction
     /// floor the request also names ([`Self::with_compaction_floor`]) is
     /// set on this override.
+    ///
+    /// Name it together with [`Self::with_model_override`]: a seat holds its
+    /// profile override with its model override set on it, so the two are a
+    /// pair. Alone, this call seats `profile` with the member's kept model
+    /// override set on it: `profile`'s own model does not apply.
     #[must_use]
     pub fn with_profile_override(mut self, profile: Option<crate::profile::Profile>) -> Self {
         self.profile_override = Some(profile);
@@ -344,6 +349,12 @@ impl MemberRespawn {
     /// override. Without this call the next incarnation keeps the member's
     /// own model override under the member's own role, and takes none under
     /// another role.
+    ///
+    /// Name it together with [`Self::with_profile_override`]: a seat holds
+    /// its profile override with its model override set on it, so the two
+    /// are a pair. Alone, `None` removes the model override and leaves the
+    /// member's kept profile override, which still holds the earlier model:
+    /// that model stays in force until the profile override is named too.
     #[must_use]
     pub fn with_model_override(mut self, model: Option<String>) -> Self {
         self.model_override = Some(model);

@@ -35,16 +35,19 @@ Options:
                           interface, which every user and process of this
                           machine reaches). The proxy does not check who calls
                           it. On a loopback address it answers loopback Host
-                          names only (localhost, 127.0.0.1, [::1]). On any other
-                          address it does not check the Host, and a caller on
-                          the network that sends no Origin header is forwarded:
-                          put the proxy behind your own authentication.
+                          names only (localhost, any 127.x.x.x, [::1]). On any
+                          other address it does not check the Host, and a caller
+                          on the network that sends no Origin header is
+                          forwarded: put the proxy behind your own
+                          authentication.
   --cors-origin <origin>  The one origin whose pages may call the proxy, or *
-                          for any origin (default: loopback origins only, such
-                          as http://localhost:5173). A request or preflight
-                          from another origin is refused before the provider
-                          is called. A request without an Origin header (curl,
-                          server code) is not affected by this option.
+                          for any origin (default: loopback origins only:
+                          localhost, any 127.x.x.x, [::1], on any port). A
+                          request or preflight from another origin is refused
+                          before the provider is called. A request without an
+                          Origin header (curl, server code) is served, unless a
+                          browser marks it Sec-Fetch-Site: cross-site and the
+                          option is not *.
   -h, --help              Show this help
 
 Environment variables:

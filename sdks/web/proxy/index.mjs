@@ -80,15 +80,21 @@ const LOOPBACK_HOST = new RegExp(`^${LOOPBACK_NAME}(:\\d+)?$`, 'i');
  * any origin. Without it only loopback origins are allowed: `localhost`, a
  * 127.0.0.0/8 address or `[::1]`, http or https, any port. An Origin of
  * `null` is allowed by `*` only. A request without an Origin header is
- * allowed whatever the setting.
+ * allowed whatever the setting, except one a browser marks
+ * `Sec-Fetch-Site: cross-site` (a browser sends no Origin on some GETs),
+ * which only `*` allows. A caller that is not a browser sends neither header.
  *
  * @param {string | undefined} allowOrigin
  * @param {string | null | undefined} origin - The request's Origin header
+ * @param {string | null | undefined} fetchSite - The request's Sec-Fetch-Site header
  * @returns {{ allowed: boolean, headers: Record<string, string> }} The CORS
  *   headers of the answer; a refused request gets no allow header.
  */
-function checkOrigin(allowOrigin, origin) {
+function checkOrigin(allowOrigin, origin, fetchSite) {
   if (allowOrigin === '*') return { allowed: true, headers: corsHeaders('*') };
+  if (!origin && typeof fetchSite === 'string' && fetchSite.trim().toLowerCase() === 'cross-site') {
+    return { allowed: false, headers: {} };
+  }
   if (allowOrigin) {
     const allowed = !origin || (origin === allowOrigin && origin !== 'null');
     return { allowed, headers: allowed ? corsHeaders(allowOrigin) : {} };
@@ -120,8 +126,8 @@ const REFUSED = {
  * `checkOrigin` above: loopback origins only when `allowOrigin` is not given,
  * one named origin, or `*` for any). It answers an allowed preflight itself.
  * It does not check who calls it in any other way: a request without an
- * Origin header is forwarded, so a server that embeds the handler puts its
- * own authentication in front of it.
+ * Origin header is forwarded unless a browser marks it cross-site, so a
+ * server that embeds the handler puts its own authentication in front of it.
  *
  * `loopbackHostOnly` makes the handler refuse (403) a request whose Host
  * header is not a loopback name or address. It is off by default, since the
@@ -150,7 +156,7 @@ export function createProxyHandler(provider, opts = {}) {
     if (loopbackHostOnly && !isLoopbackHost(req.headers.get('host') ?? new URL(req.url).host)) {
       return new Response(REFUSED.host, { status: 403, headers: json });
     }
-    const origin = checkOrigin(allowOrigin, req.headers.get('origin'));
+    const origin = checkOrigin(allowOrigin, req.headers.get('origin'), req.headers.get('sec-fetch-site'));
     if (!origin.allowed) {
       return new Response(REFUSED.origin, { status: 403, headers: { ...json, ...origin.headers } });
     }
@@ -267,7 +273,7 @@ export function startProxy(opts = {}) {
         nodeRes.end(REFUSED.host);
         return;
       }
-      const origin = checkOrigin(allowOrigin, nodeReq.headers.origin);
+      const origin = checkOrigin(allowOrigin, nodeReq.headers.origin, nodeReq.headers['sec-fetch-site']);
       if (!origin.allowed) {
         nodeRes.writeHead(403, { ...json, ...origin.headers });
         nodeRes.end(REFUSED.origin);

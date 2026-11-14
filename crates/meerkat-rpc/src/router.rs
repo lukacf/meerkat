@@ -13010,6 +13010,130 @@ mod tests {
             assert_eq!(listed_sessions(&router).await, vec![session_id]);
         }
 
+        /// A client whose route states `high` until its first provider
+        /// request, and no levels after it. That request asks for a tool the
+        /// session does not have, so the turn makes a second request, which
+        /// is judged against the route as it is then: the level the build
+        /// accepted is refused inside the turn.
+        struct HighUntilTheFirstRequestLlmClient {
+            states_levels: std::sync::atomic::AtomicBool,
+        }
+
+        #[async_trait]
+        impl LlmClient for HighUntilTheFirstRequestLlmClient {
+            fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+                if self.states_levels.load(std::sync::atomic::Ordering::SeqCst) {
+                    OnlyHighLlmClient.reasoning_route()
+                } else {
+                    None
+                }
+            }
+
+            fn project_replay_messages(
+                &self,
+                messages: &[meerkat_core::Message],
+            ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+                Ok(messages.to_vec())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                request: &'a meerkat_client::LlmRequest,
+            ) -> Pin<
+                Box<
+                    dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                self.states_levels
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(stream::iter(vec![
+                    Ok(meerkat_client::LlmEvent::ToolCallComplete {
+                        id: "late-refusal-call".to_string(),
+                        name: "a_tool_the_session_does_not_have".to_string(),
+                        args: serde_json::json!({}),
+                        meta: None,
+                    }),
+                    Ok(meerkat_client::LlmEvent::UsageUpdate {
+                        usage: meerkat_core::TurnUsage::host_declared(
+                            meerkat_core::Provider::Anthropic,
+                            &request.model,
+                            meerkat_core::Usage::default(),
+                        ),
+                    }),
+                    Ok(meerkat_client::LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::success(StopReason::ToolUse),
+                    }),
+                ]))
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Anthropic
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                Ok(())
+            }
+        }
+
+        /// A create whose first turn is refused for the level after its
+        /// session was built keeps the session: the build accepted the
+        /// level, the turn stored its messages, and a later provider request
+        /// of the same turn is refused because the route's levels changed.
+        /// The create answers the typed refusal, and the built session is
+        /// still listed and read, with its transcript. Only a session that
+        /// was never built is removed.
+        #[tokio::test]
+        async fn a_create_refused_for_its_level_after_its_build_keeps_the_built_session() {
+            let (router, _rx) = test_router_with_llm(Arc::new(HighUntilTheFirstRequestLlmClient {
+                states_levels: std::sync::atomic::AtomicBool::new(true),
+            }))
+            .await;
+            let answer = tokio::time::timeout(
+                FAILURE_BOUND,
+                call(
+                    &router,
+                    "session/create",
+                    serde_json::json!({"prompt": "hello", "reasoning_effort": "high"}),
+                ),
+            )
+            .await
+            .expect("the create answers");
+            let refused = answer
+                .error
+                .as_ref()
+                .unwrap_or_else(|| panic!("expected the refusal, got {answer:?}"));
+            assert_eq!(refused.code, error::INVALID_PARAMS, "{refused:?}");
+            let data = refused.data.as_ref().expect("the typed refusal data");
+            assert_eq!(data["kind"], "reasoning_effort_refused", "{data}");
+            assert_eq!(
+                data["reasoning_effort_refusal"]["reason"], "supported_levels_unknown",
+                "the level is refused by the route as it is at the later request: {data}"
+            );
+
+            let listed = listed_sessions(&router).await;
+            assert_eq!(
+                listed.len(),
+                1,
+                "the built session stays after the late refusal: {listed:?}"
+            );
+            let read = call(
+                &router,
+                "session/read",
+                serde_json::json!({ "session_id": listed[0] }),
+            )
+            .await;
+            let read = result_value(&read);
+            assert_eq!(read["session_id"], listed[0]);
+            assert!(
+                read["message_count"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0),
+                "the built session keeps the transcript of its refused turn: {read}"
+            );
+        }
+
         /// A deferred create has answered its session id before the
         /// level is judged, so its session stays, in either form the level
         /// is named in. A turn that names a level the route takes runs, a

@@ -357,7 +357,9 @@ origins by default (`localhost`, `127.0.0.1` and `[::1]`, http or https,
 any port), the one origin `--cors-origin <origin>` (`allowOrigin`) names,
 or any origin with `*`. Through 0.9.14 every origin was allowed by default
 and the option set the response header only. A request without an `Origin`
-header is forwarded as before: the proxy does not check who calls it. See
+header is forwarded as before, except one a browser marks
+`Sec-Fetch-Site: cross-site`, which only `*` allows: the proxy does not
+check who calls it. See
 [the proxy example](/examples/wasm).
 
 Nothing changes for a page served from a loopback origin that calls a proxy

@@ -1213,9 +1213,11 @@ them.
   by default. Through 0.9.14 the standalone proxy bound every interface,
   every origin was allowed by default, and `--cors-origin` set the response
   header without comparing the request's origin. A request without an
-  `Origin` header is forwarded as before: the proxy does not check who calls
-  it, and one that listens on another address belongs behind your own
-  authentication. Affects 0.4.1 through 0.9.14.
+  `Origin` header is forwarded as before, except one a browser marks
+  `Sec-Fetch-Site: cross-site` (a browser sends no `Origin` on some GETs),
+  which is answered 403 unless `*` allows every origin. The proxy does not
+  check who calls it, and one that listens on another address belongs behind
+  your own authentication. Affects 0.4.1 through 0.9.14.
 
 ### Upgrade notes
 

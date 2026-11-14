@@ -23,7 +23,10 @@ This page is intentionally browser/WASM-specific rather than a cross-surface tab
     rkat mob web build ./dist/my-mob.mobpack -o ./dist/web-bundle --wasm ./meerkat-web-runtime/pkg --trust-policy permissive
     ```
 
-    Then serve and open it: `python3 -m http.server -d ./dist/web-bundle`.
+    Then serve and open it:
+    `python3 -m http.server --bind 127.0.0.1 -d ./dist/web-bundle`.
+    The page is served on this machine only; to show it to others, host the
+    bundle deliberately.
     The generated page trust-verifies the pack and initializes the runtime. A
     host application must still create the mob, spawn members, and provide its
     own prompt/transcript UI.

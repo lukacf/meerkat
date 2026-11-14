@@ -277,7 +277,9 @@ rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web --
 
 Output is a static asset bundle. It still needs provider access through a
 user-supplied key or your authenticated proxy. Serve the directory
-(for example with `python3 -m http.server`) and open `index.html`:
+(for example with `python3 -m http.server --bind 127.0.0.1`) and open
+`index.html`. The page is served on this machine only; to show it to others,
+host the bundle deliberately. The directory holds:
 
 - `index.html` - browser bootstrap page: trust-verifies the pack and initializes the WASM runtime, but does not create a mob or provide prompt/transcript UI
 - `meerkat-bootstrap.js` — reusable ES module exporting `bootMobpack(opts)`; import it from your own app

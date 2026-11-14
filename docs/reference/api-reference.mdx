@@ -460,26 +460,33 @@ Python, TypeScript and Web SDKs keep error details as untyped data.
 0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 Since 0.9.15 `SESSION_BUSY` (`-32002`) with the data
-`{"kind": "reasoning_effort_change_needs_idle_session"}` answers a turn that
-would change the model identity of a session while the session has
-unfinished work (a running turn, or anything queued). The turn is not queued
-and nothing is stored for it. The one `kind` covers every cause. On a session
-that holds a provider-neutral reasoning effort level: a turn that sets,
-changes or clears the level, or that changes the model, the provider, the
-self-hosted server, the provider parameters or the auth binding (a level
-named inside `provider_params` replaces those parameters, so it is one of
-these even when the level is the same; repeat a level with the direct field
-`reasoning_effort`). On a session that holds no level: a turn that sets one.
-Plain turns, turns that repeat the session's level, and on a session without
-a level every other change queue as before. A client may send the same turn
-again: wait for the running turn's answer first, and do not poll. A later
-release is planned to queue such a turn. A level the model or its route does
-not accept is answered with its typed refusal (`INVALID_PARAMS` and the
-`reasoning_effort_refused` data) before this answer, and that refusal is not
-retried unchanged. JSON-RPC `turn/start` and `mob/turn_start` answer it, and
-the MCP server's `meerkat_resume` answers the same `kind` in its tool error's
-data (see [MCP](/api/mcp)). REST does not use it: see
-`POST /sessions/{id}/messages` in [REST](/api/rest).
+`{"kind": "reasoning_effort_change_needs_idle_session"}` answers a JSON-RPC
+turn request (`turn/start`, `mob/turn_start`) that would change the model
+identity of a session while the session has unfinished work (a running turn,
+or anything queued). The turn is not queued and nothing is stored for it. The
+one `kind` covers every cause. On a session that holds a provider-neutral
+reasoning effort level: a turn that sets, changes or clears the level, or
+that changes the model, the provider, the self-hosted server, the provider
+parameters or the auth binding (a level named inside `provider_params`
+replaces those parameters, so it is one of these even when the level is the
+same; repeat a level with the direct field `reasoning_effort`). On a session
+that holds no level: a turn that sets one. Plain turns, turns that repeat the
+session's level, and on a session without a level every other change queue
+as before; the table is in
+[Model settings on a busy session](/api/rpc#model-settings-on-a-busy-session).
+A client may send the same turn again: wait for the running turn's answer
+first, and do not poll. A later release is planned to queue such a turn. A
+level the model or its route does not accept is answered with its typed
+refusal (`INVALID_PARAMS` and the `reasoning_effort_refused` data) before
+this answer, and that refusal is not retried unchanged.
+
+That rule lives in the JSON-RPC turn requests only. The MCP server's
+`meerkat_resume` uses the same `kind`, in its tool error's data, for a case
+of its own: a resume that names the level (set or clear, as the member or
+inside `provider_params`) while a turn is running on the session, whatever
+the session holds; there the level is judged only after the busy answer, when
+the resume is sent again (see [MCP](/api/mcp)). REST does not use the `kind`:
+see `POST /sessions/{id}/messages` in [REST](/api/rest).
 
 For session-service transport behavior specifically, see the [Capability matrix](/reference/capability-matrix#error-codes).
 

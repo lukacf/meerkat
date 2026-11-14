@@ -1153,7 +1153,12 @@ extraction calls.
   `{"kind": "reasoning_effort_change_needs_idle_session"}`, the kind
   JSON-RPC answers such a turn with. Nothing is retired or stored, and the
   running turn and the resumes behind it go on. Wait for the running turn's
-  answer, then send the resume again; do not poll. The level is judged when
+  answer, then send the resume again; do not poll. This is the MCP server's
+  own rule, not the table of the JSON-RPC turn requests
+  ([Model settings on a busy session](/api/rpc#model-settings-on-a-busy-session)):
+  it applies to every resume that names the level while a turn runs,
+  whatever the session holds, a repeat of the session's level and a clear
+  on a session without one included. The level is judged when
   the session is rebuilt, so on a busy session a level the model does not
   accept is answered busy first, and its typed refusal when the resume is
   sent again. One window stays (read from the source, not run): a plain

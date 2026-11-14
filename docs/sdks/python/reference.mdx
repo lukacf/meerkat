@@ -394,7 +394,9 @@ kept as a string. `route`, `supported` and `facts` are always present in the
 refusal data: `None` when they have no value, never left out.
 
 A turn that would change the model identity of a session that has unfinished
-work is not queued behind that work. It fails at once with a `MeerkatError`
+work is not queued behind that work (the rule of the JSON-RPC turn requests:
+[Model settings on a busy session](/api/rpc#model-settings-on-a-busy-session)).
+It fails at once with a `MeerkatError`
 whose `code` is `"-32002"` (session busy) and whose `details` are
 `{"kind": "reasoning_effort_change_needs_idle_session"}`; nothing is stored
 for the turn. The one `kind` covers every cause. On a session that holds a

@@ -454,7 +454,8 @@ is already in the agent's record.
   (`runtime.reset("editor")`; in the Console, the roster's reset action where
   the console configuration shows it, `show_reset`, and the viewer may reset
   the agent) starts a new conversation led by the current instructions, and
-  the earlier conversation is lost. The call is always available. The change
+  the earlier conversation is lost. The call is available for every agent
+  that is not archived. The change
   also takes effect at the agent's next compaction at the start of a run. A
   respawn does not bring the change into effect, and neither does an archive
   followed by an unarchive.

@@ -454,7 +454,8 @@ What to know:
   compacted only when it reaches its compaction threshold (see `compaction`
   in [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)),
   never after a time or a number of turns, and until then the agent goes on
-  following its earlier instructions. `meta/reset` is always available: it
+  following its earlier instructions. `meta/reset` is available for every
+  agent that is not archived: it
   starts the agent on a fresh conversation, built from the current text,
   and gives the earlier conversation up. A respawn (`meta/respawn`) and an
   archive followed by an unarchive keep the conversation and do not bring

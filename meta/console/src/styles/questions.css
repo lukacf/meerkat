@@ -180,5 +180,13 @@
   border-radius: var(--_cc-radius-xs);
 }
 
-/* In the inbox the question sets head the Pending tab, above the approvals. */
+/* In the inbox the question sets head the Pending tab, above the approvals.
+   The list itself takes the focus when a card that held it left and no line
+   is shown for it. */
 .gating-inbox__questions .cc-question-set { margin: 0; }
+.gating-inbox__questions:focus { outline: none; }
+.gating-inbox__questions:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}

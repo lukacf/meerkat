@@ -13943,6 +13943,11 @@ mod tests {
             65_536,
             "Gemini 4 Carbon defaults to its synchronous output cap, as Gemini 4 Argon"
         );
+        assert_eq!(
+            model_aware_default_max_tokens(&registry, Provider::Gemini, "gemini-4-hydrogen"),
+            65_536,
+            "Gemini 4 Hydrogen defaults to its synchronous output cap, as Gemini 4 Argon"
+        );
     }
 
     #[test]

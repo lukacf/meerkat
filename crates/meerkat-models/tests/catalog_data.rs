@@ -267,6 +267,31 @@ fn gemini_4_carbon_is_cataloged_without_changing_the_defaults() {
     assert_eq!(global_default_model(), "gpt-6-astra");
 }
 
+/// Gemini 4 Hydrogen (GA 2026-11-12, on the free and the paid Gemini API
+/// tiers) is a recommended row and does not change the Gemini or the global
+/// default.
+/// <https://ai.google.dev/gemini-api/docs/models/gemini-4-hydrogen>
+/// <https://ai.google.dev/gemini-api/docs/changelog>
+#[test]
+fn gemini_4_hydrogen_is_cataloged_without_changing_the_defaults() {
+    let id = "gemini-4-hydrogen";
+    let entry = entry_for(Provider::Gemini, id).expect("gemini-4-hydrogen must be in the catalog");
+    assert_eq!(entry.provider, "gemini");
+    assert_eq!(entry.display_name, "Gemini 4 Hydrogen");
+    assert_eq!(entry.tier, ModelTier::Recommended);
+    assert_eq!(entry.release_stage, meerkat_core::ModelReleaseStage::Stable);
+    assert_eq!(entry.context_window, Some(1_048_576));
+    assert_eq!(entry.max_input_tokens, None);
+    assert_eq!(entry.max_output_tokens, Some(65_536));
+    assert!(
+        allowed_models(Provider::Gemini).any(|allowed| allowed == id),
+        "gemini-4-hydrogen must be in the Gemini allowlist"
+    );
+    assert_eq!(infer_provider(id), Some(Provider::Gemini));
+    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-argon"));
+    assert_eq!(global_default_model(), "gpt-6-astra");
+}
+
 #[test]
 fn gemini_38_stays_recommended_without_owning_the_default() {
     let recommended = entry_for(Provider::Gemini, "gemini-3.8-flash")
@@ -1557,6 +1582,170 @@ fn gemini_4_carbon_capability_row_matches_the_official_model_page() {
     assert_eq!(carbon_as_argon, format!("{argon:?}"));
 }
 
+/// Google's model page, thinking guide and long decode page give Gemini 4
+/// Hydrogen the limits, inputs, caching and client-timeout guidance of
+/// Gemini 4 Argon. Its thinking levels are low, medium, high and xhigh, and
+/// its default is high: the row lists the three Meerkat's Gemini thinking
+/// level can send.
+#[test]
+fn gemini_4_hydrogen_capability_row_matches_the_official_model_page() {
+    let caps = capabilities_for(Provider::Gemini, "gemini-4-hydrogen")
+        .expect("gemini-4-hydrogen must be in the Gemini catalog");
+    assert_eq!(caps.provider, Provider::Gemini);
+    assert_eq!(caps.display_name, "Gemini 4 Hydrogen");
+    assert_eq!(caps.tier, ModelTier::Recommended);
+    assert_eq!(caps.model_family, "gemini-4");
+    assert_eq!(
+        caps.context_window,
+        Some(1_048_576),
+        "input, thinking and output share one 1,048,576-token window"
+    );
+    assert_eq!(caps.max_input_tokens, None);
+    assert_eq!(
+        caps.max_output_tokens,
+        Some(65_536),
+        "synchronous output cap; longer output needs long decode"
+    );
+    assert_eq!(caps.thinking, ThinkingSupport::GeminiThinkingLevel);
+    assert_eq!(
+        caps.effort_levels,
+        [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High],
+        "the levels Meerkat sends; Google also documents xhigh, which the \
+         Gemini thinking level cannot express"
+    );
+    assert!(
+        !caps.supports_temperature && !caps.supports_top_p && !caps.supports_top_k,
+        "the row records no sampling parameters, as the Argon row"
+    );
+    assert!(
+        !caps.supports_thinking_budget_legacy,
+        "Gemini 4 Hydrogen documents thinking_level only"
+    );
+    assert!(caps.vision);
+    assert!(caps.image_tool_results);
+    assert!(caps.inline_video);
+    assert!(
+        !caps.realtime,
+        "the Live API does not serve Gemini 4 Hydrogen"
+    );
+    assert!(!caps.image_generation);
+    assert!(caps.supports_structured_output);
+    assert!(caps.supports_web_search);
+    assert!(caps.supports_forced_tool_choice);
+    assert!(
+        !caps.supports_mid_conversation_system_messages,
+        "generateContent takes system rows as a leading prefix only"
+    );
+    assert_eq!(
+        caps.call_timeout_secs,
+        Some(900),
+        "the Gemini 4 long decode guidance: stream read timeouts of 15 to 20 minutes"
+    );
+    assert_eq!(caps.stream_inactivity_timeout_secs, Some(900));
+
+    // Every other field equals the Argon row's: the two rows differ in
+    // identity only.
+    let argon = capabilities_for(Provider::Gemini, "gemini-4-argon")
+        .expect("gemini-4-argon must be in the Gemini catalog");
+    let hydrogen_as_argon = format!("{caps:?}")
+        .replace("gemini-4-hydrogen", "gemini-4-argon")
+        .replace("Gemini 4 Hydrogen", "Gemini 4 Argon");
+    assert_eq!(hydrogen_as_argon, format!("{argon:?}"));
+}
+
+/// The provider-neutral `reasoning_effort` on Gemini 4 Hydrogen, resolved as
+/// every door resolves it (`resolve_reasoning_effort`, on the direct
+/// generateContent route, against the catalog row). Google's thinking guide
+/// lists low, medium, high (the default) and xhigh for the model, and no
+/// minimal. The row states low, medium and high, so:
+/// - `high` is written as the Gemini thinking level;
+/// - `xhigh`, which Meerkat does not send in this release, and `minimal` are
+///   refused as `unsupported_level` with the row's levels and `catalog` as
+///   their source, and the request's params are left as they were.
+#[test]
+fn gemini_4_hydrogen_reasoning_effort_resolves_low_to_high_and_refuses_xhigh() {
+    use meerkat_core::lifecycle::run_primitive::{
+        GeminiThinkingLevel, ProviderParamsOverride, ProviderTag,
+    };
+    use meerkat_core::{
+        ReasoningEffortDecidedBy, ReasoningFactsSource, ReasoningLevelFacts, ReasoningResolveInput,
+        ReasoningResolveMode, direct_route_observation, resolve_reasoning_effort,
+        supported_reasoning_levels,
+    };
+
+    let id = "gemini-4-hydrogen";
+    let row = capabilities_for(Provider::Gemini, id);
+    assert!(row.is_some(), "gemini-4-hydrogen must be in the catalog");
+    let route = direct_route_observation(Provider::Gemini);
+    let resolve = |level: EffortLevel, params: &mut Option<ProviderParamsOverride>| {
+        resolve_reasoning_effort(
+            ReasoningResolveInput::new(
+                level,
+                Provider::Gemini,
+                id,
+                route.as_ref(),
+                row,
+                ReasoningEffortDecidedBy::Request,
+            ),
+            params,
+            ReasoningResolveMode::Strict,
+        )
+    };
+
+    assert_eq!(
+        supported_reasoning_levels(Provider::Gemini, route.as_ref(), row),
+        ReasoningLevelFacts::Stated {
+            levels: vec![EffortLevel::Low, EffortLevel::Medium, EffortLevel::High],
+            source: ReasoningFactsSource::Catalog,
+        }
+    );
+
+    for level in [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High] {
+        let mut params = None;
+        let resolution = resolve(level, &mut params).expect("a level the row states resolves");
+        assert_eq!(resolution.level, level);
+        assert_eq!(
+            resolution.fields,
+            ["generationConfig.thinkingConfig.thinkingLevel"]
+        );
+        assert_eq!(resolution.facts, ReasoningFactsSource::Catalog);
+        let written = match params.and_then(|params| params.provider_tag) {
+            Some(ProviderTag::Gemini(tag)) => tag.thinking_level,
+            other => panic!("{level:?}: expected the Gemini tag, got {other:?}"),
+        };
+        let expected = match level {
+            EffortLevel::Low => GeminiThinkingLevel::Low,
+            EffortLevel::Medium => GeminiThinkingLevel::Medium,
+            _ => GeminiThinkingLevel::High,
+        };
+        assert_eq!(written, Some(expected), "{level:?}");
+    }
+
+    for level in [
+        EffortLevel::None,
+        EffortLevel::Minimal,
+        EffortLevel::Xhigh,
+        EffortLevel::Max,
+    ] {
+        let mut params = None;
+        let refusal = resolve(level, &mut params).expect_err("a level the row does not state");
+        assert!(params.is_none(), "{level:?}: a refusal writes nothing");
+        assert_eq!(
+            serde_json::to_value(&refusal).expect("a refusal serializes"),
+            serde_json::json!({
+                "requested": level.as_wire_str(),
+                "provider": "gemini",
+                "model": id,
+                "route": { "backend": "google_genai", "api": "generate_content" },
+                "reason": "unsupported_level",
+                "supported": ["low", "medium", "high"],
+                "facts": "catalog",
+            }),
+            "{level:?}"
+        );
+    }
+}
+
 #[test]
 fn claude_opus_5_capability_row_mirrors_the_claude_5_generation() {
     let caps = capabilities_for(Provider::Anthropic, "claude-opus-5")
@@ -1772,8 +1961,12 @@ fn call_timeout_secs_populated_for_known_models() {
 fn stream_inactivity_windows_follow_documented_long_silent_responses() {
     for caps in all_capabilities() {
         let expected = match (caps.provider, caps.id) {
-            // Google: set client timeouts to at least 15 minutes.
-            (Provider::Gemini, "gemini-4-argon" | "gemini-4-carbon") => Some(900),
+            // Google: set client timeouts to at least 15 minutes (Argon);
+            // stream read timeouts of 15 to 20 minutes (the Gemini 4 long
+            // decode guidance, which names Carbon and Hydrogen too).
+            (Provider::Gemini, "gemini-4-argon" | "gemini-4-carbon" | "gemini-4-hydrogen") => {
+                Some(900)
+            }
             // OpenAI: requests may take several minutes; no streaming.
             (Provider::OpenAI, "gpt-5.5-pro") => Some(7200),
             _ => None,
@@ -2281,12 +2474,17 @@ mod schema {
     /// answers 400 "Thinking level MINIMAL is not supported for this model"
     /// on these models and 200 on every other Gemini row, so only the others
     /// may advertise `minimal`. Gemini 4 Carbon (GA 2026-11-10) is listed
-    /// from the thinking guide, which gives it low, medium and high.
+    /// from the thinking guide, which gives it low, medium and high. Gemini 4
+    /// Hydrogen (GA 2026-11-12) is listed from the thinking guide too, which
+    /// gives it low, medium, high and xhigh and no `minimal`; its `xhigh` is
+    /// not a Gemini thinking level Meerkat sends, so its row advertises low,
+    /// medium and high.
     #[test]
     fn gemini_rows_advertise_only_the_thinking_levels_the_model_accepts() {
         const REFUSES_MINIMAL: &[&str] = &[
             "gemini-4-carbon",
             "gemini-4-argon",
+            "gemini-4-hydrogen",
             "gemini-3.8-flash",
             "gemini-3.7-flash",
             "gemini-3.1-pro-preview",

@@ -197,8 +197,8 @@ Provider requests are routed to the configured proxy base URL, which must own
 the real credentials and expose `/anthropic`, `/openai`, and `/gemini` routes.
 The browser uses placeholder keys and auto-starts on load.
 
-The Web SDK's standalone proxy (`npx @rkat/web proxy --port 8080`) exposes
-those routes. It listens on the loopback interface (`127.0.0.1`) by default;
+From 0.9.15 the Web SDK's standalone proxy (`npx @rkat/web proxy --port 8080`)
+exposes those routes on the loopback interface (`127.0.0.1`) by default;
 `--host <address>` binds another address. It answers pages from loopback
 origins only, unless `--cors-origin <origin>` names another origin, and it
 does not check who calls it: put a proxy that listens on another address

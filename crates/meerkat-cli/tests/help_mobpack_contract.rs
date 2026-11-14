@@ -335,10 +335,13 @@ fn mob_pack_leaves_key_and_output_out_however_their_paths_are_written()
 -> Result<(), Box<dyn std::error::Error>> {
     let rkat = std::env::var_os("CARGO_BIN_EXE_rkat")
         .ok_or("Cargo or Nextest must provide the runtime rkat binary path")?;
-    // Throwaway signing key: 32 bytes made up here, hex encoded.
+    // Throwaway signing key: 32 bytes made up here, as 64 hex digits.
     let key_hex: String = (0u8..32)
-        .map(|index| format!("{:02x}", index.wrapping_mul(7).wrapping_add(11)))
+        .map(|index| index.wrapping_mul(7).wrapping_add(11))
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .filter_map(|nibble| char::from_digit(u32::from(nibble), 16))
         .collect();
+    assert_eq!(key_hex.len(), 64);
 
     // (typed inside the mob directory, directory, key, output); `{mob}` is
     // the mob directory's absolute path.

@@ -7,6 +7,7 @@ import {
   createQuestionSetResource,
   normalizeQuestionSet,
   questionSetAnswerParams,
+  questionSetAnswersOffered,
   questionSetAnswersSendable,
   questionSetDismissParams,
   questionSetEntries,
@@ -242,6 +243,32 @@ describe("question set decision params", () => {
     expect(utf8ByteLength("abc")).toBe(3);
     expect(utf8ByteLength("å")).toBe(2);
     expect(utf8ByteLength("日本")).toBe(6);
+  });
+
+  it("sends an answer for any question id the gateway admits, also the names every object has", () => {
+    // `__proto__`, `constructor` and `toString` are 1 to 32 bytes of a-z, 0-9, _ and -.
+    const ids = ["__proto__", "constructor", "toString".toLowerCase(), "valueof", "hasownproperty"];
+    const named = normalizeQuestionSet(wire(PENDING_ID, {
+      questions: ids.map((id) => ({ id, prompt: `Question ${id}?`, choices: [{ id: "y", label: "Yes" }, { id: "n", label: "No" }], allow_free_text: true })),
+    }))!;
+    expect(named.questions.map((question) => question.id)).toEqual(ids);
+    // Nothing answered: nothing offered and nothing sent, whatever an object inherits.
+    const none = questionSetAnswersOffered(named, {});
+    expect(Object.keys(none)).toEqual([]);
+    for (const id of [...ids, "toString", "valueOf"]) expect(none[id]).toBeUndefined();
+    expect(questionSetAnswersSendable(named, {})).toBe(false);
+    expect(questionSetAnswerParams(named, {}).answers).toEqual([]);
+    // Every question answered, each as the card's draft holds it (an own entry).
+    let draft: Record<string, { kind: "choice"; choiceId: string }> = {};
+    for (const id of ids) draft = { ...draft, [id]: { kind: "choice", choiceId: "y" } };
+    const offered = questionSetAnswersOffered(named, draft);
+    for (const id of ids) expect([id, offered[id]]).toEqual([id, { kind: "choice", choiceId: "y" }]);
+    expect(questionSetAnswersSendable(named, offered)).toBe(true);
+    expect(questionSetAnswerParams(named, offered).answers.map((answer) => answer.question_id)).toEqual(ids);
+    // One alone, the id that names an object's prototype.
+    const alone = questionSetAnswersOffered(named, { ["__proto__"]: { kind: "free_text", text: "Later" } });
+    expect(questionSetAnswersSendable(named, alone)).toBe(true);
+    expect(questionSetAnswerParams(named, alone).answers).toEqual([{ question_id: "__proto__", answer: { kind: "free_text", text: "Later" } }]);
   });
 
   it("says which answer sets can be sent", () => {
@@ -978,6 +1005,28 @@ describe("createQuestionSetResource", () => {
     stage = 2; await resource.refresh();
     expect(resource.getSnapshot()).toMatchObject({ status: "forbidden", sets: [], closed: [], decisions: {}, notices: [], slots: {}, readOnly: true });
     expect(nothingKept(resource.getSnapshot())).toBe(true);
+    resource.dispose();
+  });
+
+  it("keeps each set's own decision and place under any id a server sends, also the names every object has", async () => {
+    const ids = ["__proto__", "constructor", "toString"];
+    const c = clock(); const sent: string[] = [];
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: ids.filter((id) => !sent.includes(id)).map((id) => wire(id)) }),
+      decide: async (params) => { sent.push(params.pending_id); return accepted("answered", params.pending_id); },
+    });
+    await tick();
+    let entries = questionSetEntries(resource.getSnapshot());
+    expect(entries.map((entry) => entry.set.pendingId)).toEqual(ids);
+    // No set has a decision yet, and each has its own place.
+    expect(entries.map((entry) => entry.decision)).toEqual([undefined, undefined, undefined]);
+    expect(new Set(entries.map((entry) => entry.slot)).size).toBe(3);
+    expect(entries.every((entry) => typeof entry.slot === "number")).toBe(true);
+    for (const id of ids) await resource.answer(id, { q1: { kind: "choice", choiceId: "eu" } });
+    expect(sent).toEqual(ids);
+    entries = questionSetEntries(resource.getSnapshot());
+    expect(entries.map((entry) => [entry.set.pendingId, entry.closed, entry.decision?.phase])).toEqual(ids.map((id) => [id, "answered", "answered"]).reverse());
     resource.dispose();
   });
 

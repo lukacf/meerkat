@@ -5,6 +5,7 @@ import { createAgentDirectory } from "../panel-kit/agents";
 import {
   QUESTION_SET_REFUSAL_WORDS,
   normalizeQuestionSet,
+  questionSetAnswerParams,
   type QuestionSet,
   type QuestionSetDecisionState,
   type QuestionSetSnapshot,
@@ -327,6 +328,36 @@ describe("QuestionSetCard", () => {
     expect(send(view).disabled).toBe(true);
     expect(dismiss(view).disabled).toBe(true);
     expect((view.getAllByRole("radio") as HTMLInputElement[]).every((input) => input.disabled)).toBe(true);
+  });
+
+  it("sends what it shows as chosen for any question id the gateway admits, also the names every object has", () => {
+    const ids = ["__proto__", "constructor", "tostring"];
+    const named = questions({ questions: ids.map((id, index) => ({
+      id, prompt: `Question ${index + 1}?`, choices: [{ id: "yes", label: `Yes ${index + 1}` }, { id: "no", label: `No ${index + 1}` }],
+    })) });
+    const { view, onAnswer } = show({ set: named });
+    // Nothing is chosen: no question reads as answered.
+    expect((view.getAllByRole("radio") as HTMLInputElement[]).some((input) => input.checked)).toBe(false);
+    expect(view.queryByRole("button", { name: /^Clear the answer/ })).toBeNull();
+    expect(send(view).disabled).toBe(true);
+    // The question whose id names an object's prototype, alone: Send is offered.
+    fireEvent.click(radio(view, "Yes 1"));
+    expect(radio(view, "Yes 1").checked).toBe(true);
+    expect(send(view).disabled).toBe(false);
+    fireEvent.click(radio(view, "No 2"));
+    fireEvent.click(radio(view, "Yes 3"));
+    expect(view.getAllByRole("button", { name: /^Clear the answer/ }).length).toBe(3);
+    fireEvent.click(send(view));
+    expect(onAnswer).toHaveBeenCalledTimes(1);
+    // What the card showed as chosen is what the request carries.
+    const chosen = onAnswer.mock.calls[0][1];
+    expect(questionSetAnswerParams(named, chosen).answers).toEqual([
+      { question_id: "__proto__", answer: { kind: "choice", choice_id: "yes" } },
+      { question_id: "constructor", answer: { kind: "choice", choice_id: "no" } },
+      { question_id: "tostring", answer: { kind: "choice", choice_id: "yes" } },
+    ]);
+    fireEvent.click(view.getByRole("button", { name: "Clear the answer to: Question 1?" }));
+    expect(radio(view, "Yes 1").checked).toBe(false);
   });
 
   it("drops from the draft what a set that changed no longer offers", () => {

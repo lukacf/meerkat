@@ -362,19 +362,19 @@ calls them at these points:
 - `customize_build` runs once when an identity is seated and Core held no
   member for it (a new identity, an identity a first-boot manifest row brings
   in, a hosted identity its host creates), when a reset or a delete starts
-  the identity's fresh life, when a respawn seats the identity's successor,
-  and when a declared role migration moves it to its new role. That call
-  publishes the identity's customizer tools and records the customized
-  spawn spec in the seat or rotation. It builds
+  the identity's fresh life, and when a declared role migration moves it to
+  its new role. That call publishes the identity's customizer tools and
+  records the customized spawn spec in the seat or rotation. It builds
   nothing, except a declared role migration's restamp of the member onto
   its session, which builds the member from it: a seat that revives the
   archived session of a member Core retired after it was built (an identity
   listed again after its member was retired, for example) is a Dormant seat
-  and builds nothing. From 0.9.15 a respawn's seat is a Dormant seat on the
-  session the member keeps, with no archive in between; for a member the
-  same-session step does not serve (see Known limitations in the changelog)
-  a respawn still retires the member and revives its archived session, as
-  before 0.9.15.
+  and builds nothing. From 0.9.15 a respawn seats the identity's successor
+  in one step, and `customize_build` runs once for that seat, a Dormant seat
+  on the session the member keeps, with no archive in between; before
+  0.9.15, and still for a member the same-session step does not serve (see
+  Known limitations in the changelog), a respawn retires the member and
+  revives its archived session with such a seat.
   `meta/identity/resolved_tools`, which reports the tools a build actually
   resolved, answers `no_build_recorded` until the member's first build. Each
   of these calls gets the runtime's real context: every registered identity

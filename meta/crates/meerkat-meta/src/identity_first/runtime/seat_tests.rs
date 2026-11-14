@@ -3487,7 +3487,8 @@ async fn a_roster_identitys_incarnation_ends_through_cores_one_step_successor() 
         let seated = runtime
             .end_incarnation_for_successor_locked(&alice, &live, cause, "row")
             .await
-            .expect("the incarnation ends");
+            .expect("the incarnation ends")
+            .successor_seated;
 
         assert!(seated, "{cause:?}: Core seated the successor");
         let successors = lock(&core.successors).clone();
@@ -3597,7 +3598,8 @@ async fn a_roster_identitys_incarnation_ends_through_cores_one_step_successor() 
             "row",
         )
         .await
-        .expect("the incarnation ends");
+        .expect("the incarnation ends")
+        .successor_seated;
 
     assert!(
         !seated,
@@ -3783,7 +3785,8 @@ async fn a_roster_member_no_successor_serves_is_retired_with_a_warning_that_name
                 "row",
             )
             .await
-            .expect("the incarnation ends");
+            .expect("the incarnation ends")
+            .successor_seated;
 
         let logged = lock(&lines.0).clone();
         let (level, text, cause) = match expected {
@@ -3801,7 +3804,14 @@ async fn a_roster_member_no_successor_serves_is_retired_with_a_warning_that_name
                 continue;
             }
         };
-        assert!(!seated, "{cause}: the member was retired");
+        assert!(!seated, "{cause}: Core seated no successor");
+        assert!(
+            core.core
+                .live_member(&alice)
+                .expect("the double's member reads")
+                .is_none(),
+            "{cause}: the member was retired"
+        );
         let [(logged_level, logged_text, logged_cause)] = logged.as_slice() else {
             panic!("{cause}: one line: {logged:?}");
         };

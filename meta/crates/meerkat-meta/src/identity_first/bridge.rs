@@ -6251,8 +6251,12 @@ pub trait SessionBridge: Send + Sync {
     /// - `Some(draft)`: the host's roster, with the seat's build the host
     ///   composed for this step (its `customize_build` of `spec`). The
     ///   successor is seated with that build, lowered as the declaration
-    ///   lowers a roster seat: its labels, its profile and model overrides
-    ///   and its build inputs. It keeps the member's own role and runtime
+    ///   lowers a roster seat: its labels and its profile and model
+    ///   overrides. Its build inputs (context, instructions and system
+    ///   prompt among them) are a first build's: only a session no build
+    ///   created yet takes them; a session a build already created keeps
+    ///   what its builds recorded. The successor keeps the member's own
+    ///   role and runtime
     ///   mode: the caller's wake declares the roster's spec, which decides
     ///   a role or mode change as for any seated member. A member whose
     ///   role is no longer the roster's is seated with nothing of the
@@ -6262,7 +6266,8 @@ pub trait SessionBridge: Send + Sync {
     /// such transition. The caller then fails an identity whose record is
     /// its row closed (composing the step from a retire and a seat would
     /// leave such an identity without a member), and retires a roster
-    /// identity's member, which its wake's declaration seats again. A member
+    /// identity's member, which its wake's declaration seats again with the
+    /// same composed build. A member
     /// Core's transition cannot serve is answered
     /// [`BridgeError::UnsupportedForMode`] for a roster identity, before
     /// anything started.
@@ -11175,29 +11180,39 @@ impl SessionBridge for MobSessionBridge {
             }
             // A roster identity's successor is seated with the build its
             // host composed for it, lowered as the declaration lowers a
-            // roster seat on a session it keeps (a resume authors no system
-            // prompt): the seat's labels with a roster spawn's marks, its
-            // profile and model overrides, and its build inputs. The role
-            // and the runtime mode stay the member's own: the wake's
-            // declaration decides a change of either. A member whose role
-            // is no longer the roster's takes nothing of this build: that
-            // declaration composes the one its role move needs.
+            // roster seat: the seat's labels with a roster spawn's marks and
+            // its profile and model overrides. The role and the runtime
+            // mode stay the member's own: the wake's declaration decides a
+            // change of either. A member whose role is no longer the
+            // roster's takes nothing of this build: that declaration
+            // composes the one its role move needs.
+            //
+            // The seat's build inputs (its context, instructions and system
+            // prompt among them) are a first build's. A session a build
+            // already created keeps what its builds recorded, as the seat
+            // that revives a retired member's session does; only a session
+            // no build created yet takes them, whole, as the seat of an
+            // identity Core held no member of does.
             Some(draft) => {
-                let mut seat =
+                let seat =
                     build_spawn_spec(spec, draft, self.base_profile_for_spec(spec).as_ref())?;
-                seat.system_prompt_override = None;
-                let seated_role = self
+                let seated = self
                     .handle
                     .get_member(&member)
                     .await
                     .map_err(|error| spawn_bridge_error("respawn_member", &error))?
-                    .map(|entry| entry.role);
-                if seated_role.as_ref() == Some(&seat.role_name) {
+                    .filter(|entry| entry.role == seat.role_name);
+                if let Some(entry) = seated {
                     request = request
                         .with_labels(seat.labels.clone().unwrap_or_default())
                         .with_profile_override(seat.override_profile.clone())
-                        .with_model_override(seat.model_override.clone())
-                        .with_build_inputs_of(&seat);
+                        .with_model_override(seat.model_override.clone());
+                    if entry
+                        .bridge_session_id()
+                        .is_some_and(|session| self.handle.session_unborn(session))
+                    {
+                        request = request.with_build_inputs_of(&seat);
+                    }
                 }
             }
         }

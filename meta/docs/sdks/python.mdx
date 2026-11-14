@@ -1482,19 +1482,20 @@ adopted instead of respawned, a respawn. `customize_build` runs:
 - once when an identity is seated and the mob held no member for it (a new
   identity, an identity a first-boot manifest row brings in, a hosted
   identity its host creates), when a reset or a delete starts its fresh
-  life, when a respawn seats its successor, and when a declared role
-  migration moves it to its new role, with
+  life, and when a declared role migration moves it to its new role, with
   the runtime's real context (every registered identity as `active_peers`,
   the roster's managed edges). That call publishes the tools and records
   the customized spawn spec. It builds nothing, except a declared role
   migration's move of the member onto its session, which builds the member
   from it: a seat that revives the session of a member that was retired
   after it was built (an identity listed again after its member was
-  retired, for example) is a Dormant seat and builds nothing. From 0.9.15 a
-  respawn's seat is a Dormant seat on the session the member keeps, with no
-  archive in between; for a member the same-session step does not serve
-  (see Known limitations in the changelog) a respawn still retires the
-  member and revives its archived session, as before 0.9.15.
+  retired, for example) is a Dormant seat and builds nothing. From 0.9.15
+  a respawn seats the identity's successor in one step, and
+  `customize_build` runs once for that seat, a Dormant seat on the session
+  the member keeps, with no archive in between; before 0.9.15, and still
+  for a member the same-session step does not serve (see Known limitations
+  in the changelog), a respawn retires the member and revives its archived
+  session with such a seat.
   `resolved_tools`, which reports the tools a build actually resolved,
   answers `no_build_recorded` until the member's first build. Your
   `after_create(identity,

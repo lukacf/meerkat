@@ -70,6 +70,19 @@ enum SuccessorSeat {
     Retired(Unserved),
 }
 
+/// How a member's incarnation ended for its successor
+/// ([`IdentityRuntime::end_incarnation_for_successor_locked`]): what the
+/// caller hands to its wake.
+#[derive(Debug, Default)]
+pub(crate) struct EndedForSuccessor {
+    /// Core seated the successor in the step that ended the incarnation.
+    pub(crate) successor_seated: bool,
+    /// The seat's build the host composed for a step that then did not
+    /// serve the member, which was retired instead: the wake's declaration
+    /// seats the identity again with it, and asks the host for no other.
+    pub(crate) composed_seat: Option<Box<AgentBuildDraft>>,
+}
+
 /// Why no one-step successor serves a roster identity's member, by what a
 /// restart between its retirement and its wake does to the mobs its session
 /// owns.
@@ -385,32 +398,40 @@ impl IdentityRuntime {
     /// - the host's roster: the host composes the seat's build first (its
     ///   `customize_build` of the registered spec, whose tools are
     ///   published and whose `after_create` the lifecycle projection tells
-    ///   of the successor's seat), and the successor is seated with it, as
-    ///   the declaration of an unseated identity seats it. A build the host
-    ///   refuses refuses the step before Core is asked: nothing has
-    ///   changed. The wake's declaration then keeps the seat.
+    ///   of the successor's seat), and the successor is seated with it: its
+    ///   labels and overrides, and for a session no build created yet its
+    ///   build inputs, as the declaration of an unseated identity seats it.
+    ///   A build the host refuses refuses the step before Core is asked:
+    ///   nothing has changed. The wake's declaration then keeps the seat.
+    ///   The build's tools are published while the incarnation it replaces
+    ///   is still live: a step Core refuses before it starts (another
+    ///   lifecycle operation of the member is pending) retires nothing and
+    ///   leaves the member with those tools.
     ///
     /// A roster identity's member that no one-step successor serves is
     /// retired instead, and the wake's declaration seats the identity again
     /// on its archived session, composing its build there: a member placed
-    /// on another host, one with no session, one whose session does not
-    /// outlive it (or whose bridge cannot say), and one Core's step refuses
-    /// as unsupported, for which the host's build is then composed a second
-    /// time by that declaration.
+    /// on another host, one with no session, and one whose session does not
+    /// outlive it (or whose bridge cannot say). A member Core's step refuses
+    /// as unsupported once its seat was composed is retired too, and that
+    /// declaration seats the identity again with the build already composed
+    /// ([`EndedForSuccessor::composed_seat`]): the host is asked for the
+    /// seat once, as for every other respawn.
     ///
     /// Either way what the retirement owes is recorded before Core is asked,
     /// as a reload's: a successor on the same session owes no side effect.
-    /// `step` names the caller's step in a failure. `Ok(true)` when Core
-    /// seated the successor already: the caller hands that to its wake
-    /// (`EmbodimentOverrides::successor_seated`), which announces the
-    /// successor as the wake that seats a retired identity's does.
+    /// `step` names the caller's step in a failure. The answer says whether
+    /// Core seated the successor already: the caller hands it to its wake
+    /// (`EmbodimentOverrides::successor_seated` and `composed_seat`), which
+    /// announces the successor as the wake that seats a retired identity's
+    /// does.
     pub(super) async fn end_incarnation_for_successor_locked(
         &self,
         identity: &AgentIdentity,
         live: &MemberRuntimeBinding,
         cause: SuccessorCause,
         step: &'static str,
-    ) -> Result<bool, IdentityRuntimeError> {
+    ) -> Result<EndedForSuccessor, IdentityRuntimeError> {
         let bridge = self.core_bridge(identity)?;
         let seat = match self.spec_record(identity).await? {
             SpecRecord::Store => SuccessorSeat::Row(self.adopt_row_spec_locked(identity).await?),
@@ -436,26 +457,31 @@ impl IdentityRuntime {
             SuccessorCause::CompactionFloor(floor) => Some(floor),
             SuccessorCause::Respawn | SuccessorCause::Reload => None,
         };
-        let (ended, successor_seated) = match &seat {
+        let seated = EndedForSuccessor {
+            successor_seated: true,
+            composed_seat: None,
+        };
+        let (ended, answer) = match seat {
             SuccessorSeat::Row(spec) => (
                 bridge
-                    .respawn_member_on_own_session(identity, spec, None, floor_change)
+                    .respawn_member_on_own_session(identity, &spec, None, floor_change)
                     .await,
-                true,
+                seated,
             ),
             SuccessorSeat::Composed(spec, draft) => {
                 match bridge
-                    .respawn_member_on_own_session(identity, spec, Some(draft), floor_change)
+                    .respawn_member_on_own_session(identity, &spec, Some(&draft), floor_change)
                     .await
                 {
                     // Core's step does not serve this member, and nothing
-                    // started: the build composed for it is let go, and the
-                    // wake's declaration composes the one it seats.
+                    // started: the member is retired, and the wake's
+                    // declaration seats the identity again with the build
+                    // composed for the step. That build stays noted for the
+                    // `after_create` of the seat the declaration makes.
                     Err(
                         error @ (BridgeError::Unsupported { .. }
                         | BridgeError::UnsupportedForMode { .. }),
                     ) => {
-                        self.forget_lifecycle_build(identity);
                         // The step is asked only for a session the store
                         // keeps.
                         log_retired_for_successor(
@@ -464,7 +490,17 @@ impl IdentityRuntime {
                             step,
                             &Unserved::StoredSession(error.to_string()),
                         );
-                        (bridge.retire_member(&live.agent_runtime_id).await, false)
+                        let retired = bridge.retire_member(&live.agent_runtime_id).await;
+                        if retired.is_err() {
+                            self.forget_lifecycle_build(identity);
+                        }
+                        (
+                            retired,
+                            EndedForSuccessor {
+                                successor_seated: false,
+                                composed_seat: Some(draft),
+                            },
+                        )
                     }
                     ended => {
                         // The composed build is the one the successor's
@@ -473,13 +509,16 @@ impl IdentityRuntime {
                             (Ok(()), Some(session)) => self.bind_lifecycle_build(identity, session),
                             _ => self.forget_lifecycle_build(identity),
                         }
-                        (ended, true)
+                        (ended, seated)
                     }
                 }
             }
             SuccessorSeat::Retired(unserved) => {
-                log_retired_for_successor(identity, live, step, unserved);
-                (bridge.retire_member(&live.agent_runtime_id).await, false)
+                log_retired_for_successor(identity, live, step, &unserved);
+                (
+                    bridge.retire_member(&live.agent_runtime_id).await,
+                    EndedForSuccessor::default(),
+                )
             }
         };
         if let Err(error) = ended {
@@ -505,7 +544,7 @@ impl IdentityRuntime {
         self.settle_lifecycle_retirement(prepared).await;
         // Seated already by Core's one step, or seated by the caller's wake
         // (a retired roster identity's): the caller tells its wake which.
-        Ok(successor_seated)
+        Ok(answer)
     }
 
     /// What the successor of roster identity `identity`'s live member

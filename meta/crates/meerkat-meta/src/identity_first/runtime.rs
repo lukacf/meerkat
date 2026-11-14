@@ -4265,6 +4265,12 @@ pub(crate) struct EmbodimentOverrides<'a> {
     /// whose seat no declaration requests): the wake finds it seated, and
     /// it is a new member to the identity's subscribers all the same.
     pub(crate) successor_seated: bool,
+    /// The seat's build the host composed just before this wake, under the
+    /// same lifecycle lock, for a same-session successor Core's step then
+    /// did not serve: the member was retired instead, and the wake's
+    /// declaration seats the identity again with this build and asks the
+    /// host for no other.
+    pub(crate) composed_seat: Option<Box<AgentBuildDraft>>,
 }
 
 /// Meta's durable identity records: the metadata store and the mob id
@@ -8431,7 +8437,7 @@ impl IdentityRuntime {
                     if carried_out {
                         self.finish_declaration(&[], true).await;
                     }
-                    self.declare_identity_locked(&spec, None).await
+                    self.declare_identity_locked(&spec, None, None).await
                 }
                 Err(error) => Err(error),
             }
@@ -9921,7 +9927,11 @@ impl IdentityRuntime {
             self.finish_declaration(&[], true).await;
         }
         let seat = self
-            .declare_identity_locked(&spec, overrides.customizer)
+            .declare_identity_locked(
+                &spec,
+                overrides.customizer,
+                overrides.composed_seat.map(|draft| *draft),
+            )
             .await?;
         if cancellation
             .as_ref()
@@ -14358,7 +14368,7 @@ impl IdentityRuntime {
         // serves a roster identity's member, the roster's declaration lowers
         // the floor into the build that seats the identity again at the wake
         // below.
-        let successor_seated = self
+        let ended = self
             .retire_locked_with_intent(
                 identity,
                 LifecycleRetireIntent::Reload(created::SuccessorCause::CompactionFloor(
@@ -14385,7 +14395,8 @@ impl IdentityRuntime {
                 None,
                 &mut trace,
                 EmbodimentOverrides {
-                    successor_seated,
+                    successor_seated: ended.successor_seated,
+                    composed_seat: ended.composed_seat,
                     ..EmbodimentOverrides::default()
                 },
             )
@@ -14458,7 +14469,7 @@ impl IdentityRuntime {
         &self,
         identity: &AgentIdentity,
         intent: LifecycleRetireIntent,
-    ) -> Result<bool, IdentityRuntimeError> {
+    ) -> Result<created::EndedForSuccessor, IdentityRuntimeError> {
         // A host-adopted identity is read-only to Meta.
         self.refuse_host_adopted(identity).await?;
         let Some(live) = self.core_live_member(identity).await? else {
@@ -14486,7 +14497,7 @@ impl IdentityRuntime {
                     .map_err(|err| release_error(identity, live.session_id.as_ref(), err))?;
                 self.clear_wake_notes_of_live_member(identity).await;
                 self.entries.notify_binding_changed();
-                return Ok(false);
+                return Ok(created::EndedForSuccessor::default());
             }
             LifecycleRetireIntent::Reload(cause) => cause,
         };
@@ -14494,7 +14505,7 @@ impl IdentityRuntime {
         // session, which owes none of a retirement's side effects: the one
         // seat request that depends on the record holding the identity's
         // spec. Whether Core seated the successor already is the answer.
-        let successor_seated = self
+        let ended = self
             .end_incarnation_for_successor_locked(identity, &live, cause, "retire")
             .await?;
         self.clear_wake_notes_of_live_member(identity).await;
@@ -14508,7 +14519,7 @@ impl IdentityRuntime {
             },
         )
         .await;
-        Ok(successor_seated)
+        Ok(ended)
     }
 
     // -----------------------------------------------------------------------
@@ -14650,15 +14661,13 @@ impl IdentityRuntime {
             "reload_member: retiring the live member and waking it onto the same session \
              (non-destructive; Core's generation advances)"
         );
-        let successor_seated = self
+        let ended = self
             .retire_locked_with_intent(
                 identity,
                 LifecycleRetireIntent::Reload(created::SuccessorCause::Reload),
             )
             .await?;
-        let outcome = self
-            .wake_onto_last_session_locked(identity, successor_seated)
-            .await?;
+        let outcome = self.wake_onto_last_session_locked(identity, ended).await?;
         Ok(outcome)
     }
 
@@ -14677,7 +14686,8 @@ impl IdentityRuntime {
             "reload_member: re-attempting the resume of a session held for the sanctioned \
              audited-endpoint repair"
         );
-        self.wake_onto_last_session_locked(identity, false).await
+        self.wake_onto_last_session_locked(identity, created::EndedForSuccessor::default())
+            .await
     }
 
     /// Wake `identity` through the one wake door under the caller's
@@ -14689,7 +14699,7 @@ impl IdentityRuntime {
     async fn wake_onto_last_session_locked(
         &self,
         identity: &AgentIdentity,
-        successor_seated: bool,
+        ended: created::EndedForSuccessor,
     ) -> Result<MemberReloadOutcome, IdentityRuntimeError> {
         let before = self.core_last_binding(identity).await?;
         let mut trace = EmbodimentTrace::default();
@@ -14701,7 +14711,8 @@ impl IdentityRuntime {
                 None,
                 &mut trace,
                 EmbodimentOverrides {
-                    successor_seated,
+                    successor_seated: ended.successor_seated,
+                    composed_seat: ended.composed_seat,
                     ..EmbodimentOverrides::default()
                 },
             )
@@ -15096,7 +15107,7 @@ impl IdentityRuntime {
             return Err(IdentityRuntimeError::UnknownIdentity(identity.clone()));
         }
         self.refuse_host_adopted(identity).await?;
-        let mut successor_seated = false;
+        let mut ended = created::EndedForSuccessor::default();
         if let Some(live) = self.core_live_member(identity).await? {
             // The step below ends the incarnation, and the wake after it
             // builds the successor on the session from what Core keeps of
@@ -15130,7 +15141,7 @@ impl IdentityRuntime {
             // that ends the incarnation; what it is seated with depends on
             // the record that holds the identity's spec: the one selection
             // of this runtime.
-            successor_seated = self
+            ended = self
                 .end_incarnation_for_successor_locked(
                     identity,
                     &live,
@@ -15149,7 +15160,8 @@ impl IdentityRuntime {
                 None,
                 &mut trace,
                 EmbodimentOverrides {
-                    successor_seated,
+                    successor_seated: ended.successor_seated,
+                    composed_seat: ended.composed_seat,
                     ..EmbodimentOverrides::default()
                 },
             )
@@ -15472,7 +15484,7 @@ impl IdentityRuntime {
                 .held_create_pass()
                 .is_none_or(|pass| !pass.covers(identity))
         {
-            self.declare_identity_locked(&spec, None).await?;
+            self.declare_identity_locked(&spec, None, None).await?;
         }
         if self.core_live_member(identity).await?.is_some() {
             self.clear_wake_notes_of_live_member(identity).await;

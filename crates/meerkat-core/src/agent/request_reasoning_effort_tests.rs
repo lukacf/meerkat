@@ -748,6 +748,37 @@ async fn run_start_request_events_and_the_run_result_report_the_level() {
         }),
         "a request without the level is handed on untouched"
     );
+
+    // The same with a client that has a default provider tag: without a
+    // level nothing joins that tag to the request. The params arrive as the
+    // session set them, with no tag; applying its default is the client's.
+    let client = Arc::new(
+        RouteClient::new(Some(operator_route(LOW_AND_HIGH))).with_default_tag(ProviderTag::OpenAi(
+            OpenAiProviderTag {
+                seed: Some(7),
+                ..Default::default()
+            },
+        )),
+    );
+    let mut agent = build(
+        &client,
+        base_builder(ProviderParamsOverride {
+            temperature: Some(0.5),
+            ..Default::default()
+        }),
+    )
+    .await;
+    let (result, events) = run_collecting(&mut agent, "hello").await;
+    assert_eq!(result.expect("the run completes").reasoning_effort, None);
+    assert!(request_reports(&events).is_empty());
+    assert_eq!(
+        client.served()[0].params,
+        Some(ProviderParamsOverride {
+            temperature: Some(0.5),
+            ..Default::default()
+        }),
+        "without a level the client's default tag is not written into the request"
+    );
 }
 
 /// A client's own default tag applies to a request that carries none. A

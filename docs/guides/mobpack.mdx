@@ -13,8 +13,8 @@ A mobpack is not a VM, container, or complete host image. It carries a mob
 definition and the files of its mob directory. It does not carry the Meerkat
 binary, OS packages, or operator network policy. It should not carry provider
 credentials or secret environment values either, but nothing removes them:
-`rkat mob pack` archives every regular file under the mob directory (see
-[What is packed](#what-is-packed)).
+`rkat mob pack` archives every regular file under the mob directory; two
+files are meant to be left out (see [What is packed](#what-is-packed)).
 </Note>
 
 ## What this guide is for
@@ -75,6 +75,38 @@ into the pack. With a `.rkat/` in a directory above, the state goes there and
 is not packed. `rkat mob pack`, `rkat mob inspect` and `rkat mob validate` do
 not create the directory.
 
+Two files are meant to be left out: the key this pack is signed with
+(`--sign`) and the file this run writes (`-o`). In 0.4.1 through 0.9.14
+(confirmed by runs on 0.9.14; the earlier releases read from the source)
+each is left out only when its path, component by component, is the mob
+directory argument's path followed by the file's own
+(`rkat mob pack mob -o mob/out.mobpack --sign mob/release.key --signer-id <id>`,
+or `.` with `./out.mobpack` and `./release.key`). A single or doubled
+separator at the end of the directory argument, or a doubled one right after
+the directory in the file's path, makes no difference; a doubled separator or
+a `.` further inside the file's path does, and the key is packed. With any
+other components, the key is packed, and so is the output of an earlier pack
+at that path:
+`rkat mob pack . -o out.mobpack --sign release.key --signer-id <id>` inside
+the mob directory, `./mob` with `mob/release.key`, an absolute directory
+with a relative path, a path through a symbolic link. A pack that holds its
+signing key gives the key to everyone who gets the pack.
+
+From 0.9.15 the two are left out however their paths are written. What is
+left out is the file that is this pack's signing key and the file this run
+writes: by its resolved path, and on Linux and macOS also by file identity,
+so another name of the same file (a hard link, or another case on a file
+system that ignores case) is left out too. On Windows the comparison is by
+resolved path only. The identity comparison is tested through hard links;
+a file system that ignores case and the Windows comparison were read from
+the source, not run. From 0.9.15 a key or output path that cannot be
+resolved, for another reason than that the file does not exist, fails the
+command instead of being compared as written.
+
+In every release a copy of the key is another file and is packed, and so are
+a key file this pack is not signed with, a key file when the pack is not
+signed, and a pack written earlier under another name.
+
 A pack is a gzip-compressed tar archive: anyone who has the file can read
 every file in it. A web build copies the pack into its bundle as
 `mobpack.bin`, so everyone who can load the hosted page can download it.
@@ -83,7 +115,7 @@ Before you share a pack or host a bundle:
 
 - Keep env files, keys and repository metadata out of the mob directory.
 - Keep the signing key and the pack output outside the mob directory, as the
-  commands in this guide do.
+  command under Signed packs and trust policy does.
 - Keep rkat's state out of the mob directory: run `rkat` from another
   directory, or pass `--state-root <directory outside the mob directory>`. If
   the mob directory already holds a `.rkat/` directory, move it out.

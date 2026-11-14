@@ -270,14 +270,22 @@ impl QuestionConsole {
     }
 
     /// Answer `pending_id` as `token`: the first choice of the first
-    /// question, the second question skipped.
+    /// question, the second question skipped. An id that names no decision
+    /// is sent with a digest of nothing.
     async fn answer(&self, token: Option<&str>, pending_id: &str) -> Value {
+        let digest = DecisionId::new(pending_id.to_string())
+            .ok()
+            .and_then(|id| self.decisions.owner().get(&id).ok())
+            .map_or_else(
+                || Sha256Digest::of(b"no set").to_string(),
+                |row| row.descriptor.subject_digest.to_string(),
+            );
         self.decide(
             token,
             json!({
                 "pending_id": pending_id,
                 "decision": "approve",
-                "presented_digest": self.digest(pending_id),
+                "presented_digest": digest,
                 "answers": [choice("q1", "a")],
             }),
         )
@@ -783,12 +791,20 @@ async fn only_a_person_who_may_view_the_asker_answers() {
     let visible_to_carol = console.asked(OTHER, "call-2").await;
     let carol_listed = console.listed(Some(&carol())).await;
     let carol_decides = console.answer(Some(&carol()), &pending_id).await;
-    // A caller who may not view the asking member is refused before
-    // anything of its request is read.
+    // The set of a member the caller may not view is decided exactly as an
+    // id that names nothing, whatever the request says.
+    let unknown = format!("decision:{}", "0".repeat(64));
+    let carol_unknown = console.answer(Some(&carol()), &unknown).await;
     let carol_unread = console
         .decide(
             Some(&carol()),
             json!({ "pending_id": pending_id, "decision": "maybe" }),
+        )
+        .await;
+    let carol_unread_unknown = console
+        .decide(
+            Some(&carol()),
+            json!({ "pending_id": unknown, "decision": "maybe" }),
         )
         .await;
     let named = console
@@ -848,21 +864,17 @@ async fn only_a_person_who_may_view_the_asker_answers() {
     open_console.stop().await;
 
     assert_eq!(
-        refusal_kind(&carol_unread),
-        &json!("access_denied"),
-        "the origin check precedes the request's parse: {carol_unread}"
+        refusal_shape(&carol_unread, &pending_id),
+        refusal_shape(&carol_unread_unknown, &unknown),
+        "a hidden set's decide reads as an unknown id's, whatever it asks: {carol_unread}"
     );
     assert_eq!(carol_listed, vec![visible_to_carol]);
     assert_eq!(
-        refusal_kind(&carol_decides),
-        &json!("access_denied"),
-        "{carol_decides}"
+        refusal_shape(&carol_decides, &pending_id),
+        refusal_shape(&carol_unknown, &unknown),
+        "a hidden set is decided as an id that names nothing: {carol_decides}"
     );
-    assert_eq!(
-        carol_decides["error"]["message"],
-        json!("access denied to approval origin"),
-        "{carol_decides}"
-    );
+    assert!(!carol_unknown["error"].is_null(), "{carol_unknown}");
     assert_eq!(named["error"]["code"], json!(-32602), "{named}");
     assert_eq!(
         refusal_kind(&service),
@@ -939,8 +951,9 @@ async fn an_answer_rechecks_its_person_when_it_commits() {
 }
 
 /// A grant withdrawn while the answer waits is honored when the decision
-/// commits: without `gating.decide` it is `access_denied`, and so it is
-/// once the person may no longer view the asking member.
+/// commits: without `gating.decide` it is `access_denied`, and once the
+/// person may no longer view the asking member the set is decided as an id
+/// that names nothing.
 #[tokio::test]
 async fn an_answer_rechecks_its_grants_when_it_commits() {
     let mut refusals = Vec::new();
@@ -976,6 +989,9 @@ async fn an_answer_rechecks_its_grants_when_it_commits() {
         hold.release();
         let answer = tokio::time::timeout(Duration::from_secs(30), decide).await;
         let phase = console.row(&pending_id).state.phase;
+        // What the same person is answered for an id that names nothing.
+        let unknown = format!("decision:{}", "0".repeat(64));
+        let unknown_answer = console.answer(Some(&carol()), &unknown).await;
         console.stop().await;
         reached.expect("the decide reached its hand-off");
         replaced.expect("the configuration is replaced");
@@ -983,21 +999,25 @@ async fn an_answer_rechecks_its_grants_when_it_commits() {
             removed,
             answer.expect("answered").expect("the decide task"),
             phase,
+            refusal_shape(&unknown_answer, &unknown),
+            pending_id,
         ));
     }
 
     // Every case is judged, and each one that is not refused as it should
-    // be is named.
+    // be is named: without `gating.decide` the refusal names it; a set whose
+    // asking member the person may no longer view is decided as an id that
+    // names nothing.
     let mut honored = Vec::new();
-    for (removed, answer, phase) in refusals {
-        let message = match removed {
-            "carol-gating" => "access denied to gating decisions",
-            _ => "access denied to approval origin",
+    for (removed, answer, phase, unknown, pending_id) in refusals {
+        let refused = match removed {
+            "carol-gating" => {
+                refusal_kind(&answer) == &json!("access_denied")
+                    && answer["error"]["message"] == json!("access denied to gating decisions")
+            }
+            _ => !answer["error"].is_null() && refusal_shape(&answer, &pending_id) == unknown,
         };
-        if refusal_kind(&answer) != &json!("access_denied")
-            || answer["error"]["message"] != json!(message)
-            || phase != DecisionPhase::Open
-        {
+        if !refused || phase != DecisionPhase::Open {
             honored.push(format!("{removed} withdrawn: {phase:?} {answer}"));
         }
     }
@@ -1036,6 +1056,8 @@ async fn a_private_members_set_is_its_owners() {
     let pending_id = console.asked("agent-p", "call-1").await;
     let others_list = console.listed(Some(&carol())).await;
     let others_answer = console.answer(Some(&carol()), &pending_id).await;
+    let unknown = format!("decision:{}", "0".repeat(64));
+    let others_unknown = console.answer(Some(&carol()), &unknown).await;
     let phase_after_other = console.row(&pending_id).state.phase;
     let owners_list = console.listed(Some(&bob())).await;
     let owners_answer = console.answer(Some(&bob()), &pending_id).await;
@@ -1043,10 +1065,11 @@ async fn a_private_members_set_is_its_owners() {
 
     assert_eq!(others_list, Vec::<String>::new());
     assert_eq!(
-        refusal_kind(&others_answer),
-        &json!("access_denied"),
-        "{others_answer}"
+        refusal_shape(&others_answer, &pending_id),
+        refusal_shape(&others_unknown, &unknown),
+        "to others the set is decided as an id that names nothing: {others_answer}"
     );
+    assert!(!others_unknown["error"].is_null(), "{others_unknown}");
     assert_eq!(phase_after_other, DecisionPhase::Open);
     assert_eq!(owners_list, vec![pending_id]);
     assert_eq!(
@@ -1989,6 +2012,9 @@ async fn a_refusal_of_the_decision_is_typed() {
         .await;
     clock.0.store(now_ms + 61_000, Ordering::SeqCst);
     let another = Sha256Digest::of(b"another set").to_string();
+    // A decide the set refuses records nothing: no decide event is bound
+    // for a set that ended, one past its deadline, or another digest.
+    let recorded_before = other_files(state_dir.path());
     let cases = [
         (
             "a set that ended",
@@ -2022,9 +2048,14 @@ async fn a_refusal_of_the_decision_is_typed() {
         );
         answers.push((label, refusal, on_console, on_stdio.error));
     }
+    let recorded_after = other_files(state_dir.path());
     let open_phase = console.row(&open).state.phase;
     console.stop().await;
 
+    assert!(
+        recorded_before == recorded_after,
+        "a decide the set refuses records nothing outside the decision store"
+    );
     assert_eq!(
         dismissal["result"]["outcome"],
         json!("dismissed"),
@@ -2191,6 +2222,8 @@ async fn a_caller_the_read_hides_a_set_from_cannot_decide_it() {
     let pending_id = console.asked("agent-u", "call-1").await;
     let listed = console.listed(Some(&bob())).await;
     let decided = console.answer(Some(&bob()), &pending_id).await;
+    let unknown = format!("decision:{}", "0".repeat(64));
+    let decided_unknown = console.answer(Some(&bob()), &unknown).await;
     let phase = console.row(&pending_id).state.phase;
     let dave = token(
         json!({ "sub": "oidc-sub-dave", "email": DAVE, "provider": "google_oauth" }),
@@ -2206,15 +2239,11 @@ async fn a_caller_the_read_hides_a_set_from_cannot_decide_it() {
         "the read lists no set of a member the Console does not know"
     );
     assert_eq!(
-        refusal_kind(&decided),
-        &json!("access_denied"),
+        refusal_shape(&decided, &pending_id),
+        refusal_shape(&decided_unknown, &unknown),
         "a caller the read hides the set from cannot decide it: {decided}"
     );
-    assert_eq!(
-        decided["error"]["message"],
-        json!("access denied to approval origin"),
-        "{decided}"
-    );
+    assert!(!decided_unknown["error"].is_null(), "{decided_unknown}");
     assert_eq!(phase, DecisionPhase::Open);
     assert_eq!(admin_listed, vec![pending_id]);
     assert_eq!(
@@ -2367,4 +2396,276 @@ async fn a_withdraw_past_the_deadline_still_answers_the_expiry_it_records() {
         "a withdraw past the deadline answers the expiry it records: {withdrawal}"
     );
     assert_eq!(phase, DecisionPhase::Expired);
+}
+
+/// One reader's walk over `meta/decisions/list` under `filter`, a row a
+/// page: every page read.
+async fn decision_pages(console: &QuestionConsole, bearer: &str, filter: &Value) -> Vec<Value> {
+    let mut pages = Vec::new();
+    let mut after: Option<String> = None;
+    for _ in 0..8 {
+        let mut params = filter.clone();
+        params["limit"] = json!(1);
+        if let Some(after) = &after {
+            params["after"] = json!(after);
+        }
+        let page = console_rpc_as(&console.app, Some(bearer), "meta/decisions/list", params).await;
+        after = page["result"]["next_after"].as_str().map(str::to_string);
+        pages.push(page);
+        if after.is_none() {
+            break;
+        }
+    }
+    pages
+}
+
+/// What a walk tells of the sets `hidden`: those its pages name anywhere,
+/// and how many of its pages carry a cursor and no row.
+fn told_of(pages: &[Value], hidden: &[String]) -> (Vec<String>, usize) {
+    let read = serde_json::to_string(pages).expect("pages");
+    let named = hidden
+        .iter()
+        .filter(|set| read.contains(set.as_str()))
+        .cloned()
+        .collect();
+    let rows = |page: &Value, field: &str| page["result"][field].as_array().map_or(0, Vec::len);
+    let empty_with_cursor = pages
+        .iter()
+        .filter(|page| {
+            rows(page, "decisions") + rows(page, "statuses") == 0
+                && page["result"]["next_after"].is_string()
+        })
+        .count();
+    (named, empty_with_cursor)
+}
+
+/// The decision list pages over what its reader may see: read a row a page,
+/// by kind or by the asking member, it names no question set of a member
+/// hidden from the reader, in a row or in a cursor, and gives no page that
+/// carries a cursor and no row. So for a person who administers decisions,
+/// and for one who holds the approver id of question sets; an access admin
+/// reads every set.
+#[tokio::test]
+async fn the_decision_list_pages_tell_nothing_of_a_set_hidden_from_their_reader() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let config: crate::access::AccessControlConfig = serde_json::from_value(json!({
+        "enabled": true,
+        "admins": [DAVE],
+        "rules": [
+            {
+                "id": "carol-administers-decisions",
+                "subjects": [CAROL],
+                "actions": [
+                    crate::access::ACTION_DECISIONS_VIEW,
+                    crate::access::ACTION_DECISIONS_ADMIN,
+                    ACTION_AGENT_VIEW,
+                ],
+            },
+            {
+                "id": "bob-reads-decisions",
+                "subjects": [BOB],
+                "actions": [crate::access::ACTION_DECISIONS_VIEW, ACTION_AGENT_VIEW],
+            },
+        ],
+        "approvers": { "ask_user": { "subjects": [BOB] } },
+    }))
+    .expect("access configuration");
+    let setup = Setup::enforced().access(config);
+    setup
+        .access
+        .as_ref()
+        .expect("access controller")
+        .record_agent_attributes(crate::access::AgentResourceAttributes {
+            identity: "agent-p".to_string(),
+            agent_id: None,
+            role: Some("worker".to_string()),
+            labels: BTreeMap::from([(
+                crate::access::PRIVATE_TO_LABEL.to_string(),
+                person_private_owner_key(ISSUER, "oidc-sub-someone-else"),
+            )]),
+        });
+    let console = QuestionConsole::start(
+        "questions-decision-pages",
+        setup,
+        decisions_in(state_dir.path(), "questions-decision-pages", true),
+    )
+    .await;
+    let hidden = [
+        console.asked("agent-p", "call-1").await,
+        console.asked("agent-p", "call-2").await,
+    ];
+    let shared_set = console.asked(ASKER, "call-3").await;
+    let by_kind = json!({ "kind": ASK_USER_QUESTIONS_KIND });
+    let by_hidden_asker =
+        json!({ "requester": console.row(&hidden[0]).descriptor.requester.as_str() });
+    let mut told = Vec::new();
+    for (reader, bearer) in [
+        ("a person who administers decisions", carol()),
+        ("a holder of the approver id", bob()),
+    ] {
+        for (walk, filter) in [
+            ("by kind", &by_kind),
+            ("by the hidden asker", &by_hidden_asker),
+        ] {
+            let pages = decision_pages(&console, &bearer, filter).await;
+            let (named, empty_with_cursor) = told_of(&pages, &hidden);
+            if !named.is_empty() || empty_with_cursor != 0 {
+                told.push(format!(
+                    "{reader}, {walk}: names {named:?}; {empty_with_cursor} pages with a \
+                     cursor and no row"
+                ));
+            }
+            let read = serde_json::to_string(&pages).expect("pages");
+            if walk == "by kind" && !read.contains(&shared_set) {
+                told.push(format!(
+                    "{reader}, {walk}: the set they may see is not read: {read}"
+                ));
+            }
+        }
+    }
+    let dave = token(
+        json!({ "sub": "oidc-sub-dave", "email": DAVE, "provider": "google_oauth" }),
+        Some(now_seconds() + 3600),
+    );
+    let admin_pages = decision_pages(&console, &dave, &by_kind).await;
+    console.stop().await;
+
+    assert!(
+        told.is_empty(),
+        "the pages tell nothing of a hidden set: {told:#?}"
+    );
+    let (admin_named, admin_empty) = told_of(&admin_pages, &hidden);
+    assert_eq!(admin_named, hidden, "an access admin reads every set");
+    assert_eq!(admin_empty, 0, "{admin_pages:?}");
+    assert_eq!(admin_pages.len(), 3, "{admin_pages:?}");
+}
+
+/// A question set whose body this version cannot read has no asker to
+/// judge. It is shown where nobody is kept apart from other people (an
+/// access admin reads it) and to nobody who is: a person who administers
+/// decisions reads it as a decision that is not there. No read lists it as
+/// a set to answer.
+#[tokio::test]
+async fn a_set_with_a_body_that_cannot_be_read_is_shown_only_where_nobody_is_kept_apart() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let setup = Setup::enforced().access(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![DAVE.to_string()],
+        rules: vec![rule(
+            "carol-administers-decisions",
+            CAROL,
+            &[
+                crate::access::ACTION_DECISIONS_VIEW,
+                crate::access::ACTION_DECISIONS_ADMIN,
+                ACTION_AGENT_VIEW,
+                ACTION_GATING_VIEW,
+            ],
+            &[],
+        )],
+        ..crate::access::AccessControlConfig::default()
+    });
+    let console = QuestionConsole::start(
+        "questions-unread-body",
+        setup,
+        decisions_in(state_dir.path(), "questions-unread-body", true),
+    )
+    .await;
+    let odd = held_of_kind(&console.decisions, ASK_USER_QUESTIONS_KIND)
+        .decision_id
+        .to_string();
+    let unknown = format!("decision:{}", "0".repeat(64));
+    let dave = token(
+        json!({ "sub": "oidc-sub-dave", "email": DAVE, "provider": "google_oauth" }),
+        Some(now_seconds() + 3600),
+    );
+    let read = |bearer: String, method: &'static str, decision_id: String| {
+        let app = console.app.clone();
+        async move {
+            let params = if method == "meta/decisions/list" {
+                json!({})
+            } else {
+                json!({ "decision_id": decision_id })
+            };
+            console_rpc_as(&app, Some(&bearer), method, params).await
+        }
+    };
+    let carol_list = read(carol(), "meta/decisions/list", String::new()).await;
+    let carol_get = read(carol(), "meta/decisions/get", odd.clone()).await;
+    let carol_unknown = read(carol(), "meta/decisions/get", unknown.clone()).await;
+    let dave_list = read(dave.clone(), "meta/decisions/list", String::new()).await;
+    let dave_get = read(dave.clone(), "meta/decisions/get", odd.clone()).await;
+    let to_answer = console.listed(Some(&dave)).await;
+    console.stop().await;
+
+    assert!(
+        !carol_list.to_string().contains(&odd),
+        "a person kept apart is not listed it: {carol_list}"
+    );
+    assert_eq!(
+        refusal_shape(&carol_get, &odd),
+        refusal_shape(&carol_unknown, &unknown),
+        "to a person kept apart it is a decision that is not there: {carol_get}"
+    );
+    assert!(
+        dave_list.to_string().contains(&odd),
+        "an access admin is listed it: {dave_list}"
+    );
+    assert!(
+        dave_get["error"].is_null(),
+        "an access admin reads it: {dave_get}"
+    );
+    assert_eq!(to_answer, Vec::<String>::new(), "it is no set to answer");
+}
+
+/// The notices of ended sets, as the runtime sends them: one that cannot
+/// be sent now (no identity runtime is installed) is asked again at a later
+/// pass, and one whose asker is no agent name ends failed for good.
+#[tokio::test]
+async fn a_notice_that_cannot_be_sent_now_is_asked_again_and_one_for_no_agent_ends() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let console = QuestionConsole::start(
+        "questions-notices",
+        Setup::enforced(),
+        decisions_in(state_dir.path(), "questions-notices", true),
+    )
+    .await;
+    let pending_id = console.asked(ASKER, "call-1").await;
+    let dismissal = console
+        .decide(
+            Some(&bob()),
+            json!({
+                "pending_id": pending_id,
+                "decision": "reject",
+                "presented_digest": console.digest(&pending_id),
+            }),
+        )
+        .await;
+    let told = Arc::new(Told::default());
+    let driver = console.drive(&told);
+    until("the asker is told", || told.all().len() == 1).await;
+    let notice = told.all().remove(0);
+    driver.shutdown().await;
+    let notices = crate::ask_user::MemberKeyedNotices::new(console.runtime.clone());
+    let asked_again = notices.deliver(&notice).await;
+    let mut for_no_agent = notice.clone();
+    for_no_agent.asker = "not an agent name".to_string();
+    let ended = notices.deliver(&for_no_agent).await;
+    console.stop().await;
+
+    assert_eq!(
+        dismissal["result"]["outcome"],
+        json!("dismissed"),
+        "{dismissal}"
+    );
+    assert!(
+        asked_again.is_none(),
+        "a notice that cannot be sent now is asked again: {asked_again:?}"
+    );
+    assert!(
+        matches!(
+            ended,
+            Some(meerkat_core::approval::ApprovalConsentDeliveryState::Failed { .. })
+        ),
+        "a notice for no agent ends failed: {ended:?}"
+    );
 }

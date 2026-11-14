@@ -95,6 +95,14 @@ impl RosterProvider for OneIdentityRoster {
 }
 
 fn decision_state() -> meerkat_meta::RuntimeDecisionState {
+    decision_state_of(ConsolePolicy {
+        require_app_auth: true,
+        ..ConsolePolicy::default()
+    })
+}
+
+/// The decision state of a Console under the policy `console`.
+fn decision_state_of(console: ConsolePolicy) -> meerkat_meta::RuntimeDecisionState {
     build_runtime_decision_state(RuntimeDecisionInputs {
         bigquery: BigQueryNaming {
             dataset: "ask_dataset".to_string(),
@@ -124,10 +132,7 @@ restart_policy = "always"
             require_verified_email: false,
             shared_account_tokens: false,
         },
-        console: ConsolePolicy {
-            require_app_auth: true,
-            ..ConsolePolicy::default()
-        },
+        console,
         ops: RuntimeOpsPolicy::default(),
         release_metadata_json: include_str!("../assets/release-targets.json").to_string(),
     })
@@ -572,4 +577,108 @@ async fn without_a_console_the_call_answers_that_no_person_can_be_asked() {
         "nothing is held: no file of the decision store"
     );
     assert_eq!(passes, None, "no pass is made for the call");
+}
+
+/// A Console on which nobody can decide is no human surface: one that can
+/// identify no person (it requires no sign-in and has no access
+/// controller), and one that takes no changes. The call answers
+/// `no_human_surface` there and holds nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_console_nobody_can_decide_on_is_no_human_surface() {
+    let mut held = Vec::new();
+    for (case, console) in [
+        (
+            "a Console that can identify no person",
+            ConsolePolicy {
+                require_app_auth: false,
+                ..ConsolePolicy::default()
+            },
+        ),
+        (
+            "a Console that takes no changes",
+            ConsolePolicy {
+                require_app_auth: true,
+                read_only: true,
+                ..ConsolePolicy::default()
+            },
+        ),
+    ] {
+        let state = tempfile::tempdir().unwrap();
+        let model = AskingModel::new();
+        let runtime = runtime(state.path(), &model).await;
+        let _app = runtime.build_console_json_router(decision_state_of(console));
+        send_ask(&runtime).await;
+        // The call's result, whatever it is.
+        let answered = model.request_with(&[CALL_ID, r#"\"outcome\":"#]).await;
+        let stdio_listed = stdio_rpc(&runtime, "meta/gating/questions", json!({})).await;
+        let files = decision_store_files(state.path());
+        runtime.shutdown().await;
+        if !answered.contains(r#"\"outcome\":\"no_human_surface\""#)
+            || stdio_listed["result"] != json!({ "question_sets": [] })
+            || !files.is_empty()
+        {
+            held.push(format!(
+                "{case}: listed {}, files {files:?}",
+                stdio_listed["result"]
+            ));
+        }
+    }
+    assert!(
+        held.is_empty(),
+        "a Console nobody can decide on holds no set: {held:#?}"
+    );
+}
+
+/// The host answers a member's set through the stdio dispatcher: the decide
+/// of a question set's id is the question set's, and the member's next turn
+/// reads the answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_host_answers_a_members_set_through_the_stdio_dispatcher() {
+    let state = tempfile::tempdir().unwrap();
+    let model = AskingModel::new();
+    let runtime = runtime(state.path(), &model).await;
+    let _app = runtime.build_console_json_router(decision_state());
+
+    send_ask(&runtime).await;
+    model
+        .request_with(&[CALL_ID, r#"\"outcome\":\"asked\""#])
+        .await;
+    let listed = stdio_rpc(&runtime, "meta/gating/questions", json!({})).await;
+    let set = listed["result"]["question_sets"][0].clone();
+    let pending_id = set["pending_id"].as_str().expect("pending id").to_string();
+    let decided = stdio_rpc(
+        &runtime,
+        "meta/gating/decide",
+        json!({
+            "pending_id": pending_id,
+            "approver_id": "person:host",
+            "decision": "approve",
+            "presented_digest": set["subject_digest"],
+            "answers": [{"question_id": "day", "answer": {"kind": "choice", "choice_id": "mon"}}],
+        }),
+    )
+    .await;
+    let told = model
+        .request_with(&[
+            "ask_user_result\\n",
+            r#"\"outcome\":\"answered\""#,
+            r#"\"choice_id\":\"mon\""#,
+        ])
+        .await;
+    let listed_after = stdio_rpc(&runtime, "meta/gating/questions", json!({})).await;
+    runtime.shutdown().await;
+
+    assert_eq!(
+        decided["result"]["kind"],
+        json!("question_set"),
+        "the stdio decide of a question set's id is the question set's: {decided}"
+    );
+    assert_eq!(decided["result"]["pending_id"], json!(pending_id));
+    assert_eq!(decided["result"]["outcome"], json!("answered"));
+    assert!(told.contains(&pending_id), "{told}");
+    assert_eq!(
+        listed_after["result"],
+        json!({ "question_sets": [] }),
+        "{listed_after}"
+    );
 }

@@ -1581,6 +1581,78 @@ async fn an_unreadable_row_reads_as_not_found_to_a_non_administrator() {
     }
 }
 
+/// Only an access administrator is told of the rows the store cannot
+/// decode. A person who administers decisions by a rule is kept apart from
+/// other people, and is told of none: the list names no such row, and by
+/// its id the row answers as an id that names no decision.
+#[tokio::test]
+async fn only_an_access_administrator_is_told_of_rows_the_store_cannot_decode() {
+    let absent = format!("decision:{}", "0".repeat(64));
+    // ERIN reads and administers decisions by a rule; ADMIN is an access
+    // administrator.
+    let access = r#"
+enabled = true
+admins = ["admin@example.test"]
+
+[[rules]]
+id = "decision-admin-by-rule"
+subjects = ["erin@example.test"]
+actions = ["decisions.view", "decisions.admin"]
+"#;
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console(&state, Some(access), true).await;
+    let owner = decisions_of(&state);
+    let readable = hold(
+        &owner,
+        "release",
+        "decode-readable",
+        "team:ops",
+        agent_requester(),
+    );
+    let broken = hold(
+        &owner,
+        "release",
+        "decode-broken",
+        "team:ops",
+        agent_requester(),
+    );
+    make_unreadable(&state, &broken);
+    let by_rule = walk(&app, Some(ERIN), 1).await;
+    let access_admin = walk(&app, Some(ADMIN), 1).await;
+    let by_rule_get = rpc(
+        &app,
+        Some(ERIN),
+        "meta/decisions/get",
+        json!({"decision_id": broken.decision_id.to_string()}),
+    )
+    .await;
+    let by_rule_absent = rpc(
+        &app,
+        Some(ERIN),
+        "meta/decisions/get",
+        json!({"decision_id": absent}),
+    )
+    .await;
+    drop(app);
+    runtime.shutdown().await;
+
+    assert_eq!(
+        access_admin.unreadable,
+        [broken.decision_id.to_string()],
+        "an access administrator is told of the row"
+    );
+    assert_eq!(by_rule.whole, sorted(&[&readable]), "{by_rule:?}");
+    assert!(
+        by_rule.unreadable.is_empty(),
+        "a person who administers decisions by a rule is told of none: {by_rule:?}"
+    );
+    assert_eq!(
+        by_rule_get, by_rule_absent,
+        "by its id the row answers as an id that names no decision"
+    );
+}
+
 /// The console audit log's rows of `meta/decisions/withdraw`, read by the
 /// access admin, read again for a short while until there are `expected` of
 /// them (a row lands with its change's answer, or just after it).

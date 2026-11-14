@@ -17,6 +17,7 @@ Numbered packs are intentionally browser-first and can include:
 - `003-swarm-stress-pack`
 - `004-mdm-console-pack`
 - `005-access-control-pack`
+- `006-long-term-agents` (a host program in Python and TypeScript; no console, no provider key)
 
 ## Prerequisites
 
@@ -93,4 +94,11 @@ it for per-persona browser exploration:
 ```bash
 ./005-access-control-pack/examples.sh
 ./005-access-control-pack/examples.sh --serve
+```
+
+Run the long-term agents example (Python and TypeScript, no API key; it
+builds the gateway unless `META_GATEWAY_BIN` names one):
+
+```bash
+./006-long-term-agents/examples.sh
 ```

@@ -510,6 +510,7 @@ mod tests {
             "a\u{202e}b.key",
             "c\u{200b}d\u{feff}.key",
             "e\u{2066}f\u{2069}.key",
+            "g\u{2028}h\u{2029}.key",
             "plain-\u{e9}-\u{4e2d}.key",
         ]));
         assert_eq!(
@@ -518,6 +519,7 @@ mod tests {
                 "a\\u{202e}b.key is in the pack: looks like a private key",
                 "c\\u{200b}d\\u{feff}.key is in the pack: looks like a private key",
                 "e\\u{2066}f\\u{2069}.key is in the pack: looks like a private key",
+                "g\\u{2028}h\\u{2029}.key is in the pack: looks like a private key",
                 "plain-\u{e9}-\u{4e2d}.key is in the pack: looks like a private key",
             ]
         );
@@ -567,30 +569,41 @@ mod tests {
             .collect()
     }
 
+    /// The form is what `--sign` accepts as a key file: the text, trimmed of
+    /// the white space around it, is exactly 64 hex digits.
     #[test]
-    fn test_signing_key_form_is_exactly_64_hex_digits_and_at_most_one_line_end() {
+    fn test_signing_key_form_is_what_the_sign_option_accepts() {
         let key = hex_key();
         for content in [
             key.clone(),
             format!("{key}\n"),
             format!("{key}\r\n"),
             key.to_ascii_uppercase(),
+            // Accepted by `--sign` as well: white space on either side.
+            format!("{key}\n\n"),
+            format!("{key} \n"),
+            format!("{key}\r"),
+            format!(" {key}"),
+            format!("\t{key}"),
+            format!("\n{key}"),
         ] {
             assert!(has_signing_key_form(content.as_bytes()), "{content:?}");
         }
         for content in [
             String::new(),
+            " \n".to_string(),
             key[1..].to_string(),
             format!("{key}0"),
-            format!("{key}\n\n"),
-            format!("{key}\r"),
-            format!(" {key}"),
-            format!("{key} \n"),
             format!("{}g", &key[1..]),
             format!("{key}\n{key}\n"),
+            format!("{} {}", &key[..32], &key[32..]),
         ] {
             assert!(!has_signing_key_form(content.as_bytes()), "{content:?}");
         }
+        // Bytes that are not text are no key file.
+        let mut not_text = key.clone().into_bytes();
+        not_text.push(0xff);
+        assert!(!has_signing_key_form(&not_text));
     }
 
     #[test]

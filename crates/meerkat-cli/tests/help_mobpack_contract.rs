@@ -806,9 +806,9 @@ fn mob_pack_counts_every_file_of_a_hidden_directory() -> RowResult {
 }
 
 /// An env file is flagged by the `.env` suffix too, and a file whose whole
-/// content is exactly 64 hex digits (with at most one line end) has the form
-/// of a signing key whatever it is called. The line names the path; no digit
-/// of the content is printed.
+/// content is exactly 64 hex digits (white space around them aside) has the
+/// form of a signing key whatever it is called. The line names the path; no
+/// digit of the content is printed.
 #[test]
 fn mob_pack_warns_about_env_files_by_suffix_and_about_the_form_of_a_signing_key() -> RowResult {
     let temp = tempfile::tempdir()?;
@@ -829,9 +829,9 @@ fn mob_pack_warns_about_env_files_by_suffix_and_about_the_form_of_a_signing_key(
         mob.join("keys").join("prod.hex"),
         format!("{}\r\n", third.to_ascii_uppercase()),
     )?;
-    // Not that form: 63 digits, and 64 digits with two line ends.
+    // Not that form: 63 digits, and two keys in one file.
     std::fs::write(mob.join("short.hex"), &first[1..])?;
-    std::fs::write(mob.join("two-lines.hex"), format!("{second}\n\n"))?;
+    std::fs::write(mob.join("two-keys.hex"), format!("{second}\n{second}\n"))?;
 
     let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
     assert!(packed.status.success(), "{}", output_text(&packed));
@@ -853,6 +853,57 @@ fn mob_pack_warns_about_env_files_by_suffix_and_about_the_form_of_a_signing_key(
             "no digit run of a flagged file's content is printed"
         );
     }
+    Ok(())
+}
+
+/// The form is what `--sign` accepts as a key file: the text, trimmed of the
+/// white space around it, is exactly 64 hex digits. Every such file is
+/// flagged, a key or not: the digest this very command prints, saved to a
+/// file, has the form too.
+#[test]
+fn mob_pack_flags_every_file_the_sign_option_would_accept_as_a_key() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), false)?;
+    let mob = temp.path().join("mob");
+    let key = throwaway_key_hex(17);
+    for (name, content) in [
+        ("a-two-line-ends.txt", format!("{key}\n\n")),
+        ("b-space-then-line-end.txt", format!("{key} \n")),
+        ("c-carriage-return.txt", format!("{key}\r")),
+        ("d-space-before.txt", format!(" {key}")),
+        ("e-tab-before.txt", format!("\t{key}")),
+        ("f-line-end-before.txt", format!("\n{key}")),
+    ] {
+        std::fs::write(mob.join(name), content)?;
+    }
+    // The digest of an earlier pack of this directory, as a shell saves it.
+    let earlier = run_rkat(
+        temp.path(),
+        &["mob", "pack", "mob", "-o", "earlier.mobpack"],
+    )?;
+    assert!(earlier.status.success(), "{}", output_text(&earlier));
+    let digest = String::from_utf8_lossy(&earlier.stdout).into_owned();
+    std::fs::write(mob.join("digest.txt"), &digest)?;
+
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+    let expected = format!(
+        "packed\t10 files\n\
+         warning\ta-two-line-ends.txt is in the pack: has the form of a signing key\n\
+         warning\tb-space-then-line-end.txt is in the pack: has the form of a signing key\n\
+         warning\tc-carriage-return.txt is in the pack: has the form of a signing key\n\
+         warning\td-space-before.txt is in the pack: has the form of a signing key\n\
+         warning\tdigest.txt is in the pack: has the form of a signing key\n\
+         warning\te-tab-before.txt is in the pack: has the form of a signing key\n\
+         warning\tf-line-end-before.txt is in the pack: has the form of a signing key\n{}",
+        pack_note("out.mobpack")
+    );
+    let stderr = String::from_utf8_lossy(&packed.stderr);
+    assert_eq!(stderr, expected);
+    assert!(
+        !stderr.contains(&key[..16]) && !stderr.contains(&digest.trim()[..16]),
+        "no digit run of a flagged file's content is printed"
+    );
     Ok(())
 }
 

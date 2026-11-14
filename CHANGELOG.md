@@ -750,11 +750,11 @@ them.
   the mobs it had created and its calls on them (`mob_list_members`,
   `mob_check_member`, `mob_retire_member`, `mob_destroy`) were refused as
   `access_denied`, in the same process and after a restart, while those mobs
-  went on running. The grant is now also re-derived for a later generation
-  of the same identity on the same session when the journal of the member's
-  own mob shows every step between the two as a same-session successor
-  step. Mobs created before this release are covered without any call: the
-  journal has recorded those steps since 0.9.10. The session's create
+  went on running. A same-session successor now keeps that management,
+  through any number of such steps, in the same process and after a restart;
+  the steps below say which changes of a member keep it and which end it.
+  Mobs created before this release are covered without any call, for the
+  successor steps a release from 0.9.10 on made. The session's create
   capability and its current role's tools decide each call as before.
   - Keeps the creator's management: `MobHandle::respawn_member`, once or
     many times; a declared role migration and a runtime-mode restamp of an
@@ -766,13 +766,13 @@ them.
     a member that was retired and later seated again on its kept session,
     whatever seated it (a spawn or `ensure_member` that resumes the session,
     an unlisted identity listed again, an archived identity unarchived);
-    every later generation once the journal of the member's own mob holds a
-    mob reset.
-  - Not brought back: a creator that was retired and seated again on its
+    every later generation of a member of a mob that was ever reset.
+  - Not brought back: upgrading does not give back a management a creator
+    had already lost. A creator that was retired and seated again on its
     session before the upgrade stays without its management of the mobs it
     created, and so does one whose successor steps a release before 0.9.10
-    journaled. Upgrading changes nothing for those mobs; they end as before,
-    with the session that owns them (see the Upgrade notes).
+    made. Those mobs end as before, with the session that owns them (see
+    the Upgrade notes).
   The 0.9.4 Known limitation about a member "reset to its next generation,
   over the same session" described this case; it no longer applies to a
   same-session successor.

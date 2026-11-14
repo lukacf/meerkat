@@ -887,6 +887,11 @@ pub(crate) struct ConsoleSendDoor {
 
 #[async_trait::async_trait]
 impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
+    /// As the Console's own configuration says.
+    fn takes_a_persons_decision(&self) -> bool {
+        crate::runtime::console_takes_a_persons_decision(&self.decisions, self.access.as_ref())
+    }
+
     /// A fire is a `/console/send` by the schedule's sender, judged now. The
     /// Console first admits the sender as it admits a live request by it
     /// (`ConsoleScheduleSender::admitted_now`: the sign-in requirement, the

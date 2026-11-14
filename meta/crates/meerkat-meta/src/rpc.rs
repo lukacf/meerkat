@@ -31,6 +31,7 @@ pub(crate) mod memory_methods;
 pub(crate) mod mob_methods;
 pub(crate) mod operator_methods;
 pub(crate) mod params;
+pub(crate) mod question_set_methods;
 pub(crate) mod realm_mcp_methods;
 mod routing_delivery_methods;
 pub(crate) mod schedule_methods;
@@ -791,6 +792,7 @@ pub fn handle_meta_rpc_json(
                 "meta/session_store/bigquery",
                 "meta/gating/evaluate",
                 "meta/gating/pending",
+                "meta/gating/questions",
                 "meta/gating/decide",
                 "meta/gating/withdraw",
                 "meta/gating/audit",
@@ -1290,6 +1292,11 @@ pub fn handle_meta_rpc_json(
                 }),
             },
         },
+        // This runtime handle keeps no durable decisions: it holds no
+        // question set (`crate::ask_user`).
+        "meta/gating/questions" => {
+            question_set_methods::gating_questions_response(None, &request.params, response_id)
+        }
         "meta/gating/withdraw" => {
             // The RPC caller is the embedding host: it withdraws requests it
             // minted on an actor's behalf. Console sessions have no route.
@@ -2733,6 +2740,7 @@ async fn handle_unified_rpc_json_inner(
                 "meta/session_store/bigquery",
                 "meta/gating/evaluate",
                 "meta/gating/pending",
+                "meta/gating/questions",
                 "meta/gating/decide",
                 "meta/gating/withdraw",
                 "meta/gating/audit",
@@ -3921,6 +3929,28 @@ async fn handle_unified_rpc_json_inner(
                 }),
             },
         },
+        // The open question sets the runtime's members asked
+        // (`crate::ask_user`): the host reads them all.
+        "meta/gating/questions" => question_set_methods::gating_questions_response(
+            runtime.mob_runtime().ask_user_slot().decisions().as_ref(),
+            &request.params,
+            response_id,
+        ),
+        // A pending id that names a question set is answered through the
+        // decision owner; any other id, a decision of another kind
+        // included, is the gating owner's below.
+        "meta/gating/decide"
+            if question_set_methods::gating_decide_names_question_set(
+                runtime.mob_runtime(),
+                &request.params,
+            ) =>
+        {
+            question_set_methods::gating_decide_question_set(
+                runtime.mob_runtime(),
+                &request.params,
+                response_id,
+            )
+        }
         "meta/gating/withdraw" => {
             // The RPC caller is the embedding host: it withdraws requests it
             // minted on an actor's behalf. Console sessions have no route.

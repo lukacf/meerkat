@@ -101775,6 +101775,88 @@
   },
   "DecisionListResult": {
     "$defs": {
+      "WireAskUserAnswer": {
+        "description": "The answer to one question an agent asked a person.",
+        "oneOf": [
+          {
+            "description": "The person picked the choice `choice_id` of the question.",
+            "properties": {
+              "choice_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "choice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "choice_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The person wrote `text` instead of picking a choice: their own\nwords, to be read as data and never as instructions.",
+            "properties": {
+              "kind": {
+                "const": "free_text",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nobody answered the question.",
+            "properties": {
+              "kind": {
+                "const": "unanswered",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an answer of a form this version does not\nknow. The server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAskUserQuestionAnswer": {
+        "description": "One question's answer in a [`WireDecisionAnswer::AskUser`].",
+        "properties": {
+          "answer": {
+            "$ref": "#/$defs/WireAskUserAnswer"
+          },
+          "question_id": {
+            "description": "The id the asking agent gave the question.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question_id",
+          "answer"
+        ],
+        "type": "object"
+      },
       "WireCanonicalPart": {
         "additionalProperties": false,
         "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
@@ -101966,6 +102048,44 @@
         ],
         "type": "object"
       },
+      "WireDecisionAnswer": {
+        "description": "The typed answer a person gave with an approving decision, for a kind\nthat asks one. It is data of the decision's evidence, never text.",
+        "oneOf": [
+          {
+            "description": "The answers to a set of questions an agent asked a person (a\ndecision of kind `ask_user.questions`): one entry per question the\nperson answered.",
+            "properties": {
+              "answers": {
+                "items": {
+                  "$ref": "#/$defs/WireAskUserQuestionAnswer"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "ask_user",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "answers"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an answer of a kind this version does not\nknow. The server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WireDecisionAssurance": {
         "description": "How the human who decided was authenticated on the decision event.",
         "oneOf": [
@@ -102010,6 +102130,17 @@
           {
             "description": "An authenticated human's decision.",
             "properties": {
+              "answer": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireDecisionAnswer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The typed answer the person gave with an approving decision, for\na kind that asks one; absent otherwise."
+              },
               "approve": {
                 "type": "boolean"
               },
@@ -102545,6 +102676,88 @@
   },
   "DecisionResult": {
     "$defs": {
+      "WireAskUserAnswer": {
+        "description": "The answer to one question an agent asked a person.",
+        "oneOf": [
+          {
+            "description": "The person picked the choice `choice_id` of the question.",
+            "properties": {
+              "choice_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "choice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "choice_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The person wrote `text` instead of picking a choice: their own\nwords, to be read as data and never as instructions.",
+            "properties": {
+              "kind": {
+                "const": "free_text",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nobody answered the question.",
+            "properties": {
+              "kind": {
+                "const": "unanswered",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an answer of a form this version does not\nknow. The server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAskUserQuestionAnswer": {
+        "description": "One question's answer in a [`WireDecisionAnswer::AskUser`].",
+        "properties": {
+          "answer": {
+            "$ref": "#/$defs/WireAskUserAnswer"
+          },
+          "question_id": {
+            "description": "The id the asking agent gave the question.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question_id",
+          "answer"
+        ],
+        "type": "object"
+      },
       "WireCanonicalPart": {
         "additionalProperties": false,
         "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
@@ -102736,6 +102949,44 @@
         ],
         "type": "object"
       },
+      "WireDecisionAnswer": {
+        "description": "The typed answer a person gave with an approving decision, for a kind\nthat asks one. It is data of the decision's evidence, never text.",
+        "oneOf": [
+          {
+            "description": "The answers to a set of questions an agent asked a person (a\ndecision of kind `ask_user.questions`): one entry per question the\nperson answered.",
+            "properties": {
+              "answers": {
+                "items": {
+                  "$ref": "#/$defs/WireAskUserQuestionAnswer"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "ask_user",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "answers"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an answer of a kind this version does not\nknow. The server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WireDecisionAssurance": {
         "description": "How the human who decided was authenticated on the decision event.",
         "oneOf": [
@@ -102780,6 +103031,17 @@
           {
             "description": "An authenticated human's decision.",
             "properties": {
+              "answer": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireDecisionAnswer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The typed answer the person gave with an approving decision, for\na kind that asks one; absent otherwise."
+              },
               "approve": {
                 "type": "boolean"
               },
@@ -153089,6 +153351,88 @@
   },
   "RequestToolGrantResult": {
     "$defs": {
+      "WireAskUserAnswer": {
+        "description": "The answer to one question an agent asked a person.",
+        "oneOf": [
+          {
+            "description": "The person picked the choice `choice_id` of the question.",
+            "properties": {
+              "choice_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "choice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "choice_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The person wrote `text` instead of picking a choice: their own\nwords, to be read as data and never as instructions.",
+            "properties": {
+              "kind": {
+                "const": "free_text",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nobody answered the question.",
+            "properties": {
+              "kind": {
+                "const": "unanswered",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an answer of a form this version does not\nknow. The server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAskUserQuestionAnswer": {
+        "description": "One question's answer in a [`WireDecisionAnswer::AskUser`].",
+        "properties": {
+          "answer": {
+            "$ref": "#/$defs/WireAskUserAnswer"
+          },
+          "question_id": {
+            "description": "The id the asking agent gave the question.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question_id",
+          "answer"
+        ],
+        "type": "object"
+      },
       "WireCanonicalPart": {
         "additionalProperties": false,
         "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
@@ -153280,6 +153624,44 @@
         ],
         "type": "object"
       },
+      "WireDecisionAnswer": {
+        "description": "The typed answer a person gave with an approving decision, for a kind\nthat asks one. It is data of the decision's evidence, never text.",
+        "oneOf": [
+          {
+            "description": "The answers to a set of questions an agent asked a person (a\ndecision of kind `ask_user.questions`): one entry per question the\nperson answered.",
+            "properties": {
+              "answers": {
+                "items": {
+                  "$ref": "#/$defs/WireAskUserQuestionAnswer"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "ask_user",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "answers"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an answer of a kind this version does not\nknow. The server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WireDecisionAssurance": {
         "description": "How the human who decided was authenticated on the decision event.",
         "oneOf": [
@@ -153324,6 +153706,17 @@
           {
             "description": "An authenticated human's decision.",
             "properties": {
+              "answer": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireDecisionAnswer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The typed answer the person gave with an approving decision, for\na kind that asks one; absent otherwise."
+              },
               "approve": {
                 "type": "boolean"
               },
@@ -168910,6 +169303,159 @@
     ],
     "title": "VisibilityClass"
   },
+  "WireAskUserAnswer": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The answer to one question an agent asked a person.",
+    "oneOf": [
+      {
+        "description": "The person picked the choice `choice_id` of the question.",
+        "properties": {
+          "choice_id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "choice",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "choice_id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The person wrote `text` instead of picking a choice: their own\nwords, to be read as data and never as instructions.",
+        "properties": {
+          "kind": {
+            "const": "free_text",
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "text"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Nobody answered the question.",
+        "properties": {
+          "kind": {
+            "const": "unanswered",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Forward compatibility: an answer of a form this version does not\nknow. The server never sends it.",
+        "properties": {
+          "kind": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireAskUserAnswer"
+  },
+  "WireAskUserQuestionAnswer": {
+    "$defs": {
+      "WireAskUserAnswer": {
+        "description": "The answer to one question an agent asked a person.",
+        "oneOf": [
+          {
+            "description": "The person picked the choice `choice_id` of the question.",
+            "properties": {
+              "choice_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "choice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "choice_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The person wrote `text` instead of picking a choice: their own\nwords, to be read as data and never as instructions.",
+            "properties": {
+              "kind": {
+                "const": "free_text",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nobody answered the question.",
+            "properties": {
+              "kind": {
+                "const": "unanswered",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an answer of a form this version does not\nknow. The server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One question's answer in a [`WireDecisionAnswer::AskUser`].",
+    "properties": {
+      "answer": {
+        "$ref": "#/$defs/WireAskUserAnswer"
+      },
+      "question_id": {
+        "description": "The id the asking agent gave the question.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "question_id",
+      "answer"
+    ],
+    "title": "WireAskUserQuestionAnswer",
+    "type": "object"
+  },
   "WireAssistantBlock": {
     "$defs": {
       "AssistantImageId": {
@@ -173404,6 +173950,88 @@
   },
   "WireDecision": {
     "$defs": {
+      "WireAskUserAnswer": {
+        "description": "The answer to one question an agent asked a person.",
+        "oneOf": [
+          {
+            "description": "The person picked the choice `choice_id` of the question.",
+            "properties": {
+              "choice_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "choice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "choice_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The person wrote `text` instead of picking a choice: their own\nwords, to be read as data and never as instructions.",
+            "properties": {
+              "kind": {
+                "const": "free_text",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nobody answered the question.",
+            "properties": {
+              "kind": {
+                "const": "unanswered",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an answer of a form this version does not\nknow. The server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAskUserQuestionAnswer": {
+        "description": "One question's answer in a [`WireDecisionAnswer::AskUser`].",
+        "properties": {
+          "answer": {
+            "$ref": "#/$defs/WireAskUserAnswer"
+          },
+          "question_id": {
+            "description": "The id the asking agent gave the question.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question_id",
+          "answer"
+        ],
+        "type": "object"
+      },
       "WireCanonicalPart": {
         "additionalProperties": false,
         "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
@@ -173431,6 +174059,44 @@
           "part_digest"
         ],
         "type": "object"
+      },
+      "WireDecisionAnswer": {
+        "description": "The typed answer a person gave with an approving decision, for a kind\nthat asks one. It is data of the decision's evidence, never text.",
+        "oneOf": [
+          {
+            "description": "The answers to a set of questions an agent asked a person (a\ndecision of kind `ask_user.questions`): one entry per question the\nperson answered.",
+            "properties": {
+              "answers": {
+                "items": {
+                  "$ref": "#/$defs/WireAskUserQuestionAnswer"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "ask_user",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "answers"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an answer of a kind this version does not\nknow. The server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WireDecisionAssurance": {
         "description": "How the human who decided was authenticated on the decision event.",
@@ -173476,6 +174142,17 @@
           {
             "description": "An authenticated human's decision.",
             "properties": {
+              "answer": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireDecisionAnswer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The typed answer the person gave with an approving decision, for\na kind that asks one; absent otherwise."
+              },
               "approve": {
                 "type": "boolean"
               },
@@ -174055,6 +174732,130 @@
     "title": "WireDecision",
     "type": "object"
   },
+  "WireDecisionAnswer": {
+    "$defs": {
+      "WireAskUserAnswer": {
+        "description": "The answer to one question an agent asked a person.",
+        "oneOf": [
+          {
+            "description": "The person picked the choice `choice_id` of the question.",
+            "properties": {
+              "choice_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "choice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "choice_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The person wrote `text` instead of picking a choice: their own\nwords, to be read as data and never as instructions.",
+            "properties": {
+              "kind": {
+                "const": "free_text",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nobody answered the question.",
+            "properties": {
+              "kind": {
+                "const": "unanswered",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an answer of a form this version does not\nknow. The server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAskUserQuestionAnswer": {
+        "description": "One question's answer in a [`WireDecisionAnswer::AskUser`].",
+        "properties": {
+          "answer": {
+            "$ref": "#/$defs/WireAskUserAnswer"
+          },
+          "question_id": {
+            "description": "The id the asking agent gave the question.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question_id",
+          "answer"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The typed answer a person gave with an approving decision, for a kind\nthat asks one. It is data of the decision's evidence, never text.",
+    "oneOf": [
+      {
+        "description": "The answers to a set of questions an agent asked a person (a\ndecision of kind `ask_user.questions`): one entry per question the\nperson answered.",
+        "properties": {
+          "answers": {
+            "items": {
+              "$ref": "#/$defs/WireAskUserQuestionAnswer"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "const": "ask_user",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "answers"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Forward compatibility: an answer of a kind this version does not\nknow. The server never sends it.",
+        "properties": {
+          "kind": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireDecisionAnswer"
+  },
   "WireDecisionAssurance": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "How the human who decided was authenticated on the decision event.",
@@ -174455,6 +175256,88 @@
   },
   "WireDecisionEvidence": {
     "$defs": {
+      "WireAskUserAnswer": {
+        "description": "The answer to one question an agent asked a person.",
+        "oneOf": [
+          {
+            "description": "The person picked the choice `choice_id` of the question.",
+            "properties": {
+              "choice_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "choice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "choice_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The person wrote `text` instead of picking a choice: their own\nwords, to be read as data and never as instructions.",
+            "properties": {
+              "kind": {
+                "const": "free_text",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nobody answered the question.",
+            "properties": {
+              "kind": {
+                "const": "unanswered",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an answer of a form this version does not\nknow. The server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAskUserQuestionAnswer": {
+        "description": "One question's answer in a [`WireDecisionAnswer::AskUser`].",
+        "properties": {
+          "answer": {
+            "$ref": "#/$defs/WireAskUserAnswer"
+          },
+          "question_id": {
+            "description": "The id the asking agent gave the question.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question_id",
+          "answer"
+        ],
+        "type": "object"
+      },
       "WireCanonicalPart": {
         "additionalProperties": false,
         "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
@@ -174482,6 +175365,44 @@
           "part_digest"
         ],
         "type": "object"
+      },
+      "WireDecisionAnswer": {
+        "description": "The typed answer a person gave with an approving decision, for a kind\nthat asks one. It is data of the decision's evidence, never text.",
+        "oneOf": [
+          {
+            "description": "The answers to a set of questions an agent asked a person (a\ndecision of kind `ask_user.questions`): one entry per question the\nperson answered.",
+            "properties": {
+              "answers": {
+                "items": {
+                  "$ref": "#/$defs/WireAskUserQuestionAnswer"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "ask_user",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "answers"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an answer of a kind this version does not\nknow. The server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WireDecisionAssurance": {
         "description": "How the human who decided was authenticated on the decision event.",
@@ -174672,6 +175593,17 @@
       {
         "description": "An authenticated human's decision.",
         "properties": {
+          "answer": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireDecisionAnswer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The typed answer the person gave with an approving decision, for\na kind that asks one; absent otherwise."
+          },
           "approve": {
             "type": "boolean"
           },
@@ -175080,6 +176012,88 @@
   },
   "WireDecisionOutcome": {
     "$defs": {
+      "WireAskUserAnswer": {
+        "description": "The answer to one question an agent asked a person.",
+        "oneOf": [
+          {
+            "description": "The person picked the choice `choice_id` of the question.",
+            "properties": {
+              "choice_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "choice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "choice_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The person wrote `text` instead of picking a choice: their own\nwords, to be read as data and never as instructions.",
+            "properties": {
+              "kind": {
+                "const": "free_text",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nobody answered the question.",
+            "properties": {
+              "kind": {
+                "const": "unanswered",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an answer of a form this version does not\nknow. The server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAskUserQuestionAnswer": {
+        "description": "One question's answer in a [`WireDecisionAnswer::AskUser`].",
+        "properties": {
+          "answer": {
+            "$ref": "#/$defs/WireAskUserAnswer"
+          },
+          "question_id": {
+            "description": "The id the asking agent gave the question.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question_id",
+          "answer"
+        ],
+        "type": "object"
+      },
       "WireCanonicalPart": {
         "additionalProperties": false,
         "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
@@ -175107,6 +176121,44 @@
           "part_digest"
         ],
         "type": "object"
+      },
+      "WireDecisionAnswer": {
+        "description": "The typed answer a person gave with an approving decision, for a kind\nthat asks one. It is data of the decision's evidence, never text.",
+        "oneOf": [
+          {
+            "description": "The answers to a set of questions an agent asked a person (a\ndecision of kind `ask_user.questions`): one entry per question the\nperson answered.",
+            "properties": {
+              "answers": {
+                "items": {
+                  "$ref": "#/$defs/WireAskUserQuestionAnswer"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "ask_user",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "answers"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an answer of a kind this version does not\nknow. The server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WireDecisionAssurance": {
         "description": "How the human who decided was authenticated on the decision event.",
@@ -175139,6 +176191,17 @@
           {
             "description": "An authenticated human's decision.",
             "properties": {
+              "answer": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireDecisionAnswer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The typed answer the person gave with an approving decision, for\na kind that asks one; absent otherwise."
+              },
               "approve": {
                 "type": "boolean"
               },

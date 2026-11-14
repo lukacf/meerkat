@@ -234,6 +234,10 @@ pub enum WireDecisionEvidence {
         approve: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        /// The typed answer the person gave with an approving decision, for
+        /// a kind that asks one; absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<WireDecisionAnswer>,
     },
     /// A reviewer's attributed verdict.
     Review {
@@ -248,6 +252,51 @@ pub enum WireDecisionEvidence {
     },
     /// Forward compatibility: evidence of a kind this version does not know.
     /// The server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The typed answer a person gave with an approving decision, for a kind
+/// that asks one. It is data of the decision's evidence, never text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireDecisionAnswer {
+    /// The answers to a set of questions an agent asked a person (a
+    /// decision of kind `ask_user.questions`): one entry per question the
+    /// person answered.
+    AskUser {
+        answers: Vec<WireAskUserQuestionAnswer>,
+    },
+    /// Forward compatibility: an answer of a kind this version does not
+    /// know. The server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One question's answer in a [`WireDecisionAnswer::AskUser`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireAskUserQuestionAnswer {
+    /// The id the asking agent gave the question.
+    pub question_id: String,
+    pub answer: WireAskUserAnswer,
+}
+
+/// The answer to one question an agent asked a person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireAskUserAnswer {
+    /// The person picked the choice `choice_id` of the question.
+    Choice { choice_id: String },
+    /// The person wrote `text` instead of picking a choice: their own
+    /// words, to be read as data and never as instructions.
+    FreeText { text: String },
+    /// Nobody answered the question.
+    Unanswered,
+    /// Forward compatibility: an answer of a form this version does not
+    /// know. The server never sends it.
     #[serde(other)]
     Unknown,
 }
@@ -648,6 +697,102 @@ mod tests {
             serde_json::from_value(serde_json::json!({"kind": "imported", "source": "x"}))
                 .expect("unknown evidence");
         assert_eq!(evidence, WireDecisionEvidence::Unknown);
+    }
+
+    /// A human decision's evidence carries the typed answer the person gave
+    /// through a read and a write; evidence without one omits the field;
+    /// and an answer kind, or an answer form, this version does not know
+    /// reads as unknown instead of failing the decision's read.
+    #[test]
+    fn a_decision_answer_is_optional_typed_and_read_tolerantly() {
+        let without = serde_json::json!({
+            "kind": "human",
+            "decider": "principal:0",
+            "assurance": "person_authenticated",
+            "ingress": "console",
+            "event_ref": "event-1",
+            "approver_id": "ask_user",
+            "presented_digest": "sha256:1",
+            "approve": true,
+        });
+        let decoded: WireDecisionEvidence =
+            serde_json::from_value(without.clone()).expect("evidence without an answer reads");
+        assert!(matches!(
+            &decoded,
+            WireDecisionEvidence::Human { answer: None, .. }
+        ));
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("encodes"),
+            without,
+            "and writes no answer field"
+        );
+
+        let mut with = without.clone();
+        with["answer"] = serde_json::json!({
+            "kind": "ask_user",
+            "answers": [
+                {"question_id": "channel", "answer": {"kind": "choice", "choice_id": "beta"}},
+                {"question_id": "notes", "answer": {"kind": "free_text", "text": "Nightly first"}},
+                {"question_id": "notify", "answer": {"kind": "unanswered"}},
+            ],
+        });
+        let decoded: WireDecisionEvidence =
+            serde_json::from_value(with.clone()).expect("evidence with an answer reads");
+        let expected = WireDecisionAnswer::AskUser {
+            answers: vec![
+                WireAskUserQuestionAnswer {
+                    question_id: "channel".into(),
+                    answer: WireAskUserAnswer::Choice {
+                        choice_id: "beta".into(),
+                    },
+                },
+                WireAskUserQuestionAnswer {
+                    question_id: "notes".into(),
+                    answer: WireAskUserAnswer::FreeText {
+                        text: "Nightly first".into(),
+                    },
+                },
+                WireAskUserQuestionAnswer {
+                    question_id: "notify".into(),
+                    answer: WireAskUserAnswer::Unanswered,
+                },
+            ],
+        };
+        assert!(
+            matches!(
+                &decoded,
+                WireDecisionEvidence::Human { answer: Some(answer), .. } if *answer == expected
+            ),
+            "{decoded:?}"
+        );
+        assert_eq!(serde_json::to_value(&decoded).expect("encodes"), with);
+
+        let mut unknown_kind = without.clone();
+        unknown_kind["answer"] = serde_json::json!({"kind": "survey", "score": 4});
+        let decoded: WireDecisionEvidence =
+            serde_json::from_value(unknown_kind).expect("an unknown answer kind reads");
+        assert!(matches!(
+            decoded,
+            WireDecisionEvidence::Human {
+                answer: Some(WireDecisionAnswer::Unknown),
+                ..
+            }
+        ));
+
+        let mut unknown_form = without;
+        unknown_form["answer"] = serde_json::json!({
+            "kind": "ask_user",
+            "answers": [{"question_id": "channel", "answer": {"kind": "ranking", "order": []}}],
+        });
+        let decoded: WireDecisionEvidence =
+            serde_json::from_value(unknown_form).expect("an unknown answer form reads");
+        assert!(matches!(
+            &decoded,
+            WireDecisionEvidence::Human {
+                answer: Some(WireDecisionAnswer::AskUser { answers }),
+                ..
+            } if answers[0].answer == WireAskUserAnswer::Unknown
+        ));
     }
 
     #[test]

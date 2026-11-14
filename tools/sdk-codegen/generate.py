@@ -517,6 +517,9 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "WireCanonicalPart",
     "WirePresentationLink",
     "WirePresentationRecord",
+    # One question's answer in a decision's typed answer; the evidence that
+    # carries it is an alias below.
+    "WireAskUserQuestionAnswer",
     "WireDecisionOutcome",
     "WireDecisionEffect",
     "WireDecision",
@@ -610,6 +613,10 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireDecisionAssurance",
     "WireDecisionReviewVerdict",
     "WirePresentationAudience",
+    # The typed answer a human decision's evidence can carry, and the answer
+    # to one question in it: both tolerant, both before the evidence.
+    "WireAskUserAnswer",
+    "WireDecisionAnswer",
     "WireDecisionEvidence",
     "WireDecisionRefusal",
     "WireDecisionErrorData",

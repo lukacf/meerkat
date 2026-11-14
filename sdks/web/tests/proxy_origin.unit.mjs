@@ -44,11 +44,12 @@ const FOREIGN_ORIGINS = [
   "null",
 ];
 
-function call(port, { method = "POST", path = "/anthropic/v1/messages", origin, host } = {}) {
+function call(port, { method = "POST", path = "/anthropic/v1/messages", origin, host, fetchSite } = {}) {
   return new Promise((resolve, reject) => {
     const headers = { connection: "close" };
     if (origin !== undefined) headers.origin = origin;
     if (host !== undefined) headers.host = host;
+    if (fetchSite !== undefined) headers["sec-fetch-site"] = fetchSite;
     if (method === "POST") headers["content-type"] = "application/json";
     const req = request({ host: "127.0.0.1", port, method, path, headers }, (res) => {
       let body = "";
@@ -280,6 +281,74 @@ test("createProxyHandler checks the Host only when asked to", async () => {
   const unchecked = createProxyHandler("anthropic");
   upstreamCalls.length = 0;
   const any = await unchecked(get("other.example"), "/v1/models");
+  assert.equal(any.status, 200);
+  assert.equal(upstreamCalls.length, 1);
+});
+
+// A browser sends Sec-Fetch-Site on every request, and no Origin on some
+// GETs. Other callers send neither.
+const MODELS = { method: "GET", path: "/anthropic/v1/models" };
+
+test("a cross-site request without an Origin header is refused", async () => {
+  for (const opts of [{}, { allowOrigin: "https://app.example" }]) {
+    await withProxy(opts, async (port) => {
+      for (const method of ["GET", "POST"]) {
+        const res = await call(port, { ...MODELS, method, fetchSite: "cross-site" });
+        assert.equal(res.status, 403, `${method} ${JSON.stringify(opts)}`);
+        assert.equal(res.headers["access-control-allow-origin"], undefined);
+      }
+      assert.deepEqual(upstreamCalls, []);
+    });
+  }
+});
+
+test("a request without an Origin header from the same origin or site, or with no Sec-Fetch-Site, is served", async () => {
+  await withProxy({}, async (port) => {
+    for (const fetchSite of ["same-origin", "same-site", "none", undefined]) {
+      upstreamCalls.length = 0;
+      const res = await call(port, { ...MODELS, fetchSite });
+      assert.equal(res.status, 200, String(fetchSite));
+      assert.equal(upstreamCalls.length, 1, String(fetchSite));
+    }
+  });
+});
+
+test("the Origin decides a cross-site request that carries one", async () => {
+  await withProxy({}, async (port) => {
+    const local = await call(port, { origin: "http://127.0.0.1:5173", fetchSite: "cross-site" });
+    assert.equal(local.status, 200);
+    assert.equal(local.headers["access-control-allow-origin"], "http://127.0.0.1:5173");
+    assert.equal(upstreamCalls.length, 1);
+  });
+});
+
+test("an allowed origin of * serves a cross-site request without an Origin header", async () => {
+  await withProxy({ allowOrigin: "*" }, async (port) => {
+    const res = await call(port, { ...MODELS, fetchSite: "cross-site" });
+    assert.equal(res.status, 200);
+    assert.equal(upstreamCalls.length, 1);
+  });
+});
+
+test("createProxyHandler refuses a cross-site request without an Origin header", async () => {
+  const get = (fetchSite) => new Request("http://127.0.0.1/anthropic/v1/models", {
+    headers: fetchSite ? { "sec-fetch-site": fetchSite } : {},
+  });
+
+  const byDefault = createProxyHandler("anthropic");
+  upstreamCalls.length = 0;
+  const refused = await byDefault(get("cross-site"), "/v1/models");
+  assert.equal(refused.status, 403);
+  assert.deepEqual(upstreamCalls, []);
+  for (const fetchSite of ["same-origin", "none", undefined]) {
+    const served = await byDefault(get(fetchSite), "/v1/models");
+    assert.equal(served.status, 200, String(fetchSite));
+  }
+  assert.equal(upstreamCalls.length, 3);
+
+  const open = createProxyHandler("anthropic", { allowOrigin: "*" });
+  upstreamCalls.length = 0;
+  const any = await open(get("cross-site"), "/v1/models");
   assert.equal(any.status, 200);
   assert.equal(upstreamCalls.length, 1);
 });

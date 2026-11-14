@@ -471,7 +471,7 @@ match agent.run("prompt".into()).await {
 }
 ```
 
-`Err(AgentError::TokenBudgetExceeded { .. })` is returned only by `Budget::check()` if you call it yourself. A token or tool-call budget spent during a run, or already spent at its start, ends as `Ok(RunResult)` with `terminal_cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted)`; a spent time budget ends as `Err(AgentError::TerminalFailure { outcome: TimeBudgetExceeded, .. })`.
+No run returns `Err(AgentError::TokenBudgetExceeded { .. })`; it comes from `Budget::check()` when you call it yourself. A token or tool-call budget spent during a run, or already spent at its start, ends as `Ok(RunResult)` with `terminal_cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted)`; a spent time budget ends as `Err(AgentError::TerminalFailure { outcome: TimeBudgetExceeded, .. })`.
 
 The answer of the model call that takes a run past its token budget is
 discarded: it is not committed to the session and not returned, although its
@@ -522,10 +522,14 @@ match event {
     AgentEvent::ToolResultReceived { id, name, content, is_error } => {}
     AgentEvent::TurnCompleted { stop_reason, usage, assistant_message_id } => {}
     // One provider attempt of a turn with a reasoning-effort preference: what
-    // was requested and what the attempt sent
+    // was requested, what the baseline request said, and the level judged for
+    // the attempt
     AgentEvent::RequestReasoningLowered {
         turn_number, fallback_attempt, provider, model, requested, baseline, outcome,
     } => {}
+    // One request was sent with the session's reasoning_effort level: the
+    // level it named, the level sent, the model and the route
+    AgentEvent::RequestReasoningEffortResolved { turn_number, fallback_attempt, resolution } => {}
 
     // Tool execution
     AgentEvent::ToolExecutionStarted { id, name } => {}

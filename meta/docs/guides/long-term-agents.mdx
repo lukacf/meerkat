@@ -303,11 +303,15 @@ One limit to know before you change an agent's instructions. On a model that
 takes a system instruction only ahead of the conversation, a changed
 instruction reaches an agent that already has a conversation only when that
 conversation is compacted at the start of a run. Those models are every
-Gemini model and the Anthropic models up to and including `claude-opus-4-7`,
-`claude-sonnet-5` and `claude-haiku-4-5`; newer Anthropic models and the
-OpenAI models take a changed instruction in mid-conversation, and a model
-the catalog does not know is treated as taking it only ahead of the
-conversation. That compaction may never happen by itself: a conversation is
+Gemini model, the Anthropic models up to and including `claude-opus-4-7`,
+`claude-sonnet-5` and `claude-haiku-4-5`, and the OpenAI models `gpt-live-1`
+and `gpt-live-1-codex`. Newer Anthropic models and the other OpenAI models
+take a changed instruction in mid-conversation, except an OpenAI model
+served through the ChatGPT backend (`chatgpt_backend`), whose requests carry
+no system instruction besides the prompt: there a change applies only from a
+new conversation. A model the catalog does not know is treated as taking it
+only ahead of the conversation. The instruction status tells for a given
+agent. That compaction may never happen by itself: a conversation is
 compacted only when it has grown to about four fifths of the model's context
 window, never after a time or a number of turns. Until then the agent goes
 on following its earlier instructions. To bring the change into effect,
@@ -446,9 +450,9 @@ is already in the agent's record.
   reset (`runtime.reset("editor")`, or the roster's reset action in the
   Console) is always available: the agent starts a new conversation led by
   the current instructions, and the earlier conversation is lost. The change
-  also takes effect at the agent's next compaction. A respawn does not bring
-  the change into effect, and neither does an archive followed by an
-  unarchive.
+  also takes effect at the agent's next compaction at the start of a run. A
+  respawn does not bring the change into effect, and neither does an archive
+  followed by an unarchive.
 - **Archive and unarchive.** An archived agent keeps its name, record,
   conversation and memory, and messages to it are refused. Like any agent
   that leaves, it is owed the harvest and distillation of its last

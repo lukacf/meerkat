@@ -459,10 +459,17 @@ What to know:
   and gives the earlier conversation up. A respawn (`meta/respawn`) and an
   archive followed by an unarchive keep the conversation and do not bring
   the change into effect. In the catalog of this release these models are
-  every Gemini model and the Anthropic models up to and including
-  `claude-opus-4-7`, `claude-sonnet-5` and `claude-haiku-4-5`; a model the
-  catalog does not know is treated the same way, and
-  `meta/instruction_status` tells for a given agent.
+  every Gemini model, the Anthropic models up to and including
+  `claude-opus-4-7`, `claude-sonnet-5` and `claude-haiku-4-5`, and the
+  OpenAI models `gpt-live-1` and `gpt-live-1-codex`; a model the catalog
+  does not know is treated the same way. Newer Anthropic models and the
+  other OpenAI models take the change at the agent's next run, except an
+  OpenAI model served through the ChatGPT backend (`chatgpt_backend`): its
+  wire is the one that carries no system row besides the prompt. A binding
+  the configuration does not resolve, or an OpenAI backend kind this
+  version does not know, is not taken to carry a system row after
+  conversation rows either. `meta/instruction_status` tells for a given
+  agent.
 - **A change made while the gateway was down** (the usual way to edit a
   configuration) is recorded after the gateway starts. For a configured
   agent: when the gateway registers it, at its start for the agents its

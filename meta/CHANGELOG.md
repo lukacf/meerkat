@@ -823,7 +823,8 @@ Security, Upgrade and Changed.
   once more as the one standing entry of the record. A removal still
   revokes the record, and a fork that holds the entry is told so at its
   next run. A model that takes a system instruction only ahead of the
-  conversation applies the change after a compaction or with a fresh
+  conversation applies the change after a compaction at the start of a run
+  or with a fresh
   conversation. A short conversation may never reach that compaction by
   itself: `meta/reset` brings the change into effect and gives the agent's
   conversation up, and `meta/instruction_status` says whether a change is

@@ -233,7 +233,7 @@ The update's result says what became of the change in
 | `kind` | Meaning |
 | --- | --- |
 | `applies_at_next_run` | The change reaches the agent at its next run. |
-| `applies_after_compaction` | The agent's model takes new instructions only at the head of what it reads: the change reaches it after its next compaction, which a short conversation may never reach. |
+| `applies_after_compaction` | The agent's model takes new instructions only at the head of what it reads: the change reaches it after its next compaction at the start of a run, which a short conversation may never reach. |
 | `applies_at_next_session` | The change does not reach the agent as it runs now, for `reason`, and applies when the agent next starts a new conversation. Reasons: `prepared_authorization_required` (a governed runtime), `slot_limit_exceeded`, `active_set_budget_exceeded`, `lowering_unavailable`, `body_too_large`, `record_unavailable`. |
 | `unchanged` | The agent holds the same instructions already. |
 

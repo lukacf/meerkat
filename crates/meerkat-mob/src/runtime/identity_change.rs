@@ -3734,7 +3734,10 @@ impl super::MobHandle {
     /// - A step that was deferred (the member holds work, or is being
     ///   woken) or failed released nothing: no.
     /// - A step that wrote a seat row seated a new incarnation, which has
-    ///   no build yet or was built from the row: yes.
+    ///   no build yet or was built from the row: yes. `Seated` and
+    ///   `FreshLife` are answered for an identity that was seated already
+    ///   too (a first-boot request of a seated member): a new incarnation
+    ///   there as well, and the settle still compares its seat row.
     /// - Any other answer, a kept member's for one: only when the member
     ///   holds no live build in this process (MobMachine's residency
     ///   fact). A member the release left live keeps the record: one the

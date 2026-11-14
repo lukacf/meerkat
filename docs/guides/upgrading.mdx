@@ -536,12 +536,13 @@ reading the 0.9.14 source, not by running a 0.9.14 binary over state that
 
 0.9.14 and earlier releases read what 0.9.15 writes without a refusal (a
 record written with `include_forks` reads there as its member's alone, see
-above), with two exceptions: a created agent's row that records an owed
-label restamp, and a mob whose operator instruction records are past what
-an earlier release holds in one mob. Check for both on 0.9.15, before the
-rollback. A third stored form is read without a refusal and is changed by
-what the earlier release writes: a schedule paused for its target, at the
-end of this subsection.
+above), with the exceptions listed below: a created agent's row that
+records an owed label restamp, a mob whose operator instruction records
+are past what an earlier release holds in one mob, and a reasoning effort
+level stored in a session, a mob or a realm profile. Check for each on
+0.9.15, before the rollback. One more stored form is read without a
+refusal and is changed by what the earlier release writes: a schedule
+paused for its target, at the end of this subsection.
 
 **A created agent's row that records an owed label restamp.** The row of a
 store-owned identity carries the key `label_restamp_owed` while an update
@@ -634,6 +635,51 @@ record keeps its slot. For each listed mob, do one of these first:
   1 MiB in total;
 - destroy the mob, or move its database out of the mob root, as for a mob
   an earlier release refuses.
+
+**A stored reasoning effort level.** 0.9.14 has no `reasoning_effort`
+field and refuses stored state that carries one with
+``unknown field `reasoning_effort` ``. Where the level is stored decides
+what a rollback costs (the note beside the change is under
+[Reasoning effort: one setting for every provider](#reasoning-effort%3A-one-setting-for-every-provider)):
+
+- **A session, or an accepted input.** A session whose stored provider
+  params hold the level, and an accepted input whose turn carries the
+  field, are refused by 0.9.14 and earlier. Before rolling back, remove
+  the level from every session that set it (`rkat run --resume <SESSION>
+  --no-reasoning-effort`, or a turn with `reasoning_effort`
+  `{"action":"clear"}`), and let accepted turns that carry it finish.
+  Replacing or clearing `provider_params` does not remove the level.
+- **A mob whose definition or a member profile ever stored a level.**
+  Storing a level in a mob is a one-way step: its event history records
+  every definition and each member's profile snapshot, and 0.9.14 reads
+  the whole history when it resumes the mob. A mob whose history holds a
+  profile with a level, or the `resume_overrides` value
+  `reasoning_effort`, cannot be read by 0.9.14, and removing the level
+  afterwards, or a reset, does not help: before rolling back, destroy the
+  mob on 0.9.15 and create it anew without the level (its members and
+  history are not kept). On 0.9.14 a Core host (`rkat-rpc`) starts and
+  serves its other mobs, and quarantines such a mob at its first request
+  (`store_unreadable`, not retryable, content retained): reads, turns, a
+  restore retry and a create under its id get the same answer. A Meta
+  gateway on 0.9.14 does not start on the state directory of such a mob.
+  Neither writes to the mob's store, and 0.9.15 loads it again with the
+  level.
+- **A realm profile that holds a level,** or the `resume_overrides` value
+  `reasoning_effort`. This is a one-way step too: on 0.9.14 the realm's
+  profile list fails as a whole and a read of that profile fails; an
+  update of that profile on 0.9.14 succeeds and drops the level.
+
+To keep the option of rolling back, set the level on a session or a turn,
+not in a mob definition, a member profile or a realm profile. There is no
+`rkat storage doctor` finding or count for stored levels yet: to find
+affected mobs before rolling back, page each mob's stored events
+(`rkat mob logs <MOB> --json`) and list the realm profiles, and search
+both for `reasoning_effort`. Sessions and mobs that never carried a level
+are written exactly as before and read on either release. What 0.9.14
+does with a mob definition and a realm profile that hold a level was
+measured with development builds of both releases; the session, accepted
+input, member snapshot and member spec cases are stated from the code of
+both releases, not from a run of 0.9.14.
 
 **A schedule paused for its target.** Nothing is refused, and the pause is
 not lost. 0.9.14 has no such mark: it ignores `paused_for_target` and reads

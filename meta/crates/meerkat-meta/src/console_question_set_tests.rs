@@ -2153,12 +2153,16 @@ fn judged(tools: &dyn meerkat_core::AgentToolDispatcher) -> (String, Vec<String>
 fn the_mount_leaves_the_builds_catalog_as_it_was() {
     let slot = AskUserSlot::default();
     let beside = || Declared::of(&["beside_one", "beside_two"], true, true, &[]);
+    let receiver = Arc::new(Receiver::default());
     let mut differing = Vec::new();
     // Each build: its own external tools, and the one tool category its
     // options switch on. Builtins and shell make the factory's base its
     // builtin composite. Image generation and web search do so only with
-    // their backends, which an ordinary member build does not have: its
-    // base stays the empty dispatcher with the switch on.
+    // their backends, which these builds do not have: the base stays the
+    // empty dispatcher with the switch on. External tools that only observe
+    // bindings (the mob runtime's receiver on a build with no external
+    // tools of its own, which every local member build carries) are
+    // composed by the factory as none.
     for (case, external, switch) in [
         ("no external tools, no switch on", None, None),
         ("no external tools, builtins on", None, Some("builtins")),
@@ -2188,6 +2192,16 @@ fn the_mount_leaves_the_builds_catalog_as_it_was() {
             "exact external tools still connecting",
             Some(Declared::of(&["probe"], true, false, &["server-a"])),
             None,
+        ),
+        (
+            "a receiver that only observes bindings, no switch on",
+            Some(Arc::clone(&receiver) as Arc<dyn meerkat_core::AgentToolDispatcher>),
+            None,
+        ),
+        (
+            "a receiver that only observes bindings, builtins on",
+            Some(Arc::clone(&receiver) as Arc<dyn meerkat_core::AgentToolDispatcher>),
+            Some("builtins"),
         ),
     ] {
         let mut request = build_request(Some("agent-a"), external.clone());
@@ -2222,10 +2236,17 @@ fn the_mount_leaves_the_builds_catalog_as_it_was() {
             .as_ref()
             .and_then(|build| build.external_tools.clone())
             .expect("mounted");
-        // The base the factory builds without the tool. A builtin composite
-        // reads as its external tools do, and as exact without any: an
-        // exact dispatcher of no tools stands in for it here.
-        let base_without: Arc<dyn meerkat_core::AgentToolDispatcher> = match (&external, builtins) {
+        // The factory binds the session's mob operator authority to the
+        // build's external tools: a receiver below the tool still gets it.
+        mounted.bind_session_mob_tool_authority(None);
+        // The base the factory builds without the tool. External tools that
+        // only observe bindings compose as none. A builtin composite reads
+        // as its external tools do, and as exact without any: an exact
+        // dispatcher of no tools stands in for it here.
+        let own = external
+            .as_ref()
+            .filter(|external| !external.observes_bindings_only());
+        let base_without: Arc<dyn meerkat_core::AgentToolDispatcher> = match (own, builtins) {
             (Some(external), _) => Arc::clone(external),
             (None, true) => Declared::of(&[], true, false, &[]),
             (None, false) => Arc::new(meerkat_tools::EmptyToolDispatcher),
@@ -2259,6 +2280,52 @@ fn the_mount_leaves_the_builds_catalog_as_it_was() {
         "mounting the tool leaves the build's catalog as it was:\n{}",
         differing.join("\n")
     );
+    assert_eq!(
+        receiver.bound.load(Ordering::Relaxed),
+        2,
+        "the receiver below the tool is bound in both of its builds"
+    );
+}
+
+/// The mob runtime's receiver of a session's mob operator authority, as a
+/// build with no external tools of its own carries it: no tools, an exact
+/// catalog, and it only observes the bindings the factory gives a build's
+/// external tools.
+#[derive(Default)]
+struct Receiver {
+    bound: AtomicU64,
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::AgentToolDispatcher for Receiver {
+    fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
+        Vec::new().into()
+    }
+
+    async fn dispatch(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        Err(meerkat_core::ToolError::not_found(call.name))
+    }
+
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        meerkat_core::ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: false,
+        }
+    }
+
+    fn bind_session_mob_tool_authority(
+        &self,
+        _authority: Option<Arc<std::sync::RwLock<meerkat_core::service::MobToolAuthorityContext>>>,
+    ) {
+        self.bound.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn observes_bindings_only(&self) -> bool {
+        true
+    }
 }
 
 /// The pins this feature leaves as they are, named for the record: the

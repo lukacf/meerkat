@@ -116,7 +116,7 @@ first message. A call that reaches the tools anyway is refused
 | Tool | Arguments | What it does |
 | --- | --- | --- |
 | `identity_create` | `agents: [{name, profile, display_name?, instructions?, context?, labels?, first_message?, peers?}]`, `request_id?` | Creates 1 to 256 agents, all together or not at all. They may name each other as peers. |
-| `identity_update` | `name`, `expected_spec_digest`, `set {display_name?, instructions?, context?, labels?, labels_remove?, profile?}`, `peers_add?`, `peers_remove?`, `request_id?` | Changes one agent. A member left out of `set` stays as it is. A profile move seats the agent again (see [Moving a profile](#moving-a-profile)). |
+| `identity_update` | `name`, `expected_spec_digest`, `set {display_name?, instructions?, context?, labels?, labels_remove?, profile?}`, `peers_add?`, `peers_remove?`, `request_id?` | Changes one agent. A member left out of `set` stays as it is. A label change keeps the agent's member (see [Changing labels](#changing-labels)); a profile move seats the agent again (see [Moving a profile](#moving-a-profile)). |
 | `identity_archive` | `name`, `expected_spec_digest`, `request_id?` | Stops an agent and keeps it: name, record, conversation and memory stay, its last conversation is harvested as for any agent that leaves, and messages to it are refused. Its schedules are paused with it. |
 | `identity_unarchive` | `name`, `expected_spec_digest`, `request_id?` | Brings an archived agent back on the conversation it had. The schedules its archive paused are resumed. |
 | `identity_remove` | `name`, `expected_spec_digest`, `request_id?` | Removes an agent for good. Its name is never available again; its last conversation is harvested as for any agent that leaves. Its schedules are ended. |
@@ -220,6 +220,44 @@ An update of an agent that waits changes its record only, and the agent still
 waits. An update that moves an agent into a profile the host prepares is
 refused `unsupported` at `set.profile`: the agent is created in that profile
 instead. Only a create answers `pending_preparation`.
+
+## Changing labels
+
+A label change (`set.labels`, `set.labels_remove`) is applied at once and
+does not seat the agent again. The agent keeps its member and its
+conversation, and it goes on listing and managing the mobs it created.
+
+- **The roster and what decides by a label use the new labels at once.**
+  The mob's roster reads them from the update on. An access rule's
+  `match_labels` decides on them at the next call (an open event stream at
+  its next read of the roster, within 20 seconds), and the identity
+  policy's rules read the agent's record. A label that was removed stops
+  deciding there at once.
+- **The agent's next build uses them.** An idle agent is released by the
+  update, so its next delivery builds it again: your customizer is handed
+  the new labels, and a label that was removed is not among them. An agent
+  that is busy is not interrupted; it takes the new labels at its next
+  build after it goes idle. Until the agent is next seated, any later
+  update of it releases it when it is idle: one more build at its next
+  delivery, nothing else.
+- **What its peers read of it.** A build adds the agent's labels to the
+  peer metadata of its conversation and takes none away, so a removed
+  label stays in what its peers read of it until the agent starts a new
+  conversation. Nothing is decided on it.
+- **The seat's own journal row trails.** The record of the agent's seat in
+  the mob's journal keeps the labels the agent was seated with until the
+  agent is next seated (a respawn, a profile move, a runtime-mode change, a
+  reset). It decides nothing an update can change. It is what an earlier
+  release that serves the same store reads, so it matters before a
+  rollback: Meerkat's upgrade guide says how to find such agents. The only
+  way to bring it in line is to seat the agent again (`meta/respawn`),
+  which costs an agent that created mobs their listing and management:
+  there is no way that keeps both.
+- **A broken agent is the exception.** An agent whose build was refused for
+  its labels (its row lacks a label your customizer sets) is `broken` and
+  serves nothing. The update that corrects its labels seats it again, and
+  its next send is served. If it had created mobs before it broke, it no
+  longer lists or manages them, as after a profile move.
 
 ## Moving a profile
 

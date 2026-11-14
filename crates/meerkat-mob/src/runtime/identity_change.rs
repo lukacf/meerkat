@@ -2186,9 +2186,10 @@ pub(super) fn declared_entry_receipt_outcome(
 ///
 /// The row owes its seat a label restamp when it owed one already, or when
 /// `seat_trails`: a member holds the identity and its last seat row carries
-/// other labels than `spec`'s. The update's member step then restamps an
-/// idle member, and a seat row that carries the row's labels lets the owed
-/// restamp go; a member that holds work keeps it owed.
+/// other labels than `spec`'s. The update's member step then releases an
+/// idle member, so that its next build takes the row's labels, and seats
+/// nothing; the member's next seat row, whatever writes it, carries the
+/// row's labels and lets the owed restamp go.
 pub(super) fn store_owned_update_row(
     spec: &CreatedIdentitySpec,
     expected_spec_digest: &str,
@@ -3777,49 +3778,39 @@ impl super::MobHandle {
     /// and is in the row at once: a seat whose session no build created yet
     /// takes the new context and instructions at its first build; otherwise
     /// the seat keeps its recorded build inputs, as a roster-owned
-    /// identity's does. A label change is in the row at once and restamps
-    /// the seated member with the row's labels on its own session
-    /// ([`super::DeclaredEntryOutcome::Restamped`]; the same-session respawn
-    /// with [`super::MemberRespawn::with_labels`]): every build of a
-    /// store-owned member must carry exactly its seat's labels
-    /// ([`super::MemberBuildPreparer::prepare_store_owned_seat`]), and what
-    /// decides on a member's labels reads its seat. The
-    /// member keeps its identity entry, session, conversation and edges;
-    /// nothing is built or woken, and no kickoff runs again. A member that
-    /// holds work is not interrupted: the update commits and answers
-    /// [`super::DeclaredEntryOutcome::Deferred`]. A label update of a busy
-    /// member is recorded in its row, and the mob's roster reads the row's
-    /// labels ([`Self::get_member`] and the member lists) from the step
-    /// that commits the row, whatever the member step then answers and
-    /// whether or not this call's caller is still there. The running
-    /// session takes them at its next build (a key the row dropped stays
-    /// in a resumed session's own peer metadata, as at every resume): the
-    /// member keeps its generation, fence and session, and no seat row is
-    /// written. The same holds when the member step fails
-    /// ([`super::DeclaredEntryOutcome::Failed`]) and for a member a
-    /// same-session successor cannot serve (a placed one, one wired to a
-    /// placed member, one on a session service that keeps no durable
-    /// sessions), whose update answers
-    /// [`super::DeclaredEntryOutcome::Kept`]; its release is tried before
-    /// the respawn that is then refused (in these three cases it releases
-    /// nothing; a member whose session cannot be kept is released and then
-    /// kept), and its restamp stays owed. The roster is not the
+    /// identity's does. A label change is in the row at once and keeps
+    /// the member ([`super::DeclaredEntryOutcome::Kept`]): no successor is
+    /// seated for a label, so the member keeps its identity entry,
+    /// generation, fence, session, conversation and edges, and no seat row
+    /// is written. The mob's roster reads the row's labels
+    /// ([`Self::get_member`] and the member lists) from the step that
+    /// commits the row, whether or not this call's caller is still there.
+    /// An idle live member is released (it stays seated, and its next
+    /// delivery wakes it), so its next build takes the row's labels (a key
+    /// the row dropped stays in a resumed session's own peer metadata, as
+    /// at every resume). A member that holds work is not interrupted: the
+    /// update commits and answers [`super::DeclaredEntryOutcome::Deferred`],
+    /// and a retry of the update releases the member once it is idle. A
+    /// member a release does not serve (a placed one, one wired to a
+    /// placed member) is kept as it is, and on a session service that keeps
+    /// no durable sessions nothing is released. The roster is not the
     /// journal: the member's last seat row keeps the labels it was seated
-    /// with until its restamp, and so do the readers of that row, the
+    /// with until its next seat row, and so do the readers of that row, the
     /// binding journal's labels and `seats_stale`
     /// ([`Self::identity_record_census`]).
     ///
-    /// The restamp stays owed, and the row records it
+    /// That restamp stays owed, and the row records it
     /// (`CreatedIdentityRecord::label_restamp_owed`): the update's commit
     /// writes it, in its own transaction, when a member holds the identity
     /// and its last seat row carries other labels than the updated row,
-    /// and the row lets it go once a seat row carries the row's labels. So
-    /// an update of an idle identity makes its seat equal its row, whatever
-    /// its seat carried. A retry of the update (it replays) or the
-    /// identity's next update carries the restamp out once the member is
-    /// idle; a retry while the member still holds work restamps nothing
-    /// and leaves it owed. A respawn with the row's labels, a rotation and
-    /// a reset settle it too. While it is owed, a start seats the row's
+    /// and the row lets it go once a seat row carries the row's labels. No
+    /// update seats a member for its labels, and neither does a retry:
+    /// while the restamp is owed each of them releases the idle member
+    /// again (a build at its next delivery, nothing else). A respawn (with
+    /// the row's labels, [`super::MemberRespawn::with_labels`], the host's
+    /// chosen step), a runtime-mode or role restamp, a rotation and a
+    /// reset write that seat row and settle it. While it is owed, a start
+    /// seats the row's
     /// labels on the member's roster entry and a build of the member is
     /// compared with the row's labels, so an update that was answered
     /// never leaves its member refused its build, in this process or after
@@ -4065,8 +4056,10 @@ impl super::MobHandle {
     /// update's member step left owed is carried out once the member is
     /// idle. That is the runtime-mode restamp or the role move a crash, a
     /// dropped caller or a busy member prevented (with the migration from
-    /// the role its member holds), and the label restamp the row records
-    /// as owed (`CreatedIdentityRecord::label_restamp_owed`). A member that
+    /// the role its member holds), and the release of a member whose row
+    /// records an owed label restamp
+    /// (`CreatedIdentityRecord::label_restamp_owed`), so that its next
+    /// build takes the row's labels. A member that
     /// still holds work is left as it is and keeps what it is owed; a
     /// member that matches its row, with nothing owed, is written nothing.
     /// The row then lets go of what the member's seat settled

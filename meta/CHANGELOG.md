@@ -933,6 +933,31 @@ Security, Upgrade and Changed.
 
 ### Changed
 
+- A label change of an agent created at run time (`meta/identity/update`,
+  the agent tool `identity_update`) does not seat the agent again. The
+  agent keeps its member and its conversation, and goes on listing and
+  managing the mobs it created with its own tools. The mob's roster reads
+  the new labels from the update on, and what decides by a label decides
+  on them at once, in both directions: an access rule's `match_labels` at
+  the next call (an open event stream within 20 seconds), the identity
+  policy's rules on the agent's record. An idle agent is released by the
+  update, so its next build is composed with the new labels (your
+  customizer is handed them, without a label that was removed); a busy
+  agent is not interrupted and takes them at its next build after it goes
+  idle, and a later update of it releases it once it is idle. What
+  trails until the agent is next seated is the record of its seat in the
+  mob's journal: it decides nothing an update can change, it is what an
+  earlier release that serves the same store reads, and only seating the
+  agent again (`meta/respawn`, with what that costs an agent that created
+  mobs) brings it in line; see the rollback notes of Meerkat's upgrade
+  guide before a rollback. A removed label stays in the peer metadata of
+  the agent's conversation, which its peers read, until the agent starts a
+  new conversation. One agent is still seated again by a label update: an
+  agent that is broken because its build was refused for its labels. It
+  serves nothing while it is broken, the update that corrects its labels
+  seats it again, and if it had created mobs before, it no longer lists or
+  manages them. See "Changing labels" in the created agents guide.
+
 - The texts say what a profile move of an agent created at run time costs.
   A profile move (`set.profile`), and a host's change of the runtime mode
   (`set.runtime_mode_override`), seats the agent again on the same
@@ -965,10 +990,11 @@ Security, Upgrade and Changed.
   the agent, put the label in its row: at its create, or by an update. An
   update seats an agent that is owed its seat (one created with a first
   message) at once; an agent Core already holds a member of is refused
-  until its row carries the label, takes its row's labels at the update
-  itself while its member is idle, and is served at its next send, with
-  no respawn or reset (a member that held work then takes them at a
-  retry of the update, at its next update, or at a respawn or a reset).
+  until its row carries the label: the update that puts it there seats
+  the refused agent again, and it is served at its next send, with no
+  respawn or reset of yours. Any other agent keeps its seat at a label
+  change and takes its row's labels at its next build (see the entry on
+  a label change above).
   The same holds after a later label change of a row. A customizer that
   sets no labels refuses nothing. An archive and a removal of a refused
   agent are served.

@@ -554,8 +554,9 @@ fn rendering(
 
 /// The administrator withdraws an open decision as the host. A decision
 /// the caller may not see at all (for an administrator: the question set of
-/// a member hidden from them) is not there to withdraw: its id is answered
-/// as an id that names no decision, as the reads answer it.
+/// a member hidden from them, and, unless the caller is told of such rows,
+/// a row the store cannot decode) is not there to withdraw: its id is
+/// answered as an id that names no decision, as the reads answer it.
 fn withdraw(
     decisions: &RuntimeDecisions,
     caller: &ConsoleDecisionCaller<'_>,
@@ -577,11 +578,11 @@ fn withdraw(
     }
     // The read records nothing: the withdraw's own touch still answers
     // what it records (the expiry of a decision past its deadline).
-    let hidden = decisions
-        .owner()
-        .for_candidate_launch()
-        .get(&decision_id)
-        .is_ok_and(|row| Viewer::of(caller).sight(&row) == Sight::Nothing);
+    let hidden = match decisions.owner().for_candidate_launch().get(&decision_id) {
+        Ok(row) => Viewer::of(caller).sight(&row) == Sight::Nothing,
+        Err(DecisionError::Unreadable { .. }) => !caller.reads_undecodable(),
+        Err(_) => false,
+    };
     if hidden {
         return wire::not_found(id);
     }

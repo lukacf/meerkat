@@ -940,6 +940,15 @@ Security, Upgrade and Changed.
 
 ### Changed
 
+- `meta/decisions/list` on the Console pages over what its caller may see: a
+  decision the caller may not see fills no place in a page and is never a
+  cursor, and the request's filters choose among the decisions it may see.
+  `meta/decisions/list`, `get`, `rendering` and `withdraw` on the Console
+  tell only an access administrator of rows the decision store cannot
+  decode. A caller who administers decisions by a rule no longer reads them:
+  `unreadable` is empty for it, and by its id such a row is answered as an
+  id that names no decision.
+
 - A host that labels its members in its customizer must put those labels
   in the row of an agent created at run time (an identity whose record is
   its row). Such an agent's member carries its row's labels and no others,

@@ -2864,12 +2864,15 @@ console change: one made for another caller than its token
 one whose caller's login ended before it is made `-32056`
 (`data.kind = "caller_not_current"`), and the console audit log records it.
 A list pages over what the caller may
-see: an administrator reads the store's own pages, and any other caller reads
-the decisions of the approver ids it holds and its own requests, and learns
-of no other decision. `meta/decisions/rendering` for a caller that
-may see only the status is refused `-32030`
-(`data.kind = "content_not_visible"`). Unreadable rows are listed only to a
-caller allowed `decisions.admin`. While the runtime keeps decisions,
+see: a decision it may not see fills no place in a page and is never a
+cursor. An administrator reads every decision its filters name, and any
+other caller reads the decisions of the approver ids it holds and its own
+requests, and learns of no other decision. `meta/decisions/rendering` for a
+caller that may see only the status is refused `-32030`
+(`data.kind = "content_not_visible"`). Rows the store cannot decode are
+listed only to an access administrator; to any other caller such a row reads
+as an id that names no decision, on `get`, `rendering` and `withdraw` alike.
+While the runtime keeps decisions,
 `meta/capabilities` lists the decision methods the caller may call. The
 Approvals panel lists the open decisions on its Pending tab, read only: each
 one is decided where it was presented.

@@ -8,9 +8,13 @@
  * Usage (standalone):
  *   ANTHROPIC_API_KEY=sk-... npx @rkat/web proxy --port 3100
  *
- * Usage (compose into existing server):
- *   import { createProxyHandler, corsHeaders } from '@rkat/web/proxy';
- *   app.all('/anthropic/*', createProxyHandler('anthropic'));
+ * Usage (compose into your own server): the handler takes a Fetch API
+ * Request and the path with the provider prefix removed, and returns a
+ * Response. It compares the request's Origin with `allowOrigin` and does not
+ * authenticate callers; see `createProxyHandler` below.
+ *   import { createProxyHandler } from '@rkat/web/proxy';
+ *   const anthropic = createProxyHandler('anthropic', { allowOrigin: 'https://app.example.com' });
+ *   const response = await anthropic(request, '/v1/messages');
  */
 
 import { createServer } from 'node:http';
@@ -52,7 +56,7 @@ const PROVIDERS = {
   },
 };
 
-// ─── CORS headers and allowed origins ───────────────────────────
+// ─── CORS headers ───────────────────────────────────────────────
 
 /**
  * CORS response headers that allow one origin value (`*` allows any).
@@ -109,8 +113,9 @@ function isLoopbackHost(host) {
 }
 
 const REFUSED = {
-  origin: JSON.stringify({ error: 'origin_not_allowed', message: 'This origin is not allowed to call the proxy.' }),
+  origin: JSON.stringify({ error: 'origin_not_allowed', message: 'This origin is not allowed to call the proxy. The allowed origin is set with --cors-origin (allowOrigin).' }),
   host: JSON.stringify({ error: 'host_not_allowed', message: 'The proxy answers loopback host names only.' }),
+  hosts: JSON.stringify({ error: 'bad_request', message: 'A request carries exactly one Host header.' }),
 };
 
 // ─── Proxy handler ──────────────────────────────────────────────
@@ -124,7 +129,10 @@ const REFUSED = {
  * The handler compares a request's Origin header with `allowOrigin` before it
  * calls the provider, and answers 403 when the origin is not allowed (see
  * `checkOrigin` above: loopback origins only when `allowOrigin` is not given,
- * one named origin, or `*` for any). It answers an allowed preflight itself.
+ * one named origin, or `*` for any). `allowOrigin` is one origin as a string:
+ * a list, a pattern or a function allows no origin. A page of the embedding
+ * site itself sends an Origin on its POSTs, so name the site's origin. The
+ * handler answers an allowed preflight itself.
  * It does not check who calls it in any other way: a request without an
  * Origin header is forwarded unless a browser marks it cross-site, so a
  * server that embeds the handler puts its own authentication in front of it.
@@ -227,6 +235,14 @@ function isLoopbackAddress(address) {
   return address === '::1' || /^(::ffff:)?127\./i.test(address);
 }
 
+// A port given as an integer or as a string of digits; 0 asks the system for
+// a free port. Anything else leaves the choice to PORT or the default.
+function portOption(value) {
+  if (Number.isInteger(value)) return value;
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) return Number(value.trim());
+  return undefined;
+}
+
 /**
  * Start a standalone proxy server.
  *
@@ -239,11 +255,10 @@ function isLoopbackAddress(address) {
  * another address it does not check the Host, and forwards any caller on the
  * network that sends no Origin header: put it behind your own authentication.
  *
- * @param {{ port?: number, host?: string, allowOrigin?: string }} [opts]
+ * @param {{ port?: number | string, host?: string, allowOrigin?: string }} [opts]
  */
 export function startProxy(opts = {}) {
-  // Port 0 asks the system for a free port.
-  const port = Number.isInteger(opts.port) ? opts.port : parseInt(process.env.PORT || '3100', 10);
+  const port = portOption(opts.port) ?? parseInt(process.env.PORT || '3100', 10);
   const host = opts.host || DEFAULT_HOST;
   const allowOrigin = opts.allowOrigin;
 
@@ -268,6 +283,12 @@ export function startProxy(opts = {}) {
     try {
       // Refuse by Host and Origin first, whatever the method and path
       const json = { 'content-type': 'application/json' };
+      const hostHeaders = nodeReq.rawHeaders.filter((name, i) => i % 2 === 0 && name.toLowerCase() === 'host');
+      if (hostHeaders.length > 1) {
+        nodeRes.writeHead(400, json);
+        nodeRes.end(REFUSED.hosts);
+        return;
+      }
       if (isLoopbackAddress(server.address().address) && !isLoopbackHost(nodeReq.headers.host)) {
         nodeRes.writeHead(403, json);
         nodeRes.end(REFUSED.host);

@@ -662,16 +662,25 @@ Where the pins come from:
   `release/library-non-published-source-members-empty.json`. It names nothing,
   so it is committed and a hosted job may hold it; its digest is an ordinary
   pin. A list that names a member is private.
-- The pins of a release are set by a commit before the scans run: the release
-  commit sets `name_list_sha256`, `rules_sha256` and
-  `non_published_list_sha256` of each target it releases (and the detector
-  builds, when they change). Until then they are `null` and every upload of
-  that target refuses. The pass line names the target, the pins file's sha256
-  and the commit the pins were read from.
+- The pins of a release are set by a commit before the scans run, and before
+  the release commit: a pins commit sets all seven pins of each target the
+  release uploads, from the lane's inputs (the name list, the rules written
+  from it by the tree's converter, the list of left-out members written by the
+  tree's packager, the two detector builds and the default rules file beside
+  each). The release commit inherits them. At the release's version commit the
+  lane derives the rules and the list of left-out members again from that
+  commit's tree and compares all seven values with the committed pins; the
+  release goes on only when every one is equal. They can differ only when the
+  release branch changed the converter, the packager, a left-out source member
+  or an input pin of the library, or when the library input set was built
+  again; then a second pins commit follows, after the release commit and
+  before the lane builds what it uploads. Until a target's pins are set they
+  are `null` and every upload of that target refuses. The pass line names the
+  target, the pins file's sha256 and the commit the pins were read from.
 - A target whose pins are `null` cannot be uploaded. The pins of
   `macos-arm64` are `null` until the change that binds that target's uploads
-  to this check sets them, and the pins of `release` are `null` until a
-  release commit sets them.
+  to this check sets them. The pins of `linux-x86_64` and of `release` are
+  set.
 - Publication is judged by the pins of a commit on the default branch. In the
   hosted workflow the accept and publish jobs refuse, in the step right after
   their checkout, unless the checked-out commit is an ancestor of the default

@@ -2562,6 +2562,55 @@ default_binding = "local"
             .expect("a verified callback is accepted");
     }
 
+    /// The builder every gateway branch gives its session service
+    /// (`for_gateway`) tells how a model takes an appended system
+    /// instruction, as the factory builder it wraps does: a session's
+    /// instruction read states the lowering from this answer, and the
+    /// answer of an instructions update is taken from that read. A builder
+    /// that cannot tell (the trait's default) would state none for every
+    /// model.
+    #[tokio::test]
+    async fn the_gateway_callback_builder_tells_each_models_instruction_lowering() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let (stdout_tx, _stdout_rx) = mpsc::channel(1);
+        let builder = StdioCallbackAgentBuilder::for_gateway(
+            FactoryAgentBuilder::new(AgentFactory::new(tmp.path()), Config::default()),
+            StdioCallbackBridge::new(stdout_tx),
+            true,
+            None,
+            None,
+            &GatewayRuntimeOptions::default(),
+            None,
+        );
+        let identity = |provider, model: &str| meerkat_core::SessionLlmIdentity {
+            model: model.to_string(),
+            provider,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let told = [
+            identity(meerkat_core::Provider::Anthropic, "claude-sonnet-4-6"),
+            identity(meerkat_core::Provider::OpenAI, "gpt-5.5"),
+        ];
+        let mut lowerings = Vec::new();
+        for identity in &told {
+            lowerings.push(
+                SessionAgentBuilder::instruction_lowering_for_identity(&builder, identity).await,
+            );
+        }
+        assert_eq!(
+            lowerings,
+            [
+                Some(meerkat_core::InstructionLowering::LeadingPrefixOnly),
+                Some(meerkat_core::InstructionLowering::MidConversation),
+            ],
+            "the gateway's builder answers each model's lowering as its inner factory builder \
+             does: a model that takes a system instruction only ahead of the conversation, and \
+             one that takes it after conversation rows"
+        );
+    }
+
     /// Under a member auth binding the SDK build callback's answer is checked
     /// as the session services checked the request: a `resume_session_id`
     /// answer that seats the build on a stored session whose recorded tooling
@@ -15766,6 +15815,20 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
     // under the root this reports.
     fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
         self.inner.session_comms_identity_root()
+    }
+
+    // Forwarded: the inner factory builder answers from the model registry
+    // of the config a build reads. This wrapper adds SDK callbacks around
+    // agent construction and knows no model. The trait's default answers
+    // "cannot tell" for every model, and an instruction read of a member's
+    // session then states no lowering: an update of an agent's
+    // instructions would say when the change applies without knowing how
+    // the agent's model takes it.
+    async fn instruction_lowering_for_identity(
+        &self,
+        identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Option<meerkat_core::InstructionLowering> {
+        self.inner.instruction_lowering_for_identity(identity).await
     }
 
     async fn abort_absent_session_compaction_stages(

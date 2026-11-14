@@ -479,16 +479,23 @@ function parseSchedulesFollowed(data: Record<string, unknown>): SchedulesFollowe
 /**
  * What became of an update's instructions change.
  *
- * The new text is in the agent's record at once, whatever the outcome. It
- * reaches the agent at its next run; a run that starts within moments of the
- * change may still use the earlier instructions; earlier instructions are
- * never rewritten.
+ * The new text is in the agent's record at once, whatever the outcome, and
+ * earlier instructions are never rewritten. When it reaches the agent is
+ * what the outcome says.
  *
- * `kind` is one of {@link INSTRUCTION_OUTCOME_KINDS}: `applies_at_next_run`;
- * `applies_after_compaction` (the agent's model takes new instructions only
- * at the head of what it reads); `applies_at_next_session` (the change does
- * not reach the agent as it runs now and applies when it next starts afresh,
- * for `reason`, one of {@link INSTRUCTION_NEXT_SESSION_REASONS}); `unchanged`.
+ * `kind` is one of {@link INSTRUCTION_OUTCOME_KINDS}: `applies_at_next_run`
+ * (a run that starts within moments of the change may still use the earlier
+ * instructions); `applies_after_compaction` (the agent's model takes new
+ * instructions only at the head of what it reads: the change waits for a
+ * compaction at the start of a run, which a short conversation may never
+ * reach; a reset of the agent brings it into effect and gives the agent's
+ * conversation up); `applies_at_next_session` (the change does not reach the
+ * agent as it runs now and applies when it next starts afresh, for `reason`,
+ * one of {@link INSTRUCTION_NEXT_SESSION_REASONS}); `unchanged`.
+ *
+ * The instruction status read (`instructionStatus` of the runtime) is the
+ * authority for whether a change is in effect: the agent's slot reads
+ * `pending` until it is, then `effective`.
  */
 export interface InstructionOutcome {
   readonly kind: InstructionOutcomeKind | (string & {});

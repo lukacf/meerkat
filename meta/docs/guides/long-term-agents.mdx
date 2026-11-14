@@ -251,14 +251,21 @@ own `request_id` or by the outcome's `operation_id`.
 <CodeGroup>
 
 ```python Python
+from meerkat_meta import (
+    IdentityDone,
+    IdentityOperationUnknown,
+    IdentityPendingDecision,
+    IdentityRefused,
+)
+
 state = await identities.operation(request_id="adopt-scout-1")
-if state.outcome == "done":
+if isinstance(state, IdentityDone):
     ...
-elif state.outcome == "pending_decision":
+elif isinstance(state, IdentityPendingDecision):
     ...  # still held; state.deadline_ms
-elif state.outcome == "refused":
+elif isinstance(state, IdentityRefused):
     state.refusal.kind  # for example decision_closed
-elif state.outcome == "unknown":
+elif isinstance(state, IdentityOperationUnknown):
     ...  # nothing committed and nothing is held: asking it commits at most once
 ```
 
@@ -292,10 +299,29 @@ decision of an SDK host renders without them.
 
 ## 4. Create, update, archive and remove
 
+One limit to know before you change an agent's instructions. On a model that
+takes a system instruction only ahead of the conversation, a changed
+instruction reaches an agent that already has a conversation only when that
+conversation is compacted at the start of a run. Those models are every
+Gemini model, the Anthropic models up to and including `claude-opus-4-7`,
+`claude-sonnet-5` and `claude-haiku-4-5`, and the OpenAI models `gpt-live-1`
+and `gpt-live-1-codex`. Newer Anthropic models and the other OpenAI models
+take a changed instruction in mid-conversation, except an OpenAI model
+served through the ChatGPT backend (`chatgpt_backend`), whose requests carry
+no system instruction besides the prompt: there a change applies only from a
+new conversation. A model the catalog does not know is treated as taking it
+only ahead of the conversation. The instruction status tells for a given
+agent. That compaction may never happen by itself: a conversation is
+compacted only when it has grown to about four fifths of the model's context
+window, never after a time or a number of turns. Until then the agent goes
+on following its earlier instructions. To bring the change into effect,
+reset the agent, which discards its conversation; **Instructions** below has
+it.
+
 <CodeGroup>
 
 ```python Python
-from meerkat_meta import AgentSet, AgentSpec
+from meerkat_meta import AgentSet, AgentSpec, IdentityDone
 
 created = await identities.create(
     [
@@ -310,7 +336,9 @@ created = await identities.create(
     ],
     request_id="create-editor-1",
 )
-digest = created.agents[0].spec_digest
+digest = ""
+if isinstance(created, IdentityDone):
+    digest = created.agents[0].spec_digest or ""
 
 updated = await identities.update(
     "editor",
@@ -318,9 +346,12 @@ updated = await identities.update(
     request_id="update-editor-1",
     set=AgentSet(instructions=["Edit for clarity.", "Keep the author's voice."]),
 )
-agent = updated.agents[0]
-agent.instructions.kind        # "applies_at_next_run", ...
-digest = agent.spec_digest
+if isinstance(updated, IdentityDone):
+    agent = updated.agents[0]
+    if agent.instructions:
+        # "applies_at_next_run", "applies_after_compaction", ...
+        agent.instructions.kind
+    digest = agent.spec_digest or digest
 
 await identities.archive("editor", expected_spec_digest=digest, request_id="archive-editor-1")
 await identities.unarchive("editor", expected_spec_digest=digest, request_id="unarchive-editor-1")
@@ -350,7 +381,8 @@ const updated = await identities.update("editor", {
 });
 if (updated.outcome === "done") {
   const agent = updated.agents[0];
-  agent.instructions?.kind; // "applies_at_next_run", ...
+  // "applies_at_next_run", "applies_after_compaction", ...
+  agent.instructions?.kind;
   digest = agent.specDigest!;
 }
 
@@ -360,6 +392,13 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
 ```
 
 </CodeGroup>
+
+This block archives and removes the agent moments after changing its
+instructions, so the gateway log may show one or two
+`operator_instruction_delivery` warnings (`failure=AGENT_ERROR`,
+`failure=SESSION_NOT_FOUND`): the change was on its way into the agent's
+conversation when the conversation was archived. Nothing is lost: the change
+is already in the agent's record.
 
 - **Create.** One call creates 1 to 256 agents, all or nothing; they may name
   each other as peers. A new agent is dormant: nothing is loaded and nothing
@@ -394,11 +433,26 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   a create and are the change class `capability` of your policy; an update
   sets a runtime mode and cannot return the agent to its profile's.
 - **Instructions.** A change of instructions is in the agent's record at
-  once. It reaches the agent at its next run; a run that starts within
-  moments of the change may still use the earlier instructions; earlier
-  instructions are never rewritten. The update's outcome says which applies:
-  `applies_at_next_run`, `applies_after_compaction`, `applies_at_next_session`
-  (with a `reason`) or `unchanged`.
+  once; earlier instructions are never rewritten. The update's outcome says
+  when the agent follows it. `applies_at_next_run`: at its next run (a run
+  that starts within moments of the change may still use the earlier
+  instructions); an agent that has no conversation yet takes the current
+  instructions in its first run, unless that run was already being started
+  when the update arrived. `applies_after_compaction`: the limit above; the
+  sample above answers it on such a model, because the agent's first message
+  has given it a conversation. `applies_at_next_session` (with a `reason`):
+  from the agent's next new conversation. `unchanged`: the update left the
+  instructions as they were. The instruction status
+  (`runtime.instruction_status(namespace="meerkat.identity.instructions", key="editor", identity="editor")`)
+  shows where a change stands, in `status["members"][0]["slots"][0]["state"]`:
+  `{"state": "pending", "reason": "leading_prefix_only_lowering"}` is
+  recorded and not yet followed; `{"state": "effective"}` is followed. A
+  reset (`runtime.reset("editor")`, or the roster's reset action in the
+  Console) is always available: the agent starts a new conversation led by
+  the current instructions, and the earlier conversation is lost. The change
+  also takes effect at the agent's next compaction at the start of a run. A
+  respawn does not bring the change into effect, and neither does an archive
+  followed by an unarchive.
 - **Archive and unarchive.** An archived agent keeps its name, record,
   conversation and memory, and messages to it are refused. Like any agent
   that leaves, it is owed the harvest and distillation of its last

@@ -823,8 +823,12 @@ Security, Upgrade and Changed.
   once more as the one standing entry of the record. A removal still
   revokes the record, and a fork that holds the entry is told so at its
   next run. A model that takes a system instruction only ahead of the
-  conversation applies the change after a compaction or with a fresh
-  conversation. A fork of the agent follows the record by Meerkat's rule for
+  conversation applies the change after a compaction at the start of a run
+  or with a fresh
+  conversation. A short conversation may never reach that compaction by
+  itself: `meta/reset` brings the change into effect and gives the agent's
+  conversation up, and `meta/instruction_status` says whether a change is
+  in effect. A fork of the agent follows the record by Meerkat's rule for
   a member and its forks: a fork that is live when the change is recorded
   gets the entry at its next run, once; a fork taken afterwards has the
   record in its own snapshot, which a durable fork has recorded in its
@@ -1633,6 +1637,20 @@ Security, Upgrade and Changed.
   the access controller it passes: they read no roster and no agent
   record.
 
+- An update of an agent's instructions that arrives while the agent's
+  first run is being started can answer `applies_at_next_run` although
+  that run, and the conversation it starts, use the earlier instructions
+  (read from the source; not seen in a run). It takes two callers at the
+  same moment: the first delivery to an agent that was created without a
+  first message, and an update of its instructions. The new text is in the
+  agent's record (`meta/identity/get`), and `meta/instruction_status` shows
+  no record and no slot for the agent, not a pending change: nothing was
+  recorded for the conversation. The change reaches the conversation at
+  the next change of the agent's instructions (another update), at a reset
+  of the agent, or at the agent's first delivery after the next gateway
+  start, as a change made while the gateway was down does. An agent created
+  with a first message is not affected: its create answers once its
+  conversation exists.
 - An agent whose instructions were edited while the gateway was down, whose
   conversation was built through 0.9.14 and that has no instruction record
   yet, may keep the text of its first prompt until the running gateway

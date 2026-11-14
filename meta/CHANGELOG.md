@@ -979,10 +979,9 @@ Security, Upgrade and Changed.
   it can call. Another agent the host's rules let change it can do that to
   an agent through `identity_update` (a profile move), and a host through
   `meta/identity/update`; an agent cannot do it to itself. What still ends
-  that management is a reset or a delete of the agent, an archive followed
-  by an unarchive, and a broken agent seated again by an update: have the
-  agent destroy such a mob first. The `identity_update` tool's description
-  says so now, and so
+  that management is a reset or a delete of the agent and an archive
+  followed by an unarchive: have the agent destroy such a mob first. The
+  `identity_update` tool's description says so now, and so
   do "Moving a profile" in the created agents guide, the long-term agents
   guide and `meta/identity/update` in the RPC reference. Text only: no
   call answers differently.

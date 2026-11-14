@@ -766,6 +766,11 @@ describe("QuestionSetList", () => {
     expect(focused()).toBe("list");
     expect(document.activeElement?.getAttribute("tabindex")).toBe("-1");
     expect(onBody()).toBe(false);
+    // The move happens once: a later read does not take the focus back from
+    // where the person put it since.
+    view.getByTestId(`question-set-sentence:${BILLING_ID}`).focus();
+    view.rerender(list(listSnapshot({ sets: [billing()], slots: { [BILLING_ID]: 2 } })));
+    expect(focused()).toBe(`question-set-sentence:${BILLING_ID}`);
     cleanup();
     // The list takes no focus that no card of its own held.
     const idle = render(list(listSnapshot()));

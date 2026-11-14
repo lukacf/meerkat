@@ -566,7 +566,7 @@ export function ApprovalAttention({ snapshot, onOpen, hostItems = 0, replies = 0
   const numbered = allReady || count > 0 || (approvalsShown && ready);
   const reading = (ready || snapshot?.status === "loading") && (questionsReady || questionStatus === "loading");
   return (
-    <section className="cc-approval-attention" aria-label="Needs you" data-testid="approval-attention" data-state={approvalsShown ? snapshot?.status : "ready"} data-pending={numbered && count > 0}>
+    <section className="cc-approval-attention" aria-label="Needs you" data-testid="approval-attention" data-state={approvalsShown ? snapshot?.status : "ready"} data-pending={count > 0}>
       <button className="cc-approval-attention__open" type="button" aria-label={`Needs you, ${status}`} title={status}
         // One approval and nothing else opens on that approval; question
         // sets head the inbox's Pending list, so with them, and while they

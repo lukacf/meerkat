@@ -671,12 +671,12 @@ the member of a seated one (confirmed by a run).
 
 The 0.9.14 Console does not serve a seated one (confirmed by a run): it lists
 it twice, its read of it by name (`meta/console/inspect_identity`) fails for
-everyone, an administrator included, and a send from the Console to it
-(`meta/console/send`) is refused. A Console schedule for it fails the same
-way. A Console schedule is a schedule made in the Console's schedule editor,
-or with `meta/schedule/create` on the Console's RPC endpoint (`POST
-/console/rpc`); `meta/schedule/list` lists an agent's. Each occurrence of such
-a schedule that comes due while rolled back ends as a failed delivery
+everyone the access rules admit, an administrator included, and a send from
+the Console to it (`meta/console/send`) is refused. A Console schedule for it
+fails the same way. A Console schedule is a schedule made in the Console's
+schedule editor, or with `meta/schedule/create` on the Console's RPC endpoint
+(`POST /console/rpc`); `meta/schedule/list` lists an agent's. Each occurrence
+of such a schedule that comes due while rolled back ends as a failed delivery
 (`delivery_failed`), and one that comes due while no gateway runs is skipped
 (`misfired`). Neither is delivered later, the return to 0.9.15 included
 (confirmed by a run). A schedule paused on 0.9.15 makes no occurrence while
@@ -756,7 +756,8 @@ everywhere.
 
 Not run: an agent owed its seat; a private agent that awaits its preparation;
 an agent that a Rust host makes private through Core's own calls. Treat each
-as not protected and apply the step below.
+as not protected and apply the step below; the step was not run for them
+either.
 
 **Do:** before a rollback, remove each such agent that a rule by role or by
 label keeps from someone, or add a deny rule that names it (confirmed by a

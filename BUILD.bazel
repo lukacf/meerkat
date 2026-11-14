@@ -801,6 +801,7 @@ test_suite(
         "//crates/meerkat-mob-mcp:child_tool_bundles_test",
         "//crates/meerkat-mob-mcp:child_tool_policy_test",
         "//crates/meerkat-mob-mcp:council_relink_test",
+        "//crates/meerkat-mob-mcp:creator_successor_management_test",
         "//crates/meerkat-mob-mcp:delegate_identity_after_switch_test",
         "//crates/meerkat-mob-mcp:delegate_profile_family_clamp_test",
         "//crates/meerkat-mob-mcp:delegate_realm_custom_model_test",

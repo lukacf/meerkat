@@ -117,7 +117,7 @@ first message. A call that reaches the tools anyway is refused
 | --- | --- | --- |
 | `identity_create` | `agents: [{name, profile, display_name?, instructions?, context?, labels?, first_message?, peers?}]`, `request_id?` | Creates 1 to 256 agents, all together or not at all. They may name each other as peers. |
 | `identity_update` | `name`, `expected_spec_digest`, `set {display_name?, instructions?, context?, labels?, labels_remove?, profile?}`, `peers_add?`, `peers_remove?`, `request_id?` | Changes one agent. A member left out of `set` stays as it is. |
-| `identity_archive` | `name`, `expected_spec_digest`, `request_id?` | Stops an agent and keeps it: name, record, conversation and memory stay, its last conversation is harvested as for any agent that leaves, and messages to it are refused. Its schedules are paused with it. |
+| `identity_archive` | `name`, `expected_spec_digest`, `request_id?` | Stops an agent and keeps it: name, record, conversation and memory stay, its last conversation is harvested as for any agent that leaves, and messages to it are refused. Its schedules are paused with it. Archiving an agent removes the mobs it created at the gateway's next start: have it destroy them first (see [Archive, remove, and a fresh life](#archive-remove-and-a-fresh-life)). |
 | `identity_unarchive` | `name`, `expected_spec_digest`, `request_id?` | Brings an archived agent back on the conversation it had. The schedules its archive paused are resumed. |
 | `identity_remove` | `name`, `expected_spec_digest`, `request_id?` | Removes an agent for good. Its name is never available again; its last conversation is harvested as for any agent that leaves. Its schedules are ended. |
 | `identity_list` | `profile?`, `include_archived?`, `after?` | Lists the mob's long-term agents that are not private to a person, of any profile. Read only. |
@@ -252,8 +252,13 @@ Three different things end an agent's current work, and they are not
 interchangeable:
 
 - **Archive** (`identity_archive`, `meta/identity/archive`) stops the agent
-  and keeps everything. Messages to it are refused until it is unarchived, and
-  it comes back on the same conversation with its current instructions.
+  and keeps its name, record, conversation and memory. Messages to it are
+  refused until it is unarchived, and it comes back on the same conversation
+  with its current instructions. Archiving an agent removes the mobs it
+  created. They stay until the gateway next starts; then each of those mobs
+  is removed with its store, and unarchiving the agent does not bring them
+  back. Have the agent destroy its mobs before you archive it. Do not
+  archive an agent whose mobs must stay.
 - **Remove** (`identity_remove`, `meta/identity/remove`) retires the name for
   good. The name is never an agent again, for anyone. The removed agent's
   conversation and memory are kept, and nothing can reach them.

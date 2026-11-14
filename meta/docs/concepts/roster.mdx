@@ -414,7 +414,12 @@ What to know:
   start, when the gateway first compares an agent (at the start when its
   roster lists one, else at the first delivery or change of one): the
   record of every removed agent is revoked then. Archiving an
-  agent keeps the record. An archive, like a removal, owes the agent's last
+  agent keeps the record. Archiving an agent removes the mobs it created.
+  They stay until the gateway next starts; then each of those mobs is
+  removed with its store, and unarchiving the agent does not bring them
+  back. Have the agent destroy its mobs before you archive it. Do not
+  archive an agent whose mobs must stay. An archive,
+  like a removal, owes the agent's last
   conversation its harvest and distillation and an exit interview, as
   leaving the roster does for a configured agent (they start right after
   the agent's member retired, in no promised order against the change's

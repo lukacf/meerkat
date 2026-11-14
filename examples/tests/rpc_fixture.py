@@ -17,7 +17,7 @@ summary = {
     "message_count": 8,
     "is_active": True,
     "total_tokens": 12,
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5-5",
     "provider": "anthropic",
 }
 

@@ -60,7 +60,7 @@ async function analyzeSentiment(
   const session = await client.createSession(
     `Analyze the sentiment of the following text:\n\n"${text}"`,
     {
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5-5",
       systemPrompt:
         "You are a sentiment analysis engine. Analyze text and return structured results.",
       outputSchema: sentimentSchema,

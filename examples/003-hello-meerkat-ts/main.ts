@@ -23,7 +23,7 @@ async function main() {
     await client.connect();
     const session = await client.createSession(
       "What makes Rust's ownership model unique? Answer in two sentences.",
-      { model: "claude-sonnet-4-6" },
+      { model: "claude-sonnet-5-5" },
     );
 
     console.log(session.text);

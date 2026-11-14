@@ -1746,3 +1746,113 @@ async fn the_access_preview_decides_an_agent_with_no_member_on_its_record() {
     assert_eq!(preview(BOB, "plain-archived").await, json!(true));
     rig.shutdown().await;
 }
+
+/// A deny by label follows a label change of a seated agent at once, in
+/// both directions, and the change seats nothing. `clerk` is created at run
+/// time and seated; no deny names it, so the denied person lists and reads
+/// it. An update that gives it the label a deny names (`tier = sealed`) is
+/// in its roster entry at once, on the same generation: the denied
+/// person's next list no longer shows it and their next get is refused, as
+/// for any agent the deny names, while a person the rules allow still
+/// reads it. An update that removes the label is in the roster entry at
+/// once too, on the same generation: the denied person's next list shows
+/// the agent again and their next get answers it. The access rules read
+/// the mob's roster at each call, so neither change waits for a seat.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deny_by_label_follows_a_label_change_of_a_seated_agent_at_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), Vec::new(), Some(SCOPED_DENIES)).await;
+    let app = rig.console();
+    let made = console_rpc(
+        &app,
+        ROOT,
+        "meta/identity/create",
+        json!({"request_id": "make-clerk", "agents": [
+            {"name": "clerk", "profile": "worker", "labels": {"desk": "front"}},
+        ]}),
+    )
+    .await;
+    assert_eq!(console_ok(&made)["outcome"], json!("done"), "{made:#}");
+    let host = ChangeRequester::host_operator("rpc");
+    let mob = rig.runtime.mob_handle();
+    let seat = || async {
+        mob.get_member(&meerkat_mob::AgentIdentity::from("clerk"))
+            .await
+            .expect("a roster read")
+            .expect("clerk is seated")
+    };
+    let seated = seat().await;
+    let lists = |subject: &'static str| {
+        let app = app.clone();
+        async move {
+            console_listed(&app, subject)
+                .await
+                .contains(&"clerk".to_owned())
+        }
+    };
+    assert!(lists(BOB).await, "no deny names the agent yet");
+    assert_eq!(
+        console_ok(&console_get(&app, BOB, "clerk").await)["name"],
+        json!("clerk")
+    );
+
+    // A label a deny names is added.
+    let digest = rig.agent("clerk").await.agent.spec_digest;
+    let sealed = rig
+        .change(
+            &host,
+            "seal-clerk",
+            update_of("clerk", &digest, json!({"labels": {"tier": "sealed"}})),
+        )
+        .await;
+    assert_eq!(sealed.token(), "done", "{sealed:?}");
+    let now = seat().await;
+    assert_eq!(
+        (
+            now.generation,
+            now.fence_token,
+            now.labels.get("tier").map(String::as_str)
+        ),
+        (seated.generation, seated.fence_token, Some("sealed")),
+        "the roster entry reads the new label at once, on the same incarnation"
+    );
+    assert!(
+        !lists(BOB).await,
+        "the denied person's next list no longer shows the agent"
+    );
+    let got = console_get(&app, BOB, "clerk").await;
+    assert_eq!(
+        console_refused(&got)["data"]["kind"],
+        json!("identity_unknown"),
+        "the denied person's next get is refused: {got:#}"
+    );
+    assert!(lists(ANN).await, "a person the rules allow still lists it");
+
+    // The label is removed.
+    let digest = rig.agent("clerk").await.agent.spec_digest;
+    let opened = rig
+        .change(
+            &host,
+            "open-clerk",
+            update_of("clerk", &digest, json!({"labels_remove": ["tier"]})),
+        )
+        .await;
+    assert_eq!(opened.token(), "done", "{opened:?}");
+    let now = seat().await;
+    assert_eq!(
+        (now.generation, now.fence_token, now.labels.get("tier")),
+        (seated.generation, seated.fence_token, None),
+        "the roster entry lost the label at once, on the same incarnation"
+    );
+    assert!(
+        lists(BOB).await,
+        "the denied person's next list shows the agent again"
+    );
+    let got = console_get(&app, BOB, "clerk").await;
+    assert_eq!(
+        console_ok(&got)["name"],
+        json!("clerk"),
+        "the denied person's next get answers it: {got:#}"
+    );
+    rig.shutdown().await;
+}

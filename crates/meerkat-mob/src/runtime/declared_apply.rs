@@ -447,13 +447,13 @@ pub enum DeclaredEntryOutcome {
     /// The identity's member keeps its seat: nothing was written. A change
     /// of descriptive facets alone answers this, and so does a change of
     /// placement alone (placement is read only for an identity no member
-    /// holds). A store-owned identity's label change is no such change: it
-    /// answers [`Self::Restamped`], and this only for a member a
-    /// same-session successor cannot serve.
+    /// holds). A store-owned identity's label change answers this too: no
+    /// successor is seated for a label, and its idle member is released so
+    /// that its next build takes the row's labels.
     Kept,
-    /// The member was restamped on its own session, at `generation`: with
-    /// its declared runtime mode, or, a store-owned identity's member whose
-    /// row's labels moved, with its row's labels.
+    /// The member was restamped on its own session, at `generation`, with
+    /// its declared runtime mode (a store-owned identity's member with its
+    /// row's labels too).
     Restamped { generation: Generation },
     /// The member was restamped under its declared new role on its own
     /// session, at `generation`.
@@ -2063,33 +2063,56 @@ impl super::MobHandle {
         super::identity_entry::machine_seats(&self.machine_state_watch_rx.borrow(), identity)
     }
 
-    /// Carry out the label restamp a kept store-owned identity's row records
-    /// as owed (`CreatedIdentityRecord::label_restamp_owed`): its member is
-    /// restamped with the row's labels on its own session, as a
-    /// runtime-mode change restamps it, once it is idle. `None` when the
-    /// declaration is not a store-owned identity's composed spec, its row
-    /// owes no restamp, no member holds the identity, or a seat row
-    /// carries the row's labels already (the settle then lets the owed
-    /// restamp go).
+    /// Release the idle member of a kept store-owned identity whose row
+    /// records an owed label restamp
+    /// (`CreatedIdentityRecord::label_restamp_owed`), so that its next build
+    /// takes the row's labels. No successor is seated for a label: the
+    /// member keeps its session, generation and fence, and with them
+    /// whatever is bound to its generation, and no seat row is written.
+    /// `None` (the identity is kept as it is) when the declaration is not a
+    /// store-owned identity's composed spec, its row owes no restamp, or
+    /// the member was released or had nothing to release.
     ///
     /// The one trigger is the row's own record, read here in one point
     /// read. An update's commit writes it when the member's last seat row
-    /// carries other labels than the updated row, so an update of an idle
-    /// identity makes its seat equal its row, whatever label the seat
-    /// carried, and a restamp a busy member deferred stays owed to the
-    /// update's retry or the identity's next update. Nothing else restamps
-    /// labels: a declaration whose labels are not the row's seats none of
-    /// them (the restamp seats the row's labels), and a seat whose row
-    /// owes nothing is left as it is, with every label it carries.
+    /// carries other labels than the updated row, and the update's step
+    /// sets the member's roster entry from the row. What a live member was
+    /// built with is its session's until its next build, so the release is
+    /// what takes a label the row dropped out of a running build. The seat
+    /// row is no measure of that build: a row that returns to the labels of
+    /// the member's seat row (a label added and removed again) still owes
+    /// the release of the build composed in between. So every row that
+    /// records the restamp is owed the release, whatever its seat row
+    /// carries, and the record is let go only where no build of the member
+    /// can predate the row's labels
+    /// (`MobHandle::no_build_predates_the_row`). The
+    /// journal's seat row follows at the member's next seat, whatever
+    /// writes it (a respawn, a runtime-mode or role restamp, a rotation, a
+    /// reset), and the row keeps the restamp owed until then: every
+    /// declaration of the identity meanwhile (an update of any field, a
+    /// retry) releases its idle member again, which costs a build at its
+    /// next delivery and nothing else. Nothing else acts on labels: a seat
+    /// whose row owes nothing is left as it is, with every label it
+    /// carries.
     ///
     /// A member that holds work is answered deferred and is not
-    /// interrupted, and a member a same-session successor cannot serve (a
-    /// placed one, one wired to a placed member, one on a service that
-    /// keeps no durable sessions) is kept: both keep the restamp owed.
-    /// Such a member's release is tried first all the same (the respawn is
-    /// what is refused): in those three cases it releases nothing, and a
-    /// member whose session cannot be kept is released and then kept.
-    async fn restamp_store_owned_seat_labels(
+    /// interrupted (the release is the idle check): a retry of the update
+    /// releases it once it is idle. A member a release does not serve (a
+    /// placed one, one wired to a placed member) is kept as it is, and on a
+    /// service that keeps no durable sessions the release releases nothing:
+    /// such a member stays live on what it was built with, and its row
+    /// keeps the record.
+    ///
+    /// The one member that is seated again is a Broken one
+    /// ([`DeclaredEntryOutcome::Restamped`]): its build was refused for
+    /// good (for a label its row lacked, say), it serves nothing and holds
+    /// no live build a release could let go, and only its next incarnation
+    /// is built again. Its successor takes the row's labels on its own
+    /// session, as a runtime-mode change's does. That holds for every
+    /// Broken member whose row records the owed restamp, whatever broke it
+    /// and whichever field the declaration moved: its labels were updated
+    /// since its last seat, and its next declaration seats it again.
+    async fn release_for_owed_store_owned_labels(
         &self,
         entry: &DeclaredEntry,
     ) -> Option<DeclaredEntryOutcome> {
@@ -2112,26 +2135,37 @@ impl super::MobHandle {
             Ok(_) => return None,
             Err(error) => return Some(failure_outcome(error)),
         };
-        // What the restamp is owed against is the member's last seat row,
-        // never its roster entry, which the update's step set from the row.
-        match self.roster.read().await.seat_row_labels(identity) {
-            Some(seat) if *seat != labels => {}
-            _ => return None,
-        }
+        // MobMachine's fact, read before the release: a Broken member
+        // serves nothing, and only its next incarnation is built again.
+        // Between the read and the respawn only a host's own respawn of
+        // the member could move the fact (a Broken member's wake is
+        // refused, and no other declared apply of the mob runs beside this
+        // one), and that seats the next incarnation as well.
+        let broken = super::identity_entry::machine_holds_broken(
+            &self.machine_state_watch_rx.borrow(),
+            identity,
+        );
         // The release is the idle check (refused, retryable, while the
-        // member holds work): a label change never interrupts a turn.
-        let restamped = match self.release_member(identity).await {
-            Ok(()) => self
+        // member holds work): a label change never interrupts a turn. It
+        // keeps the member's session, generation and fence, and no
+        // successor follows it for a member that serves.
+        let answered = match self.release_member(identity).await {
+            Ok(()) if broken => self
                 .respawn_member(
                     identity.clone(),
                     super::MemberRespawn::new().with_labels(labels),
                 )
                 .await
-                .map(|receipt| receipt.runtime_id().generation),
+                .map(|receipt| {
+                    Some(DeclaredEntryOutcome::Restamped {
+                        generation: receipt.runtime_id().generation,
+                    })
+                }),
+            Ok(()) => Ok(None),
             Err(error) => Err(error),
         };
-        match restamped {
-            Ok(generation) => Some(DeclaredEntryOutcome::Restamped { generation }),
+        match answered {
+            Ok(answer) => answer,
             Err(MobError::UnsupportedForMode { .. }) => None,
             Err(error) => Some(failure_outcome(error)),
         }
@@ -2171,10 +2205,11 @@ impl super::MobHandle {
         let identity = &entry.spec.identity;
         match verdict {
             // A kept store-owned identity whose row records an owed label
-            // restamp is restamped with the row's labels on its own
-            // session.
+            // restamp has its idle member released, so its next build takes
+            // the row's labels. No successor is seated for a label (a
+            // Broken member alone is seated again).
             mob_dsl::IdentityEntryVerdict::Kept => self
-                .restamp_store_owned_seat_labels(entry)
+                .release_for_owed_store_owned_labels(entry)
                 .await
                 .unwrap_or(DeclaredEntryOutcome::Kept),
             mob_dsl::IdentityEntryVerdict::HostedOnFirstUse => {

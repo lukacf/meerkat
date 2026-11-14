@@ -271,8 +271,9 @@ owed restamp, so no start and no build of 0.9.15 moves the seat's labels.
 before the host adopts `MemberBuildPreparer::prepare_store_owned_seat` or a
 spawn customizer that sets labels. Respawn the member with its row's labels
 (`MobHandle::respawn_member` with `MemberRespawn::new().with_labels(..)`),
-or update the identity while its member is idle: any update then makes the
-seat equal the row. A host that answers such a member's seat from its row
+or update the identity: any update then records the restamp its seat row
+is owed, and the member's builds are compared with the row's labels from
+then on. A host that answers such a member's seat from its row
 is otherwise refused the member's build, with a refusal that names the
 label keys that differ. A seat whose owed restamp 0.9.15 recorded itself
 (see [Rolling back to 0.9.14](#rolling-back-to-0-9-14)) is counted in
@@ -479,7 +480,11 @@ Each item below says what an earlier release does and what to do.
 **A created agent's row that records an owed label restamp.** The row of a
 store-owned identity carries the key `label_restamp_owed` while an update
 of the agent has committed labels that its seated member's seat row does
-not carry yet: the member held work at the update, say. The row lets the
+not carry yet. A label update of a created agent never seats the agent
+again, so its row carries the key from the update until the agent's next
+seat (a respawn, a profile or runtime-mode change, a rotation or a reset);
+a retry of the update and a later update of other fields do not settle it.
+The row lets the
 key go once a seat row carries the row's labels, and an archive or a
 removal drops it. A row that owes none carries no such key and reads on
 earlier releases as before.
@@ -500,10 +505,15 @@ Before a rollback, on 0.9.15, read `MobHandle::identity_record_census()`
 file or `MobStorage::identity_record_rows` for a storage). While
 `label_restamps_owed` is above zero, settle each owed restamp:
 
-- retry the update, or update the agent again
-  (`MobHandle::update_store_owned_identity`), while its member is idle;
-- or respawn its member with the row's labels (`MobHandle::respawn_member`
-  with `MemberRespawn::new().with_labels(..)`);
+- respawn its member with the row's labels (`MobHandle::respawn_member`
+  with `MemberRespawn::new().with_labels(..)`). The respawn seats the agent
+  again on the same conversation and cancels a turn in flight, and an agent
+  that created mobs with its own tools then no longer lists or manages
+  them: have it destroy such a mob first, or leave that agent unsettled. It
+  is then out of service while rolled back, and nothing of it is lost;
+- a profile move or a runtime-mode change of the agent
+  (`MobHandle::update_store_owned_identity`) seats it again and settles it
+  too;
 - a member no same-session successor can serve (a placed member, a member
   wired to a placed member, a member on a session service that keeps no
   durable sessions) is settled by none of these: rotate it
@@ -511,7 +521,18 @@ file or `MobStorage::identity_record_rows` for a storage). While
 
 `rkat storage doctor` and Meta's storage doctor do not report this count,
 and a host that uses only the SDKs has no read for it in 0.9.15: the Rust
-calls above are the read.
+calls above are the read. The count says how many rows owe a restamp, not
+which agents. To list them, read the mob's SQLite store read-only (the
+database of the state directory that holds the table
+`mob_identity_intents`), with the host stopped or beside it:
+
+```bash
+sqlite3 -readonly <store> "SELECT mob_id, agent_identity FROM mob_identity_intents WHERE json_extract(CAST(record_json AS TEXT), '$.schema_version') = 2 AND json_extract(CAST(record_json AS TEXT), '$.label_restamp_owed') = 1;"
+```
+
+It prints one line per agent whose row carries the key (`<mob>|<agent>`),
+and nothing when none does. A Meta host settles one with `meta/respawn` of
+that agent, at the cost named above.
 
 **Operator instruction records past an earlier release's totals.** An
 earlier release bounds the mob as a whole at 64
@@ -2652,22 +2673,19 @@ preparation (`preparations_open`), the held constructions
 last seat row predates their row's labels or profile (`seats_stale`: 0.9.8
 rebuilds such a member from its seat row; a respawn with the row's labels,
 `MemberRespawn::with_labels`, or a restamp brings the seat row up to date).
-From 0.9.15 a label update restamps its idle member
-itself, so only a seat an earlier release left behind, or one whose member
-was not restamped at its update (it held work, say), counts here. From
-that release on, an update that leaves its member's restamp owed records
-it in the identity's row (`label_restamps_owed` counts those rows): the
+From 0.9.15 a label update keeps its member's seat and records the restamp
+its seat row is owed in the identity's row (`label_restamps_owed` counts
+those rows), so such a seat counts here until its next seat row: the
 mob's roster reads the row's labels from the update's commit and from each
 start on (a host's own respawn of the member with other labels in between
 keeps those on its roster entry until the next start or the restamp, while
 its builds carry the row's), the member's builds are compared with them,
-and a retry of the
-update, the identity's next update while the member is idle, or a respawn
-with the row's labels settles it. Such a seat needs no step before its
+and a respawn with the row's labels, a profile or runtime-mode change, a
+rotation or a reset settles it. Such a seat needs no step before its
 host adopts `MemberBuildPreparer::prepare_store_owned_seat` or a spawn
 customizer that sets labels. A seat an earlier release left behind carries
-no such record: respawn it with its row's labels, or update the identity
-while its member is idle, before the host adopts either, since no start
+no such record: respawn it with its row's labels, or update the identity,
+before the host adopts either, since no start
 and no build moves its labels and a host that answers such a seat from its
 row is refused the member's build. Releases 0.9.9 through 0.9.14 read a row
 that records an owed restamp as unreadable, for that identity alone:

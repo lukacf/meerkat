@@ -552,10 +552,11 @@ pub struct IdentityRecordCensus {
     /// Rows that record their seat is owed a label restamp
     /// (`CreatedIdentityRecord::label_restamp_owed`): an update committed
     /// while the member's seat row carried other labels, and no seat row
-    /// has carried the row's labels since. A retry of the update or the
-    /// identity's next update while the member is idle, or a respawn with
+    /// has carried the row's labels since. No update of the identity's
+    /// labels and no retry of one seats its member. A respawn with
     /// the row's labels ([`super::MobHandle::respawn`] or
-    /// [`super::MobHandle::respawn_member`]), settles
+    /// [`super::MobHandle::respawn_member`]), or a runtime-mode or role
+    /// restamp, settles
     /// it; a member no same-session successor can serve is settled by a
     /// rotation ([`super::MobHandle::rotate_member`]), and an archive or a
     /// removal drops the record. The row lets the record go when one of
@@ -1239,6 +1240,16 @@ pub(crate) fn machine_seats(state: &mob_dsl::MobMachineState, identity: &AgentId
     state
         .identity_to_runtime
         .contains_key(&mob_dsl::AgentIdentity::from_domain(identity))
+}
+
+/// Whether one published machine state holds `identity`'s member Broken:
+/// its build was refused for good, and it serves nothing until its next
+/// incarnation or the mob's next start.
+pub(crate) fn machine_holds_broken(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> bool {
+    broken_fact(state, &mob_dsl::AgentIdentity::from_domain(identity)).is_some()
 }
 
 /// [`super::MobHandle::identity_entry`] over one published machine state.

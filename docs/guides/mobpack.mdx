@@ -66,6 +66,15 @@ an env file placed there (`.env`, `.env.local`) is in the pack with its
 contents, and so is the whole `.git` directory when the mob directory is a
 repository of its own.
 
+rkat's own state directory is packed like any other. A command such as
+`rkat run` that is started inside the mob directory creates `.rkat/` there
+when no directory above it has one; even a run that fails for a missing
+provider key creates it. It holds the
+stored conversations of those runs, the prompts included, and all of it goes
+into the pack. With a `.rkat/` in a directory above, the state goes there and
+is not packed. `rkat mob pack`, `rkat mob inspect` and `rkat mob validate` do
+not create the directory.
+
 A pack is a gzip-compressed tar archive: anyone who has the file can read
 every file in it. A web build copies the pack into its bundle as
 `mobpack.bin`, so everyone who can load the hosted page can download it.
@@ -75,8 +84,14 @@ Before you share a pack or host a bundle:
 - Keep env files, keys and repository metadata out of the mob directory.
 - Keep the signing key and the pack output outside the mob directory, as the
   commands in this guide do.
-- List what the pack holds: `rkat mob inspect <pack>` prints one `file` line
-  for each archived file. It also reads the `mobpack.bin` of a built bundle.
+- Keep rkat's state out of the mob directory: run `rkat` from another
+  directory, or pass `--state-root <directory outside the mob directory>`. If
+  the mob directory already holds a `.rkat/` directory, move it out.
+- List what the pack holds: `rkat mob inspect <pack>` prints one line for
+  each archived file: the word `file`, a tab, and the file's path. It also
+  reads the `mobpack.bin` of a built bundle. A path with `.rkat/`, `.git/` or
+  an env file such as `.env` in it, at the top of the pack or below a
+  subdirectory, names a file that should not be there.
 - Move out everything that is not the manifest, the definition and the assets
   you meant to ship, then pack again.
 
@@ -163,7 +178,8 @@ rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack --sign ./ke
 
 Signing embeds the public key but does not install the signer in the verifier's
 trust configuration. Use permissive mode for this immediate local path, then
-switch to strict after installing the signer as trusted:
+switch to strict after installing the signer as trusted (see
+[Trusting a signer](#trusting-a-signer)):
 
 ```bash
 rkat mob run ./dist/release-triage.mobpack --prompt "triage release regressions" --trust-policy permissive
@@ -187,6 +203,53 @@ Permissive mode accepts unsigned packs and valid signatures from unknown
 signers with warnings. It still rejects an invalid signature, digest mismatch,
 or signer-key mismatch. Permissive means relaxed signer enrollment, not skipped
 integrity.
+
+### Trusting a signer
+
+A signing key is a file that holds 32 random bytes as 64 hexadecimal
+characters. Make one, for example, with:
+
+```bash
+openssl rand -hex 32 > ./keys/release.key
+```
+
+Keep it outside the mob directory. A signed pack carries the signer id and
+the public key in its `signature.toml`:
+
+```bash
+tar -xzf ./dist/release-triage.mobpack -O signature.toml
+```
+
+A host trusts a signer once a trust store lists it. `rkat` reads two files,
+each optional: `~/.rkat/trusted-signers.toml` for the user, and
+`.rkat/trusted-signers.toml` in the directory `rkat` is run from. A `.rkat/`
+in a directory above is not read for this; to use a project's file from
+elsewhere, pass `--context-root <project directory>`: that directory's file
+is then read in place of the run directory's. `--user-config-root
+<directory>` moves the user's file to
+`<directory>/.rkat/trusted-signers.toml`. Each file lists
+signers by id, with the `public_key` value from `signature.toml`:
+
+```toml
+[signers]
+"release@example.com" = "<public key>"
+```
+
+When both files list a signer, the entry in the directory's file is used; if
+the two entries hold different keys, `rkat` prints a warning that it
+overrides the user's entry. Check the result
+with `rkat mob validate ./dist/release-triage.mobpack`: under the default
+`strict` policy it refuses the pack as an unknown signer before the signer is
+listed, and prints `valid` with the pack's digest after.
+
+**Replacing a key.** There is no revocation list. To replace a signer's key,
+sign with the new key and replace the signer's entry in every trust store that
+lists it. Until an entry is replaced, that host accepts packs signed with the
+old key and refuses packs signed with the new one. Once it is replaced, a pack
+signed with the old key is refused as a signer-key mismatch, under `strict`
+and under `permissive`. Replace the entry; do not only remove it: with the
+entry removed, a host that runs `permissive` accepts a pack signed with the
+old key again, as an unknown signer with a warning.
 
 ## Run Modes
 
@@ -277,7 +340,9 @@ rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web --
 
 Output is a static asset bundle. It still needs provider access through a
 user-supplied key or your authenticated proxy. Serve the directory
-(for example with `python3 -m http.server`) and open `index.html`:
+(for example with `python3 -m http.server --bind 127.0.0.1`) and open
+`index.html`. The page is served on this machine only; to show it to others,
+host the bundle deliberately. The directory holds:
 
 - `index.html` - browser bootstrap page: trust-verifies the pack and initializes the WASM runtime, but does not create a mob or provide prompt/transcript UI
 - `meerkat-bootstrap.js` — reusable ES module exporting `bootMobpack(opts)`; import it from your own app

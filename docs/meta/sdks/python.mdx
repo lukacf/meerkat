@@ -4,7 +4,7 @@ description: "Meta Python SDK — typed builder API, async runtime, and streamin
 icon: "python"
 ---
 
-*Mirrored from Meerkat Meta main at [abdabeb8e978](https://github.com/lukacf/meerkat/commit/abdabeb8e97805385e71d66da7e78136c4b0e68c) on 2026-11-12; Meta version 0.9.14 at that commit.*
+*Mirrored from Meerkat Meta main at [359f08425e2d](https://github.com/lukacf/meerkat/commit/359f08425e2df4c8a799e105645fe3f6499bc650) on 2026-11-14; Meta version 0.9.14 at that commit.*
 
 The Meta Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -41,10 +41,16 @@ id = "python-quickstart"
 [profiles.worker]
 model = "gpt-5.5"
 runtime_mode = "turn_driven"
+external_addressable = true
 
 [profiles.worker.tools]
 comms = true
 ```
+
+`external_addressable = true` lets a caller outside the mob, such as the
+script below, send to members of the profile. It is `false` by default, and
+`handle.send` is then refused with
+`mob member is not externally addressable: agent-1`.
 
 Set `OPENAI_API_KEY` in your environment for the model above, or choose a
 supported model and its matching provider credentials. Run the following
@@ -85,6 +91,44 @@ async def main():
 
 asyncio.run(main())
 ```
+
+<Warning>
+Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the
+Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events
+late or not at all, and a loop that waits for `run_completed` can wait
+without end. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases and what to do.
+</Warning>
+
+On an affected release, replace the send and the watch loop: read the
+member's `tokens_used` before the send, then wait until it is greater:
+
+```python
+        # Read the member's token count before the send
+        before = (await handle.member_status("agent-1")).tokens_used
+        await handle.send("agent-1", "Hello")
+
+        # Wait until the count is greater: it grows when a run ends
+        loop = asyncio.get_running_loop()
+        done_by = loop.time() + 120
+        while True:
+            status = await handle.member_status("agent-1")
+            if status.tokens_used > before:
+                break
+            if loop.time() > done_by:
+                raise TimeoutError("no run of agent-1 ended within 120 seconds")
+            await asyncio.sleep(0.5)
+        print(status.output_preview)
+```
+
+`tokens_used` grows once per run, when the run ends, and only for a run that
+called the model and whose provider reported usage: a run that fails before
+that, or a provider that reports no usage, ends this wait in the
+`TimeoutError`. It counts every run of the member, whoever started it, so the
+wait shows that a run ended, not that yours did; in this sample nothing else
+sends to `agent-1`. `status.status` and `status.is_final` describe the
+member, not the run.
 
 ## Durable detached tools
 
@@ -234,9 +278,15 @@ status = await alice.status()          # state, session_id, generation, labels
 
 # Lifecycle
 await alice.reset()                    # Destructive: new generation, new session
-await rt.agent("domain:calendar").respawn()  # Non-destructive recovery
+await rt.agent("domain:calendar").respawn()  # Recovery: same identity, history and memory
 await rt.reconcile()                  # In-process roster reconciliation
 ```
+
+<Warning>
+Known issue, noted 2026-11-13: on Meta 0.9.9 through 0.9.14, respawning an identity on a gateway that keeps its state on disk, or on an embedding host that keeps its state on disk and uses identities, can destroy the mobs it created and its delegates. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases, how it happens and what to do.
+</Warning>
 
 `send_and_wait`, `dispatch_and_wait` and `dispatch_text_and_wait` are
 per-admission: the runtime mints a turn ticket for the delivery and keeps the
@@ -468,6 +518,128 @@ retired identity); both are advisory. Every refusal raises
 `TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
 [Scoped tool grants](/meta/api/rpc#scoped-tool-grants).
 
+### Long-term agents
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+`runtime.identities` reads and changes the mob's long-term agents, one call
+per `meta/identity/*` host method. Every agent is read and changed the same
+way, whoever asked for it and by whatever route it came to exist. The
+[guide](/meta/guides/long-term-agents) walks through adopting an agent your
+configuration declares.
+
+```python
+from meerkat_meta import AgentSet, AgentSpec, IdentityRefusedError
+
+identities = runtime.identities
+
+record = await identities.get("scout")           # AgentRecord
+page = await identities.list(include_archived=True)   # AgentPage: .agents, .next
+try:
+    outcome = await identities.adopt(
+        "scout", expected_spec_digest=record.spec_digest, request_id="adopt-scout-1",
+    )
+except IdentityRefusedError as refused:
+    refused.kind, refused.field, refused.detail, refused.retryable, refused.details
+else:
+    outcome.outcome          # "done", "pending_decision" or "pending_preparation"
+
+state = await identities.operation(request_id="adopt-scout-1")
+```
+
+| Call | Sends | Returns |
+| --- | --- | --- |
+| `create(agents, *, request_id, proposer=None, source_evidence=None)` | `agents`: a list of `AgentSpec(name, profile, display_name, instructions, context, labels, first_message, peers, addressability, runtime_mode_override)` | outcome |
+| `update(name, *, expected_spec_digest, request_id, set=None, peers_add=(), peers_remove=(), ...)` | `set`: `AgentSet(display_name, instructions, context, labels, labels_remove, profile, addressability, runtime_mode_override)` | outcome |
+| `archive`, `unarchive`, `remove`, `adopt` `(name, *, expected_spec_digest, request_id, ...)` | the agent and the spec digest you read | outcome |
+| `settle_preparation(name, *, request_id)` | the agent your host has prepared | outcome |
+| `withdraw(*, request_id=None, operation_id=None)` | exactly one of the two | `IdentityWithdrawn` |
+| `changes_hold(held, *, reason=None)` | | `IdentityChangesHold` |
+| `list(*, profile=None, include_archived=False, after=None)` | | `AgentPage` of `AgentSummary` |
+| `get(name)` | | `AgentRecord` |
+| `operation(*, request_id=None, operation_id=None)` | exactly one of the two | outcome, `IdentityRefused` or `IdentityOperationUnknown` |
+| `directory(*, query=None, after=None)` | | `AgentDirectoryPage` |
+| `plan(change, request)` | `change` and a `CreateAgents`, `UpdateAgent` or `AgentRef` | `IdentityChangePlan` |
+
+A change needs your `request_id`: the same id and request return the same
+state and commit at most once. `expected_spec_digest` is the agent's
+`spec_digest` as you read it. There is one spec digest on every surface: the
+same value in `list`, `get`, an outcome and `stale_spec`'s `current_digest`.
+
+An outcome is `IdentityDone` (`operation_id`, `agents`),
+`IdentityPendingDecision` (`operation_id`, `decision_id`, `deadline_ms`) or
+`IdentityPendingPreparation`; each has `.outcome`, its token. A held decision
+is a normal answer. The SDK does not poll: read `operation` when you want the
+state. Each `AgentOutcome` carries the agent's `spec_digest` afterwards, a
+create's `seat` (`seated` or `owed`) and an update's `instructions`
+(`InstructionOutcome`: `applies_at_next_run`, `applies_after_compaction`,
+`applies_at_next_session` with a `reason`, or `unchanged`).
+
+The first answer of an `archive`, an `unarchive` and a `remove` also carries
+the agent's `schedules` (`SchedulesFollowed`: `effect`, `count`,
+`schedules` of `ScheduleRef(schedule_id, name)`, `incomplete`): how the
+agent's schedules stand after the change. After an archive the list is the
+schedules paused for the agent; after an unarchive, its schedules that are
+active after the call (one somebody resumed by name meanwhile included);
+after a removal, the ended ones. The gateway gives your host the list; a
+caller that is not given it (an agent that asks for the change, a Console
+caller without `runtime.admin`) is told the `effect` and the `count` only,
+and such an answer reads as an empty `schedules` with its `count` kept. A
+replay of the request and an `operation` read state none, so compare a
+retry by `operation_id` and each agent's `state` and `spec_digest`, not
+whole. `IdentityChangePlan.schedules` carries the list a planned change
+would answer.
+
+`AgentSpec` and `AgentSet` take `addressability` (`addressable`,
+`internal_only`) and `runtime_mode_override` (`autonomous_host`,
+`turn_driven`), the members and values of a roster row; `AgentSummary` and
+`AgentRecord` read both back, each `None` when it is the default.
+
+A create of an agent of a profile whose preparation the policy names
+`required` returns `IdentityPendingPreparation`: prepare what the agent
+needs, then `settle_preparation(name, request_id=...)` seats it. An agent
+that awaits none refuses `preparation_not_pending`.
+
+`IdentityStatus.roster_listing_superseded` (`runtime.status(name)`) is
+`True` when the host's roster lists a name whose agent is served from its
+record, an adopted agent your roster still lists for one: the roster's
+entry is not applied. `get`, `list`, the directory and the plan of a change
+of such an agent read the same member (`AgentSummary`, `AgentRecord`,
+`DirectoryPeer`, `IdentityChangePlan`). `IdentityStatus.archived` is `True`
+while the agent
+is archived, and `IdentityStatus.preparation_pending` while it waits for
+its host's preparation; the gateway writes each only when it is so. An
+agent's spec digest, provenance and `open_operations` are read with `get`
+and `list`: `open_operations` names its create while it waits for its
+host, and each change of it that is held or approved and not yet carried
+out, and is empty when nothing is open.
+
+Every refusal of every call raises `IdentityRefusedError` (`-32058`); its
+kinds are the closed vocabulary `IDENTITY_REFUSAL_KINDS`. A kind newer than
+the SDK is the same error with `known_kind` false. Only `operation` answers a
+refusal as a value. A candidate launch refuses a change with the gateway-wide
+`AnnouncementRefusedError` (`kind` `candidate_launch`). Advisory values
+(`readiness`, a change's `state`, provenance, directory verdicts) are kept as
+the gateway sent them.
+
+The gateway changes agents only under the host's policy:
+`MetaBuilder.identity_creation(policy)` sends it as
+`runtime_options.identity_creation`. Without one every change is refused
+`change_denied`. The outcomes of this release are `allow`, `require_approval`
+and `deny`; a policy that names `notify` or `review` is refused at init. See
+the [policy reference](/meta/reference/identity-policy) and, for the methods
+themselves, [Agent changes](/meta/api/rpc#agent-changes).
+
+A 0.9.15 client against a 0.9.14 gateway was exercised in one keyless run
+only (the Meta Python SDK's own tests that start a real gateway without a
+provider key, against a gateway built at the 0.9.14 commit); no other client
+and no 0.9.14 runtime was exercised. Of the tests in that run that start a
+real gateway, the five that existed at 0.9.14 and need no provider key
+passed; the failures were in tests new in 0.9.15 (the identity methods and
+cross-mob delivery between gateways) or in tests that need a provider key.
+The methods for agents created at run time (meta/identity) need a 0.9.15
+gateway: upgrade the gateway before the SDKs that call them.
+
 ### Realm MCP administration
 
 The stdio gateway lets its host administer the installation realm's own MCP
@@ -522,7 +694,12 @@ await rt.revoke_instruction("app.example", "tone", 2)
 ```
 
 A write returns once the record is durable; a refusal raises `RpcError` with
-`data["instruction_set_code"]` (for example `stale_revision`). The status
+`data["instruction_set_code"]` (for example `stale_revision`). A member
+target is for that member alone. From 0.9.15 Meerkat has `include_forks`, a
+record for a member and its forks: `set_instruction` refuses a target that
+carries it, and such a record is written by a Rust host that embeds Meta,
+through the mob handle's `set_operator_instruction` (`instruction_status`
+shows it). The status
 read never wakes a member and names each member by its `identity`; its
 advisory values (a pending or blocked `reason`, `residency`) may be new to
 this SDK, so keep them as they are. These replace
@@ -559,6 +736,15 @@ async for event in handle.subscribe_mob():
 ```
 
 Observation is independent of delivery. Subscribe before or after sending — the stream is continuous.
+
+<Warning>
+Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the
+Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events
+late or not at all, and a loop that waits for `run_completed` can wait
+without end. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases and what to do.
+</Warning>
 
 ### Structural mob events — durable observability
 
@@ -684,6 +870,68 @@ if health.last_delivery_error and health.last_delivery_error["class"] == "reload
 status enum is non-exhaustive, so consumers should tolerate future state
 strings.
 
+### Cross-mob peering (two gateways)
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+From 0.9.15. Through 0.9.14 `wire_cross_mob` wired nothing, and the Python builder had no `member_comms_tcp`.
+
+`wire_cross_mob(local_member_id, remote_member_id, remote_handle)` wires a
+member of this mob and a member of another mob to each other, so the two
+agents can send each other ordinary peer messages with their comms `send`
+tool. Every `MetaRuntime` starts its own gateway process, so two mob handles
+are normally two processes: give the members of both gateways a socket
+endpoint with `.member_comms_tcp()` on each builder.
+
+```python
+core = await Meta.builder().mob("core.toml").member_comms_tcp().build()
+desk = await Meta.builder().mob("desk.toml").member_comms_tcp().build()
+await core.mob_handle().wire_cross_mob("research", "calendar", desk.mob_handle())
+```
+
+The helper reads `peer_info` on both sides and calls `wire_local` on each
+side. `peer_info` answers `member_id`, `mob_id`, `comms_name`, `peer_id`,
+`address` (the in-process address), `pubkey_b64` (the member's own transport
+key) and, only for a member with a socket endpoint, `dialable_address`. When
+both answers carry `dialable_address`, each side is wired to the other by
+that address and the member's key. Otherwise each side is wired by the
+in-process address with no key, which works when one process hosts both mobs
+(the gateway takes the member's key from its own registration and installs
+the route with the trust); a member that process does not have is refused in
+plain words and nothing is wired. A refused second side undoes the first,
+unless that side was wired before the call.
+
+Calling the helper again for a pair that is already wired with the same
+endpoints changes nothing. A wire is never replaced: when a side is already
+wired to that peer with another endpoint (another address, or another key
+after a respawn), its `wire_local` is refused in plain words and nothing
+changes. Call `unwire_local` on both sides, each with the other member's
+current `peer_info`, then wire again. A member of a stopped mob still accepts
+a message through a wire and is handed it when its mob resumes.
+
+**What a wire survives.** Between two gateways, a wire survives a gateway
+restart on persistent state only when each wired member's `dialable_address`
+is the same after the restart. With `member_comms_tcp()`'s default address
+(port `0`, a port the system picks at each start) it is not: the restarted
+member binds another port, is restored `broken`, and its wires are dead. Give
+a mob with persistent state a fixed address (`member_comms_tcp("host:port")`).
+To wire a member again after its address changed:
+
+1. `respawn_member` the broken member. It comes back active with its new
+   address, and on a fresh conversation: a respawn starts the member on a new
+   session.
+2. `unwire_local` on the other gateway, with the respawned member's current
+   `peer_info`.
+3. `unwire_local` on the restarted gateway, with the other member's current
+   `peer_info`.
+4. `wire_cross_mob` again.
+
+With member socket endpoints, run one member per gateway today.
+
+A descriptor always carries the MEMBER's key from `peer_info`. `peer_pubkey()`
+is the gateway's own key, for contact directories; it never describes a
+member.
+
 ### Common pattern: new user first contact
 
 Per-user agents are **durable** members, so stand them up on the identity
@@ -702,6 +950,15 @@ result = await runtime.send(f"personal:{user_id}", slack_message)
 async for event in runtime.mob_handle().subscribe_agent(f"personal:{user_id}"):
     forward_to_slack(event)
 ```
+
+<Warning>
+Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the
+Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events
+late or not at all, and a loop that waits for `run_completed` can wait
+without end. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases and what to do.
+</Warning>
 
 Reserve `ensure_member` for **ephemeral workers** (helpers a parent spawns
 and an idle-retire label reaps) — the worker plane. See the
@@ -729,6 +986,7 @@ rt = await (
 | `.mob(path)` | Path to mob TOML config |
 | `.mob_inline(toml_str)` | Inline mob TOML string (no temp file) |
 | `.meerkat_config(path)` | Meerkat host `config.toml` forwarded as `runtime_options.meerkat_config_path`, the only door for the `[self_hosted]` and `[realm]` tables Meerkat keeps out of `mob.toml` (a host-config `[models]` table reaches the factory too, but a profile's `model` must be catalogued, provider-annotated or defined under `mob.toml`'s own `[models.<id>]` to pass the init model check); a missing, malformed or non-validating file refuses init rather than building agents from the default config, and a top-level `[self_hosted]` or `[realm]` table inside `mob.toml` is refused at init with a message naming this option. TypeScript twin `meerkatConfig(path)`. See [Self-hosted models and the Meerkat host config](/meta/reference/configuration#self-hosted-models-and-the-meerkat-host-config) |
+| `.member_comms_tcp(address="127.0.0.1:0")` | From 0.9.15. Signed TCP comms endpoints for the locally hosted mob members, forwarded as `runtime_options.member_comms_address`: each member binds a port on `address` (port `0`: one the system picks), and `MobHandle.peer_info` reports it as `dialable_address`. Needed on both gateways before `wire_cross_mob` can wire members of two gateways, which are two processes; pass a concrete externally reachable interface address for peers on another host. An empty address is a `ValueError`. TypeScript twin `memberCommsTcp(address)`. See [Cross-mob peering](#cross-mob-peering-two-gateways) |
 | `.provider_credentials_root(path)` | Provider credentials directory forwarded as `runtime_options.provider_credentials_root`: every agent the gateway builds resolves and persists provider logins and tokens there instead of the process default `<config dir>/meerkat/credentials`, which every process of the OS user shares. Absolute: the gateway opens it once at init, creating it when missing, and a relative path or a root it cannot open refuses init, never falling back to the default. Give each user their own root, and pass the same root on every reopen of that user's state; a host moving off a per-process `XDG_CONFIG_HOME=<C>` passes `<C>/meerkat/credentials` to keep existing logins. See [Provider credentials](/meta/reference/configuration#provider-credentials) |
 | `.native_realm(realm_id, *, context_root, state_root, user_config_root)` | A native realm's effective configuration as every agent's configuration, forwarded as `runtime_options.native_realm`: the gateway reads it once at init with Meerkat's own native reader, copying and writing nothing, in place of `.meerkat_config(path)` (the two are refused together). Each root is an absolute path; a realm the state root does not hold, or a configuration that cannot be read or does not validate, refuses init, never falling back to the default configuration. The realm's whole configuration applies to every member. Requires `.member_auth_binding(...)`. TypeScript twin `nativeRealm({...})`. See [Native realm and member auth binding](/meta/reference/configuration#native-realm-and-member-auth-binding) |
 | `.member_auth_binding(binding)` | The `AuthBindingRef(realm, binding, profile=None, origin=None)` every member is built with, forwarded as `runtime_options.member_auth_binding`; `origin` is `None` or `"configured"`. The gateway refuses at init a binding the members' configuration does not define, a definition profile the binding does not serve, and an automatic spawn policy, a model fallback target off the binding, image generation or the agent memory engines, in the definition, a realm profile it references or a stored child mob, and an identity declaration an earlier launch adopted that was sealed with no binding or another one; every member it builds then uses exactly this binding, or its build is refused (roster members, helpers and forks, later spawns, respawns and resets, members rebuilt after a restart, child mobs' members), never a default one; a member Meerkat rebuilds from its own records (a fork seated before the launch named the binding) that recorded another binding or none is refused at its rebuild and must be re-created; and a spawn that names another binding, an agent's child mob that would leave it, identity adoption, and an attach of a session whose live actor runs another binding are refused. A running gateway is never rebound. TypeScript twin `memberAuthBinding({...})`. See [Native realm and member auth binding](/meta/reference/configuration#native-realm-and-member-auth-binding) |
@@ -738,7 +996,7 @@ rt = await (
 | `.agent_customizer(customizer)` | Identity-first agent customizer (`customize_build(context, spec, draft)`; see [Per-profile tools](#session-agent-builder-and-per-profile-tools)) |
 | `.on_error(callback)` | Error hook. Receives every runtime `ErrorEvent` (`category`, `message`, `context`) the gateway forwards as the `meta/on_error` notification; sync or async, fire-and-forget. Without a callback the events reach only the gateway's normal log sink: ERROR for failures, INFO for `actor_loop_recovered` and `mob_announcement_escalation_resolved`, subject to configured tracing filters and stderr handling (see [Error hook and logging](/meta/guides/unified-runtime#error-hook-and-logging)). `ErrorEvent.is_resolution` is true for those two, a failure ending rather than starting |
 | `.identity_bootstrap_mode(mode)` | The roster pass's mode: every mode seats each roster identity without materializing it, and `lazy_with_background_warm` also materializes them in a bounded background task; requires `.roster(...)` |
-| `.member_restore(restore)` | How the mob materializes its seated members at start: `"on_demand"` (default; only members that hold work), `"on_demand_verified"` (plus a read-only check of the others before ready) or `"eager"` (all); sent as `runtime_options.member_restore` |
+| `.member_restore(restore)` | How the mob materializes its seated members at start: `"on_demand"` (default; only the members that must be live, such as those that hold work: the full set is under `member_restore` in [Configuration](/meta/reference/configuration#sdk-and-gateway-runtime-options)), `"on_demand_verified"` (plus a read-only check of the others before ready) or `"eager"` (all); sent as `runtime_options.member_restore` |
 | `.role_migrations(declarations)` | Authorize durable member role migrations for THIS boot. Takes an iterable of `RoleMigrationDeclaration` dataclasses or equivalent `identity` / `from_role` dicts, validating either form; a conflicting pair for one identity raises `ValueError`, an identical repeat is accepted, and leaving the setter unused emits no `role_migrations` init-params key at all |
 | `.session_service(builder)` | Session agent builder |
 | `.gating(path)` | Gating config path (`config/gating.toml` is discovered when present). An empty path raises `ValueError`: it no longer switches gating off. To keep gating off, do not call it and keep nothing at `config/gating.toml` under the working directory |
@@ -1477,6 +1735,7 @@ from meerkat_meta.errors import (
     IdentityHostAdoptedError,          # A host adopted the identity, so Meta's verbs leave it alone (-32053)
     IdentityWakeHeldError,             # The wake is held until an operator acts (-32603): .kind names the hold
     ToolGrantRequestRefusedError,      # A refused meta/tool_grants/* request (-32602): .refusal_kind, .refusal
+    IdentityRefusedError,              # From 0.9.15: a refused meta/identity/* request (-32058): .kind, .field, .detail, .retryable, .details
     RealmMcpRefusedError,              # A refused meta/realm_mcp/* request (-32602): .refusal_kind, .refusal
     RealmMcpUnavailableError,          # A realm MCP write could not be made now, or no credential store (-32004)
     RealmMcpOutcomeUnknownError,       # A realm MCP write began and its result is unknown (-32603)
@@ -1493,7 +1752,7 @@ from meerkat_meta.errors import (
 ## Advanced API
 
 These methods are available for power users and module-system internals.
-Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`reconcile` instead.
+Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`reconcile` instead. Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events late or not at all, and a loop that waits for `run_completed` can wait without end. See the [known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14) for the affected releases and what to do.
 
 | Method | Return type | Description |
 |--------|-------------|-------------|
@@ -1651,6 +1910,17 @@ from meerkat_meta import (
     AnnouncementFrontierError, AnnouncementRefusedError, AnnouncementNotFoundError,
     MOB_ANNOUNCEMENTS_UNAVAILABLE_CODE, ANNOUNCEMENT_CONFLICT_CODE,
     ANNOUNCEMENT_FRONTIER_CODE, ANNOUNCEMENT_REFUSED_CODE, ANNOUNCEMENT_NOT_FOUND_CODE,
+    # Long-term agents (from 0.9.15)
+    IdentitiesHandle, AgentSpec, AgentSet, CreateAgents, UpdateAgent, AgentRef,
+    SourceEvidence, AgentPage, AgentSummary, AgentRecord, AgentProvenance,
+    AgentOutcome, InstructionOutcome, SchedulesFollowed, ScheduleRef,
+    IdentityDone, IdentityPendingDecision,
+    IdentityPendingPreparation, IdentityRefused, IdentityOperationUnknown,
+    IdentityRefusal, IdentityRefusedError, IdentityWithdrawn, IdentityChangesHold,
+    AgentDirectoryPage, DirectoryProfile, DirectoryPeer,
+    IdentityChangePlan, identity_outcome_from_dict,
+    IDENTITY_REFUSAL_KINDS, IDENTITY_REFUSED_CODE, IDENTITY_OUTCOMES,
+    INSTRUCTION_OUTCOME_KINDS, INSTRUCTION_NEXT_SESSION_REASONS, AGENT_SEATS,
     # Config modules
     auth, event_log, memory, runtime_store,
 )

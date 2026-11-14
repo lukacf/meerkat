@@ -477,18 +477,39 @@ under `## [0.9.15]`.
 
 ### Rolling back to 0.9.14
 
-What this subsection says an earlier release does was established by
-reading the 0.9.14 source, not by running a 0.9.14 binary over state that
-0.9.15 wrote.
+What this subsection says an earlier release does was established by reading
+the 0.9.14 source, except where an item says it was confirmed by a run. Such a
+run was made with a 0.9.14 gateway built from the release tag, over state
+written by a gateway built from the development source for 0.9.15 (main on 13
+November), with a scripted model in place of a provider.
 
-0.9.14 and earlier releases read what 0.9.15 writes without a refusal (a
-record written with `include_forks` reads there as its member's alone, see
-above), with two exceptions: a created agent's row that records an owed
-label restamp, and a mob whose operator instruction records are past what
-an earlier release holds in one mob. Check for both on 0.9.15, before the
-rollback. A third stored form is read without a refusal and is changed by
-what the earlier release writes: a schedule paused for its target, at the
-end of this subsection.
+0.9.14 and earlier releases read most of what 0.9.15 writes without a
+refusal. The items below are where a rollback differs: configurations that
+make a 0.9.14 gateway refuse to start, stored forms an earlier release
+refuses, and what it reads without a refusal but serves differently while
+rolled back or changes by what it writes.
+
+Most items have a step to take: before the rollback, on 0.9.15, unless the
+line says otherwise.
+
+- Settle every owed label restamp.
+- Bring each mob within the earlier totals of operator instruction records,
+  counting the agents' instruction records.
+- For a mob kept in a host store, list the records written with
+  `include_forks`.
+- End every change of an agent that waits for approval.
+- Remove the new agent actions from the access rules, and `archive` and
+  `adopt` from the identity policy.
+- Unarchive, settle or remove each agent that must not stay as it is.
+- Pause the Console schedules of agents created at run time
+  (`meta/schedule/pause`); resume them after the return
+  (`meta/schedule/resume`).
+- Remove each agent created at run time that an access rule by role or by
+  label keeps from someone, or add a deny rule that names it.
+- While rolled back, send no message from the Console to an agent created at
+  run time.
+
+Each item below says what an earlier release does and what to do.
 
 **A created agent's row that records an owed label restamp.** The row of a
 store-owned identity carries the key `label_restamp_owed` while an update
@@ -581,6 +602,207 @@ record keeps its slot. For each listed mob, do one of these first:
   1 MiB in total;
 - destroy the mob, or move its database out of the mob root, as for a mob
   an earlier release refuses.
+
+**Operator instruction records written with `include_forks`.** 0.9.14 reads
+such a record as its member's alone and a fork's spawn row without its lineage
+root, so while rolled back the record does not select the forks; nothing is
+refused. On the SQLite store nothing is rewritten and the return to 0.9.15
+restores both. On a host store 0.9.14 writes the journal again without the
+fork scope and the lineage roots, and they do not come back. **Do:** before a
+rollback of a mob kept in a host store, list the records written with
+`include_forks` (`mob/instruction_status`,
+`MobHandle::operator_instruction_status`); after the return to 0.9.15, write
+each of them again at a new revision with `include_forks` (for an agent's own
+instruction record, 0.9.15 refuses `meta/set_instruction`: update the agent's
+instructions instead, as the item on agents' instruction records says. An
+update that keeps the text writes nothing: update once with a changed text,
+then with the earlier text put back). They then select the forks seated from
+then on; forks seated before the rollback keep no lineage root and are not
+selected. A fork seated while rolled back has no lineage root on either store,
+and no such record selects it.
+
+**Agents' instruction records.** An agent whose instructions changed on 0.9.15
+has one operator instruction record that holds them (namespace
+`meerkat.identity.instructions`, keyed by the agent's name). On 0.9.14 the
+record stays Active: the agent's conversation keeps the entry it has, and a
+new conversation of the agent gets the record's text as an entry beside its
+first prompt. Each such record is a record of the mob: it counts toward the 64
+records and the 1 MiB of Active bodies that 0.9.14 holds in one mob, and past
+either total 0.9.14 cannot serve that mob (see "Operator instruction records
+past an earlier release's totals" above). A 0.9.14 gateway does not bring the
+record up to date when the agent's instructions change, and its
+`meta/set_instruction` and `meta/revoke_instruction` accept the namespace
+(confirmed by a run: the record stays Active on 0.9.14, a revoked record keeps
+its slot in the 64, 0.9.14's two verbs accept the namespace and 0.9.15 refuses
+them, and the update step; read from the source, not run: the entry a new
+conversation gets, the 1 MiB total, and a mob past either total). **Do:**
+before a rollback, count the mob's records on 0.9.15: read
+`meta/instruction_status` without `namespace` and `key`
+(`mob/instruction_status`, `MobHandle::operator_instruction_status`), count
+the entries of `desired`, the revoked ones included, and add up `body_bytes`
+of the entries whose `effect` is `active`; or run `rkat storage doctor`, which
+names a mob database past either total (`operator-instruction-mob-totals`,
+with its record count and its Active bytes). A mob past either total is
+handled as that section says. While rolled back, do not change an agent's
+instructions and write no record under `meerkat.identity.`: a conversation
+started after such a change holds the earlier text as well as the new one.
+After the return, update the instructions of an agent that was changed while
+rolled back once more: 0.9.15 then writes its record again. The update
+restores a record only when it changes the agent's instruction text: 0.9.15
+compares the text with the record's and writes nothing when they are equal. A
+record that only lost its fork scope, as on a host store after a rollback,
+therefore stays its member's alone through an update that keeps the text. To
+keep the text, update the agent twice: once with a changed text, then with the
+earlier text put back. Make the two updates one after the other and choose a
+change that does no harm: a run of the agent that starts between them works
+under the changed text, and a conversation first built between them keeps it
+in its first prompt, with the earlier text appended after it (read from the
+source). Where the identity policy holds a change of instructions (class
+`descriptive`) for approval, each of the two updates is a request of its own
+and needs its own approval; request the second once the first is carried out
+(read from the source). 0.9.15 then writes the record at two new revisions,
+the second with the earlier text and for the agent and its forks (confirmed by
+a run, on a record written again on 0.9.14 with the same text and without the
+fork scope; a host store was not run). Forks of the agent seated before the
+rollback keep no lineage root on a host store and are not selected by the
+rewritten record, as in the `include_forks` item (read from the source).
+
+**Changes of agents that wait for approval.** A change of an agent that the
+identity policy holds for approval is a pending decision of kind
+`identity.create`, `identity.update`, `identity.archive`,
+`identity.unarchive`, `identity.remove` or `identity.adopt`. A 0.9.14 gateway
+lists such a decision and lets an approver decide it or the host withdraw it,
+but carries no change out. A decision that reaches its deadline (by default a
+day for a creation and four hours for any other change, seven days at most) is
+recorded expired. An approval given while rolled back is recorded, and the
+change is carried out only after the return to 0.9.15, if the decision has not
+expired, its approver may still decide it and the request still reads as the
+approver was shown it. The requester is told nothing until the return
+(confirmed by a run: the decision is listed, an approval is recorded and
+nothing is carried out, also across a restart, and the change is carried out
+after the return; the expiry, a withdrawal and what the requester is told were
+read from the source, not run). **Do:** before a rollback, list the decisions
+of these kinds that are `open` or `approved` (`meta/decisions/list` with
+`kind` and `phase`) and end each one: have it decided and wait until it reads
+`executed`, or withdraw it (`meta/identity/withdraw`, or
+`meta/decisions/withdraw` as the host). While rolled back, decide none of
+them.
+
+**Access rules for changes of agents.** 0.9.15 adds the actions
+`agent.identity.create`, `agent.identity.manage` and `agent.identity.remove`.
+A 0.9.14 gateway refuses an access configuration in which a rule names one of
+them (or `agent.identity.*`) as `unknown_action`, and does not start with it
+(confirmed by a run). **Do:** before a rollback, remove those actions from the
+rules of `access.toml` (or of the file `runtime_options.access_config_path`
+names); add them again after the return. A rule that grants `*` or `agent.*`
+needs no change.
+
+**Identity policy.** A policy that sets `approval.timeouts_ms.archive` or
+`approval.timeouts_ms.adopt`, or in which a rule of `approval.rules` lists
+`archive` or `adopt` under `change`, is refused by a 0.9.14 gateway at init,
+enabled or not (confirmed by a run for `archive`: in a rule's `change` of an
+enabled policy and under `approval.timeouts_ms` of a disabled one; the other
+combinations and `adopt` were read from the source). **Do:** before a
+rollback, remove those keys and values from
+`runtime_options.identity_creation`; add them again after the return.
+
+**Agents created at run time.** A 0.9.14 gateway starts on a state that holds
+agents created on 0.9.15, and a send through the gateway (`meta/send`) reaches
+the member of a seated one (confirmed by a run).
+
+The 0.9.14 Console does not serve a seated one (confirmed by a run): it lists
+it twice, its read of it by name (`meta/console/inspect_identity`) fails for
+everyone the access rules admit, an administrator included, and a send from
+the Console to it (`meta/console/send`) is refused. A Console schedule for it
+fails the same way. A Console schedule is a schedule made in the Console's
+schedule editor, or with `meta/schedule/create` on the Console's RPC endpoint
+(`POST /console/rpc`); `meta/schedule/list` lists an agent's. Each occurrence
+of such a schedule that comes due while rolled back ends as a failed delivery
+(`delivery_failed`), and one that comes due while no gateway runs is skipped
+(`misfired`). Neither is delivered later, the return to 0.9.15 included
+(confirmed by a run). A schedule paused on 0.9.15 makes no occurrence while
+rolled back and runs again once it is resumed after the return (confirmed by a
+run). A schedule with another target (the agent as a member or by name, or its
+session, as an agent's schedule tools or a host make it) does not go through
+the Console; it was not run.
+
+A seated agent adopted from configuration is served by the 0.9.14 Console as a
+configured one: listed once, read by name, sent to (confirmed by a run).
+
+An archived agent, and one that awaits its preparation, stay as they are while
+rolled back (confirmed by a run). The Console lists each once and reads it by
+name. A send through the gateway is refused: as final (not retryable) when the
+agent is archived (`identity_archived`; an internal error for an adopted agent
+that its configuration still lists), until the agent is unarchived on 0.9.15;
+as retryable when it awaits its preparation. A 0.9.14 gateway has no method
+that unarchives the one or settles the other. A send from the Console to such
+an agent is lost: the call is answered as accepted, nothing is delivered, the
+message then shows in the Console's conversation as a failed delivery
+(`delivery_failed`) without a reason, and it is not delivered later, the
+return to 0.9.15 and an unarchive included (confirmed by a run).
+
+A send to an agent that is owed its seat is refused as retryable until the mob
+next starts (a restart of the gateway, or the resume of a stopped mob), which
+seats it; nothing seats it while the mob runs (read from the source, not run).
+
+Of the `meta/identity` methods a 0.9.14 gateway serves `resolved_tools`,
+`routing_status` and `warm` only, and its lifecycle verbs refuse such an agent
+(`identity_store_owned`) (confirmed by a run). It serves none of the fourteen
+methods that are new in 0.9.15, so such an agent is not created, updated,
+archived, unarchived, removed or adopted there, and is not listed or read
+through them.
+
+**Do:** before a rollback, on 0.9.15, unarchive, remove or settle each agent
+that must not stay as it is, and pause the Console schedules of agents created
+at run time (`meta/schedule/pause`); resume them after the return
+(`meta/schedule/resume`). While rolled back, send to a seated agent created at
+run time through the gateway, not from the Console.
+
+**Do, for an archived agent and one that awaits its preparation:** no step
+makes a Console send to it arrive while rolled back. Do not send to it from
+the Console while rolled back. After the return, send again each message that
+shows `delivery_failed`: it is not delivered by itself.
+
+**Access rules and agents created at run time.** This item is about a
+rollback: a 0.9.14 Console over state that holds agents created on 0.9.15.
+There the Console does not decide such an agent by its role and labels
+everywhere.
+
+- **The list of agents.** The entry of such an agent is not hidden by a rule
+  that names a role, whether or not the agent has a seated member; a rule that
+  names a label of the agent hides it (confirmed by a run). A seated one is
+  listed twice: a rule by role hides the first entry, its member's, and not
+  the second, the agent's own entry, which carries no role (confirmed by a
+  run).
+- **A read by name** (`meta/console/inspect_identity`,
+  `meta/identity/resolved_tools`) of such an agent that has no seated member
+  (archived, or awaiting its preparation) is decided without its role and its
+  labels: a deny that names either does not apply. A read by name of a seated
+  one is decided by both. A person whom a rule by role or by label keeps out
+  is refused by the rule (`-32030`, `access_denied`), on
+  `meta/console/inspect_identity` as on `meta/identity/resolved_tools`. For a
+  person the rules admit, `meta/identity/resolved_tools` answers, and
+  `meta/console/inspect_identity` fails as the item above says: with an
+  internal error (`-32000`), not a refusal, so a caller can tell the two apart
+  (confirmed by a run).
+- **A deny rule that names the agent** hides its entry, both entries of a
+  seated one, and refuses the reads (confirmed by a run).
+- **An agent private to a person** stays private: another signed-in person who
+  is no administrator is shown no entry of it, gets no read of it by name and
+  nothing of its conversation, and cannot send to it, whether it is seated or
+  archived (confirmed by a run). Through the gateway's methods, only one
+  adopted from a configuration that declares it private is private: a create
+  or an update that names the private label is refused (`reserved_key`; the
+  create confirmed by a run, the update read from the source).
+
+Not run: an agent owed its seat; a private agent that awaits its preparation;
+an agent that a Rust host makes private through Core's own calls. Treat each
+as not protected and apply the step below; the step was not run for them
+either.
+
+**Do:** before a rollback, remove each such agent that a rule by role or by
+label keeps from someone, or add a deny rule that names it (confirmed by a
+run).
 
 **A schedule paused for its target.** Nothing is refused, and the pause is
 not lost. 0.9.14 has no such mark: it ignores `paused_for_target` and reads
@@ -2092,6 +2314,8 @@ without them no longer compiles:
   `live_session_own_operator_instruction_entry_placement`, which says where
   the operator-instruction entry rows a live session wrote itself stand.
 
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
 Forward these new methods too. They have defaults, so a wrapper without them
 compiles, but the default disables what they carry:
 
@@ -2432,6 +2656,8 @@ different: 0.9.8 decodes a mob's identity intents as a whole and does not
 open the mob's storage while one of them is a created entry's row. Before a
 downgrade, a mob on a host store must hold no created identity entry.
 
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
 A removal writes a row of the same schema for either custody (a removed
 roster-owned identity's tombstone included), and so do an archive and a
 store-owned identity's pending preparation, so the paragraph above applies to
@@ -2473,6 +2699,8 @@ The count names the seat rows a downgrade would read: step 3 of the
 downgrade cycle brings them up to date.
 Change receipts are rows of the identity store's receipts table under keys
 0.9.8 never asks for.
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 From 0.9.10 the rows are also counted with no running mob, by the same
 rule, read-only. `MobStorage::read_identity_record_rows` counts a store

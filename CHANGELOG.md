@@ -1036,6 +1036,44 @@ them.
   with `-32602`, which the SDKs raise as `MeerkatError`.
   `mob/cancel_all_work` cancels all of a member's work. Only the texts
   changed; the method, its types and its error codes are as before.
+- Release binaries: the Linux x86_64 release archives of `rkat`, `rkat-rpc`,
+  `rkat-rest` and `rkat-mcp` registered no capability and no built-in skill.
+  The capability list was empty on every surface (`rkat capabilities`,
+  `capabilities/get`, `GET /capabilities`, `meerkat_capabilities`): a client
+  that reads it was told nothing is available, and the Python and TypeScript
+  SDKs, which download and start that `rkat-rpc`, refused
+  `Session.invoke_skill` / `session.invokeSkill` before sending anything
+  (`CapabilityUnavailableError`, "Capability 'skills' is not available").
+  `has_capability` / `hasCapability` answered false for every id except
+  `mob`, which the SDKs decide from the method list, so mob calls were sent.
+  Agents ran without the built-in skills: none was listed, the skill
+  inventory was missing from the prompt, `rkat run --skill <built-in id>`
+  ran without the skill and without a message, and a project or user skill
+  that declares `requires_capabilities` was dropped. Mob members, and the
+  members a session creates with `delegate`, were spawned and worked without
+  their `mob-communication` instructions and without their `task-workflow`
+  or `workgraph-workflow` instructions; the only sign was a warning in the
+  server's log. The skill text was in
+  the binaries and the registrations never ran: the lane that builds those
+  archives linked with a linker that leaves the constructors of link-time
+  registrations out of the table a process runs at start. That lane now
+  links with GNU ld, and every release binary is asked for its capabilities,
+  its built-in skills and, on `rkat-rpc`, a mob member's prompt before it is
+  published (`scripts/check-release-binary-registrations`, see the
+  [release guide](docs/guides/cd-and-distribution.md#binary-artifacts)).
+  Affects the Linux x86_64 release archives that lane built: every release
+  from 0.8.23 through 0.9.14, with two exceptions: 0.8.50 (the other build
+  lane; not affected, by reading) and 0.8.30 (not established: treat it as
+  affected until it is). This is read from the run history for each of the
+  44 releases; no archive was downloaded for this. By run: 0.8.52, 0.9.0,
+  0.9.10, 0.9.13 and 0.9.14. The
+  macOS arm64 archive of 0.9.14 is not affected, by run. The Linux aarch64,
+  Intel macOS and Windows archives and builds from source with Cargo
+  (`cargo install`, a host that embeds the crates) link another way and are
+  not affected, by reading; a Cargo build of the 0.9.14 sources carries
+  every registration, by run. The known issue on the
+  [0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
+  says what to do on an affected release.
 
 ### Security
 
@@ -1470,6 +1508,32 @@ them.
   whole refusal at `warn`, with the mob's id; read the cause there. The
   host's own destroy is answered as before.
 
+- Linux x86_64 release archives: the built-in skills and the capability
+  list are back (see Fixed), which changes what an agent started from that
+  download receives: the CLI, and the `rkat-rpc` the Python and TypeScript
+  SDKs download and start. The skill inventory is in its prompt again, so
+  prompt content and input token counts change on that platform against
+  the affected archives: every release from 0.8.23 through 0.9.14, with two
+  exceptions: 0.8.50 (the other build lane; not affected, by reading) and
+  0.8.30 (not established: treat it as affected until it is). With the
+  default configuration the first request
+  of a plain `rkat run` names all 6 built-in skills `rkat` lists by default
+  (none of them on 0.9.14) and is about 2.3 kB larger. `rkat run --skill
+  <built-in id>` loads the skill. Mob members and delegated members get
+  their `mob-communication` instructions and their `task-workflow` or
+  `workgraph-workflow` instructions. SDK calls that check a capability first
+  (`invoke_skill`, `has_capability`, `require_capability`) start working.
+  Project and user skills that declare `requires_capabilities`, which those
+  archives dropped without a message, load again. With the default
+  configuration and an empty project a binary lists this many built-in
+  skills: `rkat` 6, `rkat-rpc` 11, `rkat-rest` 7, `rkat-mcp` 11; the other
+  built-in skills require capabilities that surface leaves off by default.
+  A project's own copy of a built-in skill, kept under the built-in's id, is
+  harmless after the upgrade and not what `--skill <id>` loads:
+  `rkat skill list` shows the copy and the built-in side by side, both
+  active, and `rkat run --skill <id>` loads the built-in, not the copy,
+  without a message. The copy can be removed.
+
 - `@rkat/web` provider proxy (see Security). Nothing changes for a page
   served from `localhost`, `127.0.0.1` or `[::1]` that calls a proxy on the
   same machine, or for a tool on that machine that sends no `Origin` header.
@@ -1584,6 +1648,19 @@ them.
   completes the retirement, and the next start is clean. A host that lifts a
   stopped mob when it starts (the Meta gateways do) always meets this: retire
   the member, then restart the host.
+
+- Read from the source: a preloaded skill that cannot be resolved (a mistyped
+  name, a skill the build does not have, or a skill whose required
+  capability is off) is dropped without an error when a session is first
+  built, and the session starts without it. This applies to
+  `rkat run --skill`, JSON-RPC `session/create` (and the Python and
+  TypeScript SDK create calls), REST `POST /sessions`, the MCP server's
+  `meerkat_run`, a schedule's first occurrence and in-process mob member
+  spawns. The signs are a `skill_resolution_failed` event where the surface
+  delivers events and one warning in the server's log; `rkat run` itself
+  prints neither by default and, with `--verbose` or `RUST_LOG=warn`, only
+  the warning (by a run); when skills are disabled altogether there is
+  neither.
 
 - Until Connect 0.9.15 is published, Connect 0.9.14 is the Connect release
   for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in

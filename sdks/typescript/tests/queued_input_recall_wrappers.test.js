@@ -94,7 +94,8 @@ describe("queued-input recall wrapper", () => {
     { recall: { outcome: "abandoned", input_id: INPUT_ID } },
     { session_id: "s-1", recall: "abandoned" },
     { session_id: "s-1", recall: { outcome: "abandoned" } },
-    { session_id: "s-1", recall: { outcome: "interrupted", input_id: INPUT_ID } },
+    { session_id: "s-1", recall: { outcome: 7, input_id: INPUT_ID } },
+    { session_id: "s-1", recall: { outcome: "", input_id: INPUT_ID } },
     { session_id: "s-1", recall: { outcome: "not_queued", input_id: INPUT_ID } },
     {
       session_id: "s-1",
@@ -117,6 +118,19 @@ describe("queued-input recall wrapper", () => {
       });
     });
   }
+
+  it("an outcome this SDK does not know is kept as it is", async () => {
+    // The list of outcomes can grow: an outcome this SDK does not know is
+    // returned unchanged, with every field the server sent, and rejects nothing.
+    const recall = { outcome: "kept_for_the_next_start", input_id: INPUT_ID, until: "later" };
+    const { client } = fakeClient({
+      "session/recall_input": { session_id: "s-1", recall },
+    });
+
+    const result = await sessionOver(client).recallInput({ inputId: INPUT_ID });
+
+    assert.deepEqual(result.recall, recall);
+  });
 
   it("the deferred session exposes the same wrapper", () => {
     assert.equal(typeof DeferredSession.prototype.recallInput, "function");

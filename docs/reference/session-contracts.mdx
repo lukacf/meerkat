@@ -1401,7 +1401,7 @@ running turn and the directed one takes the follow-up turn.
 
 ### Withdrawing one queued input
 
-`MeerkatMachine::recall_queued_input(session_id, input_id)` withdraws
+From 0.9.15. `MeerkatMachine::recall_queued_input(session_id, input_id)` withdraws
 exactly one input, and only while no run has taken it. It is the
 counterpart of the calls below that end started work: a recall never
 interrupts a run.
@@ -1423,6 +1423,9 @@ interrupts a run.
   turn discarded what it had appended counts no attempt.
 - `QueuedInputRecall::NotQueued { phase, run_id }`: a run holds the input
   (`Staged`, `Applied` or `AppliedPendingConsumption`). Nothing changes.
+  `run_id` is the run that holds it, when the runtime has one.
+- The list of outcomes can grow (`QueuedInputRecall` is non-exhaustive):
+  keep an outcome you do not know as it is.
 - `QueuedInputRecall::AlreadyTerminal { terminal }`: the input already ended.
   Nothing changes. A second recall answers this, from the live ledger or,
   once the terminal row is archived and after a restart, from the store.
@@ -1447,8 +1450,10 @@ interrupts a run.
   reload, and it refuses a recall until then. The store decides what
   happened: after the reload (or a restart) the input is either queued
   again, and can run or be recalled, or terminal and never taken by a run.
-  So after a durability refusal, reload the session, then read the input's
-  status. Until the reload the per-input read answers the live machine's
+  No call reloads the session: the runtime reloads it from its store the
+  next time it prepares the session for a turn, and at a restart. So after a
+  durability refusal, start the session's next turn or restart, then read
+  the input's status. Until the reload the per-input read answers the live machine's
   row, which can be ahead of the store (the abandon applied, its commit
   failed): it is not the recall's answer.
 - A recall can land while the submit of the same input is still preparing to

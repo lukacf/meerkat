@@ -5382,10 +5382,15 @@ export class MeerkatClient {
         }
         break;
       default:
-        throw new MeerkatError(
-          "INVALID_RESPONSE",
-          `${context}: unknown recall outcome ${String(recall.outcome)}`,
-        );
+        if (typeof recall.outcome !== "string" || recall.outcome.length === 0) {
+          throw new MeerkatError(
+            "INVALID_RESPONSE",
+            `${context}: recall.outcome must be a string`,
+          );
+        }
+        // An outcome this SDK does not know is kept as it is: the list of
+        // outcomes can grow, and the caller reads the string it got.
+        break;
     }
     return recall as unknown as WireQueuedInputRecall;
   }

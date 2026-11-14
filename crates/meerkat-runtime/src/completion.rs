@@ -473,14 +473,19 @@ impl CompletionCleanupObservation {
         }
     }
 
-    /// Return whether this runtime-minted observation proves that `session_id`
-    /// reached the machine-owned runtime-termination completion class.
+    /// Return whether this runtime-minted observation says that an input of
+    /// `session_id` ended in the machine-owned runtime-termination completion
+    /// class.
     ///
-    /// Cleanup relays use this narrow proof when the machine-owned unregister
-    /// saga wins the race and removes the runtime registration after the
-    /// executor's external-only cleanup, before the completion relay inspects
-    /// the registry. It must not be replaced with a generic "registration is
-    /// absent" check: absence alone carries no terminal authority.
+    /// By itself this does not prove that the runtime ended: one queued input
+    /// taken back (cancelled or recalled) is answered this class on a runtime
+    /// that serves. Cleanup relays use it together with two other facts, the
+    /// registration gone and the live session absent, when the machine-owned
+    /// unregister saga wins the race and removes the runtime registration
+    /// after the executor's external-only cleanup, before the completion
+    /// relay inspects the registry. It must not be replaced with a generic
+    /// "registration is absent" check: absence alone carries no terminal
+    /// authority.
     #[must_use]
     pub fn proves_runtime_termination_for(&self, session_id: &SessionId) -> bool {
         self.owner_session_id == *session_id

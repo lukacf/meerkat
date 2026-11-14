@@ -5871,10 +5871,12 @@ class MeerkatClient:
                     "INVALID_RESPONSE",
                     f"{context}: an already_terminal recall needs a terminal",
                 )
-        else:
+        elif not isinstance(outcome, str) or not outcome:
             raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: unknown recall outcome {outcome!r}"
+                "INVALID_RESPONSE", f"{context}: recall.outcome must be a string"
             )
+        # An outcome this SDK does not know is kept as it is: the list of
+        # outcomes can grow, and the caller reads the string it got.
         return cast(WireQueuedInputRecall, raw)
 
     @staticmethod

@@ -882,16 +882,21 @@ nothing in a model to put an invariant on. The completion cleanup rule
 follows a request (`RetainRuntime`, `CleanupRuntime`, or
 `CleanupArchivedSession`, the only one that ends the mobs a session owns).
 One input that ended (taken back while queued, or ended with a run a retire
-ended) keeps a runtime that serves, and keeps a retired runtime while its
-drain has work left: a run bound, or an input still queued, read from the
-machine's own state; a retired runtime with nothing left to drain, and a
-stopped one, are cleaned up.
+ended) keeps a runtime that serves. In Retired the rule keeps the runtime
+while its drain has work left (a run bound, or an input still queued, read
+from the machine's own state) and answers the cleanup when nothing is left.
+A runtime that never started (Initializing) and a stopped one are cleaned
+up. The Retired cells are the rule for a host whose own relay does not read
+the session as archived: the three shipped relays (JSON-RPC, REST and the
+MCP server) read a retired runtime as an archived session, so the archived
+arm answers them first and they clean a retired runtime up as before.
 For now that ownership rule is pinned by tests, not by a model: the rule
 table over the catalog
 (`crates/meerkat-machine-schema/tests/runtime_completion_cleanup_rule.rs`),
-the runtime rows that ask the rule on real sessions in each phase, and the
-rows at the JSON-RPC and REST completion relays. Do not read a green TLC run
-as covering it.
+the runtime rows that ask the rule on real sessions in each phase, the rows
+at the JSON-RPC and REST completion relays, and a row at the MCP server's
+relay for the path that keeps the runtime. Do not read a green TLC run as
+covering it.
 
 ## See Also
 

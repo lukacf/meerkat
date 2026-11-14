@@ -5384,12 +5384,14 @@ impl SessionRuntime {
                     // The machine-owned unregister coordinator can remove the
                     // entry before completion waiters are delivered, after
                     // the executor's external-only cleanup discarded the live
-                    // session. The
-                    // runtime-minted, session-bound RuntimeTerminated
-                    // observation plus independently observed absent live
-                    // session is the narrow proof that lets the relay finish
-                    // the remaining surface anchors without weakening
-                    // ordinary cleanup. No generated authority named a
+                    // session. The runtime-minted, session-bound observation
+                    // that an input ended as runtime-terminated, together
+                    // with the registration gone and the independently
+                    // observed absent live session, is the narrow proof that
+                    // lets the relay finish the remaining surface anchors
+                    // without weakening ordinary cleanup (the observation
+                    // alone proves no runtime's end: an input taken back on
+                    // a serving runtime is answered the same class). No generated authority named a
                     // cleanup here, so this is never the archive's: an
                     // archived session whose registration is gone returned
                     // above, and a session that is not archived keeps what
@@ -47264,17 +47266,140 @@ mod tests {
         );
     }
 
-    /// One of two turn requests queued behind a running turn is cancelled:
-    /// the running turn completes and is answered its result, the other
-    /// queued request runs after it and is answered its result, and the
-    /// session keeps everything it holds.
+    /// What a turn that waits on its queued input is answered when that input
+    /// is cancelled by its exact input (as a request's cancel does it, with
+    /// the cancel's reason), and when it is recalled: the turn-failure code
+    /// with the text that the runtime ended the input before a run.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    const CANCELLED_QUEUED_REQUEST_ANSWER: &str =
+        "-32603 runtime terminated: RPC request cancelled";
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    const RECALLED_QUEUED_REQUEST_ANSWER: &str =
+        "-32603 runtime terminated: input recalled before it started";
+
+    /// What a row reads after the middle one of three queued turn requests
+    /// ended: the ended request's answer (code and message, session ids
+    /// replaced), its input's stored phase and terminal, the running
+    /// request's answer, the answers of the two other queued requests (the
+    /// one queued before the ended one, then the one queued after it), the
+    /// order in which the three were answered, how many model requests were
+    /// made from the moment the model was served again until the other
+    /// requests were answered, what the session holds, and whether its next
+    /// turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    type AfterTheMiddleQueuedRequestEnded = (
+        String,
+        String,
+        Result<(), String>,
+        (Result<(), String>, Result<(), String>),
+        Vec<&'static str>,
+        usize,
+        (bool, usize, bool, bool, bool, bool, bool),
+        Result<(), String>,
+    );
+
+    /// Serve the model from here on and collect
+    /// [`AfterTheMiddleQueuedRequestEnded`].
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn after_the_middle_queued_request_ended(
+        session: &FailedStartSession,
+        ended: FailedStartTurn,
+        ended_input: &InputId,
+        running: FailedStartTurn,
+        before: FailedStartTurn,
+        after: FailedStartTurn,
+    ) -> AfterTheMiddleQueuedRequestEnded {
+        let model_requests_before = session.client.calls.load(AtomicOrdering::SeqCst);
+        let answered = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let watch = |label: &'static str, turn: FailedStartTurn| {
+            let answered = Arc::clone(&answered);
+            tokio::spawn(async move {
+                let answer = FailedStartSession::turn_answer(turn).await;
+                answered
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(label);
+                answer
+            })
+        };
+        let running = watch("the running request", running);
+        let before = watch("the request queued before", before);
+        let after = watch("the request queued after", after);
+        let serving = session.serve_model_requests();
+        let ended = match without_session_ids(FailedStartSession::turn_answer(ended).await) {
+            Ok(()) => "its result".to_string(),
+            Err(text) => text,
+        };
+        let running = running.await.expect("the running request's watcher");
+        let before = before
+            .await
+            .expect("the watcher of the request queued before");
+        let after = after
+            .await
+            .expect("the watcher of the request queued after");
+        let model_requests =
+            session.client.calls.load(AtomicOrdering::SeqCst) - model_requests_before;
+        let ended_input = stored_input(session, ended_input).await;
+        let holdings = session.holdings().await;
+        let next = FailedStartSession::turn_answer(session.spawn_turn("next", None)).await;
+        serving.abort();
+        let answered = answered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        (
+            ended,
+            phase_and_terminal(&ended_input).to_string(),
+            running,
+            (before, after),
+            answered,
+            model_requests,
+            holdings,
+            next,
+        )
+    }
+
+    /// What [`AfterTheMiddleQueuedRequestEnded`] is when ending one queued
+    /// request ends nothing else. The ended request is answered
+    /// `ended_answer` and its input is stored as cancelled; the running turn
+    /// and the two other queued requests are answered their results, in the
+    /// order they were queued; one model request is made for each of the two
+    /// other requests and none for the ended one; the session keeps its
+    /// child mob with its member, its implicit mob, its MCP adapter, its
+    /// runtime registration and its stored session; and its next turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    fn only_the_middle_request_ended(ended_answer: &str) -> AfterTheMiddleQueuedRequestEnded {
+        (
+            ended_answer.to_string(),
+            "Abandoned, terminal Some(Abandoned { reason: Cancelled })".to_string(),
+            Ok(()),
+            (Ok(()), Ok(())),
+            vec![
+                "the running request",
+                "the request queued before",
+                "the request queued after",
+            ],
+            2,
+            (true, 1, true, true, true, true, true),
+            Ok(()),
+        )
+    }
+
+    /// The middle one of three turn requests queued behind a running turn
+    /// is cancelled by its exact input: that request's turn is answered that
+    /// the runtime ended its input, its input is stored as cancelled, no
+    /// model request is made for it, the running
+    /// turn completes and is answered its result, the two other queued
+    /// requests run after it in the order they were queued and are answered
+    /// their results, and the session keeps everything it holds.
     #[cfg(all(feature = "mob", feature = "mcp"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cancelled_queued_request_leaves_the_running_turn_and_the_other_queued_request() {
         let session = FailedStartSession::materialized().await;
-        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 2).await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 3).await;
+        let (before, _before_input) = queued.remove(0);
         let (cancelled, cancelled_input) = queued.remove(0);
-        let (other, _other_input) = queued.remove(0);
+        let (after, _after_input) = queued.remove(0);
         session
             .runtime
             .runtime_adapter
@@ -47285,34 +47410,61 @@ mod tests {
             )
             .await
             .expect("the queued request's input is cancelled");
+        let measured = after_the_middle_queued_request_ended(
+            &session,
+            cancelled,
+            &cancelled_input,
+            running,
+            before,
+            after,
+        )
+        .await;
+        println!("the middle of three queued requests cancelled: {measured:?}");
         assert_eq!(
-            after_one_queued_request_ended(&session, cancelled, running, vec![other]).await,
-            only_the_one_request_ended(1),
-            "(the cancelled request refused, the running request, the other queued requests, \
-             (child mob, its members, its member's session, implicit mob, MCP adapter, runtime \
-             registration, stored session), the next turn)"
+            measured,
+            only_the_middle_request_ended(CANCELLED_QUEUED_REQUEST_ANSWER),
+            "(the cancelled request's answer, its input's stored phase and terminal, the \
+             running request, (the request queued before, the request queued after), the order \
+             they were answered in, model requests made, (child mob, its members, its member's \
+             session, implicit mob, MCP adapter, runtime registration, stored session), the \
+             next turn)"
         );
     }
 
-    /// One of two turn requests queued behind a running turn is recalled by
-    /// its input, as `session/recall_input` recalls it: the running turn
-    /// completes and is answered its result, the other queued request runs
-    /// after it and is answered its result, and the session keeps everything
-    /// it holds.
+    /// The middle one of three turn requests queued behind a running turn
+    /// is recalled by its input, as `session/recall_input` recalls it: that
+    /// request is answered that the runtime ended its input before a run and
+    /// its input is stored as cancelled, no model request is made for it,
+    /// the running turn completes and is answered its result, the two other
+    /// queued requests run after it in the order they were queued and are
+    /// answered their results, and the session keeps everything it holds.
     #[cfg(all(feature = "mob", feature = "mcp"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn recall_of_a_queued_turn_leaves_the_running_turn_and_the_other_queued_request() {
         let session = FailedStartSession::materialized().await;
-        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 2).await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 3).await;
+        let (before, _before_input) = queued.remove(0);
         let (recalled, recalled_input) = queued.remove(0);
-        let (other, _other_input) = queued.remove(0);
+        let (after, _after_input) = queued.remove(0);
         recall_the_queued_request(&session, &recalled_input).await;
+        let measured = after_the_middle_queued_request_ended(
+            &session,
+            recalled,
+            &recalled_input,
+            running,
+            before,
+            after,
+        )
+        .await;
+        println!("the middle of three queued requests recalled: {measured:?}");
         assert_eq!(
-            after_one_queued_request_ended(&session, recalled, running, vec![other]).await,
-            only_the_one_request_ended(1),
-            "(the recalled request refused, the running request, the other queued requests, \
-             (child mob, its members, its member's session, implicit mob, MCP adapter, runtime \
-             registration, stored session), the next turn)"
+            measured,
+            only_the_middle_request_ended(RECALLED_QUEUED_REQUEST_ANSWER),
+            "(the recalled request's answer, its input's stored phase and terminal, the \
+             running request, (the request queued before, the request queued after), the order \
+             they were answered in, model requests made, (child mob, its members, its member's \
+             session, implicit mob, MCP adapter, runtime registration, stored session), the \
+             next turn)"
         );
     }
 
@@ -47460,10 +47612,11 @@ mod tests {
     /// the member's next turns are answered exactly as they are after a
     /// `mob/cancel_all_work` with no request queued.
     ///
-    /// The row pins that equality, not the answers themselves: it prints
-    /// them. What a member's next turns are answered after its work was
-    /// cancelled is tracked as a follow-up; read this row again when that is
-    /// settled.
+    /// The row pins that equality, and it pins today's answers as measured,
+    /// not as wanted: after a member's running run was cancelled, the first
+    /// turn a client starts on the member's session is answered an internal
+    /// error and is not run, and the turn after it runs (the changelog's
+    /// Known limitations). A change of either answer fails the row.
     #[cfg(all(feature = "mob", feature = "mcp"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn cancel_all_work_on_a_member_keeps_the_members_registration() {
@@ -47477,6 +47630,20 @@ mod tests {
         assert!(
             registered_plain,
             "a member's session stays registered after its work was cancelled"
+        );
+        let first_turn = match &next_plain {
+            Ok(()) => "its result",
+            Err(text) => text.as_str(),
+        };
+        assert!(
+            first_turn.starts_with("-32603 turn abandoned"),
+            "the first turn after a member's work was cancelled, with no request queued: \
+             {first_turn}"
+        );
+        assert_eq!(
+            after_next_plain,
+            Ok(()),
+            "the turn after it, with no request queued"
         );
         assert_eq!(
             with_a_queued_request,

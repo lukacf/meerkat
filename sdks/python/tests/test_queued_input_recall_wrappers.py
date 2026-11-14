@@ -128,7 +128,8 @@ async def test_the_selector_is_exactly_one_of_input_id_and_key() -> None:
         {"recall": {"outcome": "abandoned", "input_id": INPUT_ID}},
         {"session_id": "s-1", "recall": "abandoned"},
         {"session_id": "s-1", "recall": {"outcome": "abandoned"}},
-        {"session_id": "s-1", "recall": {"outcome": "interrupted", "input_id": INPUT_ID}},
+        {"session_id": "s-1", "recall": {"outcome": 7, "input_id": INPUT_ID}},
+        {"session_id": "s-1", "recall": {"outcome": "", "input_id": INPUT_ID}},
         {"session_id": "s-1", "recall": {"outcome": "not_queued", "input_id": INPUT_ID}},
         {
             "session_id": "s-1",
@@ -149,6 +150,20 @@ async def test_malformed_recall_results_fail_closed(result: dict[str, Any]) -> N
     client, _calls = fake_client({"session/recall_input": result})
     with pytest.raises(MeerkatError):
         await client._recall_input("s-1", input_id=INPUT_ID)
+
+
+@pytest.mark.asyncio
+async def test_an_outcome_this_sdk_does_not_know_is_kept_as_it_is() -> None:
+    # The list of outcomes can grow: an outcome this SDK does not know is
+    # returned unchanged, with every field the server sent, and raises nothing.
+    recall = {"outcome": "kept_for_the_next_start", "input_id": INPUT_ID, "until": "later"}
+    client, _calls = fake_client(
+        {"session/recall_input": {"session_id": "s-1", "recall": recall}}
+    )
+
+    result = await session_over(client).recall_input(input_id=INPUT_ID)
+
+    assert result.recall == recall
 
 
 def test_the_deferred_session_exposes_the_same_wrapper() -> None:

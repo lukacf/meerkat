@@ -55,7 +55,8 @@ test('malformed recall answers fail closed', async () => {
   for (const recall of [
     'abandoned',
     { outcome: 'abandoned' },
-    { outcome: 'interrupted', input_id: INPUT_ID },
+    { outcome: 7, input_id: INPUT_ID },
+    { outcome: '', input_id: INPUT_ID },
     { outcome: 'not_queued', input_id: INPUT_ID },
     { outcome: 'not_queued', input_id: INPUT_ID, phase: 'staged', run_id: 7 },
     { outcome: 'already_terminal', input_id: INPUT_ID },
@@ -64,6 +65,14 @@ test('malformed recall answers fail closed', async () => {
     const session = sessionWithRecall(async () => JSON.stringify(recall));
     await assert.rejects(session.recallInput(INPUT_ID), MeerkatError);
   }
+});
+
+test('an outcome this SDK does not know is kept as it is', async () => {
+  // The list of outcomes can grow: an outcome this SDK does not know is
+  // returned unchanged, with every field the runtime sent, and rejects nothing.
+  const recall = { outcome: 'kept_for_the_next_start', input_id: INPUT_ID, until: 'later' };
+  const session = sessionWithRecall(async () => JSON.stringify(recall));
+  assert.deepEqual(await session.recallInput(INPUT_ID), recall);
 });
 
 test('a refusal from the runtime surfaces as a MeerkatError', async () => {

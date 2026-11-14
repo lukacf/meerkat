@@ -95,11 +95,16 @@ async def main():
                     reasoning_effort="high",
                 )
             except MeerkatError as error:
+                # Two different things can go wrong. A refusal is Meerkat
+                # declining the level for this model, with a typed reason. Any
+                # other error (the provider, the key, the network) is not about
+                # the level at all.
                 refusal = reasoning_effort_refusal(error)
-                if refusal is None:
-                    raise
-                accepted = ", ".join(refusal.supported) if refusal.supported else "no level"
-                print(f"  Refused: {refusal.reason}; this model accepts: {accepted}")
+                if refusal is not None:
+                    accepted = ", ".join(refusal.supported) if refusal.supported else "no level"
+                    print(f"  Refused: {refusal.reason}; this model accepts: {accepted}")
+                else:
+                    print(f"  Error ({type(error).__name__}, code {error.code}): {error}")
                 print()
                 continue
             print(f"  Response: {session.text[:200]}...")

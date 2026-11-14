@@ -74,6 +74,11 @@ for line in sys.stdin:
                 "code": -32000, "message": "Synthetic session refusal",
             }})
             continue
+        if mode == "effort-error" and "reasoning_effort" in params:
+            send({"id": request["id"], "error": {
+                "code": -32000, "message": "Synthetic provider failure",
+            }})
+            continue
         if mode == "effort-refusal" and "reasoning_effort" in params:
             send({"id": request["id"], "error": {
                 "code": -32602, "message": "Synthetic reasoning effort refusal",

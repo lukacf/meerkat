@@ -236,6 +236,18 @@ describe("Python SDK example controls", { concurrency: 4 }, () => {
     assert.match(result.stdout, /Anthropic with a thinking budget/);
     assert.match(result.stdout, /Routing Strategies/);
   });
+  it("021 reports an error that is not a refusal as an error and carries on", async () => {
+    const result = await runExample("021-multi-provider-routing-py", "effort-error", {
+      ANTHROPIC_API_KEY: "synthetic-not-a-key",
+      OPENAI_API_KEY: "synthetic-not-a-key",
+      GEMINI_API_KEY: "synthetic-not-a-key",
+    });
+    successful(result);
+    assert.equal(
+      result.stdout.match(/Error \(MeerkatError, code -32000\): Synthetic provider failure/g)?.length, 3);
+    assert.doesNotMatch(result.stdout, /Refused:/);
+    assert.match(result.stdout, /Anthropic with a thinking budget/);
+  });
   it("021 with no provider keys prints setup guidance without creating sessions", async () => {
     const result = await runExample("021-multi-provider-routing-py");
     successful(result);

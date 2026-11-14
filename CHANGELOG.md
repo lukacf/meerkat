@@ -1033,7 +1033,10 @@ them.
   nothing spoken is refused like one on a channel that has heard no request
   (nothing runs for it and the call continues), and a request spoken after
   the typed turn runs once, as before. Affects 0.8.38 through 0.9.14, every
-  release with the public GPT Live channel.
+  release with the public GPT Live channel: from 0.8.51 a typed turn reaches
+  the voice as quiet text-chat context, the form the new tests drive; in
+  0.8.38 through 0.8.50 it was voiced as commentary and the same rule
+  ignored it (established by reading the code, not by a test).
 
 ### Security
 

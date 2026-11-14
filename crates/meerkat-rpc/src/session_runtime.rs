@@ -45895,16 +45895,19 @@ mod tests {
         served.abort();
     }
 
-    /// A session holds a level and a turn runs. A turn that changes the
-    /// model and clears the level carries no level in its target, but
-    /// queued it would move the session to another model under every turn
-    /// behind it: a turn that repeats the session's level, admitted behind
-    /// it as a repeat, would set that level on the new model at its start.
-    /// So a turn that names anything of the LLM identity beside the level
-    /// on a session that holds a level is not queued either: it is answered
-    /// that the session is busy, with the reason in its data, at once, and
-    /// stores no input. A clear alone still queues, and so does a repeat of
-    /// the level behind it: both run, on the same model.
+    /// On a session that holds a level, only plain turns and true repeats
+    /// of that level queue behind unfinished work. A turn runs. A turn that
+    /// changes the model and clears the level carries no level in its
+    /// target, and a turn that only clears the level changes no model, but
+    /// either one queued would let a turn that repeats the level, admitted
+    /// behind it as a repeat, set that level again at its own start: a
+    /// level set hidden in the queue, judged only there. So every turn
+    /// that changes anything of the session's LLM identity is answered that
+    /// the session is busy, with the reason in its data, at once, and
+    /// stores no input: a model change with a clear, a clear alone, and the
+    /// level named inside `provider_params` even when it equals the held
+    /// one (that form replaces the provider params; it is never a repeat).
+    /// A repeat of the level by the field itself queues and runs.
     #[cfg(all(feature = "mob", feature = "mcp"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_model_change_with_a_clear_on_a_busy_session_that_holds_a_level_is_answered_busy() {
@@ -45973,28 +45976,51 @@ mod tests {
             "((code, data), stored inputs, active inputs): {busy:?}"
         );
 
-        // A clear alone queues, and a repeat of the level behind it.
-        let clear = session.spawn_turn(
-            "clears the level",
-            Some(level_overrides(TurnMetadataOverride::Clear)),
-        );
-        session.wait_for_active_inputs(2).await;
+        // A clear alone, and the held level named inside `provider_params`,
+        // are answered at once too.
+        let [_, (_, nested_held_level)] = both_forms_of_a_level(EffortLevel::High);
+        for (what, overrides) in [
+            (
+                "a clear alone",
+                level_overrides(TurnMetadataOverride::Clear),
+            ),
+            ("the held level inside provider_params", nested_held_level),
+        ] {
+            let busy = tokio::time::timeout(
+                Duration::from_secs(10),
+                session.spawn_turn("changes the identity", Some(overrides)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{what}: the request is answered while the turn runs"))
+            .unwrap()
+            .expect_err("a change of the identity of a session that holds a level is not queued");
+            assert_eq!(
+                (
+                    (busy.code, busy.data.clone()),
+                    stored_inputs().await,
+                    session.active_inputs().await
+                ),
+                (level_change_needs_idle_session(), inputs_before, 1),
+                "{what}: ((code, data), stored inputs, active inputs): {busy:?}"
+            );
+        }
+
+        // A repeat of the level by the field itself queues and runs.
         let repeat = session.spawn_turn(
             "repeats the level",
             Some(level_overrides(TurnMetadataOverride::Set(
                 EffortLevel::High,
             ))),
         );
-        session.wait_for_active_inputs(3).await;
+        session.wait_for_active_inputs(2).await;
         let served = session.serve_model_requests();
         assert_eq!(
             (
                 FailedStartSession::turn_answer(running).await,
-                FailedStartSession::turn_answer(clear).await,
                 FailedStartSession::turn_answer(repeat).await,
             ),
-            (Ok(()), Ok(()), Ok(())),
-            "(the running turn, the clear, the repeat of the level behind it)"
+            (Ok(()), Ok(())),
+            "(the running turn, the repeat of the level behind it)"
         );
         served.abort();
         assert_eq!(

@@ -1254,14 +1254,10 @@ impl SessionTargetBinding {
     }
 
     /// A schedule's session spec does not take the provider-neutral
-    /// `reasoning_effort` level in this release. A stored schedule that names
-    /// one cannot be read by an earlier release (its params refuse the key),
-    /// which fails that release's schedule list as a whole, and a schedule
-    /// deleted with the level cannot be repaired. So a request that would
-    /// store one is refused when the schedule is created or updated. A
-    /// provider's own effort under `provider_tag` is accepted as before, and a
-    /// level that is already stored is still judged when an occurrence is
-    /// delivered.
+    /// `reasoning_effort` level in this release: a request that would store
+    /// one is refused when the schedule is created or updated. A provider's
+    /// own effort under `provider_tag` is accepted as before, and a level that
+    /// is already stored is still judged when an occurrence is delivered.
     fn refuse_reasoning_effort_level(&self) -> Result<(), String> {
         if let Self::MaterializeOnDemandSession { create, .. } = self
             && create
@@ -3461,10 +3457,8 @@ mod tests {
         let request: CreateScheduleRequest = serde_json::from_value(
             create_request_with_provider_params(serde_json::json!({"reasoning_effort": "high"})),
         )
-        .expect("the request parses: the key is a typed member of the params");
-        let refused = request
-            .validate_public_api()
-            .expect_err("a level in a schedule's session settings is refused");
+        .unwrap();
+        let refused = request.validate_public_api().unwrap_err();
         assert!(
             refused.contains("reasoning_effort")
                 && refused.contains("not accepted in a schedule's session settings"),
@@ -3483,13 +3477,13 @@ mod tests {
                 )["target"]
                     .clone(),
             )
-            .expect("the target parses");
+            .unwrap();
         let refused = UpdateScheduleRequest {
             target: Some(target),
             ..Default::default()
         }
         .validate_public_api()
-        .expect_err("a level in a schedule's session settings is refused");
+        .unwrap_err();
         assert!(
             refused.contains("reasoning_effort")
                 && refused.contains("not accepted in a schedule's session settings"),
@@ -3513,7 +3507,7 @@ mod tests {
             let request: CreateScheduleRequest = serde_json::from_value(
                 create_request_with_provider_params(provider_params.clone()),
             )
-            .expect("the request parses");
+            .unwrap();
             assert_eq!(request.validate_public_api(), Ok(()), "{provider_params}");
         }
     }

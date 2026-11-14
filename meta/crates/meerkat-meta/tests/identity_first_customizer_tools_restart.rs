@@ -4822,3 +4822,736 @@ async fn a_refused_build_preparation_on_the_doors_own_wake_is_retried_once() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Who manages a mob an identity created with its own `mob_create`, after the
+// identity's next incarnations. Each question is the identity's own: its own
+// turn makes the call through its own tools, and the row reads the tool's
+// answer from the identity's transcript.
+// ---------------------------------------------------------------------------
+
+/// The host turn marker of these rows: a request whose transcript holds it
+/// is the asking identity's.
+const OWN_TOOLS_TURN: &str = "USE-YOUR-OWN-MOB-TOOLS";
+
+/// A scripted model: on a request whose transcript holds [`OWN_TOOLS_TURN`]
+/// it makes, once each and in order, the queued calls whose id the
+/// transcript does not hold yet, and it records every tool result a
+/// transcript holds.
+#[derive(Clone, Default)]
+struct OwnToolsModel {
+    script: Arc<std::sync::Mutex<Vec<(String, &'static str, serde_json::Value)>>>,
+    tool_results: Arc<std::sync::Mutex<BTreeMap<String, (bool, String)>>>,
+}
+
+impl OwnToolsModel {
+    fn queue(&self, id: &str, tool: &'static str, args: serde_json::Value) {
+        self.script
+            .lock()
+            .unwrap()
+            .push((id.to_string(), tool, args));
+    }
+
+    /// The recorded result of the call `id`: whether it was an error, and
+    /// its text.
+    fn result(&self, id: &str) -> (bool, String) {
+        self.tool_results
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| panic!("the call {id} has a recorded result"))
+    }
+}
+
+impl meerkat_client::LlmClient for OwnToolsModel {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+        let transcript = serde_json::to_string(&request.messages).unwrap_or_default();
+        {
+            let mut recorded = self.tool_results.lock().unwrap();
+            for message in &request.messages {
+                if let meerkat_core::Message::ToolResults { results, .. } = message {
+                    for result in results {
+                        recorded.insert(
+                            result.tool_use_id.clone(),
+                            (result.is_error, result.text_content()),
+                        );
+                    }
+                }
+            }
+        }
+        let call = if transcript.contains(OWN_TOOLS_TURN) {
+            self.script
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _, _)| !transcript.contains(id.as_str()))
+                .cloned()
+        } else {
+            None
+        };
+        let [usage, done] = llm_usage::usage_then_done(
+            request,
+            meerkat::Provider::OpenAI,
+            if call.is_some() {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            },
+        );
+        Box::pin(async_stream::stream! {
+            match call {
+                Some((id, name, args)) => {
+                    yield Ok(LlmEvent::ToolCallComplete {
+                        id,
+                        name: name.to_string(),
+                        args,
+                        meta: None,
+                    });
+                }
+                None => {
+                    yield Ok(LlmEvent::TextDelta { delta: "ok".to_string(), meta: None });
+                }
+            }
+            yield Ok(usage);
+            yield Ok(done);
+        })
+    }
+
+    fn provider(&self) -> meerkat::Provider {
+        meerkat::Provider::OpenAI
+    }
+
+    fn health_check<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), LlmError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// The definition of these rows: two roles that mount the mob tools (so a
+/// move between them keeps the tools), and a worker role.
+const OWN_TOOLS_MOB_TOML: &str = r#"
+[mob]
+id = "{MOB_ID}"
+
+[profiles.personal]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.personal.tools]
+comms = true
+mob = true
+
+[profiles.steward]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.steward.tools]
+comms = true
+mob = true
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+durable = true
+
+[profiles.worker.tools]
+comms = true
+"#;
+
+async fn boot_own_tools(
+    mob_id: &str,
+    state: &Path,
+    model: OwnToolsModel,
+) -> meerkat_meta::UnifiedRuntime {
+    Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(
+                MobDefinition::from_toml(&OWN_TOOLS_MOB_TOML.replace("{MOB_ID}", mob_id))
+                    .expect("definition"),
+            )
+            .persistent_state(state)
+            .continuity_from_state_dir(state)
+            .await
+            .expect("open the state-dir identity substrate")
+            .roster_provider(Arc::new(ListedRoster(&[CREATOR])))
+            .identity_runtime_instance_id(mob_id)
+            .comms(true)
+            .default_llm_client(Arc::new(model))
+            .build(),
+    )
+    .await
+    .expect("build the runtime")
+}
+
+/// One turn of `who` that makes `calls` through its own tools, in order, and
+/// answers each call's recorded result: whether it was an error, and its
+/// text. `stage` makes the call ids unique.
+async fn own_tools_turn(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    model: &OwnToolsModel,
+    who: &str,
+    stage: &str,
+    calls: Vec<(&'static str, serde_json::Value)>,
+) -> Vec<(bool, String)> {
+    let ids: Vec<String> = calls
+        .iter()
+        .enumerate()
+        .map(|(n, (tool, _))| format!("own-{stage}-{n}-{tool}"))
+        .collect();
+    for (id, (tool, args)) in ids.iter().zip(calls) {
+        model.queue(id, tool, args);
+    }
+    runtime
+        .identity_runtime()
+        .expect("identity runtime")
+        .send_awaiting_commit(
+            &id(who),
+            &meerkat_core::ContentInput::Text(format!("{OWN_TOOLS_TURN} {stage}")),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{who}'s turn at {stage} commits: {error}"));
+    ids.iter().map(|id| model.result(id)).collect()
+}
+
+/// `who` creates the mob `child` with its own `mob_create` and seats
+/// [`OWNED_WORKER`] in it with its own `mob_spawn_member`.
+async fn creates_a_mob_with_its_own_tool(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    model: &OwnToolsModel,
+    who: &str,
+    child: &str,
+) {
+    let answers = own_tools_turn(
+        runtime,
+        model,
+        who,
+        &format!("create-{child}"),
+        vec![
+            (
+                "mob_create",
+                serde_json::json!({ "definition": {
+                    "id": child,
+                    "profiles": { "worker": {
+                        "model": "gpt-5.5",
+                        "runtime_mode": "turn_driven",
+                        "tools": { "comms": true }
+                    } }
+                } }),
+            ),
+            (
+                "mob_spawn_member",
+                serde_json::json!({
+                    "mob_id": child, "profile": "worker", "member_id": OWNED_WORKER
+                }),
+            ),
+        ],
+    )
+    .await;
+    for (is_error, text) in &answers {
+        assert!(
+            !is_error,
+            "{who} creates {child} and seats its worker: {text}"
+        );
+    }
+    let provenance = runtime
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the agent mob tools' state")
+        .handle_for(&meerkat_mob::MobId::from(child))
+        .await
+        .expect("the created mob is hosted")
+        .provenance()
+        .await
+        .expect("the creation record reads");
+    assert!(
+        matches!(
+            provenance,
+            meerkat_mob::MobProvenance::OperatorMember { .. }
+        ),
+        "the record names {who} as the creator of its own create: {provenance:?}"
+    );
+}
+
+/// `who` lists `child` and reads and checks its member, through its own
+/// tools.
+async fn assert_manages_its_mob(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    model: &OwnToolsModel,
+    who: &str,
+    child: &str,
+    when: &str,
+) {
+    let answers = own_tools_turn(
+        runtime,
+        model,
+        who,
+        &format!("reads-{when}-{child}"),
+        vec![
+            ("mob_list", serde_json::json!({})),
+            ("mob_list_members", serde_json::json!({ "mob_id": child })),
+            (
+                "mob_check_member",
+                serde_json::json!({ "mob_id": child, "member_id": OWNED_WORKER }),
+            ),
+        ],
+    )
+    .await;
+    let [list, members, check] = answers.as_slice() else {
+        panic!("three answers: {answers:?}");
+    };
+    assert!(
+        !list.0 && list.1.contains(child),
+        "{when}: {who} lists the mob it created: {list:?}"
+    );
+    assert!(
+        !members.0 && members.1.contains(OWNED_WORKER),
+        "{when}: {who} reads the members of the mob it created: {members:?}"
+    );
+    assert!(
+        !check.0,
+        "{when}: {who} checks a member of the mob it created: {check:?}"
+    );
+}
+
+/// `who` destroys `child` with its own tool, and the host no longer manages
+/// the mob.
+async fn assert_destroys_its_mob(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    model: &OwnToolsModel,
+    who: &str,
+    child: &str,
+    when: &str,
+) {
+    let answers = own_tools_turn(
+        runtime,
+        model,
+        who,
+        &format!("destroys-{when}-{child}"),
+        vec![("mob_destroy", serde_json::json!({ "mob_id": child }))],
+    )
+    .await;
+    assert!(
+        !answers[0].0,
+        "{when}: {who} destroys the mob it created: {:?}",
+        answers[0]
+    );
+    assert!(
+        runtime
+            .mob_runtime()
+            .agent_mob_mcp_state()
+            .expect("the agent mob tools' state")
+            .handle_for(&meerkat_mob::MobId::from(child))
+            .await
+            .is_err(),
+        "{when}: the destroyed mob is no longer hosted"
+    );
+}
+
+/// `who` does not list `child`, each of its calls on the mob is refused, and
+/// the host still manages the mob.
+async fn assert_manages_nothing_of(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    model: &OwnToolsModel,
+    who: &str,
+    child: &str,
+    when: &str,
+) {
+    let answers = own_tools_turn(
+        runtime,
+        model,
+        who,
+        &format!("refused-{when}-{child}"),
+        vec![
+            ("mob_list", serde_json::json!({})),
+            ("mob_list_members", serde_json::json!({ "mob_id": child })),
+            (
+                "mob_check_member",
+                serde_json::json!({ "mob_id": child, "member_id": OWNED_WORKER }),
+            ),
+            ("mob_destroy", serde_json::json!({ "mob_id": child })),
+        ],
+    )
+    .await;
+    let (list, calls) = answers.split_first().expect("four answers");
+    assert!(
+        !list.0 && !list.1.contains(child),
+        "{when}: {who} does not list the mob: {list:?}"
+    );
+    for (is_error, text) in calls {
+        assert!(
+            *is_error && text.contains("not allowed"),
+            "{when}: {who}'s call on the mob is refused: {text}"
+        );
+    }
+    assert!(
+        runtime
+            .mob_runtime()
+            .agent_mob_mcp_state()
+            .expect("the agent mob tools' state")
+            .handle_for(&meerkat_mob::MobId::from(child))
+            .await
+            .is_ok(),
+        "{when}: the refused calls left the mob in place"
+    );
+}
+
+/// The session `who` runs on and the generation of its member.
+async fn seat_of(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    who: &str,
+) -> (meerkat_core::types::SessionId, meerkat_mob::Generation) {
+    let status = runtime
+        .identity_runtime()
+        .expect("identity runtime")
+        .status(&id(who))
+        .await
+        .expect("the identity's status");
+    (
+        status.session_id.expect("the identity runs on a session"),
+        status
+            .generation
+            .expect("the identity's member has a generation"),
+    )
+}
+
+/// An identity that created a mob with its own tool keeps managing it after
+/// its respawn: it lists the mob, reads and checks its members in the same
+/// process and after a restart of the gateway, and then destroys it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_respawned_identity_keeps_managing_the_mob_it_created_across_a_restart() {
+    const MOB_ID: &str = "customizer-tools-restart-own-a";
+    let child = format!("{MOB_ID}-child");
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let model = OwnToolsModel::default();
+
+    let before = {
+        let runtime = boot_own_tools(MOB_ID, &state, model.clone()).await;
+        creates_a_mob_with_its_own_tool(&runtime, &model, CREATOR, &child).await;
+        assert_manages_its_mob(&runtime, &model, CREATOR, &child, "before the respawn").await;
+        let before = seat_of(&runtime, CREATOR).await;
+
+        runtime
+            .identity_runtime()
+            .expect("identity runtime")
+            .respawn(&id(CREATOR))
+            .await
+            .expect("the respawn completes");
+        let after = seat_of(&runtime, CREATOR).await;
+        assert_eq!(
+            after.0, before.0,
+            "the respawned identity keeps its session"
+        );
+        assert!(after.1 > before.1, "at a later generation: {after:?}");
+        assert_manages_its_mob(
+            &runtime,
+            &model,
+            CREATOR,
+            &child,
+            "after the respawn, in the same process",
+        )
+        .await;
+        runtime.shutdown().await;
+        after
+    };
+
+    let runtime = boot_own_tools(MOB_ID, &state, model.clone()).await;
+    assert_eq!(
+        seat_of(&runtime, CREATOR).await,
+        before,
+        "the restart keeps the respawned identity's seat"
+    );
+    assert_manages_its_mob(&runtime, &model, CREATOR, &child, "after a restart").await;
+    assert_destroys_its_mob(&runtime, &model, CREATOR, &child, "after a restart").await;
+    runtime.shutdown().await;
+}
+
+/// An identity reset onto a fresh session, and one deleted and listed again,
+/// manages nothing its earlier session created: the mob is not listed and
+/// every call on it is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_on_a_fresh_session_manages_nothing_its_earlier_session_created() {
+    const MOB_ID: &str = "customizer-tools-restart-own-b";
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let model = OwnToolsModel::default();
+    let runtime = boot_own_tools(MOB_ID, &state, model.clone()).await;
+    let identities = runtime.identity_runtime().expect("identity runtime");
+
+    let first = format!("{MOB_ID}-before-reset");
+    creates_a_mob_with_its_own_tool(&runtime, &model, CREATOR, &first).await;
+    let before = seat_of(&runtime, CREATOR).await;
+    identities
+        .reset(&id(CREATOR))
+        .await
+        .expect("the reset completes");
+    assert_manages_nothing_of(&runtime, &model, CREATOR, &first, "after a reset").await;
+    let reset = seat_of(&runtime, CREATOR).await;
+    assert_ne!(reset.0, before.0, "a reset takes a fresh session");
+
+    let second = format!("{MOB_ID}-before-delete");
+    creates_a_mob_with_its_own_tool(&runtime, &model, CREATOR, &second).await;
+    assert_manages_its_mob(&runtime, &model, CREATOR, &second, "before the delete").await;
+    identities
+        .delete_identity(&id(CREATOR))
+        .await
+        .expect("the delete completes");
+    for child in [&first, &second] {
+        assert_manages_nothing_of(&runtime, &model, CREATOR, child, "after a delete").await;
+    }
+    let deleted = seat_of(&runtime, CREATOR).await;
+    assert_ne!(deleted.0, reset.0, "a delete takes a fresh session");
+    runtime.shutdown().await;
+}
+
+/// The identity these rows create at run time: its record is its row in the
+/// mob's identity store.
+const KEEPER: &str = "keeper";
+
+fn keeper_spec(profile: &str) -> meerkat_mob::CreatedIdentitySpec {
+    meerkat_mob::CreatedIdentitySpec::new(KEEPER, profile).with_display_name("Keeper")
+}
+
+fn identity_operation(name: &str) -> meerkat_mob::IdentityOperation {
+    meerkat_mob::IdentityOperation::new(
+        name,
+        meerkat_core::approval::decision::Sha256Digest::of(name.as_bytes()).as_str(),
+    )
+}
+
+/// Change the created identity's row from `from` to `to` through Core's
+/// store-owned update, as the host.
+async fn update_keeper(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    operation: &str,
+    from: &meerkat_mob::CreatedIdentitySpec,
+    to: meerkat_mob::CreatedIdentitySpec,
+) {
+    let updated = runtime
+        .mob_handle()
+        .update_store_owned_identity(
+            meerkat_mob::StoreOwnedIdentityUpdate::new(
+                identity_operation(operation),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                to,
+                from.spec_digest().expect("the row's digest"),
+            ),
+            meerkat_mob::IdentityChangeConsentInput::Policy(
+                meerkat_mob::IdentityPolicyOutcome::Allow,
+            ),
+        )
+        .await
+        .map(|updated| updated.change);
+    assert!(
+        matches!(
+            updated,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "Core updates the created identity ({operation}): {updated:?}"
+    );
+}
+
+/// Wait (bounded) until Core holds the created identity's member on
+/// `session` at a generation after `after`, and answer it.
+async fn keeper_successor_after(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    session: &meerkat_core::types::SessionId,
+    after: meerkat_mob::Generation,
+    what: &str,
+) -> meerkat_mob::Generation {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let seated = runtime.mob_handle().member_of_session(session).await;
+        if let Some((identity, generation)) = &seated
+            && identity.as_str() == KEEPER
+            && *generation > after
+        {
+            return *generation;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what}: a successor is seated on the identity's session: {seated:?}"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// An identity created at run time that created a mob with its own tool
+/// keeps managing it after its row moves it to another role, and after its
+/// row changes its runtime mode: each change seats its successor on its own
+/// session, and the successor lists the mob, reads and checks its members
+/// and at last destroys it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_created_identity_moved_to_another_role_or_mode_keeps_managing_the_mob_it_created() {
+    const MOB_ID: &str = "customizer-tools-restart-own-c";
+    let child = format!("{MOB_ID}-child");
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let model = OwnToolsModel::default();
+    let runtime = boot_own_tools(MOB_ID, &state, model.clone()).await;
+
+    let created = runtime
+        .mob_handle()
+        .create_store_owned_identities(
+            meerkat_mob::StoreOwnedIdentityCreate::new(
+                identity_operation("create-keeper"),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                vec![meerkat_mob::CreatedIdentityRequest::new(keeper_spec(
+                    "personal",
+                ))],
+            ),
+            meerkat_mob::IdentityChangeConsentInput::Policy(
+                meerkat_mob::IdentityPolicyOutcome::Allow,
+            ),
+        )
+        .await
+        .map(|created| created.change);
+    assert!(
+        matches!(
+            created,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "Core creates the identity: {created:?}"
+    );
+    runtime
+        .identity_first_context()
+        .expect("identity-first context installed")
+        .refresh_desired_topology()
+        .await
+        .expect("the roster pass registers the created identity");
+
+    creates_a_mob_with_its_own_tool(&runtime, &model, KEEPER, &child).await;
+    assert_manages_its_mob(&runtime, &model, KEEPER, &child, "before its row changes").await;
+    let (session, created_at) = seat_of(&runtime, KEEPER).await;
+
+    let moved = keeper_spec("steward");
+    update_keeper(
+        &runtime,
+        "move-keeper",
+        &keeper_spec("personal"),
+        moved.clone(),
+    )
+    .await;
+    let after_move =
+        keeper_successor_after(&runtime, &session, created_at, "after the role move").await;
+    assert_manages_its_mob(
+        &runtime,
+        &model,
+        KEEPER,
+        &child,
+        "after a move to another role",
+    )
+    .await;
+    assert_eq!(
+        seat_of(&runtime, KEEPER).await.0,
+        session,
+        "the role move keeps the identity's session"
+    );
+
+    update_keeper(
+        &runtime,
+        "remode-keeper",
+        &moved,
+        moved
+            .clone()
+            .with_runtime_mode_override(meerkat_mob::MobRuntimeMode::AutonomousHost),
+    )
+    .await;
+    keeper_successor_after(
+        &runtime,
+        &session,
+        after_move,
+        "after the runtime-mode change",
+    )
+    .await;
+    // The member runs autonomously now and takes no tracked turn: its
+    // session's own mob tools are asked directly, as its next build holds
+    // them (it may create mobs and manages none).
+    let listed = session_tools_call(&runtime, &session, "mob_list", serde_json::json!({}))
+        .await
+        .expect("mob_list");
+    assert!(
+        listed.to_string().contains(&child),
+        "after a runtime-mode change the identity lists the mob it created: {listed}"
+    );
+    let members = session_tools_call(
+        &runtime,
+        &session,
+        "mob_list_members",
+        serde_json::json!({ "mob_id": child }),
+    )
+    .await
+    .expect("after a runtime-mode change the identity reads the members of the mob it created");
+    assert!(members.to_string().contains(OWNED_WORKER), "{members}");
+    session_tools_call(
+        &runtime,
+        &session,
+        "mob_destroy",
+        serde_json::json!({ "mob_id": child }),
+    )
+    .await
+    .expect("after a runtime-mode change the identity destroys the mob it created");
+    assert!(
+        runtime
+            .mob_runtime()
+            .agent_mob_mcp_state()
+            .expect("the agent mob tools' state")
+            .handle_for(&meerkat_mob::MobId::from(child.as_str()))
+            .await
+            .is_err(),
+        "the destroyed mob is no longer hosted"
+    );
+    runtime.shutdown().await;
+}
+
+/// One call of the agent mob tools of `session`, built as the session's next
+/// build holds them: it may create mobs and manages none.
+async fn session_tools_call(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    session: &meerkat_core::types::SessionId,
+    tool: &str,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, ToolError> {
+    let tools = meerkat_mob_mcp::AgentMobToolSurface::new(
+        runtime
+            .mob_runtime()
+            .agent_mob_mcp_state()
+            .expect("the agent mob tools' state"),
+        None,
+        meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
+            .expect("generated create-only authority"),
+        "gpt-5.5".to_string(),
+        session.clone(),
+        None,
+        None,
+        None,
+    );
+    let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
+    let outcome = tools
+        .dispatch(ToolCallView {
+            id: "session-tools-call",
+            name: tool,
+            args: &raw,
+        })
+        .await?;
+    Ok(serde_json::from_str(&outcome.result.text_content())
+        .unwrap_or_else(|_| serde_json::json!(outcome.result.text_content())))
+}

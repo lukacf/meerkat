@@ -727,6 +727,29 @@ them.
   inbox that is only closed for peer ingress has not left and still
   registers.
 
+- `meerkat-mob`, `meerkat-machine-schema`: the stop of a mob stays refused
+  while a flow run is active on another member, also after one member's
+  work was cancelled. After a force cancel of a member (JSON-RPC
+  `mob/force_cancel` and `mob/hard_cancel_member`, REST
+  `POST /mob/{id}/members/{agent_identity}/cancel`, `rkat mob force-cancel`,
+  the MCP tools `mob_force_cancel` and `meerkat_mob_force_cancel`, the
+  `force_cancel_member` member tool, Meta's `meta/force_cancel_member`,
+  `MobHandle::force_cancel_member` and `MobHandle::hard_cancel_member`) or
+  a cancel of all work of one member (`mob/cancel_all_work`,
+  `MobHandle::cancel_all_work`), `mob/lifecycle` with `action: "stop"`
+  (`MobHandle::stop`) now answers the existing refusal,
+  `MobError::InvalidTransition` from `Running` to `Stopped` (on JSON-RPC,
+  error `-32602` with the message `invalid state transition: Running ->
+  Stopped` and no error data), for as long as a flow run of the mob is
+  active; in that state it answered success before (see Fixed). To stop the
+  mob then, cancel the run with `mob/flow_cancel`
+  (`MobHandle::cancel_flow`; the run id is the one `mob/flow_run`
+  returned) or wait for it to end, and send the stop once
+  `mob/flow_status` reports the run terminal. A stop sent right after the
+  run turns terminal can still be refused for a moment; send it again. No
+  wire type and no stored form changes. See the Upgrade notes and Known
+  limitations.
+
 ### Fixed
 
 - `meerkat-core`: a turn that fails because a provider failure outlasted the
@@ -1066,6 +1089,21 @@ them.
   every registration, by run. The known issue on the
   [0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
   says what to do on an affected release.
+
+- `meerkat-mob`, `meerkat-machine-schema`: a force cancel of one member no
+  longer clears the mob's count of active flow runs, and neither does a
+  cancel of all work of one member. Both cancel the work of that one member
+  only; both also set the mob-wide count to zero before this change. A mob
+  with a flow run still active on another member then accepted a stop as if
+  nothing ran: it went `Stopped` with that run still running inside it, no
+  longer counted. Each run's own end lowers the count now, as it always did
+  for a run that no cancel touched, so the stop is refused until the run
+  ends or is cancelled. This sets right the entry on the mob's active run
+  count in 0.9.5, which named force cancel and cancel all work among the
+  arms that end every run of the mob: each ends one member's work. That
+  entry also said that a stop admitted under an active run cancelled the
+  run at a boundary. A stop does not cancel flow runs: the run was left to
+  go on inside the stopped mob, no longer counted.
 
 ### Security
 
@@ -1498,6 +1536,16 @@ them.
   active, and `rkat run --skill <id>` loads the built-in, not the copy,
   without a message. The copy can be removed.
 
+- A host that force cancels a member, or cancels all work of a member, and
+  then stops the mob: while a flow run of the mob is still active the stop
+  is now refused with `MobError::InvalidTransition` (`Running` to
+  `Stopped`; on JSON-RPC, error `-32602`), where it answered success
+  before. Cancel the run first with `mob/flow_cancel`
+  (`MobHandle::cancel_flow`), or wait for it to end; wait for
+  `mob/flow_status` to report the run terminal and send the stop; if the
+  stop is refused once more, send it again. A host that already handles
+  this refusal of a stop under an active flow run needs no change.
+
 ### Known limitations
 
 - The owner-only rule of this release (see Security) covers the
@@ -1577,6 +1625,13 @@ them.
   for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in
   either direction: it rests on the version requirements Connect 0.9.14
   published.
+
+- `meerkat-mob`: a flow run that `mob/flow_cancel` does not bring to a
+  terminal status keeps the stop of its mob refused; complete, reset or
+  destroy the mob instead. Read from the source, not confirmed by a run: a
+  run that a restart of the host recovered while its step was owed by a
+  member placed on another host is such a run until that member's turn is
+  settled.
 
 ## [0.9.14] - 2026-11-11
 

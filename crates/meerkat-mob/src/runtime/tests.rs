@@ -62828,6 +62828,723 @@ async fn test_stop_still_rejects_an_active_flow_after_another_member_retires() {
         .expect("the stop is admitted once the run ended");
 }
 
+/// Another member's force cancel does not end the mob's runs: with a flow run
+/// active on the worker, the idle lead (a member of no run) is force
+/// cancelled, the worker's run stays counted by MobMachine, and a stop is
+/// still refused until that run ends. The sibling of the retirement row
+/// above. Before, the force cancel reset the mob-wide run count while it
+/// cancelled only the named member's own work, and the stop was admitted
+/// with the worker's run still running inside the stopped mob.
+#[tokio::test]
+async fn test_stop_still_rejects_an_active_flow_after_another_member_is_force_cancelled() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    handle
+        .spawn(ProfileName::from("lead"), AgentIdentity::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Control: the worker's run is counted and the stop is refused.
+    let counted_before = handle
+        .query_machine_state()
+        .await
+        .expect("machine state with the run active")
+        .active_run_count;
+    assert!(counted_before > 0, "the active flow run is counted");
+    let control = handle
+        .stop()
+        .await
+        .expect_err("control: the stop rejects the active flow");
+    assert!(matches!(
+        control,
+        MobError::InvalidTransition {
+            from: MobState::Running,
+            to: MobState::Stopped,
+        }
+    ));
+
+    // Another caller force cancels the lead, which is in no run.
+    handle
+        .force_cancel_member(AgentIdentity::from("l-1"))
+        .await
+        .expect("force cancel the idle lead");
+
+    assert_stop_still_rejects_the_active_flow(
+        &handle,
+        &run_id,
+        counted_before,
+        "a force cancel of the idle lead",
+    )
+    .await;
+
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow after the rejected stop");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+    handle
+        .stop()
+        .await
+        .expect("the stop is admitted once the run ended");
+}
+
+/// The mob for the rows on a cancel of one member's work beside another
+/// member's flow run: a worker and a lead, and a flow run on the worker whose
+/// turn never ends. Returns the run, the run count MobMachine holds for it
+/// and the lead's member reference, after the control: the run is counted
+/// and a stop is refused.
+async fn mob_with_an_active_worker_flow_and_a_lead(
+    lead_mode: Option<crate::MobRuntimeMode>,
+) -> (MobHandle, Arc<MockSessionService>, RunId, u64, MemberRef) {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    let lead_ref = handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            AgentIdentity::from("l-1"),
+            None,
+            lead_mode,
+            None,
+        )
+        .await
+        .expect("spawn lead");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let counted_before = handle
+        .query_machine_state()
+        .await
+        .expect("machine state with the run active")
+        .active_run_count;
+    assert!(counted_before > 0, "the active flow run is counted");
+    let control = handle
+        .stop()
+        .await
+        .expect_err("control: the stop rejects the active flow");
+    assert!(matches!(
+        control,
+        MobError::InvalidTransition {
+            from: MobState::Running,
+            to: MobState::Stopped,
+        }
+    ));
+    (handle, service, run_id, counted_before, lead_ref)
+}
+
+/// Holds one turn of the turn-driven lead open, so that a cancel of the
+/// lead's work has a run to cancel. Returns the lead's session.
+async fn hold_a_turn_open_on_the_lead(
+    handle: &MobHandle,
+    service: &MockSessionService,
+    lead_ref: &MemberRef,
+) -> SessionId {
+    let session_id = lead_ref
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed lead");
+    service.set_start_turn_delay_ms(600_000);
+    let baseline_start_turn = service.start_turn_call_count();
+    handle
+        .member(&AgentIdentity::from("l-1"))
+        .await
+        .expect("lead handle")
+        .send("hold the lead's turn", HandlingMode::Queue)
+        .await
+        .expect("the lead admits the turn");
+    wait_for_start_turn_call_count(
+        service,
+        baseline_start_turn + 1,
+        "the lead's turn should reach the live session boundary",
+    )
+    .await;
+    session_id
+}
+
+/// After a cancel of one member's work, the other member's flow run is still
+/// counted by MobMachine, the stop is still refused, the mob is Running and
+/// the run is running. One assertion, so that a failure prints every
+/// observation.
+async fn assert_stop_still_rejects_the_active_flow(
+    handle: &MobHandle,
+    run_id: &RunId,
+    counted_before: u64,
+    cancel: &str,
+) {
+    let counted_after = handle
+        .query_machine_state()
+        .await
+        .expect("machine state after the cancel")
+        .active_run_count;
+    let run_after_cancel = handle
+        .flow_status(run_id.clone())
+        .await
+        .map(|run| run.map(|run| run.status));
+    let stop = tokio::time::timeout(Duration::from_mins(1), handle.stop())
+        .await
+        .map(|result| result.map(|_| ()));
+    let phase_after_stop = handle.status().await;
+    let stop_refused = matches!(
+        stop,
+        Ok(Err(MobError::InvalidTransition {
+            from: MobState::Running,
+            to: MobState::Stopped,
+        }))
+    );
+    // What the run's caller reads after the stop attempt: followed for a
+    // while when the stop was admitted, to show where it leaves the run.
+    let observe_deadline = Instant::now()
+        + if stop_refused {
+            Duration::from_millis(200)
+        } else {
+            Duration::from_secs(5)
+        };
+    let run_after_stop = loop {
+        let run = handle
+            .flow_status(run_id.clone())
+            .await
+            .map(|run| run.map(|run| run.status));
+        let live = matches!(run, Ok(Some(MobRunStatus::Running | MobRunStatus::Pending)));
+        if !live || Instant::now() >= observe_deadline {
+            break run;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let counted_after_stop = handle
+        .query_machine_state()
+        .await
+        .map(|state| state.active_run_count);
+
+    let count_kept = counted_after == counted_before;
+    let mob_running = matches!(phase_after_stop, Ok(MobState::Running));
+    let run_live = matches!(run_after_stop, Ok(Some(MobRunStatus::Running)));
+    assert!(
+        count_kept && stop_refused && mob_running && run_live,
+        "{cancel} must leave the worker's flow run counted, the stop refused and the run running; observed: active_run_count before the cancel = {counted_before}, after the cancel = {counted_after}, run after the cancel = {run_after_cancel:?}, stop = {stop:?}, mob phase after the stop = {phase_after_stop:?}, run after the stop = {run_after_stop:?}, active_run_count after the stop = {counted_after_stop:?}"
+    );
+}
+
+/// A cancel of all work of the lead's runtime does not end the mob's runs:
+/// with a flow run active on the worker, the worker's run stays counted and
+/// a stop is still refused until that run ends.
+#[tokio::test]
+async fn test_stop_still_rejects_an_active_flow_after_another_members_work_is_all_cancelled() {
+    let (handle, _service, run_id, counted_before, _lead_ref) =
+        mob_with_an_active_worker_flow_and_a_lead(None).await;
+    let lead = handle
+        .get_member(&AgentIdentity::from("l-1"))
+        .await
+        .unwrap()
+        .expect("the lead is a member");
+
+    handle
+        .cancel_all_work(lead.agent_runtime_id.clone(), lead.fence_token)
+        .await
+        .expect("cancel all work of the idle lead");
+
+    assert_stop_still_rejects_the_active_flow(
+        &handle,
+        &run_id,
+        counted_before,
+        "a cancel of all work of the idle lead",
+    )
+    .await;
+
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow after the rejected stop");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+    handle
+        .stop()
+        .await
+        .expect("the stop is admitted once the run ended");
+}
+
+/// A force cancel of a member with a turn in flight cancels that member's
+/// work only: with a flow run active on the worker, the worker's run stays
+/// counted and a stop is still refused until that run ends.
+#[tokio::test]
+async fn test_stop_still_rejects_an_active_flow_after_a_busy_member_is_force_cancelled() {
+    let (handle, service, run_id, counted_before, lead_ref) =
+        mob_with_an_active_worker_flow_and_a_lead(Some(crate::MobRuntimeMode::TurnDriven)).await;
+    let lead_session = hold_a_turn_open_on_the_lead(&handle, service.as_ref(), &lead_ref).await;
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+
+    handle
+        .force_cancel_member(AgentIdentity::from("l-1"))
+        .await
+        .expect("force cancel the lead's turn");
+    assert!(
+        service.cancel_after_boundary_call_count() > baseline_boundary,
+        "the force cancel reaches the lead's run"
+    );
+
+    assert_stop_still_rejects_the_active_flow(
+        &handle,
+        &run_id,
+        counted_before,
+        "a force cancel of the lead's turn",
+    )
+    .await;
+
+    // Release the lead's held turn, then end the worker's run.
+    let _ = SessionService::interrupt(service.as_ref(), &lead_session).await;
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow after the rejected stop");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+}
+
+/// A hard cancel of a member with a turn in flight commits the same machine
+/// input as the force cancel: with a flow run active on the worker, the
+/// worker's run stays counted and a stop is still refused until that run
+/// ends. The machine records the cancel before the interrupt is dispatched,
+/// so the row holds whatever the interrupt answers; its answer is printed.
+#[tokio::test]
+async fn test_stop_still_rejects_an_active_flow_after_another_member_is_hard_cancelled() {
+    let (handle, service, run_id, counted_before, lead_ref) =
+        mob_with_an_active_worker_flow_and_a_lead(Some(crate::MobRuntimeMode::TurnDriven)).await;
+    let lead_session = hold_a_turn_open_on_the_lead(&handle, service.as_ref(), &lead_ref).await;
+
+    let hard_cancel = handle
+        .hard_cancel_member(
+            crate::control_policy::MobControlPrincipal::Owner,
+            AgentIdentity::from("l-1"),
+            "hard cancel the lead's turn",
+        )
+        .await;
+
+    assert_stop_still_rejects_the_active_flow(
+        &handle,
+        &run_id,
+        counted_before,
+        &format!("a hard cancel of the lead's turn (answered {hard_cancel:?})"),
+    )
+    .await;
+
+    // Release the lead's turn if the hard cancel left it held, then end the
+    // worker's run.
+    let _ = SessionService::interrupt(service.as_ref(), &lead_session).await;
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow after the rejected stop");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+}
+
+/// No run is left counted for ever: a flow run whose own member is force
+/// cancelled in the middle of its step stays counted while it is on, its own
+/// end lowers the count to zero, and a stop is admitted after it. The run's
+/// count is read before its status in every sample, so a sample that reads
+/// the count at zero and the run still on is a run the mob no longer counts.
+#[tokio::test]
+async fn test_a_flow_run_whose_member_is_force_cancelled_stays_counted_until_it_ends() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    // The worker's flow turn fails after 1.5 s unless the cancel ends it
+    // first: either way the run reaches a terminal of its own.
+    service.set_flow_turn_fail(true);
+    service.set_flow_turn_delay_ms(1_500);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let counted_before = handle
+        .query_machine_state()
+        .await
+        .expect("machine state with the run active")
+        .active_run_count;
+    assert!(counted_before > 0, "the active flow run is counted");
+
+    let cancelled_at = Instant::now();
+    handle
+        .force_cancel_member(AgentIdentity::from("w-1"))
+        .await
+        .expect("force cancel the run's own member");
+
+    let mut first_sample = None;
+    let mut uncounted_while_on = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (terminal, terminal_after) = loop {
+        let counted = handle
+            .query_machine_state()
+            .await
+            .expect("machine state while the run ends")
+            .active_run_count;
+        let run = handle
+            .flow_status(run_id.clone())
+            .await
+            .expect("flow_status should succeed")
+            .expect("run should exist");
+        let is_terminal = crate::run::mob_machine_run_status_is_terminal(&run.run_id, &run.status)
+            .expect("MobMachine terminality classifier should accept run status");
+        if first_sample.is_none() {
+            first_sample = Some((counted, run.status.clone()));
+        }
+        if counted == 0 && !is_terminal && uncounted_while_on.is_none() {
+            uncounted_while_on = Some(run.status.clone());
+        }
+        if is_terminal {
+            break (run.status, cancelled_at.elapsed());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for run {run_id} to end after the force cancel; last status: {:?}",
+            run.status
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    // The run's cleanup follows its persisted terminal.
+    let drain_deadline = Instant::now() + Duration::from_secs(5);
+    let counted_after_end = loop {
+        let counted = handle
+            .query_machine_state()
+            .await
+            .expect("machine state after the run ended")
+            .active_run_count;
+        if counted == 0 || Instant::now() >= drain_deadline {
+            break counted;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let stop = tokio::time::timeout(Duration::from_mins(1), handle.stop())
+        .await
+        .map(|result| result.map(|_| ()));
+    let phase_after_stop = handle.status().await;
+
+    let observed = format!(
+        "active_run_count before the cancel = {counted_before}; first sample after the cancel (count, run) = {first_sample:?}; run read on with the count at zero = {uncounted_while_on:?}; run terminal = {terminal:?} {} ms after the cancel; active_run_count after the run ended = {counted_after_end}; stop = {stop:?}; mob phase after the stop = {phase_after_stop:?}",
+        terminal_after.as_millis()
+    );
+    println!("force cancel of the run's own member mid-step: {observed}");
+    assert!(
+        uncounted_while_on.is_none()
+            && counted_after_end == 0
+            && matches!(stop, Ok(Ok(())))
+            && matches!(phase_after_stop, Ok(MobState::Stopped)),
+        "a flow run whose member is force cancelled must stay counted while it is on, and its end must lower the count to zero and let the stop through; observed: {observed}"
+    );
+}
+
+/// The count is kept per run: with two flow runs active, a force cancel of
+/// the idle lead leaves both counted, the end of one run lowers the count by
+/// that run's share only and the stop stays refused under the other, and the
+/// end of the other lets the stop through.
+#[tokio::test]
+async fn test_two_flow_runs_stay_counted_each_until_its_own_end_across_a_force_cancel() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    handle
+        .spawn(ProfileName::from("lead"), AgentIdentity::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_a = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow a");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let counted_a = handle
+        .query_machine_state()
+        .await
+        .expect("machine state with run a")
+        .active_run_count;
+    let run_b = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow b");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let counted_both = handle
+        .query_machine_state()
+        .await
+        .expect("machine state with both runs")
+        .active_run_count;
+    assert!(
+        counted_a > 0 && counted_both == 2 * counted_a,
+        "each run is counted: {counted_a} with one run, {counted_both} with two"
+    );
+
+    handle
+        .force_cancel_member(AgentIdentity::from("l-1"))
+        .await
+        .expect("force cancel the idle lead");
+    let counted_after_cancel = handle
+        .query_machine_state()
+        .await
+        .expect("machine state after the cancel")
+        .active_run_count;
+
+    handle
+        .cancel_flow(run_a.clone())
+        .await
+        .expect("cancel run a");
+    let terminal_a = wait_for_run_terminal(&handle, &run_a, Duration::from_secs(8)).await;
+    // A run's cleanup follows its persisted terminal.
+    let drain_deadline = Instant::now() + Duration::from_secs(5);
+    let counted_after_a = loop {
+        let counted = handle
+            .query_machine_state()
+            .await
+            .expect("machine state after run a ended")
+            .active_run_count;
+        if counted <= counted_a || Instant::now() >= drain_deadline {
+            break counted;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let stop_under_b = tokio::time::timeout(Duration::from_mins(1), handle.stop())
+        .await
+        .map(|result| result.map(|_| ()));
+    let phase_under_b = handle.status().await;
+    let run_b_under_stop = handle
+        .flow_status(run_b.clone())
+        .await
+        .map(|run| run.map(|run| run.status));
+
+    handle
+        .cancel_flow(run_b.clone())
+        .await
+        .expect("cancel run b");
+    let terminal_b = wait_for_run_terminal(&handle, &run_b, Duration::from_secs(8)).await;
+    let drain_deadline = Instant::now() + Duration::from_secs(5);
+    let counted_at_the_end = loop {
+        let counted = handle
+            .query_machine_state()
+            .await
+            .expect("machine state after both runs ended")
+            .active_run_count;
+        if counted == 0 || Instant::now() >= drain_deadline {
+            break counted;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let stop_at_the_end = tokio::time::timeout(Duration::from_mins(1), handle.stop())
+        .await
+        .map(|result| result.map(|_| ()));
+    let phase_at_the_end = handle.status().await;
+
+    let observed = format!(
+        "active_run_count with run a = {counted_a}, with both runs = {counted_both}, after the force cancel = {counted_after_cancel}; run a terminal = {:?}; active_run_count after run a ended = {counted_after_a}; stop under run b = {stop_under_b:?}, mob phase = {phase_under_b:?}, run b = {run_b_under_stop:?}; run b terminal = {:?}; active_run_count at the end = {counted_at_the_end}; stop at the end = {stop_at_the_end:?}, mob phase = {phase_at_the_end:?}",
+        terminal_a.status, terminal_b.status
+    );
+    println!("two runs and a force cancel between them: {observed}");
+    assert!(
+        counted_after_cancel == counted_both
+            && terminal_a.status == MobRunStatus::Canceled
+            && counted_after_a == counted_a
+            && matches!(
+                stop_under_b,
+                Ok(Err(MobError::InvalidTransition {
+                    from: MobState::Running,
+                    to: MobState::Stopped,
+                }))
+            )
+            && matches!(phase_under_b, Ok(MobState::Running))
+            && matches!(run_b_under_stop, Ok(Some(MobRunStatus::Running)))
+            && terminal_b.status == MobRunStatus::Canceled
+            && counted_at_the_end == 0
+            && matches!(stop_at_the_end, Ok(Ok(())))
+            && matches!(phase_at_the_end, Ok(MobState::Stopped)),
+        "each of two flow runs must stay counted until its own end, and the stop must wait for the last of them; observed: {observed}"
+    );
+}
+
+/// A flow run whose own member leaves in the middle of its step, by a
+/// retirement or by a respawn, stays counted while it is on: the stop is
+/// refused under it, its own end (the step's timeout here, since the
+/// fixture's turn never ends) lowers the count to zero, and the stop is
+/// admitted after it.
+async fn a_flow_run_whose_member_leaves_stays_counted_until_it_ends(respawn: bool) {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(10_000, 8)).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    handle
+        .spawn(ProfileName::from("lead"), AgentIdentity::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let counted_before = handle
+        .query_machine_state()
+        .await
+        .expect("machine state with the run active")
+        .active_run_count;
+    assert!(counted_before > 0, "the active flow run is counted");
+
+    let left_at = Instant::now();
+    if respawn {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            handle.respawn(AgentIdentity::from("w-1"), None),
+        )
+        .await
+        .expect("the respawn of the run's own member answers")
+        .expect("respawn the run's own member");
+    } else {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            handle.retire(AgentIdentity::from("w-1")),
+        )
+        .await
+        .expect("the retirement of the run's own member answers")
+        .expect("retire the run's own member");
+    }
+    let counted_after_leave = handle
+        .query_machine_state()
+        .await
+        .expect("machine state after the member left")
+        .active_run_count;
+    let run_after_leave = handle
+        .flow_status(run_id.clone())
+        .await
+        .map(|run| run.map(|run| run.status));
+    let stop_under_the_run = tokio::time::timeout(Duration::from_mins(1), handle.stop())
+        .await
+        .map(|result| result.map(|_| ()));
+    let phase_under_the_run = handle.status().await;
+
+    let mut uncounted_while_on = None;
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let (terminal, terminal_after) = loop {
+        let counted = handle
+            .query_machine_state()
+            .await
+            .expect("machine state while the run ends")
+            .active_run_count;
+        let run = handle
+            .flow_status(run_id.clone())
+            .await
+            .expect("flow_status should succeed")
+            .expect("run should exist");
+        let is_terminal = crate::run::mob_machine_run_status_is_terminal(&run.run_id, &run.status)
+            .expect("MobMachine terminality classifier should accept run status");
+        if counted == 0 && !is_terminal && uncounted_while_on.is_none() {
+            uncounted_while_on = Some(run.status.clone());
+        }
+        if is_terminal {
+            break (run.status, left_at.elapsed());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for run {run_id} to end after its member left; last status: {:?}",
+            run.status
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let drain_deadline = Instant::now() + Duration::from_secs(5);
+    let counted_after_end = loop {
+        let counted = handle
+            .query_machine_state()
+            .await
+            .expect("machine state after the run ended")
+            .active_run_count;
+        if counted == 0 || Instant::now() >= drain_deadline {
+            break counted;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let stop_after_the_run = tokio::time::timeout(Duration::from_mins(1), handle.stop())
+        .await
+        .map(|result| result.map(|_| ()));
+    let phase_at_the_end = handle.status().await;
+
+    let observed = format!(
+        "respawn = {respawn}; active_run_count before the member left = {counted_before}, after it = {counted_after_leave}, run = {run_after_leave:?}; stop under the run = {stop_under_the_run:?}, mob phase = {phase_under_the_run:?}; run read on with the count at zero = {uncounted_while_on:?}; run terminal = {terminal:?} {} ms after the member left; active_run_count after the run ended = {counted_after_end}; stop after the run = {stop_after_the_run:?}, mob phase = {phase_at_the_end:?}",
+        terminal_after.as_millis()
+    );
+    println!("the run's own member leaves mid-step: {observed}");
+    assert!(
+        counted_after_leave == counted_before
+            && matches!(
+                stop_under_the_run,
+                Ok(Err(MobError::InvalidTransition {
+                    from: MobState::Running,
+                    to: MobState::Stopped,
+                }))
+            )
+            && matches!(phase_under_the_run, Ok(MobState::Running))
+            && uncounted_while_on.is_none()
+            && counted_after_end == 0
+            && matches!(stop_after_the_run, Ok(Ok(())))
+            && matches!(phase_at_the_end, Ok(MobState::Stopped)),
+        "a flow run whose own member leaves must stay counted while it is on, and its end must lower the count to zero and let the stop through; observed: {observed}"
+    );
+}
+
+#[tokio::test]
+async fn test_a_flow_run_whose_member_is_retired_stays_counted_until_it_ends() {
+    a_flow_run_whose_member_leaves_stays_counted_until_it_ends(false).await;
+}
+
+#[tokio::test]
+async fn test_a_flow_run_whose_member_is_respawned_stays_counted_until_it_ends() {
+    a_flow_run_whose_member_leaves_stays_counted_until_it_ends(true).await;
+}
+
 #[tokio::test]
 async fn test_failed_spawn_clears_pending_spawn_count_and_failed_roster_entry() {
     let (handle, service) = create_test_mob(sample_definition_with_auto_wire()).await;

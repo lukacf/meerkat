@@ -21701,9 +21701,12 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_placement.contains_key(agent_identity) == false
                 || mob_machine_placed_carrier_binding_active(self.member_placement, self.current_placed_spawn_host_binding_generations, self.host_bind_phase, self.host_binding_generations, agent_identity)
             }
-            update {
-                self.active_run_count = 0;
-            }
+            // The cancel is of this member's work only: the mob's active
+            // runs stay counted. Each run's own end lowers the count
+            // (CompleteFlow, FinishRun), so a stop still waits for a run on
+            // another member. `FlowTerminalized` authorizes the member's
+            // interrupt and says nothing about the mob's runs.
+            update {}
             to Running
             emit FlowTerminalized
         }
@@ -25456,9 +25459,9 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
-            update {
-                self.active_run_count = 0;
-            }
+            // All work of this one runtime: the mob's active runs stay
+            // counted (see ForceCancelRunning).
+            update {}
             to Running
             emit FlowTerminalized
         }

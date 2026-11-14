@@ -1585,6 +1585,11 @@ Security, Upgrade and Changed.
   the known issue on the Meta 0.9.14 release page:
   https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14
 
+- A teardown of the runtime that follows a force cancel of a member now
+  cancels the mob's active flow runs before it stops the mob, as a teardown
+  without a force cancel always did (see Core's changelog, Fixed: the
+  mob's count of active flow runs).
+
 ### Known limitations
 
 - An update cannot hand an agent's runtime mode back to its profile: to

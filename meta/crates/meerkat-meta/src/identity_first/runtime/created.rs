@@ -67,27 +67,63 @@ enum SuccessorSeat {
     /// No one-step successor serves the roster identity's member, for this
     /// reason: it is retired, and its wake's declaration seats the identity
     /// again.
-    Retired(String),
+    Retired(Unserved),
+}
+
+/// Why no one-step successor serves a roster identity's member, by what a
+/// restart between its retirement and its wake does to the mobs its session
+/// owns.
+enum Unserved {
+    /// The session is kept in a store and reads archived until the wake
+    /// succeeds: a restart in between ends the mobs it owns.
+    StoredSession(String),
+    /// The member is placed on another host. Whether a restart in between
+    /// ends the mobs its session owns is not established.
+    PlacedOnAnotherHost,
+    /// No session of the member's is kept in a store, so a restart in
+    /// between finds no archived session.
+    NoStoredSession(&'static str),
 }
 
 /// Say that a roster identity's member is retired and then woken, with the
-/// cause. Until that wake succeeds Core keeps the member's session
-/// archived, and a restart in that state ends the mobs the session owns.
-fn warn_retired_for_successor(
+/// cause, and no more about a restart in between than holds for that cause
+/// (see [`Unserved`]): a warning for a session kept in a store and for a
+/// member placed on another host, a debug line otherwise.
+fn log_retired_for_successor(
     identity: &AgentIdentity,
     live: &MemberRuntimeBinding,
     step: &'static str,
-    cause: &str,
+    unserved: &Unserved,
 ) {
-    tracing::warn!(
-        %identity,
-        session_id = ?live.session_id,
-        step,
-        cause,
-        "no same-session successor serves the identity's member, so it is retired and then \
-         woken: until the wake succeeds its session reads archived, and a restart in between \
-         ends the mobs the session owns. Do not stop this process before the identity has woken"
-    );
+    match unserved {
+        Unserved::StoredSession(cause) => tracing::warn!(
+            %identity,
+            session_id = ?live.session_id,
+            step,
+            cause = cause.as_str(),
+            "no same-session successor serves the identity's member, so it is retired and \
+             then woken: until the wake succeeds its session reads archived, and a restart in \
+             between ends the mobs the session owns. Do not stop this process before the \
+             identity has woken"
+        ),
+        Unserved::PlacedOnAnotherHost => tracing::warn!(
+            %identity,
+            session_id = ?live.session_id,
+            step,
+            cause = "its member is placed on another host",
+            "no same-session successor serves the identity's member, so it is retired and \
+             then woken, as in 0.9.14: whether a restart before the wake succeeds ends the \
+             mobs its session owns is not established"
+        ),
+        Unserved::NoStoredSession(cause) => tracing::debug!(
+            %identity,
+            session_id = ?live.session_id,
+            step,
+            cause,
+            "no same-session successor serves the identity's member, so it is retired and \
+             then woken"
+        ),
+    }
 }
 
 /// Which record holds an identity's spec (see the module docs).
@@ -420,7 +456,14 @@ impl IdentityRuntime {
                         | BridgeError::UnsupportedForMode { .. }),
                     ) => {
                         self.forget_lifecycle_build(identity);
-                        warn_retired_for_successor(identity, live, step, &error.to_string());
+                        // The step is asked only for a session the store
+                        // keeps.
+                        log_retired_for_successor(
+                            identity,
+                            live,
+                            step,
+                            &Unserved::StoredSession(error.to_string()),
+                        );
                         (bridge.retire_member(&live.agent_runtime_id).await, false)
                     }
                     ended => {
@@ -435,7 +478,7 @@ impl IdentityRuntime {
                 }
             }
             SuccessorSeat::Retired(unserved) => {
-                warn_retired_for_successor(identity, live, step, unserved);
+                log_retired_for_successor(identity, live, step, unserved);
                 (bridge.retire_member(&live.agent_runtime_id).await, false)
             }
         };
@@ -485,14 +528,12 @@ impl IdentityRuntime {
             .map(|entry| entry.spec.clone())
             .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?;
         if spec.placement.is_some() {
-            return Ok(SuccessorSeat::Retired(
-                "its member is placed on another host".to_string(),
-            ));
+            return Ok(SuccessorSeat::Retired(Unserved::PlacedOnAnotherHost));
         }
         let Some(session_id) = live.session_id.as_ref() else {
-            return Ok(SuccessorSeat::Retired(
-                "its member holds no session".to_string(),
-            ));
+            return Ok(SuccessorSeat::Retired(Unserved::NoStoredSession(
+                "its member holds no session",
+            )));
         };
         match self
             .core_bridge(identity)?
@@ -501,15 +542,17 @@ impl IdentityRuntime {
         {
             Ok(true) => {}
             Ok(false) => {
-                return Ok(SuccessorSeat::Retired(
-                    "its session is kept in memory only".to_string(),
-                ));
+                return Ok(SuccessorSeat::Retired(Unserved::NoStoredSession(
+                    "its session is kept in memory only",
+                )));
             }
+            // A bridge that cannot say is read as one whose store keeps the
+            // session.
             Err(error) => {
-                return Ok(SuccessorSeat::Retired(format!(
+                return Ok(SuccessorSeat::Retired(Unserved::StoredSession(format!(
                     "its session bridge does not say whether the session outlives its member \
                      ({error})"
-                )));
+                ))));
             }
         }
         let installed = self.installed_agent_customizer().await;

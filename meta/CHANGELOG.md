@@ -1237,7 +1237,8 @@ Security, Upgrade and Changed.
     session bridge. That is the stock composition over a persistent state
     directory.
   - Not served, and handled as in 0.9.14 (the member is retired and then
-    woken; a warning is logged each time, with the cause). Still exposed
+    woken; a line is logged each time, with the cause: a warning unless
+    the member is never exposed). Still exposed
     to the loss (see Known limitations): an identity served through a
     host's own `SessionBridge` that does not implement
     `respawn_member_on_own_session` or does not say that its sessions
@@ -1636,29 +1637,45 @@ Security, Upgrade and Changed.
 ### Known limitations
 
 - The loss of an identity's mobs after a respawn (see Fixed) remains for
-  two kinds of member the fix does not serve: an identity served through
-  a host's own `SessionBridge` that does not implement the same-session
-  step, or does not answer that its sessions outlive their members, when
-  that host keeps sessions and child mobs on disk; and an identity whose
-  session's creation record or spawn continuity cannot be read. For them,
-  as in 0.9.14: do not respawn the identity while its provider is
-  unavailable; after a respawn, do not stop or restart the gateway until
-  the identity has woken on the same session; and if a respawn's wake
-  failed, wake the identity successfully, on the same session, before
-  any restart. A member placed on another host is handled as in 0.9.14,
-  and whether it is exposed is not established. Each such respawn logs
-  one warning, "no same-session successor serves the identity's member,
-  so it is retired and then woken ...", with the identity, its session
-  and a `cause` field that tells the case:
-  - `its session bridge does not say whether the session outlives its
-    member (...)`: a host's own session bridge without that answer;
-  - `this session bridge does not implement
-    respawn_member_on_own_session`: a host's own session bridge without
-    the step;
-  - `... the creation the member's session recorded cannot be read ...`
-    or `... no spawn row records the member's current continuity ...`:
-    the member's session cannot be kept by the step;
-  - `its member is placed on another host`.
+  the members the fix does not serve whose session a store keeps. A
+  member the fix does not serve is retired and then woken, as in 0.9.14,
+  and each time one line is logged that begins "no same-session
+  successor serves the identity's member, so it is retired and then
+  woken" and carries the identity, its session, the step and a `cause`
+  field. The rest of the line differs by cause, as below. Each cause is
+  marked "confirmed by a test" where a test confirms that the member is
+  retired and the line is logged at that level with that cause, and
+  "read from the source" otherwise.
+  - Exposed. The line is a warning that goes on: "until the wake succeeds
+    its session reads archived, and a restart in between ends the mobs
+    the session owns. Do not stop this process before the identity has
+    woken". Its causes:
+    - `its session bridge does not say whether the session outlives its
+      member (...)`: an identity served through a host's own
+      `SessionBridge` without that answer (confirmed by a test);
+    - `this session bridge does not implement
+      respawn_member_on_own_session`: an identity served through a host's
+      own `SessionBridge` without the same-session step (confirmed by a
+      test);
+    - `... the creation the member's session recorded cannot be read
+      ...`: the step cannot keep the member's session (confirmed by a
+      test, over a session bridge that answers with Core's refusal);
+    - `... no spawn row records the member's current continuity ...`:
+      the same (read from the source).
+
+    The two session bridge causes are exposed when that host keeps
+    sessions and child mobs on disk. For all four, as in 0.9.14: do not
+    respawn the identity while its provider is unavailable; after a
+    respawn, do not stop or restart the gateway until the identity has
+    woken on the same session; and if a respawn's wake failed, wake the
+    identity successfully, on the same session, before any restart.
+  - Not established. `its member is placed on another host`: the line is
+    a warning that goes on: "as in 0.9.14: whether a restart before the
+    wake succeeds ends the mobs its session owns is not established"
+    (confirmed by a test).
+  - Not exposed. `its session is kept in memory only` and `its member
+    holds no session`: the line is a debug line with nothing after its
+    beginning, and no warning is logged (both confirmed by a test).
 - An update cannot hand an agent's runtime mode back to its profile: to
   change how such an agent runs, set the other explicit value
   (`autonomous_host` or `turn_driven`); clearing an override is not offered

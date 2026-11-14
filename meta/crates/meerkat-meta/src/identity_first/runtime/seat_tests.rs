@@ -3607,12 +3607,12 @@ async fn a_roster_identitys_incarnation_ends_through_cores_one_step_successor() 
     );
 }
 
-/// The `cause` field of each warning this thread logs that a roster
-/// identity's member is retired and then woken.
+/// Each line this thread logs that a roster identity's member is retired
+/// and then woken: its level, its message and its `cause` field.
 #[derive(Clone, Default)]
-struct RetiredForSuccessorCauses(Arc<StdMutex<Vec<String>>>);
+struct RetiredForSuccessorLines(Arc<StdMutex<Vec<(tracing::Level, String, String)>>>);
 
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RetiredForSuccessorCauses {
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RetiredForSuccessorLines {
     fn on_event(
         &self,
         event: &tracing::Event<'_>,
@@ -3635,9 +3635,6 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RetiredForSuccesso
                 }
             }
         }
-        if *event.metadata().level() != tracing::Level::WARN {
-            return;
-        }
         let mut fields = Fields::default();
         event.record(&mut fields);
         if fields
@@ -3645,67 +3642,133 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RetiredForSuccesso
             .contains("no same-session successor serves the identity's member")
             && let Some(cause) = fields.cause
         {
-            lock(&self.0).push(cause);
+            lock(&self.0).push((*event.metadata().level(), fields.message, cause));
         }
     }
 }
 
+/// What the step logs of a member it retires for a successor.
+enum RetiredLine {
+    /// A warning that a restart before the wake ends the mobs the session
+    /// owns, with this cause.
+    WarnsOfTheLoss(&'static str),
+    /// A warning that says the loss is not established, with this cause.
+    WarnsNotEstablished(&'static str),
+    /// A debug line with this cause, and no warning.
+    Debug(&'static str),
+    /// Nothing: Core seated the successor.
+    Nothing,
+}
+
 /// A roster identity's member that no one-step successor serves is retired
-/// and then woken, and each such step logs one warning that names its
-/// cause: a bridge that does not say its sessions outlive their members, a
-/// bridge without the step, and a member Core's step refuses as one it
-/// cannot serve (here, a session whose creation record cannot be read). A
-/// served member's step logs none. This test runs on one thread, so a
+/// and then woken, and each such step logs one line that names its cause
+/// and says no more about a restart before the wake than holds for it:
+///
+/// - a session the store keeps (a bridge that does not say its sessions
+///   outlive their members, a bridge without the step, and a member Core's
+///   step refuses as one it cannot serve; here, a session whose creation
+///   record cannot be read): a warning that such a restart ends the mobs
+///   the session owns;
+/// - a member placed on another host: a warning that says whether it does
+///   is not established;
+/// - a session kept in memory only, and a member without a session: a
+///   debug line, and no warning.
+///
+/// A served member's step logs none. This test runs on one thread, so a
 /// thread-local subscriber sees every event.
 #[tokio::test]
 async fn a_roster_member_no_successor_serves_is_retired_with_a_warning_that_names_the_cause() {
     use tracing_subscriber::layer::SubscriberExt as _;
 
-    let causes = RetiredForSuccessorCauses::default();
-    let _logging =
-        tracing::subscriber::set_default(tracing_subscriber::registry().with(causes.clone()));
-    let alice = identity("personal:alice");
+    const THE_LOSS: &str = "a restart in between ends the mobs the session owns. Do not stop \
+                            this process before the identity has woken";
+    const NOT_ESTABLISHED: &str = "whether a restart before the wake succeeds ends the mobs its \
+                                   session owns is not established";
     const UNREADABLE: &str = "unsupported for runtime mode turn_driven: the creation the \
                               member's session recorded cannot be read";
-    for (core, cause) in [
+
+    let lines = RetiredForSuccessorLines::default();
+    let _logging =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(lines.clone()));
+    let alice = identity("personal:alice");
+    let keeps_sessions = || SeatCore {
+        sessions_outlive_members: true,
+        ..SeatCore::default()
+    };
+    // (Core, the identity's spec, whether Core binds its member to a
+    // session, the line expected)
+    for (core, spec, has_session, expected) in [
         (
             SeatCore::default(),
-            Some("its session bridge does not say whether the session outlives its member"),
+            spec(&alice),
+            true,
+            RetiredLine::WarnsOfTheLoss(
+                "its session bridge does not say whether the session outlives its member",
+            ),
+        ),
+        (
+            keeps_sessions(),
+            spec(&alice),
+            true,
+            RetiredLine::WarnsOfTheLoss(
+                "this session bridge does not implement respawn_member_on_own_session",
+            ),
         ),
         (
             SeatCore {
-                sessions_outlive_members: true,
-                ..SeatCore::default()
-            },
-            Some("this session bridge does not implement respawn_member_on_own_session"),
-        ),
-        (
-            SeatCore {
-                sessions_outlive_members: true,
                 successor_unsupported_for_mode: Some(UNREADABLE.to_string()),
+                ..keeps_sessions()
+            },
+            spec(&alice),
+            true,
+            RetiredLine::WarnsOfTheLoss(UNREADABLE),
+        ),
+        (
+            keeps_sessions(),
+            placed(&alice),
+            true,
+            RetiredLine::WarnsNotEstablished("its member is placed on another host"),
+        ),
+        (
+            SeatCore {
+                sessions_in_memory: true,
                 ..SeatCore::default()
             },
-            Some(UNREADABLE),
+            spec(&alice),
+            true,
+            RetiredLine::Debug("its session is kept in memory only"),
+        ),
+        (
+            keeps_sessions(),
+            spec(&alice),
+            false,
+            RetiredLine::Debug("its member holds no session"),
         ),
         (
             SeatCore {
                 one_step_successor: true,
                 ..SeatCore::default()
             },
-            None,
+            spec(&alice),
+            true,
+            RetiredLine::Nothing,
         ),
     ] {
-        lock(&causes.0).clear();
+        lock(&lines.0).clear();
         let core = Arc::new(core);
         let runtime = runtime_over(None, &core);
-        register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        register_live(&runtime, &core.core, spec, 0, SessionId::new())
             .await
             .expect("registered live");
-        let live = runtime
+        let mut live = runtime
             .core_live_member(&alice)
             .await
             .expect("Core's live member reads")
             .expect("the identity has a live member");
+        if !has_session {
+            // A member Core binds to no session.
+            live.session_id = None;
+        }
 
         let seated = runtime
             .end_incarnation_for_successor_locked(
@@ -3717,22 +3780,43 @@ async fn a_roster_member_no_successor_serves_is_retired_with_a_warning_that_name
             .await
             .expect("the incarnation ends");
 
-        let warned = lock(&causes.0).clone();
-        match cause {
-            Some(cause) => {
-                assert!(!seated, "{cause}: the member was retired");
-                assert!(
-                    matches!(warned.as_slice(), [warned] if warned.contains(cause)),
-                    "one warning that names the cause '{cause}': {warned:?}"
-                );
+        let logged = lock(&lines.0).clone();
+        let (level, text, cause) = match expected {
+            RetiredLine::WarnsOfTheLoss(cause) => (tracing::Level::WARN, Some(THE_LOSS), cause),
+            RetiredLine::WarnsNotEstablished(cause) => {
+                (tracing::Level::WARN, Some(NOT_ESTABLISHED), cause)
             }
-            None => {
+            RetiredLine::Debug(cause) => (tracing::Level::DEBUG, None, cause),
+            RetiredLine::Nothing => {
                 assert!(seated, "Core seated the successor");
                 assert!(
-                    warned.is_empty(),
-                    "a served member's step warns of nothing: {warned:?}"
+                    logged.is_empty(),
+                    "a served member's step logs no such line: {logged:?}"
                 );
+                continue;
             }
+        };
+        assert!(!seated, "{cause}: the member was retired");
+        let [(logged_level, logged_text, logged_cause)] = logged.as_slice() else {
+            panic!("{cause}: one line: {logged:?}");
+        };
+        assert_eq!(
+            *logged_level, level,
+            "{cause}: the line's level: {logged:?}"
+        );
+        assert!(
+            logged_cause.contains(cause),
+            "the line names the cause '{cause}': {logged:?}"
+        );
+        assert!(
+            text.is_none_or(|text| logged_text.contains(text)),
+            "{cause}: the line says '{text:?}': {logged:?}"
+        );
+        for other in [THE_LOSS, NOT_ESTABLISHED] {
+            assert!(
+                text == Some(other) || !logged_text.contains(other),
+                "{cause}: the line does not say '{other}': {logged:?}"
+            );
         }
     }
 }

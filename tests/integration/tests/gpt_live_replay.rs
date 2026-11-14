@@ -44,12 +44,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use meerkat::experimental_gpt_live::{
     ExperimentalGptLiveOpenAuthority, ExperimentalGptLiveWebrtcTransport,
-    ExperimentalLiveOpenAuthorityProvider, ExperimentalLivePublicObservation,
-    ExperimentalLivePublicObservationDeliveryError, ExperimentalLivePublicObservationPublisher,
-    GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID, GPT_LIVE_PUBLIC_MODEL, LIVE_LATE_SUMMARY_PREFIX,
-    LIVE_RUNTIME_WORK_PREFIX, PublicGptLiveOpenAuthorityConfig, PublicGptLivePlaybackPolicy,
-    provider_recording,
+    ExperimentalLiveOpenAuthorityError, ExperimentalLiveOpenAuthorityProvider,
+    ExperimentalLivePublicObservation, ExperimentalLivePublicObservationDeliveryError,
+    ExperimentalLivePublicObservationPublisher, GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID,
+    GPT_LIVE_PUBLIC_MODEL, LIVE_LATE_SUMMARY_PREFIX, LIVE_RUNTIME_WORK_PREFIX,
+    PublicGptLiveOpenAuthorityConfig, PublicGptLivePlaybackPolicy, provider_recording,
 };
+use meerkat::session_runtime::live_orchestration::ExperimentalLiveChannelOpenError;
 use meerkat::session_runtime::live_summary::{
     LiveContextBootstrapMode, LiveContextSummarizer, LiveContextSummaryError,
     LiveContextSummaryPolicy, LiveContextSummarySnapshot,
@@ -81,7 +82,9 @@ use tokio::io::BufReader;
 use tokio::sync::watch;
 use tokio::time::{Duration, timeout};
 
-use replay::{Cassette, ClientKey, Fixture, RecordedSummary, SummaryGate, fixture_findings};
+use replay::{
+    Cassette, ClientKey, Fixture, Parked, RecordedSummary, SummaryGate, fixture_findings,
+};
 use support::evidence::{self, Journal};
 use support::{
     ExplicitScenarioBindingAuthority, FixedConfigSource, JsonlRpcClient, execution_identity,
@@ -2052,5 +2055,92 @@ async fn s106_replay_commits_exactly_the_heard_words_and_schedules_through_the_w
         jobs,
         "each voice delegation is one WorkGraph item, not the serial fallback: {titles:?}"
     );
+    Ok(())
+}
+
+/// The profile id of the deprecated private client-context profile. The
+/// public authority admits only its own profile
+/// (`GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID`).
+const DEPRECATED_PRIVATE_PROFILE_ID: &str = "openai.gpt-live-1-codex.client-context.v1";
+
+/// The first check of the live scenario S97, which needs no provider frame
+/// at all: the public authority fails closed on the deprecated private
+/// profile. The member live host's open is refused with the typed admission
+/// error before any channel exists (no create request reaches the provider,
+/// and the tape of every recorded channel is untouched), so the real open
+/// that follows starts clean: it is the first channel, and it activates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_deprecated_private_profile_is_refused_before_any_channel_exists()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _one_at_a_time = REPLAY_LOCK.lock().await;
+    let fixture = Fixture::parse(S104_FIXTURE)?;
+    let cassette = Arc::new(Cassette::start(fixture.clone()).await?);
+    let evidence = Journal::create_for("S97-refusal-replay", S104_RESULT_TOKEN.to_owned())?;
+    let llm = scripted_llm(BTreeMap::from([(
+        Purpose::Conversation(0),
+        conversation(S104_SEED_REPLY),
+    )]));
+    let host = open_replay_host(HostOptions {
+        base_url: cassette.base_url(),
+        llm,
+        policy: LiveDelegationExecutionPolicy::DurableFork,
+        executor_instructions: S104_EXECUTOR_INSTRUCTIONS,
+        seed_prompt: Some(S104_SEED_PROMPT),
+        summary: "The team mascot is a heron named Bartleby.",
+        summary_gate: cassette.summary_gate(),
+    })
+    .await?;
+
+    let refused = host
+        .member_host
+        .open_with_execution_identity(
+            host.authority.as_ref(),
+            &host.session_id,
+            &serde_json::from_value(execution_identity(DEPRECATED_PRIVATE_PROFILE_ID))?,
+            None,
+            None,
+            Some(LiveOpenTransport::Webrtc),
+        )
+        .await;
+    match refused {
+        Err(ExperimentalLiveChannelOpenError::Authority(
+            ExperimentalLiveOpenAuthorityError::AdmissionFailed,
+        )) => {}
+        Err(other) => {
+            return Err(format!(
+                "the deprecated private profile must be refused at the public authority's admission, not by: {other}"
+            )
+            .into());
+        }
+        Ok(_) => {
+            return Err(
+                "the public authority must fail closed on the deprecated private profile".into(),
+            );
+        }
+    }
+    assert!(
+        cassette.create_bodies().is_empty(),
+        "the refused open sent a create request to the provider"
+    );
+    for tape in &fixture.channels {
+        assert_eq!(
+            cassette.parked(tape.ordinal),
+            Parked::NotCreated,
+            "the refused open touched the tape of channel {}",
+            tape.ordinal
+        );
+    }
+
+    let (channel, _open) = host.connect(&evidence).await?;
+    assert_eq!(
+        channel, 1,
+        "the open after the refusal is the first channel"
+    );
+    assert_eq!(
+        cassette.create_bodies().len(),
+        1,
+        "the open after the refusal creates exactly one provider session"
+    );
+    evidence.finish(evidence::Outcome::Passed)?;
     Ok(())
 }

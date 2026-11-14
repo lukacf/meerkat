@@ -1437,7 +1437,16 @@ pub(crate) struct CompletionRegistry {
     /// then, while by delivery its terminal may already have archived that
     /// record.
     disclosures: Arc<StdMutex<CapturedDisclosureMap>>,
+    /// Test-only: called with each input whose waiters are taken out for
+    /// delivery, at that moment, so a test can read machine state exactly
+    /// when a waiter is answered.
+    #[cfg(test)]
+    waiter_release_probe: Option<WaiterReleaseProbe>,
 }
+
+/// See [`CompletionRegistry::set_waiter_release_probe_for_test`].
+#[cfg(test)]
+pub(crate) type WaiterReleaseProbe = Arc<dyn Fn(&InputId) + Send + Sync>;
 
 type CapturedDisclosureMap = HashMap<InputId, DeferredDisclosure>;
 
@@ -1509,6 +1518,15 @@ impl CompletionRegistry {
         }
     }
 
+    /// Test-only: `probe` runs for each input whose waiters this registry
+    /// takes out for delivery (an outcome or a wait failure), before they are
+    /// answered. It runs under the waiter lock: it must not touch the
+    /// registry.
+    #[cfg(test)]
+    pub(crate) fn set_waiter_release_probe_for_test(&mut self, probe: WaiterReleaseProbe) {
+        self.waiter_release_probe = Some(probe);
+    }
+
     /// The disclosure of a delivered outcome: the decision captured when its
     /// waiters registered. There is no late lookup: by delivery the input's
     /// terminal may have archived what the machine recorded for it, so an
@@ -1544,6 +1562,10 @@ impl CompletionRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let input_waiters = waiters.remove(input_id)?;
+        #[cfg(test)]
+        if let Some(probe) = self.waiter_release_probe.as_ref() {
+            probe(input_id);
+        }
         let captured = self
             .disclosures
             .lock()
@@ -2132,6 +2154,12 @@ impl CompletionRegistry {
                 .clear();
             std::mem::take(&mut *waiters)
         };
+        #[cfg(test)]
+        if let Some(probe) = self.waiter_release_probe.as_ref() {
+            for input_id in all_waiters.keys() {
+                probe(input_id);
+            }
+        }
         for (_, senders) in all_waiters {
             Self::send_error(senders.into_values().collect(), error.clone());
         }
@@ -2199,6 +2227,10 @@ impl CompletionRegistry {
             .retain(|input_id, senders| {
                 if is_still_pending(input_id) {
                     return true;
+                }
+                #[cfg(test)]
+                if let Some(probe) = self.waiter_release_probe.as_ref() {
+                    probe(input_id);
                 }
                 self.disclosures
                     .lock()

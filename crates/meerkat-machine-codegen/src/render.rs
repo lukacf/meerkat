@@ -365,6 +365,14 @@ pub enum MachineKernelRenderError {
         "MeerkatMachine transition `{transition}` belongs to an input declared after the appended-input section; list it in MEERKAT_TRANSITION_ENUM_LATE_TAIL"
     )]
     UnlistedLateTransition { transition: String },
+    #[error(
+        "MeerkatMachine retired TransitionId variant `{transition}` is still a schema transition; a retired name is never reused"
+    )]
+    RetiredTransitionStillLive { transition: String },
+    #[error(
+        "MeerkatMachine retired TransitionId variant `{transition}` follows `{follows}`, which the enum does not have"
+    )]
+    RetiredTransitionFollowsUnknown { transition: String, follows: String },
 }
 
 // Rust enum order is a public compatibility surface, while transition schema
@@ -647,6 +655,71 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "ConsumeCompactionRequestInertAttached",
     "ConsumeCompactionRequestInertStopped",
     "ConsumeCompactionRequestInertDestroyed",
+    // The exact queued-input abandon and its three no-op answers.
+    "AbandonQueuedInputIdle",
+    "AbandonQueuedInputAttached",
+    "AbandonQueuedInputRunning",
+    "AbandonQueuedInputRetired",
+    "AbandonQueuedInputStopped",
+    "AbandonQueuedInputNotQueuedInitializing",
+    "AbandonQueuedInputNotQueuedIdle",
+    "AbandonQueuedInputNotQueuedAttached",
+    "AbandonQueuedInputNotQueuedRunning",
+    "AbandonQueuedInputNotQueuedRetired",
+    "AbandonQueuedInputNotQueuedStopped",
+    "AbandonQueuedInputNotQueuedDestroyed",
+    "AbandonQueuedInputAlreadyTerminalInitializing",
+    "AbandonQueuedInputAlreadyTerminalIdle",
+    "AbandonQueuedInputAlreadyTerminalAttached",
+    "AbandonQueuedInputAlreadyTerminalRunning",
+    "AbandonQueuedInputAlreadyTerminalRetired",
+    "AbandonQueuedInputAlreadyTerminalStopped",
+    "AbandonQueuedInputAlreadyTerminalDestroyed",
+    "AbandonQueuedInputUntrackedInitializing",
+    "AbandonQueuedInputUntrackedIdle",
+    "AbandonQueuedInputUntrackedAttached",
+    "AbandonQueuedInputUntrackedRunning",
+    "AbandonQueuedInputUntrackedRetired",
+    "AbandonQueuedInputUntrackedStopped",
+    "AbandonQueuedInputUntrackedDestroyed",
+    "ResolveRuntimeCompletionCleanupInputTerminatedWhileServingIdle",
+    "ResolveRuntimeCompletionCleanupInputTerminatedWhileServingAttached",
+    "ResolveRuntimeCompletionCleanupInputTerminatedWhileServingRunning",
+    "ResolveRuntimeCompletionCleanupInputTerminatedWhileDrainingRetired",
+];
+
+/// One published `TransitionId` variant whose transition no longer exists.
+#[cfg(not(test))]
+struct RetiredTransitionVariant {
+    /// The variant's published name.
+    name: &'static str,
+    /// The variant it followed in the published enum (a live transition or
+    /// an earlier entry of the retired list).
+    follows: &'static str,
+}
+
+// Published MeerkatMachine `TransitionId` variants whose transition no
+// longer exists. Each stays in the enum right after the variant it followed
+// when it was published, so no published discriminant moves. No transition
+// fires a retired variant, and its name appears nowhere else: in no
+// transition table, spec, model or poster. The list is used only to emit
+// the enum. It is append-only, like the tails above: an entry is never
+// removed, renamed or reordered, and a retired name is never given to a new
+// transition (rendering refuses a retired name the schema still has).
+#[cfg(not(test))]
+const MEERKAT_TRANSITION_ENUM_RETIRED: &[RetiredTransitionVariant] = &[
+    RetiredTransitionVariant {
+        name: "ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle",
+        follows: "ResolveRuntimeCompletionCleanupRuntimeTerminatedInitializing",
+    },
+    RetiredTransitionVariant {
+        name: "ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached",
+        follows: "ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle",
+    },
+    RetiredTransitionVariant {
+        name: "ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning",
+        follows: "ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached",
+    },
 ];
 
 // Append-only emission tails for the other machines, whose public
@@ -1421,6 +1494,61 @@ fn transitions_in_public_enum_order(
     Ok(ordered)
 }
 
+/// One variant of a kernel's public `TransitionId` enum.
+#[cfg(not(test))]
+enum PublicTransitionVariant<'a> {
+    /// A transition of the schema.
+    Live(&'a TransitionSchema),
+    /// A published variant whose transition no longer exists
+    /// ([`MEERKAT_TRANSITION_ENUM_RETIRED`]).
+    Retired(&'static str),
+}
+
+/// The variants of `schema`'s public `TransitionId` enum, in order: its
+/// transitions in public enum order, with each retired variant right after
+/// the variant it followed when it was published. A retired name that is
+/// still a transition of the schema, or that follows a variant the enum does
+/// not have, is refused.
+#[cfg(not(test))]
+fn public_transition_enum_variants(
+    schema: &MachineSchema,
+) -> Result<Vec<PublicTransitionVariant<'_>>, MachineKernelRenderError> {
+    let mut variants: Vec<PublicTransitionVariant<'_>> = transitions_in_public_enum_order(schema)?
+        .into_iter()
+        .map(PublicTransitionVariant::Live)
+        .collect();
+    if schema.machine.as_ref() != "MeerkatMachine" {
+        return Ok(variants);
+    }
+    for retired in MEERKAT_TRANSITION_ENUM_RETIRED {
+        if schema
+            .transitions
+            .iter()
+            .any(|transition| transition.name.as_ref() == retired.name)
+        {
+            return Err(MachineKernelRenderError::RetiredTransitionStillLive {
+                transition: retired.name.to_owned(),
+            });
+        }
+        let follows = variants
+            .iter()
+            .position(|variant| match variant {
+                PublicTransitionVariant::Live(transition) => {
+                    transition.name.as_ref() == retired.follows
+                }
+                PublicTransitionVariant::Retired(name) => *name == retired.follows,
+            })
+            .ok_or_else(
+                || MachineKernelRenderError::RetiredTransitionFollowsUnknown {
+                    transition: retired.name.to_owned(),
+                    follows: retired.follows.to_owned(),
+                },
+            )?;
+        variants.insert(follows + 1, PublicTransitionVariant::Retired(retired.name));
+    }
+    Ok(variants)
+}
+
 #[cfg(not(test))]
 fn render_canonical_stub_modeled_module(
     schema: &MachineSchema,
@@ -1682,8 +1810,23 @@ fn render_canonical_stub_modeled_module(
         "#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
     );
     pushln!(&mut out, "pub enum TransitionId {{");
-    for transition in transitions_in_public_enum_order(schema)? {
-        pushln!(&mut out, "    {},", rust_ident(&transition.name));
+    for variant in public_transition_enum_variants(schema)? {
+        match variant {
+            PublicTransitionVariant::Live(transition) => {
+                pushln!(&mut out, "    {},", rust_ident(&transition.name));
+            }
+            PublicTransitionVariant::Retired(name) => {
+                pushln!(
+                    &mut out,
+                    "    /// Retired: never fired. No transition has this id any more; the"
+                );
+                pushln!(
+                    &mut out,
+                    "    /// variant keeps its place so that no published discriminant moves."
+                );
+                pushln!(&mut out, "    {name},");
+            }
+        }
     }
     pushln!(&mut out, "}}");
     pushln!(&mut out, "#[allow(non_camel_case_types)]");

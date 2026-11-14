@@ -261,6 +261,8 @@ from .types import (
     ReadSessionTranscriptRevisionParams,
     ReadyWorkFilter,
     RealmIdParams,
+    RecallInputParams,
+    RecallInputResult,
     RequestToolGrantParams,
     RequestToolGrantResult,
     RestoreSessionTranscriptRevisionParams,
@@ -1022,6 +1024,14 @@ class RpcRequest(Protocol):
         params: SessionInputStateParams,
         /,
     ) -> Awaitable[SessionInputStateResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["session/recall_input"],
+        params: RecallInputParams,
+        /,
+    ) -> Awaitable[RecallInputResult]: ...
 
     @overload
     def __call__(

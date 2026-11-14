@@ -933,6 +933,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `BindInputRequesterBatchKey`(input_id: String, authority_batch_key: String)
 - `RequestCompaction`
 - `ConsumeCompactionRequest`(run_id: RunId)
+- `AbandonQueuedInput`(input_id: String, reason: InputAbandonReason)
 
 ## Signals
 - `Initialize`
@@ -1212,6 +1213,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ExactRunBoundaryCancel`(run_id: RunId, reason: String)
 - `CompactionRequestResolved`(verdict: CompactionRequestVerdict)
 - `CompactionRequestConsumed`(run_id: RunId)
+- `QueuedInputAbandonResolved`(input_id: String, disposition: QueuedInputAbandonDisposition, phase: Option<InputPhase>)
 
 ## Helpers
 - `runtime_authority_reconcile_decision`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool) -> `RuntimeAuthorityReconcileDecision`
@@ -7263,39 +7265,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RuntimeCompletionCleanupResolved`
 - To: `Initializing`
 
-### `ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle`
-- From: `Idle`
-- On: `ResolveRuntimeCompletionCleanup`(session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session)
-- Guards:
-  - `observation_matches_session`
-  - `observation_matches_runtime_binding`
-  - `not_archived`
-  - `runtime_terminated`
-- Emits: `RuntimeCompletionCleanupResolved`
-- To: `Idle`
-
-### `ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached`
-- From: `Attached`
-- On: `ResolveRuntimeCompletionCleanup`(session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session)
-- Guards:
-  - `observation_matches_session`
-  - `observation_matches_runtime_binding`
-  - `not_archived`
-  - `runtime_terminated`
-- Emits: `RuntimeCompletionCleanupResolved`
-- To: `Attached`
-
-### `ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning`
-- From: `Running`
-- On: `ResolveRuntimeCompletionCleanup`(session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session)
-- Guards:
-  - `observation_matches_session`
-  - `observation_matches_runtime_binding`
-  - `not_archived`
-  - `runtime_terminated`
-- Emits: `RuntimeCompletionCleanupResolved`
-- To: `Running`
-
 ### `ResolveRuntimeCompletionCleanupRuntimeTerminatedRetired`
 - From: `Retired`
 - On: `ResolveRuntimeCompletionCleanup`(session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session)
@@ -7304,6 +7273,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `observation_matches_runtime_binding`
   - `not_archived`
   - `runtime_terminated`
+  - `nothing_left_to_drain`
 - Emits: `RuntimeCompletionCleanupResolved`
 - To: `Retired`
 
@@ -7317,6 +7287,51 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_terminated`
 - Emits: `RuntimeCompletionCleanupResolved`
 - To: `Stopped`
+
+### `ResolveRuntimeCompletionCleanupInputTerminatedWhileServingIdle`
+- From: `Idle`
+- On: `ResolveRuntimeCompletionCleanup`(session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session)
+- Guards:
+  - `observation_matches_session`
+  - `observation_matches_runtime_binding`
+  - `not_archived`
+  - `runtime_terminated`
+- Emits: `RuntimeCompletionCleanupResolved`
+- To: `Idle`
+
+### `ResolveRuntimeCompletionCleanupInputTerminatedWhileServingAttached`
+- From: `Attached`
+- On: `ResolveRuntimeCompletionCleanup`(session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session)
+- Guards:
+  - `observation_matches_session`
+  - `observation_matches_runtime_binding`
+  - `not_archived`
+  - `runtime_terminated`
+- Emits: `RuntimeCompletionCleanupResolved`
+- To: `Attached`
+
+### `ResolveRuntimeCompletionCleanupInputTerminatedWhileServingRunning`
+- From: `Running`
+- On: `ResolveRuntimeCompletionCleanup`(session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session)
+- Guards:
+  - `observation_matches_session`
+  - `observation_matches_runtime_binding`
+  - `not_archived`
+  - `runtime_terminated`
+- Emits: `RuntimeCompletionCleanupResolved`
+- To: `Running`
+
+### `ResolveRuntimeCompletionCleanupInputTerminatedWhileDrainingRetired`
+- From: `Retired`
+- On: `ResolveRuntimeCompletionCleanup`(session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session)
+- Guards:
+  - `observation_matches_session`
+  - `observation_matches_runtime_binding`
+  - `not_archived`
+  - `runtime_terminated`
+  - `work_left_to_drain`
+- Emits: `RuntimeCompletionCleanupResolved`
+- To: `Retired`
 
 ### `ResolveRuntimeCompletionCleanupFinalizationFailedInitializing`
 - From: `Initializing`
@@ -29968,6 +29983,214 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `ConsumeCompactionRequestInertDestroyed`
 - From: `Destroyed`
 - On: `ConsumeCompactionRequest`(run_id)
+- To: `Destroyed`
+
+### `AbandonQueuedInputIdle`
+- From: `Idle`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_queued`
+- Emits: `RecordTerminalOutcome`, `QueuedInputAbandonResolved`
+- To: `Idle`
+
+### `AbandonQueuedInputAttached`
+- From: `Attached`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_queued`
+- Emits: `RecordTerminalOutcome`, `QueuedInputAbandonResolved`
+- To: `Attached`
+
+### `AbandonQueuedInputRunning`
+- From: `Running`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_queued`
+- Emits: `RecordTerminalOutcome`, `QueuedInputAbandonResolved`
+- To: `Running`
+
+### `AbandonQueuedInputRetired`
+- From: `Retired`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_queued`
+- Emits: `RecordTerminalOutcome`, `QueuedInputAbandonResolved`
+- To: `Retired`
+
+### `AbandonQueuedInputStopped`
+- From: `Stopped`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_queued`
+- Emits: `RecordTerminalOutcome`, `QueuedInputAbandonResolved`
+- To: `Stopped`
+
+### `AbandonQueuedInputNotQueuedInitializing`
+- From: `Initializing`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_held_by_a_run`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Initializing`
+
+### `AbandonQueuedInputNotQueuedIdle`
+- From: `Idle`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_held_by_a_run`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Idle`
+
+### `AbandonQueuedInputNotQueuedAttached`
+- From: `Attached`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_held_by_a_run`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Attached`
+
+### `AbandonQueuedInputNotQueuedRunning`
+- From: `Running`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_held_by_a_run`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Running`
+
+### `AbandonQueuedInputNotQueuedRetired`
+- From: `Retired`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_held_by_a_run`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Retired`
+
+### `AbandonQueuedInputNotQueuedStopped`
+- From: `Stopped`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_held_by_a_run`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Stopped`
+
+### `AbandonQueuedInputNotQueuedDestroyed`
+- From: `Destroyed`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_held_by_a_run`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Destroyed`
+
+### `AbandonQueuedInputAlreadyTerminalInitializing`
+- From: `Initializing`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_terminal`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Initializing`
+
+### `AbandonQueuedInputAlreadyTerminalIdle`
+- From: `Idle`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_terminal`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Idle`
+
+### `AbandonQueuedInputAlreadyTerminalAttached`
+- From: `Attached`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_terminal`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Attached`
+
+### `AbandonQueuedInputAlreadyTerminalRunning`
+- From: `Running`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_terminal`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Running`
+
+### `AbandonQueuedInputAlreadyTerminalRetired`
+- From: `Retired`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_terminal`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Retired`
+
+### `AbandonQueuedInputAlreadyTerminalStopped`
+- From: `Stopped`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_terminal`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Stopped`
+
+### `AbandonQueuedInputAlreadyTerminalDestroyed`
+- From: `Destroyed`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_terminal`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Destroyed`
+
+### `AbandonQueuedInputUntrackedInitializing`
+- From: `Initializing`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_untracked`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Initializing`
+
+### `AbandonQueuedInputUntrackedIdle`
+- From: `Idle`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_untracked`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Idle`
+
+### `AbandonQueuedInputUntrackedAttached`
+- From: `Attached`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_untracked`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Attached`
+
+### `AbandonQueuedInputUntrackedRunning`
+- From: `Running`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_untracked`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Running`
+
+### `AbandonQueuedInputUntrackedRetired`
+- From: `Retired`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_untracked`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Retired`
+
+### `AbandonQueuedInputUntrackedStopped`
+- From: `Stopped`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_untracked`
+- Emits: `QueuedInputAbandonResolved`
+- To: `Stopped`
+
+### `AbandonQueuedInputUntrackedDestroyed`
+- From: `Destroyed`
+- On: `AbandonQueuedInput`(input_id, reason)
+- Guards:
+  - `input_untracked`
+- Emits: `QueuedInputAbandonResolved`
 - To: `Destroyed`
 
 ## Coverage

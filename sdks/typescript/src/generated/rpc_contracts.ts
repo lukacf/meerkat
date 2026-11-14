@@ -253,6 +253,8 @@ import type {
   ReadSessionTranscriptRevisionParams,
   ReadyWorkFilter,
   RealmIdParams,
+  RecallInputParams,
+  RecallInputResult,
   RequestToolGrantParams,
   RequestToolGrantResult,
   RestoreSessionTranscriptRevisionParams,
@@ -669,6 +671,10 @@ export interface RpcMethodContracts {
   "session/input_status": {
     params: SessionInputStateParams;
     result: (SessionInputStateResult) & Record<string, unknown>;
+  };
+  "session/recall_input": {
+    params: RecallInputParams;
+    result: (RecallInputResult) & Record<string, unknown>;
   };
   "events/latest_cursor": {
     params: EventsLatestCursorParams;

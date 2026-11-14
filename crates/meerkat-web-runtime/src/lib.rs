@@ -2050,6 +2050,39 @@ pub async fn stop_session_run(
         .map_err(|error| err_str("internal_error", error))
 }
 
+/// Withdraw one input of this session, only while it is still queued.
+/// Resolves to the JSON `WireQueuedInputRecall`: `abandoned`, `not_queued`
+/// (a run holds the input; nothing was touched and the run is not
+/// interrupted) or `already_terminal`. An input this session does not hold
+/// is an `invalid_params` error, as a malformed input id is.
+#[wasm_bindgen]
+pub async fn recall_session_input(handle: u32, input_id: String) -> Result<JsValue, JsValue> {
+    let (machine, session_id) = with_runtime_state(|state| {
+        let session = state
+            .sessions
+            .get(&handle)
+            .ok_or_else(|| err_invalid_session_handle(handle))?;
+        Ok((state.machine.clone(), session.session_id.clone()))
+    })?;
+    let input_id = meerkat::surface::parse_wire_input_id(&input_id)
+        .map_err(|error| err_str("invalid_params", error))?;
+    let recall = machine
+        .recall_queued_input(&session_id, &input_id)
+        .await
+        .map_err(err_runtime)?
+        .ok_or_else(|| {
+            err_str(
+                "invalid_params",
+                format!("session {session_id} holds no input {input_id}"),
+            )
+        })?;
+    let recall = meerkat::surface::wire_queued_input_recall(&recall)
+        .map_err(|error| err_str("internal_error", error))?;
+    serde_json::to_string(&recall)
+        .map(|json| JsValue::from_str(&json))
+        .map_err(|error| err_str("internal_error", error))
+}
+
 /// Install directional trust from one direct session to another local session.
 #[wasm_bindgen]
 pub async fn session_wire_peer(handle: u32, peer_handle: u32) -> Result<(), JsValue> {

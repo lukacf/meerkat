@@ -88,6 +88,14 @@ pub struct PersistentRuntimeDriver {
     /// a later step failed.
     #[cfg(test)]
     pub(crate) force_queued_abandon_archive_failure_for_test: bool,
+    /// Test-only staging: the next [`Self::abandon_queued_input`] first steps
+    /// its input out of the queue (applied, with no run), so the machine
+    /// answers that the input is not queued to a caller that read it as
+    /// queued under the same hold of this driver. No production path can
+    /// step an input between that read and the abandon; tests use this to
+    /// pin what a caller does with the machine's answer.
+    #[cfg(test)]
+    pub(crate) step_input_out_of_queue_before_next_abandon_for_test: bool,
     /// Test-only typed pause just before an admission's durable commit: the
     /// driver signals the first half, then waits for the second.
     #[cfg(test)]
@@ -588,6 +596,8 @@ impl PersistentRuntimeDriver {
             #[cfg(test)]
             force_queued_abandon_archive_failure_for_test: false,
             #[cfg(test)]
+            step_input_out_of_queue_before_next_abandon_for_test: false,
+            #[cfg(test)]
             admission_commit_gate_for_test: None,
         }
     }
@@ -645,6 +655,8 @@ impl PersistentRuntimeDriver {
             force_input_snapshot_failure_for_test: false,
             #[cfg(test)]
             force_queued_abandon_archive_failure_for_test: false,
+            #[cfg(test)]
+            step_input_out_of_queue_before_next_abandon_for_test: false,
             #[cfg(test)]
             admission_commit_gate_for_test: None,
         }
@@ -3130,6 +3142,10 @@ impl PersistentRuntimeDriver {
         reason: InputAbandonReason,
     ) -> Result<bool, RuntimeDriverError> {
         self.require_durability_ready()?;
+        #[cfg(test)]
+        if std::mem::take(&mut self.step_input_out_of_queue_before_next_abandon_for_test) {
+            self.inner.apply_without_run_for_test(input_id)?;
+        }
         let checkpoint = self.persistence_rollback_checkpoint();
         let abandoned = match self.inner.abandon_queued_input(input_id, reason) {
             Ok(abandoned) => abandoned,

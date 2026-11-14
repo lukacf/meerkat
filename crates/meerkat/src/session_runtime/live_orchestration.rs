@@ -963,7 +963,7 @@ mod orchestrator {
         LiveOpenPrecheckError,
     };
     use crate::session_runtime::recovery::{RecoveryContext, RecoveryRuntimeBindingMode};
-    use crate::session_runtime::runtime_state::{ArchiveRuntimeCleanup, RuntimeCleanupScope};
+    use crate::session_runtime::runtime_state::ArchiveRuntimeCleanup;
     use crate::session_runtime::staged_promotion::PendingPromotionCleanup;
     use crate::{StagedLifecycleError, StagedSessionRegistry};
     use meerkat_core::error::AgentError;
@@ -1942,7 +1942,7 @@ mod orchestrator {
 
         /// Take back the runtime registration a failed recovery created.
         /// The session was not archived: it keeps what it owns
-        /// ([`RuntimeCleanupScope::KeptSession`]).
+        /// ([`ArchiveRuntimeCleanup::run_runtime_only`]).
         async fn cleanup_recovered_runtime_if_new(
             &self,
             session_id: &SessionId,
@@ -1952,7 +1952,7 @@ mod orchestrator {
                 return Ok(());
             }
             self.archive_runtime_cleanup
-                .run_scoped(session_id, RuntimeCleanupScope::KeptSession)
+                .run_runtime_only(session_id)
                 .await
         }
 

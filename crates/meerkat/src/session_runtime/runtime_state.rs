@@ -180,19 +180,21 @@ pub enum RuntimeCleanupScope {
 }
 
 impl RuntimeCleanupScope {
-    /// The scope of a cleanup the generated completion cleanup authority
-    /// asked for. `archived_by_authority` is that authority's own archive
-    /// fact (the `archived_by_authority` field of the value
-    /// `MeerkatMachine::resolve_runtime_completion_cleanup` answers): only
-    /// the generated `ResolveRuntimeCompletionCleanupArchived` transition
-    /// asks for the cleanup of an archived session, so every other cleanup
-    /// is of a session that stays.
+    /// The cleanup the generated completion cleanup action names: none for
+    /// `RetainRuntime`, the cleanup of a session that stays for
+    /// `CleanupRuntime`, the cleanup of an archived session for
+    /// `CleanupArchivedSession`. The machine decides which; a surface hands
+    /// its action here and runs what comes back.
     #[must_use]
-    pub fn of_completion_cleanup(archived_by_authority: bool) -> Self {
-        if archived_by_authority {
-            Self::ArchivedSession
-        } else {
-            Self::KeptSession
+    pub fn of_completion_action(
+        action: meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionCleanupAction,
+    ) -> Option<Self> {
+        use meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionCleanupAction as Action;
+
+        match action {
+            Action::RetainRuntime => None,
+            Action::CleanupRuntime => Some(Self::KeptSession),
+            Action::CleanupArchivedSession => Some(Self::ArchivedSession),
         }
     }
 }
@@ -262,6 +264,19 @@ impl ArchiveRuntimeCleanup {
         session_id: &SessionId,
     ) -> Result<(), meerkat_core::service::SessionError> {
         self.run_scoped(session_id, RuntimeCleanupScope::ArchivedSession)
+            .await
+    }
+
+    /// The cleanup of a session that stays: the unregister, event-stream,
+    /// MCP and comms-drain steps of [`Self::run`], and never the
+    /// owner-archive mob hook. The entry point for a cleanup that is never
+    /// an archive, such as taking back the runtime registration a failed
+    /// recovery or create made.
+    pub async fn run_runtime_only(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.run_scoped(session_id, RuntimeCleanupScope::KeptSession)
             .await
     }
 

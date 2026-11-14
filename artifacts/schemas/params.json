@@ -44063,6 +44063,66 @@
     "title": "RealmIdParams",
     "type": "object"
   },
+  "RecallInputParams": {
+    "$defs": {
+      "SessionInputStateSelector": {
+        "description": "Typed selector for `session/input_status`: exactly one lookup key.",
+        "oneOf": [
+          {
+            "description": "Look up by the canonical runtime input id.",
+            "properties": {
+              "by": {
+                "const": "input_id",
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "by",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Look up by the caller-supplied idempotency key (durable\nreconciliation: \"did the interaction I submitted under this key reach\na terminal state, and which?\").",
+            "properties": {
+              "by": {
+                "const": "idempotency_key",
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "by",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Parameters for `session/recall_input`.\n\n`selector` names the input exactly as `session/input_status` does: by the\nruntime input id the submit answered, or by the idempotency key the caller\nsubmitted it under.",
+    "properties": {
+      "selector": {
+        "$ref": "#/$defs/SessionInputStateSelector"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "selector"
+    ],
+    "title": "RecallInputParams",
+    "type": "object"
+  },
   "RequestToolGrantParams": {
     "$defs": {
       "ToolGrantScopeRequest": {

@@ -639,6 +639,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "SessionInputStateResult",
             ),
             RpcMethodDescriptor::typed(
+                "session/recall_input",
+                "Withdraw one input only while it is still queued; a run that has taken it is never interrupted",
+                "RecallInputParams",
+                "RecallInputResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "events/latest_cursor",
                 "Read the latest replay cursor for an event source",
                 "EventsLatestCursorParams",

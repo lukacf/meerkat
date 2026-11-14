@@ -107,6 +107,7 @@ export type { InjectSystemContextResult as AppendSystemContextResult } from './g
 export type {
   SessionState, WireRunResult, WireTurnInputOptions, RuntimeProfileCapability, RuntimeProfileRefusal,
   WireRunStopReceipt, WireRunStopContributor, WireRunStopCompletion,
+  WireQueuedInputRecall,
   RuntimeProfileClearingAction, RuntimeProfileId,
 } from './generated/session.js';
 

@@ -393,6 +393,7 @@ remote peer, start `rkat run` with `--comms-listen-tcp` and usually
 - `session/export_atif` - export the projected event log as an ATIF v1.7 trajectory (requires event replay)
 - `session/external_event`, `session/peer_response_terminal`, `session/inject_context`
 - `session/input_status` - read an input's stored runtime state by input id or idempotency key
+- `session/recall_input` - withdraw one input (`session_id`, `selector` by `input_id` or `idempotency_key`, as `session/input_status`) only while it is still queued; `recall.outcome` is `abandoned` (terminal `cancelled`, never runs), `not_queued` (a run holds it; nothing touched, the run is not interrupted) or `already_terminal`; an input the session does not hold is `-32602`; no REST route
 - `session/stream_open` / `session/stream_close` — event streaming
 - `events/latest_cursor`, `events/list_since`, `events/snapshot` — cursor-based event reads
 - `turn/start` - accepts `model`, `provider`, `self_hosted_server_id`, `provider_params` and `auth_binding` for mid-session hot-swap (`provider_params`/`auth_binding`: a value or `{"action":"set","value":...}` sets, `{"action":"clear"}` removes); `max_tokens`, `output_schema` and `structured_output_retries` are parsed but refused with -32602 ("Cannot override ... on a runtime-routed turn") on every session, so set them on `session/create` (including a deferred create); the SDK `turn` arguments of those names are refused the same way; `system_prompt` appends one System message before the turn (it does not replace earlier ones; from the second turn on it needs a model that accepts mid-conversation System messages, so Gemini and older Anthropic models refuse it); optional `injected_context` (list of content inputs) delivers host-attached ambient context as separate typed messages before the user message (`session/create` accepts the same field); `transient_turn_context` is request-only, must be non-empty and is never written to the transcript; unknown fields are refused
@@ -854,6 +855,7 @@ Session methods:
 - `Session.invoke_skill(skill_ref, prompt)` → `RunResult`
 - `Session.interrupt()`
 - `Session.stop_run(run_id, *, reason)` → `StopRunResult` (`turn/stop_run`; `run_id` from the `run_started` event)
+- `Session.recall_input(*, input_id=None, idempotency_key=None)` → `RecallInputResult` (`session/recall_input`; withdraws the input only while it is queued)
 - `Session.archive()`
 - `Session.inject_context(text, *, source=None, idempotency_key=None)` / `send_external_event(...)` / `send_peer_response_terminal(...)`
 - `Session.transcript_revision(...)` / `transcript_revisions(...)` / `rewrite_transcript(...)` / `restore_transcript_revision(...)` / `fork_at(...)` / `fork_replace(...)`
@@ -986,6 +988,7 @@ Session methods:
 - `Session.invokeSkill(skillRef, prompt)` → `RunResult`
 - `Session.interrupt()`
 - `Session.stopRun(runId, reason)` → `StopRunResult` (`turn/stop_run`)
+- `Session.recallInput({ inputId } | { idempotencyKey })` → `RecallInputResult` (`session/recall_input`)
 - `Session.archive()`
 - `Session.injectContext(...)` / `sendExternalEvent(...)` / `sendPeerResponseTerminal(...)`
 - `Session.transcriptRevision(...)` / `transcriptRevisions(...)` / `rewriteTranscript(...)` / `restoreTranscriptRevision(...)` / `forkAt(...)` / `forkReplace(...)`

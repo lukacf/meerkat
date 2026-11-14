@@ -1451,6 +1451,12 @@ meerkat_machine_runtime_internal_inputs!(
         RequestCompaction,
         ConsumeCompactionRequest,
     ],
+    // The exact queued-input abandon, applied by the session's driver, which
+    // reads the machine's answer (`MeerkatMachine::recall_queued_input` and
+    // the internal queued-input cancel points).
+    InputQueueLifecycle => [
+        AbandonQueuedInput,
+    ],
 );
 
 macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {

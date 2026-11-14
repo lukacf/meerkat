@@ -191,6 +191,8 @@ export type {
   CompactSessionResult,
   MobCompactMemberResult,
   WireCompactionRequestOutcome,
+  RecallInputResult,
+  WireQueuedInputRecall,
   WireRunStopReceipt,
   WireRunStopContributor,
   MobLifecycleAction,

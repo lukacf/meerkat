@@ -155926,6 +155926,128 @@
     "title": "RealtimeVideoChunk",
     "type": "object"
   },
+  "RecallInputResult": {
+    "$defs": {
+      "WireInputLifecycleState": {
+        "description": "Public input lifecycle state projection used by RPC surfaces.",
+        "enum": [
+          "accepted",
+          "queued",
+          "staged",
+          "applied",
+          "applied_pending_consumption",
+          "consumed",
+          "superseded",
+          "coalesced",
+          "abandoned"
+        ],
+        "type": "string"
+      },
+      "WireInputTerminalOutcome": {
+        "description": "Typed wire projection of an input's terminal outcome.",
+        "enum": [
+          "completed",
+          "abandoned",
+          "superseded",
+          "coalesced",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "WireQueuedInputRecall": {
+        "description": "Typed answer of a queued-input recall.",
+        "oneOf": [
+          {
+            "description": "The input was still queued and is now withdrawn: its terminal is\n`cancelled`, durably, and no run will take it. `attempt_count` is the\nnumber of run attempts counted for the input before it was withdrawn\n(a failed attempt that returned it to the queue to be retried); `0`\nmeans no attempt was counted, which is not proof that no run ever saw\nthe input (a steer that joined a running turn and went back to the\nqueue because the turn discarded what it had appended counts none).",
+            "properties": {
+              "attempt_count": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "input_id": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "abandoned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "input_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A run has taken the input and it has not reached a terminal: nothing\nwas touched and the run is not interrupted. `phase` is the input's\nlifecycle state (`staged`, `applied` or\n`applied_pending_consumption`); `run_id` is the run that holds it, for\na caller that wants to stop that run instead.",
+            "properties": {
+              "input_id": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "not_queued",
+                "type": "string"
+              },
+              "phase": {
+                "$ref": "#/$defs/WireInputLifecycleState"
+              },
+              "run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "outcome",
+              "input_id",
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The input already reached a terminal: nothing was touched. `terminal`\nis its terminal class; a second recall of a recalled input answers\n`cancelled` here.",
+            "properties": {
+              "input_id": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "already_terminal",
+                "type": "string"
+              },
+              "terminal": {
+                "$ref": "#/$defs/WireInputTerminalOutcome"
+              }
+            },
+            "required": [
+              "outcome",
+              "input_id",
+              "terminal"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result for `session/recall_input`.",
+    "properties": {
+      "recall": {
+        "$ref": "#/$defs/WireQueuedInputRecall"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "recall"
+    ],
+    "title": "RecallInputResult",
+    "type": "object"
+  },
   "RequestToolGrantResult": {
     "$defs": {
       "WireCanonicalPart": {
@@ -208295,6 +208417,112 @@
     ],
     "title": "WireQuarantinedMob",
     "type": "object"
+  },
+  "WireQueuedInputRecall": {
+    "$defs": {
+      "WireInputLifecycleState": {
+        "description": "Public input lifecycle state projection used by RPC surfaces.",
+        "enum": [
+          "accepted",
+          "queued",
+          "staged",
+          "applied",
+          "applied_pending_consumption",
+          "consumed",
+          "superseded",
+          "coalesced",
+          "abandoned"
+        ],
+        "type": "string"
+      },
+      "WireInputTerminalOutcome": {
+        "description": "Typed wire projection of an input's terminal outcome.",
+        "enum": [
+          "completed",
+          "abandoned",
+          "superseded",
+          "coalesced",
+          "cancelled"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed answer of a queued-input recall.",
+    "oneOf": [
+      {
+        "description": "The input was still queued and is now withdrawn: its terminal is\n`cancelled`, durably, and no run will take it. `attempt_count` is the\nnumber of run attempts counted for the input before it was withdrawn\n(a failed attempt that returned it to the queue to be retried); `0`\nmeans no attempt was counted, which is not proof that no run ever saw\nthe input (a steer that joined a running turn and went back to the\nqueue because the turn discarded what it had appended counts none).",
+        "properties": {
+          "attempt_count": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "outcome": {
+            "const": "abandoned",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "input_id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A run has taken the input and it has not reached a terminal: nothing\nwas touched and the run is not interrupted. `phase` is the input's\nlifecycle state (`staged`, `applied` or\n`applied_pending_consumption`); `run_id` is the run that holds it, for\na caller that wants to stop that run instead.",
+        "properties": {
+          "input_id": {
+            "type": "string"
+          },
+          "outcome": {
+            "const": "not_queued",
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "outcome",
+          "input_id",
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The input already reached a terminal: nothing was touched. `terminal`\nis its terminal class; a second recall of a recalled input answers\n`cancelled` here.",
+        "properties": {
+          "input_id": {
+            "type": "string"
+          },
+          "outcome": {
+            "const": "already_terminal",
+            "type": "string"
+          },
+          "terminal": {
+            "$ref": "#/$defs/WireInputTerminalOutcome"
+          }
+        },
+        "required": [
+          "outcome",
+          "input_id",
+          "terminal"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireQueuedInputRecall"
   },
   "WireReachability": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

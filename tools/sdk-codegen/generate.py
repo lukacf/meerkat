@@ -457,6 +457,8 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "SessionInputStateParams",
     "SessionInputStateSelector",
     "SessionInputStateResult",
+    "RecallInputParams",
+    "RecallInputResult",
     "RealmIdParams",
     "RestoreSessionTranscriptRevisionParams",
     "RewriteSessionTranscriptParams",
@@ -555,6 +557,7 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireRunStopCompletion",
     "WireInputTerminalOutcome",
     "WireCompactionRequestOutcome",
+    "WireQueuedInputRecall",
     "WireDeviceCompleteResult",
     "AuthLogoutParams",
     "AuthStatusParams",
@@ -1188,6 +1191,9 @@ def _promote_nested_schema_def(name: str) -> bool:
         # A compaction request's outcome stays named inside
         # `CompactSessionResult` / `MobCompactMemberResult`.
         "WireCompactionRequestOutcome",
+        # The queued-input recall's typed answer stays a named union inside
+        # `RecallInputResult`.
+        "WireQueuedInputRecall",
     }
 
 
@@ -6249,7 +6255,7 @@ def generate_web_session_types(schemas: dict, output_dir: Path) -> None:
     wire = schemas["wire-types"]
     definitions: dict[str, Any] = {}
     roots: dict[str, Any] = {}
-    for name in ("WireRunResult", "WireSessionInfo", "InjectSystemContextResult", "RuntimeProfileRefusal", "WireTurnInputOptions", "WireRunStopReceipt"):
+    for name in ("WireRunResult", "WireSessionInfo", "InjectSystemContextResult", "RuntimeProfileRefusal", "WireTurnInputOptions", "WireRunStopReceipt", "WireQueuedInputRecall"):
         schema = _lookup_named_schema(wire, name)
         if not schema:
             raise KeyError(f"canonical {name} schema is missing")

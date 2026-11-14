@@ -1244,6 +1244,7 @@ pub use admitted_original::{
     AdmittedOriginal, AdmittedOriginalRefusal, DurableAdmittedOriginal,
     DurableAdmittedOriginalRefusal,
 };
+mod queued_input_recall;
 mod resumed_run;
 mod retained_resume;
 pub(crate) use retained_resume::SettledRefusedResumes;
@@ -15062,6 +15063,15 @@ mod terminal_receipt_tests;
 
 #[cfg(test)]
 mod input_transition_wait_tests;
+
+#[cfg(test)]
+mod queued_input_recall_tests;
+
+#[cfg(test)]
+mod completion_cleanup_rule_tests;
+
+#[cfg(test)]
+mod queued_work_at_a_retirement_tests;
 
 #[cfg(all(test, feature = "live"))]
 mod live_custody_read_tests;

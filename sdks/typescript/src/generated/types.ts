@@ -673,6 +673,27 @@ export type WireInputTerminalOutcome = "completed" | "abandoned" | "superseded" 
 
 export type WireCompactionRequestOutcome = "requested" | "already_requested";
 
+export interface WireQueuedInputRecallAbandoned {
+  attempt_count?: number;
+  input_id: string;
+  outcome: "abandoned";
+}
+
+export interface WireQueuedInputRecallNotQueued {
+  input_id: string;
+  outcome: "not_queued";
+  phase: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
+  run_id?: string | null;
+}
+
+export interface WireQueuedInputRecallAlreadyTerminal {
+  input_id: string;
+  outcome: "already_terminal";
+  terminal: WireInputTerminalOutcome;
+}
+
+export type WireQueuedInputRecall = WireQueuedInputRecallAbandoned | WireQueuedInputRecallNotQueued | WireQueuedInputRecallAlreadyTerminal;
+
 export interface WireDeviceCompleteResultPending {
   state: "pending";
 }
@@ -1712,6 +1733,16 @@ export interface SessionInputStateSelector {
 
 export interface SessionInputStateResult {
   state?: Record<string, unknown> | null;
+}
+
+export interface RecallInputParams {
+  selector: SessionInputStateSelector;
+  session_id: string;
+}
+
+export interface RecallInputResult {
+  recall: WireQueuedInputRecall;
+  session_id: string;
 }
 
 export interface RealmIdParams {

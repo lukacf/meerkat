@@ -508,6 +508,12 @@
       "result_type": "SessionInputStateResult"
     },
     {
+      "description": "Withdraw one input only while it is still queued; a run that has taken it is never interrupted",
+      "name": "session/recall_input",
+      "params_type": "RecallInputParams",
+      "result_type": "RecallInputResult"
+    },
+    {
       "description": "Read the latest replay cursor for an event source",
       "name": "events/latest_cursor",
       "params_type": "EventsLatestCursorParams",

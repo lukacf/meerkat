@@ -26,7 +26,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .generated.types import CommsSendResult, CompactSessionResult, StopRunResult
+from .generated.types import (
+    CommsSendResult,
+    CompactSessionResult,
+    RecallInputResult,
+    StopRunResult,
+)
 from .instructions import SessionInstructionStatus, SessionInstructionWriteResult
 from .reasoning_effort import ReasoningEffortLevel
 from .types import (
@@ -264,6 +269,28 @@ class Session:
         ``run_id`` returns a ``not_current`` receipt and touches nothing.
         """
         return await self._client._stop_run(self._id, run_id, reason)  # noqa: SLF001
+
+    async def recall_input(
+        self,
+        *,
+        input_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> RecallInputResult:
+        """Withdraw one input of this session, only while it is still queued.
+
+        Name the input by the ``input_id`` its submit answered, or by the
+        ``idempotency_key`` it was submitted under (exactly one). The answer's
+        ``recall["outcome"]`` is ``abandoned`` (the input was queued and is now
+        withdrawn: its terminal is ``cancelled`` and no run will take it),
+        ``not_queued`` (a run holds it: nothing was touched and the run is not
+        interrupted; ``phase`` and ``run_id`` say where it is) or
+        ``already_terminal`` (it already ended; a second recall of a recalled
+        input answers this with ``terminal`` ``cancelled``). An input this
+        session does not hold is refused as invalid params.
+        """
+        return await self._client._recall_input(  # noqa: SLF001
+            self._id, input_id=input_id, idempotency_key=idempotency_key
+        )
 
     async def compact(self) -> CompactSessionResult:
         """Ask this live session's next compaction check to compact.
@@ -673,6 +700,25 @@ class DeferredSession:
         ``run_id`` returns a ``not_current`` receipt and touches nothing.
         """
         return await self._client._stop_run(self._id, run_id, reason)  # noqa: SLF001
+
+    async def recall_input(
+        self,
+        *,
+        input_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> RecallInputResult:
+        """Withdraw one input of this session, only while it is still queued.
+
+        Name the input by the ``input_id`` its submit answered, or by the
+        ``idempotency_key`` it was submitted under (exactly one). The answer's
+        ``recall["outcome"]`` is ``abandoned``, ``not_queued`` (a run holds
+        the input: nothing was touched and the run is not interrupted) or
+        ``already_terminal``. An input this session does not hold is refused
+        as invalid params.
+        """
+        return await self._client._recall_input(  # noqa: SLF001
+            self._id, input_id=input_id, idempotency_key=idempotency_key
+        )
 
     async def compact(self) -> CompactSessionResult:
         """Ask this session's next compaction check to compact.

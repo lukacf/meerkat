@@ -574,20 +574,26 @@ async fn archive_runtime_cleanup_dispatches_to_trait_hooks() {
     assert!(mob_ran.load(Ordering::SeqCst));
 }
 
-/// A cleanup the completion authority asks for is of an archived session
-/// only when the authority says the session is archived; every other one is
-/// of a session that stays.
+/// The completion cleanup's scope is the machine's action and nothing else:
+/// `RetainRuntime` names no cleanup, `CleanupRuntime` the cleanup of a
+/// session that stays, `CleanupArchivedSession` the cleanup of an archived
+/// session. A surface hands the action over and runs what comes back.
 #[test]
-fn a_completion_cleanup_is_of_an_archived_session_only_by_authority() {
+fn a_completion_cleanup_is_of_an_archived_session_only_by_the_machines_action() {
     use meerkat::session_runtime::runtime_state::RuntimeCleanupScope;
+    use meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionCleanupAction as Action;
 
     assert_eq!(
-        RuntimeCleanupScope::of_completion_cleanup(true),
-        RuntimeCleanupScope::ArchivedSession
+        RuntimeCleanupScope::of_completion_action(Action::RetainRuntime),
+        None
     );
     assert_eq!(
-        RuntimeCleanupScope::of_completion_cleanup(false),
-        RuntimeCleanupScope::KeptSession
+        RuntimeCleanupScope::of_completion_action(Action::CleanupRuntime),
+        Some(RuntimeCleanupScope::KeptSession)
+    );
+    assert_eq!(
+        RuntimeCleanupScope::of_completion_action(Action::CleanupArchivedSession),
+        Some(RuntimeCleanupScope::ArchivedSession)
     );
 }
 

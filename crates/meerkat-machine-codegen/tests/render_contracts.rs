@@ -2344,3 +2344,158 @@ fn deep_machine_cfgs_sample_guard_string_literals() {
         assert!(deep.contains("\"\""), "{name} deep: {deep}");
     }
 }
+
+/// MeerkatMachine's retired `TransitionId` variants: published names whose
+/// transition no longer exists, each with the index it was published at.
+const MEERKAT_RETIRED_TRANSITION_VARIANTS: [(&str, usize); 3] = [
+    ("ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle", 499),
+    (
+        "ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached",
+        500,
+    ),
+    (
+        "ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning",
+        501,
+    ),
+];
+
+/// Whether `text` mentions `name` as a whole identifier.
+fn mentions_identifier(text: &str, name: &str) -> bool {
+    text.match_indices(name).any(|(start, _)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + name.len()..].chars().next();
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        !before.is_some_and(is_word) && !after.is_some_and(is_word)
+    })
+}
+
+/// A retired variant keeps the index it was published at, so no published
+/// `TransitionId` discriminant moves: the three terminated-input arms of the
+/// serving phases stay at 499 to 501 between the arm's Initializing and
+/// Retired variants, and every variant name is in the enum once.
+#[test]
+fn meerkat_retired_transition_variants_keep_their_published_index() {
+    let rendered = render_machine_kernel_module(&meerkat_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| variants.iter().position(|variant| variant == name);
+    assert_eq!(
+        index("ResolveRuntimeCompletionCleanupRuntimeTerminatedInitializing"),
+        Some(498)
+    );
+    for (name, published) in MEERKAT_RETIRED_TRANSITION_VARIANTS {
+        assert_eq!(index(name), Some(published), "{name}");
+    }
+    assert_eq!(
+        index("ResolveRuntimeCompletionCleanupRuntimeTerminatedRetired"),
+        Some(502)
+    );
+    assert_eq!(
+        index("ResolveRuntimeCompletionCleanupRuntimeTerminatedStopped"),
+        Some(503)
+    );
+    let unique: BTreeSet<&String> = variants.iter().collect();
+    assert_eq!(
+        unique.len(),
+        variants.len(),
+        "every TransitionId variant is in the enum once"
+    );
+}
+
+/// A retired variant is an enum name and nothing else: it is no transition
+/// of the schema, the kernel names it once (its enum member, documented as
+/// retired), and the machine's model, contract and mapping do not name it.
+#[test]
+fn a_retired_transition_variant_is_an_enum_name_and_nothing_else() {
+    let schema = meerkat_machine();
+    let coverage = canonical_machine_coverage_manifests()
+        .into_iter()
+        .find(|coverage| coverage.machine == schema.machine)
+        .expect("meerkat coverage manifest");
+    let kernel = render_machine_kernel_module(&schema);
+    let model = render_machine_semantic_model(&schema).expect("render machine semantic model");
+    let contract = render_machine_contract_markdown(&schema, &coverage);
+    let mapping = render_machine_mapping_coverage(&schema, &coverage);
+    for (name, _) in MEERKAT_RETIRED_TRANSITION_VARIANTS {
+        assert!(
+            schema
+                .transitions
+                .iter()
+                .all(|transition| transition.name.as_ref() != name),
+            "{name} is no transition of the schema"
+        );
+        let mentions: Vec<&str> = kernel
+            .lines()
+            .filter(|line| mentions_identifier(line, name))
+            .collect();
+        assert_eq!(
+            mentions,
+            vec![format!("    {name},").as_str()],
+            "the kernel names {name} once, as an enum member"
+        );
+        assert!(
+            kernel.contains(&format!(
+                "    /// Retired: never fired. No transition has this id any more; the\n    \
+                 /// variant keeps its place so that no published discriminant moves.\n    \
+                 {name},"
+            )),
+            "the kernel documents {name} as retired"
+        );
+        for (document, text) in [
+            ("model", &model),
+            ("contract", &contract),
+            ("mapping", &mapping),
+        ] {
+            assert!(
+                !mentions_identifier(text, name),
+                "the machine's {document} does not name the retired variant {name}"
+            );
+        }
+    }
+}
+
+/// A retired name is never given to a transition again: rendering refuses a
+/// schema that still has a transition of that name.
+#[test]
+fn a_retired_transition_name_that_is_a_live_transition_is_refused() {
+    let mut schema = meerkat_machine();
+    let mut revived = schema
+        .transitions
+        .iter()
+        .find(|transition| {
+            transition.name.as_ref()
+                == "ResolveRuntimeCompletionCleanupRuntimeTerminatedInitializing"
+        })
+        .expect("the terminated-input arm's Initializing variant")
+        .clone();
+    revived.name = meerkat_machine_schema::identity::TransitionId::parse(
+        "ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle",
+    )
+    .expect("transition identity");
+    schema.transitions.push(revived);
+
+    let error = try_render_machine_kernel_module(&schema)
+        .expect_err("a retired name that is a live transition must fail rendering");
+    assert!(
+        matches!(
+            &error,
+            MachineKernelRenderError::RetiredTransitionStillLive { transition }
+                if transition == "ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle"
+        ),
+        "{error:?}"
+    );
+}
+
+/// No kernel constructs a `TransitionId` value: the enum is declared for
+/// hosts and never produced by generated code, which is why a variant
+/// without a transition needs no table entry anywhere.
+#[test]
+fn no_generated_kernel_constructs_a_transition_id() {
+    for schema in canonical_machine_schemas() {
+        let kernel = render_machine_kernel_module(&schema);
+        assert!(
+            !kernel.contains("TransitionId::"),
+            "{}: the kernel constructs or matches a TransitionId variant",
+            schema.machine.as_str()
+        );
+    }
+}

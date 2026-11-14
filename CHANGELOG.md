@@ -1987,14 +1987,16 @@ them.
   for the running turn's answer, then send the resume again. The level on
   `meerkat_resume` is new in this release, and no published version is
   affected: before this fix such a resume waited behind the running turn
-  and then rebuilt the session, and when the level was one the model does
-  not accept, a resume that had been accepted behind it ended without
-  running (`-32003`, `session_resume_required`). A resume that rebuilds
-  the session for another field (`model`, `max_tokens`, `provider_params`
-  without the level, and the other build fields) is unchanged from 0.9.14:
-  it waits behind the running turn, rebuilds the session and runs, and the
-  resumes queued beside it run (confirmed by tests of this change, with
-  the level as the member, as the nested key and as a clear). `meerkat_run`
+  and then rebuilt the session, and a resume that had been accepted behind
+  it could end without running (`-32003`, `session_resume_required`). A
+  resume that rebuilds the session for another field (`model`,
+  `max_tokens`, `provider_params` without the level, and the other build
+  fields) is unchanged from 0.9.14: it waits behind the running turn,
+  rebuilds the session and runs, and a plain resume queued beside it
+  either runs or ends with that same `-32003` answer, depending on which
+  of the two reaches the session first; send it again (confirmed by tests
+  of this change, with the level as the member, as the nested key and as a
+  clear, and with `max_tokens` for the other fields). `meerkat_run`
   always creates its session, so it cannot meet this case.
 
 - Python and TypeScript SDKs: the busy answer to a turn that would change
@@ -2770,9 +2772,14 @@ them.
   run): the server reads whether a turn is running before the resume does
   anything else; a plain resume that starts between that read and the
   level resume's own start runs, but a request queued behind that plain
-  resume can still be ended by the level resume's rebuild when the level
-  is one the model does not accept. It then answers `-32003`
-  (`session_resume_required`) without running; send it again.
+  resume can still be ended by the level resume's rebuild. It then answers
+  `-32003` (`session_resume_required`) without running; send it again. The
+  same holds, as on 0.9.14, for a plain resume queued beside a resume that
+  rebuilds the session for another field (`model`, `max_tokens` and the
+  other build fields): it runs, or it ends with that answer when the
+  rebuild reaches the session first (confirmed by a test of this change
+  for `max_tokens`; the retire before a rebuild is the same code as on
+  0.9.14, read from the source).
 
 - A schedule's session spec is the one surface where the reasoning effort
   level is not accepted in this release. A schedule whose `create` spec

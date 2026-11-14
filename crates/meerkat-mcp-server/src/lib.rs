@@ -8370,10 +8370,13 @@ mod tests {
     }
 
     /// A `meerkat_resume` that rebuilds the session for another build field
-    /// (here `max_tokens`) behaves as on 0.9.14: sent while a turn runs, it
-    /// waits behind that turn, rebuilds the session and runs, and a plain
-    /// resume queued beside it, before or after, runs too. Only a resume
-    /// that names the reasoning effort level is answered busy instead.
+    /// (here `max_tokens`) is unchanged: sent while a turn runs, it is not
+    /// answered busy. It waits behind that turn, rebuilds the session and
+    /// runs. The rebuild replaces the session's runtime attachment, so a
+    /// plain resume queued beside it either runs or ends with the typed
+    /// `session_resume_required` answer, depending on which of the two
+    /// reaches the session first: both outcomes are pinned, and nothing
+    /// else. The session is live afterwards and takes its next resume.
     #[tokio::test]
     async fn resume_that_rebuilds_for_another_field_while_a_turn_runs_waits_and_runs() {
         // Bounds a failure only; the passing path never waits for it.
@@ -8432,11 +8435,7 @@ mod tests {
             );
 
             release.add_permits(16);
-            for (name, turn) in [
-                ("first", running),
-                ("rebuilding", rebuild),
-                ("plain", plain),
-            ] {
+            for (name, turn) in [("first", running), ("rebuilding", rebuild)] {
                 let answer = timeout(FAILURE_BOUND, turn)
                     .await
                     .unwrap_or_else(|_| {
@@ -8448,6 +8447,24 @@ mod tests {
                     "plain_first={plain_first}: the {name} resume: {:?}",
                     answer.err()
                 );
+            }
+            match timeout(FAILURE_BOUND, plain)
+                .await
+                .unwrap_or_else(|_| panic!("plain_first={plain_first}: the plain resume answers"))
+                .expect("resume task")
+            {
+                Ok(_) => {}
+                Err(ended) => {
+                    assert_eq!(
+                        (
+                            ended.code,
+                            ended.data.as_ref().map(|data| data["kind"].clone()),
+                        ),
+                        (-32003, Some(json!("session_resume_required"))),
+                        "plain_first={plain_first}: the plain resume: {}",
+                        ended.message
+                    );
+                }
             }
             assert_eq!(
                 (

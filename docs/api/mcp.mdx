@@ -1162,7 +1162,10 @@ extraction calls.
   ended by the rebuild; send it again. A resume that rebuilds the session
   for another field (`model`, `max_tokens`, `provider_params` without the
   level, and the other build fields) is unchanged from 0.9.14: it waits
-  behind the running turn, rebuilds the session and runs.
+  behind the running turn, rebuilds the session and runs. A plain resume
+  queued beside such a resume either runs or, when the rebuild reaches the
+  session first, ends with `-32003` (`session_resume_required`) without
+  running; send it again.
 </ParamField>
 
 <ParamField body="stream" type="bool" default="false">

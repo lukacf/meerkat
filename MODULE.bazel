@@ -3,7 +3,7 @@ module(
     version = "0.0.0",
 )
 
-bazel_dep(name = "rules_rust", version = "0.70.0")
+bazel_dep(name = "rules_rust", version = "0.75.0")
 
 # crate_universe records in-tree [patch.crates-io] path dependencies with the
 # absolute path of whichever checkout last evaluated the extension, which
@@ -295,10 +295,10 @@ crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 # repository so crate_universe never writes its synthetic direct-dependency
 # package into Cargo's authoritative workspace lockfile.
 crate.spec(package = "bytes", repositories = ["meerkat_live_crates"], version = "=1.12.1")
-crate.spec(package = "opus", repositories = ["meerkat_live_crates"], version = "=0.3.1")
+crate.spec(package = "opus", repositories = ["meerkat_live_crates"], version = "=0.4.0")
 crate.spec(package = "rubato", repositories = ["meerkat_live_crates"], version = "=2.0.0")
-crate.spec(package = "webrtc", repositories = ["meerkat_live_crates"], version = "=0.14.0")
-crate.spec(package = "webrtc-media", repositories = ["meerkat_live_crates"], version = "=0.11.0")
+crate.spec(package = "webrtc", repositories = ["meerkat_live_crates"], version = "=0.21.1")
+crate.spec(package = "webrtc-media", repositories = ["meerkat_live_crates"], version = "=0.17.3")
 # One Tokio per binary. That repository resolves its own copy of every crate
 # the live stack needs, tokio among them, and a second tokio is a second
 # runtime context: the process enters the main hub's tokio, so the stack's

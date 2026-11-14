@@ -116,7 +116,7 @@ cargo_common_metadata = "allow"
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1"
 meerkat-core = { workspace = true }
 # The one-remote-bundle reference provider (M4b) implements both levels of
@@ -131,9 +131,9 @@ meerkat-meta = { workspace = true }
 # the suite reaches it without turning on meerkat-meta's extension-state
 # feature.
 meta-extension-state = { workspace = true }
-rusqlite = { version = "0.41.1", features = ["bundled", "fallible_uint"] }
+rusqlite = { version = "0.42.0", features = ["bundled", "fallible_uint"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]

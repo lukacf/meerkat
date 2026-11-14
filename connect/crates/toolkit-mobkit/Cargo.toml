@@ -50,7 +50,7 @@ toolkit-store.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 futures = { workspace = true, optional = true }
-nix = { version = "0.29", features = ["fs", "socket"], optional = true }
+nix = { version = "0.31", features = ["fs", "socket"], optional = true }
 
 [dev-dependencies]
 # Exact prepared-call context for the native workflow failure controls.

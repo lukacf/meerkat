@@ -325,3 +325,97 @@ fn embedded_help_mobpack_examples_match_typed_authoring_contracts()
 
     Ok(())
 }
+
+/// `rkat mob pack <dir> -o <output> --sign <key>` packs neither the signing
+/// key nor its own output file, however the three paths are written. Every
+/// spelling packs twice, so the second run finds the first run's output in
+/// the mob directory.
+#[test]
+fn mob_pack_leaves_key_and_output_out_however_their_paths_are_written()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat = std::env::var_os("CARGO_BIN_EXE_rkat")
+        .ok_or("Cargo or Nextest must provide the runtime rkat binary path")?;
+    // Throwaway signing key: 32 bytes made up here, hex encoded.
+    let key_hex: String = (0u8..32)
+        .map(|index| format!("{:02x}", index.wrapping_mul(7).wrapping_add(11)))
+        .collect();
+
+    // (typed inside the mob directory, directory, key, output); `{mob}` is
+    // the mob directory's absolute path.
+    let spellings = [
+        (true, ".", "key.hex", "out.mobpack"),
+        (true, ".", "./key.hex", "./out.mobpack"),
+        (false, "mob", "mob/key.hex", "mob/out.mobpack"),
+        (false, "./mob", "mob/key.hex", "mob/out.mobpack"),
+        (false, "mob", "./mob/key.hex", "./mob/out.mobpack"),
+        (false, "{mob}", "mob/key.hex", "mob/out.mobpack"),
+        (false, "{mob}", "{mob}/key.hex", "{mob}/out.mobpack"),
+    ];
+
+    let mut packed_by_spelling = Vec::new();
+    for (inside_mob, dir, key, output) in spellings {
+        let temp = tempfile::tempdir()?;
+        let mob = temp.path().join("mob");
+        std::fs::create_dir_all(&mob)?;
+        std::fs::write(
+            mob.join("manifest.toml"),
+            "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
+        )?;
+        std::fs::write(mob.join("definition.json"), br#"{"id":"fixture"}"#)?;
+        std::fs::write(mob.join("key.hex"), &key_hex)?;
+
+        let absolute = mob.display().to_string();
+        let dir = dir.replace("{mob}", &absolute);
+        let key = key.replace("{mob}", &absolute);
+        let output = output.replace("{mob}", &absolute);
+        let current = if inside_mob {
+            mob.as_path()
+        } else {
+            temp.path()
+        };
+        let spelling = format!("rkat mob pack {dir} -o {output} --sign {key}");
+
+        for run in ["first", "second"] {
+            let packed = Command::new(&rkat)
+                .current_dir(current)
+                .env("HOME", temp.path())
+                .env("XDG_CONFIG_HOME", temp.path().join("config"))
+                .env_remove("RKAT_TRUST_POLICY")
+                .args(["mob", "pack", &dir, "-o", &output, "--sign", &key])
+                .args(["--signer-id", "team@example.com"])
+                .output()?;
+            assert!(
+                packed.status.success(),
+                "{spelling}: {run} mob pack failed: {}",
+                output_text(&packed)
+            );
+        }
+
+        let inspected = Command::new(&rkat)
+            .current_dir(current)
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["mob", "inspect", &output])
+            .output()?;
+        assert!(
+            inspected.status.success(),
+            "{spelling}: mob inspect failed: {}",
+            output_text(&inspected)
+        );
+        let stdout = String::from_utf8_lossy(&inspected.stdout);
+        let files: Vec<&str> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("file\t"))
+            .collect();
+        if files != ["definition.json", "manifest.toml", "signature.toml"] {
+            packed_by_spelling.push(format!("{spelling} packed {files:?}"));
+        }
+    }
+
+    assert!(
+        packed_by_spelling.is_empty(),
+        "only the sources and the signature are packed; not so for:\n{}",
+        packed_by_spelling.join("\n")
+    );
+    Ok(())
+}

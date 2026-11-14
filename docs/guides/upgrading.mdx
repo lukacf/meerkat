@@ -1854,13 +1854,30 @@ compiling. A Meta probe that must keep the earlier rule checks
   SDK changes. `meta_gateway identity-census --json` adds
   `identity_store_rows`. **Do:** before a rollback to Meta 0.9.7 or earlier,
   run the doctor instead of the queries in the 0.9.9 notes.
-- **Known limitation: `meta/compact_member` after a failed turn.** When the
-  forced maintenance turn ends in a definite failure (a provider error, a
-  rate limit, or a request that compaction could not shrink), the temporary
-  compaction threshold (1024 tokens by default) stays on the member,
-  durably, and every later `compact_member` on that identity is refused as
-  busy until the gateway restarts. **Do:** after a failed `compact_member`,
-  call `meta/respawn` for the identity, then restart the gateway.
+- **Known limitation: `meta/compact_member` after a failed turn (Meta 0.9.9
+  through 0.9.14).** When the forced maintenance turn ends in a definite
+  failure (a provider error, a rate limit, or a request that compaction
+  could not shrink, which is usual on a conversation of a few short
+  messages), the temporary compaction threshold (1024 tokens by default)
+  stays on the member, durably: it survives a gateway restart and does not
+  end by itself. The member then compacts again every third model request,
+  an ordinary turn whose compaction cannot shrink the request fails
+  ("compaction is irreducible at the configured retention"), and every
+  later `compact_member` on that identity is refused as busy until the
+  gateway restarts. **Do:** after a failed `compact_member`, call
+  `meta/respawn` for the identity, then restart the gateway: the respawn
+  seats the member without the threshold and keeps its conversation. After
+  a gateway restart, a second `compact_member` that completes clears it
+  too, whether or not it compacts (a `floor_tokens` above the conversation's
+  size completes without compacting); `meta/reset` clears it and ends the
+  conversation. A restart alone does not clear it. **From 0.9.15** the call
+  restores the member's threshold before it answers such a failure
+  (`error.data.stage` is `profile_restored`) and a second call is taken at
+  once; the call still answers the failure. The upgrade repairs nothing
+  stored: a member that 0.9.9 through 0.9.14 left with the threshold keeps
+  it on 0.9.15 until one of the steps above clears it. The
+  `meta/compact_member` section of Meta's RPC reference says what 0.9.15
+  still does not restore.
 - **Meta Forge 0.3.1** installs the matched Meta 0.9.10, Connect 0.9.10 and
   `meerkat-toolkit` 0.9.10 set on Linux x86_64 and macOS arm64. It is the
   first Forge release from this repository (tag `meta-installer-v0.3.1`);

@@ -6866,10 +6866,14 @@ fn unmasked_resume_divergence(
 /// snapshotted into `SpawnMemberSpec::override_profile` with
 /// `auto_compact_threshold` replaced by the floor, which meerkat-mob lowers
 /// into `SessionBuildOptions::auto_compact_threshold_override` (the strongest
-/// compaction-threshold authority). The registry is in-memory only and the
-/// verb clears the entry after the forced compaction fires; a floor is never
-/// persisted, so a crash mid-verb degrades to the original profile value on
-/// the next boot rather than freezing a compact-every-turn build.
+/// compaction-threshold authority). The registry is in-memory only, and the
+/// verb clears the entry when it rebuilds the member without the floor. The
+/// floor itself is persisted all the same: Core journals a spawn's override
+/// profile on the seat's `MemberSpawned` row and replays it at a restart, so
+/// a member seated with the floor builds with it until a later seat is made
+/// without it (the verb's restoring rebuild; a respawn of an identity the
+/// host's roster declares). A crash mid-verb therefore leaves the member
+/// compacting at the floor after the next boot, with no entry here.
 #[derive(Debug, Default)]
 pub struct CompactionFloorRegistry {
     floors: std::sync::Mutex<std::collections::BTreeMap<String, CompactionFloorEntry>>,

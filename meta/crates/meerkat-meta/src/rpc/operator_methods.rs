@@ -11,10 +11,14 @@
 //!   one lifecycle lock) so a fresh build picks the floor up, drives one
 //!   queued maintenance turn so the forced compaction fires at that turn's
 //!   pre-LLM boundary, then disarms the floor and rebuilds again so the live
-//!   build returns to the original profile value. Leaving the floor armed
-//!   would compact every turn — the meerkat override is deliberately
-//!   non-durable across recovery, so the profile is what re-supplies it on
-//!   every build.
+//!   build returns to the original profile value. A maintenance turn that
+//!   ends for good without completing (abandoned, cancelled) gets the same
+//!   restoring rebuild before its failure is answered; only an outcome
+//!   that does not prove the turn ended leaves the floor in place. A floor
+//!   left in place keeps the member compacting at it (one attempt per
+//!   compaction cadence), across restarts too: the session-level override
+//!   is not durable across recovery, but Core journals the seat's profile
+//!   override, which re-supplies the floor on every build.
 //!
 //! - `meta/bound_member_transcript` — the surgical escape hatch. Commits
 //!   one audited keep-last-N rewrite through meerkat's
@@ -1417,7 +1421,11 @@ impl CompactOperation {
             _ => None,
         };
         let terminal_error = compaction_terminal_class(&outcome, &session_id);
-        if let Some(class) = terminal_error {
+        // A terminal that ended the exact input for good without completing
+        // it: the floor must not outlive the call, so the member is rebuilt
+        // at its original threshold below, as after a completion, and the
+        // failure is answered afterwards.
+        let definite_failure = if let Some(class) = terminal_error {
             let deadline_detail = if timed_out {
                 format!(
                     "maintenance turn did not complete within {}ms; ",
@@ -1435,10 +1443,18 @@ impl CompactOperation {
             if let Some(error) = failure_metadata {
                 data.insert("error".to_string(), error);
             }
-            return self.error_with_data("compact_member_completion_failed", "terminal", format!(
-                "compact_member {deadline_detail}exact input ended as {class}; profile restoration was not authorized"
-            ), data);
-        }
+            // A terminal that does not prove the input ended on the captured
+            // session restores nothing: a rebuild could act under work that
+            // still runs or runs again.
+            if !compaction_terminal_is_definite(&outcome) {
+                return self.error_with_data("compact_member_completion_failed", "terminal", format!(
+                    "compact_member {deadline_detail}exact input ended as {class}; profile restoration was not authorized"
+                ), data);
+            }
+            Some((class, deadline_detail, data))
+        } else {
+            None
+        };
         if let Err(error) = runtime
             .rebuild_compaction_owner(
                 &self.identity,
@@ -1460,7 +1476,17 @@ impl CompactOperation {
                     &self.operation_id,
                 )
                 .await;
-            return self.error("compact_member_rebuild_failed", "profile_restore", error);
+            return match definite_failure {
+                Some((class, deadline_detail, data)) => self.error_with_data("compact_member_rebuild_failed", "profile_restore", format!(
+                    "compact_member {deadline_detail}exact input ended as {class}, and the member could not be rebuilt at its original threshold ({error}); the temporary threshold may still be on the member"
+                ), data),
+                None => self.error("compact_member_rebuild_failed", "profile_restore", error),
+            };
+        }
+        if let Some((class, deadline_detail, data)) = definite_failure {
+            return self.error_with_data("compact_member_completion_failed", "profile_restored", format!(
+                "compact_member {deadline_detail}exact input ended as {class}; member rebuilt at its original threshold"
+            ), data);
         }
         if timed_out {
             return self.error(
@@ -1988,11 +2014,13 @@ fn prune_member_system_rows_error(
     }
 }
 
-/// The terminal class of a maintenance turn's exact input that refuses the
-/// profile restoration, or None for its completion on its own session. Only
-/// that completion proves the turn ran: every other outcome refuses, one a
-/// recovery could not confirm (`outcome_unknown`) included, and no class
-/// retries or redelivers the input.
+/// The terminal class of a maintenance turn's exact input that is not its
+/// completion on its own session, or None for that completion. Only that
+/// completion proves the turn ran and is answered with a result: every
+/// other outcome is answered as an error under its class, one a recovery
+/// could not confirm (`outcome_unknown`) included, and no class retries or
+/// redelivers the input. [`compaction_terminal_is_definite`] says which of
+/// them restore the profile all the same.
 fn compaction_terminal_class(
     outcome: &meerkat_runtime::CompletionOutcome,
     session_id: &meerkat_core::SessionId,
@@ -2024,30 +2052,60 @@ fn compaction_terminal_class(
     }
 }
 
+/// Whether a maintenance turn's terminal proves its exact input ended for
+/// good without completing: abandoned (with or without a typed failure of
+/// its run), cancelled, or consumed with no result. Nothing of such an
+/// input runs or runs again, so the member is rebuilt at its original
+/// threshold before the failure is answered: the floor never outlives a
+/// call whose turn is over. Every other terminal leaves that open (the
+/// completion itself is answered as a result or, on another session, as
+/// `wrong_session`; pending callbacks; a run that is not durably terminal;
+/// a stopped runtime; an outcome a recovery could not confirm) and restores
+/// nothing, since a rebuild could act under work that still runs or runs
+/// again.
+fn compaction_terminal_is_definite(outcome: &meerkat_runtime::CompletionOutcome) -> bool {
+    match outcome {
+        meerkat_runtime::CompletionOutcome::Abandoned { .. }
+        | meerkat_runtime::CompletionOutcome::AbandonedWithError { .. }
+        | meerkat_runtime::CompletionOutcome::Cancelled
+        | meerkat_runtime::CompletionOutcome::CompletedWithoutResult => true,
+        meerkat_runtime::CompletionOutcome::Completed(_)
+        | meerkat_runtime::CompletionOutcome::CallbackPending { .. }
+        | meerkat_runtime::CompletionOutcome::CallbackBatchPending { .. }
+        | meerkat_runtime::CompletionOutcome::CompletedWithFinalizationFailure { .. }
+        | meerkat_runtime::CompletionOutcome::RuntimeTerminated { .. }
+        | meerkat_runtime::CompletionOutcome::OutcomeUnknown { .. } => false,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    /// Only the exact input's own completion authorizes the rebuild. An
-    /// outcome a recovery could not confirm refuses it under its own class,
-    /// never as a success and never as a class that retries the input.
+    /// Only the exact input's own completion is answered with a result. An
+    /// outcome a recovery could not confirm is refused under its own class,
+    /// never as a success and never as a class that retries the input, and
+    /// it restores nothing; a cancellation ended the input for good and
+    /// restores the profile.
     #[test]
     fn an_unconfirmed_maintenance_outcome_refuses_the_rebuild() {
         let session_id = meerkat_core::SessionId::new();
+        let unknown = meerkat_runtime::CompletionOutcome::OutcomeUnknown {
+            run_id: meerkat_core::lifecycle::RunId::new(),
+        };
         assert_eq!(
-            super::compaction_terminal_class(
-                &meerkat_runtime::CompletionOutcome::OutcomeUnknown {
-                    run_id: meerkat_core::lifecycle::RunId::new(),
-                },
-                &session_id,
+            (
+                super::compaction_terminal_class(&unknown, &session_id),
+                super::compaction_terminal_is_definite(&unknown),
             ),
-            Some("outcome_unknown")
+            (Some("outcome_unknown"), false)
         );
+        let cancelled = meerkat_runtime::CompletionOutcome::Cancelled;
         assert_eq!(
-            super::compaction_terminal_class(
-                &meerkat_runtime::CompletionOutcome::Cancelled,
-                &session_id
+            (
+                super::compaction_terminal_class(&cancelled, &session_id),
+                super::compaction_terminal_is_definite(&cancelled),
             ),
-            Some("cancelled")
+            (Some("cancelled"), true)
         );
     }
 
@@ -3319,9 +3377,13 @@ comms = true
             .await;
         let rows_after = harness.settled_transcript_count().await;
         let (_, last_rewrite) = harness.transcript_facts().await;
-        eprintln!(
-            "the failed call's conversation: {rows_before} rows before, {rows_after} after, last \
-             rewrite {last_rewrite:?}"
+        assert!(
+            rows_after < rows_before
+                && last_rewrite
+                    .as_deref()
+                    .is_some_and(|reason| reason.to_lowercase().contains("compact")),
+            "the compaction's rewrite stays in the conversation: {rows_before} rows before the \
+             call, {rows_after} after, last rewrite {last_rewrite:?}"
         );
         harness
             .identity_runtime
@@ -4155,6 +4217,9 @@ comms = true
              member was rebuilt): {response:#}"
         );
         assert_eq!(after.session_id, before.session_id);
+        // The maintenance input stays in the conversation, and the scripted
+        // client fails every request that carries it while the flag is set.
+        harness.fail_maintenance.store(false, Ordering::SeqCst);
         harness
             .run_exact_probe("after the failed maintenance turn")
             .await;

@@ -1585,7 +1585,66 @@ Security, Upgrade and Changed.
   the known issue on the Meta 0.9.14 release page:
   https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14
 
+- `meta/compact_member` no longer leaves its temporary compaction threshold
+  on the member when its maintenance turn fails. On Meta 0.9.9 through
+  0.9.14 a call whose maintenance turn ended in a definite failure (a
+  provider error, a rate limit, or a request the compaction could not make
+  smaller, which is what a conversation of a few short messages gives)
+  answered the failure and left the threshold (1024 tokens by default) on
+  the member's seat, where it survived a gateway restart. The member then
+  compacted again every third model request, a later ordinary turn failed
+  the same way ("compaction is irreducible at the configured retention"),
+  and every later `compact_member` on the identity answered
+  `compact_member_busy` until the gateway restarted (read from the released
+  sources, and seen in runs on 0.9.14). Now the call rebuilds the member at
+  its original threshold before it answers a maintenance turn that ended
+  for good: abandoned (`abandoned`, `abandoned_with_error`), cancelled
+  (`cancelled`) or consumed with no result (`completed_without_result`). It
+  still answers the error, with the same `kind`
+  (`compact_member_completion_failed`), `completion_type` and typed error
+  metadata, and with `stage: "profile_restored"` where it answered
+  `terminal`; a second call is taken at once. When that rebuild fails, the
+  call answers `compact_member_rebuild_failed` at stage `profile_restore`
+  with the terminal's `completion_type`, and the threshold may still be on
+  the member. An outcome that does not prove the turn ended
+  (`wrong_session`, `callback_pending`, `callback_batch_pending`,
+  `completed_with_finalization_failure`, `runtime_terminated`,
+  `outcome_unknown`, a superseded incarnation) restores nothing, as before.
+  Only an agent the host's configuration declares could be left with the
+  threshold by a release (0.9.9 through 0.9.14 refuse the call for an agent
+  created at run time), and nothing stored is repaired: such a member keeps
+  the threshold until `meta/respawn` clears it (see Known limitations and
+  the `meta/compact_member` section of the RPC reference).
+
 ### Known limitations
+
+- `meta/compact_member` still answers an error on a conversation its
+  compaction cannot make smaller, which is usual for a young agent: with no
+  more turns than the retained-turn budget plus one (five at the default)
+  the compaction folds only the oldest turn into a summary that can be
+  longer than the turn, and Meerkat ends a turn whose compaction left the
+  request no smaller ("compaction is irreducible at the configured
+  retention"; seen on an Anthropic model in a run, and by the source the
+  same check applies wherever the client reports the request's size). The
+  member's threshold is restored; the rewrite stays in the conversation, as
+  does the maintenance turn's input. Call again when the conversation is
+  longer. An ordinary turn can end the same way, with no call involved,
+  when an automatic compaction leaves its request no smaller: a turn whose
+  own tool results cross the compaction threshold after only a few short
+  earlier exchanges folds one short exchange into a longer summary
+  (confirmed by a test of Meerkat's agent loop with a scripted summary;
+  not seen in a run at the default threshold).
+- A member can still be left with the temporary threshold of
+  `meta/compact_member` when no restoring rebuild ran: the gateway stopped
+  between the call's two rebuilds, the maintenance turn's end could not be
+  proved, or the restoring rebuild failed (and a member 0.9.9 through 0.9.14
+  left with it keeps it). The threshold survives a restart and does not end
+  by itself. For an agent the host's configuration declares, `meta/respawn`
+  clears it and keeps the conversation. For an agent created at run time a
+  respawn does not clear it (read from the source, and seen in a run and in
+  a test run before this fix). For both, a second `meta/compact_member`
+  that completes clears it (after a gateway restart, which ends the busy
+  refusal), and so does `meta/reset`, which ends the conversation.
 
 - An update cannot hand an agent's runtime mode back to its profile: to
   change how such an agent runs, set the other explicit value

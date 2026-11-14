@@ -719,8 +719,8 @@ run time through the gateway, not from the Console.
 
 **Do, for an archived agent and one that awaits its preparation:** no step
 makes a Console send to it arrive while rolled back. Do not send to it from
-the Console while rolled back; a message that shows `delivery_failed` is sent
-again after the return.
+the Console while rolled back. After the return, send again each message that
+shows `delivery_failed`: it is not delivered by itself.
 
 **Access rules and agents created at run time.** This item is about a
 rollback: a 0.9.14 Console over state that holds agents created on 0.9.15.

@@ -240,6 +240,9 @@ async fn write_interrupted_council(
             council_id: council_id.clone(),
             request_fingerprint: fingerprint,
             temporary_mob_id: council_id.temporary_mob_id(),
+            temporary_mob_custody: Some(
+                meerkat_mob::temporary_council::TemporaryCouncilMobCustody::NotCreated,
+            ),
             deadline: created + chrono::Duration::seconds(600),
             machine_state: authority.state().clone(),
             durability: TemporaryCouncilDurability::Durable,
@@ -249,6 +252,7 @@ async fn write_interrupted_council(
             result: None,
             cleanup: None,
             detached_job: Some(TemporaryCouncilJobBinding::new(job_id, owner.clone())),
+            convener: None,
             revision: 0,
             created_at: created,
             updated_at: created,

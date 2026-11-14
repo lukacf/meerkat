@@ -2020,6 +2020,13 @@ impl AgentMobToolSurface {
             merge_back,
         );
         request.durability = durability;
+        // Who convenes the council is the session this surface is bound to,
+        // never an argument of the call: the council records it with its
+        // first durable write, and its create of the temporary mob tells
+        // the host's create hook.
+        let recorded_convener = meerkat_mob::temporary_council::TemporaryCouncilConvener::new(
+            self.owner_bridge_session_id.clone(),
+        );
 
         // A council's own deadline may exceed the agent loop's default tool
         // deadline, which would cut the convener's call while the council
@@ -2044,7 +2051,7 @@ impl AgentMobToolSurface {
                 let outcome = self
                     .state
                     .temporary_council()
-                    .run_admitted(request, admitted_sources)
+                    .run_admitted(request, admitted_sources, recorded_convener)
                     .await
                     .map_err(|error| Self::map_council_error(call, error))?;
                 let mut value = council_outcome_json(&outcome);
@@ -2072,7 +2079,7 @@ impl AgentMobToolSurface {
             "detached council run",
             async move {
                 let outcome = match council
-                    .run_detached_admitted(request, job, admitted_sources)
+                    .run_detached_admitted(request, job, admitted_sources, recorded_convener)
                     .await
                 {
                     // A council that ran but failed (e.g. participant seating)
@@ -3047,7 +3054,8 @@ fn build_tool_defs_with_profile_support(
                durable, named member with its own conversation and memory that stays after \
                your work. A mob you create holds workers you manage and retire.\n\n\
              KEY DEFINITION FIELDS:\n\
-             - id: Unique mob identifier (string).\n\
+             - id: Unique mob identifier (string). An id that starts with \"council--\" is \
+               reserved for temporary councils and is refused; choose another id.\n\
              - profiles: Named role templates (inline or realm profile references) that members \
                are spawned from. Each profile specifies model, tools, skills, and runtime_mode.\n\
              - wiring: Rules for automatic peer connections between members (e.g., hub-spoke, \
@@ -4208,6 +4216,7 @@ struct ConcludeObjectiveArgs {
 struct MobCreateArgs {
     /// Explicit mob definition. Minimal useful shape:
     /// {"id":"mob-id","profiles":{"role":{"model":"gpt-5.5","tools":{"builtins":true,"shell":true,"comms":true}}}}.
+    /// An id that starts with "council--" is reserved and refused.
     #[schemars(with = "serde_json::Value")]
     definition: MobDefinitionInput,
 }
@@ -7224,6 +7233,111 @@ mod tests {
                 mob_id: MobId::from(claimed.as_str()),
                 owner_bridge_session_id: Some(session_id),
                 implicit_delegation_mob: false,
+                council: None,
+            }]
+        );
+    }
+
+    /// An agent's `mob_create` cannot make its mob a temporary council's or
+    /// name a convener. Keys that claim one beside the definition are no
+    /// arguments of the tool and change nothing the create hook is told;
+    /// inside the definition they are refused before the hook is asked.
+    #[tokio::test]
+    async fn mob_create_cannot_claim_a_council_or_a_convener() {
+        let state = MobMcpState::new_in_memory();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&asked);
+        state
+            .set_before_create(Arc::new(move |request: crate::MobCreateRequest| {
+                recorder
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(request);
+                Box::pin(async { Ok(()) })
+            }))
+            .expect("bind the create hook");
+        let session_id = SessionId::new();
+        let surface = AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            create_only_authority(),
+            "claude-sonnet-4-5".to_string(),
+            session_id.clone(),
+            None,
+            None,
+            None,
+        );
+        let claimed_session = SessionId::new();
+        let claim = json!({
+            "council_id": "claimed-council",
+            "convener_session_id": claimed_session,
+        });
+        let definition = |id: &str| {
+            json!({
+                "id": id,
+                "profiles": {
+                    "worker": {
+                        "model": "claude-sonnet-4-5",
+                        "tools": { "comms": true },
+                        "peer_description": "worker",
+                        "runtime_mode": "turn_driven"
+                    }
+                }
+            })
+        };
+
+        let beside = serde_json::value::RawValue::from_string(
+            json!({
+                "definition": definition("claims-beside-the-definition"),
+                "council": claim,
+                "convener": { "session_id": claimed_session },
+                "convener_session_id": claimed_session,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        surface
+            .dispatch(ToolCallView {
+                id: "claim-beside-1",
+                name: "mob_create",
+                args: &beside,
+            })
+            .await
+            .expect("keys beside the definition are no arguments of the tool");
+
+        for (index, key) in ["council", "convener", "convener_session_id"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut claiming = definition(&format!("claims-inside-the-definition-{index}"));
+            claiming[key] = claim.clone();
+            let inside = serde_json::value::RawValue::from_string(
+                json!({ "definition": claiming }).to_string(),
+            )
+            .unwrap();
+            let refused = surface
+                .dispatch(ToolCallView {
+                    id: "claim-inside-1",
+                    name: "mob_create",
+                    args: &inside,
+                })
+                .await
+                .expect_err("a definition holds no such key");
+            assert!(
+                matches!(refused, ToolError::InvalidArguments { .. }),
+                "{key}: {refused:?}"
+            );
+        }
+
+        assert_eq!(
+            *asked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![crate::MobCreateRequest {
+                mob_id: MobId::from("claims-beside-the-definition"),
+                owner_bridge_session_id: Some(session_id),
+                implicit_delegation_mob: false,
+                council: None,
             }]
         );
     }
@@ -10094,6 +10208,39 @@ mod tests {
         assert_refused_as_argument_error(&error, "host filesystem path");
         assert!(
             state.handle_for(&MobId::from("path-skill")).await.is_err(),
+            "no mob is created"
+        );
+    }
+
+    /// The agent `mob_create` makes no ordinary mob under an id of the form
+    /// temporary councils own: the call fails as for any invalid definition,
+    /// naming the reserved identifier, and nothing is created.
+    #[tokio::test]
+    async fn mob_create_refuses_an_id_of_the_council_form() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+        let error = dispatch_err(
+            &surface,
+            "mob_create",
+            json!({ "definition": {
+                "id": "council--from-the-model",
+                "profiles": { "worker": { "model": "claude-sonnet-4-5" } }
+            } }),
+        )
+        .await;
+        match &error {
+            ToolError::ExecutionFailed { message } => assert!(
+                message.contains("reserved_system_identifier")
+                    && message.contains("council--from-the-model"),
+                "the refusal names the reserved id: {message}"
+            ),
+            other => panic!("expected a failed call, got {other:?}"),
+        }
+        assert!(
+            state
+                .handle_for(&MobId::from("council--from-the-model"))
+                .await
+                .is_err(),
             "no mob is created"
         );
     }

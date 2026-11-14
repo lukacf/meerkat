@@ -803,6 +803,7 @@ test_suite(
         "//crates/meerkat-mob-mcp:child_member_registration_hook_test",
         "//crates/meerkat-mob-mcp:child_tool_bundles_test",
         "//crates/meerkat-mob-mcp:child_tool_policy_test",
+        "//crates/meerkat-mob-mcp:council_mob_id_test",
         "//crates/meerkat-mob-mcp:council_relink_test",
         "//crates/meerkat-mob-mcp:delegate_identity_after_switch_test",
         "//crates/meerkat-mob-mcp:delegate_profile_family_clamp_test",

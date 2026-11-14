@@ -70,6 +70,45 @@ Your `definition_template` is used verbatim apart from its `id`, which is
 replaced with the deterministic council mob id. Every participant's
 `target_profile` must exist in that template.
 
+From 0.9.15 the id form `council--...` belongs to councils. No other create
+may use it:
+an ordinary mob create under such an id (the agent `mob_create`, `mob/create`,
+`meerkat_mob_create`, a mobpack create with `rkat mob run` or
+`rkat mob deploy`, the Rust create entries of the mob state) is refused as
+an invalid definition, with the diagnostic
+`reserved_system_identifier` at `id`. Only a council's own create uses the
+form. A create under an id that a mob currently holds is answered "mob
+already exists", as under any id; the reserved refusal is what a create gets
+once the id is free.
+
+From 0.9.15 a council acts only on the mob it created. Its record keeps the
+incarnation
+of that mob (`temporary_mob_custody`), written before anyone is seated, and
+both seating and cleanup compare it with the mob found under the id:
+
+- If another mob already holds the id when the council seats (a mob stored
+  under such an id by a release that did not reserve the form, or one a host
+  built itself and inserted), the council ends with
+  `ParticipantSeatingFailed` for participant 0 and touches nothing of that
+  mob.
+- Cleanup retires seats in, and destroys, the recorded incarnation only. A
+  cleanup that runs late (a retry of cleanup debt, or recovery after a
+  crash) reads any other mob under the id as "the council's mob is gone"
+  and leaves it untouched.
+- A record that names no incarnation is cleaned up by id: a record written
+  before the incarnation was recorded, and one whose council stopped, or
+  whose create failed, between issuing the create and recording the mob.
+  Two guards apply: nothing is destroyed when its last cleanup receipt
+  already says the temporary mob is destroyed, and a mob found under the id
+  is destroyed only when every member of it runs on a session the record
+  holds for a seat (or it has no member). Otherwise the mob is left
+  untouched, the council keeps its cleanup debt, and a warning is logged;
+  the council settles once that mob is gone. Two limits follow for such a
+  record: a mob with no member that took the id is still destroyed, and the
+  council's own mob is left in place when one of its seats added a member to
+  it (a seat whose profile has the mob tools can), until that mob is
+  destroyed.
+
 ## Bounds
 
 Every bound is validated **before** any side effect: an over-budget request
@@ -254,6 +293,18 @@ claim lease is observed expired. Councils are never re-executed, and delivery
 uses the same idempotency key, so the outcome is recorded once. A council whose
 convener session no longer exists (deleted or archived) is reported as owner
 gone and settled, so later restarts do not retry it.
+
+From 0.9.15 a council started with the tool also records who convened it:
+the session
+the calling agent runs on. The tool has no argument for it. The council's
+custody record keeps it as `convener`, written once with the record's first
+write, and a replay or a second caller that presents the same `council_id`
+leaves it unchanged. A host that admits mob creates with
+`MobMcpState::set_before_create` is told the same when the council creates
+its temporary mob: the request's `council` field carries the council id and
+the convener's session (see
+[Session contracts](/reference/session-contracts)). A council a host runs
+directly through the Rust API (`run`, `run_detached`) has no convener.
 
 ### Example Tool Call
 

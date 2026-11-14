@@ -4935,7 +4935,7 @@ mod tests {
     fn the_agent_errors_with_wire_data_are_the_listed_ones() {
         use crate::error::AgentError;
         let refusal: crate::ReasoningEffortRefusal = serde_json::from_value(serde_json::json!({
-            "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+            "requested": "max", "provider": "anthropic", "model": "test-anthropic-default",
             "route": {"backend": "anthropic_api", "api": "messages"},
             "reason": "unsupported_level",
             "supported": ["low", "medium", "high"], "facts": "catalog",

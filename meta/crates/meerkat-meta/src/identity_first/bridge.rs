@@ -6233,29 +6233,54 @@ pub trait SessionBridge: Send + Sync {
     /// ONE Core transition (`MobHandle::respawn_member`): the current
     /// incarnation is retired and the next one is seated Dormant at the next
     /// generation on the same session, so the identity is never without a
-    /// member, and a mob restarted in between finishes it itself. The
-    /// successor is seated with `spec`'s profile, runtime mode and labels
-    /// (the identity's current record), and keeps the member's conversation;
-    /// under the member's own profile it keeps its wiring too. A
-    /// `compaction_floor` change seats it with that auto-compact floor
+    /// member and its session is never archived, and a mob restarted in
+    /// between finishes it itself. The successor keeps the member's
+    /// conversation; under the member's own profile it keeps its wiring too.
+    /// A `compaction_floor` change seats it with that auto-compact floor
     /// (`Some(None)` removes one an earlier successor was seated with;
     /// `None` keeps what the member builds with). Nothing is
-    /// materialized: the caller wakes the successor. The identity runtime
-    /// asks it for an identity whose record is its row in the mob's identity
-    /// store, which no declaration seats again.
+    /// materialized: the caller wakes the successor.
     ///
-    /// The default fails closed: composing it from a retire and a seat
-    /// would leave such an identity without a member.
+    /// `spec` is the identity's current record, and `composed` says which
+    /// record that is:
+    ///
+    /// - `None`: its row in the mob's identity store, which no declaration
+    ///   seats again. The successor is seated with the row's profile,
+    ///   runtime mode and labels, and each of its builds composes the
+    ///   host's build.
+    /// - `Some(draft)`: the host's roster, with the seat's build the host
+    ///   composed for this step (its `customize_build` of `spec`). The
+    ///   successor is seated with that build, lowered as the declaration
+    ///   lowers a roster seat: its labels and its profile and model
+    ///   overrides. Its build inputs (context, instructions and system
+    ///   prompt among them) are a first build's: only a session no build
+    ///   created yet takes them; a session a build already created keeps
+    ///   what its builds recorded. The successor keeps the member's own
+    ///   role and runtime
+    ///   mode: the caller's wake declares the roster's spec, which decides
+    ///   a role or mode change as for any seated member. A member whose
+    ///   role is no longer the roster's is seated with nothing of the
+    ///   draft, for that declaration to decide.
+    ///
+    /// The default answers [`BridgeError::Unsupported`]: this bridge has no
+    /// such transition. The caller then fails an identity whose record is
+    /// its row closed (composing the step from a retire and a seat would
+    /// leave such an identity without a member), and retires a roster
+    /// identity's member, which its wake's declaration seats again with the
+    /// same composed build. A member
+    /// Core's transition cannot serve is answered
+    /// [`BridgeError::UnsupportedForMode`] for a roster identity, before
+    /// anything started.
     async fn respawn_member_on_own_session(
         &self,
-        identity: &AgentIdentity,
+        _identity: &AgentIdentity,
         _spec: &DurableAgentSpec,
+        _composed: Option<&AgentBuildDraft>,
         _compaction_floor: Option<Option<std::num::NonZeroU64>>,
     ) -> Result<(), BridgeError> {
-        Err(BridgeError::InvalidInput(format!(
-            "this SessionBridge does not implement the same-session successor, so identity \
-             {identity} cannot be respawned: the transition must be one Core step"
-        )))
+        Err(BridgeError::Unsupported {
+            operation: "respawn_member_on_own_session",
+        })
     }
 
     /// Whether Core holds an identity intent row for `identity` (a host
@@ -6866,10 +6891,15 @@ fn unmasked_resume_divergence(
 /// snapshotted into `SpawnMemberSpec::override_profile` with
 /// `auto_compact_threshold` replaced by the floor, which meerkat-mob lowers
 /// into `SessionBuildOptions::auto_compact_threshold_override` (the strongest
-/// compaction-threshold authority). The registry is in-memory only and the
-/// verb clears the entry after the forced compaction fires; a floor is never
-/// persisted, so a crash mid-verb degrades to the original profile value on
-/// the next boot rather than freezing a compact-every-turn build.
+/// compaction-threshold authority). The registry is in-memory only, and the
+/// verb clears the entry when it rebuilds the member without the floor. The
+/// floor itself is persisted all the same: Core journals a spawn's override
+/// profile on the seat's `MemberSpawned` row and replays it at a restart, so
+/// a member seated with the floor builds with it until a later seat is made
+/// without it (the verb's restoring rebuild; a reset; a respawn of an
+/// identity the host's roster declares). A crash mid-verb therefore leaves
+/// the member compacting at the floor after the next boot, with no entry
+/// here.
 #[derive(Debug, Default)]
 pub struct CompactionFloorRegistry {
     floors: std::sync::Mutex<std::collections::BTreeMap<String, CompactionFloorEntry>>,
@@ -11137,14 +11167,59 @@ impl SessionBridge for MobSessionBridge {
         &self,
         identity: &AgentIdentity,
         spec: &DurableAgentSpec,
+        composed: Option<&AgentBuildDraft>,
         compaction_floor: Option<Option<std::num::NonZeroU64>>,
     ) -> Result<(), BridgeError> {
         let member = member_id_for_identity(identity);
-        let mut request = meerkat_mob::MemberRespawn::new()
-            .with_profile(spec.profile.clone())
-            .with_labels(spec.labels.clone());
-        if let Some(runtime_mode) = spec.runtime_mode_override {
-            request = request.with_runtime_mode(runtime_mode);
+        let mut request = meerkat_mob::MemberRespawn::new();
+        match composed {
+            // A row's successor is seated with the row's record, and each
+            // of its builds composes the host's build.
+            None => {
+                request = request
+                    .with_profile(spec.profile.clone())
+                    .with_labels(spec.labels.clone());
+                if let Some(runtime_mode) = spec.runtime_mode_override {
+                    request = request.with_runtime_mode(runtime_mode);
+                }
+            }
+            // A roster identity's successor is seated with the build its
+            // host composed for it, lowered as the declaration lowers a
+            // roster seat: the seat's labels with a roster spawn's marks and
+            // its profile and model overrides. The role and the runtime
+            // mode stay the member's own: the wake's declaration decides a
+            // change of either. A member whose role is no longer the
+            // roster's takes nothing of this build: that declaration
+            // composes the one its role move needs.
+            //
+            // The seat's build inputs (its context, instructions and system
+            // prompt among them) are a first build's. A session a build
+            // already created keeps what its builds recorded, as the seat
+            // that revives a retired member's session does; only a session
+            // no build created yet takes them, whole, as the seat of an
+            // identity Core held no member of does.
+            Some(draft) => {
+                let seat =
+                    build_spawn_spec(spec, draft, self.base_profile_for_spec(spec).as_ref())?;
+                let seated = self
+                    .handle
+                    .get_member(&member)
+                    .await
+                    .map_err(|error| spawn_bridge_error("respawn_member", &error))?
+                    .filter(|entry| entry.role == seat.role_name);
+                if let Some(entry) = seated {
+                    request = request
+                        .with_labels(seat.labels.clone().unwrap_or_default())
+                        .with_profile_override(seat.override_profile.clone())
+                        .with_model_override(seat.model_override.clone());
+                    if entry
+                        .bridge_session_id()
+                        .is_some_and(|session| self.handle.session_unborn(session))
+                    {
+                        request = request.with_build_inputs_of(&seat);
+                    }
+                }
+            }
         }
         if let Some(floor) = compaction_floor {
             request = request.with_compaction_floor(floor);
@@ -11161,6 +11236,19 @@ impl SessionBridge for MobSessionBridge {
                     BridgeError::RotationRefused {
                         identity: member.clone(),
                         detail: error.to_string(),
+                    }
+                }
+                // A roster identity's member Core's same-session successor
+                // cannot serve, refused before anything started: typed, so
+                // the caller retires it for its wake's declaration instead.
+                meerkat_mob::MobError::UnsupportedForMode { mode, reason }
+                    if composed.is_some() =>
+                {
+                    BridgeError::UnsupportedForMode {
+                        identity: member.clone(),
+                        mode,
+                        detail: meerkat_mob::MobError::UnsupportedForMode { mode, reason }
+                            .to_string(),
                     }
                 }
                 error => spawn_bridge_error("respawn_member", &error),
@@ -12434,10 +12522,11 @@ impl SessionBridge for super::PublicSessionBridge {
         &self,
         identity: &AgentIdentity,
         spec: &DurableAgentSpec,
+        composed: Option<&AgentBuildDraft>,
         compaction_floor: Option<Option<std::num::NonZeroU64>>,
     ) -> Result<(), BridgeError> {
         self.bridge
-            .respawn_member_on_own_session(identity, spec, compaction_floor)
+            .respawn_member_on_own_session(identity, spec, composed, compaction_floor)
             .await
     }
 

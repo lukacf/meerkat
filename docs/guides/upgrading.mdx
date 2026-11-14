@@ -433,6 +433,19 @@ under `## [0.9.15]`.
   The methods for agents created at run time (meta/identity) need a 0.9.15
   gateway: upgrade the gateway before the SDKs that call them. **Do:**
   upgrade the SDKs with the gateway.
+- `meta/compact_member`: a call whose maintenance turn ended for good
+  without completing (`completion_type` `abandoned`,
+  `abandoned_with_error`, `cancelled` or `completed_without_result`) now
+  restores the member's compaction threshold before it answers, and its
+  error carries `error.data.stage: "profile_restored"`. 0.9.14 answered
+  `stage: "terminal"` and left the temporary threshold on the member. The
+  `kind` (`compact_member_completion_failed`), the `completion_type` and
+  the typed error are unchanged; `stage: "terminal"` remains for an outcome
+  that does not prove the turn ended, where nothing is restored; a
+  restoring rebuild that fails answers `compact_member_rebuild_failed` at
+  stage `profile_restore`. **Do:** a host that matches on
+  `stage: "terminal"` to learn that the call failed matches on the `kind`
+  instead, or takes both stages.
 
 ### Rolling back to 0.9.14
 
@@ -457,6 +470,12 @@ line says otherwise.
 - For a mob kept in a host store, list the records written with
   `include_forks`.
 - End every change of an agent that waits for approval.
+- Let every member respawn that is under way complete: wait until its call
+  (`meta/respawn`, the Console's respawn or `meta/compact_member`) has
+  answered without an error, and for a member the respawn fix does not serve
+  (a warning names it at the respawn) until the identity has then answered one
+  message; after a crash during a respawn, start 0.9.15 once more so that it
+  finishes the rotation.
 - Remove the new agent actions from the access rules, and `archive` and
   `adopt` from the identity policy.
 - Unarchive, settle or remove each agent that must not stay as it is.
@@ -762,6 +781,19 @@ either.
 **Do:** before a rollback, remove each such agent that a rule by role or by
 label keeps from someone, or add a deny rule that names it (confirmed by a
 run).
+
+**A member rotation in flight.** A member rotation that a 0.9.15 process
+started and did not finish (a respawn interrupted by a crash) is finished by
+the 0.9.15 process that restarts (read from the source). Restarting on 0.9.14
+in that state has not been run, and whether 0.9.14 finishes it is not
+established.
+
+**Do:** before a rollback, on 0.9.15, let every member respawn that is under
+way complete: a respawn whose call has answered without an error is complete
+for a member the fix serves; for one it does not serve, see Known limitations
+in the Meta changelog: do not stop the process before the identity has
+answered one message. After a crash during a respawn, start 0.9.15 once more
+so that it finishes the rotation.
 
 **A schedule paused for its target.** Nothing is refused, and the pause is
 not lost. 0.9.14 has no such mark: it ignores `paused_for_target` and reads
@@ -1854,13 +1886,53 @@ compiling. A Meta probe that must keep the earlier rule checks
   SDK changes. `meta_gateway identity-census --json` adds
   `identity_store_rows`. **Do:** before a rollback to Meta 0.9.7 or earlier,
   run the doctor instead of the queries in the 0.9.9 notes.
-- **Known limitation: `meta/compact_member` after a failed turn.** When the
-  forced maintenance turn ends in a definite failure (a provider error, a
-  rate limit, or a request that compaction could not shrink), the temporary
-  compaction threshold (1024 tokens by default) stays on the member,
-  durably, and every later `compact_member` on that identity is refused as
-  busy until the gateway restarts. **Do:** after a failed `compact_member`,
-  call `meta/respawn` for the identity, then restart the gateway.
+- **Known limitation: `meta/compact_member` after a failed turn (Meta 0.9.9
+  through 0.9.14).** When the forced maintenance turn ends in a definite
+  failure (a provider error, a rate limit, or a request that compaction
+  could not shrink, which is usual on a conversation of a few short
+  messages), the temporary compaction threshold (1024 tokens by default)
+  stays on the member, durably: it survives a gateway restart and does not
+  end by itself. The member then compacts again every third model request,
+  an ordinary turn whose compaction cannot shrink the request fails
+  ("compaction is irreducible at the configured retention"), and every
+  later `compact_member` on that identity is refused as busy until the
+  gateway restarts. A restart alone does not clear it. **Do:** after a
+  failed `compact_member`, restart the gateway (this ends the busy
+  refusal), then call `meta/respawn` for the identity while its provider is
+  available, and do not stop or restart the gateway again until the
+  respawn has answered without an error and the identity has then answered
+  one message: the respawn seats the member without the threshold and keeps
+  its conversation. On these releases a
+  stop or restart after a respawn, before the identity has woken on the
+  same session, is followed by the loss of the mobs its session owns. After
+  the restart a second `compact_member` that completes clears the threshold
+  too, whether or not it compacts (a `floor_tokens` above the conversation's
+  size completes without compacting), and `meta/reset` clears it and ends
+  the conversation. The respawn has a cost of its own for an identity that
+  created mobs, on every release including 0.9.15: after it has completed,
+  the identity no longer lists a mob it created, and the calls tried that
+  name the mob were refused, while the mob's members can go on running; the
+  mobs' stores stay. A completed `compact_member` has the same cost (see
+  the `meta/compact_member` section of Meta's RPC reference). A reset: it
+  ends the identity's session, and the mobs that session owns end with it,
+  no later than the gateway's next start (read from the source, not run). A
+  `meta/compact_member` that failed has rebuilt the identity once before
+  its maintenance turn, so the identity has probably paid that cost already
+  (read from the source, not run): check whether it still lists the mobs it
+  created. If it does and must go on managing them, weigh that against the
+  failing messages before you respawn: none of the three steps (a respawn,
+  a second call that completes, a reset) is known to keep it; and before
+  the respawn have it retire the members of, or destroy, a mob it created
+  whose members act on their own (not run). **From 0.9.15** the call
+  restores the member's threshold before it answers such a failure
+  (`error.data.stage` is `profile_restored`) and a second call is taken at
+  once; the call still answers the failure. The upgrade repairs nothing
+  stored: a member that 0.9.9 through 0.9.14 left with the threshold keeps
+  it on 0.9.15 until one of the steps above clears it. On 0.9.15 an agent
+  created at run time can be left with the threshold too, in the cases the
+  `meta/compact_member` section of Meta's RPC reference names, and a
+  respawn does not clear it for such an agent: after a gateway restart a
+  second `compact_member` that completes does, and so does `meta/reset`.
 - **Meta Forge 0.3.1** installs the matched Meta 0.9.10, Connect 0.9.10 and
   `meerkat-toolkit` 0.9.10 set on Linux x86_64 and macOS arm64. It is the
   first Forge release from this repository (tag `meta-installer-v0.3.1`);

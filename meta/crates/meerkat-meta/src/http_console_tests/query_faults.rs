@@ -330,13 +330,46 @@ async fn approval_origin_access_cannot_be_bypassed_by_whitespace_ids()
             .await;
         pending_ids.push(created.pending_id.expect("owner creates pending approval"));
     }
-    let app = runtime.build_console_json_router(RuntimeDecisionState::local_console(
-        crate::ConsolePolicy {
-            require_app_auth: false,
-            ..Default::default()
-        },
-        None,
-    ));
+    // Sign-in is optional: the reads are sent with no token, the decides by
+    // a person who is not an admin, so the decide's answer is the origin
+    // rule's and not the answer to a caller that is no person.
+    let mut decisions = super::console_human_admission_tests::state().decisions;
+    decisions.console.require_app_auth = false;
+    let app = runtime.build_console_json_router(decisions);
+    let person = {
+        let mut claims = super::console_token_lapse_tests::human_claims();
+        claims["sid"] = json!("login-7");
+        super::console_token_lapse_tests::token(
+            claims,
+            Some(super::console_token_lapse_tests::now_seconds() + 3600),
+        )
+    };
+    // A decide of a request whose origin is hidden from the caller is
+    // answered as a decide of an id that is not pending is.
+    let not_pending = {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/console/rpc")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {person}"))
+                    .body(Body::from(
+                        json!({ "jsonrpc":"2.0", "id":1, "method":"meta/gating/decide",
+                    "params": {"pending_id":"gate-pending-never-minted", "decision":"approve"} })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+        let bytes = axum::body::to_bytes(response.into_body(), 32_768).await?;
+        serde_json::from_slice::<Value>(&bytes)?
+    };
+    assert_eq!(not_pending["error"]["code"], -32602, "{not_pending}");
+    assert!(
+        not_pending["error"]["data"]["kind"].is_null(),
+        "the person is one who decides: {not_pending}"
+    );
     for method in [
         "meta/gating/pending",
         "meta/gating/audit",
@@ -346,24 +379,27 @@ async fn approval_origin_access_cannot_be_bypassed_by_whitespace_ids()
             .iter()
             .flat_map(|pending_id| [pending_id.clone(), format!("  {pending_id}\t")])
         {
+            let mut call = axum::http::Request::builder()
+                .method("POST")
+                .uri("/console/rpc")
+                .header("content-type", "application/json");
+            if method.ends_with("/decide") {
+                call = call.header("authorization", format!("Bearer {person}"));
+            }
             let response = app
                 .clone()
                 .oneshot(
-                    axum::http::Request::builder()
-                        .method("POST")
-                        .uri("/console/rpc")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            json!({ "jsonrpc":"2.0", "id":1, "method":method,
+                    call.body(Body::from(
+                        json!({ "jsonrpc":"2.0", "id":1, "method":method,
                     "params": {"pending_id":id, "decision":"approve"} })
-                            .to_string(),
-                        ))?,
+                        .to_string(),
+                    ))?,
                 )
                 .await?;
             let bytes = axum::body::to_bytes(response.into_body(), 32_768).await?;
             let body: Value = serde_json::from_slice(&bytes)?;
             if method.ends_with("/decide") {
-                assert_eq!(body["error"]["data"]["kind"], "access_denied", "{body}");
+                assert_eq!(body, not_pending, "{body}");
             } else {
                 assert!(body["error"].is_null(), "{body}");
                 assert!(

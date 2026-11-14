@@ -30,6 +30,20 @@ const decide = (fixture, id, decision = "approve") => rpc(fixture.baseUrl, "meta
 function accessDenied(response) {
   assert.equal(response.body.error?.code, -32030, JSON.stringify(response));
 }
+// The whole answer to a decide as it arrives: status, content type and the
+// body's bytes.
+async function decideAnswer(fixture, id) {
+  const response = await fetch(`${fixture.baseUrl}/console/rpc`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "meta/gating/decide", params: {
+      pending_id: id, decision: "approve", reason: "Reviewed the complete owner request",
+    } }),
+  });
+  return {
+    status: response.status, contentType: response.headers.get("content-type"),
+    body: Buffer.from(await response.arrayBuffer()).toString("latin1"),
+  };
+}
 function decisionResult(response, id, decision) {
   const result = response.body.result;
   assert.equal(result?.pending_id, id, JSON.stringify(response));
@@ -271,7 +285,20 @@ async function accessMatrix() {
     assert.deepEqual(visible.map(item => item.pending_id).sort(), [publicRequest.pending_id, originless.pending_id].sort());
     const visibleAudit = await audit(fixture);
     assert(!visibleAudit.some(item => item.pending_id === privateRequest.pending_id || item.detail?.origin?.identity === "domain:delivery"));
-    for (const id of [privateRequest.pending_id, ` ${privateRequest.pending_id} `]) accessDenied(await decide(fixture, id));
+    // This caller may decide, and the list does not show it the private
+    // request. A decide of that request, by its id as issued and with blanks
+    // around it, gets the answer of a decide of an id that was never issued:
+    // the same status, content type and body bytes, a refusal that decides
+    // nothing.
+    const neverIssued = privateRequest.pending_id.replace(/\d+$/, "999999");
+    assert(![publicRequest, privateRequest, originless].some(request => request.pending_id === neverIssued), neverIssued);
+    const unknown = await decideAnswer(fixture, neverIssued);
+    const refusal = JSON.parse(unknown.body);
+    assert(refusal.error && !("result" in refusal), JSON.stringify(unknown));
+    for (const id of [privateRequest.pending_id, ` ${privateRequest.pending_id} `]) {
+      assert.deepEqual(await decideAnswer(fixture, id), unknown, "a decide of a request the list does not show is answered as a decide of an id that was never issued");
+    }
+    assert.deepEqual((await pending(fixture)).map(item => item.pending_id).sort(), visible.map(item => item.pending_id).sort(), "a refused decide changes nothing the list shows");
 
     await fixture.control("access", { mode: "open" });
     assert.equal((await pending(fixture)).length, 3, "access filtering never deletes the hidden request");

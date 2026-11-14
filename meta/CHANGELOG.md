@@ -143,7 +143,35 @@ Security, Upgrade and Changed.
   receives both as before.
 - On a console that can identify a person, a gating audit entry or pending
   request whose origin is an agent the console does not know is shown to an
-  administrator only, like every other record the console cannot attribute.
+  administrator only, like every other record the console cannot attribute,
+  and only an administrator decides such a request. A decide by the id of a
+  request the pending list withholds from its caller (`meta/gating/decide`
+  on the Console) is answered as a decide of an id that is not pending, and
+  the request stays pending. That also holds for a request whose origin an
+  access rule or a private owner keeps from the caller, which was answered
+  `access_denied`. Through 0.9.14 the pending list, the audit read and the
+  decide all asked only whether the caller may view the agent that holds
+  the origin's name, so a person who is not an administrator and may view
+  that agent was shown such a request and could decide it. Only a host
+  supplies a request's origin. On a Console that requires sign-in and has
+  no access configuration, a person's decide by id could in a narrow window
+  be applied to a request whose origin is an agent private to another
+  person; a request is now judged at the moment its decision is applied.
+  Affects 0.9.11 through 0.9.14 (read from the released sources; a run on
+  the development source showed the window). The Console's delivery history
+  (`meta/delivery/history`) follows the pending list as well: the record
+  of an approval notification carries the request's id and action text, and
+  is withheld from a caller the list would not show the request, and, on a
+  console that can identify a person, from everyone but an administrator
+  once the request is no longer held. A page of that history holds the
+  newest records its caller may read, up to its limit. Through 0.9.14 that
+  record was shown to every caller who may read the delivery history,
+  whatever the request's origin (from 0.9.11, unless the record itself
+  names an agent private to another person). On a Console that requires
+  sign-in and has no access configuration there is no administrator: a
+  request whose origin the Console does not know is shown to nobody there
+  and decided by nobody there. Its host decides or withdraws it, or it runs
+  into its timeout.
 - In 0.9.11 through 0.9.14, on a console that does not require sign-in and
   whose access rules are off, a caller who sent no token could read the
   conversation of a private side chat after that side chat had ended.
@@ -957,6 +985,19 @@ Security, Upgrade and Changed.
   sets no labels refuses nothing. An archive and a removal of a refused
   agent are served.
 
+- From 0.9.15 a gating decide on the Console (`meta/gating/decide`)
+  follows the pending list (see Security): a decide of a request the list
+  does not show its caller is answered as a decide of an id that is not
+  pending is. Two answers change with it. New in 0.9.15: on a console that
+  can identify a person, a decide of a request whose origin is an agent the
+  console does not know gets that answer unless the caller is an
+  administrator; through 0.9.14 such a decide was applied for a person who
+  may view that agent. And a decide of a request whose origin an access
+  rule or a private owner keeps from the caller is no longer answered
+  `access_denied`: it gets that answer too. A client that handled
+  `access_denied` on this call now gets the answer for an id that is not
+  pending; `access_denied` still answers a caller without the
+  `gating.decide` grant.
 - A declared definition update (`runtime_options.declare_spec_update` on
   the stdio gateway, `spec_update_ceremony` from Rust) that drops a profile
   agents were created on, or renames it, is refused: Meerkat answers the

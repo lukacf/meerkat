@@ -957,6 +957,23 @@ Security, Upgrade and Changed.
   sets no labels refuses nothing. An archive and a removal of a refused
   agent are served.
 
+- A declared definition update (`runtime_options.declare_spec_update` on
+  the stdio gateway, `spec_update_ceremony` from Rust) that drops a profile
+  agents were created on, or renames it, is refused: Meerkat answers the
+  diagnostic `profile_held_by_identity` at `profiles.<name>`, naming the
+  agents, and the gateway's init fails with `declared mob spec update
+  refused: ...`. Nothing is written, and a launch without the declaration
+  that carries the definition the mob had starts as before (one that
+  carries the edited definition is refused, as any undeclared edit is).
+  Keep the profile, or update those agents to another
+  profile or remove them, then declare the update. While this release
+  cannot read the record of one of the mob's created agents (one a later
+  release wrote, after a rollback), such an update is refused the same
+  way, at `profiles`, naming those agents, since that record may name the
+  profile: keep the profile, or declare the update on the release that
+  reads the records. It was accepted before,
+  and such an agent then failed each restore with a profile-not-found
+  reason.
 - A respawn hands the inputs queued on the member to its successor, for
   the members the respawn fix serves (see Fixed). A prompt sent just
   before a respawn now runs afterwards, once, on the respawned identity;
@@ -980,23 +997,6 @@ Security, Upgrade and Changed.
   refuses the respawn because another lifecycle operation of the member
   is in progress (read from the source).
 
-- A declared definition update (`runtime_options.declare_spec_update` on
-  the stdio gateway, `spec_update_ceremony` from Rust) that drops a profile
-  agents were created on, or renames it, is refused: Meerkat answers the
-  diagnostic `profile_held_by_identity` at `profiles.<name>`, naming the
-  agents, and the gateway's init fails with `declared mob spec update
-  refused: ...`. Nothing is written, and a launch without the declaration
-  that carries the definition the mob had starts as before (one that
-  carries the edited definition is refused, as any undeclared edit is).
-  Keep the profile, or update those agents to another
-  profile or remove them, then declare the update. While this release
-  cannot read the record of one of the mob's created agents (one a later
-  release wrote, after a rollback), such an update is refused the same
-  way, at `profiles`, naming those agents, since that record may name the
-  profile: keep the profile, or declare the update on the release that
-  reads the records. It was accepted before,
-  and such an agent then failed each restore with a profile-not-found
-  reason.
 - On the Console, a read, a plan and a change of one agent
   (`meta/identity/get`, `plan`, `update`, `archive`, `unarchive`, `remove`
   and `adopt`) answer an agent the caller may not view exactly as a name no

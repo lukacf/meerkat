@@ -743,6 +743,57 @@ impl Param {
         COPILOT_PARAMS.contains(&self)
     }
 
+    /// The route's cell, under the name the row manifest of the reasoning
+    /// effort execution receipt gives it.
+    fn receipt_cell(self) -> &'static str {
+        match self {
+            Self::OpenAiDirect => "openai_direct",
+            Self::ClaudeDirect => "claude_direct",
+            Self::GeminiDirect => "gemini_direct",
+            Self::SelfHostedChat => "self_hosted_chat",
+            Self::SelfHostedResponses => "self_hosted_responses",
+            Self::CopilotResponses => "copilot_responses",
+            Self::CopilotResponsesUncatalogued => "copilot_responses_uncatalogued",
+            Self::CopilotChat => "copilot_chat",
+            Self::CopilotClaude => "copilot_claude",
+            Self::CopilotGemini => "copilot_gemini",
+        }
+    }
+
+    /// Says which model and level the row `test` uses on this route, one
+    /// line on stdout. The rows pick both from the catalog when they run, so
+    /// the generator of the execution receipt reads them from this line. It
+    /// asserts nothing.
+    fn report_cell(self, test: &str, model: &str, level: EffortLevel) {
+        println!(
+            "reasoning-effort-receipt-cell {}",
+            json!({
+                "test": test,
+                "cell": self.receipt_cell(),
+                "model": model,
+                "level": level.as_wire_str(),
+                "route": self.route().to_string(),
+            })
+        );
+    }
+
+    /// As `report_cell`, for a second thing the row `test` asserts on this
+    /// route, which the row manifest lists as a row of its own under the
+    /// word `case`: the line names the case too. It asserts nothing.
+    fn report_case(self, test: &str, case: &str, model: &str, level: EffortLevel) {
+        println!(
+            "reasoning-effort-receipt-cell {}",
+            json!({
+                "test": test,
+                "case": case,
+                "cell": self.receipt_cell(),
+                "model": model,
+                "level": level.as_wire_str(),
+                "route": self.route().to_string(),
+            })
+        );
+    }
+
     /// The wire paths the route writes a level to.
     fn fields(self) -> Vec<String> {
         let fields: &[&str] = match self {
@@ -1351,6 +1402,11 @@ async fn supported_level_completes_with_tools_schema_and_streaming() {
         let stub = Stub::spawn(&[Reply::ToolCall, Reply::Text, Reply::Json]).await;
         let fixture = param.fixture(Stage::Stated, &stub.base).expect("staged");
         let level = fixture.level();
+        param.report_cell(
+            "supported_level_completes_with_tools_schema_and_streaming",
+            &fixture.model,
+            level,
+        );
         let expected = fixture.resolution(level);
         let tools = Arc::new(RecordingTools::default());
         let (live_tx, mut live_rx) = tokio::sync::mpsc::channel(4096);
@@ -1502,6 +1558,12 @@ async fn unsupported_level_is_refused_before_any_provider_request() {
         levels.dedup();
 
         for level in levels {
+            // One line for each level the row refuses on this route.
+            param.report_cell(
+                "unsupported_level_is_refused_before_any_provider_request",
+                &fixture.model,
+                level,
+            );
             let refusal = refused(&fixture, level_params(level)).await;
             assert_eq!(
                 refusal,
@@ -1526,6 +1588,13 @@ async fn unsupported_level_is_refused_before_any_provider_request() {
             );
             let level = fixture.level();
             assert!(level <= EffortLevel::High);
+            // The one line of this case: its own row of the receipt.
+            param.report_case(
+                "unsupported_level_is_refused_before_any_provider_request",
+                "second_thinking_type",
+                &fixture.model,
+                level,
+            );
             let refusal = refused(
                 &fixture,
                 ProviderParamsOverride {
@@ -1598,6 +1667,15 @@ async fn unknown_support_is_refused_before_any_provider_request() {
             );
         }
         let level = EffortLevel::Low;
+        // One line per route: the case every route has. The two cases added
+        // above run on a route that already has its line.
+        if stage == Stage::Unknown {
+            param.report_cell(
+                "unknown_support_is_refused_before_any_provider_request",
+                &fixture.model,
+                level,
+            );
+        }
         let refusal = refused(&fixture, level_params(level)).await;
         assert_eq!(
             refusal,
@@ -1806,6 +1884,12 @@ async fn copilot_route_change_re_resolves_before_sending() {
         .fixture(Stage::Stated, &stub.base)
         .expect("staged");
     let level = fixture.level();
+    // The route the one request is sent on.
+    Param::CopilotChat.report_cell(
+        "copilot_route_change_re_resolves_before_sending",
+        &fixture.model,
+        level,
+    );
     let client = changing_route(&fixture, |entry| {
         entry["supported_endpoints"] = json!(["/chat/completions"]);
     });
@@ -1872,6 +1956,11 @@ async fn a_refresh_that_changes_only_the_levels_re_resolves() {
         .fixture(Stage::Stated, &stub.base)
         .expect("staged");
     let level = fixture.level();
+    Param::CopilotResponses.report_cell(
+        "a_refresh_that_changes_only_the_levels_re_resolves",
+        &fixture.model,
+        level,
+    );
     let remaining: Vec<EffortLevel> = fixture
         .supported
         .iter()
@@ -1927,6 +2016,11 @@ async fn refusal_inside_a_turn_is_the_typed_refusal() {
         let stub = Stub::spawn(&[Reply::Text]).await;
         let fixture = param.fixture(Stage::Stated, &stub.base).expect("staged");
         let level = fixture.level();
+        param.report_cell(
+            "refusal_inside_a_turn_is_the_typed_refusal",
+            &fixture.model,
+            level,
+        );
         let mut agent = build(&fixture, Build::level(level))
             .await
             .unwrap_or_else(|error| panic!("{param:?}: the agent builds: {error}"));
@@ -2009,6 +2103,11 @@ async fn a_resumed_session_resolves_and_reports_its_level() {
         let stub = Stub::spawn(&[Reply::Text]).await;
         let fixture = param.fixture(Stage::Stated, &stub.base).expect("staged");
         let level = fixture.level();
+        param.report_cell(
+            "a_resumed_session_resolves_and_reports_its_level",
+            &fixture.model,
+            level,
+        );
         let expected = fixture.resolution(level);
 
         let mut agent = build(&fixture, Build::level(level))

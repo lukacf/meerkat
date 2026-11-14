@@ -1,0 +1,365 @@
+{
+  "schema_version": 1,
+  "kind": "reasoning_effort_receipt_manifest",
+  "rules": [
+    {
+      "id": "catalog_model",
+      "text": "A model of the provider's catalog whose row states some reasoning effort levels and not every level, the provider's default model first."
+    },
+    {
+      "id": "catalog_model_listed_with_a_dot",
+      "text": "A Claude model of the catalog whose id an account lists with a dot between its last two numbers, one that also takes a second thinking type first."
+    },
+    {
+      "id": "accepted_level",
+      "text": "A level the route accepts for the model: high where it is accepted, else low, else the lowest active level it accepts."
+    },
+    {
+      "id": "levels_outside_the_set",
+      "text": "Every level the row refuses on the route: the lowest active level the route does not accept for the model; none on a Claude model; minimal on the Copilot Gemini route; and on a Copilot route a level the model's catalog row lists and the account's entry does not."
+    },
+    {
+      "id": "catalog_model_missing_an_active_level",
+      "text": "A model of the provider's catalog whose row states two reasoning effort levels or more and not every level, one whose row leaves out an active level (low or above) first, the provider's default model first."
+    },
+    {
+      "id": "lowest_level_outside_the_set",
+      "text": "The lowest active level (low or above) the model's catalog row does not list; where it lists every active level, the lowest level it does not list."
+    }
+  ],
+  "cells": [
+    { "id": "openai_direct", "provider_family": "openai", "backend": "openai_api", "api": "responses" },
+    { "id": "claude_direct", "provider_family": "anthropic", "backend": "anthropic_api", "api": "messages" },
+    { "id": "gemini_direct", "provider_family": "gemini", "backend": "google_genai", "api": "generate_content" },
+    { "id": "self_hosted_chat", "provider_family": "self_hosted", "backend": "self_hosted", "api": "chat_completions" },
+    { "id": "self_hosted_responses", "provider_family": "self_hosted", "backend": "self_hosted", "api": "responses" },
+    { "id": "copilot_responses", "provider_family": "openai", "backend": "copilot", "api": "responses" },
+    { "id": "copilot_responses_uncatalogued", "provider_family": "openai", "backend": "copilot", "api": "responses" },
+    { "id": "copilot_chat", "provider_family": "openai", "backend": "copilot", "api": "chat_completions" },
+    { "id": "copilot_claude", "provider_family": "anthropic", "backend": "copilot", "api": "messages" },
+    { "id": "copilot_gemini", "provider_family": "gemini", "backend": "copilot", "api": "chat_completions" }
+  ],
+  "legs": [
+    {
+      "id": "routes",
+      "mode": "in_process",
+      "title": "The route rows: an agent loop on the real provider client of each route, against a scripted loopback server. The Copilot account and its model list are generic stand-ins."
+    },
+    {
+      "id": "binary",
+      "mode": "built_binary",
+      "title": "The built rkat binary on a direct provider route or a self-hosted server, against a scripted loopback server."
+    },
+    {
+      "id": "live_copilot",
+      "mode": "live",
+      "title": "The live Copilot rows: the models of a real account's list, in process and through the built rkat binary."
+    },
+    {
+      "id": "live_direct",
+      "mode": "live",
+      "title": "The live direct provider rows: one case per provider API that has a key."
+    }
+  ],
+  "rows": [
+    {
+      "id": "routes.supported",
+      "leg": "routes",
+      "title": "A level the route accepts completes a run with a tool call, streamed text and structured output; every request carries it and the result reports it.",
+      "test": {
+        "package": "meerkat",
+        "target": "reasoning_effort_routes",
+        "name": "supported_level_completes_with_tools_schema_and_streaming",
+        "source": "crates/meerkat/tests/reasoning_effort_routes.rs"
+      },
+      "outcome": { "kind": "sent" },
+      "model": { "rule": "catalog_model" },
+      "requested_level": { "rule": "accepted_level" },
+      "cells": [
+        { "cell": "openai_direct" },
+        { "cell": "claude_direct" },
+        { "cell": "gemini_direct" },
+        { "cell": "self_hosted_chat", "model": { "id": "remote-model" }, "requested_level": { "level": "high" } },
+        { "cell": "self_hosted_responses", "model": { "id": "remote-model" }, "requested_level": { "level": "high" } },
+        { "cell": "copilot_responses", "requested_level": { "level": "low" } },
+        {
+          "cell": "copilot_responses_uncatalogued",
+          "model": { "id": "fixture-reasoner-1" },
+          "requested_level": { "level": "low" }
+        },
+        { "cell": "copilot_chat", "model": { "id": "fixture-reasoner-1" }, "requested_level": { "level": "low" } },
+        {
+          "cell": "copilot_claude",
+          "model": { "rule": "catalog_model_listed_with_a_dot" },
+          "requested_level": { "level": "low" }
+        },
+        { "cell": "copilot_gemini", "requested_level": { "level": "low" } }
+      ]
+    },
+    {
+      "id": "routes.unsupported",
+      "leg": "routes",
+      "title": "Each level outside the set the route accepts is refused with the typed refusal before any request is sent.",
+      "lines": "per_level",
+      "test": {
+        "package": "meerkat",
+        "target": "reasoning_effort_routes",
+        "name": "unsupported_level_is_refused_before_any_provider_request",
+        "source": "crates/meerkat/tests/reasoning_effort_routes.rs"
+      },
+      "outcome": { "kind": "refused", "reason": "unsupported_level" },
+      "model": { "rule": "catalog_model" },
+      "requested_level": { "rule": "levels_outside_the_set" },
+      "cells": [
+        { "cell": "openai_direct" },
+        { "cell": "claude_direct" },
+        { "cell": "gemini_direct" },
+        { "cell": "self_hosted_chat", "model": { "id": "remote-model" } },
+        { "cell": "self_hosted_responses", "model": { "id": "remote-model" } },
+        { "cell": "copilot_responses" },
+        { "cell": "copilot_responses_uncatalogued", "model": { "id": "fixture-reasoner-1" } },
+        { "cell": "copilot_chat", "model": { "id": "fixture-reasoner-1" } },
+        { "cell": "copilot_claude", "model": { "rule": "catalog_model_listed_with_a_dot" } },
+        { "cell": "copilot_gemini" }
+      ]
+    },
+    {
+      "id": "routes.second_thinking_type",
+      "leg": "routes",
+      "title": "On Copilot Messages a level the route accepts is refused with the typed refusal when the session sets a second thinking type; nothing is sent.",
+      "case": "second_thinking_type",
+      "test": {
+        "package": "meerkat",
+        "target": "reasoning_effort_routes",
+        "name": "unsupported_level_is_refused_before_any_provider_request",
+        "source": "crates/meerkat/tests/reasoning_effort_routes.rs"
+      },
+      "outcome": { "kind": "refused", "reason": "conflicting_thinking_type" },
+      "model": { "rule": "catalog_model_listed_with_a_dot" },
+      "requested_level": { "rule": "accepted_level" },
+      "cells": [{ "cell": "copilot_claude" }]
+    },
+    {
+      "id": "routes.unknown",
+      "leg": "routes",
+      "title": "A level nothing states the accepted set for is refused as unknown before any request is sent.",
+      "test": {
+        "package": "meerkat",
+        "target": "reasoning_effort_routes",
+        "name": "unknown_support_is_refused_before_any_provider_request",
+        "source": "crates/meerkat/tests/reasoning_effort_routes.rs"
+      },
+      "outcome": { "kind": "refused", "reason": "supported_levels_unknown" },
+      "model": { "rule": "catalog_model" },
+      "requested_level": { "level": "low" },
+      "cells": [
+        { "cell": "openai_direct", "model": { "id": "fixture-reasoner-1" } },
+        { "cell": "claude_direct", "model": { "id": "fixture-reasoner-1" } },
+        { "cell": "gemini_direct", "model": { "id": "fixture-reasoner-1" } },
+        { "cell": "self_hosted_chat", "model": { "id": "remote-model" } },
+        { "cell": "self_hosted_responses", "model": { "id": "remote-model" } },
+        { "cell": "copilot_responses" },
+        { "cell": "copilot_responses_uncatalogued" },
+        { "cell": "copilot_chat" },
+        { "cell": "copilot_claude", "model": { "rule": "catalog_model_listed_with_a_dot" } },
+        { "cell": "copilot_gemini" }
+      ]
+    },
+    {
+      "id": "routes.resumed",
+      "leg": "routes",
+      "title": "A session built with a level and resumed without naming it again still sends and reports the level.",
+      "test": {
+        "package": "meerkat",
+        "target": "reasoning_effort_routes",
+        "name": "a_resumed_session_resolves_and_reports_its_level",
+        "source": "crates/meerkat/tests/reasoning_effort_routes.rs"
+      },
+      "outcome": { "kind": "sent" },
+      "model": { "rule": "catalog_model" },
+      "requested_level": { "rule": "accepted_level" },
+      "cells": [
+        { "cell": "openai_direct" },
+        { "cell": "claude_direct" },
+        { "cell": "gemini_direct" },
+        { "cell": "self_hosted_chat", "model": { "id": "remote-model" }, "requested_level": { "level": "high" } },
+        { "cell": "self_hosted_responses", "model": { "id": "remote-model" }, "requested_level": { "level": "high" } },
+        { "cell": "copilot_responses", "requested_level": { "level": "low" } },
+        {
+          "cell": "copilot_responses_uncatalogued",
+          "model": { "id": "fixture-reasoner-1" },
+          "requested_level": { "level": "low" }
+        },
+        { "cell": "copilot_chat", "model": { "id": "fixture-reasoner-1" }, "requested_level": { "level": "low" } },
+        {
+          "cell": "copilot_claude",
+          "model": { "rule": "catalog_model_listed_with_a_dot" },
+          "requested_level": { "level": "low" }
+        },
+        { "cell": "copilot_gemini", "requested_level": { "level": "low" } }
+      ]
+    },
+    {
+      "id": "routes.refused_in_a_turn",
+      "leg": "routes",
+      "title": "A level sent on one turn is refused on the next once the account's list no longer states it; nothing is sent for the refused turn.",
+      "test": {
+        "package": "meerkat",
+        "target": "reasoning_effort_routes",
+        "name": "refusal_inside_a_turn_is_the_typed_refusal",
+        "source": "crates/meerkat/tests/reasoning_effort_routes.rs"
+      },
+      "outcome": { "kind": "refused", "reason": "unsupported_level" },
+      "model": { "rule": "catalog_model" },
+      "requested_level": { "level": "low" },
+      "cells": [
+        { "cell": "copilot_responses" },
+        { "cell": "copilot_responses_uncatalogued", "model": { "id": "fixture-reasoner-1" } },
+        { "cell": "copilot_chat", "model": { "id": "fixture-reasoner-1" } },
+        { "cell": "copilot_claude", "model": { "rule": "catalog_model_listed_with_a_dot" } },
+        { "cell": "copilot_gemini" }
+      ]
+    },
+    {
+      "id": "routes.route_moved",
+      "leg": "routes",
+      "title": "The account's list moves the model from Responses to Chat Completions after the level was resolved: the one request is sent on Chat Completions with that API's field.",
+      "test": {
+        "package": "meerkat",
+        "target": "reasoning_effort_routes",
+        "name": "copilot_route_change_re_resolves_before_sending",
+        "source": "crates/meerkat/tests/reasoning_effort_routes.rs"
+      },
+      "outcome": { "kind": "sent" },
+      "model": { "rule": "catalog_model" },
+      "requested_level": { "level": "low" },
+      "cells": [{ "cell": "copilot_chat" }]
+    },
+    {
+      "id": "routes.levels_changed",
+      "leg": "routes",
+      "title": "The account's list drops the level after it was resolved, on the same endpoint: the turn fails with the typed refusal and nothing is sent.",
+      "test": {
+        "package": "meerkat",
+        "target": "reasoning_effort_routes",
+        "name": "a_refresh_that_changes_only_the_levels_re_resolves",
+        "source": "crates/meerkat/tests/reasoning_effort_routes.rs"
+      },
+      "outcome": { "kind": "refused", "reason": "unsupported_level" },
+      "model": { "rule": "catalog_model" },
+      "requested_level": { "level": "low" },
+      "cells": [{ "cell": "copilot_responses" }]
+    },
+    {
+      "id": "binary.supported",
+      "leg": "binary",
+      "title": "The built binary completes a run at an accepted level with workspace tools, a schema and streaming, and reports the level sent.",
+      "test": {
+        "package": "rkat",
+        "target": "run_reasoning_effort_families",
+        "name": "cli_supported_run_reports_requested_and_sent_on_direct_routes",
+        "source": "crates/meerkat-cli/tests/run_reasoning_effort_families.rs"
+      },
+      "outcome": { "kind": "sent" },
+      "model": { "rule": "catalog_model_missing_an_active_level" },
+      "requested_level": { "rule": "accepted_level" },
+      "cells": [{ "cell": "openai_direct" }, { "cell": "claude_direct" }, { "cell": "gemini_direct" }]
+    },
+    {
+      "id": "binary.unsupported",
+      "leg": "binary",
+      "title": "The built binary refuses a level outside the accepted set: exit status 2, one failure document, no request.",
+      "test": {
+        "package": "rkat",
+        "target": "run_reasoning_effort_families",
+        "name": "cli_unsupported_level_is_refused_on_direct_routes",
+        "source": "crates/meerkat-cli/tests/run_reasoning_effort_families.rs"
+      },
+      "outcome": { "kind": "refused", "reason": "unsupported_level" },
+      "model": { "rule": "catalog_model_missing_an_active_level" },
+      "requested_level": { "rule": "lowest_level_outside_the_set" },
+      "cells": [{ "cell": "openai_direct" }, { "cell": "claude_direct" }, { "cell": "gemini_direct" }]
+    },
+    {
+      "id": "binary.unknown",
+      "leg": "binary",
+      "title": "The built binary refuses a level nothing states the accepted set for: exit status 2, one failure document, no request.",
+      "test": {
+        "package": "rkat",
+        "target": "run_reasoning_effort_families",
+        "name": "cli_unknown_support_is_refused_on_direct_routes",
+        "source": "crates/meerkat-cli/tests/run_reasoning_effort_families.rs"
+      },
+      "outcome": { "kind": "refused", "reason": "supported_levels_unknown" },
+      "model": { "id": "fixture-reasoner-1" },
+      "requested_level": { "level": "high" },
+      "cells": [{ "cell": "openai_direct" }, { "cell": "claude_direct" }, { "cell": "gemini_direct" }]
+    },
+    {
+      "id": "binary.self_hosted_supported",
+      "leg": "binary",
+      "title": "The built binary on a self-hosted server completes a run at an accepted level and reports the level sent.",
+      "test": {
+        "package": "rkat",
+        "target": "run_reasoning_effort",
+        "name": "cli_supported_run_reports_requested_and_sent",
+        "source": "crates/meerkat-cli/tests/run_reasoning_effort.rs"
+      },
+      "outcome": { "kind": "sent" },
+      "model": { "id": "loopback-declared" },
+      "requested_level": { "level": "high" },
+      "cells": [{ "cell": "self_hosted_chat" }]
+    },
+    {
+      "id": "binary.self_hosted_unsupported",
+      "leg": "binary",
+      "title": "The built binary on a self-hosted server refuses a level outside the accepted set: exit status 2, one failure document, no request.",
+      "test": null,
+      "outcome": { "kind": "refused", "reason": "unsupported_level" },
+      "model": null,
+      "requested_level": null,
+      "cells": [{ "cell": "self_hosted_chat" }]
+    },
+    {
+      "id": "binary.self_hosted_unknown",
+      "leg": "binary",
+      "title": "The built binary on a self-hosted server refuses a level nothing states the accepted set for: exit status 2, one failure document, no request.",
+      "test": null,
+      "outcome": { "kind": "refused", "reason": "supported_levels_unknown" },
+      "model": null,
+      "requested_level": null,
+      "cells": [{ "cell": "self_hosted_chat" }]
+    },
+    {
+      "id": "live.copilot_matrix",
+      "leg": "live_copilot",
+      "title": "One catalog model per provider family and endpoint a real Copilot account serves: one stated level is sent in one request; a level outside the stated set and a model with no stated levels are refused without a request.",
+      "test": {
+        "package": "meerkat-integration-tests",
+        "target": "copilot_live_e2e",
+        "name": "copilot_live_reasoning_effort_matrix",
+        "source": "tests/integration/tests/copilot_live_e2e.rs"
+      },
+      "cells": "observed"
+    },
+    {
+      "id": "live.copilot_binary",
+      "leg": "live_copilot",
+      "title": "The built rkat binary on a Copilot binding, one model per family the account serves.",
+      "test": null,
+      "cells": "observed"
+    },
+    {
+      "id": "live.direct_providers",
+      "leg": "live_direct",
+      "title": "Each direct provider API that has a key: an accepted level is sent, a level outside the catalog row is refused.",
+      "test": {
+        "package": "meerkat-integration-tests",
+        "target": "e2e_live_lane",
+        "name": "direct_provider_live_reasoning_effort",
+        "source": "tests/integration/tests/e2e_live_lane.rs"
+      },
+      "cells": "observed"
+    }
+  ]
+}

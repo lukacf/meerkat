@@ -687,6 +687,101 @@ backend.
 `.github/workflows/buildbuddy.yml` is `workflow_call`-only; `nightly.yml` and
 `release.yml` call it, `ci.yml` never does.
 
+### Reasoning effort execution receipt
+
+`scripts/reasoning-effort-receipt.mjs` writes, for one commit, what was
+executed for the provider-neutral reasoning effort level and what was not:
+one JSON document (`scripts/reasoning-effort-receipt.schema.json`, schema
+version 1) and a Markdown file rendered from it. No workflow runs it or
+attaches its output to a release yet.
+
+- The row manifest `scripts/reasoning-effort-receipt-rows.json` lists the
+  cells (provider family, backend, provider API), the legs (in process,
+  built binary, live) and the rows with the test that covers each. Where a
+  row picks its model or level when it runs, the manifest names the rule.
+- Each leg has one result file, `<leg>.json`: `record` writes it from the
+  run's output (`cargo nextest run --message-format libtest-json-plus`, which
+  names every test, or the human log, which gives the summary's counts and
+  the tests whose status lines it shows), or records that the leg did not run
+  and why. A leg result holds counts, test names and typed cells, never the
+  run's text.
+- The route rows print what they picked: one line per cell, the prefix
+  `reasoning-effort-receipt-cell ` and one JSON object of the row's name, the
+  cell, the model, the level and the route. `record` reads those lines and
+  nothing else a test prints: in the JSON output of a run with
+  `--no-capture`, or in the log of a run with `--success-output final`. On
+  an executed entry the printed model and level replace the manifest's
+  rule; a line of a cell the manifest does not list, or one that disagrees
+  with a value the manifest fixes, is an error. The row that refuses levels
+  outside a route's set refuses several on some routes: it prints one line
+  per refused level (the manifest marks it `lines: per_level`), and an
+  executed cell of it has one entry per level, `row/cell:level`, the lowest
+  level first.
+- A second thing a test asserts gets a row of its own. The manifest row names
+  the same test and a `case`, and the test prints the lines of that case with
+  that word as `case`; those lines belong to the case's row and to no other.
+  The refusing route row has one: on Copilot Messages it also refuses a level
+  the route accepts when the session sets a second thinking type
+  (`routes.second_thinking_type`). The selftest fails when the route rows
+  assert a refusal reason that is the outcome of no manifest row.
+- A row whose cells only its run knows (the models of a live account)
+  prints each cell it reached: the prefix
+  `reasoning-effort-receipt-observation ` and one JSON object that is exactly
+  an `observation` of the inputs schema (row, provider family, backend, API,
+  model, requested level, outcome, result). `record` reads those lines from
+  the run's output the same way and refuses an object with any other member;
+  `--observations FILE` adds a list from a file. The receipt reads a row's
+  observations only from a leg result that names the row's own test with a
+  pass or a fail: beside a test the run skipped or did not run they make no
+  entry, and the row is listed as source only with that reason. A failed
+  cell may carry the
+  HTTP status and an error code as typed fields, the code a word of the row's
+  own failure classes; never a provider's text or message. The two live rows
+  are `copilot_live_reasoning_effort_matrix` and
+  `direct_provider_live_reasoning_effort` of `meerkat-integration-tests`,
+  both ignored by default.
+- A live row prints the constant `<redacted>` for a model id it withheld.
+  The receipt records such a cell with its own result and the model as
+  observed with its id withheld, never as an id. The manifest may name models
+  a live row is to show (`named_models`: a cell and a model id). A cell
+  shows one only when it names that id on that route; a named model no cell
+  shows is an entry of its own and a gap, `model_not_proven` when a cell of
+  the route had its id withheld and `model_not_observed` otherwise. The
+  totals count those two on a line of their own, apart from the rows that
+  did not run.
+- A row may name a test that is written and not yet in the tree, with the
+  mark `awaited` on the test. A commit that does not define the test then
+  lists the row's cells as `not_run` with the reason `test_not_at_commit`;
+  without the mark a test the commit does not define is an error. The mark
+  goes when the test lands: the selftest fails while a marked test is in the
+  tree. No row of the manifest carries the mark at present: the built-binary
+  rows of the three direct provider routes and of the self-hosted server,
+  which were written ahead of their tests, name tests the tree defines.
+- `make reasoning-effort-receipt RESULTS=<directory> OUT=<directory>` (or
+  the script's `generate`) reads the version, the manifest and the test
+  sources from the commit and writes both files. An entry is `executed` only
+  when its leg ran at that commit and reported the entry's own result; it
+  then names the result file and its digest. A row in the source without
+  such a result is `source_only`, a cell no test covers is `not_run`, and
+  each is listed again under `gaps`. A leg without a result file, a result
+  of no leg, a file that does not match its schema, and a row whose test the
+  commit does not define (unless the manifest marks it `awaited`) are errors.
+- The output is the same bytes for the same inputs, and holds no path, host
+  name, URL, credential or e-mail address: such a string in an input is
+  refused. `verify` checks a written receipt against its schema, its
+  Markdown file and its result files' digests.
+- A receipt is written whatever it holds. `--check` (on `generate` and
+  `verify`; `CHECK=1` on the make target) judges it and exits 3 on any
+  failed entry and on any gap of the in-process and built-binary legs, which
+  need no credential and can always run. Gaps of the live legs never fail
+  it: it names each with its reason (a named model that is not proven is
+  one of them).
+
+`make ci-lanes-selftest` runs `scripts/reasoning-effort-receipt-selftest.mjs`,
+which also fails when the committed manifest names a test the tree does not
+define, or when the cell, case and row names the route rows and the live rows
+print are not the manifest's.
+
 ## Doctor
 
 Run:

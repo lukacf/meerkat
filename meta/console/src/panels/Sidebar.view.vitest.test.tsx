@@ -246,6 +246,49 @@ describe("Workbench nav (B14)", () => {
     expect(withAttention.onOpenControl.mock.calls.at(-1)?.[0]).toBe("gating");
   });
 
+  it("sits between Needs you and the Roster mast, whose controls are directly above the roster list", () => {
+    const view = render(<Sidebar {...withAttention} visibleControls={[...withAttention.visibleControls]} />);
+    const before = (first: Element, second: Element) => (
+      (first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+    );
+    const needsYou = view.getByRole("button", { name: /^Needs you/ });
+    const nav = view.getByRole("navigation", { name: "Workbench" });
+    const mast = view.getByText("Roster", { selector: ".sidebar__mast-title" });
+    const list = view.getByTestId("sidebar-agent-list");
+    expect(before(needsYou, nav)).toBe(true);
+    expect(nav.contains(view.getByTestId("nav:workgraph"))).toBe(true);
+    expect(before(nav, mast)).toBe(true);
+    // The mast, the view options and the search are one block, and the roster
+    // list is the very next element.
+    const head = mast.closest(".sidebar__head");
+    expect(head !== null && head.contains(view.getByTestId("sidebar-view-menu"))).toBe(true);
+    expect(head !== null && head.contains(view.getByTestId("sidebar-search"))).toBe(true);
+    expect(head !== null && head.nextElementSibling === list).toBe(true);
+    // The tab order is the same order: Needs you, the Workbench, the roster's
+    // controls, then the roster list.
+    const focusable = "button, input, a[href]";
+    const stops = [...view.getByTestId("sidebar-root").querySelectorAll(focusable)];
+    const stop = (element: Element | null) => (element ? stops.indexOf(element) : -1);
+    const order = [
+      stop(needsYou),
+      stop(view.getByTestId("sidebar-workbench-toggle")),
+      stop(view.getByTestId("nav:workgraph")),
+      stop(view.getByTestId("sidebar-view-menu")),
+      stop(view.getByTestId("sidebar-search")),
+      stop(list.querySelector(focusable)),
+    ];
+    expect(order.every((index) => index >= 0)).toBe(true);
+    expect(order.join(",")).toBe([...order].sort((a, b) => a - b).join(","));
+    view.unmount();
+
+    // Nothing needs the person: the Workbench comes first.
+    const quiet = render(<Sidebar {...props} visibleControls={["topology"]} />);
+    expect(quiet.queryByRole("button", { name: /^Needs you/ }) === null).toBe(true);
+    const quietNav = quiet.getByRole("navigation", { name: "Workbench" });
+    expect(quietNav.previousElementSibling?.getAttribute("data-testid")).toBe("sidebar-reorder-live");
+    expect(before(quietNav, quiet.getByText("Roster", { selector: ".sidebar__mast-title" }))).toBe(true);
+  });
+
   it("folds the Workbench away, keeps the choice per user and sums the attention on its head", () => {
     const first = render(<Sidebar {...withAttention} visibleControls={[...withAttention.visibleControls]} />);
     const toggle = first.getByTestId("sidebar-workbench-toggle");

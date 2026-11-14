@@ -63,7 +63,7 @@ member by stable `AgentIdentity`, not by an internal session or runtime binding.
 | Wiring | Undirected peer connectivity and mutual trust between members |
 | Runtime mode | `autonomous_host` by default, `turn_driven` when explicit control is needed |
 | Flow | Declarative workflow that dispatches steps to members |
-| Work lane | Cancellable tracked work submitted to a mob or member |
+| Work lane | Tracked work submitted to a mob or member |
 | Mobpack | Portable signed artifact containing a mob definition and optional assets |
 
 ## Agent Tools Vs Host APIs
@@ -111,6 +111,13 @@ included), and its result says it created the mob. The current identity is
 read from the session's stored metadata, which `rkat` and the JSON-RPC, REST
 and MCP servers keep; a session on the in-memory ephemeral session service,
 which keeps none, delegates on the route it was built with.
+
+<Warning>
+Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, a turn
+that cannot be started can permanently destroy the mobs its session owns. See
+the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
+for the affected releases, the cases and what to do.
+</Warning>
 
 For recurring teams, use explicit mobs instead of a chain of ad hoc delegates.
 
@@ -523,6 +530,19 @@ unless the realm config overrides it; either way it knows nothing about the
 mob or the member's role. The mob comms and WorkGraph operating skills are
 preloaded separately and survive any prompt override, so a role prompt does not
 have to repeat them.
+
+<Warning>
+Known issue, noted 2026-11-13: mob members run by the four binaries in the
+Linux x86_64 release archives (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`)
+are built without the built-in skills a mob preloads (`mob-communication`,
+and `workgraph-workflow` or `task-workflow` by profile): the spawn succeeds
+and the member still has its communication tools. A project copy of those
+skills does not restore them for members. Members of a mob run by the
+published Meta `rpc_gateway` are not affected. See the
+[known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
+for the releases and platforms that were checked and how each statement is
+known.
+</Warning>
 
 Identity-first hosts (Meta) have two more knobs that reach the prompt
 without editing the definition: `DurableAgentSpec.additional_instructions`,
@@ -1093,7 +1113,9 @@ are exempt gets a provisioned flow member, as a role with none does.
 ## Send Work
 
 Use member send for direct content delivery. Use the work lane when the caller
-needs a tracked, cancellable work reference.
+needs a work reference for the unit it submitted: `mob/submit_work` returns a
+`work_ref`. One submitted unit cannot be cancelled by that reference; see
+[Cancel work](#cancel-work) below.
 
 `mob/member_send`, SDK `Member.send`, and `mob/submit_work` with
 `origin: "external"` require the target's profile to set
@@ -1131,18 +1153,6 @@ required for internal flow dispatch or ordinary peer messaging.
       }
     }
     ```
-
-    ```json
-    {
-      "jsonrpc": "2.0",
-      "id": 7,
-      "method": "mob/cancel_work",
-      "params": {
-        "mob_id": "release-triage",
-        "work_ref": "work_123"
-      }
-    }
-    ```
   </Tab>
 </Tabs>
 
@@ -1150,6 +1160,38 @@ required for internal flow dispatch or ordinary peer messaging.
 helper spawn, fork, and respawn responses. Application code should pass it back
 to work-lane APIs as-is instead of constructing it from `mob_id` and
 `agent_identity`.
+
+### Cancel work
+
+One submitted unit cannot be cancelled. The host lists `mob/cancel_work`, and
+it is always refused. An otherwise valid call is refused with `-32602`:
+
+```text
+per-unit work cancellation is unsupported for <work_ref>: no work-tracking ledger is wired
+```
+
+The submitted unit runs on. A `work_ref` that is not a UUID is refused one
+step earlier, also with `-32602` (`work_ref must be a valid UUID: ...`).
+
+`mob/cancel_all_work` is a different call. It takes a `member_ref` and
+cancels the work that member had admitted when the cancel was taken, not one
+unit: the member's current run is cancelled at the run's next boundary, and
+the input it held queued is abandoned. Input admitted after the cancel is
+untouched. Cancelling an idle member is not an error. On success the result
+is `{"mob_id": "...", "ok": true}`.
+
+<Warning>
+Known issue in 0.9.5 through 0.9.14 (0.8.51 through 0.9.4 not determined),
+noted 2026-11-13, read from the source and not yet confirmed by a test: if a
+client has a turn of its own queued on that member's session
+(`mob/turn_start`, or `turn/start` on the member's session id),
+`mob/cancel_all_work` also abandons it, and the mobs that member's session
+owns are then destroyed. Work the mob itself admitted (member sends,
+submitted work) does not trigger this. See the
+[known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14).
+Until a release with the fix, do not call `mob/cancel_all_work` while such a
+turn is queued.
+</Warning>
 
 ## Flows
 
@@ -1448,7 +1490,7 @@ command. `rkat run --export-atif` writes a trajectory for a single-session run.
 | Watch events | `mob/events`, SDK event subscriptions |
 | Manage lifecycle | `mob/lifecycle`, `mob/retire`, `mob/respawn`, `mob/destroy` |
 | Manage flows | `mob/flows`, `mob/flow_run`, `mob/flow_status`, `mob/flow_cancel` |
-| Manage work | `mob/submit_work`, `mob/conclude_objective`, `mob/cancel_work`, `mob/cancel_all_work` |
+| Manage work | `mob/submit_work`, `mob/conclude_objective`, `mob/cancel_all_work`, `mob/cancel_work` (listed and always refused; see [Cancel work](#cancel-work)) |
 | Wait for startup | `mob/wait_kickoff`, `mob/wait_ready` |
 | Manage profiles | `mob/profile/create`, `mob/profile/get`, `mob/profile/list`, `mob/profile/update`, `mob/profile/delete` |
 

@@ -17,7 +17,7 @@ export ANTHROPIC_API_KEY=sk-...
 ```
 
 Every command that starts a session passes `--model claude-sonnet-4-6` (the
-`MODEL` variable near the top of `examples.sh`), so the Anthropic key is the
+`MODEL` variable set just before step 1 in `examples.sh`), so the Anthropic key is the
 only credential the script needs. Step 3 resumes the session from step 2
 without `--model` and keeps that session's model. To run against another
 provider, change `MODEL` and export that provider's key: setting an API key

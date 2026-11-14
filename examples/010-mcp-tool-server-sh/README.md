@@ -38,8 +38,8 @@ The script checks `ANTHROPIC_API_KEY` and its live step runs
 credential it needs. To run the live step against another provider, change
 both the `--model` argument and the key guard in `setup.sh`: setting an API key
 alone does not select its provider. The script redirects its state, context
-and user-config roots into `.work/`, so a model pinned in your ordinary realm
-does not apply to it.
+and user-config roots into `.work/`, so a model pinned in your own project,
+user or realm configuration does not apply to it.
 
 If `rkat` is not on your `PATH`, the script automatically falls back to
 repo-local binaries built by `./scripts/repo-cargo`.

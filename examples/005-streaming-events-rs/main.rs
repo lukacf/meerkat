@@ -4,7 +4,8 @@
 //! shows how to tap into that stream for real-time UIs, logging, or metrics.
 //!
 //! ## What you'll learn
-//! - Setting up an event channel with `tokio::sync::mpsc`
+//! - Setting up an event channel with `tokio::sync::mpsc` and giving it to
+//!   both the model adapter (text deltas) and the run (turn-level events)
 //! - Processing `AgentEvent` variants (text deltas, tool calls, etc.)
 //! - Using the SDK `spawn_event_logger` helper
 //!
@@ -23,6 +24,8 @@ use std::{
 use meerkat::{
     AgentBuilder, AgentEvent, AgentFactory, AnthropicClient, EventLoggerConfig, spawn_event_logger,
 };
+use meerkat_client::LlmClient;
+use meerkat_core::RunResult;
 use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
 use tokio::sync::mpsc;
@@ -57,6 +60,38 @@ async fn process_events(
     Ok(())
 }
 
+const MODEL: &str = "claude-sonnet-4-6";
+
+/// Runs one prompt and sends every event of the run to `event_tx`.
+///
+/// Text deltas are emitted by the model adapter; the agent emits the
+/// turn-level events. Give both the same channel: an adapter built without
+/// one (`build_llm_adapter`) emits no text deltas, and `run_with_events` does
+/// not add them.
+async fn run_streaming(
+    factory: &AgentFactory,
+    client: Arc<dyn LlmClient>,
+    store: Arc<StoreAdapter<JsonlStore>>,
+    prompt: &str,
+    event_tx: mpsc::Sender<AgentEvent>,
+) -> Result<RunResult, Box<dyn std::error::Error + Send + Sync>> {
+    let llm = factory
+        .build_llm_adapter_with_events(client, MODEL, Some(event_tx.clone()))
+        .await;
+    let mut agent = AgentBuilder::new()
+        .model(MODEL)
+        .system_prompt("You are a creative writing assistant.")
+        .max_tokens_per_turn(1024)
+        .build(Arc::new(llm), Arc::new(EmptyToolDispatcher), store)
+        .await?;
+
+    let result = agent.run_with_events(prompt.into(), event_tx).await?;
+    // The adapter inside `agent` holds a sender. The agent is dropped when
+    // this function returns, which closes the channel and so ends a consumer
+    // that reads until the channel is closed.
+    Ok(result)
+}
+
 async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
@@ -66,19 +101,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
-    let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
+    let client: Arc<dyn LlmClient> = Arc::new(AnthropicClient::new(api_key)?);
 
     let store = Arc::new(JsonlStore::new(store_dir));
     store.init().await?;
     let store = Arc::new(StoreAdapter::new(store));
-
-    let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4-6")
-        .system_prompt("You are a creative writing assistant.")
-        .max_tokens_per_turn(1024)
-        .build(Arc::new(llm), Arc::new(EmptyToolDispatcher), store)
-        .await?;
 
     // --- Option A: Use the built-in event logger (simplest) ---
     println!("=== Streaming with built-in logger ===\n");
@@ -91,12 +118,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         },
     );
 
-    let result = agent
-        .run_with_events(
-            "Write a short poem about a meerkat standing guard.".into(),
-            event_tx,
-        )
-        .await?;
+    let result = run_streaming(
+        &factory,
+        client.clone(),
+        store.clone(),
+        "Write a short poem about a meerkat standing guard.",
+        event_tx,
+    )
+    .await?;
 
     logger_handle.await?;
     println!("\n\n--- Stats ---");
@@ -107,12 +136,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
     let processor = tokio::spawn(process_events(event_rx, io::stdout()));
 
-    let result = agent
-        .run_with_events(
-            "Now write a limerick about the same meerkat.".into(),
-            event_tx,
-        )
-        .await;
+    let result = run_streaming(
+        &factory,
+        client,
+        store,
+        "Write a limerick about a meerkat standing guard.",
+        event_tx,
+    )
+    .await;
 
     // Join even if the agent failed. On I/O failure the receiver drops, so the
     // producer is not stranded waiting for an event consumer.

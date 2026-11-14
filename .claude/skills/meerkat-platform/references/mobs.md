@@ -279,7 +279,9 @@ for `OperatorMember` while the session is the bridge session of the recorded
 member at the recorded generation, or of its same-session successor (the
 same identity at a later generation reached from the recorded one by
 same-session successor steps alone, as `respawn_member` makes them), in the
-recorded parent incarnation.
+recorded parent incarnation. The successor clause is newer than the rest of
+this paragraph: 0.9.4 through 0.9.14 gave the grant to the recorded
+generation only.
 A mob a host created for the session
 (`mob_create_definition_with_owner_bridge_session`, recorded as `Session` or
 `Member`) is owned by the session but gets no grant. `Host`, `Ambiguous` and

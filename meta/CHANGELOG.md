@@ -1419,8 +1419,8 @@ Security, Upgrade and Changed.
     (`meta/retire_member`, then `meta/attach_existing_session` or
     `meta/ensure_member` with a resume session); an identity the roster
     unlisted and lists again; an agent that is archived and unarchived.
-    The reset and the delete are confirmed by a test; the others are read
-    from the source.
+    The reset, the delete, and the archive with its unarchive are
+    confirmed by tests; the others are read from the source.
   - Not brought back: a mob whose creator lost its management on 0.9.14
     stays as it is. Upgrading does not bring the mob back into its
     creator's reach. On a stock gateway the way found to end it is a

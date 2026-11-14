@@ -86,7 +86,9 @@ live_comms_mobs_live.md and comms in live_comms_mobs_comms.md.
   restart, the session that created a mob with the agent mob tools manages
   it again, and so does a creating member's same-session successor (not a
   creating member that was reset onto a fresh session, or retired and
-  seated again later; an operator grant restores manage).
+  seated again later; an operator grant restores manage). The successor
+  clause is newer than the rest of this item: 0.9.4 through 0.9.14 gave the
+  grant to the recorded generation only.
 
 ## Admission close (Rust hosts)
 

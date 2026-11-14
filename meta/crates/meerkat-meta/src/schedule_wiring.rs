@@ -1704,9 +1704,16 @@ where
     {
         return args;
     }
+    // A `reasoning_effort` member written on the prompt action is not a
+    // member of a mob send: the target goes on as it was written, so the
+    // schedule reader sees the member and refuses it (a `null` member names
+    // no level, as the reader reads it).
     if action_value_is_non_empty(action.get("system_prompt"))
         || action_value_is_non_empty(action.get("skill_refs"))
         || action_value_is_non_empty(action.get("additional_instructions"))
+        || action
+            .get("reasoning_effort")
+            .is_some_and(|level| !level.is_null())
     {
         return args;
     }

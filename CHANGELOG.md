@@ -1977,6 +1977,36 @@ them.
   REST `POST /sessions` and the MCP server's `meerkat_run` judge the level
   before a session exists and left none (confirmed by a test of each).
 
+- MCP server: a `meerkat_resume` that names the provider-neutral reasoning
+  effort level (`reasoning_effort`, set or clear, or the key of that name
+  inside `provider_params`) while a turn is running on its session is
+  answered at once with code `-32002` (session busy) and the data
+  `{"kind": "reasoning_effort_change_needs_idle_session"}`, the kind
+  JSON-RPC answers such a turn with. It is not queued, and nothing is
+  retired or stored: the running turn and the resumes behind it go on. Wait
+  for the running turn's answer, then send the resume again. The level on
+  `meerkat_resume` is new in this release, and no published version is
+  affected: before this fix such a resume waited behind the running turn
+  and then rebuilt the session, and when the level was one the model does
+  not accept, a resume that had been accepted behind it ended without
+  running (`-32003`, `session_resume_required`). A resume that rebuilds
+  the session for another field (`model`, `max_tokens`, `provider_params`
+  without the level, and the other build fields) is unchanged from 0.9.14:
+  it waits behind the running turn, rebuilds the session and runs, and the
+  resumes queued beside it run (confirmed by tests of this change, with
+  the level as the member, as the nested key and as a clear). `meerkat_run`
+  always creates its session, so it cannot meet this case.
+
+- Python and TypeScript SDKs: the busy answer to a turn that would change
+  the model identity of a session with unfinished work (`-32002`, data
+  `{"kind": "reasoning_effort_change_needs_idle_session"}`) is raised as
+  the SDK's general `MeerkatError` with the code and the data as sent, and
+  `reasoning_effort_refusal` / `reasoningEffortRefusal` do not read it as a
+  level refusal: they read only `reasoning_effort_refused` (a test in each
+  suite). No SDK code changes; the SDK pages name the kind, the turns it
+  covers and the advice (wait for the running turn's answer, then send the
+  turn again).
+
 ### Security
 
 - Examples: a build of `examples/032-wasm-webcm-agent` no longer contains
@@ -2718,6 +2748,31 @@ them.
   that request that rebuilds the session (`model`, `provider`,
   `max_tokens` and the rest). Set the level when the session is created
   (`POST /sessions`).
+
+- REST: a level or a `model` on a message for a session the server holds
+  live is refused at once whether or not a turn is running, and nothing is
+  stored or queued for it; a running turn and the messages queued behind it
+  go on, and the session takes its next turn (confirmed by a test of this
+  change). It is not an answer to retry when the session is idle: sending
+  the message again while the server holds the session is refused the same
+  way, and the typed busy answer of JSON-RPC
+  (`reasoning_effort_change_needs_idle_session`) is not used on REST.
+  `provider_params` is not a member of `POST /sessions/{id}/messages` and
+  is not read there: a message that carries it runs as a plain message and
+  sets no level (confirmed by a test of this change).
+
+- MCP server: a `meerkat_resume` that names the reasoning effort level
+  while a turn is running on its session is answered busy at once (see
+  Fixed). The server judges a level only when it rebuilds the session, so
+  on a busy session a level the model does not accept is answered busy
+  first, and its typed refusal when the resume is sent again (confirmed by
+  a test of this change). One window stays (read from the source, not
+  run): the server reads whether a turn is running before the resume does
+  anything else; a plain resume that starts between that read and the
+  level resume's own start runs, but a request queued behind that plain
+  resume can still be ended by the level resume's rebuild when the level
+  is one the model does not accept. It then answers `-32003`
+  (`session_resume_required`) without running; send it again.
 
 - A schedule's session spec is the one surface where the reasoning effort
   level is not accepted in this release. A schedule whose `create` spec

@@ -1475,9 +1475,11 @@ pub enum ScheduledSessionAction {
 }
 
 /// The derived reader of [`ScheduledSessionAction`]: the same variants and
-/// members, which the compiler checks against the type (a member added to
-/// one and not the other does not build). The action's own `Deserialize`
-/// wraps it.
+/// members. The compiler checks a member, and a variant added here, against
+/// the type. A variant added to the type alone would be written and then not
+/// read back, so the action's own `Deserialize`, which wraps this reader,
+/// names every variant of the type and stops building until it is added
+/// here too.
 #[derive(Deserialize)]
 #[serde(
     remote = "ScheduledSessionAction",
@@ -1517,7 +1519,14 @@ impl<'de> Deserialize<'de> for ScheduledSessionAction {
         let value = serde_json::Value::deserialize(deserializer)?;
         let writes_level = writes_reasoning_effort_member(&value);
         let action = ScheduledSessionActionReader::deserialize(value).map_err(DeError::custom)?;
-        if writes_level && matches!(action, Self::Prompt { .. }) {
+        // Every variant is named: a variant added to the type does not build
+        // here until it is given an arm, and a reader in
+        // `ScheduledSessionActionReader`.
+        let takes_no_level = match &action {
+            Self::Prompt { .. } => true,
+            Self::Event { .. } => false,
+        };
+        if writes_level && takes_no_level {
             return Err(DeError::custom(REASONING_EFFORT_DIRECTLY_ON_PROMPT_ACTION));
         }
         Ok(action)

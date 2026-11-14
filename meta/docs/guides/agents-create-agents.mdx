@@ -116,7 +116,7 @@ first message. A call that reaches the tools anyway is refused
 | Tool | Arguments | What it does |
 | --- | --- | --- |
 | `identity_create` | `agents: [{name, profile, display_name?, instructions?, context?, labels?, first_message?, peers?}]`, `request_id?` | Creates 1 to 256 agents, all together or not at all. They may name each other as peers. |
-| `identity_update` | `name`, `expected_spec_digest`, `set {display_name?, instructions?, context?, labels?, labels_remove?, profile?}`, `peers_add?`, `peers_remove?`, `request_id?` | Changes one agent. A member left out of `set` stays as it is. |
+| `identity_update` | `name`, `expected_spec_digest`, `set {display_name?, instructions?, context?, labels?, labels_remove?, profile?}`, `peers_add?`, `peers_remove?`, `request_id?` | Changes one agent. A member left out of `set` stays as it is. A profile move seats the agent again (see [Moving a profile](#moving-a-profile)). |
 | `identity_archive` | `name`, `expected_spec_digest`, `request_id?` | Stops an agent and keeps it: name, record, conversation and memory stay, its last conversation is harvested as for any agent that leaves, and messages to it are refused. Its schedules are paused with it. |
 | `identity_unarchive` | `name`, `expected_spec_digest`, `request_id?` | Brings an archived agent back on the conversation it had. The schedules its archive paused are resumed. |
 | `identity_remove` | `name`, `expected_spec_digest`, `request_id?` | Removes an agent for good. Its name is never available again; its last conversation is harvested as for any agent that leaves. Its schedules are ended. |
@@ -137,6 +137,8 @@ another mob, placement, binding, backend, addressability or runtime mode.
 Grants and schedules for a new agent are separate calls. An agent's
 addressability and runtime mode are set by the host (`meta/identity/create`,
 `meta/identity/update`); `identity_list` and `identity_get` read them back.
+A host's change of the runtime mode seats the agent again, as a profile move
+does (see [Moving a profile](#moving-a-profile)).
 There is no reset tool; a host resets an agent with its own methods.
 
 ### What a model is told
@@ -218,6 +220,27 @@ An update of an agent that waits changes its record only, and the agent still
 waits. An update that moves an agent into a profile the host prepares is
 refused `unsupported` at `set.profile`: the agent is created in that profile
 instead. Only a create answers `pending_preparation`.
+
+## Moving a profile
+
+A profile move (`set.profile`) seats the agent again on the same
+conversation, once it is idle: it goes on under the new profile's model,
+tools and skills. A host's change of the runtime mode
+(`set.runtime_mode_override` of `meta/identity/update`) seats the agent
+again in the same way.
+
+An agent that is seated again no longer lists or manages the mobs it
+created with its own tools: its mob tools answer no such mob, and its calls
+that name one are refused. The mobs and their members stay as they are. So
+have the agent destroy such a mob before its profile is moved, or leave the
+profile and the runtime mode of an agent that must go on managing its mobs
+as they are.
+
+Who can do this to an agent: another agent of the mob that the host's rules
+let change it, through `identity_update` (a profile move), and a host,
+through `meta/identity/update` (a profile move or a runtime-mode change).
+An agent cannot do it to itself: a change that names the caller is refused
+`self_change_refused`, and no tool takes a runtime mode.
 
 ## Changing instructions
 

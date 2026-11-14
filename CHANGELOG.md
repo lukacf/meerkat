@@ -1061,7 +1061,8 @@ them.
   test runs of development builds on 2026-11-11 and 2026-11-14, whose code
   for this is the same as in 0.9.14". The new tests drive the rule on the
   current source and replay the committed recording of a live run, in which
-  two later questions were reported as the rest of an earlier request; no
+  two later turns of the user (a question, and the goodbye that ends the
+  call) were reported as the rest of an earlier request; no
   test passes later words to a job that is still running (no recording
   holds that order). See Known limitations for what the fix does not cover.
 - `meerkat-contracts`, Python and TypeScript SDKs: the method catalog and

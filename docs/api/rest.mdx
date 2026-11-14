@@ -233,8 +233,7 @@ reports `truncated` and `next_after_seq` for `after_seq`.
 REST request cancellation is opt-in and request-ID based.
 
 <Warning>
-Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, cancelling
-a request that is still waiting behind another turn can permanently destroy
+Known issue, noted 2026-11-13: in Meerkat 0.8.0 through 0.9.14, cancelling a request that is still waiting behind another turn can permanently destroy
 the mobs of the session it was queued for. See
 the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
 for the affected releases, the cases and what to do.
@@ -660,7 +659,7 @@ Continue an existing session.
 </ParamField>
 
 <ParamField body="model" type="string | null" default="from session">
-  Model override for this turn. On materialized sessions this hot-swaps the LLM client for the remainder of the session. Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, a turn that cannot be started can permanently destroy the mobs its session owns. See the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14) for the affected releases, the cases and what to do.
+  Model override for this turn. On materialized sessions this hot-swaps the LLM client for the remainder of the session. Known issue, noted 2026-11-13: in releases up to and including 0.9.14 (the first affected release differs by case: see the release page for the range of each), a turn that cannot be started can permanently destroy the mobs its session owns. See the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14) for the affected releases, the cases and what to do.
 </ParamField>
 
 <ParamField body="provider" type="string | null" default="from session">
@@ -759,8 +758,7 @@ run of a mob member and returns `MobStopMemberRunResult`
 Cancel an uncommitted in-flight request that previously supplied `X-Meerkat-Request-Id`.
 
 <Warning>
-Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, cancelling
-a request that is still waiting behind another turn can permanently destroy
+Known issue, noted 2026-11-13: in Meerkat 0.8.0 through 0.9.14, cancelling a request that is still waiting behind another turn can permanently destroy
 the mobs of the session it was queued for. See
 the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
 for the affected releases, the cases and what to do.

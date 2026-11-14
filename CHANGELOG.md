@@ -1192,6 +1192,21 @@ them.
   a name the mob does not hold, and nothing is forked. Before, `council`
   was not held to the audience. Affects 0.9.11 through 0.9.14.
 
+- Mob: a `mob_destroy` refused by the mob tells an agent nothing of a
+  member the host's member tool audience
+  (`MobBuilder::with_member_tool_audience`) hides from that agent. Before,
+  a destroy the mob refused because a member's state could not be restored
+  named that member, its session and the cause to every caller, in the
+  refusal's message and in its data. An agent is now answered such a
+  refusal whole only when it names a member the agent is shown. A refusal
+  whose fields can name no member (a count of pending cleanup, a closed
+  actor channel, the mob's own state) is answered whole as well. Every
+  other refusal the mob answers is answered to an agent as one fixed text
+  with no data, on a host with no audience too, and is logged whole on the
+  host. The host's own destroy is answered as before. The member lists of
+  the report `mob_destroy` answers an agent hold only members the agent
+  was shown when the destroy started. Affects 0.9.11 through 0.9.14.
+
 - `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486, in
   Cargo.lock and in the example workspaces' lockfiles. Releases through
   0.9.14 build with 1.1.5. `meerkat-core` depends on `rustix` directly and
@@ -1410,6 +1425,14 @@ them.
   the forks seated before have no lineage. Write the records again, at a
   new revision, with `include_forks`; they then select the forks seated
   from then on.
+
+- Mob: an agent whose `mob_destroy` the mob refuses is now answered
+  `mob destroy refused. The destroy can be retried; the host's log has the
+  cause.`, with no data, for every refusal whose type does not show what it
+  names (an internal error's text, a pending lifecycle operation), also on
+  a host that installs no member tool audience. The host's log holds the
+  whole refusal at `warn`, with the mob's id; read the cause there. The
+  host's own destroy is answered as before.
 
 ### Known limitations
 

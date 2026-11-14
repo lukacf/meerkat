@@ -4784,6 +4784,12 @@ to a request that names a level).
   the change.
 - The one `kind` names the level in every busy cell, also when the request
   only changed the model.
+- The rule lives in the JSON-RPC turn requests only (`turn/start`,
+  `mob/turn_start`). What a mob sends its members by itself (flow steps,
+  kickoffs, peer messages, `mob/member_send`, a schedule's delivery, a
+  wake) enters through the runtime and is never answered busy; a model or
+  level change carried by such an input is judged only when its turn
+  starts.
 - A later release queues these turns.
 
 ### comms/send error data

@@ -196,7 +196,20 @@ them.
   does not accept is refused with the typed `reasoning_effort_refused`
   data. Remove the key, or send the level you mean. On `session/create`,
   `turn/start` and the MCP tools, 0.9.14 refused the key as an unknown
-  field.
+  field. The other wire paths that ignored the key are `mob/spawn`'s
+  `override_profile` and a profile or definition an agent writes with the
+  mob tools. A level set through a mob profile makes the mob's members
+  hold a level: the key beside a different provider effort, a thinking
+  budget, a raw reasoning body or reasoning turned off fails that member's
+  build with the typed refusal, and a JSON-RPC `mob/turn_start` with a
+  model or `provider_params` override on a member that has a turn running
+  or queued is answered `-32002` (`SESSION_BUSY`, data kind
+  `reasoning_effort_change_needs_idle_session`) where 0.9.14 queued it
+  (see Known limitations). A mob already stored by 0.9.14 keeps no level:
+  only a definition or request sent again sets one. Before upgrading,
+  check whether any mob definition a host sends to `mob/create`, any
+  `override_profile` or any agent-written profile carries
+  `reasoning_effort` inside `provider_params`.
 
 - `meerkat-rpc`: `handlers::turn::TurnOverrides` gains the field
   `reasoning_effort: Option<TurnMetadataOverride<EffortLevel>>` (see Added).

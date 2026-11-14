@@ -419,9 +419,23 @@ route (the four differences are listed under Changed in the changelog).
   profile. A session without a level emits no such event.
 - **The flat key.** From 0.9.15, `provider_params.reasoning_effort` on the wire is
   read as the provider-neutral level and judged. 0.9.14 ignored it in a
-  REST `POST /sessions` body, on `mob/turn_start` and in a mob profile sent
-  to `mob/create`, so a client that sent the key there by mistake can
-  be refused from 0.9.15. A schedule's session settings do not take the
+  REST `POST /sessions` body, on `mob/turn_start`, in a mob profile sent
+  to `mob/create`, in `mob/spawn`'s `override_profile` and in a profile or
+  definition an agent writes with the mob tools, so a client that sent the
+  key there by mistake can be refused from 0.9.15: a value that is no
+  level is refused when the request is read, and the key beside a
+  different provider effort, a thinking budget, a raw reasoning body or
+  reasoning turned off now fails that member's build. A level set this
+  way also makes the mob's members hold a level: a `mob/turn_start` with a
+  model or `provider_params` override on a member that has a turn running
+  or queued is answered `-32002` (`SESSION_BUSY`) where 0.9.14 queued it
+  (see "The price of holding a level" above). A mob already stored by
+  0.9.14 keeps no level: only a definition or request sent again sets one.
+  Check before upgrading: does any mob definition a host sends to
+  `mob/create`, any `override_profile` or any agent-written profile carry
+  `reasoning_effort` inside `provider_params` (not under `provider_tag`)?
+  Remove the key, or keep it on purpose and expect the members to hold
+  that level. A schedule's session settings do not take the
   key in 0.9.15: a schedule whose `create` spec carries it is refused when
   it is created or updated (0.9.14 refused it there as an unknown field).
 - **CLI scripts.** `rkat run --reasoning-effort <LEVEL>` exits 2 when the

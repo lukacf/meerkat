@@ -312,8 +312,9 @@ no system instruction besides the prompt: there a change applies only from a
 new conversation. A model the catalog does not know is treated as taking it
 only ahead of the conversation. The instruction status tells for a given
 agent. That compaction may never happen by itself: a conversation is
-compacted only when it has grown to about four fifths of the model's context
-window, never after a time or a number of turns. Until then the agent goes
+compacted only when it reaches its compaction threshold (by default about
+four fifths of the model's context window), never after a time or a number
+of turns. Until then the agent goes
 on following its earlier instructions. To bring the change into effect,
 reset the agent, which discards its conversation; **Instructions** below has
 it.
@@ -446,10 +447,14 @@ is already in the agent's record.
   (`runtime.instruction_status(namespace="meerkat.identity.instructions", key="editor", identity="editor")`)
   shows where a change stands, in `status["members"][0]["slots"][0]["state"]`:
   `{"state": "pending", "reason": "leading_prefix_only_lowering"}` is
-  recorded and not yet followed; `{"state": "effective"}` is followed. A
-  reset (`runtime.reset("editor")`, or the roster's reset action in the
-  Console) is always available: the agent starts a new conversation led by
-  the current instructions, and the earlier conversation is lost. The change
+  recorded and not yet followed; `{"state": "effective"}` is followed. Right
+  after the update the reason is `delivery_owed` for a moment: the change is
+  not in the agent's conversation yet (the other values are on the
+  [roster page](/concepts/roster#changing-an-agents-instructions)). A reset
+  (`runtime.reset("editor")`; in the Console, the roster's reset action where
+  the console configuration shows it, `show_reset`, and the viewer may reset
+  the agent) starts a new conversation led by the current instructions, and
+  the earlier conversation is lost. The call is always available. The change
   also takes effect at the agent's next compaction at the start of a run. A
   respawn does not bring the change into effect, and neither does an archive
   followed by an unarchive.

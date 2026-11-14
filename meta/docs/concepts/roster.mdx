@@ -532,11 +532,23 @@ Whatever the kind, `meta/instruction_status` is the authority for whether
 the change is in effect for the agent. Read it with the namespace
 `meerkat.identity.instructions` and the agent's name as `key` and as
 `identity`; the slot's state is then the member `members[0].slots[0].state`
-of the answer. `{"state": "pending", "reason": "leading_prefix_only_lowering"}`
-is a change that is recorded and not yet in effect on a model that takes a
-system instruction only ahead of the conversation;
-`{"state": "pending", "reason": "awaiting_run_start"}` is one that the
-agent's next run puts in effect; `{"state": "effective"}` is in effect.
+of the answer. Right after an update it reads
+`{"state": "pending", "reason": "delivery_owed"}`: the mob holds the record
+and has not recorded it in the agent's conversation yet. The mob records it
+there itself, as a rule within moments, without a run and without waking
+the agent; what happens when that write fails is under "What to know"
+above. The slot then reads one of:
+`{"state": "pending", "reason": "awaiting_run_start"}`, a change that the
+agent's next run puts in effect, on a model that takes a system instruction
+after conversation rows;
+`{"state": "pending", "reason": "leading_prefix_only_lowering"}`, a change
+that is recorded and not yet in effect, on a model that takes a system
+instruction only ahead of the conversation; `{"state": "effective"}`, in
+effect. These are not all the values: Meerkat has more reasons
+(`session_unborn` for an agent whose conversation no build has created,
+`lowering_unavailable` for a model whose wire carries no system row besides
+its prompt), a slot can read `blocked` with a reason of its own, and the
+list of reasons can grow, so keep a reason you do not know as it is.
 
 The update of the spec itself always stands.
 

@@ -189,6 +189,9 @@ Security, Upgrade and Changed.
   `UnifiedRuntimeBuilder` and both gateway binaries complete the bootstrap
   themselves.
 
+- Hosts whose customizer has side effects: see Known limitations, respawn
+  during a pending role move.
+
 - The published 0.9.14 Meta Python and TypeScript SDKs (the source of tag
   `meta-v0.9.14`) were run against a development build of this release's
   gateway with no provider key: every row of their own suites that starts a

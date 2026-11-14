@@ -4197,8 +4197,9 @@ For an identity that created mobs each clearing step has a cost of its own:
 - a respawn on 0.9.9 through 0.9.14: a stop or restart after it, before the
   identity has woken on the same session, is followed by the loss of the mobs
   its session owns. Restart first (that ends the busy refusal), respawn while
-  the identity's provider is available, and do not stop or restart again
-  until the identity is active on the same session;
+  the identity's provider is available, and do not stop or restart the
+  gateway again until the respawn has answered without an error and the
+  identity has then answered one message;
 - a respawn on every release, 0.9.15 included: after it has completed, the
   identity no longer lists a mob it created, and the calls tried that name
   the mob were refused, while the mob's members can go on running; the mobs'

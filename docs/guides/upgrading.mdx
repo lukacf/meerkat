@@ -1900,8 +1900,9 @@ compiling. A Meta probe that must keep the earlier rule checks
   failed `compact_member`, restart the gateway (this ends the busy
   refusal), then call `meta/respawn` for the identity while its provider is
   available, and do not stop or restart the gateway again until the
-  identity is active on the same session: the respawn seats the member
-  without the threshold and keeps its conversation. On these releases a
+  respawn has answered without an error and the identity has then answered
+  one message: the respawn seats the member without the threshold and keeps
+  its conversation. On these releases a
   stop or restart after a respawn, before the identity has woken on the
   same session, is followed by the loss of the mobs its session owns. After
   the restart a second `compact_member` that completes clears the threshold

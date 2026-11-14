@@ -1983,6 +1983,28 @@ them.
     to Dormant keeps its pending notices: they are still true of it, and
     their send wakes nothing.
 
+- `meerkat-mob`: a mob lift that follows a lift whose wait for a member's
+  retirement ran out no longer answers with that earlier lift's stale "still
+  in progress" result once the retirement has ended. A lift
+  (`MobHandle::resume`, the resume of `mob/lifecycle`) that has to retire a
+  member's old live actor first (the member's auth binding changed while the
+  mob was stopped, or the mob was reopened over an attachment an earlier
+  handle left) and waits for that longer than its 30 second budget answers a
+  retryable refusal (`LifecycleOperationProgressStalled`) while its attempt
+  goes on, and the attempt ends a moment later with
+  `LifecycleOperationPending` (`explicit_resume_attachment_retirement:<session>`).
+  The handle kept that late answer for the next caller, with no age limit:
+  the next lift, even long after the retirement had ended, was answered "mob
+  lifecycle operation is still in progress" at once and did nothing, and only
+  the lift after that one ran. A lift that finds a kept answer which is
+  itself a retryable refusal (its structured data says `retryable: true`) now
+  drops it and runs an attempt of its own: it lifts the mob once the
+  retirement has ended, and while the retirement is still running it waits
+  for it within its own budget and answers its own refusal. A kept success
+  and a kept error that is not retryable are still returned to the lift that
+  finds them, and a lift that joins an attempt still in flight still gets
+  that attempt's answer. Affects 0.8.22 through 0.9.14.
+
 - `meerkat-mob`: a member that was being woken could not be wired, messaged
   or notified for a short span of its wake (0.9.7 through 0.9.14: since
   members are woken on demand). A wake creates the member's session, and
@@ -2084,6 +2106,24 @@ them.
   every registration, by run. The known issue on the
   [0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
   says what to do on an affected release.
+
+- `meerkat-mob`: `MobHandle::retire` (and each step of
+  `MobHandle::retire_at_scope`) no longer answers
+  `SharedRetirementFailure(StaleMemberOperatorAuthority)` ("retire command no
+  longer matches the exact roster transport incarnation") when it meets a
+  retirement of the same member that the mob already runs: its own re-drive
+  of a started retirement once a store serves again or after a resume, or a
+  batch retirement. The member was retired all the same and a second retire
+  answered `Ok(())`; only that first answer was wrong (through 0.9.14).
+  Such a retire now joins the retirement: it waits within its own budget and
+  answers `Ok(())` once the member is retired, and the retirement's own
+  outcome when that retirement does not complete. When its budget ends first
+  it answers `MemberRetirementInProgress` if the retirement it met is
+  durably started, and `MemberRetirementAdmissionPending` if it is not yet
+  (a member of a batch retirement before its start, for one). A request that
+  names an incarnation the mob no longer holds, a retire, or a descendant
+  step of a scoped retire, held behind a respawn or a rotation of the member
+  included, is still refused with `StaleMemberOperatorAuthority`.
 
 - `meerkat-copilot` (GitHub Copilot device sign-in): an account no longer
   keeps the model list and the API base of an earlier sign-in after a new

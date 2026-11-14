@@ -195,6 +195,46 @@ Security, Upgrade and Changed.
   to set attributes while unpacking, so Meta's own use is not known to be
   affected.
 
+- A console whose visibility policy includes nested members listed the
+  participants of a running temporary council as members and read their
+  history into the timeline. The `ConsoleVisibilityPolicy` trait default and
+  `AllowAllConsoleVisibilityPolicy` include nested members; the stock
+  console, which hides them, was not affected. A participant is a fork of
+  its source member, so its history begins with a copy of the source's
+  earlier turns, and nothing linked it to its source: it was decided on its
+  own name, its council role and the labels it inherits. A caller the access
+  rules deny the source by identity, by role or through the member that
+  spawned it could therefore read the source's earlier turns in the
+  participant's frames, while the council ran and, in a timeline read by the
+  participant's name, after it ended; such a caller could also send to,
+  inspect and retire the participant by name. A rule on a label the
+  participant inherits still applied, so a source private to a person stayed
+  private. A council participant is now a console member on no policy: it is
+  not listed, every member action by its name (send, inspect, retire, blobs,
+  timeline) answers as for an agent that does not exist, the console reads
+  none of its history, and a frame a console stored for one is served to
+  nobody. A council's mob is known from the council's own record; a stored
+  frame whose mob id has a council mob's form (`council--...`) and names no
+  mob the runtime holds is treated the same, so those frames stay unserved
+  on a host that does not keep council records across a restart. Limits: an
+  ordinary mob whose id has that form is treated as a council's where the
+  console cannot tell the two apart, so under the id of a council that
+  settled a member named like one of that council's seats is listed while
+  its stored frames are not served, under that id every frame dated up to
+  the time the council settled stays unserved, whoever wrote it (the frames
+  of a later mob created under the id before the settling was recorded, and
+  its frames dated before the settling or without a real time, included),
+  and under the id of a council that still owes cleanup its members stay
+  unlisted and their frames unserved until the council settles. Other
+  nested members are listed and served as before while a runtime is
+  registered; with none registered no nested mob's stored frames are
+  served (see above).
+  Frames a console stored
+  for participants before this release stay in its console store, unserved.
+  Affected: 0.8.27 through 0.9.14. The 0.9.13 notes said the next release
+  would no longer list a council's participants; 0.9.14 shipped without
+  this change and still lists them.
+
 ### Upgrade
 
 - A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`

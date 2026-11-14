@@ -67,7 +67,7 @@ They replace the realm's composed `[confinement]` for every launch kind of
 this process. The workspace preset confines each launch to `--context-root`;
 without `--context-root` the server refuses to start with it. A start in which
 a confined process could change the server's realm state or user config
-document is refused (see [the host's own inputs](/concepts/configuration#the-hosts-own-inputs)).
+document is refused (see [the host's own inputs](/concepts/configuration#the-host%E2%80%99s-own-inputs)).
 At startup the server logs each launch kind's requested and effective
 confinement and warns for each required kind its platform cannot confine.
 
@@ -508,7 +508,7 @@ structured-output extraction fails. Inspect both `structured_output` and
 never requested. These optional REST fields are omitted when absent, not
 filled with `null`.
 
-### GET /sessions/{id}/history
+### GET /sessions/\{id\}/history
 
 Read committed transcript history for a session without changing the lightweight metadata shape of `GET /sessions/{id}`.
 

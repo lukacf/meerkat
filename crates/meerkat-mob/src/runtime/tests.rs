@@ -71176,7 +71176,10 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
         "one process-owned exact takeover must remain blocked behind B"
     );
 
-    let second = tokio::time::timeout(Duration::from_secs(3), resumed.resume())
+    // The first resume's late answer is a retryable refusal, so this retry
+    // runs an attempt of its own: it joins the retained takeover and waits
+    // for it within its own budget (two seconds in this profile).
+    let second = tokio::time::timeout(Duration::from_secs(5), resumed.resume())
         .await
         .expect("level-trigger retry must remain caller-bounded")
         .expect_err("retry must join the retained takeover");
@@ -71184,7 +71187,7 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
     assert_eq!(
         service.turn_finalization_acquire_counts(),
         (boundary_baseline.0 + 1, boundary_baseline.1),
-        "retry must observe the retained result instead of starting a duplicate takeover"
+        "retry must join the retained takeover instead of starting a duplicate one"
     );
 
     drop(held_gate);
@@ -71340,6 +71343,129 @@ async fn test_explicit_resume_terminal_survives_observer_drop_and_is_shared() {
         "observer drop and concurrent observers must not replay Resume"
     );
     responder.await.expect("Resume responder task");
+}
+
+/// What a kept answer says, by its own structured data, about asking again.
+fn kept_answer_says_retryable(error: &MobError) -> Option<bool> {
+    error
+        .structured_data()
+        .and_then(|data| data.get("retryable").and_then(serde_json::Value::as_bool))
+}
+
+/// Ask for a lift on a handle that keeps `kept`: the answer of an earlier
+/// explicit resume that no caller has read. Returns what the lift answered
+/// and how many Resume commands it sent to the actor; each one is admitted
+/// and answered Ok.
+async fn lift_over_a_kept_resume_answer(
+    kept: Result<(), MobError>,
+) -> (Result<(), MobError>, usize) {
+    // A row asks this more than once: each mob needs an id of its own.
+    let (handle, _service) =
+        create_test_mob(with_unique_mob_id(sample_definition(), "kept-answer")).await;
+    let (command_tx, mut command_rx) =
+        tokio::sync::mpsc::channel::<super::scope_gate::RoutedMobCommand>(4);
+    let shared_handle = MobHandle {
+        command_tx,
+        explicit_resume_operations: Arc::new(super::handle::ResumeOperationRegistry::default()),
+        ..handle
+    };
+    shared_handle.install_terminal_resume_result_for_test(kept);
+    let commands = Arc::new(AtomicUsize::new(0));
+    let responder_commands = Arc::clone(&commands);
+    let responder = tokio::spawn(async move {
+        while let Some(routed) = command_rx.recv().await {
+            let super::state::MobCommand::ResumeLifecycle {
+                admission,
+                reply_tx,
+                ..
+            } = routed.cmd
+            else {
+                panic!("expected ResumeLifecycle command");
+            };
+            responder_commands.fetch_add(1, Ordering::SeqCst);
+            admission.admit();
+            let _ = reply_tx.send(Ok(()));
+        }
+    });
+    let answer = tokio::time::timeout(
+        Duration::from_secs(5),
+        shared_handle.resume_until_for_test(Instant::now() + Duration::from_secs(5)),
+    )
+    .await
+    .expect("the lift answers");
+    let sent = commands.load(Ordering::SeqCst);
+    responder.abort();
+    (answer, sent)
+}
+
+/// A kept answer that is itself a retryable refusal is not a later lift's
+/// answer: the lift that finds it runs an attempt of its own.
+#[tokio::test]
+async fn test_a_lift_over_a_kept_retryable_refusal_runs_its_own_attempt() {
+    for kept in [
+        MobError::LifecycleOperationPending {
+            intent: "explicit_resume_attachment_retirement:kept".to_string(),
+        },
+        MobError::LifecycleOperationAdmissionPending {
+            intent: "explicit_resume".to_string(),
+            stage: "actor_command_admission",
+        },
+    ] {
+        assert_eq!(
+            kept_answer_says_retryable(&kept),
+            Some(true),
+            "precondition: the kept refusal says a retry can succeed: {kept}"
+        );
+        let refusal = kept.to_string();
+        let (answer, sent) = lift_over_a_kept_resume_answer(Err(kept)).await;
+        if let Err(error) = answer {
+            panic!("the lift was answered with a refusal (kept: `{refusal}`): {error}");
+        }
+        assert_eq!(
+            sent, 1,
+            "the lift over the kept refusal `{refusal}` ran one attempt of its own"
+        );
+    }
+}
+
+/// A kept Ok is still the answer of the lift that finds it: the mob was
+/// lifted, and no second Resume reaches the actor.
+#[tokio::test]
+async fn test_a_lift_over_a_kept_ok_is_answered_that_ok() {
+    let (answer, sent) = lift_over_a_kept_resume_answer(Ok(())).await;
+    answer.expect("the lift is answered the kept Ok");
+    assert_eq!(sent, 0, "a kept Ok is not replayed to the actor");
+}
+
+/// A kept error that does not say a retry can succeed (it says nothing about
+/// a retry, or says a retry cannot succeed) is still the answer of the lift
+/// that finds it.
+#[tokio::test]
+async fn test_a_lift_over_a_kept_hard_error_is_answered_that_error() {
+    for kept in [
+        MobError::Internal("kept hard failure".to_string()),
+        MobError::MemberReloadRequired {
+            member_id: AgentIdentity::from("kept-reload-member"),
+            reason: "kept durability reload".to_string(),
+        },
+    ] {
+        assert_ne!(
+            kept_answer_says_retryable(&kept),
+            Some(true),
+            "precondition: the kept error does not say a retry can succeed: {kept}"
+        );
+        let failure = kept.to_string();
+        let (answer, sent) = lift_over_a_kept_resume_answer(Err(kept)).await;
+        let error = answer.expect_err("the lift is answered the kept error");
+        assert!(
+            matches!(&error, MobError::SharedLifecycleFailure(inner) if inner.to_string() == failure),
+            "the lift is answered the kept error `{failure}`: {error:?}"
+        );
+        assert_eq!(
+            sent, 0,
+            "the kept error `{failure}` is not replayed to the actor"
+        );
+    }
 }
 
 #[tokio::test]
@@ -105350,6 +105476,11 @@ mod retire_absent;
 /// names, admitted in every step's own actor command, or nothing.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod retire_at_scope;
+/// An exact retire converges with what became of the incarnation it names:
+/// `Ok(())` once its retirement completed, a join of one durably started,
+/// and the stale refusal only for a request that is stale.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod retire_converges;
 mod retirement_isolation;
 /// #1814 owned rollbacks release the turn-finalization boundary before they
 /// take the lease a concurrent raw unregister holds into its cleanup.

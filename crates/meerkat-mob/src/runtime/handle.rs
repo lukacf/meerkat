@@ -325,10 +325,31 @@ pub(super) struct PendingResumeOperation {
     progress_rx: tokio::sync::watch::Receiver<super::state::LifecycleProgressObservation>,
 }
 
+impl PendingResumeOperation {
+    /// Whether this operation already ended with a refusal that itself says
+    /// asking again can succeed (the `retryable` fact of its own structured
+    /// data). An operation still in flight, one that ended Ok and one that
+    /// ended with any other error answer `false`.
+    fn ended_with_retryable_refusal(&self) -> bool {
+        match &*self.state_tx.borrow() {
+            ResumeOperationState::Terminal(result) => match result.as_ref() {
+                Ok(()) => false,
+                Err(error) => error.says_retryable(),
+            },
+            ResumeOperationState::AwaitingLifecycleAdmission
+            | ResumeOperationState::LifecycleAuthorityAdmitted
+            | ResumeOperationState::InvalidatedByLifecycleAuthority => false,
+        }
+    }
+}
+
 #[derive(Default)]
 struct ResumeOperationRegistryState {
     generation: u64,
     current: Vec<Arc<PendingResumeOperation>>,
+    /// How many operations this registry started.
+    #[cfg(test)]
+    started: u64,
 }
 
 /// Handle-clone shared custody for one process-owned explicit Resume.
@@ -337,6 +358,13 @@ struct ResumeOperationRegistryState {
 /// deadline. Actor-admitted Stop/Reset/Complete/Destroy/Shutdown advances the
 /// generation and invalidates the current slot, so a predecessor Resume
 /// terminal cannot be replayed after intervening lifecycle authority.
+///
+/// A kept result that is itself a retryable refusal is not replayed either.
+/// It can be the late answer of an attempt whose caller already left at its
+/// progress budget, and what it refused over (a member's retirement still in
+/// flight) may have ended since: the caller that finds it drops it and runs
+/// an attempt of its own. A kept Ok, a kept error that is not retryable and
+/// an operation still in flight are joined as before.
 #[derive(Default)]
 pub(super) struct ResumeOperationRegistry {
     state: std::sync::Mutex<ResumeOperationRegistryState>,
@@ -352,12 +380,18 @@ impl ResumeOperationRegistry {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(current) = state
+        let kept = state
             .current
             .iter()
             .find(|current| current.command_authority == *command_authority)
-        {
-            return (Arc::clone(current), false);
+            .cloned();
+        if let Some(current) = kept {
+            if !current.ended_with_retryable_refusal() {
+                return (current, false);
+            }
+            state
+                .current
+                .retain(|operation| !Arc::ptr_eq(operation, &current));
         }
         let (state_tx, _) =
             tokio::sync::watch::channel(ResumeOperationState::AwaitingLifecycleAdmission);
@@ -371,7 +405,32 @@ impl ResumeOperationRegistry {
             progress_rx,
         });
         state.current.push(Arc::clone(&pending));
+        #[cfg(test)]
+        {
+            state.started = state.started.wrapping_add(1);
+        }
         (pending, true)
+    }
+
+    /// How many operations this registry started, and whether it keeps an
+    /// answer of `command_authority`'s operation that no caller has read.
+    #[cfg(test)]
+    fn observation_for_test(
+        &self,
+        command_authority: &crate::control_policy::CommandAuthority,
+    ) -> (u64, bool) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let kept = state.current.iter().any(|current| {
+            current.command_authority == *command_authority
+                && matches!(
+                    &*current.state_tx.borrow(),
+                    ResumeOperationState::Terminal(_)
+                )
+        });
+        (state.started, kept)
     }
 
     pub(super) fn invalidate_after_lifecycle_admission(&self) {
@@ -8717,6 +8776,14 @@ impl MobHandle {
         self.send_resume_actor_command_until(deadline).await
     }
 
+    /// How many explicit Resume operations this handle's registry started,
+    /// and whether it keeps an answer no caller has read.
+    #[cfg(test)]
+    pub(super) fn explicit_resume_operations_for_test(&self) -> (u64, bool) {
+        self.explicit_resume_operations
+            .observation_for_test(&self.command_authority)
+    }
+
     #[cfg(test)]
     pub(super) fn install_terminal_resume_result_for_test(&self, result: Result<(), MobError>) {
         let (operation, is_new) = self.explicit_resume_operations.get_or_insert(
@@ -8783,6 +8850,11 @@ impl MobHandle {
         }
     }
 
+    /// Whether MobMachine shows the key's exact incarnation in a durably
+    /// admitted retirement: it still holds the incarnation's material, and
+    /// either marks its runtime Retiring or, past the retirement's archive
+    /// observation, maps the identity to no runtime (the roster anchor then
+    /// goes last).
     fn retirement_exactly_durably_admitted(&self, key: &RetirementOperationKey) -> bool {
         let state = self.machine_state_watch_rx.borrow().clone();
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&key.agent_identity);
@@ -8791,8 +8863,9 @@ impl MobHandle {
             .member_runtime_material_for_identity(&dsl_identity)
             .map(|material| material.to_domain_for_identity(&key.agent_identity))
             == Some((key.agent_runtime_id.clone(), key.fence_token))
-            && state.member_state_markers.get(&dsl_runtime_id)
+            && (state.member_state_markers.get(&dsl_runtime_id)
                 == Some(&mob_dsl::MobMemberState::Retiring)
+                || !state.identity_to_runtime.contains_key(&dsl_identity))
     }
 
     async fn wait_for_retirement_operation(
@@ -15862,7 +15935,14 @@ impl MobHandle {
     /// identity. A retire that races a spawn of the same identity (the spawn
     /// committed its membership after the retire read the roster) is refused
     /// with [`MobError::LifecycleOperationPending`], which is retryable:
-    /// retried after the spawn settles, it retires the new incarnation.
+    /// retried after the spawn settles, it retires the new incarnation. A
+    /// retire that meets a retirement of the same member the mob already
+    /// runs (its own re-drive of a started retirement, a batch retirement)
+    /// joins it: it waits within its own budget and answers `Ok(())` once
+    /// the member is retired. A retire held behind a respawn or a rotation
+    /// of the member names the incarnation that operation superseded: it is
+    /// refused with [`MobError::StaleMemberOperatorAuthority`] (inside
+    /// [`MobError::SharedRetirementFailure`]) and retires nothing.
     ///
     /// A successful return is the terminal lifecycle barrier for work owned by
     /// this mob incarnation. New member work has been fenced, any Mob-owned

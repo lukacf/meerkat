@@ -3379,8 +3379,15 @@ impl super::MobHandle {
     /// and an adoption of it are refused. Meanwhile the declared apply defers
     /// the identity, and afterwards refuses its name.
     ///
-    /// Answers once the member's retirement ended. A retirement that fails
-    /// leaves the removal marked: a retry of the same operation (which
+    /// Answers once the member's retirement ended. When the caller's
+    /// retirement budget ends first, the answer is the typed in-progress
+    /// error ([`MobError::is_retirement_in_progress`]): the removal is
+    /// committed, the mob still owns the retirement, and the same operation
+    /// again answers [`IdentityChangeOutcome::Replayed`]. When the retirement
+    /// was not yet admitted inside that budget the answer is
+    /// [`MobError::MemberRetirementAdmissionPending`] instead, which is not an
+    /// in-progress error; the same operation again then retires the member. A
+    /// retirement that fails leaves the removal marked: a retry of the same operation (which
     /// answers [`IdentityChangeOutcome::Replayed`]) or the mob's next start
     /// retires the member again.
     ///
@@ -3434,7 +3441,14 @@ impl super::MobHandle {
     /// preparation is settled, or the identity removed. Decided against a
     /// spec ([`IdentityArchiveChange::with_expected_spec_digest`]), it is
     /// refused [`IdentityChangeRefusal::StaleSpec`] when the row's spec moved
-    /// since. Answers once the member's retirement ended, as a removal does.
+    /// since. Answers once the member's retirement ended, as a removal does;
+    /// when the caller's retirement budget ends first, the answer is the
+    /// typed in-progress error ([`MobError::is_retirement_in_progress`]): the
+    /// archive is committed, the mob still owns the retirement, and the same
+    /// operation again answers [`IdentityChangeOutcome::Replayed`]. When the
+    /// retirement was not yet admitted inside that budget the answer is
+    /// [`MobError::MemberRetirementAdmissionPending`] instead, which is not an
+    /// in-progress error; the same operation again then retires the member.
     pub async fn archive_identity(
         &self,
         change: IdentityArchiveChange,

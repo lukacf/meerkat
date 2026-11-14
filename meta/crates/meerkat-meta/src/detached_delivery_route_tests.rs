@@ -1441,4 +1441,7 @@ mod completion_delivery {
             "the announcer alone keeps nothing alive"
         );
     }
+
+    /// The console's rows over this module's council fixture.
+    mod console_council_participants;
 }

@@ -3397,8 +3397,9 @@ struct WatchCustody {
 #[cfg(test)]
 #[derive(Default)]
 struct CatchUpTestHooks {
-    /// Runs on a watch worker at the start of a tick, outside every lock.
-    tick: Option<Box<dyn FnOnce() + Send>>,
+    /// Runs on a watch worker at the start of a tick, outside every lock,
+    /// with the tick's kind.
+    tick: Option<Box<dyn FnOnce(SqliteWatchTick) + Send>>,
     /// Runs inside a catch-up, under the catch-up lock, after the existence
     /// precheck.
     in_catch_up: Option<Box<dyn FnOnce(&Path) + Send>>,
@@ -3528,7 +3529,7 @@ impl SqliteMobEventCatchUp {
             Duration::from_millis(EVENT_WATCH_SAFETY_SWEEP_MS),
             move |tick| {
                 #[cfg(test)]
-                catch_up.run_tick_test_hook();
+                catch_up.run_tick_test_hook(tick);
                 if tick == SqliteWatchTick::Sweep && catch_up.event_tx.receiver_count() == 0 {
                     return SqliteWatchControl::Handled;
                 }
@@ -3666,10 +3667,10 @@ impl SqliteMobEventCatchUp {
 
 #[cfg(test)]
 impl SqliteMobEventCatchUp {
-    fn run_tick_test_hook(&self) {
+    fn run_tick_test_hook(&self, tick: SqliteWatchTick) {
         let hook = lock_unpoisoned(&self.test_hooks).tick.take();
         if let Some(hook) = hook {
-            hook();
+            hook(tick);
         }
     }
 
@@ -15776,19 +15777,34 @@ mod tests {
         drop(catch_up);
     }
 
-    /// Count every tick of `catch_up`'s watches from now on.
-    fn count_watch_ticks(catch_up: &Arc<SqliteMobEventCatchUp>) -> Arc<AtomicU64> {
-        fn arm(catch_up: &Arc<SqliteMobEventCatchUp>, ticks: &Arc<AtomicU64>) {
+    /// The ticks of `catch_up`'s watches from the moment the count is armed,
+    /// by kind.
+    #[derive(Default)]
+    struct WatchTicks {
+        /// Ticks a change woke.
+        changed: AtomicU64,
+        /// Safety sweeps: they tick on their interval whatever the store
+        /// does, so one is no sign of a wake.
+        sweeps: AtomicU64,
+    }
+
+    /// Count the ticks of `catch_up`'s watches from now on, by kind.
+    fn count_watch_ticks(catch_up: &Arc<SqliteMobEventCatchUp>) -> Arc<WatchTicks> {
+        fn arm(catch_up: &Arc<SqliteMobEventCatchUp>, ticks: &Arc<WatchTicks>) {
             let again = Arc::downgrade(catch_up);
             let count = Arc::clone(ticks);
-            lock_unpoisoned(&catch_up.test_hooks).tick = Some(Box::new(move || {
-                count.fetch_add(1, Ordering::SeqCst);
+            lock_unpoisoned(&catch_up.test_hooks).tick = Some(Box::new(move |tick| {
+                let kind = match tick {
+                    SqliteWatchTick::Changed => &count.changed,
+                    SqliteWatchTick::Sweep => &count.sweeps,
+                };
+                kind.fetch_add(1, Ordering::SeqCst);
                 if let Some(again) = again.upgrade() {
                     arm(&again, &count);
                 }
             }));
         }
-        let ticks = Arc::new(AtomicU64::new(0));
+        let ticks = Arc::new(WatchTicks::default());
         arm(catch_up, &ticks);
         ticks
     }
@@ -15796,8 +15812,9 @@ mod tests {
     /// A quiet observer's own catch-up wakes nothing. A catch-up opens the
     /// database read-only; as its first connection it creates the WAL and
     /// the WAL index and writes the index, and none of that is a change, so
-    /// one catch-up on a quiet store is followed by no tick (the sweep is
-    /// 5 s off). Before, each catch-up's open woke the next.
+    /// one catch-up on a quiet store is followed by no tick a change woke
+    /// (a safety sweep that falls in the window is not one). Before, each
+    /// catch-up's open woke the next.
     #[test]
     fn a_quiet_observers_own_catch_up_wakes_nothing() {
         let (_dir, path) = temp_db_path();
@@ -15822,9 +15839,99 @@ mod tests {
         catch_up.publish_available_from_storage().unwrap();
         std::thread::sleep(Duration::from_millis(500));
         assert_eq!(
-            ticks.load(Ordering::SeqCst),
+            ticks.changed.load(Ordering::SeqCst),
             0,
             "the observer's own catch-up woke its watch"
+        );
+        drop(stores);
+    }
+
+    /// A safety sweep is not a wake. The sweep is armed when the watch
+    /// starts and ticks on its interval whatever the store does, so a quiet
+    /// window can hold one. Here one is waited for: for a subscriber its
+    /// catch-up reads the quiet store, publishes nothing and, like every
+    /// catch-up, wakes no tick after it.
+    #[test]
+    fn a_safety_sweep_on_a_quiet_store_is_not_a_wake() {
+        let (_dir, path) = temp_db_path();
+        drop(SqliteMobStores::open(&path).unwrap());
+        let _drained = SqliteMobStores::drain_observers(&path).expect("no owner remains");
+        let held = open_existing_read_connection(&path).unwrap();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        wait_for_watch_registrations(&path);
+        let wal = path.with_file_name("mob.db-wal");
+        assert_eq!(
+            std::fs::metadata(&wal).map(|wal| wal.len()).unwrap_or(0),
+            0,
+            "the reopen committed nothing"
+        );
+        drop(held);
+        let catch_up = Arc::clone(&stores.event_bus.catch_up);
+        // With a subscriber the sweep reads the store instead of returning
+        // at once, so its catch-up tells that the sweep ran.
+        let mut rx = stores.event_store().subscribe().unwrap();
+        let ticks = count_watch_ticks(&catch_up);
+        let (swept_tx, swept_rx) = mpsc::channel();
+        lock_unpoisoned(&catch_up.test_hooks).in_catch_up = Some(Box::new(move |_: &Path| {
+            let _ = swept_tx.send(());
+        }));
+        swept_rx
+            .recv_timeout(Duration::from_millis(EVENT_WATCH_SAFETY_SWEEP_MS) + OBSERVER_HANG_GUARD)
+            .expect("the safety sweep reads the store for its subscriber");
+        assert!(
+            ticks.sweeps.load(Ordering::SeqCst) >= 1,
+            "the catch-up that read for the subscriber was not a safety sweep's"
+        );
+        // The quiet window after the sweep's own catch-up.
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            ticks.changed.load(Ordering::SeqCst),
+            0,
+            "a safety sweep on a quiet store was counted as a wake"
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            "the sweep published to a subscriber of a quiet store"
+        );
+        assert_eq!(*lock_unpoisoned(&catch_up.latest_broadcast_cursor), 0);
+        drop(stores);
+    }
+
+    /// The positive control of the two quiet rows above: a commit by
+    /// another writer is a tick a change woke, and it reaches the
+    /// subscriber. Without it those rows could pass blind: with a hook that
+    /// names every tick a sweep, or with a watch whose notifications never
+    /// registered (the commit would then arrive with the next sweep, and no
+    /// change tick would be counted).
+    #[test]
+    fn a_commit_by_another_writer_is_a_counted_tick() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        wait_for_watch_registrations(&path);
+        let catch_up = Arc::clone(&stores.event_bus.catch_up);
+        let mut rx = stores.event_store().subscribe().unwrap();
+        let ticks = count_watch_ticks(&catch_up);
+
+        raw_append(&path, 1);
+        let deadline = std::time::Instant::now()
+            + Duration::from_millis(EVENT_WATCH_SAFETY_SWEEP_MS)
+            + OBSERVER_HANG_GUARD;
+        let observed = loop {
+            match rx.try_recv() {
+                Ok(event) => break event,
+                Err(broadcast::error::TryRecvError::Empty) => {}
+                Err(error) => panic!("the subscription ended: {error}"),
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the subscriber never observed the other writer's commit"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(observed.cursor, 1);
+        assert!(
+            ticks.changed.load(Ordering::SeqCst) >= 1,
+            "the other writer's commit reached the subscriber, but no tick was counted as woken by a change"
         );
         drop(stores);
     }
@@ -15839,7 +15946,7 @@ mod tests {
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let (outcome_tx, outcome_rx) = mpsc::channel();
         let hook_path = path.clone();
-        lock_unpoisoned(&catch_up.test_hooks).tick = Some(Box::new(move || {
+        lock_unpoisoned(&catch_up.test_hooks).tick = Some(Box::new(move |_tick| {
             let _ = entered_tx.send(());
             let _ = release_rx.recv();
             let _ = outcome_tx.send(SqliteMobStores::drain_observers(&hook_path));

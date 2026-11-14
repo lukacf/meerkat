@@ -2254,7 +2254,24 @@ mod tests {
         release: Arc<tokio::sync::Notify>,
         maintenance_only: Arc<AtomicBool>,
         fail_maintenance: Arc<AtomicBool>,
+        /// The compaction summary requests served so far.
+        summary_requests: Arc<std::sync::atomic::AtomicUsize>,
+        /// Fail, for good, the request that follows each compaction summary:
+        /// the turn a compaction ran in ends in a terminal provider failure
+        /// with the compaction's rewrite already committed. It stands in for
+        /// Core's refusal of a request a compaction left no smaller, which
+        /// needs a client that reports each request's exact size; Meta's
+        /// wrappers of a mob-wide default client do not pass that on.
+        fail_after_compaction: Arc<AtomicBool>,
+        /// A compaction summary was served and the request after it is owed
+        /// its failure.
+        failure_owed: AtomicBool,
     }
+
+    /// The failure [`GatedUsageLlmClient`] ends the request after a
+    /// compaction with.
+    const REQUEST_AFTER_COMPACTION_FAILURE: &str =
+        "scripted: the request after the compaction is no smaller";
 
     impl meerkat_client::LlmClient for GatedUsageLlmClient {
         fn project_replay_messages(
@@ -2281,6 +2298,22 @@ mod tests {
             let gate_armed = self.gate_armed.load(Ordering::SeqCst)
                 && (!self.maintenance_only.load(Ordering::SeqCst) || maintenance);
             let fail = maintenance && self.fail_maintenance.load(Ordering::SeqCst);
+            // A compaction's summary request ends with the compactor's
+            // prompt.
+            let summary_request = request.messages.last().is_some_and(|prompt| {
+                serde_json::to_string(prompt)
+                    .expect("test request")
+                    .contains("You are performing a CONTEXT COMPACTION")
+            });
+            let fail_after_compaction = if summary_request {
+                self.summary_requests.fetch_add(1, Ordering::SeqCst);
+                if self.fail_after_compaction.load(Ordering::SeqCst) {
+                    self.failure_owed.store(true, Ordering::SeqCst);
+                }
+                false
+            } else {
+                self.failure_owed.swap(false, Ordering::SeqCst)
+            };
             let in_call = Arc::clone(&self.in_call);
             let entered = Arc::clone(&self.entered);
             let release = Arc::clone(&self.release);
@@ -2298,10 +2331,14 @@ mod tests {
                         released.await;
                     }
                     in_call.store(false, Ordering::SeqCst);
-                    if fail {
+                    if fail || fail_after_compaction {
                         return futures::stream::iter(vec![Err(
                             meerkat_client::LlmError::InvalidRequest {
-                                message: "injected terminal maintenance failure".to_string(),
+                                message: if fail {
+                                    "injected terminal maintenance failure".to_string()
+                                } else {
+                                    REQUEST_AFTER_COMPACTION_FAILURE.to_string()
+                                },
                             },
                         )]);
                     }
@@ -2362,6 +2399,8 @@ mod tests {
         release: Arc<tokio::sync::Notify>,
         maintenance_only: Arc<AtomicBool>,
         fail_maintenance: Arc<AtomicBool>,
+        summary_requests: Arc<std::sync::atomic::AtomicUsize>,
+        fail_after_compaction: Arc<AtomicBool>,
     }
 
     impl OperatorVerbHarness {
@@ -2423,6 +2462,24 @@ mod tests {
         /// Observe the exact probe's finalized receipt before tearing down the
         /// runtime; a session-wide completion cursor can precede finalization.
         async fn run_exact_probe(&self, text: &str) {
+            let session = self
+                .identity_runtime
+                .status(&self.identity)
+                .await
+                .expect("probe identity")
+                .session_id
+                .expect("probe session");
+            match self.exact_turn_outcome(text).await {
+                meerkat_runtime::CompletionOutcome::Completed(result) => {
+                    assert_eq!(result.session_id, session);
+                }
+                other => panic!("probe did not complete successfully: {other:?}"),
+            }
+        }
+
+        /// Run one turn on `text` and answer how its exact input ended, read
+        /// from the input's finalized receipt.
+        async fn exact_turn_outcome(&self, text: &str) -> meerkat_runtime::CompletionOutcome {
             use meerkat_runtime::SessionServiceRuntimeExt;
             let owner = meerkat_mob::MobSessionService::acquire_runtime_adapter(
                 self.concrete.as_ref(),
@@ -2465,19 +2522,33 @@ mod tests {
                             .await
                             .expect("probe terminal read")
                     {
-                        match outcome {
-                            meerkat_runtime::CompletionOutcome::Completed(result) => {
-                                assert_eq!(result.session_id, session);
-                                break;
-                            }
-                            other => panic!("probe did not complete successfully: {other:?}"),
-                        }
+                        break outcome;
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             })
             .await
-            .expect("exact probe finalizes within backstop");
+            .expect("exact probe finalizes within backstop")
+        }
+
+        /// The auto-compact threshold the member's own seat carries: the
+        /// profile override Core journals with the member's incarnation
+        /// (`MemberSpawned`), replays into its roster entry at a restart and
+        /// lowers into every build of the member. `None` when the member
+        /// follows its role's profile, as it does outside a compaction call.
+        async fn seat_threshold(&self) -> Option<u64> {
+            let member_id = meerkat_mob::AgentIdentity::from(
+                crate::member_comms_id::mob_member_id_str(self.identity.as_str()).into_owned(),
+            );
+            self.runtime
+                .mob_handle()
+                .get_member(&member_id)
+                .await
+                .expect("read member")
+                .expect("member present")
+                .effective_profile_override
+                .and_then(|profile| profile.auto_compact_threshold)
+                .map(NonZeroU64::get)
         }
 
         async fn transcript_facts(&self) -> (usize, Option<String>) {
@@ -2749,6 +2820,8 @@ mod tests {
         let release = Arc::new(tokio::sync::Notify::new());
         let maintenance_only = Arc::new(AtomicBool::new(false));
         let fail_maintenance = Arc::new(AtomicBool::new(false));
+        let summary_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fail_after_compaction = Arc::new(AtomicBool::new(false));
         let definition = meerkat_mob::MobDefinition::from_toml(&format!(
             r#"
 [mob]
@@ -2781,6 +2854,9 @@ comms = true
                 release: Arc::clone(&release),
                 maintenance_only: Arc::clone(&maintenance_only),
                 fail_maintenance: Arc::clone(&fail_maintenance),
+                summary_requests: Arc::clone(&summary_requests),
+                fail_after_compaction: Arc::clone(&fail_after_compaction),
+                failure_owed: AtomicBool::new(false),
             })),
         });
         mob_spec.committed_boundary_recoverer = Some(concrete.clone());
@@ -2936,6 +3012,8 @@ comms = true
             release,
             maintenance_only,
             fail_maintenance,
+            summary_requests,
+            fail_after_compaction,
         }
     }
 
@@ -3153,6 +3231,452 @@ comms = true
         )
         .await;
         harness.teardown().await;
+    }
+
+    /// A young agent's conversation, two short turns, on which the turn a
+    /// compaction runs in fails for good right after the compaction's
+    /// rewrite: what the call met in the live runs, where the summary of
+    /// the one turn a compaction folded was longer than that turn and Core
+    /// refused the request the rewrite left no smaller ("compaction is
+    /// irreducible at the configured retention"). The scripted client fails
+    /// the request after each compaction instead (see
+    /// `GatedUsageLlmClient::fail_after_compaction`).
+    async fn seed_a_conversation_too_short_to_shrink(harness: &OperatorVerbHarness) {
+        harness.fail_after_compaction.store(true, Ordering::SeqCst);
+        harness.run_turn("hello".to_string()).await;
+        harness.run_turn("one more message".to_string()).await;
+        assert_eq!(
+            (
+                harness.seat_threshold().await,
+                harness.summary_requests.load(Ordering::SeqCst),
+            ),
+            (None, 0),
+            "before the call the member follows its role's threshold and has not compacted"
+        );
+    }
+
+    /// `meta/compact_member` with its default floor, as an operator calls it.
+    async fn compact_with_the_default_floor(harness: &OperatorVerbHarness) -> Value {
+        rpc(
+            harness,
+            "meta/compact_member",
+            serde_json::json!({
+                "identity": harness.member_alias,
+                "timeout_ms": 30_000,
+            }),
+        )
+        .await
+    }
+
+    /// The call's answer when its maintenance turn failed right after its
+    /// compaction: that turn's own failure, typed.
+    fn assert_the_maintenance_turn_failed_after_its_compaction(response: &Value) {
+        let data = &response["error"]["data"];
+        assert_eq!(
+            (
+                data["kind"].as_str(),
+                data["completion_type"].as_str(),
+                response
+                    .to_string()
+                    .contains(REQUEST_AFTER_COMPACTION_FAILURE),
+            ),
+            (
+                Some("compact_member_completion_failed"),
+                Some("abandoned_with_error"),
+                true
+            ),
+            "the call answers its maintenance turn's failure: {response:#}"
+        );
+    }
+
+    /// `meta/compact_member` on a conversation too short to shrink answers
+    /// its maintenance turn's failure, and the temporary threshold does not
+    /// outlive the call: the answer says the profile was restored, the
+    /// call's registry entry is gone, and the member's seat (what a later
+    /// build and a restart read) carries no threshold of its own, right
+    /// after the call and after the member is rebuilt once more. The
+    /// compaction's rewrite stays in the conversation.
+    ///
+    /// RED before the call restored the profile on a definite failed
+    /// terminal: the answer's stage was `terminal`, the registry kept the
+    /// entry, and the seat kept the floor (1024).
+    async fn assert_a_failed_short_compaction_restores_the_profile(harness: &OperatorVerbHarness) {
+        seed_a_conversation_too_short_to_shrink(harness).await;
+        let session_before = harness
+            .identity_runtime
+            .status(&harness.identity)
+            .await
+            .expect("the identity's status")
+            .session_id;
+
+        let rows_before = harness.settled_transcript_count().await;
+        let response = compact_with_the_default_floor(harness).await;
+        assert_the_maintenance_turn_failed_after_its_compaction(&response);
+        let registry_after_the_call = harness.floors.get(&harness.identity).map(NonZeroU64::get);
+        let seat_after_the_call = harness.seat_threshold().await;
+        harness
+            .wait_for_runtime_settled("the failed maintenance run before the respawn's retire")
+            .await;
+        let rows_after = harness.settled_transcript_count().await;
+        let (_, last_rewrite) = harness.transcript_facts().await;
+        eprintln!(
+            "the failed call's conversation: {rows_before} rows before, {rows_after} after, last \
+             rewrite {last_rewrite:?}"
+        );
+        harness
+            .identity_runtime
+            .respawn_tracked(&harness.identity)
+            .await
+            .expect("the member is rebuilt once more");
+        let seat_after_a_rebuild = harness.seat_threshold().await;
+        assert_eq!(
+            (
+                response["error"]["data"]["stage"].as_str(),
+                registry_after_the_call,
+                seat_after_the_call,
+                seat_after_a_rebuild,
+            ),
+            (Some("profile_restored"), None, None, None),
+            "(the answer's stage, the registry's floor, the seat's threshold after the call, the \
+             seat's threshold after a rebuild): {response:#}"
+        );
+        assert_eq!(
+            harness
+                .identity_runtime
+                .status(&harness.identity)
+                .await
+                .expect("the identity's status")
+                .session_id,
+            session_before,
+            "the rebuilds keep the member's session"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_member_on_a_conversation_too_short_to_shrink_restores_the_profile() {
+        let harness = operator_verb_harness("worker:main", "operator-compact-short").await;
+        assert_a_failed_short_compaction_restores_the_profile(&harness).await;
+        harness.teardown().await;
+    }
+
+    /// The same for an identity whose record is its row in the mob's
+    /// identity store: Core's same-session successor carried the floor, and
+    /// the restoring rebuild asks Core to remove it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_member_on_a_rows_conversation_too_short_to_shrink_restores_the_profile() {
+        let harness = operator_verb_harness_of_a_row("keeper", "operator-compact-short-row").await;
+        assert_a_failed_short_compaction_restores_the_profile(&harness).await;
+        harness.teardown().await;
+    }
+
+    /// The ordinary turns after such a call run on the profile's own
+    /// threshold: none compacts, and each completes. Four turns cover the
+    /// compaction cadence (one attempt per three model requests).
+    ///
+    /// RED before the call restored the profile: the member kept the floor,
+    /// the third model request after the call compacted again, and that
+    /// turn ended `abandoned_with_error` as the maintenance turn had.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ordinary_turns_after_a_failed_short_compaction_complete() {
+        let harness = operator_verb_harness("worker:main", "operator-compact-short-turns").await;
+        seed_a_conversation_too_short_to_shrink(&harness).await;
+        let response = compact_with_the_default_floor(&harness).await;
+        assert_the_maintenance_turn_failed_after_its_compaction(&response);
+        let compactions_of_the_call = harness.summary_requests.load(Ordering::SeqCst);
+
+        let mut ends = Vec::new();
+        for turn in 0..4 {
+            let end = harness
+                .exact_turn_outcome(&format!("ordinary turn {turn}"))
+                .await;
+            ends.push(match end {
+                meerkat_runtime::CompletionOutcome::Completed(_) => "completed".to_string(),
+                other => format!("{other:?}"),
+            });
+        }
+        assert_eq!(
+            (
+                ends,
+                harness.summary_requests.load(Ordering::SeqCst) - compactions_of_the_call,
+            ),
+            (vec!["completed".to_string(); 4], 0),
+            "(how each ordinary turn after the call ended, the compactions they ran)"
+        );
+        harness.teardown().await;
+    }
+
+    /// A second call right after the failed one is taken: nothing of the
+    /// first call still owns the member.
+    ///
+    /// RED before the call restored the profile: the second call answered
+    /// `compact_member_busy` ("a prior compaction floor remains unsettled")
+    /// until the gateway restarted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_compact_call_after_a_failed_short_compaction_is_not_refused_busy() {
+        let harness = operator_verb_harness("worker:main", "operator-compact-short-again").await;
+        seed_a_conversation_too_short_to_shrink(&harness).await;
+        let first = compact_with_the_default_floor(&harness).await;
+        assert_the_maintenance_turn_failed_after_its_compaction(&first);
+
+        let second = compact_with_the_default_floor(&harness).await;
+        assert_ne!(
+            second["error"]["data"]["kind"].as_str(),
+            Some("compact_member_busy"),
+            "the second call is taken: {second:#}"
+        );
+        assert_eq!(
+            (
+                harness.floors.get(&harness.identity).map(NonZeroU64::get),
+                harness.seat_threshold().await,
+            ),
+            (None, None),
+            "the second call leaves no floor either: {second:#}"
+        );
+        harness.teardown().await;
+    }
+
+    /// The guard of the rows above: on a conversation long enough to shrink
+    /// the call still succeeds, for an identity whose record is its row too,
+    /// and the member's seat carries no threshold of its own afterwards.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_member_on_a_long_conversation_leaves_no_threshold_on_the_seat() {
+        for record_is_its_row in [false, true] {
+            let harness = if record_is_its_row {
+                operator_verb_harness_of_a_row("keeper", "operator-compact-long-row").await
+            } else {
+                operator_verb_harness("worker:main", "operator-compact-long").await
+            };
+            let fat = "seeded transcript ballast ".repeat(160);
+            for turn in 0..8 {
+                harness.run_turn(format!("turn {turn}: {fat}")).await;
+            }
+            let response = compact_with_the_default_floor(&harness).await;
+            assert!(
+                response["error"].is_null(),
+                "compact_member must succeed: {response:#}"
+            );
+            assert_eq!(
+                (
+                    response["result"]["compaction_applied"].as_bool(),
+                    harness.floors.get(&harness.identity).map(NonZeroU64::get),
+                    harness.seat_threshold().await,
+                ),
+                (Some(true), None, None),
+                "(compaction applied, the registry's floor, the seat's threshold): {response:#}"
+            );
+            harness.teardown().await;
+        }
+    }
+
+    /// Reads the maintenance input's own terminal, then answers
+    /// `substitute` of it: a terminal class no scripted run produces.
+    struct SubstitutedTerminalObserver {
+        inner: Arc<meerkat_runtime::MeerkatMachine>,
+        substitute: fn(meerkat_runtime::CompletionOutcome) -> meerkat_runtime::CompletionOutcome,
+    }
+
+    #[async_trait::async_trait]
+    impl CompactCompletionObserver for SubstitutedTerminalObserver {
+        async fn observe(
+            &self,
+            session_id: &meerkat_core::SessionId,
+            key: &str,
+            input_id: &mut Option<meerkat_core::lifecycle::InputId>,
+        ) -> Result<Option<meerkat_runtime::CompletionOutcome>, meerkat_runtime::RuntimeDriverError>
+        {
+            CompactCompletionObserver::observe(self.inner.as_ref(), session_id, key, input_id)
+                .await
+                .map(|terminal| terminal.map(self.substitute))
+        }
+    }
+
+    /// One compaction call (floor 256) on a seeded member whose maintenance
+    /// turn's terminal the call reads as `substitute` of the real one.
+    /// Answers the call's response, the registry's floor and the seat's
+    /// threshold afterwards.
+    async fn compact_with_a_substituted_terminal(
+        mob_id: &str,
+        substitute: fn(meerkat_runtime::CompletionOutcome) -> meerkat_runtime::CompletionOutcome,
+    ) -> (Value, Option<u64>, Option<u64>) {
+        let harness = operator_verb_harness("worker:main", mob_id).await;
+        let fat = "seeded transcript ballast ".repeat(160);
+        for turn in 0..4 {
+            harness.run_turn(format!("turn {turn}: {fat}")).await;
+        }
+        let operation = CompactOperation {
+            ctx: harness.identity_ctx(),
+            identity: harness.identity.clone(),
+            expected_alias: None,
+            observer: Arc::new(SubstitutedTerminalObserver {
+                inner: meerkat_mob::MobSessionService::acquire_runtime_adapter(
+                    harness.concrete.as_ref(),
+                    None,
+                )
+                .expect("acquire the operator fixture runtime owner")
+                .expect("persistent owner"),
+                substitute,
+            }),
+            admission: Arc::new(IdentityCompactionAdmission),
+            floors: harness.floors.clone(),
+            floor: NonZeroU64::new(256).expect("floor"),
+            timeout_ms: 30_000,
+            response_id: serde_json::json!(1),
+            operation_id: meerkat_core::SessionId::new().to_string(),
+        };
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        let runtime = harness.identity_runtime.clone();
+        let response = runtime
+            .run_tracked_foreground(async move { Ok(operation.run(sender).await) })
+            .await
+            .expect("the owned operation answers");
+        let response = serde_json::to_value(response).expect("a json-rpc response");
+        let registry = harness.floors.get(&harness.identity).map(NonZeroU64::get);
+        let seat = harness.seat_threshold().await;
+        harness.teardown().await;
+        (response, registry, seat)
+    }
+
+    /// A definite terminal of the maintenance input that is not its
+    /// completion (abandoned, or consumed with no result) is answered as an
+    /// error with the profile restored, like the failed terminal of the rows
+    /// above: the input ended for good, so nothing of it runs on the
+    /// rebuilt member.
+    ///
+    /// RED before the call restored the profile on a definite terminal: each
+    /// class answered stage `terminal` and left the floor (256).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_member_restores_the_profile_on_each_definite_terminal() {
+        let classes: [(
+            &str,
+            &str,
+            fn(meerkat_runtime::CompletionOutcome) -> meerkat_runtime::CompletionOutcome,
+        ); 2] = [
+            ("abandoned", "operator-definite-abandoned", |_| {
+                meerkat_runtime::CompletionOutcome::Abandoned {
+                    reason: "substituted".to_string(),
+                    error: meerkat_core::event::TurnErrorMetadata::runtime_apply_failure(
+                        "substituted",
+                    ),
+                }
+            }),
+            (
+                "completed_without_result",
+                "operator-definite-without-result",
+                |_| meerkat_runtime::CompletionOutcome::CompletedWithoutResult,
+            ),
+        ];
+        for (class, mob_id, substitute) in classes {
+            let (response, registry, seat) =
+                compact_with_a_substituted_terminal(mob_id, substitute).await;
+            let data = &response["error"]["data"];
+            assert_eq!(
+                (
+                    data["kind"].as_str(),
+                    data["completion_type"].as_str(),
+                    data["stage"].as_str(),
+                    registry,
+                    seat,
+                ),
+                (
+                    Some("compact_member_completion_failed"),
+                    Some(class),
+                    Some("profile_restored"),
+                    None,
+                    None,
+                ),
+                "(kind, completion type, stage, the registry's floor, the seat's threshold): \
+                 {response:#}"
+            );
+        }
+    }
+
+    /// A terminal that is not definite still restores nothing: the answer
+    /// is the error at stage `terminal`, the call's registry entry stays
+    /// (later calls are refused busy) and the member's seat keeps the
+    /// floor. Nothing proves the maintenance input ended for good on the
+    /// captured session, so a rebuild could act under work that still runs
+    /// or runs again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_member_restores_nothing_on_each_terminal_that_is_not_definite() {
+        let classes: [(
+            &str,
+            &str,
+            fn(meerkat_runtime::CompletionOutcome) -> meerkat_runtime::CompletionOutcome,
+        ); 6] = [
+            (
+                "wrong_session",
+                "operator-indefinite-session",
+                |terminal| match terminal {
+                    meerkat_runtime::CompletionOutcome::Completed(mut result) => {
+                        result.session_id = meerkat_core::SessionId::new();
+                        meerkat_runtime::CompletionOutcome::Completed(result)
+                    }
+                    other => panic!("the seeded maintenance turn completes: {other:?}"),
+                },
+            ),
+            ("callback_pending", "operator-indefinite-callback", |_| {
+                meerkat_runtime::CompletionOutcome::CallbackPending {
+                    tool_use_id: "call-1".to_string(),
+                    tool_name: "probe".to_string(),
+                    args: serde_json::json!({}),
+                    dedupe_key: None,
+                }
+            }),
+            (
+                "callback_batch_pending",
+                "operator-indefinite-callbacks",
+                |_| meerkat_runtime::CompletionOutcome::CallbackBatchPending {
+                    pending_tool_calls: Vec::new(),
+                },
+            ),
+            (
+                "completed_with_finalization_failure",
+                "operator-indefinite-finalization",
+                |_| meerkat_runtime::CompletionOutcome::CompletedWithFinalizationFailure {
+                    error: meerkat_core::event::TurnErrorMetadata::runtime_apply_failure(
+                        "substituted",
+                    ),
+                },
+            ),
+            (
+                "runtime_terminated",
+                "operator-indefinite-terminated",
+                |_| meerkat_runtime::CompletionOutcome::RuntimeTerminated {
+                    reason: "substituted".to_string(),
+                    error: meerkat_core::event::TurnErrorMetadata::runtime_apply_failure(
+                        "substituted",
+                    ),
+                },
+            ),
+            ("outcome_unknown", "operator-indefinite-unknown", |_| {
+                meerkat_runtime::CompletionOutcome::OutcomeUnknown {
+                    run_id: meerkat_core::lifecycle::RunId::new(),
+                }
+            }),
+        ];
+        for (class, mob_id, substitute) in classes {
+            let (response, registry, seat) =
+                compact_with_a_substituted_terminal(mob_id, substitute).await;
+            let data = &response["error"]["data"];
+            assert_eq!(
+                (
+                    data["kind"].as_str(),
+                    data["completion_type"].as_str(),
+                    data["stage"].as_str(),
+                    registry,
+                    seat,
+                ),
+                (
+                    Some("compact_member_completion_failed"),
+                    Some(class),
+                    Some("terminal"),
+                    Some(256),
+                    Some(256),
+                ),
+                "(kind, completion type, stage, the registry's floor, the seat's threshold): \
+                 {response:#}"
+            );
+        }
     }
 
     /// The identity pairs Core's roster holds wired, either directed half,
@@ -3583,8 +4107,15 @@ comms = true
         harness.teardown().await;
     }
 
+    /// A maintenance turn that ends in a definite failure (its provider
+    /// call failed for good) is answered as that failure, typed, with the
+    /// profile restored: the member is rebuilt on its session without the
+    /// floor, and the call's registry entry is gone.
+    ///
+    /// RED before the call restored the profile on a definite failed
+    /// terminal: the registry kept the entry and the member was not rebuilt.
     #[tokio::test(flavor = "multi_thread")]
-    async fn compact_member_failed_exact_terminal_does_not_authorize_rebuild() {
+    async fn compact_member_failed_exact_terminal_restores_the_profile_before_answering() {
         let harness = held_compaction_harness("operator-terminal-failure").await;
         harness.fail_maintenance.store(true, Ordering::SeqCst);
         let caller = start_held_compaction(&harness);
@@ -3596,24 +4127,94 @@ comms = true
             .expect("status");
         release_compaction_and_join(&harness).await;
         let response = caller.await.expect("caller result");
-        assert_eq!(
-            response["error"]["data"]["kind"],
-            "compact_member_completion_failed"
-        );
-        assert!(
-            response["error"]["data"]["completion_type"]
-                .as_str()
-                .is_some()
-        );
         assert!(response["result"].is_null());
-        assert!(harness.floors.get(&harness.identity).is_some());
         let after = harness
             .identity_runtime
             .status(&harness.identity)
             .await
             .expect("status");
+        let data = &response["error"]["data"];
+        assert_eq!(
+            (
+                data["kind"].as_str(),
+                data["completion_type"].as_str(),
+                data["stage"].as_str(),
+                harness.floors.get(&harness.identity).map(NonZeroU64::get),
+                harness.seat_threshold().await,
+                after.agent_runtime_id != before.agent_runtime_id,
+            ),
+            (
+                Some("compact_member_completion_failed"),
+                Some("abandoned_with_error"),
+                Some("profile_restored"),
+                None,
+                None,
+                true,
+            ),
+            "(kind, completion type, stage, the registry's floor, the seat's threshold, the \
+             member was rebuilt): {response:#}"
+        );
         assert_eq!(after.session_id, before.session_id);
-        assert_eq!(after.agent_runtime_id, before.agent_runtime_id);
+        harness
+            .run_exact_probe("after the failed maintenance turn")
+            .await;
+        harness.teardown().await;
+    }
+
+    /// A maintenance turn an operator cancels ends in the cancellation
+    /// terminal, which is definite: the call answers it, typed, with the
+    /// profile restored.
+    ///
+    /// RED before the call restored the profile on a definite terminal: the
+    /// answer's stage was `terminal`, and the floor stayed on the member.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_member_cancelled_exact_terminal_restores_the_profile_before_answering() {
+        let harness = held_compaction_harness("operator-terminal-cancelled").await;
+        let caller = start_held_compaction_with_timeout(&harness, 30_000);
+        wait_for_held_compaction(&harness).await;
+        let before = harness
+            .identity_runtime
+            .status(&harness.identity)
+            .await
+            .expect("status");
+        harness
+            .runtime
+            .mob_handle()
+            .force_cancel_member(meerkat_mob::AgentIdentity::from(
+                crate::member_comms_id::mob_member_id_str(harness.identity.as_str()).into_owned(),
+            ))
+            .await
+            .expect("the held maintenance turn is cancelled");
+        release_compaction_and_join(&harness).await;
+        let response = caller.await.expect("caller result");
+        let after = harness
+            .identity_runtime
+            .status(&harness.identity)
+            .await
+            .expect("status");
+        let data = &response["error"]["data"];
+        assert_eq!(
+            (
+                data["kind"].as_str(),
+                data["completion_type"].as_str(),
+                data["stage"].as_str(),
+                harness.floors.get(&harness.identity).map(NonZeroU64::get),
+                harness.seat_threshold().await,
+            ),
+            (
+                Some("compact_member_completion_failed"),
+                Some("cancelled"),
+                Some("profile_restored"),
+                None,
+                None,
+            ),
+            "(kind, completion type, stage, the registry's floor, the seat's threshold): \
+             {response:#}"
+        );
+        assert_eq!(after.session_id, before.session_id);
+        harness
+            .run_exact_probe("after the cancelled maintenance turn")
+            .await;
         harness.teardown().await;
     }
 

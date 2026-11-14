@@ -19,6 +19,10 @@
 //! - there is no browser: the offer is a literal string, and the test steps
 //!   the recording's markers (`play_at:*`, `disconnect:*`) itself.
 //!
+//! The host can also take the steps the scenarios without a recording need
+//! (`HostSteps`, `ScriptedToolCall`, `HeldJobs`, constructed tapes); the
+//! rows at the end of this file prove each on recorded frames.
+//!
 //! The replay records its own provider stream through the same journal hook
 //! as a live run and must send exactly the recording's client events per
 //! channel (type and deterministic `event_id`), in order.
@@ -48,7 +52,8 @@ use meerkat::experimental_gpt_live::{
     ExperimentalLivePublicObservation, ExperimentalLivePublicObservationDeliveryError,
     ExperimentalLivePublicObservationPublisher, GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID,
     GPT_LIVE_PUBLIC_MODEL, LIVE_LATE_SUMMARY_PREFIX, LIVE_RUNTIME_WORK_PREFIX,
-    PublicGptLiveOpenAuthorityConfig, PublicGptLivePlaybackPolicy, provider_recording,
+    PublicGptLiveInstructionsPreface, PublicGptLiveOpenAuthorityConfig,
+    PublicGptLivePlaybackPolicy, provider_recording,
 };
 use meerkat::session_runtime::live_orchestration::ExperimentalLiveChannelOpenError;
 use meerkat::session_runtime::live_summary::{
@@ -57,7 +62,8 @@ use meerkat::session_runtime::live_summary::{
 };
 use meerkat::surface::{
     ExperimentalGptLiveContextMirrorHost, ExperimentalLiveChannelPhaseStatus,
-    LiveWebrtcBoundReadyBinder, ServiceMemberLiveHost, ServiceMemberLiveHostConfig,
+    LiveContextPreparationStatus, LiveWebrtcBoundReadyBinder, ServiceMemberLiveHost,
+    ServiceMemberLiveHostConfig,
 };
 use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
 use meerkat_contracts::{LiveOpenTransport, WireLiveTransportBootstrap};
@@ -83,7 +89,8 @@ use tokio::sync::watch;
 use tokio::time::{Duration, timeout};
 
 use replay::{
-    Cassette, ClientKey, Fixture, Parked, RecordedSummary, SummaryGate, fixture_findings,
+    CONSTRUCTED_END_STEP, Cassette, ClientKey, ConstructedEnd, Fixture, Parked, RecordedSummary,
+    SummaryGate, fixture_findings,
 };
 use support::evidence::{self, Journal};
 use support::{
@@ -136,13 +143,28 @@ enum Purpose {
     DelegatedJob(usize),
     MergeReply,
     Conversation(usize),
+    /// The n-th turn of the mob's second member (its instructions carry
+    /// [`SECOND_MEMBER_INSTRUCTIONS_MARK`]).
+    SecondMember(usize),
 }
 
-/// One scripted answer, optionally held until a gate opens.
+/// One tool call a scripted turn makes before its answer. The call is real:
+/// the runtime dispatches it to the member's own tools and commits its
+/// result row; the scripted turn then continues over that result.
+#[derive(Clone)]
+struct ScriptedToolCall {
+    name: &'static str,
+    args: Value,
+}
+
+/// One scripted answer, optionally held until a gate opens. With tool
+/// calls, the turn first makes each call in order (one per LLM call, as a
+/// model that calls one tool at a time), and the gate holds only the answer.
 #[derive(Clone)]
 struct Script {
     text: String,
     gate: Option<watch::Receiver<bool>>,
+    tool_calls: Vec<ScriptedToolCall>,
 }
 
 /// Executor and worker LLM, keyed by purpose. Request bytes never select
@@ -151,13 +173,47 @@ struct ScriptedLlm {
     scripts: BTreeMap<Purpose, Script>,
     conversations: AtomicUsize,
     jobs: AtomicUsize,
+    second_member_turns: AtomicUsize,
+    /// The scripted tool calls in flight, by call id: whose turn made the
+    /// call and how many of its calls are made. An LLM call whose newest
+    /// row is that call's result continues the same turn.
+    tool_calls: std::sync::Mutex<BTreeMap<String, (Purpose, usize)>>,
     calls: std::sync::Mutex<Vec<(Purpose, String)>>,
     /// Advanced on every call, so a test can await one by purpose.
     called: watch::Sender<usize>,
 }
 
+/// The line that marks the second member's instructions, so the scripted
+/// LLM can tell its turns from the executor's.
+const SECOND_MEMBER_INSTRUCTIONS_MARK: &str = "You are the second member of this mob.";
+
 impl ScriptedLlm {
-    fn purpose(&self, request: &LlmRequest) -> Purpose {
+    /// What the call is for, and how many scripted tool calls of that turn
+    /// have been made already.
+    fn purpose(&self, request: &LlmRequest) -> (Purpose, usize) {
+        // A call over the result of a scripted tool call continues the turn
+        // that made the call.
+        if let Some(Message::ToolResults { results, .. }) = request.messages.last() {
+            let in_flight = self.tool_calls.lock().expect("tool calls");
+            if let Some(turn) = results
+                .iter()
+                .find_map(|result| in_flight.get(&result.tool_use_id))
+            {
+                return *turn;
+            }
+        }
+        // The second member's turns run under its own instructions.
+        let second_member = request
+            .messages
+            .first()
+            .and_then(|message| serde_json::to_string(message).ok())
+            .is_some_and(|system| system.contains(SECOND_MEMBER_INSTRUCTIONS_MARK));
+        if second_member {
+            return (
+                Purpose::SecondMember(self.second_member_turns.fetch_add(1, Ordering::SeqCst)),
+                0,
+            );
+        }
         // The newest input names what the turn is for: a merged post-close
         // result is injected context carrying the merge marker; a live
         // delegation's worker runs over the delegation execution context.
@@ -167,7 +223,7 @@ impl ScriptedLlm {
             .and_then(|message| serde_json::to_string(message).ok())
             .unwrap_or_default();
         if newest.contains(S104_MERGE_MARKER) {
-            return Purpose::MergeReply;
+            return (Purpose::MergeReply, 0);
         }
         // A live delegation's worker (a fork, or the existing member under
         // its execution-context row) gets the voice request framed as a
@@ -183,9 +239,15 @@ impl ScriptedLlm {
             })
             .is_some_and(|text| text.contains(LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE));
         if delegated {
-            return Purpose::DelegatedJob(self.jobs.fetch_add(1, Ordering::SeqCst));
+            return (
+                Purpose::DelegatedJob(self.jobs.fetch_add(1, Ordering::SeqCst)),
+                0,
+            );
         }
-        Purpose::Conversation(self.conversations.fetch_add(1, Ordering::SeqCst))
+        (
+            Purpose::Conversation(self.conversations.fetch_add(1, Ordering::SeqCst)),
+            0,
+        )
     }
 }
 
@@ -224,7 +286,7 @@ impl LlmClient for ScriptedLlm {
         request: &'a LlmRequest,
     ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>>
     {
-        let purpose = self.purpose(request);
+        let (purpose, calls_made) = self.purpose(request);
         let newest: String = request
             .messages
             .last()
@@ -251,6 +313,30 @@ impl LlmClient for ScriptedLlm {
         self.called.send_modify(|count| *count += 1);
         let script = self.scripts.get(&purpose).cloned();
         let model = request.model.clone();
+        // The turn's next scripted tool call, if it has one left to make.
+        let tool_call = script
+            .as_ref()
+            .and_then(|script| script.tool_calls.get(calls_made))
+            .cloned()
+            .map(|call| {
+                let mut in_flight = self.tool_calls.lock().expect("tool calls");
+                let id = format!("replay-call-{}", in_flight.len() + 1);
+                in_flight.insert(id.clone(), (purpose, calls_made + 1));
+                (id, call)
+            });
+        let usage = move || -> Result<LlmEvent, LlmError> {
+            Ok(LlmEvent::UsageUpdate {
+                usage: meerkat_core::TurnUsage::host_declared(
+                    meerkat_core::Provider::OpenAI,
+                    &model,
+                    meerkat_core::Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        ..Default::default()
+                    },
+                ),
+            })
+        };
         Box::pin(
             futures::stream::once(async move {
                 let Some(script) = script else {
@@ -258,6 +344,20 @@ impl LlmClient for ScriptedLlm {
                         message: format!("replay script has no answer for {purpose:?}"),
                     })];
                 };
+                if let Some((id, call)) = tool_call {
+                    return vec![
+                        Ok(LlmEvent::ToolCallComplete {
+                            id,
+                            name: call.name.to_owned(),
+                            args: call.args,
+                            meta: None,
+                        }),
+                        usage(),
+                        Ok(LlmEvent::Done {
+                            outcome: LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
+                        }),
+                    ];
+                }
                 if let Some(mut gate) = script.gate {
                     let _ = gate.wait_for(|open| *open).await;
                 }
@@ -266,17 +366,7 @@ impl LlmClient for ScriptedLlm {
                         delta: script.text,
                         meta: None,
                     }),
-                    Ok(LlmEvent::UsageUpdate {
-                        usage: meerkat_core::TurnUsage::host_declared(
-                            meerkat_core::Provider::OpenAI,
-                            &model,
-                            meerkat_core::Usage {
-                                input_tokens: 1,
-                                output_tokens: 1,
-                                ..Default::default()
-                            },
-                        ),
-                    }),
+                    usage(),
                     Ok(LlmEvent::Done {
                         outcome: LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
                     }),
@@ -354,6 +444,85 @@ impl ExperimentalLivePublicObservationPublisher for UnmeasuredPublisher {
     }
 }
 
+/// Measured playback without a browser: every assistant output the runtime
+/// publishes is accepted under the exact live binding (as the RPC surface
+/// does) and handed to the test, which is the peer that plays it and
+/// completes it with [`ReplayHost::complete_playback`].
+struct MeasuredPublisher {
+    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    outputs: tokio::sync::mpsc::UnboundedSender<meerkat_live::LiveAssistantOutputAddress>,
+}
+
+#[async_trait::async_trait]
+impl ExperimentalLivePublicObservationPublisher for MeasuredPublisher {
+    async fn publish(
+        &self,
+        observation: ExperimentalLivePublicObservation,
+    ) -> Result<(), ExperimentalLivePublicObservationDeliveryError> {
+        let _custody = self
+            .runtime
+            .acquire_live_binding_publication_custody(observation.binding())
+            .await
+            .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+        self.outputs
+            .send(observation.into_output())
+            .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Closed)
+    }
+}
+
+/// A summarizer the test holds: each call is handed to the test as a
+/// [`HeldSummary`] and returns only what the test releases it with. The
+/// context preparation of an open stays pending for exactly as long as the
+/// test says, with no model and no clock.
+struct HeldSummarizer {
+    captures: tokio::sync::mpsc::UnboundedSender<HeldSummary>,
+}
+
+/// One pending summarizer call.
+struct HeldSummary {
+    session_id: meerkat_core::SessionId,
+    release: tokio::sync::oneshot::Sender<String>,
+}
+
+#[async_trait::async_trait]
+impl LiveContextSummarizer for HeldSummarizer {
+    async fn summarize(
+        &self,
+        snapshot: LiveContextSummarySnapshot<'_>,
+    ) -> Result<String, LiveContextSummaryError> {
+        let (release, released) = tokio::sync::oneshot::channel();
+        self.captures
+            .send(HeldSummary {
+                session_id: snapshot.session_id().clone(),
+                release,
+            })
+            .map_err(|_| LiveContextSummaryError::Producer("the test left".to_owned()))?;
+        released.await.map_err(|_| {
+            LiveContextSummaryError::Producer("the held summary was dropped".to_owned())
+        })
+    }
+}
+
+/// Host knowledge prepended to the public session instructions, recording
+/// every resolution with the number of create requests the provider had
+/// received by then (the tape's own count, not a clock).
+struct RecordedPreface {
+    text: String,
+    gate: SummaryGate,
+    resolved: std::sync::Mutex<Vec<(meerkat_core::SessionId, usize)>>,
+}
+
+#[async_trait::async_trait]
+impl PublicGptLiveInstructionsPreface for RecordedPreface {
+    async fn preface(&self, session_id: &meerkat_core::SessionId) -> Option<String> {
+        self.resolved
+            .lock()
+            .expect("preface resolutions")
+            .push((session_id.clone(), self.gate.opens_created()));
+        Some(self.text.clone())
+    }
+}
+
 // --- host graph -------------------------------------------------------------
 
 fn auth_binding() -> AuthBindingRef {
@@ -426,6 +595,8 @@ struct ReplayHost {
     transport: Arc<ExperimentalGptLiveWebrtcTransport>,
     binder: Arc<dyn LiveWebrtcBoundReadyBinder>,
     session_id: meerkat_core::SessionId,
+    /// The second member's own session, when the host has one.
+    second_member_session: Option<meerkat_core::SessionId>,
 }
 
 struct OpenChannel {
@@ -446,7 +617,34 @@ struct HostOptions<'a> {
     /// The summary of an open the recording carries none for.
     summary: &'a str,
     summary_gate: SummaryGate,
+    /// The host steps a recorded run did not use; the default is the host
+    /// the two committed recordings were made on.
+    steps: HostSteps,
 }
+
+/// Host steps beyond the recorded runs' host. Every one defaults to what
+/// the committed recordings were made with.
+#[derive(Default)]
+struct HostSteps {
+    /// A second member of the executor's mob, wired to the executor, with
+    /// these instructions after [`SECOND_MEMBER_INSTRUCTIONS_MARK`].
+    second_member: Option<&'static str>,
+    /// Host knowledge prepended to the public session instructions.
+    preface: Option<Arc<dyn PublicGptLiveInstructionsPreface>>,
+    /// Measured playback: published assistant outputs go to this receiver's
+    /// sender and wait for [`ReplayHost::complete_playback`]. Without it the
+    /// host is unmeasured, as the recorded runs.
+    measured_outputs:
+        Option<tokio::sync::mpsc::UnboundedSender<meerkat_live::LiveAssistantOutputAddress>>,
+    /// The summarizer, instead of the recording's ([`RecordedSummarizer`]).
+    summarizer: Option<Arc<dyn LiveContextSummarizer>>,
+    /// How long a concurrent open waits for its summary before it opens
+    /// without it, instead of the product's default.
+    pre_open_bound: Option<Duration>,
+}
+
+/// The second member's identity in the executor's mob.
+const SECOND_MEMBER: &str = "voice-analyst";
 
 async fn open_replay_host(
     options: HostOptions<'_>,
@@ -561,6 +759,38 @@ async fn open_replay_host(
         60,
     )
     .await?;
+    let mut second_member_session = None;
+    if let Some(instructions) = options.steps.second_member {
+        rpc.call(
+            "mob/spawn",
+            json!({"mob_id":mob_id,"profile":"executor","agent_identity":SECOND_MEMBER,
+                "runtime_mode":"turn_driven",
+                "additional_instructions":[format!("{SECOND_MEMBER_INSTRUCTIONS_MARK} {instructions}")],
+                "auth_binding":{"realm":REALM,"binding":BINDING}}),
+            60,
+        )
+        .await?;
+        // Comms trust is the wiring: an unwired member is no peer of the
+        // executor.
+        rpc.call(
+            "mob/wire",
+            json!({"mob_id":mob_id,"member":"voice-executor","peer":{"local":SECOND_MEMBER}}),
+            60,
+        )
+        .await?;
+        let status = rpc
+            .call(
+                "mob/member_status",
+                json!({"mob_id":mob_id,"agent_identity":SECOND_MEMBER}),
+                60,
+            )
+            .await?;
+        second_member_session = Some(meerkat_core::SessionId::parse(
+            status["current_session_id"]
+                .as_str()
+                .ok_or("the spawned second member has no durable session")?,
+        )?);
+    }
     let status = rpc
         .call(
             "mob/member_status",
@@ -604,12 +834,37 @@ async fn open_replay_host(
             transport: Arc::clone(&public_transport),
             voice: "marin".to_string(),
             session_instructions: None,
-            session_instructions_preface: None,
-        })?
-        .with_public_playback_policy(PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured)?
-        .with_test_base_url(options.base_url);
+            session_instructions_preface: options.steps.preface.clone(),
+        })?;
+    // Measured playback is the authority's default; the recorded runs were
+    // unmeasured.
+    let authority = if options.steps.measured_outputs.is_some() {
+        authority
+    } else {
+        authority
+            .with_public_playback_policy(PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured)?
+    }
+    .with_test_base_url(options.base_url);
     let authority = Arc::new(authority);
 
+    let summarizer: Arc<dyn LiveContextSummarizer> = match options.steps.summarizer.clone() {
+        Some(summarizer) => summarizer,
+        None => Arc::new(RecordedSummarizer {
+            gate: options.summary_gate,
+            fallback: options.summary.to_owned(),
+        }),
+    };
+    let summary_policy = LiveContextSummaryPolicy::new(
+        summarizer,
+        4 * 1024 * 1024,
+        16 * 1024,
+        Duration::from_secs(60),
+    )?
+    .with_bootstrap_mode(LiveContextBootstrapMode::Concurrent);
+    let summary_policy = match options.steps.pre_open_bound {
+        Some(bound) => summary_policy.with_pre_open_bound(bound),
+        None => summary_policy,
+    };
     let member_host = ServiceMemberLiveHost::new(ServiceMemberLiveHostConfig {
         service: runtime.inner().service.clone(),
         runtime_adapter: runtime.runtime_adapter(),
@@ -622,18 +877,7 @@ async fn open_replay_host(
         backend: runtime.backend(),
     })
     .with_webrtc_cleanup_state(webrtc)
-    .with_context_summary_policy(
-        LiveContextSummaryPolicy::new(
-            Arc::new(RecordedSummarizer {
-                gate: options.summary_gate,
-                fallback: options.summary.to_owned(),
-            }),
-            4 * 1024 * 1024,
-            16 * 1024,
-            Duration::from_secs(60),
-        )?
-        .with_bootstrap_mode(LiveContextBootstrapMode::Concurrent),
-    );
+    .with_context_summary_policy(summary_policy);
     let member_host = Arc::new(member_host);
     let coordinator = compose_experimental_live_delegation_coordinator_with_policy(
         runtime.runtime_adapter(),
@@ -653,8 +897,16 @@ async fn open_replay_host(
         .runtime_adapter()
         .set_member_live_host(member_host.clone());
     mobs.set_member_live_host(member_host.clone());
+    let publisher: Arc<dyn ExperimentalLivePublicObservationPublisher> =
+        match options.steps.measured_outputs {
+            Some(outputs) => Arc::new(MeasuredPublisher {
+                runtime: runtime.runtime_adapter(),
+                outputs,
+            }),
+            None => Arc::new(UnmeasuredPublisher),
+        };
     let binder = authority
-        .bound_ready_binder_for(context_host, live_host, Arc::new(UnmeasuredPublisher))
+        .bound_ready_binder_for(context_host, live_host, publisher)
         .ok_or("replay host has no complete WebRTC answer binder")?;
     Ok(ReplayHost {
         _temp: temp,
@@ -668,6 +920,7 @@ async fn open_replay_host(
         transport: public_transport,
         binder,
         session_id,
+        second_member_session,
     })
 }
 
@@ -842,19 +1095,47 @@ impl ReplayHost {
     /// Every live delegation the session's machine recorded: who ran it,
     /// under which ownership, and its typed terminal.
     async fn delegations(&self) -> Result<Vec<DelegationRecord>, Box<dyn std::error::Error>> {
-        let snapshots = self
-            .session_runtime
-            .runtime_adapter()
-            .live_delegation_recovery_snapshots(&self.session_id)
+        Ok(delegation_records(&self.session_runtime, &self.session_id).await?)
+    }
+
+    /// The host's workspace: the default working directory of the members'
+    /// shell tool.
+    fn workspace(&self) -> std::path::PathBuf {
+        self._temp.path().join("project")
+    }
+
+    /// The typed context preparation status of a channel, with its phase.
+    async fn preparation(
+        &self,
+        open: &OpenChannel,
+    ) -> Result<
+        (
+            ExperimentalLiveChannelPhaseStatus,
+            LiveContextPreparationStatus,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let custody = self
+            .member_host
+            .validate_experimental_live_channel_custody(&open.id, &open.pending_receipt)
             .await?;
-        Ok(snapshots
-            .iter()
-            .map(|snapshot| DelegationRecord {
-                worker_identity: snapshot.worker_identity().to_string(),
-                ownership: snapshot.worker_ownership(),
-                terminal: snapshot.terminal(),
-            })
-            .collect())
+        Ok((custody.phase().clone(), *custody.context_preparation()))
+    }
+
+    /// The peer played one published assistant output to its end: the
+    /// acknowledgement a measured host owes the runtime for it.
+    async fn complete_playback(
+        &self,
+        open: &OpenChannel,
+        output: &meerkat_live::LiveAssistantOutputAddress,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if output.channel_id != open.id {
+            return Err("the published output belongs to another channel".into());
+        }
+        self.member_host
+            .complete_live_playback(&open.id, &open.activation_receipt, &output.output_id)
+            .await?;
+        Ok(())
     }
 
     /// The titles of the WorkGraph items of the executor's mob, terminal
@@ -875,11 +1156,31 @@ impl ReplayHost {
 }
 
 /// One live delegation as the session's machine recorded it.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct DelegationRecord {
     worker_identity: String,
     ownership: LiveDelegationWorkerOwnership,
     terminal: Option<LiveDelegationWorkerTerminalKind>,
+}
+
+/// The live delegations the machine of `session_id` recorded, in order.
+async fn delegation_records(
+    runtime: &SessionRuntime,
+    session_id: &meerkat_core::SessionId,
+) -> Result<Vec<DelegationRecord>, String> {
+    let snapshots = runtime
+        .runtime_adapter()
+        .live_delegation_recovery_snapshots(session_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(snapshots
+        .iter()
+        .map(|snapshot| DelegationRecord {
+            worker_identity: snapshot.worker_identity().to_string(),
+            ownership: snapshot.worker_ownership(),
+            terminal: snapshot.terminal(),
+        })
+        .collect())
 }
 
 /// One committed row of `session/history`, read by its typed wire fields.
@@ -1117,6 +1418,8 @@ struct RecordedJob {
     channel: u32,
     /// The job's "Started voice request" narration on its channel.
     started: Option<ClientKey>,
+    /// The job's "Finished voice request" narration on its channel.
+    finished: Option<ClientKey>,
     /// Its result reached this channel (a "Finished voice request"
     /// narration followed on it); otherwise the channel went down first and
     /// the result merged after it.
@@ -1142,6 +1445,7 @@ fn recorded_jobs(fixture: &Fixture) -> Vec<RecordedJob> {
                         RecordedJob {
                             channel: line.channel_ordinal,
                             started: None,
+                            finished: None,
                             delivered_on_channel: false,
                             result: None,
                         },
@@ -1163,6 +1467,7 @@ fn recorded_jobs(fixture: &Fixture) -> Vec<RecordedJob> {
                     job.started = Some(ClientKey::of(event));
                 } else if content.starts_with("Finished voice request") {
                     job.delivered_on_channel = true;
+                    job.finished = Some(ClientKey::of(event));
                 } else if job.delivered_on_channel && job.result.is_none() {
                     job.result = Some(content.to_owned());
                 }
@@ -1184,6 +1489,27 @@ struct ReplayScript {
     /// typed sign that those jobs reached the state the recorded run had at
     /// its reopen (S104: the merged job's reply turn has started).
     reopen_after_call: BTreeMap<u32, Purpose>,
+    /// Jobs (by creation index) whose answer is held to the latest point
+    /// the recording allows: until the tape waits for the job's "Finished"
+    /// narration, so every frame recorded before the result has been
+    /// served. The session's delegation records are read at that typed
+    /// state, before the answer is released.
+    held_until_result_awaited: Option<HeldJobs>,
+}
+
+/// The jobs a replay holds until the tape waits for their result, and what
+/// the session's machine recorded about its delegations at that state.
+#[derive(Clone, Default)]
+struct HeldJobs {
+    jobs: Vec<usize>,
+    observed: Arc<std::sync::Mutex<Vec<HeldJobObservation>>>,
+}
+
+/// The session's delegation records while job `job` was held.
+#[derive(Clone, Debug)]
+struct HeldJobObservation {
+    job: usize,
+    delegations: Vec<DelegationRecord>,
 }
 
 /// The owner's append lanes around one replayed open. `at_first_step` is
@@ -1214,8 +1540,33 @@ async fn drive_replay(
 ) -> Result<Vec<OpenObservation>, Box<dyn std::error::Error>> {
     let mut gate_openers = Vec::new();
     let mut held_until_close: BTreeMap<u32, Vec<watch::Sender<bool>>> = BTreeMap::new();
-    for (job, gate) in jobs.iter().zip(job_gates) {
+    let held_jobs = script.held_until_result_awaited.clone().unwrap_or_default();
+    for (index, (job, gate)) in jobs.iter().zip(job_gates).enumerate() {
         match (&job.started, job.delivered_on_channel) {
+            (Some(_), true) if held_jobs.jobs.contains(&index) => {
+                let finished = job
+                    .finished
+                    .clone()
+                    .ok_or("a job delivered on its channel has no Finished narration")?;
+                let cassette = Arc::clone(&cassette);
+                let channel = job.channel;
+                let runtime = Arc::clone(&host.session_runtime);
+                let session_id = host.session_id.clone();
+                let observed = Arc::clone(&held_jobs.observed);
+                gate_openers.push(tokio::spawn(async move {
+                    if cassette.waiting_for(channel, &finished).await.is_ok() {
+                        if let Ok(delegations) = delegation_records(&runtime, &session_id).await {
+                            observed.lock().expect("held job observations").push(
+                                HeldJobObservation {
+                                    job: index,
+                                    delegations,
+                                },
+                            );
+                        }
+                        gate.send_replace(true);
+                    }
+                }));
+            }
             (Some(started), true) => {
                 let cassette = Arc::clone(&cassette);
                 let started = started.clone();
@@ -1342,6 +1693,8 @@ fn scripted_llm(scripts: BTreeMap<Purpose, Script>) -> Arc<ScriptedLlm> {
         scripts,
         conversations: AtomicUsize::new(0),
         jobs: AtomicUsize::new(0),
+        second_member_turns: AtomicUsize::new(0),
+        tool_calls: std::sync::Mutex::new(BTreeMap::new()),
         calls: std::sync::Mutex::new(Vec::new()),
         called: watch::channel(0).0,
     })
@@ -1366,6 +1719,7 @@ fn job_scripts(
                     .clone()
                     .unwrap_or_else(|| undelivered_answer.to_owned()),
                 gate: Some(gate_rx),
+                tool_calls: Vec::new(),
             },
         );
     }
@@ -1376,6 +1730,7 @@ fn conversation(text: &str) -> Script {
     Script {
         text: text.to_owned(),
         gate: None,
+        tool_calls: Vec::new(),
     }
 }
 
@@ -1393,6 +1748,9 @@ struct Replayed {
     /// (the channel went down first), and of the source member's reply to
     /// that result once it merged.
     post_close_result: String,
+    /// The recorded resolutions of the instructions preface, when the
+    /// replay's host had one.
+    preface: Option<Arc<RecordedPreface>>,
     _one_at_a_time: tokio::sync::MutexGuard<'static, ()>,
 }
 
@@ -1429,6 +1787,7 @@ async fn replay_s104() -> Result<Replayed, Box<dyn std::error::Error>> {
         Script {
             text: merge_reply.clone(),
             gate: Some(merge_gate_rx),
+            tool_calls: Vec::new(),
         },
     );
     let llm = scripted_llm(scripts);
@@ -1440,6 +1799,7 @@ async fn replay_s104() -> Result<Replayed, Box<dyn std::error::Error>> {
         seed_prompt: Some(S104_SEED_PROMPT),
         summary: "The team mascot is a heron named Bartleby.",
         summary_gate: cassette.summary_gate(),
+        steps: HostSteps::default(),
     })
     .await?;
     let result = drive_replay(
@@ -1453,6 +1813,7 @@ async fn replay_s104() -> Result<Replayed, Box<dyn std::error::Error>> {
             typed_after_channel: BTreeMap::from([(1, S104_TYPED_PROMPT)]),
             merge_gate_on_channel_open: Some((2, merge_gate)),
             reopen_after_call: BTreeMap::from([(1, Purpose::MergeReply)]),
+            held_until_result_awaited: None,
         },
     )
     .await;
@@ -1476,6 +1837,7 @@ async fn replay_s104() -> Result<Replayed, Box<dyn std::error::Error>> {
         host,
         opens,
         post_close_result: merge_reply,
+        preface: None,
         _one_at_a_time: one_at_a_time,
     })
 }
@@ -1539,6 +1901,25 @@ async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
 /// their result on the delegation lane, a typed turn during the first
 /// closure, and reopens seeded from the retained summary.
 async fn replay_s106() -> Result<Replayed, Box<dyn std::error::Error>> {
+    replay_s106_with(S106Steps::default()).await
+}
+
+/// What a row adds to the S106 replay beyond the recorded run's own steps.
+/// The default adds nothing.
+#[derive(Default)]
+struct S106Steps {
+    /// Tool calls the first job's worker makes before its recorded answer.
+    first_job_tool_calls: Vec<ScriptedToolCall>,
+    /// Jobs held until the tape waits for their result.
+    held_jobs: Option<HeldJobs>,
+    /// A second member of the mob (its instructions) and its scripted turns.
+    second_member: Option<(&'static str, Vec<Script>)>,
+    /// Host knowledge prepended to the public session instructions.
+    preface: Option<&'static str>,
+}
+
+/// S106 replayed to its end with a row's extra host steps.
+async fn replay_s106_with(steps: S106Steps) -> Result<Replayed, Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
@@ -1552,6 +1933,22 @@ async fn replay_s106() -> Result<Replayed, Box<dyn std::error::Error>> {
     let (mut scripts, job_gates) = job_scripts(&jobs, "Done.");
     scripts.insert(Purpose::Conversation(0), conversation(S106_SEED_REPLY));
     scripts.insert(Purpose::Conversation(1), conversation(S106_TYPED_REPLY));
+    if let Some(first_job) = scripts.get_mut(&Purpose::DelegatedJob(0)) {
+        first_job.tool_calls = steps.first_job_tool_calls;
+    }
+    let second_member = steps.second_member.map(|(instructions, turns)| {
+        for (index, turn) in turns.into_iter().enumerate() {
+            scripts.insert(Purpose::SecondMember(index), turn);
+        }
+        instructions
+    });
+    let preface = steps.preface.map(|text| {
+        Arc::new(RecordedPreface {
+            text: text.to_owned(),
+            gate: cassette.summary_gate(),
+            resolved: std::sync::Mutex::new(Vec::new()),
+        })
+    });
     let llm = scripted_llm(scripts);
     let mut host = open_replay_host(HostOptions {
         base_url: cassette.base_url(),
@@ -1561,6 +1958,13 @@ async fn replay_s106() -> Result<Replayed, Box<dyn std::error::Error>> {
         seed_prompt: Some(S106_SEED_PROMPT),
         summary: "The sponsor's name is Marlow. The project codename is Saffron. The launch venue is Lisbon. The budget code is Kestrel.",
         summary_gate: cassette.summary_gate(),
+        steps: HostSteps {
+            second_member,
+            preface: preface
+                .clone()
+                .map(|preface| preface as Arc<dyn PublicGptLiveInstructionsPreface>),
+            ..HostSteps::default()
+        },
     })
     .await?;
     let result = drive_replay(
@@ -1574,6 +1978,7 @@ async fn replay_s106() -> Result<Replayed, Box<dyn std::error::Error>> {
             typed_after_channel: BTreeMap::from([(1, S106_TYPED_PROMPT)]),
             merge_gate_on_channel_open: None,
             reopen_after_call: BTreeMap::new(),
+            held_until_result_awaited: steps.held_jobs,
         },
     )
     .await;
@@ -1597,6 +2002,7 @@ async fn replay_s106() -> Result<Replayed, Box<dyn std::error::Error>> {
         host,
         opens,
         post_close_result: "Done.".to_owned(),
+        preface,
         _one_at_a_time: one_at_a_time,
     })
 }
@@ -2088,6 +2494,7 @@ async fn the_deprecated_private_profile_is_refused_before_any_channel_exists()
         seed_prompt: Some(S104_SEED_PROMPT),
         summary: "The team mascot is a heron named Bartleby.",
         summary_gate: cassette.summary_gate(),
+        steps: HostSteps::default(),
     })
     .await?;
 
@@ -2142,5 +2549,562 @@ async fn the_deprecated_private_profile_is_refused_before_any_channel_exists()
         "the open after the refusal creates exactly one provider session"
     );
     evidence.finish(evidence::Outcome::Passed)?;
+    Ok(())
+}
+
+// --- host steps beyond the recorded runs' host -------------------------------
+//
+// Each row below proves one step of the replay host that the live scenarios
+// without a committed recording need: scripted tool calls, a job held on a
+// typed tape state, a second mob member and the instructions preface, a
+// channel closed while its context preparation is pending, a close the
+// provider never confirms, and measured playback. The rows on the S106
+// recording keep its client events exactly; the others run on constructed
+// tapes (`Fixture::constructed`), which replay recorded frames only.
+
+/// The tool results of the calls named `name` in a `session/history`
+/// reading, joined to their calls by the typed call id: `(is_error, text)`.
+fn linked_tool_results(history: &Value, name: &str) -> Vec<(bool, String)> {
+    let messages: Vec<&Value> = history["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .collect();
+    let calls: Vec<&str> = messages
+        .iter()
+        .filter(|row| row["role"] == "block_assistant")
+        .flat_map(|row| row["blocks"].as_array().into_iter().flatten())
+        .filter(|block| block["block_type"] == "tool_use" && block["data"]["name"] == name)
+        .filter_map(|block| block["data"]["id"].as_str())
+        .collect();
+    messages
+        .iter()
+        .filter(|row| row["role"] == "tool_results")
+        .flat_map(|row| row["results"].as_array().into_iter().flatten())
+        .filter(|result| {
+            result["tool_use_id"]
+                .as_str()
+                .is_some_and(|id| calls.contains(&id))
+        })
+        .map(|result| {
+            let text = match &result["content"] {
+                Value::String(text) => text.clone(),
+                Value::Array(blocks) => blocks
+                    .iter()
+                    .filter_map(|block| block["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                _ => String::new(),
+            };
+            (result["is_error"].as_bool().unwrap_or(false), text)
+        })
+        .collect()
+}
+
+/// Scripted tool calls: the first job's worker runs `pwd` with the member's
+/// real shell tool before it gives the recorded answer. The call and its
+/// result are committed rows of the executor's session, joined by the call
+/// id; the result is a success whose output is the host's workspace (the
+/// live scenarios' check of a delegated shell call, without a model); and
+/// the channel is sent exactly the recorded client events.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s106_replay_a_scripted_shell_call_commits_its_call_linked_result()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut replayed = replay_s106_with(S106Steps {
+        first_job_tool_calls: vec![ScriptedToolCall {
+            name: "shell",
+            args: json!({"command": "pwd"}),
+        }],
+        ..S106Steps::default()
+    })
+    .await?;
+    assert_recorded_client_events(&replayed.evidence, &replayed.fixture, &replayed.llm)?;
+
+    let session_id = json!(replayed.host.session_id);
+    let history = replayed.host.rpc.session_history(session_id, 30).await?;
+    let results = linked_tool_results(&history, "shell");
+    let [(is_error, text)] = results.as_slice() else {
+        return Err(format!(
+            "exactly one shell result joined to its call is committed, got {results:?}"
+        )
+        .into());
+    };
+    assert!(!is_error, "the shell call failed: {text}");
+    let mut lines = text.lines();
+    assert!(
+        lines
+            .next()
+            .is_some_and(|status| status.starts_with("exit code 0 ")),
+        "the shell result does not report exit code 0: {text}"
+    );
+    let printed = std::path::PathBuf::from(lines.next().unwrap_or_default().trim());
+    assert_eq!(
+        printed.canonicalize()?,
+        replayed.host.workspace().canonicalize()?,
+        "the shell tool ran outside the host's workspace"
+    );
+    // The job that made the call still completed as the recorded one did.
+    let delegations = replayed.host.delegations().await?;
+    assert_eq!(
+        delegations.first().and_then(|first| first.terminal),
+        Some(LiveDelegationWorkerTerminalKind::Completed),
+        "the first job did not complete: {delegations:?}"
+    );
+    Ok(())
+}
+
+/// A job held on a typed tape state: the first job's answer is released
+/// only when the tape waits for the job's "Finished" narration, so every
+/// frame the recording holds before the result has been served. At that
+/// state the session's machine records the delegation as running (no
+/// terminal), under the executor's own identity; after the release it
+/// completes, and the channel is sent exactly the recorded client events.
+/// No sleep stands in for the job and no sampler for the order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s106_replay_a_job_held_until_the_tape_awaits_its_result_is_recorded_running()
+-> Result<(), Box<dyn std::error::Error>> {
+    let held = HeldJobs {
+        jobs: vec![0],
+        ..HeldJobs::default()
+    };
+    let replayed = replay_s106_with(S106Steps {
+        held_jobs: Some(held.clone()),
+        ..S106Steps::default()
+    })
+    .await?;
+    assert_recorded_client_events(&replayed.evidence, &replayed.fixture, &replayed.llm)?;
+
+    let observed = held.observed.lock().expect("held job observations").clone();
+    let [
+        HeldJobObservation {
+            job: 0,
+            delegations: while_held,
+        },
+    ] = observed.as_slice()
+    else {
+        return Err(format!("the first job was observed once while held, got {observed:?}").into());
+    };
+    assert_eq!(
+        while_held.as_slice(),
+        [DelegationRecord {
+            worker_identity: "voice-executor".to_owned(),
+            ownership: LiveDelegationWorkerOwnership::ExistingMember,
+            terminal: None,
+        }],
+        "while the tape waits for its result, the first job is the one running delegation"
+    );
+    let delegations = replayed.host.delegations().await?;
+    assert_eq!(
+        delegations.first().and_then(|first| first.terminal),
+        Some(LiveDelegationWorkerTerminalKind::Completed),
+        "the released job did not complete: {delegations:?}"
+    );
+    Ok(())
+}
+
+const S106_ROSTER_PREFACE: &str = "Backing agent roster for this session. You speak for the mob member voice-executor. \
+     The other member in this mob is voice-analyst.";
+const SECOND_MEMBER_PROMPT: &str = "What is your role in this mob? Answer in one short sentence.";
+const SECOND_MEMBER_REPLY: &str = "I am the analyst of this mob.";
+
+/// A second mob member and the instructions preface. The preface is
+/// resolved exactly once per open, for the executor's own session, before
+/// that open's create request reached the provider (read from the tape's
+/// count of create requests, not from a clock), and each create request's
+/// instructions carry it. The second member is a wired member with its own
+/// session and its own scripted turns, which never take one of the
+/// executor's; and the channel is sent exactly the recorded client events.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s106_replay_resolves_the_roster_preface_once_per_open_before_its_create_request()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut replayed = replay_s106_with(S106Steps {
+        second_member: Some((
+            "You are an analyst. Answer in one short sentence.",
+            vec![conversation(SECOND_MEMBER_REPLY)],
+        )),
+        preface: Some(S106_ROSTER_PREFACE),
+        ..S106Steps::default()
+    })
+    .await?;
+    assert_recorded_client_events(&replayed.evidence, &replayed.fixture, &replayed.llm)?;
+
+    let resolved = replayed
+        .preface
+        .as_ref()
+        .ok_or("the replay's host has no preface")?
+        .resolved
+        .lock()
+        .expect("preface resolutions")
+        .clone();
+    let expected: Vec<(meerkat_core::SessionId, usize)> = (0..replayed.fixture.channels.len())
+        .map(|open| (replayed.host.session_id.clone(), open))
+        .collect();
+    assert_eq!(
+        resolved, expected,
+        "the preface is resolved once per open, for the executor's session, before that open's create request"
+    );
+    for (index, body) in replayed.cassette.create_bodies().iter().enumerate() {
+        assert!(
+            body["session"]["instructions"]
+                .as_str()
+                .is_some_and(|instructions| instructions.contains(S106_ROSTER_PREFACE)),
+            "open #{} does not carry the preface in its instructions",
+            index + 1
+        );
+    }
+
+    // The second member's own turn, on its own session.
+    let second = replayed
+        .host
+        .second_member_session
+        .clone()
+        .ok_or("the replay's host has no second member")?;
+    assert_ne!(second, replayed.host.session_id);
+    let turn = replayed
+        .host
+        .rpc
+        .call_raw(
+            "turn/start",
+            json!({"session_id":second,"prompt":SECOND_MEMBER_PROMPT}),
+            120,
+        )
+        .await?;
+    assert!(
+        turn["error"].is_null(),
+        "the second member's turn failed: {}",
+        turn["error"]
+    );
+    let history = replayed.host.rpc.session_history(json!(second), 30).await?;
+    let rows = history_rows(&history);
+    assert!(
+        rows.iter()
+            .any(|row| row.is_assistant() && row.text.contains(SECOND_MEMBER_REPLY)),
+        "the second member's session does not hold its scripted reply: {rows:?}"
+    );
+    let calls = replayed.llm.calls.lock().expect("calls").clone();
+    let second_member_calls = calls
+        .iter()
+        .filter(|(purpose, _)| matches!(purpose, Purpose::SecondMember(_)))
+        .count();
+    assert_eq!(
+        second_member_calls, 1,
+        "exactly the second member's own turn was scripted as its: {calls:?}"
+    );
+    Ok(())
+}
+
+/// One open on a constructed tape, with the replay's own journal.
+struct ConstructedReplay {
+    cassette: Arc<Cassette>,
+    evidence: Journal,
+    host: ReplayHost,
+    _one_at_a_time: tokio::sync::MutexGuard<'static, ()>,
+}
+
+/// A replay host over a tape constructed from the S106 recording's first
+/// channel (see [`Fixture::constructed`]): the executor and its seed turn
+/// as recorded, nothing driven yet.
+async fn open_constructed_s106(
+    label: &'static str,
+    steps_kept: &[usize],
+    end: ConstructedEnd,
+    unanswered: &[(u32, ClientKey)],
+    steps: HostSteps,
+) -> Result<ConstructedReplay, Box<dyn std::error::Error>> {
+    let one_at_a_time = REPLAY_LOCK.lock().await;
+    let source = Fixture::parse(S106_FIXTURE)?;
+    let fixture = Fixture::constructed(&source, 1, steps_kept, end, unanswered)?;
+    let cassette = Arc::new(Cassette::start(fixture).await?);
+    let evidence = Journal::create_for(label, "Saffron".to_owned())?;
+    let llm = scripted_llm(BTreeMap::from([(
+        Purpose::Conversation(0),
+        conversation(S106_SEED_REPLY),
+    )]));
+    let host = open_replay_host(HostOptions {
+        base_url: cassette.base_url(),
+        llm,
+        policy: LiveDelegationExecutionPolicy::ExistingMember,
+        executor_instructions: S106_EXECUTOR_INSTRUCTIONS,
+        seed_prompt: Some(S106_SEED_PROMPT),
+        summary: "The sponsor's name is Marlow.",
+        summary_gate: cassette.summary_gate(),
+        steps,
+    })
+    .await?;
+    Ok(ConstructedReplay {
+        cassette,
+        evidence,
+        host,
+        _one_at_a_time: one_at_a_time,
+    })
+}
+
+impl ConstructedReplay {
+    /// The host closes `open` at the constructed step and the provider
+    /// confirms: the committed close is awaited.
+    async fn host_close_confirmed(
+        &self,
+        channel: u32,
+        open: &mut OpenChannel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.cassette.release(channel, CONSTRUCTED_END_STEP).await?;
+        self.cassette.at_host_close(channel).await?;
+        self.host.host_close(open).await?;
+        self.cassette.ended(channel).await?;
+        self.host.closed(open).await
+    }
+}
+
+async fn next_held_summary(
+    held: &mut tokio::sync::mpsc::UnboundedReceiver<HeldSummary>,
+) -> Result<HeldSummary, Box<dyn std::error::Error>> {
+    timeout(CONVERGENCE_BOUND, held.recv())
+        .await
+        .map_err(|_| "the open never asked for its summary")?
+        .ok_or_else(|| "the held summarizer is gone".into())
+}
+
+const OBSOLETE_SUMMARY: &str = "The obsolete summary names the venue Quillfeather.";
+const REPLACEMENT_SUMMARY: &str = "The replacement summary names the venue Lisbon.";
+
+/// A channel closed while its context preparation is pending. The summary
+/// of each open is held by the test, so the preparation stays pending with
+/// no model and no clock. The channel closed in that state reports the
+/// typed preparation failure, never an acknowledgement, and the close
+/// cancels its summary job (the job's caller is gone, so a late result has
+/// nowhere to arrive); the reopen asks for a fresh summary of the same
+/// session and is sent that summary alone, as its first thinking append.
+/// The provider never acknowledges that append on this tape, and the
+/// replacement, closed while it waits, reports the typed failure too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_channel_closed_while_its_context_preparation_is_pending_reports_a_typed_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (captures, mut held) = tokio::sync::mpsc::unbounded_channel();
+    let late_summary = ClientKey {
+        kind: "session.thinking.append".to_owned(),
+        event_id: Some("meerkat-thinking-1-0".to_owned()),
+    };
+    let replay = open_constructed_s106(
+        "pending-preparation-replay",
+        &[0, 1],
+        ConstructedEnd::HostClose,
+        &[(2, late_summary.clone())],
+        HostSteps {
+            summarizer: Some(Arc::new(HeldSummarizer { captures })),
+            // The open never waits for a summary the test holds.
+            pre_open_bound: Some(Duration::ZERO),
+            ..HostSteps::default()
+        },
+    )
+    .await?;
+    let ConstructedReplay {
+        cassette,
+        evidence,
+        host,
+        ..
+    } = &replay;
+
+    let (first_channel, mut first) = host.connect(evidence).await?;
+    let obsolete = next_held_summary(&mut held).await?;
+    assert_eq!(obsolete.session_id, host.session_id);
+    cassette
+        .reached(first_channel, CONSTRUCTED_END_STEP)
+        .await?;
+    let (phase, preparation) = host.preparation(&first).await?;
+    assert!(
+        matches!(phase, ExperimentalLiveChannelPhaseStatus::Active { .. }),
+        "a pending preparation must not gate the active channel: {phase:?}"
+    );
+    assert!(
+        matches!(preparation, LiveContextPreparationStatus::Preparing(_)),
+        "the held summary leaves the preparation pending: {preparation:?}"
+    );
+    replay
+        .host_close_confirmed(first_channel, &mut first)
+        .await?;
+    let (_, preparation) = host.preparation(&first).await?;
+    assert!(
+        matches!(preparation, LiveContextPreparationStatus::Failed(_)),
+        "closing a pending preparation must report the typed failure: {preparation:?}"
+    );
+    // The close cancels the closed channel's summary job: its caller goes
+    // away, so nothing it could still return has anywhere to arrive.
+    let mut obsolete = obsolete;
+    timeout(CONVERGENCE_BOUND, obsolete.release.closed())
+        .await
+        .map_err(|_| "the closed channel's summary job was not cancelled by the close")?;
+
+    let (second_channel, mut second) = host.connect(evidence).await?;
+    assert_ne!(second.id, first.id);
+    let replacement = next_held_summary(&mut held).await?;
+    assert_eq!(replacement.session_id, host.session_id);
+    // The replacement channel keeps the recording's first spoken exchange:
+    // its summary returns while the tape stands before that exchange.
+    let exchange = cassette
+        .fixture()
+        .channels
+        .get(1)
+        .and_then(|tape| tape.markers().first().cloned())
+        .ok_or("the constructed replacement channel has no recorded step")?;
+    cassette.reached(second_channel, &exchange).await?;
+    assert!(
+        obsolete.release.send(OBSOLETE_SUMMARY.to_owned()).is_err(),
+        "the cancelled summary job took a late result"
+    );
+    replacement
+        .release
+        .send(REPLACEMENT_SUMMARY.to_owned())
+        .map_err(|_| "the replacement summary's caller is gone")?;
+    cassette.release(second_channel, &exchange).await?;
+    cassette.received(second_channel, &late_summary).await?;
+    let thinking = evidence.owned_thinking_appends(second_channel)?;
+    let [only] = thinking.as_slice() else {
+        return Err(format!(
+            "the replacement channel is sent one thinking append, got {thinking:?}"
+        )
+        .into());
+    };
+    assert!(
+        only.starts_with(LIVE_LATE_SUMMARY_PREFIX) && only.contains(REPLACEMENT_SUMMARY),
+        "the replacement channel's first thinking append is its own late summary: {only:?}"
+    );
+    assert!(
+        !only.contains(OBSOLETE_SUMMARY),
+        "the closed channel's summary reached the replacement channel"
+    );
+    assert!(
+        evidence.owned_thinking_appends(first_channel)?.is_empty(),
+        "the closed channel was sent a summary"
+    );
+    let (_, preparation) = host.preparation(&second).await?;
+    assert!(
+        matches!(preparation, LiveContextPreparationStatus::Preparing(_)),
+        "an append the provider has not acknowledged is not an acknowledged preparation: {preparation:?}"
+    );
+    replay
+        .host_close_confirmed(second_channel, &mut second)
+        .await?;
+    let (_, preparation) = host.preparation(&second).await?;
+    assert!(
+        matches!(preparation, LiveContextPreparationStatus::Failed(_)),
+        "a preparation the provider never acknowledged must end as the typed failure: {preparation:?}"
+    );
+    cassette.diverged()?;
+    evidence.finish(evidence::Outcome::Passed)?;
+    Ok(())
+}
+
+/// A close the provider never confirms. The tape keeps the sideband open
+/// and answers nothing after the host's close, so only the product's own
+/// confirmation bound can end the channel: the close returns, the close is
+/// committed and the custody is Closed, and not before that bound. The row
+/// spends the product's real bound once (the product has no clock seam to
+/// inject one); it asserts no upper limit on the time, only that the
+/// retirement was not earlier than the bound, which no slow host can fail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_close_the_provider_never_confirms_is_retired_at_the_products_own_bound()
+-> Result<(), Box<dyn std::error::Error>> {
+    let replay = open_constructed_s106(
+        "unconfirmed-close-replay",
+        &[0],
+        ConstructedEnd::Unconfirmed,
+        &[],
+        HostSteps::default(),
+    )
+    .await?;
+    let ConstructedReplay {
+        cassette,
+        evidence,
+        host,
+        ..
+    } = &replay;
+    let (channel, mut open) = host.connect(evidence).await?;
+    cassette.reached(channel, CONSTRUCTED_END_STEP).await?;
+    let requested = std::time::Instant::now();
+    let status = host
+        .member_host
+        .close_experimental_live_active_channel(
+            host.authority.as_ref(),
+            &open.id,
+            &open.activation_receipt,
+        )
+        .await;
+    host.closed(&mut open).await?;
+    let elapsed = requested.elapsed();
+    assert_eq!(
+        cassette.parked(channel),
+        Parked::Marker(CONSTRUCTED_END_STEP.to_owned()),
+        "the tape confirmed the close"
+    );
+    assert!(
+        elapsed >= meerkat::experimental_gpt_live::LIVE_CLOSE_CONFIRMATION_BOUND,
+        "the unconfirmed close ended after {elapsed:?}, before the product's bound (close returned {status:?})"
+    );
+    cassette.diverged()?;
+    evidence.finish(evidence::Outcome::Passed)?;
+    Ok(())
+}
+
+/// Measured playback without a browser. The host accepts published
+/// assistant outputs and the test is the peer: on a tape constructed from
+/// the recording's first spoken exchange, the answer's output is published
+/// to the host, and the test completes its playback through the member
+/// live host, for the channel that published it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_measured_host_is_handed_the_answer_output_and_completes_its_playback()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (outputs, mut published) = tokio::sync::mpsc::unbounded_channel();
+    let mut replay = open_constructed_s106(
+        "measured-playback-replay",
+        &[1],
+        ConstructedEnd::HostClose,
+        &[],
+        HostSteps {
+            measured_outputs: Some(outputs),
+            ..HostSteps::default()
+        },
+    )
+    .await?;
+    let cassette = Arc::clone(&replay.cassette);
+    let (channel, mut open) = replay.host.connect(&replay.evidence).await?;
+    let first_step = cassette
+        .fixture()
+        .channels
+        .first()
+        .and_then(|tape| tape.markers().first().cloned())
+        .ok_or("the constructed tape has no recorded step")?;
+    cassette.release(channel, &first_step).await?;
+    cassette.reached(channel, CONSTRUCTED_END_STEP).await?;
+    let output = timeout(CONVERGENCE_BOUND, published.recv())
+        .await
+        .map_err(|_| "the measured host was never handed an assistant output")?
+        .ok_or("the measured publisher is gone")?;
+    assert_eq!(output.channel_id, open.id);
+    // The published answer becomes the session's committed assistant row
+    // with the playback confirmation, not before: its words are the tape's
+    // spoken answer.
+    let spoken = words(&cassette.fixture().spoken_assistant_text(channel));
+    assert!(!spoken.is_empty(), "the constructed tape holds no answer");
+    let answer_rows = |rows: &[HistoryRow]| {
+        rows.iter()
+            .filter(|row| row.is_assistant() && words(&row.text) == spoken)
+            .count()
+    };
+    let before = replay.host.history_rows().await?;
+    assert_eq!(
+        answer_rows(&before),
+        0,
+        "the answer was committed before its playback was confirmed: {before:?}"
+    );
+    replay.host.complete_playback(&open, &output).await?;
+    let after = replay.host.history_rows().await?;
+    assert_eq!(
+        answer_rows(&after),
+        1,
+        "the confirmed answer is one committed assistant row: {after:?}"
+    );
+    replay.host_close_confirmed(channel, &mut open).await?;
+    cassette.diverged()?;
+    replay.evidence.finish(evidence::Outcome::Passed)?;
     Ok(())
 }

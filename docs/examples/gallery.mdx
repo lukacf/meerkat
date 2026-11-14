@@ -40,7 +40,7 @@ If you are new to Meerkat, start with the three hello-world examples above befor
 
 <CardGroup cols={2}>
   <Card title="021 Multi-Provider Routing" icon="server" href="https://github.com/lukacf/meerkat/tree/main/examples/021-multi-provider-routing-py">
-    **Python** -- Same code routes to Anthropic, OpenAI, or Gemini. Provider-specific params, model switching at runtime.
+    **Python** -- Same code routes to Anthropic, OpenAI, or Gemini, one new session per model. Provider-specific params (extended thinking, reasoning effort).
   </Card>
   <Card title="024 Multi-Turn Processing" icon="satellite-dish" href="https://github.com/lukacf/meerkat/tree/main/examples/024-host-mode-event-mesh-rs">
     **Rust** -- Standalone in-process session with directly submitted turns, retained context, and event streaming.
@@ -57,7 +57,7 @@ If you are new to Meerkat, start with the three hello-world examples above befor
 
 <CardGroup cols={2}>
   <Card title="028 Mobpack Release Triage" icon="box-archive" href="https://github.com/lukacf/meerkat/tree/main/examples/028-mobpack-release-triage-sh">
-    **Shell** -- Build, sign, validate, and deploy a believable multi-role release-triage `.mobpack`. Trust policy, inspection, and realistic incident prompts.
+    **Shell** -- Build, sign, inspect, and validate a multi-role release-triage `.mobpack` offline, with a trust policy. A packaging example: it stops before deployment and runs no agents.
   </Card>
   <Card title="034 CodeMob MCP" icon="code" href="https://github.com/lukacf/meerkat/tree/main/examples/034-codemob-mcp">
     **Rust (MCP)** -- Multi-agent MCP server for Claude Code. Teams deliberate on code reviews, architecture, brainstorming, and RCT pipelines through machine-owned structured flows.

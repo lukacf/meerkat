@@ -73,8 +73,9 @@ requires `meerkat-meta==0.9.14`. In that pairing:
   0.9.15 beside it: its optional peers accept 0.9.14 and later below 0.10.0.
 - Without that extra, the Python `meerkat-toolkit` 0.9.14 puts no
   requirement on `meerkat-meta`.
-- The pairing rests on these published version requirements. It was not run
-  as a whole before Core 0.9.15 and Meta 0.9.15 were published.
+
+That pairing was not run as a whole, in either direction: it rests on the
+version requirements Connect 0.9.14 published.
 
 State that 0.9.14 or 0.9.13 persisted loads under 0.9.15 as it is. What
 that rests on differs by store:
@@ -93,6 +94,9 @@ that rests on differs by store:
 - **A store the host implements itself** (a host-supplied schedule store,
   for example) holds Core's serialized forms, so the same holds for it
   provided it stores them whole and keeps the keys it does not know.
+
+Connect's own stored forms were not audited: what is said above covers these
+three kinds of store only.
 
 ### Configuration documents are readable by their owner only
 
@@ -216,7 +220,7 @@ text meets a code it did not know, `profile_held_by_identity`. Rust code
 that matches `meerkat_mob::DiagnosticCode` exhaustively adds an arm for
 `ProfileHeldByIdentity`, which is appended last.
 
-### Schedules paused for their target, and a rollback
+### Schedules paused for their target and a rollback
 
 A schedule can be paused for its target (`ScheduleService::pause_for_target`):
 it is stored as a paused schedule whose machine state carries
@@ -333,8 +337,7 @@ store:
 
 - **SQLite store**: no stored row is rewritten. The lineage of every fork
   seated on 0.9.15 is restored from its spawn row and the records select
-  those forks again; write each such record at a new revision after the
-  return, which delivers it to every fork it selects.
+  those forks again.
 - **Host store** (a realm kept in the host's own database through the host
   store SPI): the earlier release writes the mob's journal again at its next
   checkpoint, from what it read, without the fork scope of the records and
@@ -462,9 +465,9 @@ under `## [0.9.15]`.
   write `require_approval` where it says `review`, or review the request in
   your own code before you ask under `allow`; and write the preparation
   mode `required` where it says `constructed`, which the host settles with
-  `meta/identity/settle_preparation`. The page "Identity policy" of Meta's
-  reference (`meta/docs/reference/identity-policy.mdx`) describes the
-  policy.
+  `meta/identity/settle_preparation`. The page
+  [Identity policy](https://docs.rkat.ai/meta/reference/identity-policy) of
+  Meta's reference describes the policy.
 - A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
   or the `bootstrap_with_*` family must complete the bootstrap before an
   agent created at run time can be built: with an identity bootstrap
@@ -513,7 +516,16 @@ under `## [0.9.15]`.
 - Python SDK (`meerkat-meta`) and TypeScript SDK (`@rkat/meta-sdk`): the
   refusal kinds of `runtime.identities` (`IDENTITY_REFUSAL_KINDS`), its
   instruction outcomes and its seats are closed vocabularies, so a kind
-  added by a later release is a breaking change of the SDKs. **Do:**
+  added by a later release is a breaking change of the SDKs. A 0.9.15 client
+  against a 0.9.14 gateway was exercised in one keyless run only (the Meta
+  Python SDK's own tests that start a real gateway without a provider key,
+  against a gateway built at the 0.9.14 commit); no other client and no
+  0.9.14 runtime was exercised. Of the tests in that run that start a real
+  gateway, the five that existed at 0.9.14 and need no provider key passed;
+  the failures were in tests new in 0.9.15 (the identity methods and
+  cross-mob delivery between gateways) or in tests that need a provider key.
+  The methods for agents created at run time (meta/identity) need a 0.9.15
+  gateway: upgrade the gateway before the SDKs that call them. **Do:**
   upgrade the SDKs with the gateway.
 
 ### Rolling back to 0.9.14
@@ -589,9 +601,9 @@ mob's recovered state against the earlier bounds is refused:
   mob's state could not be recovered;
 - every flow run is refused before it starts, for the same reason;
 - with more than 64 records, every member's operator instruction delivery
-  is also refused by the member's session (`slot_limit_exceeded`) and
-  retried without end: the status read shows the member `owed` with that
-  `last_failure`, and no later write reaches it. What a member's session
+  is also refused by the member's session (`slot_limit_exceeded`): the
+  status read shows the member `owed` with that `last_failure`, and no
+  later write reaches it. What a member's session
   already applied stays in effect. A member whose build mints a new session
   fails to build, because the mob cannot carry its snapshot into the
   session.
@@ -633,7 +645,7 @@ acknowledgement) stores it without the mark; a schedule the earlier release
 did not write keeps the mark. After the return to 0.9.15 a schedule that
 kept its mark is resumed with its target, and one whose mark was dropped
 stays paused when its target comes back, until it is resumed by name. See
-[Schedules paused for their target, and a rollback](#schedules-paused-for-their-target%2C-and-a-rollback).
+[Schedules paused for their target and a rollback](#schedules-paused-for-their-target-and-a-rollback).
 
 ## Upgrading to 0.9.14
 

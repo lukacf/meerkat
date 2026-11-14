@@ -1076,6 +1076,19 @@ try {
 
 Both `createSession()` and `session.turn()` accept structured skill parameters.
 
+<Warning>
+Known issue, noted 2026-11-13. The four binaries in the Linux x86_64 release
+archives (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) start without the
+built-in skills and report an empty capability list, with no error. The Python and TypeScript
+SDKs download and start the same `rkat-rpc` on Linux x86_64, so
+`session.invokeSkill()` throws `CapabilityUnavailableError` there, also for a
+skill of your own, because it checks the capability report first. A skill of
+your own that declares `requires_capabilities` is dropped by those archives
+without a message. See the
+[known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
+for the releases and platforms that were checked and for a workaround.
+</Warning>
+
 ```typescript
 // Preload skills into the system prompt at session creation
 const session = await client.createSession("Hello!", {

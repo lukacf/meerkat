@@ -933,6 +933,15 @@ Security, Upgrade and Changed.
 
 ### Changed
 
+- A respawn hands the inputs queued on the member to its successor, for
+  the members the respawn fix serves (see Fixed). A prompt sent just
+  before a respawn now runs afterwards, once, on the respawned identity;
+  in 0.9.14 it never ran. A host that used a respawn to discard queued
+  prompts must withdraw them another way. Core hands them over as its
+  same-session successor does: the durable prompts not bound to an
+  objective are kept and run on the successor's first wake, every other
+  queued input ends stopped, and the turn in flight is cancelled.
+
 - A host that labels its members in its customizer must put those labels
   in the row of an agent created at run time (an identity whose record is
   its row). Such an agent's member carries its row's labels and no others,
@@ -1107,9 +1116,9 @@ Security, Upgrade and Changed.
   edges an identity's row declares; default none), `holds_identity_entry`
   (whether Core holds a member id as an identity entry; default `false`)
   and `respawn_member_on_own_session` (Core's same-session successor;
-  default a refusal). A host's own wrapper of a session bridge forwards
-  them to the bridge it wraps. The identity runtime no longer calls
-  `created_identities`.
+  default `BridgeError::Unsupported`). A host's own wrapper of a session
+  bridge forwards them to the bridge it wraps. The identity runtime no
+  longer calls `created_identities`.
 
 - A held add (`IdentityFirstRuntimeContext::add_member_held`) of a name an
   identity holds through its row answers
@@ -1196,6 +1205,63 @@ Security, Upgrade and Changed.
   the roster list.
 
 ### Fixed
+
+- A respawn of an identity keeps the mobs its session owns, for the
+  served members named below. In Meta 0.9.9 through 0.9.14, on a gateway
+  or a host that keeps its state on disk, a
+  respawn whose wake failed (the provider or a credential was unavailable,
+  or the host's build refused it), or whose process ended before the
+  identity had woken again, was followed at the next start by the loss of
+  the mobs the identity's session owned: the child mobs its agent created
+  with `mob_create`, with their members, and its implicit mob, which holds
+  its delegates and forks. The identity, its conversation and its memory
+  were kept. A respawn that completed lost nothing, and neither did one
+  whose identity woke again on its session before the process stopped.
+  Mobs lost this way are not restored by the upgrade. `meta/respawn`
+  (`MetaRuntime.respawn` in both SDKs, `IdentityRuntime::respawn`), the
+  Console's respawn and the two rebuilds of `meta/compact_member` were
+  affected. On 0.9.9 and 0.9.10 a gateway could enter the state by
+  itself: at each roster compile it respawned, once, every listed
+  identity whose live member had been created before an upgrade from an
+  older release and had not been respawned since. A respawn, the
+  Console's and the rebuilds now replace the member by its successor on
+  the same session in one step in Core, as they already did for an agent
+  created at run time: the identity is never without a member, and after
+  a failed wake it stays seated on the session it had, its next delivery
+  wakes it, and a restart keeps what its session owns. The host's
+  customizer is asked as before: once for the successor's seat, whose
+  build is composed before Core is asked (a build the host refuses now
+  refuses the respawn before anything changes, where it used to leave the
+  identity without a member), and once for its build; `after_create` is
+  told once, of the session the respawn keeps. The successor is seated
+  with the customizer's current answer, as the seat of 0.9.14 was.
+  - Served members: every configured identity whose member runs in this
+    process on a session the gateway's store keeps, over the stock
+    session bridge. That is the stock composition over a persistent state
+    directory.
+  - Not served, and handled as in 0.9.14 (the member is retired and then
+    woken; a line is logged each time, with the cause: a warning unless
+    the member is never exposed). Still exposed
+    to the loss (see Known limitations): an identity served through a
+    host's own `SessionBridge` that does not implement
+    `respawn_member_on_own_session` or does not say that its sessions
+    outlive their members (`session_outlives_member`), and a member whose
+    session's creation record or spawn continuity cannot be read (for it
+    the host's customizer is asked a third time: the retired member's
+    seat is composed again). Unchanged, exposure not established: a
+    member placed on another host. Never exposed: a member whose sessions
+    are kept in memory only (`meta/respawn` refuses such a member before
+    anything is retired, as before) and a member without a session. Fork
+    children and side chats are not respawned.
+  - The inputs queued on a served member are handed to its successor
+    (see Changed).
+  - Rust: `SessionBridge::respawn_member_on_own_session` takes the
+    identity's spec and, for an identity the host's roster holds, the
+    seat's build the host composed (`Some(draft)`; `None` for an agent
+    created at run time, seated with its row's record), and its default
+    answers `BridgeError::Unsupported`. It uses the new
+    `MemberRespawn::with_profile_override`, `with_model_override` and
+    `with_build_inputs_of` of Meerkat's mob (see Meerkat's changelog).
 
 - An agent created at run time that the mob's start seats before the
   host's identity runtime is composed is not built from its row alone.
@@ -1587,6 +1653,46 @@ Security, Upgrade and Changed.
 
 ### Known limitations
 
+- The loss of an identity's mobs after a respawn (see Fixed) remains for
+  the members the fix does not serve whose session a store keeps. A
+  member the fix does not serve is retired and then woken, as in 0.9.14,
+  and each time one line is logged that begins "no same-session
+  successor serves the identity's member, so it is retired and then
+  woken" and carries the identity, its session, the step and a `cause`
+  field. The rest of the line differs by cause, as below. Each cause is
+  marked "confirmed by a test" where a test confirms that the member is
+  retired and the line is logged at that level with that cause, and
+  "read from the source" otherwise.
+  - Exposed. The line is a warning that goes on: "until the wake succeeds
+    its session reads archived, and a restart in between ends the mobs
+    the session owns. Do not stop this process before the identity has
+    woken". Its causes:
+    - `its session bridge does not say whether the session outlives its
+      member (...)`: an identity served through a host's own
+      `SessionBridge` without that answer (confirmed by a test);
+    - `this session bridge does not implement
+      respawn_member_on_own_session`: an identity served through a host's
+      own `SessionBridge` without the same-session step (confirmed by a
+      test);
+    - `... the creation the member's session recorded cannot be read
+      ...`: the step cannot keep the member's session (confirmed by a
+      test, over a session bridge that answers with Core's refusal);
+    - `... no spawn row records the member's current continuity ...`:
+      the same (read from the source).
+
+    The two session bridge causes are exposed when that host keeps
+    sessions and child mobs on disk. For all four, as in 0.9.14: do not
+    respawn the identity while its provider is unavailable; after a
+    respawn, do not stop or restart the gateway until the identity has
+    woken on the same session; and if a respawn's wake failed, wake the
+    identity successfully, on the same session, before any restart.
+  - Not established. `its member is placed on another host`: the line is
+    a warning that goes on: "as in 0.9.14: whether a restart before the
+    wake succeeds ends the mobs its session owns is not established"
+    (confirmed by a test).
+  - Not exposed. `its session is kept in memory only` and `its member
+    holds no session`: the line is a debug line with nothing after its
+    beginning, and no warning is logged (both confirmed by a test).
 - An update cannot hand an agent's runtime mode back to its profile: to
   change how such an agent runs, set the other explicit value
   (`autonomous_host` or `turn_driven`); clearing an override is not offered

@@ -225,6 +225,21 @@ them.
   afterwards. A request that names no floor keeps what the member builds
   with. Additive: `MemberRespawn` is non-exhaustive.
 
+- Mob: `MemberRespawn::with_profile_override`,
+  `MemberRespawn::with_model_override` and
+  `MemberRespawn::with_build_inputs_of` seat a member's same-session
+  successor (`MobHandle::respawn_member`) with a host's freshly composed
+  seat: the profile override and the model override the successor
+  carries (`None` seats it with none, so it follows its role's profile and
+  model), and the build inputs a lowered `SpawnMemberSpec` names (its
+  context, additional instructions, system prompt override, budget limits,
+  tool access policy, application tool policy, auth binding and web search
+  override), which the successor's builds on the kept session apply. The
+  rotation's record holds them, so a restarted mob finishes the same
+  successor. A request that names none of them keeps the member's own
+  overrides (under its own role) and what its session's builds recorded,
+  as before. Additive: `MemberRespawn` is non-exhaustive.
+
 - Mob: a store-owned identity's row records a label restamp its seat is
   owed (`CreatedIdentityRecord::label_restamp_owed`), and
   `IdentityRecordCensus::label_restamps_owed` counts the rows that do; so

@@ -78,17 +78,18 @@ not create the directory.
 Two files are meant to be left out: the key this pack is signed with
 (`--sign`) and the file this run writes (`-o`). In 0.4.1 through 0.9.14
 (confirmed by runs on 0.9.14; the earlier releases read from the source)
-each is left out only when its path, component by component, is the mob
-directory argument's path followed by the file's own; a trailing or doubled
-separator makes no difference
-(`rkat mob pack mob -o mob/out.mobpack --sign mob/release.key --signer-id <id>`,
-or `.` with `./out.mobpack` and `./release.key`). With any other
-components, the key is packed, and so is the output of an earlier pack at
-that path:
+each is left out only when its path is written as the mob directory
+argument followed by the file's path below it (`./key.hex` with `.`,
+`mob/key.hex` with `mob`; a trailing separator on the directory argument, or
+a doubled one in it or right after it, makes no difference), as in
+`rkat mob pack mob -o mob/out.mobpack --sign mob/release.key --signer-id <id>`.
+Written otherwise, the key is packed, and so is the output of an earlier
+pack at that path:
 `rkat mob pack . -o out.mobpack --sign release.key --signer-id <id>` inside
 the mob directory, `./mob` with `mob/release.key`, an absolute directory
-with a relative path, a path through a symbolic link. A pack that holds its
-signing key gives the key to everyone who gets the pack.
+with a relative path, a doubled separator further in
+(`mob/keys//release.key`), a path through a symbolic link. A pack that holds
+its signing key gives the key to everyone who gets the pack.
 
 From 0.9.15 the two are left out however their paths are written. What is
 left out is the file that is this pack's signing key and the file this run

@@ -837,7 +837,9 @@ fn lineage_binding(
     match history {
         Ok(history) => history.binding_for_session(session).cloned(),
         Err(error) => {
-            tracing::warn!(
+            // Asked once for each mob a successor's session created, at each
+            // listing: a line an operator's log takes at debug level.
+            tracing::debug!(
                 mob_id = %parent,
                 %error,
                 "a mob's member history could not be read to follow its creator's successors"

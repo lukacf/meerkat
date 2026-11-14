@@ -9,6 +9,13 @@
 //! Started work is never interrupted by a recall. An input the session does
 //! not hold, an unknown session and a session with no live runtime to decide
 //! in are errors from the existing vocabulary, never an outcome here.
+//!
+//! The list of outcomes can grow: a later release may add one.
+//! [`WireQueuedInputRecall`] is non-exhaustive, so a Rust client outside this
+//! crate matches it with a wildcard arm. The attribute keeps that match
+//! compiling when an outcome is added; it adds no catch-all variant, so a
+//! client built on this release that deserializes an outcome the enum does
+//! not have gets a decode error.
 
 use serde::{Deserialize, Serialize};
 
@@ -29,9 +36,14 @@ pub struct RecallInputParams {
 }
 
 /// Typed answer of a queued-input recall.
+// A later release may add an outcome, so a Rust client outside this crate
+// keeps a wildcard arm (see the module documentation). That note is not in
+// the item's own doc text, which the schema and the generated SDK types
+// carry as this type's description.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum WireQueuedInputRecall {
     /// The input was still queued and is now withdrawn: its terminal is
     /// `cancelled`, durably, and no run will take it. `attempt_count` is the

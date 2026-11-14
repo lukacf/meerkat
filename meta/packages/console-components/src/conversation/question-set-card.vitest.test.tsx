@@ -9,6 +9,8 @@ import {
   type QuestionSetDecisionState,
   type QuestionSetSnapshot,
 } from "../../../console-core/src/pending-questions";
+import { normalizePendingApproval, type PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
+import { ApprovalAttention } from "./approval-card";
 import { ConversationApprovals } from "./conversation-approvals";
 import { ConversationQuestionSets, QuestionSetCard, QuestionSetList, QuestionSetsProvider, type QuestionSetCardProps } from "./question-set-card";
 
@@ -443,6 +445,38 @@ describe("QuestionSetList", () => {
     // A list that never showed the card says nothing of it.
     const late = render(list(left));
     expect(late.container.textContent).toBe("");
+  });
+});
+
+describe("Needs you with question sets", () => {
+  const approvals: PendingApprovalSnapshot = {
+    scopeKey: "a", status: "ready", decisions: {}, readOnly: false,
+    requests: [normalizePendingApproval({ pending_id: "p1", action_id: "a1", action: "Deploy release", rationale: "Publish reviewed changes" })!],
+  };
+  const count = (view: ReturnType<typeof render>) => view.getByTestId("approval-attention").querySelector(".cc-approval-attention__count")?.textContent;
+
+  it("counts the open question sets with the approvals and opens the inbox's list", () => {
+    const onOpen = vi.fn();
+    const view = render(<ApprovalAttention snapshot={approvals} questionSets={2} onOpen={onOpen} />);
+    expect(count(view)).toBe("3");
+    expect(view.getByRole("status").textContent).toBe("1 pending approval, 2 question sets");
+    expect(view.getByTestId("approval-attention").getAttribute("data-pending")).toBe("true");
+    fireEvent.click(view.getByRole("button", { name: "Needs you, 1 pending approval, 2 question sets" }));
+    // The list, where the question sets head Pending: not the one approval.
+    expect(onOpen).toHaveBeenCalledWith(undefined);
+  });
+
+  it("shows a question set that waits where no approval does, and nothing for none", () => {
+    const view = render(<ApprovalAttention snapshot={{ ...approvals, requests: [] }} questionSets={1} onOpen={vi.fn()} />);
+    expect(count(view)).toBe("1");
+    expect(view.getByRole("button", { name: "Needs you, 0 pending approvals, 1 question set" })).toBeTruthy();
+    cleanup();
+    // A connection that shows no approvals still names the question set.
+    const alone = render(<ApprovalAttention questionSets={1} onOpen={vi.fn()} />);
+    expect(count(alone)).toBe("1");
+    expect(alone.getByRole("button", { name: "Needs you, 1 question set" })).toBeTruthy();
+    alone.rerender(<ApprovalAttention questionSets={0} onOpen={vi.fn()} />);
+    expect(alone.queryByTestId("approval-attention") === null).toBe(true);
   });
 });
 

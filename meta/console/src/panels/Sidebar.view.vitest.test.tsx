@@ -217,6 +217,21 @@ describe("Workbench nav (B14)", () => {
     navAttention: { workgraph: { count: 2, tone: "warn" as const, description: "2 blocked work items" } },
   };
 
+  it("counts the open question sets with the approvals, in Needs you and on the Approvals view's badge", () => {
+    const view = render(<Sidebar {...withAttention} visibleControls={[...withAttention.visibleControls]} questionSetCount={1} />);
+    expect(view.getByTestId("nav-badge:gating").textContent).toBe("3");
+    expect(describedBy(view.getByTestId("nav:gating"))).toBe("2 pending approvals, 1 question set");
+    expect(view.getByTestId("approval-attention").querySelector(".cc-approval-attention__count")?.textContent).toBe("3");
+    expect(within(view.getByTestId("approval-attention")).getByRole("button").getAttribute("aria-label"))
+      .toBe("Needs you, 2 pending approvals, 1 question set");
+    cleanup();
+    // Question sets alone: no approvals are shown on this connection.
+    const alone = render(<Sidebar {...withAttention} visibleControls={[...withAttention.visibleControls]} approvals={undefined} questionSetCount={2} />);
+    expect(alone.getByTestId("nav-badge:gating").textContent).toBe("2");
+    expect(describedBy(alone.getByTestId("nav:gating"))).toBe("2 question sets");
+    expect(within(alone.getByTestId("approval-attention")).getByRole("button").getAttribute("aria-label")).toBe("Needs you, 2 question sets");
+  });
+
   it("lists views with exact names, describes their attention badges and marks the focused pane's view", () => {
     const view = render(<Sidebar {...withAttention} visibleControls={[...withAttention.visibleControls]} />);
     const nav = view.getByRole("navigation", { name: "Workbench" });

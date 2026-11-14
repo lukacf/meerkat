@@ -285,32 +285,66 @@ impl AskUserSlot {
         // surface, and its empty dispatcher, which is not, otherwise. The
         // tool is then composed over that same empty dispatcher and reads
         // as it reads.
-        let below = match build.external_tools.take() {
+        let own = build.external_tools.take();
+        let alone = own.is_none();
+        let below = match own {
             Some(external) => Some(external),
             None if composes_builtin_surface(build) => None,
             None => Some(Arc::new(meerkat_tools::EmptyToolDispatcher)
                 as Arc<dyn meerkat_core::AgentToolDispatcher>),
         };
-        build.external_tools = Some(crate::tool_compose::ComposedExternalTools::over(
-            tool, below,
-        ));
+        let mounted = crate::tool_compose::ComposedExternalTools::over(tool, below);
+        if alone {
+            remember_mounted_alone(&mounted);
+        }
+        build.external_tools = Some(mounted);
     }
 }
 
-/// Whether the factory composes its builtin tool surface for `build`: the
-/// build's options switch builtins, shell, image generation or web search
-/// on. A member build sets the first three explicitly. Read from the build's
-/// own options, not from what the factory resolves: a build that switches
-/// image generation or web search on while the factory composes neither
-/// reads as composing one.
+/// The dispatchers [`AskUserSlot::mount`] built with none of a build's own
+/// external tools below them, held weakly and known by identity: the very
+/// dispatcher the hook built, never a tool name a host could use too.
+static MOUNTED_ALONE: std::sync::Mutex<
+    Vec<std::sync::Weak<dyn meerkat_core::AgentToolDispatcher>>,
+> = std::sync::Mutex::new(Vec::new());
+
+fn remember_mounted_alone(mounted: &Arc<dyn meerkat_core::AgentToolDispatcher>) {
+    let mut known = MOUNTED_ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    known.retain(|dispatcher| dispatcher.strong_count() > 0);
+    known.push(Arc::downgrade(mounted));
+}
+
+/// Whether `tools` is a dispatcher this module's mount built with none of a
+/// build's own external tools below it. Such a dispatcher is not one the
+/// build supplied: it stands where the factory's base stands. What judges
+/// the dispatchers a build supplies (the capability invariant) leaves it
+/// out, so its judgement of a build is the one it has without the tool.
+pub(crate) fn mounted_alone(tools: &Arc<dyn meerkat_core::AgentToolDispatcher>) -> bool {
+    MOUNTED_ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|known| {
+            known
+                .upgrade()
+                .is_some_and(|known| Arc::ptr_eq(&known, tools))
+        })
+}
+
+/// Whether the factory's base for `build` is its builtin composite: the
+/// build's options switch builtins or shell on, the two switches the
+/// factory resolves from the build alone (a member build sets both
+/// explicitly). Image generation and the fallback web search also make the
+/// factory compose that composite, but only with their backends, which the
+/// build's options do not show: an ordinary member build has such a switch
+/// on while the factory composes neither. A build the factory composes the
+/// composite for by those alone reads here as having the empty base, and
+/// its catalog then reads not exact (nothing of it is deferred).
 fn composes_builtin_surface(build: &meerkat_core::service::SessionBuildOptions) -> bool {
-    [
-        build.override_builtins,
-        build.override_shell,
-        build.override_image_generation,
-        build.override_web_search,
-    ]
-    .contains(&meerkat_core::ToolCategoryOverride::Enable)
+    [build.override_builtins, build.override_shell]
+        .contains(&meerkat_core::ToolCategoryOverride::Enable)
 }
 
 /// The principal a question set names as its requester: the asking agent,

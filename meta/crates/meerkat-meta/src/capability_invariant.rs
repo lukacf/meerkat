@@ -233,8 +233,19 @@ impl MemberCapabilityInvariantContext {
         // exactness from what they wrap; a host that supplies a dispatcher on
         // the trait default is the remaining legitimate source of
         // `NonExactCatalog`, and that is a steady state, not a defect.
+        //
+        // The stock `ask_user` tool Meta mounts on every member build is not
+        // a dispatcher the build supplied. Mounted with none of the build's
+        // own external tools below it, it stands where the factory's base
+        // stands and reads as that base reads, so that dispatcher (known by
+        // identity, as the one the mount built) is left out here: the
+        // judgement of a build's own dispatchers is the one it has without
+        // the tool.
         let catalog_exactness = if [
-            build.external_tools.as_ref(),
+            build
+                .external_tools
+                .as_ref()
+                .filter(|tools| !crate::ask_user::mounted_alone(tools)),
             build.schedule_tools.as_ref(),
             build.workgraph_tools.as_ref(),
         ]

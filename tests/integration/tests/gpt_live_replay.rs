@@ -3284,3 +3284,176 @@ async fn a_measured_host_is_handed_the_answer_output_and_completes_its_playback(
     replay.evidence.finish(evidence::Outcome::Passed)?;
     Ok(())
 }
+
+// --- the continuation rule, over the S106 recording --------------------------
+
+/// The adapter's "lowered a sideband observation" debug lines of one
+/// replay, captured as text. No typed surface carries a
+/// `user_turn_continues_delegation` observation out of the composed host
+/// (the delegation coordinator consumes it), so the row that needs it reads
+/// the line the adapter writes for every observation it hands on, whose
+/// value is the observation's stable kind label.
+#[derive(Clone, Default)]
+struct LoweredObservations(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LoweredObservations {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("capture").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LoweredObservations {
+    /// Capture the adapter's debug lines written on the calling thread, for
+    /// the rest of the thread's life. A thread default, so it does not
+    /// depend on which test of the process installed the global subscriber.
+    fn capture_on_this_thread(&self) {
+        use tracing_subscriber::util::SubscriberInitExt as _;
+        let writer = self.clone();
+        let guard = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(
+                "meerkat_openai::public_live=debug",
+            ))
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish()
+            .set_default();
+        std::mem::forget(guard);
+    }
+
+    /// How many observations of `kind` the adapter handed on.
+    fn count(&self, kind: &str) -> usize {
+        let text = String::from_utf8_lossy(&self.0.lock().expect("capture")).into_owned();
+        let label = format!("kind: \"{kind}\"");
+        text.lines()
+            .filter(|line| {
+                line.contains("public Live lowered a sideband observation") && line.contains(&label)
+            })
+            .count()
+    }
+}
+
+/// The value of a `u64` millisecond constant of the public Live adapter,
+/// read from its source (the product does not export its bounds).
+fn broker_constant_ms(marker: &str) -> f64 {
+    const BROKER: &str = include_str!("../../../crates/meerkat-openai/src/public_live.rs");
+    let start = BROKER
+        .find(marker)
+        .unwrap_or_else(|| panic!("`{marker}` is defined"))
+        + marker.len();
+    let value: u32 = BROKER[start..]
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit() || *c == '_')
+        .filter(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or_else(|_| panic!("`{marker}` has a numeric value"));
+    f64::from(value)
+}
+
+/// For every client delegation of a recording that the user spoke after on
+/// the same channel: the channel, and the pause on the session timeline
+/// between the delegated words (the end of the user's last transcript delta
+/// before the delegation) and the first word spoken after it.
+fn pauses_after_delegations(fixture: &Fixture) -> Vec<(u32, f64)> {
+    let mut pauses = Vec::new();
+    // Per channel: the end of the user's last word, and whether a
+    // delegation is waiting for the user's next word.
+    let mut channels: BTreeMap<u32, (Option<f64>, bool)> = BTreeMap::new();
+    for line in &fixture.lines {
+        let provider_recording::Entry::ServerFrame { raw } = &line.entry else {
+            continue;
+        };
+        let (last_end, delegated) = channels.entry(line.channel_ordinal).or_default();
+        if raw["type"] == "session.delegation.created" && raw["delegation"]["target"] == "client" {
+            *delegated = true;
+        } else if raw["type"] == "session.input_transcript.delta" {
+            let (Some(start), Some(end)) = (raw["start_ms"].as_f64(), raw["end_ms"].as_f64())
+            else {
+                continue;
+            };
+            if std::mem::take(delegated)
+                && let Some(last_end) = *last_end
+            {
+                pauses.push((line.channel_ordinal, start - last_end));
+            }
+            *last_end = Some(end);
+        }
+    }
+    pauses
+}
+
+/// S106 replayed through the composed host: no user turn is reported as
+/// continuing an earlier delegation.
+///
+/// The recording holds the first half of the released defect twice. Each of
+/// its three requests is delegated at its last word, with the user's turn
+/// still open, which arms the "rest of the same sentence" rule. On channel
+/// 1 the user's next words are "Remind me, which venue did I mention
+/// earlier", 18.4 s after the delegated words and after the job's result
+/// was read out; on channel 3 they are "Thanks. That's all for today. Close
+/// the call", 26.6 s after. The voice answers both itself, and each was
+/// reported as continuing the earlier request's delegation: words for its
+/// job, had it still been running or waiting to start.
+///
+/// The row first states those facts of the tape (two turns follow a
+/// delegation, each after more than the pause one sentence holds), so a
+/// recapture that carries a real continuation fails here by name instead
+/// of turning the count below into a wrong expectation. The replay itself
+/// is the recorded run: it must send exactly the recording's client events.
+#[test]
+fn s106_replay_reports_no_later_turn_as_continuing_an_earlier_delegation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let lowered = LoweredObservations::default();
+    lowered.capture_on_this_thread();
+    let runtime = {
+        let lowered = lowered.clone();
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .on_thread_start(move || lowered.capture_on_this_thread())
+            .build()?
+    };
+
+    let sentence_pause_ms = broker_constant_ms("const USER_FLOOR_SILENCE_RELEASE_MS: u64 =");
+    let recording = Fixture::parse(S106_FIXTURE)?;
+    let later_turns = pauses_after_delegations(&recording);
+    assert_eq!(
+        later_turns,
+        [(1, 18_400.0), (3, 26_600.0)],
+        "the turns the S106 recording holds after a delegation on its channel (channel, ms after the delegated words)"
+    );
+    assert!(
+        later_turns
+            .iter()
+            .all(|(_, pause_ms)| *pause_ms > sentence_pause_ms),
+        "a turn of the S106 recording begins within the sentence pause ({sentence_pause_ms} ms) of delegated words; it continues that delegation and this row must count it: {later_turns:?}"
+    );
+    let delegations = recorded_jobs(&recording).len();
+
+    runtime.block_on(async {
+        let replayed = replay_s106().await?;
+        assert_recorded_client_events(&replayed.evidence, &replayed.fixture, &replayed.llm)?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+
+    // The capture saw the adapter's observations: one joined delegation per
+    // recorded delegation. Without this the count below could be zero
+    // because nothing was captured.
+    assert_eq!(
+        lowered.count("client_delegation_final"),
+        delegations,
+        "the capture must hold one joined delegation per recorded delegation"
+    );
+    assert_eq!(
+        lowered.count("user_turn_continues_delegation"),
+        0,
+        "turns spoken long after a delegated request were reported as continuing its delegation; the recording's later turns (channel, ms after the delegated words): {later_turns:?}"
+    );
+    Ok(())
+}

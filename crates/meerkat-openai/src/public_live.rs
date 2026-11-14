@@ -10700,6 +10700,88 @@ mod tests {
         );
     }
 
+    /// A refused delegation ends the earlier continuation, as an accepted
+    /// one does. A request delegated while the user's turn was still open
+    /// arms a continuation: the next user turn to finish is reported as
+    /// continuing that delegation. After a typed turn, a delegation created
+    /// with nothing spoken is refused; the turn the user speaks next, which
+    /// the voice answers itself, must then be an ordinary turn and not more
+    /// words for the earlier job.
+    ///
+    /// The same sequence WITHOUT the refused delegation still reports the
+    /// next spoken turn as continuing the earlier delegation: a typed turn
+    /// alone does not end a continuation. That half is today's behaviour
+    /// and is pinned here so that changing it is a decision.
+    #[test]
+    fn a_refused_delegation_ends_the_earlier_continuation() {
+        let next_spoken_turn = |refused_delegation: bool| {
+            // Spoken request, delegated while its turn is still open.
+            let mut state = state_with_spoken_delegation();
+            let (typed, events) =
+                text_chat_append(&mut state, "From the text chat: make it four people");
+            assert!(state.hold_or_send_text_chat(typed, events).is_some());
+            if refused_delegation {
+                state
+                    .apply_frame(frame(delegation_created("dlg_after_typed", "client")))
+                    .unwrap();
+                assert!(
+                    drain(&mut state).iter().any(|observation| matches!(
+                        observation,
+                        GptLiveBrokerObservation::DelegationActionableInputUnsupported { delegation }
+                            if delegation.__opaque_provider_id() == "dlg_after_typed"
+                    )),
+                    "the delegation after the typed turn is refused"
+                );
+            }
+            // The user speaks again and the voice answers itself.
+            state
+                .apply_frame(frame(input_delta_at("what time is it", 3000.0)))
+                .unwrap();
+            state
+                .apply_frame(frame(output_delta_span("It is noon.", 3500.0, 3600.0)))
+                .unwrap();
+            drain(&mut state)
+        };
+        let continues_the_earlier_delegation = |observed: &[GptLiveBrokerObservation]| {
+            observed.iter().any(|observation| {
+                matches!(
+                    observation,
+                    GptLiveBrokerObservation::UserTurnContinuesDelegation { delegation, transcript, .. }
+                        if delegation.0 == "dlg_cue" && transcript == "what time is it"
+                )
+            })
+        };
+        let finished_as_a_user_turn = |observed: &[GptLiveBrokerObservation]| {
+            observed.iter().any(|observation| {
+                matches!(
+                    observation,
+                    GptLiveBrokerObservation::TurnFinished { role: GptLiveTurnRole::User, transcript, .. }
+                        if transcript == "what time is it"
+                )
+            })
+        };
+
+        let after_refusal = next_spoken_turn(true);
+        assert!(
+            finished_as_a_user_turn(&after_refusal),
+            "the next spoken turn finishes as a user turn: {after_refusal:?}"
+        );
+        assert!(
+            !continues_the_earlier_delegation(&after_refusal),
+            "after the refused delegation the next spoken turn was reported as continuing the earlier delegation: {after_refusal:?}"
+        );
+
+        let without_refusal = next_spoken_turn(false);
+        assert!(
+            finished_as_a_user_turn(&without_refusal),
+            "the next spoken turn finishes as a user turn: {without_refusal:?}"
+        );
+        assert!(
+            continues_the_earlier_delegation(&without_refusal),
+            "with no delegation in between, the next spoken turn still continues the earlier delegation: {without_refusal:?}"
+        );
+    }
+
     #[test]
     fn context_fragments_cut_at_whitespace_and_rejoin_exactly() {
         let text = "alpha ".repeat(120) + "omega";

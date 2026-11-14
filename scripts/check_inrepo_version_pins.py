@@ -52,10 +52,14 @@ searched in the key path of the value that starts on the pin's line (object
 keys joined by `/`, array items by their index): it then covers only the pins
 of the values under those keys, so two rows of one file that pin the same
 release keep apart. An entry may carry `context`, a regular expression
-searched in the text beside the pin (the pin's line and the line after it,
-each run of white space read as one space): it then covers only the pins
-that stand in that text, so a sentence that says why it names an older
-release is told from a line that only names it. An entry with `match`, `key`
+searched in the text beside the pin (the paragraph the pin stands in: its
+line and the lines around it up to a blank line, each run of white space
+read as one space): it then covers
+only a pin that stands INSIDE the text the expression matches, so a sentence
+that says why it names an older release is told from a line that only names
+it, and a second pin on the sentence's line, or on a line beside it, is not
+the sentence's pin. A pin read from a manifest's structure has no place in a
+line, and no `context` entry covers it. An entry with `match`, `key`
 or `context` is stale when it covers no pin. A temporary entry names, in
 `removed_by`, the change that removes its pins; when that change lands the
 entry is stale and goes.
@@ -292,8 +296,12 @@ class Finding:
     excludes: bool = False
     # In a JSON file a `key` entry scopes: the key path of the value that starts on the line.
     key: str | None = None
-    # In a file a `context` entry scopes: the pin's line and the line after it, white space as one space.
+    # In a file a `context` entry scopes: the text beside the pin (its paragraph, white space as one
+    # space) and the pin's place in that text. A pin read by scan_line
+    # carries its place in its line (span); a pin read from a structure has none and no context covers it.
     context: str | None = None
+    place: tuple[int, int] | None = None
+    span: tuple[int, int] | None = None
 
     def describe(self) -> str:
         where = f"{self.path}:{self.line}" if self.line else self.path
@@ -539,6 +547,9 @@ class Scanner:
         self.published = list(published)
         # The allow entries with `at`: each waits on the pins of a package still below its version.
         self.holds = list(holds)
+        # The place in its line of the pin scan_line is reading (start, end); None for a pin read
+        # from a structure or a file name.
+        self.span = None
         # Version constants without a product word, configured per file: {path: {name: package key}}.
         self.constants = constants or {}
         self.constants_seen: set[tuple[str, str]] = set()
@@ -572,6 +583,8 @@ class Scanner:
         self.cheap_re = re.compile(r"\d\.\d+\.\d|lukacf/|\"[=^~<>]*\d+\.\d+\"")
 
     def check(self, path, line, shape, pin, key, pinned, movable=False, spec=None):
+        # The pin's place in its line, set by scan_line; a pin read from a structure has none.
+        span, self.span = self.span, None
         if key is None:
             return
         name, expected = self.inventory.expected(key)
@@ -586,14 +599,15 @@ class Scanner:
             # A record of a published release: it is judged with the other inputs of its
             # product once every file is read, not against the version here alone.
             self.published_pins.append(Finding(path, line, shape, pin, name, pinned or "", expected, False,
-                                               published=True, product=self.inventory.product_of(key) or name))
+                                               published=True, product=self.inventory.product_of(key) or name,
+                                               span=span))
             return
         # A requirement must also admit the version here: a ceiling at or below it, a strict
         # floor at it, or a floor or an exact pin above it shuts it out.
         excludes = spec is not None and not range_admits(spec, expected)
         if pinned is None or below(pinned, expected) or excludes:
             self.findings.append(Finding(path, line, shape, pin, name, pinned or "", expected, movable,
-                                         excludes=excludes))
+                                         excludes=excludes, span=span))
 
     def scan(self, path: str) -> None:
         name = PurePosixPath(path).name
@@ -673,6 +687,7 @@ class Scanner:
         walk(self._json(text))
 
     def release(self, path, line, repository, tag, pin) -> None:
+        span, self.span = self.span, None
         if repository in RETIRED_REPOSITORIES:
             # The monorepo's own product tags (v, meta-v, connect-v) mean other
             # things there; only a configured package tag (forge-v) names it.
@@ -680,10 +695,11 @@ class Scanner:
             key = (resolved[0] if resolved is not None and resolved[0][0] != "product"
                    else ("product", RETIRED_REPOSITORIES[repository]))
             name, expected = self.inventory.expected(key)
-            self.findings.append(Finding(path, line, "retired-repository", pin, name, tag, expected))
+            self.findings.append(Finding(path, line, "retired-repository", pin, name, tag, expected, span=span))
             return
         resolved = self.inventory.tag(tag) if repository == MONOREPO else None
         if resolved is not None:
+            self.span = span
             self.check(path, line, "release", pin, resolved[0], resolved[1])
 
     def scan_text(self, path: str, text: str, name: str) -> None:
@@ -701,6 +717,7 @@ class Scanner:
             end = len(text) if end < 0 else end
             last_start = end + 1
             self.scan_line(path, number, text[start:end], name, manifest, code)
+            self.span = None
             number += 1
 
     def known_issue_spans(self, line: str) -> list[tuple[int, int]]:
@@ -719,30 +736,37 @@ class Scanner:
         return spans
 
     def scan_line(self, path, number, line, name, manifest, code) -> None:
+        # self.span is the place of the pin being read in its line; check() and release() keep it
+        # on the finding, so that an entry with a context can tell the pin its text holds.
         recorded = self.known_issue_spans(line) if "release page](" in line else ()
         for match in self.release_re.finditer(line):
             if any(start <= match.start() < end for start, end in recorded):
                 continue
+            self.span = match.span()
             self.release(path, number, match.group(1), match.group(2),
                          f"{OWNER}/{match.group(1)} release {match.group(2)}")
         for match in self.retired_git_re.finditer(line):
             product_name, expected = self.inventory.expected(("product", RETIRED_REPOSITORIES[match.group(1)]))
             self.findings.append(Finding(path, number, "retired-repository", match.group(0), product_name, "",
-                                         expected))
+                                         expected, span=match.span()))
         for match in self.asset_re.finditer(line):
             # A release asset whose digest sits beside it is pinned by its bytes: only a new
             # release's published digest moves it.
+            self.span = match.span()
             self.check(path, number, "asset", match.group(0), self.inventory.assets[match.group(1)],
                        match.group(2), movable=not DIGEST_RE.search(line) and not name.endswith(".json"))
         for match in self.requirement_re.finditer(line):
+            self.span = match.span()
             self.check(path, number, "requirement", match.group(0), key_of("pypi", match.group(1)),
                        pep440_floor(match.group(2)), "--hash" not in line, match.group(2))
         for match in self.npm_spec_re.finditer(line):
             if self.inventory.get("npm", match.group(1)) is not None:
+                self.span = match.span()
                 self.check(path, number, "npm-spec", match.group(0), key_of("npm", match.group(1)),
                            match.group(3), True, (match.group(2) or "") + match.group(3))
         if code:
             for match in self.constant_re.finditer(line):
+                self.span = match.span()
                 product = self.constant_product(match.group(1))
                 if product is not None:
                     self.check(path, number, "constant", match.group(0), ("product", product), match.group(4))
@@ -756,6 +780,7 @@ class Scanner:
             if self.inventory.get("npm", match.group(1)) is None or SAME_COMMIT_SPEC.match(match.group(2)):
                 continue
             floor = npm_floor(match.group(2))
+            self.span = match.span()
             self.check(path, number, "npm-entry", match.group(0), key_of("npm", match.group(1)), floor,
                        floor is not None, match.group(2))
         match = self.cargo_line_re.match(line)
@@ -767,6 +792,8 @@ class Scanner:
                     return
                 plain = version.group(1)
             if plain is not None and re.match(r"^\s*[=^~<>]*\s*v?\d", plain):
+                start = match.start() + len(match.group(0)) - len(match.group(0).lstrip())
+                self.span = (start, start + len(match.group(0).strip()))
                 self.check(path, number, "cargo", match.group(0).strip(), key_of("cargo", crate),
                            cargo_floor(plain), True, plain)
 
@@ -1011,20 +1038,52 @@ def attach_keys(root: Path, findings: list[Finding], allowlist: list[AllowEntry]
 
 
 def attach_context(root: Path, findings: list[Finding], allowlist: list[AllowEntry]) -> None:
-    """Give each finding in a file that a `context` entry scopes the text beside its pin.
+    """Give each finding in a file that a `context` entry scopes the text beside its pin, and the pin's place in it.
 
-    The text is the pin's line and the line after it, each run of white space read as one
-    space, so a sentence that wraps after the pin is read as it is written.
+    The text is the paragraph the pin stands in (its line and the lines around it up to a
+    blank line), each run of white space read as one space, so a sentence that wraps before
+    or after the pin is read as it is written. A pin without a place in its line (read from
+    a structure) gets none.
     """
     scoped = [entry.path for entry in allowlist if entry.context is not None]
     files: dict[str, list[str]] = {}
     for finding in findings:
-        if not finding.line or not any(pattern.match(finding.path) for pattern in scoped):
+        if not finding.line or finding.span is None or not any(pattern.match(finding.path) for pattern in scoped):
             continue
         if finding.path not in files:
             files[finding.path] = (root / finding.path).read_text(encoding="utf-8").split("\n")
-        beside = files[finding.path][finding.line - 1:finding.line + 1]
-        finding.context = WHITE_SPACE_RE.sub(" ", " ".join(beside)).strip()
+        lines = files[finding.path]
+        index, (start, end) = finding.line - 1, finding.span
+        first = last = index
+        while first > 0 and lines[first - 1].strip():
+            first -= 1
+        while last + 1 < len(lines) and lines[last + 1].strip():
+            last += 1
+        before = "\n".join(lines[first:index] + [lines[index][:start]])
+        after = "\n".join([lines[index][end:]] + lines[index + 1:last + 1])
+        head = WHITE_SPACE_RE.sub(" ", before).lstrip()
+        pin = WHITE_SPACE_RE.sub(" ", lines[index][start:end])
+        finding.context = head + pin + WHITE_SPACE_RE.sub(" ", after).rstrip()
+        finding.place = (len(head), len(head) + len(pin))
+
+
+def inside(pattern: re.Pattern, finding: Finding) -> bool:
+    """Whether the pin stands inside a text the expression matches beside it.
+
+    A pin that only stands near the matched text (elsewhere on its line, or on a line
+    beside it) is not the text's pin.
+    """
+    if finding.context is None or finding.place is None:
+        return False
+    start, end = finding.place
+    position = 0
+    while True:
+        match = pattern.search(finding.context, position)
+        if match is None or match.start() > start:
+            return False
+        if end <= match.end():
+            return True
+        position = match.start() + 1
 
 
 def move_version(text: str, pinned: str, expected: str) -> str:
@@ -1037,7 +1096,7 @@ def covering(finding: Finding, allowlist: list[AllowEntry]) -> list[AllowEntry]:
             if not entry.whole and entry.path.match(finding.path)
             and (entry.match is None or entry.match.search(finding.pin))
             and (entry.key is None or (finding.key is not None and entry.key.search(finding.key)))
-            and (entry.context is None or (finding.context is not None and entry.context.search(finding.context)))
+            and (entry.context is None or inside(entry.context, finding))
             and (entry.at is None or version_key(entry.at) == version_key(finding.expected))]
 
 

@@ -1000,9 +1000,11 @@ Security, Upgrade and Changed.
   and on the Approvals view: who asked and by when, one group of choices
   per question, the agent's recommendation marked and never preselected,
   "Something else" for the person's own words where allowed, Send answers
-  and Dismiss. A card says "Answered" or "Dismissed" once the gateway
-  confirmed it, "Not accepted" with what to do when the gateway refused the
-  reply and still lists the set, and why nobody can answer when the caller
+  and Dismiss. A set is listed once on the Pending tab, as that card, and
+  not among the durable decisions below it. A card says "Answered" or
+  "Dismissed" once the gateway confirmed it, "Not accepted" with what to do
+  when the gateway refused the reply and still lists the set, and why
+  nobody can answer when the caller
   is not signed in or may not decide. A set the gateway no longer lists
   leaves the screen whole; where its card was, one line says that the
   question is no longer listed here. The deadline shown is the gateway's,

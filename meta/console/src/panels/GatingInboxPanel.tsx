@@ -64,7 +64,7 @@ import {
   type RawRecord,
 } from "./gating-model";
 import { DecisionCardList } from "./DecisionCard";
-import type { DecisionCardView, OwnDecisionWithdrawal } from "./decision-cards";
+import { decisionCardsBesideQuestions, type DecisionCardView, type OwnDecisionWithdrawal } from "./decision-cards";
 
 interface GatingInboxPanelProps {
   pending: unknown[];
@@ -558,7 +558,9 @@ export function GatingInboxPanel({
   const hostFailedSources = tab === "pending" ? hostAttention?.failedSources ?? [] : [];
   // Durable decisions follow the approvals too, read only: each one is
   // decided where it was presented. "Load more" follows the list's cursor.
-  const decisionCards = tab === "pending" ? durableDecisions ?? [] : [];
+  // A question set is not among them while the question list shows the
+  // sets: it is answered on its own card above, and listed once.
+  const decisionCards = tab === "pending" ? decisionCardsBesideQuestions(durableDecisions ?? [], questions?.snapshot.status) : [];
   const decisionCursor = tab === "pending" && onLoadMoreDecisions ? decisionsNextAfter : undefined;
   const hostCardsShown = hostItems.length > 0 || hostFailedSources.length > 0;
   const hostShown = replyItems.length > 0 || hostCardsShown || decisionCards.length > 0

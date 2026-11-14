@@ -161,6 +161,25 @@ export function decisionCardsOf(page: unknown, renderings: ReadonlyMap<string, s
   return [...whole, ...statuses].sort(byDeadline);
 }
 
+/** The decision kind of a question set an agent asked (`ask_user`). */
+export const QUESTION_SET_DECISION_KIND = "ask_user.questions";
+
+/** The decision cards the Pending tab lists beside the agents' question
+ *  sets. A question set is a durable decision too, so the decisions' read
+ *  lists it; while the question sets are read here (`questionStatus` is the
+ *  status of their list: being read, read, or possibly out of date), a set
+ *  is the question list's to show, as the card a person answers, and its
+ *  decision card is left out: nobody gets one set twice. Where the question
+ *  sets are not read (no list, or one that failed, was refused or is not
+ *  offered), the decision card is the one place that shows the set. */
+export function decisionCardsBesideQuestions(
+  cards: readonly DecisionCardView[],
+  questionStatus: string | undefined,
+): readonly DecisionCardView[] {
+  const questionsShown = questionStatus === "loading" || questionStatus === "ready" || questionStatus === "stale";
+  return questionsShown ? cards.filter((card) => card.kind !== QUESTION_SET_DECISION_KIND) : cards;
+}
+
 /** The params of one `meta/decisions/list` page of open decisions: at most
  *  `limit` rows, after the cursor `after` when the panel follows one. */
 export function decisionPageParams(limit: number, after?: string): Record<string, unknown> {

@@ -14,6 +14,12 @@ Security, Upgrade and Changed.
 
 ### Breaking
 
+- Behaviour only: a mob create under a mob id that starts with `council--`
+  through Meta's mob tools (an agent's `mob_create` included) is now
+  refused as an invalid definition; 0.9.14 accepted it. See Changed, and
+  Breaking in the Meerkat changelog. A mob already stored under such an id
+  keeps loading and working.
+
 - Rust API of `meerkat-meta`, `identity_creation`: `ChangeClass` gains the
   variants `Archive` (an archive and an unarchive) and `Adopt`. A match on it
   needs both arms.

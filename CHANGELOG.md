@@ -1271,12 +1271,14 @@ them.
   `--cors-origin` set the response header without comparing the request's
   origin. A caller that reached the port over the network, or a web page
   open in a browser on the same machine, could send requests to the
-  providers with the proxy's keys. A request without an `Origin` header is
-  forwarded as before, except one a browser marks
-  `Sec-Fetch-Site: cross-site`, which is answered 403 unless `*` allows
-  every origin. The proxy does not check who calls it, and one that listens
-  on another address belongs behind your own authentication (see Known
-  limitations). Affects 0.4.1 through 0.9.14.
+  providers with the proxy's keys. A server that mounts `createProxyHandler`
+  itself had the same missing origin check in 0.4.1 through 0.9.14, so a
+  web page on any origin that reached that server could do the same. A
+  request without an `Origin` header is forwarded as before, except one a
+  browser marks `Sec-Fetch-Site: cross-site`, which is answered 403 unless
+  `*` allows every origin. The proxy does not check who calls it, and one
+  that listens on another address belongs behind your own authentication
+  (see Known limitations). Affects 0.4.1 through 0.9.14.
 
 ### Upgrade notes
 
@@ -1524,12 +1526,15 @@ them.
   not check the `Host` header, so a GET from a page whose host name points
   at the proxy is forwarded and the page reads the answer; and a cross-site
   GET that carries no `Sec-Fetch-Site` header is forwarded, which is every
-  such GET over plain http, because a browser sends that header only to
-  https and loopback addresses. A tunnel or reverse proxy that rewrites
-  `Host` to a loopback name has the same effect on a loopback-bound proxy.
-  A request without `Origin` that a browser marks `same-site` is forwarded.
-  The proxy keeps no record of the requests it forwards. Put the proxy
-  behind your own authentication in those uses.
+  such GET over plain http to an address that is not loopback, because a
+  browser sends that header only to https and loopback addresses. On a
+  loopback-bound proxy the same holds for a browser that sends no
+  `Sec-Fetch-Site` header at all: its cross-site GET without `Origin` is
+  forwarded, and the page cannot read the answer. A tunnel or reverse proxy
+  that rewrites `Host` to a loopback name has the same effect on a
+  loopback-bound proxy. A request without `Origin` that a browser marks
+  `same-site` is forwarded. The proxy keeps no record of the requests it
+  forwards. Put the proxy behind your own authentication in those uses.
 
 - Mob: an explicit resume of a stopped mob (`MobHandle::resume`) rebuilds
   each member from its seat as the host's spawn customizer makes it and

@@ -26,6 +26,7 @@ from meerkat_meta import (
     AgentOutcome,
     AgentSet,
     AgentSpec,
+    DurableAgentSpec,
     IdentitiesHandle,
     IdentityChangeResult,
     IdentityDone,
@@ -34,7 +35,6 @@ from meerkat_meta import (
     IdentityRefusedError,
     Meta,
 )
-from meerkat_meta.identity_first_models import DurableAgentSpec
 
 HERE = Path(__file__).resolve().parent
 
@@ -79,7 +79,7 @@ def say(step: str, text: str) -> None:
 
 async def adopt_scout(identities: IdentitiesHandle) -> None:
     record = await identities.get("scout")
-    say("2", f"scout: spec digest {record.spec_digest[:19]}…")
+    say("2", f"scout: spec digest {record.spec_digest[:19]}...")
     try:
         outcome = await identities.adopt(
             "scout",
@@ -200,7 +200,7 @@ async def main() -> int:
     if not gateway:
         print("Set META_GATEWAY_BIN to the rpc_gateway binary of Meta 0.9.15 or later.", file=sys.stderr)
         return 2
-    state_dir = Path(os.environ.get("EXAMPLE_STATE_DIR", HERE / ".state"))
+    state_dir = Path(os.environ.get("EXAMPLE_STATE_DIR", HERE / ".state" / "python"))
     state_dir.mkdir(parents=True, exist_ok=True)
 
     runtime = await (

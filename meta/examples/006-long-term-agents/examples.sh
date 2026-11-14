@@ -62,7 +62,7 @@ check "Python" "$WORK/py-1.log" "$WORK/py-2.log"
 
 echo "[long-term-agents] TypeScript"
 (cd "$META_ROOT/sdk/typescript" && npm install --silent --no-fund --no-audit && npm run build --silent)
-(cd "$META_ROOT/examples" && npm install --silent --no-fund --no-audit)
+(cd "$META_ROOT/examples" && npm ci --silent --no-fund --no-audit)
 for run in 1 2; do
   (cd "$META_ROOT/examples" && EXAMPLE_STATE_DIR="$WORK/state-ts" npx tsx "$PACK_DIR/main.ts" > "$WORK/ts-$run.log" 2> "$WORK/ts-$run.err") \
     || { echo "[long-term-agents] TypeScript: run $run failed:" >&2; tail -n 20 "$WORK/ts-$run.err" >&2; exit 1; }

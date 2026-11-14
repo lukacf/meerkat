@@ -17,7 +17,10 @@ Numbered packs are intentionally browser-first and can include:
 - `003-swarm-stress-pack`
 - `004-mdm-console-pack`
 - `005-access-control-pack`
-- `006-long-term-agents` (a host program in Python and TypeScript; no console, no provider key)
+
+One example is a host program and not a browser pack:
+
+- `006-long-term-agents` (Python and TypeScript; no console, no provider key)
 
 ## Prerequisites
 

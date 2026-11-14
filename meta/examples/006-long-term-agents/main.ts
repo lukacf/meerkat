@@ -74,7 +74,7 @@ function say(step: string, text: string): void {
 
 async function adoptScout(identities: IdentitiesHandle): Promise<void> {
   const record = await identities.get("scout");
-  say("2", `scout: spec digest ${record.specDigest.slice(0, 19)}…`);
+  say("2", `scout: spec digest ${record.specDigest.slice(0, 19)}...`);
   try {
     const outcome = await identities.adopt("scout", {
       expectedSpecDigest: record.specDigest,
@@ -205,7 +205,7 @@ async function main(): Promise<number> {
     console.error("Set META_GATEWAY_BIN to the rpc_gateway binary of Meta 0.9.15 or later.");
     return 2;
   }
-  const stateDir = process.env.EXAMPLE_STATE_DIR ?? join(HERE, ".state");
+  const stateDir = process.env.EXAMPLE_STATE_DIR ?? join(HERE, ".state", "typescript");
   mkdirSync(stateDir, { recursive: true });
 
   const runtime = await Meta.builder()

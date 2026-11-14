@@ -5,9 +5,12 @@ configuration declares, creates another, updates it, archives it, brings it
 back, removes it, and reads what a refusal says. Python and TypeScript, the
 same five steps, the same output.
 
-**Needs Meta 0.9.15 or later.** The calls (`runtime.identities`) and the
-launch policy (`identity_creation`) are not in 0.9.14. Until 0.9.15 is
-published this example runs against a gateway built from this repository.
+**Needs Meta 0.9.15 or later, gateway and SDKs.** `runtime.identities` and
+the builder's `identity_creation(policy)` are new in the 0.9.15 SDKs. A
+0.9.14 gateway reads an `identity_creation` policy at launch and carries out
+no change under it; given this example's policy it refuses to start, because
+it does not know the change `adopt`. `examples.sh` builds a gateway from this
+repository when `META_GATEWAY_BIN` names none.
 
 The guide it follows: [Long-term agents](../../docs/guides/long-term-agents.mdx).
 
@@ -23,8 +26,9 @@ The guide it follows: [Long-term agents](../../docs/guides/long-term-agents.mdx)
 
 Every change carries a request id. Run the program twice on the same state
 directory: the second run sends the same ids, each change is answered from
-the record of the first run, and nothing is changed twice. An answer from
-the record states less than the first one (no seat, no instruction outcome).
+the record of the first run, and nothing is changed twice. By then the
+first run has removed `editor`, and the answers from the record state less
+than the first ones: no seat and no instruction outcome.
 
 No provider key is needed. The program starts no agent run: the agent it
 creates has no first message and its profile is `turn_driven`.
@@ -67,8 +71,10 @@ Or both, with the checks:
 ./meta/examples/006-long-term-agents/examples.sh
 ```
 
-The programs keep their state in `.state/` beside them (set
-`EXAMPLE_STATE_DIR` to put it elsewhere). Delete it to start over.
+The programs keep their state under `.state/` beside them, each language in
+its own directory (`.state/python`, `.state/typescript`), so each prints its
+first-run lines the first time you run it. Set `EXAMPLE_STATE_DIR` to put
+the state elsewhere. Delete the directory to start over.
 
 ## What it prints
 
@@ -76,7 +82,7 @@ First run:
 
 ```text
 [1] runtime started with a policy that allows the host to adopt, create, describe, archive and remove
-[2] scout: spec digest sha256:2a7d2d311c90…
+[2] scout: spec digest sha256:2a7d2d311c90...
 [2] adopt answered done
 [3] the adoption is committed
 [4] created editor: state committed, seat seated
@@ -90,8 +96,8 @@ First run:
 ```
 
 (TypeScript prints `false` where Python prints `False`.) On a second run
-lines `[4]` read `seat None` and `not stated`: those two answers come from
-the record.
+the first two `[4]` lines read `seat None` (TypeScript: `seat null`) and
+`not stated`: those two answers come from the record.
 
 ## Notes
 

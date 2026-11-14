@@ -1103,7 +1103,12 @@ them.
   refused before anything is published: no session is created, no provider
   request is made, a refused resume or recovery leaves the stored identity
   as it was, and a refused reconfiguration leaves the live session's
-  identity, client and stored params as they were. The stored params are
+  identity, client and stored params as they were. Through JSON-RPC a turn
+  that would change the session's model settings beside a provider-neutral
+  level is taken only when the session has no unfinished work, and is
+  answered `SESSION_BUSY` with the data
+  `{"kind": "reasoning_effort_change_needs_idle_session"}` otherwise (the
+  cases are under Known limitations). The stored params are
   never rewritten: the level stays in the neutral field. A build or a
   target that carries no level is not judged. A level that passes this
   check is resolved again for the route that serves each request (see the
@@ -1789,6 +1794,39 @@ them.
   names); what is stored for the refused input is the existing
   never-executed record and the turn's typed error. The reasoning effort
   controls are new in this release, so no released version had this.
+
+- `meerkat-rpc`, `meerkat`: a JSON-RPC turn (`turn/start`,
+  `mob/turn_start`) that names the provider-neutral reasoning effort level
+  is answered for that level when it arrives, in two cases where it was
+  not. Sent while another turn of the session runs, it waited for that
+  turn's end and was then answered `-32600` "the session runtime is
+  destroyed and does not admit this request", with no typed data, whether
+  the route refuses the level or takes it, and so was a model change on a
+  session created with the level; the running turn, the requests behind it
+  and the session were not affected. Now a level the route refuses is
+  refused with the typed refusal (`-32602`, `reasoning_effort_refused`)
+  while that turn runs, and a request the route takes is answered `-32002`
+  (`SESSION_BUSY`, retryable) with the data
+  `{"kind": "reasoning_effort_change_needs_idle_session"}` at once and
+  stores nothing: wait for the running turn's answer, then send it again
+  (the cases are under Known limitations). On a stored session that is not
+  live (after a restart) a refused level is refused before the turn's
+  input is stored, as on a live session, also for a turn that names no
+  level on a session that holds one: nothing is stored for the turn, and
+  the session's runtime registration and what is queued on it stay.
+  Before, that refusal came at the turn's start, which retired the
+  session's live runtime. A level whose source cannot be read yet
+  (`supported_levels_unavailable`) is still judged at the start of such a
+  turn. In the code of this release before this fix, queued requests that
+  changed a session's level or model could end other work queued on that
+  session; such requests are no longer queued, and no client sequence
+  reaches that any more; one race between two requests sent without
+  waiting for each other remains until a later release (see Known
+  limitations). A session that holds no
+  provider-neutral level queues its turns as in 0.9.14, a model change and
+  a provider's own effort parameter (`provider_tag`) included. Measured by
+  tests of this change, with the level named in `reasoning_effort` and
+  inside `provider_params`.
 
 - `meerkat-rpc`, `meerkat-rest`, `meerkat`: a session that was cleaned up
   without being archived no longer loses the agents it created to the
@@ -2932,20 +2970,68 @@ them.
 
 - A turn that asks for a reasoning effort level its session's route refuses
   is answered with the typed refusal and makes no provider request. Through
-  the JSON-RPC session runtime a turn on a live session is refused before
-  its input is stored. A turn that has to build its session first (a
-  deferred create's first turn, or a stored session that is not live), and
-  a turn whose route changes between that check and its start, is judged
-  when it starts: its stored input ends as abandoned with the reason
-  `stopped`, not with the refusal (confirmed by a test of this change for
-  a stored session
-  that is not live; the other two cases are read from the source). The
+  the JSON-RPC session runtime a turn is refused before its input is
+  stored, on a live session (also while another turn of it runs) and on a
+  stored session that is not live.
+
+  A JSON-RPC turn (`turn/start`, `mob/turn_start`) that would change the
+  session's model settings beside a provider-neutral level is not queued
+  behind unfinished work. On a session that holds a provider-neutral
+  level, anything that changes the model identity needs an idle session;
+  plain turns and true repeats of the level queue. On a session that holds
+  none, only setting a level needs an idle session; everything else queues
+  as on 0.9.14. "Busy" is `-32002` (`SESSION_BUSY`) with `data.kind`
+  `reasoning_effort_change_needs_idle_session`, answered at once, with
+  nothing stored, while the session has an unfinished turn or queued input
+  (a deferred session: while its first turn is still building it, for a
+  request that names a level):
+
+  | The session | A plain turn | Repeats its level with `reasoning_effort` | Sets or changes the level | Clears the level | Changes the model, the provider, the self-hosted server, the provider params or the auth binding |
+  |---|---|---|---|---|---|
+  | holds a provider-neutral level | queued | queued | busy | busy | busy |
+  | holds none | queued | nothing to repeat | busy | queued | queued |
+
+  A level named inside `provider_params` is never a repeat: on a busy
+  session that holds a level it is answered busy even when equal; a client
+  repeats its level with the field `reasoning_effort`. A session holds a
+  level when a request set one, when it was forked from or resumed as one
+  that does, and when it is a mob member built from a profile whose
+  `provider_params` carry `reasoning_effort`; no host or realm
+  configuration gives sessions a level. The price of holding a level: a
+  client that sets a level once and then varies `provider_params` per turn
+  is answered busy whenever another turn runs or is queued. The one `kind`
+  names the level also for a request that only changed the model. Wait for
+  the running turn's answer, then send the request again; do not poll. A
+  session with standing work may never be idle for such a request: stop
+  sending, let the queue drain, then make the change. A later release
+  queues these turns. (Confirmed by tests of this change, on a session, on
+  a mob member's session and through the JSON-RPC router.)
+
+  The reason: a level is judged again when its turn starts, and a level
+  refused at a turn's start is still a failed start, which ends the
+  session's other queued requests: the stored input of the refused turn
+  ends as abandoned with the reason `stopped`, not with the refusal, and
+  the requests queued behind it end without a run. What can still be
+  refused at its start: a deferred create's first turn; a turn on a stored
+  session that is not live whose level cannot be judged yet
+  (`supported_levels_unavailable`: an account's model list that is not
+  loaded; confirmed by a test of this change); a request sent without
+  waiting for another one, when it reaches admission in the time between
+  that other turn's admission on an idle session and its start; an input
+  that carries a model or level change and enters through the runtime
+  without a turn request; and a turn admitted on an idle session whose
+  model, level or route is changed by something else (a host's
+  reconfiguration of a mob member, a config reload, an account's model
+  list) between its admission and its start (these three read from the
+  source). The
   refused start costs the session
   that one turn and nothing it owns: its mobs and their members stay. The
   runtime retires the session's live runtime (its registration and its
   MCP adapter) after the refused start, and the next turn builds it again
-  from the stored session. The refusal reason is in the typed details of
-  the answer (`reasoning_effort_refusal`).
+  from the stored session; an input queued on that registration behind the
+  refused turn ends with it, without a run, and its sender sends it again.
+  The refusal reason is in the typed details of the answer
+  (`reasoning_effort_refusal`).
 
 - MCP server: `meerkat_resume` rebuilds the session whenever it names a
   reasoning effort level, and retires the live session before that build.

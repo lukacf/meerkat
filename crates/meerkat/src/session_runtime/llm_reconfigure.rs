@@ -263,6 +263,20 @@ pub trait SessionRuntimeLlmReconfigureService: Send + Sync {
         session_id: &SessionId,
     ) -> Result<Option<meerkat_core::RealmId>, SessionError>;
 
+    /// The same realm, read from the session's committed document without
+    /// asking the live session: `Some(realm)` is what that document records
+    /// (a session's realm is fixed by its first build), and `None` says
+    /// there is no committed document to read. The read neither waits for a
+    /// running turn nor depends on what that turn has not committed yet, so
+    /// a request can be judged while a turn runs. A service that keeps no
+    /// committed document answers `None`.
+    async fn committed_realm_id(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Option<Option<meerkat_core::RealmId>>, SessionError> {
+        Ok(None)
+    }
+
     async fn live_tool_visibility_state(
         &self,
         session_id: &SessionId,
@@ -342,6 +356,32 @@ async fn preferred_hot_swap_realm(
         .or(fallback_realm))
 }
 
+/// The realm a request is judged in before it is admitted: the session's
+/// own, read from its committed document, so the judgement neither waits for
+/// a running turn nor fails on what that turn has not committed. A session
+/// with no committed document is read live, as a reconfiguration reads it.
+/// `None` says neither read has the session's realm (no committed document,
+/// and no live session that answers for itself): such a request is not
+/// judged before its admission, and the turn's own start judges it.
+async fn preferred_judge_realm(
+    service: &dyn SessionRuntimeLlmReconfigureService,
+    session_id: &SessionId,
+    fallback_realm: Option<meerkat_core::RealmId>,
+) -> Result<Option<Option<meerkat_core::RealmId>>, RuntimeDriverError> {
+    if let Some(realm) = service
+        .committed_realm_id(session_id)
+        .await
+        .map_err(session_error_to_runtime_driver)?
+    {
+        return Ok(Some(realm.or(fallback_realm)));
+    }
+    match service.live_realm_id(session_id).await {
+        Ok(realm) => Ok(Some(realm.or(fallback_realm))),
+        Err(SessionError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(session_error_to_runtime_driver(error)),
+    }
+}
+
 #[async_trait::async_trait]
 impl SessionRuntimeLlmReconfigureService for PersistentSessionService<FactoryAgentBuilder> {
     async fn synchronize_live_session_from_durable_authority(
@@ -413,6 +453,16 @@ impl SessionRuntimeLlmReconfigureService for PersistentSessionService<FactoryAge
             .await?
             .session_metadata()
             .and_then(|metadata| metadata.realm_id))
+    }
+
+    async fn committed_realm_id(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Option<meerkat_core::RealmId>>, SessionError> {
+        Ok(self
+            .load_authoritative_session_metadata(session_id)
+            .await?
+            .map(|view| view.session_metadata.and_then(|metadata| metadata.realm_id)))
     }
 
     async fn live_tool_visibility_state(
@@ -1367,8 +1417,22 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         {
             return Ok(());
         }
+        // The judge reads the session's realm from its committed document:
+        // it runs before the request is admitted, possibly while a turn of
+        // the session runs, and the live session's own answer is ordered
+        // behind that turn. A session whose realm neither read has is not
+        // judged here: the turn's own start judges it.
+        let Some(preferred_realm) = preferred_judge_realm(
+            self.service()?.as_ref(),
+            session_id,
+            self.inheritance_head_realm(),
+        )
+        .await?
+        else {
+            return Ok(());
+        };
         let (adapter, selection) = self
-            .build_adapter_for_session_llm_identity(session_id, target_identity)
+            .build_adapter_for_llm_identity_in_realm(target_identity, preferred_realm.as_ref())
             .await?;
         // The catalog row is read through the binding the client resolved
         // with, as the apply names it.

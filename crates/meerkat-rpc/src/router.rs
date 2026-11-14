@@ -20857,6 +20857,478 @@ mod tests {
         );
     }
 
+    /// A client whose route states the reasoning effort level `high`, and
+    /// whose requests can be held: while `held` is set a request waits
+    /// before it answers.
+    #[cfg(feature = "mob")]
+    struct HeldRouteLlmClient {
+        calls: std::sync::atomic::AtomicUsize,
+        held: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl LlmClient for HeldRouteLlmClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            use meerkat_core::model_profile::capabilities::EffortLevel;
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::Anthropic(
+                    meerkat_core::provider_matrix::AnthropicBackendKind::Copilot,
+                ),
+                api: meerkat_core::ModelApi::Messages,
+                account: meerkat_core::AccountLevelStatement::Stated(vec![EffortLevel::High]),
+                operator_levels: None,
+            })
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            use std::sync::atomic::Ordering;
+            Box::pin(async_stream::stream! {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                while self.held.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                yield Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "Hello from the held client".to_string(),
+                    meta: None,
+                });
+                yield Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                });
+                yield Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::success(StopReason::EndTurn),
+                });
+            })
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Anthropic
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// Through the JSON-RPC router, `turn/start` and `mob/turn_start` on a
+    /// session whose turn is running answer a turn that names the
+    /// provider-neutral reasoning effort level as the session runtime does:
+    /// a level the route takes is answered that the session is busy
+    /// (`-32002`, the reason in `data.kind`), a level the route refuses is
+    /// answered its typed refusal, each at once, and nothing is admitted
+    /// beside the running turn. The level is named in the field
+    /// `reasoning_effort` and inside `provider_params`; one parser serves
+    /// both methods. The running turns then complete.
+    #[cfg(feature = "mob")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_level_turn_on_a_busy_session_is_answered_at_once_through_the_router() {
+        use meerkat_runtime::SessionServiceRuntimeExt as _;
+        use std::sync::atomic::Ordering;
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = anthropic_test_config();
+        let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+            config.clone(),
+            meerkat_models::canonical(),
+        ));
+        let sessions: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let persistence = meerkat::PersistenceBundle::new(sessions, store, memory_blob_store())
+            .expect("construct runtime authority");
+        let runtime =
+            SessionRuntime::new(factory, config, 10, persistence, NotificationSink::noop())
+                .expect("compose the RPC session runtime");
+        let client = Arc::new(HeldRouteLlmClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            held: std::sync::atomic::AtomicBool::new(false),
+        });
+        runtime.set_default_llm_client(Some(client.clone() as Arc<dyn LlmClient>));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let (notif_tx, _notif_rx) = mpsc::channel(100);
+        let router = Arc::new(
+            MethodRouter::new(
+                Arc::new(runtime),
+                config_store,
+                NotificationSink::new(notif_tx),
+            )
+            .expect("construct runtime authority"),
+        );
+        let call = |method: &'static str, params: serde_json::Value| {
+            let router = Arc::clone(&router);
+            async move {
+                router
+                    .dispatch(make_request(method, params))
+                    .await
+                    .expect("response")
+            }
+        };
+        let ok = |response: RpcResponse, what: &str| {
+            assert!(response.error.is_none(), "{what}: {:?}", response.error);
+            result_value(&response)
+        };
+
+        // A session with one finished turn, and a mob with one member.
+        let created = ok(
+            call(
+                "session/create",
+                serde_json::json!({"prompt": "Hello", "model": "claude-sonnet-4-5"}),
+            )
+            .await,
+            "the session is created",
+        );
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("a session id")
+            .to_string();
+        ok(
+            call(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "busy-level-mob",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
+                                "tools": {"comms": true},
+                            }
+                        }
+                    }
+                }),
+            )
+            .await,
+            "the mob is created",
+        );
+        ok(
+            call(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": "busy-level-mob",
+                    "profile": "worker",
+                    "agent_identity": "worker-1",
+                    "runtime_mode": "turn_driven",
+                }),
+            )
+            .await,
+            "the member spawns",
+        );
+        ok(
+            call(
+                "mob/turn_start",
+                serde_json::json!({
+                    "mob_id": "busy-level-mob",
+                    "agent_identity": "worker-1",
+                    "prompt": "first",
+                }),
+            )
+            .await,
+            "the member takes its first turn",
+        );
+
+        // A turn runs on the session and one on the member: both held at
+        // the model.
+        let before = client.calls.load(Ordering::SeqCst);
+        client.held.store(true, Ordering::SeqCst);
+        let session_turn = serde_json::json!({"session_id": &session_id, "prompt": "running"});
+        let member_turn = serde_json::json!({
+            "mob_id": "busy-level-mob",
+            "agent_identity": "worker-1",
+            "prompt": "running",
+        });
+        let running_session = tokio::spawn(call("turn/start", session_turn.clone()));
+        let running_member = tokio::spawn(call("mob/turn_start", member_turn.clone()));
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while client.calls.load(Ordering::SeqCst) < before + 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both running turns reach the model");
+        let active_inputs = || async {
+            router
+                .runtime_adapter()
+                .list_active_inputs(
+                    &meerkat_core::SessionId::parse(&session_id).expect("session id"),
+                )
+                .await
+                .map(|inputs| inputs.len())
+                .unwrap_or(0)
+        };
+        let active_before = active_inputs().await;
+
+        for (method, base) in [
+            ("turn/start", &session_turn),
+            ("mob/turn_start", &member_turn),
+        ] {
+            for form in ["direct", "nested"] {
+                let with_level = |level: &str| {
+                    let mut params = base.clone();
+                    params["prompt"] = serde_json::json!("names a level");
+                    if form == "direct" {
+                        params["reasoning_effort"] = serde_json::json!(level);
+                    } else {
+                        params["provider_params"] = serde_json::json!({"reasoning_effort": level});
+                    }
+                    params
+                };
+                let answer = |params: serde_json::Value| async move {
+                    tokio::time::timeout(Duration::from_secs(10), call(method, params))
+                        .await
+                        .unwrap_or_else(|_| panic!("{method} {form}: answered while the turn runs"))
+                        .error
+                        .unwrap_or_else(|| panic!("{method} {form}: the turn is not taken"))
+                };
+
+                let busy = answer(with_level("high")).await;
+                assert_eq!(
+                    (busy.code, busy.data.clone()),
+                    (
+                        error::SESSION_BUSY,
+                        Some(serde_json::json!({
+                            "kind": "reasoning_effort_change_needs_idle_session"
+                        })),
+                    ),
+                    "{method} {form}: {busy:?}"
+                );
+                let refused = answer(with_level("low")).await;
+                assert_eq!(
+                    (
+                        refused.code,
+                        refused
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.get("kind"))
+                            .cloned(),
+                        refused
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.pointer("/reasoning_effort_refusal/reason"))
+                            .cloned(),
+                    ),
+                    (
+                        error::INVALID_PARAMS,
+                        Some(serde_json::json!("reasoning_effort_refused")),
+                        Some(serde_json::json!("unsupported_level")),
+                    ),
+                    "{method} {form}: {refused:?}"
+                );
+            }
+        }
+        assert_eq!(
+            active_inputs().await,
+            active_before,
+            "no answered request was admitted on the session"
+        );
+
+        client.held.store(false, Ordering::SeqCst);
+        for (what, running) in [
+            ("the session's", running_session),
+            ("the member's", running_member),
+        ] {
+            let response = tokio::time::timeout(Duration::from_secs(60), running)
+                .await
+                .unwrap_or_else(|_| panic!("{what} running turn is answered"))
+                .expect("the turn task");
+            assert!(
+                response.error.is_none(),
+                "{what} running turn completes: {:?}",
+                response.error
+            );
+        }
+    }
+
+    /// A mob member built from a profile whose `provider_params` carry the
+    /// provider-neutral reasoning effort level holds that level, though no
+    /// client request named one. So on such a member a `mob/turn_start`
+    /// that changes the model, or only replaces the provider params (a
+    /// temperature, say), while the member has a turn running, is answered
+    /// that the session is busy, with the reason in `data.kind`, at once. A
+    /// plain `mob/turn_start` is queued behind the running turn and runs.
+    #[cfg(feature = "mob")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_built_from_a_profile_with_a_level_answers_a_model_change_busy() {
+        use std::sync::atomic::Ordering;
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = anthropic_test_config();
+        let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+            config.clone(),
+            meerkat_models::canonical(),
+        ));
+        let sessions: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let persistence = meerkat::PersistenceBundle::new(sessions, store, memory_blob_store())
+            .expect("construct runtime authority");
+        let runtime =
+            SessionRuntime::new(factory, config, 10, persistence, NotificationSink::noop())
+                .expect("compose the RPC session runtime");
+        let client = Arc::new(HeldRouteLlmClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            held: std::sync::atomic::AtomicBool::new(false),
+        });
+        runtime.set_default_llm_client(Some(client.clone() as Arc<dyn LlmClient>));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let (notif_tx, _notif_rx) = mpsc::channel(100);
+        let router = Arc::new(
+            MethodRouter::new(
+                Arc::new(runtime),
+                config_store,
+                NotificationSink::new(notif_tx),
+            )
+            .expect("construct runtime authority"),
+        );
+        let call = |method: &'static str, params: serde_json::Value| {
+            let router = Arc::clone(&router);
+            async move {
+                router
+                    .dispatch(make_request(method, params))
+                    .await
+                    .expect("response")
+            }
+        };
+        let ok = |response: RpcResponse, what: &str| {
+            assert!(response.error.is_none(), "{what}: {:?}", response.error);
+            result_value(&response)
+        };
+        let member_turn = |prompt: &str| {
+            serde_json::json!({
+                "mob_id": "profile-level-mob",
+                "agent_identity": "worker-1",
+                "prompt": prompt,
+            })
+        };
+
+        // The profile carries the level; the member is built from it and
+        // takes its first turn.
+        ok(
+            call(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "profile-level-mob",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
+                                "tools": {"comms": true},
+                                "provider_params": {"reasoning_effort": "high"},
+                            }
+                        }
+                    }
+                }),
+            )
+            .await,
+            "the mob is created",
+        );
+        ok(
+            call(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": "profile-level-mob",
+                    "profile": "worker",
+                    "agent_identity": "worker-1",
+                    "runtime_mode": "turn_driven",
+                }),
+            )
+            .await,
+            "the member spawns",
+        );
+        ok(
+            call("mob/turn_start", member_turn("first")).await,
+            "the member takes its first turn",
+        );
+
+        // A turn runs on the member, held at the model.
+        let before = client.calls.load(Ordering::SeqCst);
+        client.held.store(true, Ordering::SeqCst);
+        let running = tokio::spawn(call("mob/turn_start", member_turn("running")));
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while client.calls.load(Ordering::SeqCst) < before + 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the running turn reaches the model");
+
+        for (what, key, value) in [
+            (
+                "a model change",
+                "model",
+                serde_json::json!("claude-opus-4-8"),
+            ),
+            (
+                "a change of the provider params",
+                "provider_params",
+                serde_json::json!({"temperature": 0.2}),
+            ),
+        ] {
+            let mut params = member_turn("changes the member's model settings");
+            params[key] = value;
+            let busy =
+                tokio::time::timeout(Duration::from_secs(10), call("mob/turn_start", params))
+                    .await
+                    .unwrap_or_else(|_| panic!("{what}: answered while the turn runs"))
+                    .error
+                    .unwrap_or_else(|| panic!("{what}: the turn is not taken"));
+            assert_eq!(
+                (busy.code, busy.data.clone()),
+                (
+                    error::SESSION_BUSY,
+                    Some(serde_json::json!({
+                        "kind": "reasoning_effort_change_needs_idle_session"
+                    })),
+                ),
+                "{what}: {busy:?}"
+            );
+        }
+
+        // A plain turn is queued behind the running one, and both complete.
+        let plain = tokio::spawn(call("mob/turn_start", member_turn("plain")));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !plain.is_finished(),
+            "a plain turn is not answered while the turn ahead runs"
+        );
+        client.held.store(false, Ordering::SeqCst);
+        for (what, turn) in [("the running turn", running), ("the plain turn", plain)] {
+            let response = tokio::time::timeout(Duration::from_secs(60), turn)
+                .await
+                .unwrap_or_else(|_| panic!("{what} is answered"))
+                .expect("the turn task");
+            assert!(
+                response.error.is_none(),
+                "{what} completes: {:?}",
+                response.error
+            );
+        }
+    }
+
     /// A `session/create` refusal keeps its typed error data: a deferred
     /// first prompt carrying inline video for a model without inline-video
     /// support is refused with `INVALID_PARAMS` and the unsupported-capability

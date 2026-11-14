@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { request } from "node:http";
+import { connect } from "node:net";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -263,6 +264,53 @@ test("bound to another address, the Host is not checked", async () => {
     const res = await call(port, { method: "GET", path: "/anthropic/v1/models", host: "other.example" });
     assert.equal(res.status, 200);
     assert.equal(upstreamCalls.length, 1);
+  });
+});
+
+// A request written line by line, for header shapes the HTTP client refuses
+// to send.
+function rawStatus(port, lines) {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1", () => {
+      socket.write(`${[...lines, "Connection: close"].join("\r\n")}\r\n\r\n`);
+    });
+    let answer = "";
+    socket.on("data", (chunk) => { answer += chunk; });
+    socket.on("close", () => resolve(Number(answer.match(/^HTTP\/1\.1 (\d+)/)?.[1])));
+    socket.on("error", reject);
+  });
+}
+
+test("a request with more than one Host header is refused", async () => {
+  for (const opts of [{}, { host: "0.0.0.0" }]) {
+    await withProxy(opts, async (port) => {
+      const local = `Host: 127.0.0.1:${port}`;
+      for (const hosts of [[local, "Host: other.example"], ["Host: other.example", local], [local, local]]) {
+        const status = await rawStatus(port, ["GET /anthropic/v1/models HTTP/1.1", ...hosts]);
+        assert.equal(status, 400, `${hosts.join(" | ")} ${JSON.stringify(opts)}`);
+      }
+      assert.deepEqual(upstreamCalls, []);
+      assert.equal(await rawStatus(port, ["GET /anthropic/v1/models HTTP/1.1", local]), 200);
+    });
+  }
+});
+
+test("another origin is refused on a path the proxy does not route", async () => {
+  await withProxy({}, async (port) => {
+    const path = "/unknown-provider/v1/models";
+    for (const method of ["GET", "POST", "OPTIONS"]) {
+      const res = await call(port, { method, path, origin: "https://other.example" });
+      assert.equal(res.status, 403, method);
+    }
+    const crossSite = await call(port, { method: "GET", path, fetchSite: "cross-site" });
+    assert.equal(crossSite.status, 403);
+
+    const local = await call(port, { method: "GET", path, origin: "http://localhost:5173" });
+    assert.equal(local.status, 404);
+    assert.equal(local.headers["access-control-allow-origin"], "http://localhost:5173");
+    const tool = await call(port, { method: "GET", path });
+    assert.equal(tool.status, 404);
+    assert.deepEqual(upstreamCalls, []);
   });
 });
 

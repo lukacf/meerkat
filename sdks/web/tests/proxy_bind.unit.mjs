@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { request } from "node:http";
+import { createServer } from "node:net";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -92,6 +93,37 @@ test("startProxy binds the address its host option names", async () => {
     assert.equal(server.address().address, "0.0.0.0");
   } finally {
     await closed(server);
+  }
+});
+
+function freePort() {
+  return new Promise((resolve) => {
+    const probe = createServer();
+    probe.listen(0, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
+test("startProxy binds a port given as a string of digits", async () => {
+  const port = await freePort();
+  for (const [given, expected] of [[String(port), port], [` ${port} `, port]]) {
+    const server = startProxy({ port: given });
+    try {
+      await once(server, "listening");
+      assert.equal(server.address().port, expected, JSON.stringify(given));
+    } finally {
+      await closed(server);
+    }
+  }
+  const any = startProxy({ port: "0" });
+  try {
+    await once(any, "listening");
+    assert.notEqual(any.address().port, 0);
+    assert.notEqual(any.address().port, 3100);
+  } finally {
+    await closed(any);
   }
 });
 

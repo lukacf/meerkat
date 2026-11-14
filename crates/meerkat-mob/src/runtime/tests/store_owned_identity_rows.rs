@@ -2661,6 +2661,104 @@ async fn a_label_update_keeps_a_member_a_same_session_successor_cannot_serve() {
     );
 }
 
+/// Row (RED): a member the release leaves live keeps the restamp owed
+/// across an update back to its seat row's labels. On a session service
+/// that keeps no durable sessions a release releases nothing: the member
+/// stays live on what it was built with. A label update of `desk` answers
+/// kept and the row records the owed restamp. A second update returns the
+/// row to the labels of the member's seat row: it answers kept again, the
+/// member is live still, and the row keeps the record, since a build of
+/// the member may predate the row's labels; the census counts it. The same
+/// holds for a member the release does not serve (a placed member, a
+/// member wired to a placed member): its answer is kept and it stays live.
+///
+/// RED before the record was kept for a member that stays live: the second
+/// update let the record go on the seat row alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_the_release_leaves_live_keeps_the_restamp_owed_across_an_update_back() {
+    let keys = tempfile::tempdir().expect("a comms identity root");
+    let service = Arc::new(MockSessionService::new());
+    service.keep_no_durable_sessions();
+    service.set_keep_alive_turns_complete_immediately(true);
+    let _adapter = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(
+        store_owned_definition("label-back-non-durable"),
+        storage.clone(),
+    )
+    .with_session_service(service.clone())
+    .with_member_comms_identity_root(keys.path())
+    .allow_ephemeral_sessions(true)
+    .create()
+    .await
+    .expect("create the mob");
+    let mob = StoreOwnedMob {
+        keys,
+        storage,
+        handle,
+        service,
+    };
+    let before = spec("desk", "worker")
+        .with_runtime_mode_override(crate::MobRuntimeMode::AutonomousHost)
+        .with_initial_message(meerkat_core::types::ContentInput::from("Begin."));
+    mob.create_outcome(
+        StoreOwnedIdentityCreate::new(
+            operation("create-desk"),
+            IdentityChangeRequesterInput::host("console"),
+            vec![CreatedIdentityRequest::new(before.clone())],
+        ),
+        ALLOW,
+    )
+    .await
+    .expect("the create commits");
+    kicked_off(&mob, "desk", "Begin.").await;
+    let seated = seat(&mob, "desk").await;
+    let moved = before.clone().with_labels(moved_team("desk"));
+    let back = moved.clone().with_labels(before.labels.clone());
+    for (operation_id, from, to) in [
+        ("relabel-desk", &before, &moved),
+        ("relabel-desk-back", &moved, &back),
+    ] {
+        let updated = mob
+            .update(operation_id, to.clone(), &spec_digest(from))
+            .await
+            .expect("the label update commits");
+        assert_eq!(
+            answer_kind(updated.applied.as_ref().expect("the update's answer")),
+            "kept",
+            "{operation_id}: {updated:?}"
+        );
+        assert!(
+            !mob.handle.member_unmaterialized(&id("desk")),
+            "{operation_id}: the release releases nothing here: the member stays live"
+        );
+        let now = seat(&mob, "desk").await;
+        assert_eq!(
+            (now.generation, now.fence_token, &now.labels),
+            (seated.generation, seated.fence_token, &to.labels),
+            "{operation_id}: nothing is seated, and the roster reads the row's labels"
+        );
+        assert!(
+            label_restamp_owed(&mob, "desk").await,
+            "{operation_id}: the row keeps the restamp owed while the member stays live"
+        );
+    }
+    assert_eq!(
+        mob.spawn_row("desk").await.labels,
+        before.labels,
+        "the seat row carries the row's labels again, and no seat row was written"
+    );
+    assert_eq!(
+        mob.handle
+            .identity_record_census()
+            .await
+            .expect("the census answers")
+            .label_restamps_owed,
+        1,
+        "the census counts the row"
+    );
+}
+
 /// Row (RED): a label update plans nothing on its member's session and
 /// reaches the member's roster entry at once. `built`'s durable session
 /// does not decode, so no successor of the member could be planned on it:

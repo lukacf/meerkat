@@ -87,8 +87,11 @@ const STATE_WORDS: Record<Exclude<QuestionSetCardState, "read_only">, { text: st
   failed: { text: "Not confirmed", tone: "crit" },
   answered: { text: "Answered", tone: "ok" },
   dismissed: { text: "Dismissed", tone: "neutral" },
-  // The gateway refused the reply and the set is still listed.
-  refused: { text: "Not sent", tone: "crit" },
+  // The gateway refused the reply and the set is still listed. One label
+  // for every refusal: each sentence under it says the reply was not
+  // accepted or not taken, and not every one of them can say that nothing
+  // left the browser.
+  refused: { text: "Not accepted", tone: "crit" },
 };
 
 /** What the card says under who asked: what to do, where the answers go,

@@ -278,7 +278,7 @@ describe("QuestionSetCard", () => {
     ["caller_changed", false],
     ["caller_not_current", false],
     ["not_sent", false],
-  ] as const)("keeps the card after a refusal its set outlives (%s): not sent, why, what to do, and the person may send again", (kind, details) => {
+  ] as const)("keeps the card after a refusal its set outlives (%s): not accepted, why, what to do, and the person may send again", (kind, details) => {
     const sentence = QUESTION_SET_REFUSAL_WORDS[kind];
     expect(sentence.length).toBeGreaterThan(20);
     const { view, card, onDismiss } = show({ decision: {
@@ -286,7 +286,10 @@ describe("QuestionSetCard", () => {
       refusal: { kind, words: sentence, ...(details ? { detail: "the gateway's own message" } : {}) },
     } });
     expect(card.dataset.state).toBe("refused");
-    expect(view.getByRole("status").textContent).toBe("Not sent");
+    // One chip for every refusal, true above each sentence: also above the
+    // one that says the reply was not accepted, where the request may have
+    // left the browser.
+    expect(view.getByRole("status").textContent).toBe("Not accepted");
     expect(visibleText(card)).not.toMatch(/not permitted/i);
     expect(view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent).toBe(sentence);
     expect(view.getByRole("alert").textContent).toContain(sentence);

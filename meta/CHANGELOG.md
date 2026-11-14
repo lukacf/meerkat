@@ -960,7 +960,7 @@ Security, Upgrade and Changed.
   per question, the agent's recommendation marked and never preselected,
   "Something else" for the person's own words where allowed, Send answers
   and Dismiss. A card says "Answered" or "Dismissed" once the gateway
-  confirmed it, "Not sent" with what to do when the gateway refused the
+  confirmed it, "Not accepted" with what to do when the gateway refused the
   reply and still lists the set, and why nobody can answer when the caller
   is not signed in or may not decide. A set the gateway no longer lists
   leaves the screen whole; where its card was, one line says that the

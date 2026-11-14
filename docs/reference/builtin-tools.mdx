@@ -639,10 +639,15 @@ A profile's member operator tools (`member_status`, `retire_member`,
 `force_cancel_member`, `list_members`) apply the same rule. With manage scope,
 all of these tools reach every member, as before. A host can hide members
 from other members' operator tools (`MobBuilder::with_member_tool_audience`):
-`member_status`, `retire_member`, `force_cancel_member`, `mob_check_member`
-and `mob_retire_member` answer a member its audience hides from the calling
-member exactly as a member the mob does not hold, with manage scope too, and
-do nothing to it; `wire_members`, `unwire_members`, `mob_wire` and
+`member_status`, `retire_member` and `force_cancel_member` answer a member
+its audience hides from the calling member exactly as a member the mob does
+not hold, with manage scope too, and do nothing to it.
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+From 0.9.15 the other tools keep to the audience as well: `mob_check_member`
+and `mob_retire_member` answer a member the audience hides in the same way;
+`wire_members`, `unwire_members`, `mob_wire` and
 `mob_unwire` answer so for either member they name, and `council` for a
 participant; `spawn_member` and `spawn_many_members` answer so for the
 source of a fork launch, and refuse a resume of a session bound to such a
@@ -657,6 +662,19 @@ host with no audience too, and the host's log holds it whole at `warn`. A
 placed member's calls are asked about as that member's. The audience is
 handed the labels the calling member and the target carry on their own
 roster rows, so its rule can rest on a member's durable labels.
+
+Through 0.9.14 only the three tools named first keep to the audience. A member
+list names a member the audience hides. Through the wire tools a member with
+manage scope over the mob can learn that a member hidden from it exists and
+reach it. Through `mob_check_member` and `mob_retire_member`, on a host that
+has not wrapped the two tools, a member can learn that a member hidden from it
+exists, and one with manage scope over the mob can read its status and retire
+it. The fork and resume launches and `council` are not held to the audience.
+The report of `mob_destroy` can name such a member, and a destroy the mob
+refuses because a member's state could not be restored names that member, its
+session and the cause to every caller. A placed member's operator calls reach
+the audience as a call no member made. The CHANGELOG lists each of these under
+Security and Fixed.
 
 A member placed on a member host holds manage scope over its mob, including
 the privileged spawn arguments, unless its controlling host narrowed it with

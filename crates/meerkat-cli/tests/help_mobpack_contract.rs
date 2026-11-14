@@ -422,3 +422,232 @@ fn mob_pack_leaves_key_and_output_out_however_their_paths_are_written()
     );
     Ok(())
 }
+
+// What `rkat mob pack` and `rkat mob web build` say about a pack's files.
+// Standard output, the exit status and the pack itself stay as they were; the
+// count and the warnings go to standard error and name paths only.
+
+type RowResult = Result<(), Box<dyn std::error::Error>>;
+
+/// The digest of the pack of [`write_report_fixture`]'s flagged directory.
+/// It is a function of the packed files alone, so it is the same before and
+/// after the pack command reports on them.
+const FLAGGED_FIXTURE_DIGEST: &str =
+    "d3f791527f9deb8ff18faeca123601fbce8d9fde85c99d2805dec70cfbbfa683";
+
+/// Bytes no row may find in anything the commands print.
+const FILE_CONTENT_MARKER: &str = "content-that-is-never-printed";
+
+/// The files of the flagged directory, as `rkat mob inspect` lists them.
+const FLAGGED_FIXTURE_FILES: [&str; 11] = [
+    ".editorconfig",
+    ".env",
+    ".git/HEAD",
+    ".git/config",
+    ".rkat/sessions/chat.jsonl",
+    "definition.json",
+    "earlier.mobpack",
+    "id_rsa",
+    "manifest.toml",
+    "release.key",
+    "skills/notes.md",
+];
+
+/// The warning lines both commands print for the flagged directory's pack.
+const FLAGGED_FIXTURE_WARNINGS: &str = "\
+warning\t.editorconfig is in the pack: a hidden file
+warning\t.env is in the pack: an environment file, which usually holds secrets
+warning\t.git/ (2 files) is in the pack: repository metadata
+warning\t.rkat/ (1 file) is in the pack: local Meerkat state and configuration
+warning\tearlier.mobpack is in the pack: looks like an earlier pack
+warning\tid_rsa is in the pack: looks like a private key
+warning\trelease.key is in the pack: looks like a private key
+";
+
+/// Writes `<root>/mob`: the pack sources and, when `flagged`, an env file,
+/// key-like files, repository metadata, local state, an earlier pack and a
+/// hidden file.
+fn write_report_fixture(root: &std::path::Path, flagged: bool) -> std::io::Result<()> {
+    let mob = root.join("mob");
+    std::fs::create_dir_all(mob.join("skills"))?;
+    std::fs::write(
+        mob.join("manifest.toml"),
+        "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
+    )?;
+    std::fs::write(mob.join("definition.json"), br#"{"id":"fixture"}"#)?;
+    std::fs::write(mob.join("skills").join("notes.md"), "# Notes skill\n")?;
+    if !flagged {
+        return Ok(());
+    }
+    let content = format!("{FILE_CONTENT_MARKER}\n");
+    std::fs::create_dir_all(mob.join(".git"))?;
+    std::fs::create_dir_all(mob.join(".rkat").join("sessions"))?;
+    for name in [
+        ".editorconfig",
+        ".env",
+        ".git/HEAD",
+        ".git/config",
+        ".rkat/sessions/chat.jsonl",
+        "earlier.mobpack",
+        "id_rsa",
+        "release.key",
+    ] {
+        std::fs::write(mob.join(name), &content)?;
+    }
+    Ok(())
+}
+
+fn run_rkat(root: &std::path::Path, args: &[&str]) -> Result<Output, Box<dyn std::error::Error>> {
+    let rkat = std::env::var_os("CARGO_BIN_EXE_rkat")
+        .ok_or("Cargo or Nextest must provide the runtime rkat binary path")?;
+    Ok(Command::new(rkat)
+        .current_dir(root)
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env_remove("RKAT_TRUST_POLICY")
+        .args(args)
+        .output()?)
+}
+
+/// A wasm-pack output directory with the two artifacts a web build copies.
+fn write_wasm_pkg(root: &std::path::Path) -> std::io::Result<()> {
+    let pkg = root.join("wasm-pkg");
+    std::fs::create_dir_all(&pkg)?;
+    std::fs::write(pkg.join("real_bg.wasm"), b"\0asm\x01\0\0\0")?;
+    std::fs::write(pkg.join("real.js"), "export default function init() {}\n")
+}
+
+fn web_build(root: &std::path::Path) -> Result<Output, Box<dyn std::error::Error>> {
+    write_wasm_pkg(root)?;
+    run_rkat(
+        root,
+        &[
+            "mob",
+            "web",
+            "build",
+            "out.mobpack",
+            "-o",
+            "web",
+            "--wasm",
+            "wasm-pkg",
+            "--trust-policy",
+            "permissive",
+        ],
+    )
+}
+
+#[test]
+fn mob_pack_standard_output_and_the_pack_are_unchanged_by_its_report() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), true)?;
+
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+    assert_eq!(
+        String::from_utf8_lossy(&packed.stdout),
+        format!("{FLAGGED_FIXTURE_DIGEST}\n"),
+        "standard output is the digest and a newline, nothing else"
+    );
+
+    let inspected = run_rkat(temp.path(), &["mob", "inspect", "out.mobpack"])?;
+    assert!(inspected.status.success(), "{}", output_text(&inspected));
+    let stdout = String::from_utf8_lossy(&inspected.stdout);
+    let files: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("file\t"))
+        .collect();
+    assert_eq!(files, FLAGGED_FIXTURE_FILES, "the pack holds what it held");
+    assert!(
+        stdout.contains(&format!("digest\t{FLAGGED_FIXTURE_DIGEST}\n")),
+        "the pack's digest is what it was: {stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn mob_pack_reports_the_count_and_warns_by_name_on_standard_error() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), true)?;
+
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+    let expected = format!(
+        "packed\t11 files\n{FLAGGED_FIXTURE_WARNINGS}note\tthe warnings come from a short list \
+         of names, not from the files' contents; list every file in the pack with: rkat mob \
+         inspect out.mobpack\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&packed.stderr), expected);
+    assert!(
+        !output_text(&packed).contains(FILE_CONTENT_MARKER),
+        "a warning names a path and never prints a file's content"
+    );
+    Ok(())
+}
+
+#[test]
+fn mob_pack_of_a_directory_without_flagged_names_reports_only_the_count() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), false)?;
+
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+    assert_eq!(String::from_utf8_lossy(&packed.stderr), "packed\t3 files\n");
+    Ok(())
+}
+
+#[test]
+fn mob_web_build_standard_output_and_bundle_are_unchanged_by_its_warnings() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), true)?;
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+
+    let built = web_build(temp.path())?;
+    assert!(built.status.success(), "{}", output_text(&built));
+    assert_eq!(
+        String::from_utf8_lossy(&built.stdout),
+        "web\tweb\nwarning\tunsigned pack accepted in permissive mode\n",
+        "standard output is the bundle line and the trust warning, nothing else"
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("web").join("mobpack.bin"))?,
+        std::fs::read(temp.path().join("out.mobpack"))?,
+        "the bundle carries the pack unchanged"
+    );
+    Ok(())
+}
+
+#[test]
+fn mob_web_build_repeats_the_warnings_on_standard_error() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), true)?;
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+
+    let built = web_build(temp.path())?;
+    assert!(built.status.success(), "{}", output_text(&built));
+    let expected = format!(
+        "{FLAGGED_FIXTURE_WARNINGS}note\tthe bundle serves the whole pack, these files \
+         included, to everyone who can load the page; list every file in the pack with: rkat \
+         mob inspect out.mobpack\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&built.stderr), expected);
+    assert!(
+        !output_text(&built).contains(FILE_CONTENT_MARKER),
+        "a warning names a path and never prints a file's content"
+    );
+    Ok(())
+}
+
+#[test]
+fn mob_web_build_of_a_pack_without_flagged_names_prints_nothing_on_standard_error() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), false)?;
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+
+    let built = web_build(temp.path())?;
+    assert!(built.status.success(), "{}", output_text(&built));
+    assert_eq!(String::from_utf8_lossy(&built.stderr), "");
+    Ok(())
+}

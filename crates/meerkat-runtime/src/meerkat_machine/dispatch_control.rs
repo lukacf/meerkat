@@ -3179,14 +3179,22 @@ fn routing_switch_approval_reason(
 /// The identity as the model-routing history records it: without the
 /// provider-neutral reasoning effort level.
 ///
-/// The history is stored in the session's head row, and an earlier release
-/// decodes the head rows of a realm typed when it looks a session up. That
-/// release's provider params have no member for the level and refuse a key
-/// they do not know, so one record that carried the level made every such
-/// lookup in the realm fail there, and no step repaired it. The record
-/// names what was installed. The level stays in the session's own settings,
-/// which are the only source of its live identity. Params that hold nothing
-/// else are recorded as absent.
+/// The history is part of the session's head, which is stored twice: in the
+/// session store's head row and, as a copy, in the runtime store's boundary
+/// head. The release before the level existed decodes a head typed whenever
+/// it loads that session, and its provider params have no member for the
+/// level and refuse a key they do not know. A realized record once carried
+/// the level of the session whose run made the switch, so a session whose
+/// history held such a record could not be loaded there, even after the
+/// level was cleared: a read, the history, a turn, and the CLI's show and
+/// resume answered an error at once, while every other session of the realm
+/// answered (confirmed by a run of that release on such a store). That
+/// release reads the head rows of several sessions at once in two places
+/// only: the storage migration census of the Meta product and the activation
+/// of a realm with an external storage provider (read from its source). The
+/// record names what was installed. The level stays in the session's own
+/// settings, which are the only source of its live identity. Params that
+/// hold nothing else are recorded as absent.
 fn model_routing_record_identity(
     identity: &meerkat_core::SessionLlmIdentity,
 ) -> meerkat_core::SessionLlmIdentity {

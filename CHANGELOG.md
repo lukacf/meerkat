@@ -1175,6 +1175,34 @@ them.
   a name the mob does not hold, and nothing is forked. Before, `council`
   was not held to the audience. Affects 0.9.11 through 0.9.14.
 
+- `rkat`, `meerkat-mob-pack`: `rkat mob pack` now leaves the signing key
+  and its own output file out of the pack however their paths are written.
+  Before, each was left out only when its path was written with the mob
+  directory argument, exactly as typed, as its prefix:
+  `rkat mob pack mob -o mob/out.mobpack --sign mob/key.hex` left both out,
+  and so did `.` with `./out.mobpack` and `./key.hex`. In every other
+  spelling a signing key kept in the mob directory was packed, and so was
+  the output of an earlier pack. Inside the mob directory,
+  `rkat mob pack . -o out.mobpack --sign key.hex` packed both. So did
+  `./mob` with `mob/key.hex`, `mob` with `./mob/key.hex`, an absolute
+  directory with a relative path or the reverse, a `..` in a path, and a
+  path through a symbolic link. A pack that holds its signing key hands the
+  key to everyone who receives the pack, and whoever has the key can sign
+  packs as that signer. The key and the output file are now left out as the
+  files their paths name, wherever the command is run from; a symbolic link
+  given as `--sign` or `-o` names the file it points to, and an output file
+  that does not exist yet is nothing to leave out. The rule covers the key
+  this pack is signed with and this pack's own output file, and nothing
+  else about what is packed changes. A key file in the mob directory that
+  this pack is not signed with (an unsigned pack, or another key), a pack
+  written earlier under another name, and a copy of the key under another
+  name, a hard link included, are files like any other and are packed, as
+  before. Keep signing keys and earlier packs outside the mob directory.
+  The Rust functions `meerkat_mob_pack::pack::pack_directory` and
+  `pack_directory_with_excludes` follow the same rule, with unchanged
+  signatures. If a pack that left your machine holds its signing key, the
+  key is exposed: see the Upgrade notes. Affects 0.4.1 through 0.9.14.
+
 - `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486, in
   Cargo.lock and in the example workspaces' lockfiles. Releases through
   0.9.14 build with 1.1.5. `meerkat-core` depends on `rustix` directly and
@@ -1244,6 +1272,28 @@ them.
     write (`chmod`, or an ACL on the file): the file is a new one every
     time, so a grant on the older file does not carry over. The descriptor
     file of `rkat mob host --descriptor-out` is owner-only in the same way.
+
+- Packs signed by 0.4.1 through 0.9.14 can hold their signing key (see
+  Security). `rkat mob inspect <pack>` lists every file of a pack on a
+  `file` line: look at each pack you signed. If the signing key file is
+  among the `file` lines of a pack that left your machine (a copy sent to
+  someone, a deploy target, a web bundle `rkat mob web build` made from it,
+  which serves the whole pack), the key is exposed and there is no
+  revocation. Make a new key (32 random bytes written as 64 hexadecimal
+  characters), sign the packs again with it, and have everyone who trusts
+  the signer replace the signer's public key in their
+  `.rkat/trusted-signers.toml`, or in the trusted signers their host
+  passes. Until they do, a pack signed with the old key still verifies for
+  them. Remove the copies of the packs that hold the key where you can.
+
+- `rkat mob pack` of a directory that holds the signing key or the output
+  of an earlier pack now gives a pack without those files, so its digest
+  differs from the digest of a pack an earlier release made from the same
+  directory with them in it. Where such a pack's digest is pinned, pin the
+  new one; a signature is over the digest, so the pack is signed again when
+  it is packed. A pack an earlier release made without those files has the
+  same digest as before, and existing pack files are not changed: they
+  verify as they did.
 
 - A script that runs `rkat run --output json` (or `--json`) must not read
   non-empty stdout as success, nor parse the last stdout document as a run

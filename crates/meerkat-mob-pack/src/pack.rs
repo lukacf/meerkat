@@ -16,7 +16,7 @@ use meerkat_mob::adaptive::AdaptivePolicy;
 use meerkat_mob::{MobDefinition, definition::SkillSource};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 /// Canonical archive path of the bundled LayerDecision schema artifact.
@@ -71,9 +71,9 @@ pub fn pack_directory_with_excludes(
     excluded_paths: &[&Path],
 ) -> Result<PackResult, PackValidationError> {
     let mut files = scan_directory(directory)?;
-    exclude_paths_from_pack(directory, excluded_paths, &mut files);
+    exclude_paths_from_pack(directory, excluded_paths, &mut files)?;
     if let Some(request) = signing {
-        exclude_paths_from_pack(directory, &[request.key_path], &mut files);
+        exclude_paths_from_pack(directory, &[request.key_path], &mut files)?;
     }
     prepare_adaptive_build_outputs(&mut files)?;
     validate_extracted_pack_files(&files)?;
@@ -649,12 +649,52 @@ fn scan_directory_inner(
     Ok(())
 }
 
-fn exclude_paths_from_pack(root: &Path, paths: &[&Path], files: &mut BTreeMap<String, Vec<u8>>) {
+/// Removes the files `paths` name from the scanned set.
+///
+/// A file is left out by what it is, not by how its path or the directory's
+/// is written: both are resolved through the file system before they are
+/// compared, so relative and absolute forms, a leading `./`, `..` and
+/// symbolic links on the way all name the same file. A path outside the
+/// directory removes nothing.
+fn exclude_paths_from_pack(
+    root: &Path,
+    paths: &[&Path],
+    files: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), PackValidationError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let root = std::fs::canonicalize(root)?;
     for path in paths {
-        if let Ok(relative) = path.strip_prefix(root) {
+        if let Ok(relative) = resolve_excluded_path(path).strip_prefix(&root) {
             files.remove(&normalize_rel_path(&relative.to_string_lossy()));
         }
     }
+    Ok(())
+}
+
+/// The real path of a file to leave out of a pack.
+///
+/// A file that exists resolves whole. One that does not exist yet (the output
+/// of a first pack) resolves through its directory, with its own name as
+/// written. A path whose directory does not resolve either names no file the
+/// scan can have found; it is made absolute on the current directory.
+fn resolve_excluded_path(path: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        // A bare file name has the empty parent: the current directory.
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        if let Ok(real_parent) = std::fs::canonicalize(parent) {
+            return real_parent.join(name);
+        }
+    }
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn normalize_rel_path(path: &str) -> String {

@@ -74,14 +74,17 @@ pub struct PackContentWarning {
 impl fmt::Display for PackContentWarning {
     /// `<path> is in the pack: <why>`, with the file count after a directory.
     /// The path is the only thing taken from the pack. Its control characters
-    /// and the characters that change how a line is laid out on screen are
-    /// printed as escapes, so a file name can neither start a line of its own
-    /// nor reorder the one it is on.
+    /// are printed as escapes, and so are the line and paragraph separators
+    /// (U+2028, U+2029) and a fixed set of invisible characters that reorder
+    /// or join the characters around them (U+00AD, U+061C, U+180E, U+200B to
+    /// U+200F, U+202A to U+202E, U+2060 to U+2064, U+2066 to U+206F, U+FEFF,
+    /// U+FFF9 to U+FFFB, U+E0001, U+E0020 to U+E007F). Every other character
+    /// is printed as it is.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for ch in self.path.chars() {
             if ch.is_control() {
                 write!(f, "{}", ch.escape_default())?;
-            } else if changes_line_layout(ch) {
+            } else if is_printed_as_code_point(ch) {
                 write!(f, "{}", ch.escape_unicode())?;
             } else {
                 write!(f, "{ch}")?;
@@ -95,16 +98,21 @@ impl fmt::Display for PackContentWarning {
     }
 }
 
-/// The bidirectional and other format characters: invisible themselves, they
-/// change the order or the joining of the characters around them.
-fn changes_line_layout(ch: char) -> bool {
+/// The characters, beside the control characters, that a warning prints as
+/// `\u{...}`: the line and paragraph separators U+2028 and U+2029, which
+/// start a new line in a viewer that knows them, and these invisible
+/// characters, which reorder or join the characters around them: U+00AD,
+/// U+061C, U+180E, U+200B to U+200F, U+202A to U+202E, U+2060 to U+2064,
+/// U+2066 to U+206F, U+FEFF, U+FFF9 to U+FFFB, U+E0001 and U+E0020 to
+/// U+E007F. This is a fixed set, not every format character of Unicode.
+fn is_printed_as_code_point(ch: char) -> bool {
     matches!(
         ch,
         '\u{00AD}'
             | '\u{061C}'
             | '\u{180E}'
             | '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
+            | '\u{2028}'..='\u{202E}'
             | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{206F}'
             | '\u{FEFF}'
@@ -150,21 +158,24 @@ pub fn classify_packed_path(path: &str) -> Option<(String, PackedPathConcern)> {
 
 /// Classifies one packed file by its name and, for the one content form, by
 /// its content: a file that [has the form of a signing
-/// key](has_signing_key_form) is pointed out whatever it is called, unless a
-/// flagged directory already stands for it.
+/// key](has_signing_key_form) is pointed out whatever it is called, unless it
+/// lies under a flagged directory (`.git/`, `.rkat/`, `.ssh/`, `.aws/`,
+/// `.gnupg/`), whose own line then stands for it.
 pub fn classify_packed_file(path: &str, content: &[u8]) -> Option<(String, PackedPathConcern)> {
     classify(path, has_signing_key_form(content))
 }
 
-/// Whether `content` is exactly a 64-digit hex key: 64 ASCII hex digits and
-/// at most one line end (`\n` or `\r\n`) after them, nothing else. That is
-/// the form of the key file `rkat mob pack --sign` takes.
+/// Whether `content` is a file `rkat mob pack --sign` would accept as a key:
+/// it is text, and with the white space around it trimmed, as the key reader
+/// trims it, it is exactly 64 hex digits.
+///
+/// Any file that is only a 64-digit hex value has this form, a key or not: a
+/// pack's digest saved to a file, for one.
 pub fn has_signing_key_form(content: &[u8]) -> bool {
-    let digits = content
-        .strip_suffix(b"\r\n")
-        .or_else(|| content.strip_suffix(b"\n"))
-        .unwrap_or(content);
-    digits.len() == 64 && digits.iter().all(u8::is_ascii_hexdigit)
+    std::str::from_utf8(content).is_ok_and(|text| {
+        let digits = text.trim();
+        digits.len() == 64 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 fn classify(path: &str, signing_key_form: bool) -> Option<(String, PackedPathConcern)> {

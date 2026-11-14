@@ -710,12 +710,20 @@ them.
   (the digest alone for `mob pack`) and their exit status, also when
   standard error cannot be written to; nothing is refused. The one thing a
   script can notice is new lines on standard error. A warning names a path
-  and never prints a byte of a file; control characters and the characters
-  that reorder a line on screen are printed as escapes. The files are
+  and never prints a byte of a file. In the path, these characters are
+  printed as escapes: the control characters, the line and paragraph
+  separators (U+2028, U+2029), and the invisible characters U+00AD,
+  U+061C, U+180E, U+200B to U+200F, U+202A to U+202E, U+2060 to U+2064,
+  U+2066 to U+206F, U+FEFF, U+FFF9 to U+FFFB, U+E0001 and U+E0020 to
+  U+E007F; every other character is printed as it is. The files are
   flagged by name, and for one form by content (a file that is exactly a
   64-digit hex key). What is flagged:
-  - a file whose whole content is 64 hex digits, with at most one line end
-    after them: the form of a signing key, whatever the file is called;
+  - a file that `--sign` would accept as a key: its text, with the white
+    space around it trimmed, is exactly 64 hex digits. It is flagged
+    whatever it is called, unless it lies under one of the directories
+    below, whose own line then stands for it. Any file that is only a
+    64-digit hex value is flagged, a key or not: this command's own digest
+    saved to a file, for example;
   - env files: `.env`, `.env.<name>` and `<name>.env`. The three template
     names `.env.example`, `.env.sample` and `.env.template` get the line of
     a hidden file instead;
@@ -1649,18 +1657,14 @@ them.
   its own output file, and nothing else. A copy of the key, a key file the
   pack is not signed with (an unsigned pack, or another key) and a pack
   written earlier under another name are packed like every other file in
-  the mob directory. `rkat mob pack` now warns about key-like names, about
-  a file that has the form of a signing key and about `.mobpack` files
-  among the packed files (see Changed); a warning removes nothing. On
-  Windows the two files are
-  recognized by their resolved paths only, so a hard link to the key under
-  another name is packed there. Whether Windows recognizes a key or an
-  output typed in another case than it is stored is not established: the
-  standard library resolves a path there by opening it and asking the
-  system for the final path of the handle, and what case that answer has
-  was neither run nor found in the sources at hand. Keep keys and packs
-  outside the mob directory, and check a pack with
-  `rkat mob inspect <pack>`.
+  the mob directory. On Windows the two files are recognized by their
+  resolved paths only, so a hard link to the key under another name is
+  packed there. Whether Windows recognizes a key or an output typed in
+  another case than it is stored is not established: the standard library
+  resolves a path there by opening it and asking the system for the final
+  path of the handle, and what case that answer has was neither run nor
+  found in the sources at hand. Keep keys and packs outside the mob
+  directory, and check a pack with `rkat mob inspect <pack>`.
 
 - Mob: an explicit resume of a stopped mob (`MobHandle::resume`) rebuilds
   each member from its seat as the host's spawn customizer makes it and
@@ -1716,11 +1720,12 @@ them.
   output file. Env files and other secrets, key files the pack is not
   signed with, `.git/`, and `.rkat/` with its stored conversations and
   configuration all go into the pack when they are in the directory, and a
-  web bundle serves the pack whole. This release warns about a short list
-  of names and one content form (see Changed), which misses much, and
-  removes nothing. Keep such files out of the
-  mob directory, and read `rkat mob inspect <pack>` before a pack leaves
-  your machine.
+  web bundle serves the pack whole. `rkat mob pack` now warns about a
+  short list of names and one content form (see Changed): key-like names,
+  a file that has the form of a signing key and `.mobpack` files among
+  them. The list misses much, and a warning removes nothing. Keep such
+  files out of the mob directory, and read `rkat mob inspect <pack>`
+  before a pack leaves your machine.
 
 - Read from the source: a preloaded skill that cannot be resolved (a mistyped
   name, a skill the build does not have, or a skill whose required

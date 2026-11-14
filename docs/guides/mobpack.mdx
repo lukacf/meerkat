@@ -61,18 +61,22 @@ token fails instead of silently downgrading execution.
 ### What is packed
 
 `rkat mob pack` archives every regular file under the mob directory, at any
-depth. Through 0.9.14 it prints no warning and no list of them. From 0.9.15
+depth. Through 0.9.15 it prints no warning and no list of them. From 0.9.16
 it reports on standard error how many files it packed and warns, by path,
 about packed files that look like secrets, repository metadata, local state
 or an earlier pack; `rkat mob web build` repeats the warnings for the pack
-it copies. Files are flagged by name, and for one form by content (a file
-that is exactly a 64-digit hex key, whatever it is called): env files
+it copies. Files are flagged by name, and for one form by content: a file
+that `--sign` would accept as a key (its text, with the white space around
+it trimmed, is exactly 64 hex digits) is flagged whatever it is called. Any
+file that is only a 64-digit hex value is flagged so, a key or not: this
+command's own digest saved to a file, for example. By name: env files
 (`.env`, `.env.<name>`, `<name>.env`); key-like names (`id_rsa`, `id_dsa`,
 `id_ecdsa`, `id_ed25519`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, and a name that
 is `key` or ends in `-key`, `_key` or `.key` before its extension, but no
 `.pub` file); `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, `.htpasswd`;
 `*.mobpack` and `mobpack.bin`; the directories `.git/`, `.rkat/`, `.ssh/`,
-`.aws/` and `.gnupg/`; and every other hidden file or directory (the
+`.aws/` and `.gnupg/`, each with one line that stands for every file under
+it, a key-shaped one included; and every other hidden file or directory (the
 template names `.env.example`, `.env.sample` and `.env.template` among
 them). The list is a heuristic and misses much (`credentials.json`,
 `terraform.tfstate`, `secrets.yaml`, `*.jks` and `*.ppk` get no warning), and

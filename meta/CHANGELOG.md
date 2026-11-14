@@ -263,6 +263,19 @@ Security, Upgrade and Changed.
   caller is answered "access denied: the session has no established owner"
   where access rules are enforced, and as for a session that does not
   exist otherwise.
+- A reasoning effort level in a mob definition is a one-way step with
+  respect to 0.9.14. A Meta gateway on 0.9.14 does not start on the state
+  directory of a mob whose stored definition holds a level
+  (`provider_params.reasoning_effort` in a profile) or lists
+  `reasoning_effort` in a profile's `resume_overrides`: the start is
+  refused at the state check, and removing the level from the definition
+  file does not help, because the stored history holds it. The refused
+  starts write nothing to the mob's store, and a 0.9.15 gateway starts on
+  it again with the level. To roll back, destroy the mob on 0.9.15 and
+  create it anew without the level first. A mob whose definition never
+  held a level starts and serves on 0.9.14 as before. Measured with
+  development builds of both releases. See Meerkat's changelog (Upgrade
+  notes) for sessions, Core hosts and realm profiles.
 
 ### Added
 
@@ -930,6 +943,24 @@ Security, Upgrade and Changed.
   locally hosted mob members signed TCP comms endpoints
   (`runtime_options.member_comms_address`), as TypeScript `memberCommsTcp`
   does: what a member of another gateway needs to reach them.
+
+- A spawn whose draft sets one provider param keeps the
+  `reasoning_effort` level its profile declares in `provider_params`, as it
+  keeps the profile's other declared params, and a draft's own level wins.
+  The level is Meerkat's new provider-neutral setting
+  (`ProviderParamsOverride.reasoning_effort`; see Meerkat's changelog):
+  Meerkat resolves it for the route that serves each of the member's
+  requests, and a level that route does not accept refuses the member's
+  build or its turn before any provider request. See Known limitations for
+  what a resume does with a profile's level.
+
+- A member's LLM client reports the reasoning route of the provider client
+  it is built on (`AgentLlmClient::reasoning_route()` and
+  `LlmClient::reasoning_route()`, new in Meerkat; see its changelog). Meta's
+  client wrappers (the mob-wide default client, the two replay sanitizers
+  and the dispatch taint observer) now forward the call. A wrapper that kept
+  the default would report no route for the members it decorates, whatever
+  the provider client states.
 
 ### Changed
 
@@ -1698,6 +1729,14 @@ Security, Upgrade and Changed.
   rule.
 - Gating: an audit entry or pending request is decided by the agent that
   holds the name of its origin now. Only a host supplies an entry's origin.
+
+- A profile's `reasoning_effort` level and members that resume: on resume
+  Meta re-applies the `provider_params` of a profile that declares params,
+  and does not re-apply the level by itself. A member that resumes takes a
+  level its profile names (a new or changed level takes effect), and keeps
+  the level its session recorded when the profile names none: removing the
+  level from a profile does not remove it from a member that resumes. A
+  member turn with `reasoning_effort` `{"action":"clear"}` removes it.
 
 - Until Connect 0.9.15 is published, Connect 0.9.14 is the Connect release
   for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in

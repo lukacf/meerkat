@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from .generated.types import CommsSendResult, CompactSessionResult, StopRunResult
 from .instructions import SessionInstructionStatus, SessionInstructionWriteResult
+from .reasoning_effort import ReasoningEffortLevel
 from .types import (
     ContentBlock,
     ForkInstructionPolicy,
@@ -155,12 +156,21 @@ class Session:
         output_schema: dict[str, Any] | None = None,
         structured_output_retries: int | None = None,
         provider_params: dict[str, Any] | None = None,
+        reasoning_effort: ReasoningEffortLevel | dict[str, str] | None = None,
         auth_binding: TurnAuthBindingOverride | None = None,
     ) -> RunResult:
         """Run another turn on this session (non-streaming).
 
         Updates :attr:`last_result` and returns the new
         :class:`~meerkat.RunResult`.
+
+        ``reasoning_effort`` sets the session's provider-neutral reasoning
+        effort level for this turn and the turns after it (a level, for
+        example ``"high"``), removes it
+        (:data:`meerkat.REASONING_EFFORT_CLEAR`), or keeps it (omitted). It
+        is its own setting: a turn that replaces ``provider_params`` keeps
+        the level. It is sent only to a server whose contract carries the
+        option (``_REASONING_EFFORT_MIN_CONTRACT`` in ``meerkat.client``).
         """
         result = await self._client._start_turn(  # noqa: SLF001
             self._id,
@@ -179,6 +189,7 @@ class Session:
             output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             provider_params=provider_params,
+            reasoning_effort=reasoning_effort,
             auth_binding=auth_binding,
         )
         self._last_result = result
@@ -202,6 +213,7 @@ class Session:
         output_schema: dict[str, Any] | None = None,
         structured_output_retries: int | None = None,
         provider_params: dict[str, Any] | None = None,
+        reasoning_effort: ReasoningEffortLevel | dict[str, str] | None = None,
         auth_binding: TurnAuthBindingOverride | None = None,
     ) -> EventStream:
         """Run another turn on this session with streaming events.
@@ -232,6 +244,7 @@ class Session:
             output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             provider_params=provider_params,
+            reasoning_effort=reasoning_effort,
             auth_binding=auth_binding,
             _session=self,
         )
@@ -618,6 +631,7 @@ class DeferredSession:
         output_schema: dict[str, Any] | None = None,
         structured_output_retries: int | None = None,
         provider_params: dict[str, Any] | None = None,
+        reasoning_effort: ReasoningEffortLevel | dict[str, str] | None = None,
         auth_binding: TurnAuthBindingOverride | None = None,
     ) -> RunResult:
         """Run the first turn on this deferred session.
@@ -642,6 +656,7 @@ class DeferredSession:
             output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             provider_params=provider_params,
+            reasoning_effort=reasoning_effort,
             auth_binding=auth_binding,
         )
 

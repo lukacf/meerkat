@@ -4085,7 +4085,11 @@ impl DriverEntry {
             finalization: existing_finalization,
         } = &owner.phase
         {
-            if existing_digest == &receipt_digest
+            if crate::input_state::interaction_terminal_payload_digest_matches(
+                &(authorized.outcome(), finalization),
+                existing_digest,
+            )
+            .is_ok_and(|same| same)
                 && existing_finalization == &finalization
                 && owner.outcome.as_ref().is_some_and(|outcome| {
                     interaction_terminal_payload_digest(&(outcome, finalization))

@@ -1322,6 +1322,8 @@ impl From<crate::traits::RuntimeDriverError> for LiveBridgeOutcomeBindingError {
             | E::ControllerInUse
             | E::NotFound { .. }
             | E::ValidationFailed { .. }
+            // A refused reconfiguration is the request's own content.
+            | E::ReasoningEffortRefused(_)
             | E::QueuedInputsRefused(_)
             | E::ScopedContextGenerationNotAdvanced { .. }
             | E::InputIdempotencyConflict { .. }

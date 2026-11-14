@@ -266,6 +266,15 @@ The wrapper resolves this before persistence. A normal session becomes a
 strand future occurrences. `current_session` is not part of the REST or
 JSON-RPC target schema.
 
+From 0.9.15 a session can carry a provider-neutral
+[reasoning effort](/concepts/providers#reasoning-effort) level, but a
+reasoning-effort level is not accepted in a schedule's session settings in
+0.9.15: a `create` spec whose `provider_params` carries `reasoning_effort`
+is refused when the schedule is created or updated (invalid params on
+JSON-RPC, HTTP 400 on REST, an invalid-arguments error from the schedule
+tools), and nothing is stored. A provider's own effort under
+`provider_params.provider_tag` is accepted in the spec, as on 0.9.14.
+
 ### Identity targets
 
 `target_kind` must be `"identity"`; the current variant is

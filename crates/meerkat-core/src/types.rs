@@ -5249,6 +5249,21 @@ pub struct RunResult {
     /// Skill subsystem diagnostics for operator surfaces.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_diagnostics: Option<crate::skills::SkillRuntimeDiagnostics>,
+    /// The provider-neutral `reasoning_effort` level the run's requests
+    /// named and what the run sent: one row per distinct resolution, in
+    /// first-use order, with its request count. Absent when the session
+    /// sets no level.
+    ///
+    /// Stored-form rule for this struct. A finished turn's stored input
+    /// row keeps its run result under digests, and an earlier release
+    /// recomputes those digests from what its own run result decodes: it
+    /// drops a member it does not know. So this member is left out of the
+    /// digests (`meerkat-runtime`, `InteractionTerminalDigestPayload`), and
+    /// they do not bind it. A member added to this struct needs the same
+    /// decision, and a rollback row: a stored row, read the way the
+    /// previous release's shape decodes it, still verifies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<crate::ReasoningEffortReport>,
 }
 
 /// Reference to an artifact stored externally

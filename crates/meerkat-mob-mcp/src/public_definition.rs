@@ -109,6 +109,9 @@ fn decode_resume_override_field(
         meerkat_contracts::WireMobResumeOverrideField::ProviderParams => {
             meerkat_mob::ResumeOverrideField::ProviderParams
         }
+        meerkat_contracts::WireMobResumeOverrideField::ReasoningEffort => {
+            meerkat_mob::ResumeOverrideField::ReasoningEffort
+        }
     }
 }
 

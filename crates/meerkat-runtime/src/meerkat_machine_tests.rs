@@ -6826,6 +6826,7 @@ async fn completion_waiter_fails_closed_when_runtime_finalization_fails() {
                         .map_err(|err| CoreExecutorError::Internal(err.to_string()))?,
                 ),
                 meerkat_core::RunResult {
+                    reasoning_effort: None,
                     text: "{\"gate\":\"green\"}".to_string(),
                     session_id: self.session_id.clone(),
                     usage: Default::default(),
@@ -7206,6 +7207,7 @@ async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
                 receipt,
                 None,
                 meerkat_core::RunResult {
+                    reasoning_effort: None,
                     text: "done".to_string(),
                     session_id: self.session_id.clone(),
                     usage: Default::default(),
@@ -8294,6 +8296,7 @@ async fn idle_explicit_steer_peer_request_runs_through_runtime_loop() {
                 },
                 None,
                 meerkat_core::RunResult {
+                    reasoning_effort: None,
                     text: "peer request executed".to_string(),
                     session_id: self.session_id.clone(),
                     usage: Default::default(),
@@ -8425,6 +8428,7 @@ async fn runtime_loop_checkpoint_failure_is_completion_finalization_failure() {
                 receipt,
                 None,
                 meerkat_core::RunResult {
+                    reasoning_effort: None,
                     text: "checkpoint-fails-after-output".to_string(),
                     session_id: self.session_id.clone(),
                     usage: Default::default(),
@@ -39395,6 +39399,7 @@ impl CoreExecutor for RuntimeRecoveryExecutor {
             },
             None,
             meerkat_core::RunResult {
+                reasoning_effort: None,
                 text: self.result_text.clone(),
                 session_id: self.session.id().clone(),
                 usage: Default::default(),
@@ -47138,6 +47143,7 @@ async fn modeled_stage_persistent_filter_matches_runtime_after_active_ahead_reco
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+            reasoning_effort: None,
         },
     )
     .await
@@ -47209,6 +47215,7 @@ async fn modeled_request_deferred_tools_matches_runtime_after_active_ahead_recon
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+            reasoning_effort: None,
         },
     )
     .await
@@ -47452,6 +47459,7 @@ async fn reconfigure_session_llm_identity_succeeds_on_idle_session() {
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .await
@@ -47462,6 +47470,171 @@ async fn reconfigure_session_llm_identity_succeeds_on_idle_session() {
         report.tool_visibility_delta.current_capability_base_filter,
         meerkat_core::capability_base_filter_for_image_tool_results(false)
     );
+}
+
+/// A reconfigure host that resolves the request's params and reasoning
+/// effort level against the current identity with Core's rule, and keeps
+/// the model and provider.
+#[derive(Clone)]
+struct LevelResolvingReconfigureHost(TestLlmReconfigureHost);
+
+#[async_trait::async_trait]
+impl SessionLlmReconfigureHost for LevelResolvingReconfigureHost {
+    async fn hydrate_session_llm_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+        self.0.hydrate_session_llm_state(session_id).await
+    }
+
+    async fn resolve_target_session_llm_identity(
+        &self,
+        request: &SessionLlmReconfigureRequest,
+        current_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<crate::ResolvedSessionLlmReconfigure, RuntimeDriverError> {
+        let provider_params = meerkat_core::resolve_session_provider_params(
+            current_identity.provider_params.as_ref(),
+            request
+                .provider_params
+                .as_ref()
+                .map(TurnMetadataOverride::as_ref),
+            request.reasoning_effort.clone(),
+        )
+        .map_err(|error| RuntimeDriverError::ValidationFailed {
+            reason: error.to_string(),
+        })?;
+        Ok(crate::ResolvedSessionLlmReconfigure {
+            target_identity: meerkat_core::SessionLlmIdentity {
+                provider_params,
+                ..current_identity.clone()
+            },
+            target_capability_surface: self.0.target_capability_surface.clone(),
+        })
+    }
+
+    async fn apply_live_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        identity: &meerkat_core::SessionLlmIdentity,
+        capability_surface: Option<&SessionLlmCapabilitySurface>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.0
+            .apply_live_session_llm_identity(session_id, identity, capability_surface)
+            .await
+    }
+
+    async fn apply_live_session_tool_visibility_state(
+        &self,
+        session_id: &SessionId,
+        visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.0
+            .apply_live_session_tool_visibility_state(session_id, visibility_state)
+            .await
+    }
+
+    async fn persist_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+        self.0.persist_live_session(session_id).await
+    }
+
+    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+        self.0.discard_live_session(session_id).await
+    }
+}
+
+/// The machine carries a session's LLM identity as a token whose params
+/// part is the params' stored form. The reasoning effort level is inside
+/// the params, so it is inside the token: a hot swap that changes only the
+/// level, or clears it, is an identity change the machine records, with no
+/// machine state of its own.
+#[tokio::test]
+async fn identity_token_ignores_nothing_it_should_carry() {
+    use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let identity = |level: Option<EffortLevel>| meerkat_core::SessionLlmIdentity {
+        model: "gpt-5.2".to_string(),
+        provider: meerkat_core::Provider::OpenAI,
+        self_hosted_server_id: None,
+        provider_params: Some(ProviderParamsOverride {
+            temperature: Some(0.5),
+            reasoning_effort: level,
+            ..Default::default()
+        }),
+        auth_binding: None,
+    };
+
+    // The token: one per level, each reading back as the identity it came
+    // from.
+    let levels = [None, Some(EffortLevel::Low), Some(EffortLevel::High)];
+    let tokens = levels.map(|level| mm_dsl::SessionLlmIdentity::from_domain(&identity(level)));
+    assert_ne!(tokens[0], tokens[1]);
+    assert_ne!(tokens[1], tokens[2]);
+    assert_ne!(tokens[0], tokens[2]);
+    for (level, token) in levels.into_iter().zip(tokens.clone()) {
+        assert_eq!(
+            meerkat_core::SessionLlmIdentity::try_from(token).expect("the token reads back"),
+            identity(level)
+        );
+    }
+
+    // The machine: a hot swap whose request carries only the level.
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(Arc::new(LevelResolvingReconfigureHost(
+        TestLlmReconfigureHost {
+            current_identity: Arc::new(std::sync::Mutex::new(identity(Some(EffortLevel::Low)))),
+            current_visibility_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            target_identity: identity(None),
+            current_capability_surface: Some(test_llm_capability_surface(true)),
+            target_capability_surface: test_llm_capability_surface(true),
+            base_tool_names: BTreeSet::new(),
+            fail_persist: false,
+        },
+    )));
+    let machine_token = || async {
+        let sessions = adapter.sessions.read().await;
+        sessions
+            .get(&session_id)
+            .expect("registered session")
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .current_session_llm_identity
+            .clone()
+    };
+    let level_only = |level: TurnMetadataOverride<EffortLevel>| SessionLlmReconfigureRequest {
+        model: None,
+        provider: None,
+        self_hosted_server_id: None,
+        provider_params: None,
+        reasoning_effort: Some(level),
+        auth_binding: None,
+    };
+
+    let report = adapter
+        .reconfigure_session_llm_identity(
+            &session_id,
+            level_only(TurnMetadataOverride::Set(EffortLevel::High)),
+        )
+        .await
+        .expect("a level-only hot swap reconfigures");
+    assert_eq!(report.previous_identity, identity(Some(EffortLevel::Low)));
+    assert_eq!(report.new_identity, identity(Some(EffortLevel::High)));
+    assert_eq!(machine_token().await, Some(tokens[2].clone()));
+
+    let report = adapter
+        .reconfigure_session_llm_identity(&session_id, level_only(TurnMetadataOverride::Clear))
+        .await
+        .expect("a hot swap that clears the level reconfigures");
+    assert_eq!(report.previous_identity, identity(Some(EffortLevel::High)));
+    assert_eq!(report.new_identity, identity(None));
+    assert_eq!(machine_token().await, Some(tokens[0].clone()));
 }
 
 #[tokio::test]
@@ -51742,6 +51915,7 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
                     },
                 )),
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .await
@@ -51901,6 +52075,7 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .await
@@ -52029,6 +52204,7 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .await
@@ -52232,6 +52408,7 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .await
@@ -56045,6 +56222,9 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
         RuntimeDriverError::ValidationFailed { reason } => {
             format!("validation_failed:{reason}")
         }
+        RuntimeDriverError::ReasoningEffortRefused(refusal) => {
+            format!("reasoning_effort_refused:{:?}", refusal.reason)
+        }
         RuntimeDriverError::InputIdempotencyConflict { existing_id } => {
             format!("input_idempotency_conflict:{existing_id}")
         }
@@ -56194,6 +56374,7 @@ async fn execute_runtime_parity_probe(
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .await

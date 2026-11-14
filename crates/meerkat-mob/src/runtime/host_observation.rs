@@ -4401,6 +4401,7 @@ mod tests {
 
     fn run_started(session: &SessionId, content: &str) -> AgentEvent {
         AgentEvent::RunStarted {
+            reasoning_effort: None,
             request_reasoning: None,
             identity: Default::default(),
             session_id: session.clone(),
@@ -4672,6 +4673,7 @@ mod tests {
     ) -> CompletionTerminalExpectation {
         CompletionTerminalExpectation::Completed {
             result: Box::new(meerkat_core::RunResult {
+                reasoning_effort: None,
                 text: output.to_string(),
                 session_id,
                 usage: meerkat_core::Usage::default(),
@@ -5726,6 +5728,7 @@ mod tests {
         let expectation = CompletionTerminalExpectation::from_completion(
             meerkat_runtime::completion::CompletionOutcome::Completed(Box::new(
                 meerkat_core::RunResult {
+                    reasoning_effort: None,
                     // Deliberately differ: the canonical interaction terminal
                     // is built from ExtractionError::last_output.
                     text: "noncanonical result text".to_string(),

@@ -370,6 +370,7 @@ fn turn_error_labels(
         Some(Reason::ModelFallbackResumeHeld { .. }) => "ModelFallbackResumeHeld",
         Some(Reason::HookLaunchRefused { .. }) => "HookLaunchRefused",
         Some(Reason::ToolGrantGateRefused { .. }) => "ToolGrantGateRefused",
+        Some(Reason::ReasoningEffortRefused { .. }) => "ReasoningEffortRefused",
     };
     let (provider_kind, provider_retryability) = match error.reason.as_ref() {
         Some(Reason::LlmProviderError {

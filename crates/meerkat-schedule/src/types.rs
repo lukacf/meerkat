@@ -1201,7 +1201,7 @@ impl TargetBinding {
 
     pub fn validate_public_api(&self) -> Result<(), String> {
         match self {
-            Self::Session(_) => Ok(()),
+            Self::Session(binding) => binding.refuse_reasoning_effort_level(),
             Self::Identity(binding) => binding.validate_public_api(),
             Self::Mob(binding) => binding.validate_public_api(),
             Self::HostRunnable(_) => Ok(()),
@@ -1251,6 +1251,28 @@ impl SessionTargetBinding {
 
     pub fn stable_key(&self) -> Result<String, String> {
         semantic_json_key("session_target", self)
+    }
+
+    /// A schedule's session spec does not take the provider-neutral
+    /// `reasoning_effort` level in this release: a request that would store
+    /// one is refused when the schedule is created or updated. A provider's
+    /// own effort under `provider_tag` is accepted as before, and a level that
+    /// is already stored is still judged when an occurrence is delivered.
+    fn refuse_reasoning_effort_level(&self) -> Result<(), String> {
+        if let Self::MaterializeOnDemandSession { create, .. } = self
+            && create
+                .provider_params
+                .as_ref()
+                .is_some_and(|params| params.reasoning_effort.is_some())
+        {
+            return Err(
+                "provider_params.reasoning_effort is not accepted in a schedule's session settings \
+                 in this release; a provider's own effort setting under \
+                 provider_params.provider_tag is"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 
     pub fn action(&self) -> &ScheduledSessionAction {
@@ -3405,6 +3427,99 @@ mod tests {
     fn validate_public_api_accepts_none_tooling() {
         let spec = HelperOptionsSpec::default();
         assert!(spec.validate_public_api().is_ok());
+    }
+
+    /// A create request whose session target is created on demand with
+    /// `provider_params` in its spec, as the wire carries it.
+    fn create_request_with_provider_params(
+        provider_params: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "trigger": {
+                "type": "interval",
+                "start_at_utc": "2026-04-21T09:00:00Z",
+                "every_seconds": 3600
+            },
+            "target": {
+                "target_kind": "session",
+                "type": "materialize_on_demand_session",
+                "create": {"model": "claude-sonnet-4-6", "provider_params": provider_params},
+                "action": {"type": "prompt", "prompt": "Check."}
+            }
+        })
+    }
+
+    /// The provider-neutral reasoning effort level is not accepted in a
+    /// schedule's session settings in this release: a create that names it is
+    /// refused, and the text names the key and says where it is not accepted.
+    /// The level is refused alone and beside a provider's own effort under
+    /// `provider_tag`, which is accepted on its own.
+    #[test]
+    fn a_schedule_session_spec_that_names_a_reasoning_effort_level_is_refused_at_create() {
+        for provider_params in [
+            serde_json::json!({"reasoning_effort": "high"}),
+            serde_json::json!({
+                "reasoning_effort": "high",
+                "provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}
+            }),
+        ] {
+            let request: CreateScheduleRequest = serde_json::from_value(
+                create_request_with_provider_params(provider_params.clone()),
+            )
+            .unwrap();
+            let refused = request.validate_public_api().unwrap_err();
+            assert!(
+                refused.contains("reasoning_effort")
+                    && refused.contains("not accepted in a schedule's session settings"),
+                "{provider_params}: {refused}"
+            );
+        }
+    }
+
+    /// An update that gives a schedule such a target is refused the same
+    /// way; an update that names no target is not judged.
+    #[test]
+    fn a_schedule_session_spec_that_names_a_reasoning_effort_level_is_refused_at_update() {
+        let target: TargetBinding =
+            serde_json::from_value(
+                create_request_with_provider_params(
+                    serde_json::json!({"reasoning_effort": "high"}),
+                )["target"]
+                    .clone(),
+            )
+            .unwrap();
+        let refused = UpdateScheduleRequest {
+            target: Some(target),
+            ..Default::default()
+        }
+        .validate_public_api()
+        .unwrap_err();
+        assert!(
+            refused.contains("reasoning_effort")
+                && refused.contains("not accepted in a schedule's session settings"),
+            "{refused}"
+        );
+        assert_eq!(
+            UpdateScheduleRequest::default().validate_public_api(),
+            Ok(())
+        );
+    }
+
+    /// A spec without a level is accepted as before, and so is a provider's
+    /// own effort under `provider_tag`.
+    #[test]
+    fn a_schedule_session_spec_without_a_level_or_with_a_provider_effort_is_accepted() {
+        for provider_params in [
+            serde_json::json!({}),
+            serde_json::json!({"temperature": 0.2}),
+            serde_json::json!({"provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}}),
+        ] {
+            let request: CreateScheduleRequest = serde_json::from_value(
+                create_request_with_provider_params(provider_params.clone()),
+            )
+            .unwrap();
+            assert_eq!(request.validate_public_api(), Ok(()), "{provider_params}");
+        }
     }
 
     // -----------------------------------------------------------------------

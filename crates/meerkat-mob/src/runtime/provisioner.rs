@@ -13867,6 +13867,7 @@ fn runtime_llm_reconfigure_request_from_primitive(
         && metadata.provider.is_none()
         && metadata.self_hosted_server_id.is_none()
         && metadata.provider_params.is_none()
+        && metadata.reasoning_effort.is_none()
         && metadata.auth_binding.is_none()
     {
         return None;
@@ -13882,7 +13883,30 @@ fn runtime_llm_reconfigure_request_from_primitive(
             .map(|provider| provider.as_str().to_string()),
         self_hosted_server_id: metadata.self_hosted_server_id.clone(),
         provider_params: metadata.provider_params.clone(),
+        reasoning_effort: metadata.reasoning_effort.clone(),
         auth_binding: metadata.auth_binding.clone(),
+    })
+}
+
+/// The apply failure of a member turn whose LLM reconfiguration failed
+/// before the turn. A reconfiguration refused for its `reasoning_effort`
+/// level keeps the typed refusal as the failure's reason, so the failed
+/// turn's error carries it and a surface answers the turn with the refusal
+/// it answers a refused build with. Any other failure carries no reason.
+#[cfg(feature = "runtime-adapter")]
+fn member_reconfigure_apply_failure(
+    message: String,
+    error: &meerkat_runtime::RuntimeDriverError,
+) -> CoreExecutorError {
+    use meerkat_core::lifecycle::core_executor::CoreApplyFailureCause;
+    let cause = CoreApplyFailureCause::runtime_turn(message);
+    CoreExecutorError::apply_failed(match error {
+        meerkat_runtime::RuntimeDriverError::ReasoningEffortRefused(refusal) => cause.with_reason(
+            meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+                refusal: refusal.clone(),
+            },
+        ),
+        _ => cause,
     })
 }
 
@@ -14078,14 +14102,12 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 )
                 .await
                 .map_err(|error| {
-                    llm_identity_application.resolve_internal_failure(format!(
+                    let message = format!(
                         "failed to reconfigure member session '{}' LLM identity for run {run_id}: {error}",
                         self.bridge_session_id
-                    ));
-                    CoreExecutorError::apply_failed_runtime_turn(format!(
-                        "failed to reconfigure member session '{}' LLM identity for run {run_id}: {error}",
-                        self.bridge_session_id
-                    ))
+                    );
+                    llm_identity_application.resolve_internal_failure(message.clone());
+                    member_reconfigure_apply_failure(message, &error)
                 })?;
             llm_identity_application.resolve_success(Some(report.new_identity));
         } else {
@@ -22546,4 +22568,117 @@ fn decode_ack_member_pubkey(pubkey: &str) -> Result<[u8; 32], MobError> {
         ));
     }
     Ok(bytes)
+}
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+#[allow(clippy::expect_used)]
+mod turn_reasoning_effort_reconfigure_tests {
+    use super::runtime_llm_reconfigure_request_from_primitive;
+    use meerkat_core::lifecycle::run_primitive::{
+        RunApplyBoundary, RunPrimitive, RuntimeTurnMetadata, StagedRunInput, TurnMetadataOverride,
+    };
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    fn primitive(metadata: RuntimeTurnMetadata) -> RunPrimitive {
+        RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunStart,
+            appends: Vec::new(),
+            contributing_input_ids: Vec::new(),
+            turn_metadata: Some(metadata),
+        })
+    }
+
+    /// A member turn whose metadata names only the reasoning effort level
+    /// asks for an LLM reconfigure, and the request carries the level as the
+    /// turn gave it (set or clear). A turn that names no identity field asks
+    /// for none.
+    #[test]
+    fn turn_reasoning_effort_reaches_the_member_reconfigure_request() {
+        for level in [
+            TurnMetadataOverride::Set(EffortLevel::High),
+            TurnMetadataOverride::Clear,
+        ] {
+            let request =
+                runtime_llm_reconfigure_request_from_primitive(&primitive(RuntimeTurnMetadata {
+                    reasoning_effort: Some(level.clone()),
+                    ..Default::default()
+                }))
+                .expect("a turn that names only the level asks for a reconfigure");
+            assert_eq!(request.reasoning_effort, Some(level));
+            assert_eq!(request.model, None);
+            assert_eq!(request.provider_params, None);
+        }
+        assert_eq!(
+            runtime_llm_reconfigure_request_from_primitive(&primitive(
+                RuntimeTurnMetadata::default()
+            )),
+            None
+        );
+        // A resumed run continues under the identity its first dispatch
+        // applied: no second reconfigure, with or without the level.
+        assert_eq!(
+            runtime_llm_reconfigure_request_from_primitive(&primitive(RuntimeTurnMetadata {
+                reasoning_effort: Some(TurnMetadataOverride::Set(EffortLevel::High)),
+                execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun),
+                ..Default::default()
+            })),
+            None
+        );
+    }
+
+    /// A member turn whose reconfiguration was refused for its reasoning
+    /// effort level fails with the typed refusal as its reason (a refusal
+    /// that names no route crosses unchanged), under the message that names
+    /// the member session; any other reconfiguration failure carries no
+    /// reason.
+    #[test]
+    fn a_refused_member_reconfigure_keeps_its_typed_reason() {
+        use meerkat_core::lifecycle::core_executor::CoreApplyFailureCauseKind;
+        use meerkat_runtime::RuntimeDriverError;
+
+        for document in [
+            serde_json::json!({
+                "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                "route": {"backend": "anthropic_api", "api": "messages"},
+                "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+                "facts": "catalog",
+            }),
+            serde_json::json!({
+                "requested": "high", "provider": "other", "model": "custom-model-1",
+                "route": null,
+                "reason": "supported_levels_unknown", "supported": null, "facts": null,
+            }),
+        ] {
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document).expect("a refusal document reads");
+            let failure = super::member_reconfigure_apply_failure(
+                "failed to reconfigure member session 's' LLM identity".to_string(),
+                &RuntimeDriverError::ReasoningEffortRefused(Box::new(refusal.clone())),
+            );
+            let cause = failure.apply_failure_cause();
+            assert_eq!(cause.kind, CoreApplyFailureCauseKind::RuntimeTurn);
+            assert_eq!(
+                cause.message(),
+                "failed to reconfigure member session 's' LLM identity"
+            );
+            assert_eq!(
+                cause.reason(),
+                Some(
+                    &meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+                        refusal: Box::new(refusal.clone()),
+                    }
+                )
+            );
+        }
+
+        let other = super::member_reconfigure_apply_failure(
+            "failed to reconfigure member session 's' LLM identity".to_string(),
+            &RuntimeDriverError::ValidationFailed {
+                reason: "provider override requires model".to_string(),
+            },
+        );
+        let cause = other.apply_failure_cause();
+        assert_eq!(cause.kind, CoreApplyFailureCauseKind::RuntimeTurn);
+        assert_eq!(cause.reason(), None);
+    }
 }

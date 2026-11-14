@@ -79,6 +79,10 @@ pub struct WireRunResult {
     pub schema_warnings: Option<Vec<SchemaWarning>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_diagnostics: Option<meerkat_core::skills::SkillRuntimeDiagnostics>,
+    /// The provider-neutral `reasoning_effort` level the run's requests
+    /// named and what the run sent; see `RunResult::reasoning_effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<meerkat_core::ReasoningEffortReport>,
 }
 
 impl From<RunResult> for WireRunResult {
@@ -97,6 +101,7 @@ impl From<RunResult> for WireRunResult {
             extraction_error: r.extraction_error,
             schema_warnings: r.schema_warnings,
             skill_diagnostics: r.skill_diagnostics,
+            reasoning_effort: r.reasoning_effort,
         }
     }
 }
@@ -218,6 +223,7 @@ mod tests {
     fn wire_run_result_preserves_unhealthy_skill_diagnostics()
     -> Result<(), Box<dyn std::error::Error>> {
         let run = RunResult {
+            reasoning_effort: None,
             text: "ok".to_string(),
             session_id: SessionId::new(),
             usage: Default::default(),

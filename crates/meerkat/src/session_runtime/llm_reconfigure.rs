@@ -66,8 +66,13 @@ fn live_session_read_error_to_runtime_driver(
     }
 }
 
-/// Convert a runtime-driver error back into a session-service error.
+/// Convert a runtime-driver error back into a session-service error. A
+/// reconfiguration refused for its `reasoning_effort` level keeps its typed
+/// refusal (the session error a refused build has).
 pub fn runtime_driver_error_to_session_error(err: RuntimeDriverError) -> SessionError {
+    if let Some(refused) = err.reasoning_effort_refused_session_error() {
+        return refused;
+    }
     SessionError::Agent(AgentError::InternalError(err.to_string()))
 }
 
@@ -131,6 +136,7 @@ fn resolve_reconfigure_target_llm_identity(
                 .provider_params
                 .as_ref()
                 .map(TurnMetadataOverride::as_ref),
+            reasoning_effort: request.reasoning_effort.clone(),
             auth_binding: request
                 .auth_binding
                 .as_ref()
@@ -189,6 +195,7 @@ pub(crate) fn resolve_model_only_reconfigure_target_identity(
         self_hosted_server_id: None,
         provider_params: None,
         auth_binding: None,
+        reasoning_effort: None,
     };
     let mut target = resolve_reconfigure_target_llm_identity(registry, current, &request)?;
     preserve_credential_account_affinity(config, current, &request, &mut target)?;
@@ -1342,6 +1349,49 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
             .map(|_| ())
     }
 
+    /// A caller's target is judged for its `reasoning_effort` level as a
+    /// build judges it: against the route of the client this host builds for
+    /// the target and the catalog row of the target's model. A level the
+    /// route does not accept refuses the request typed, before anything is
+    /// staged or applied. A target that carries no level builds no client
+    /// here.
+    async fn judge_requested_target_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        target_identity: &SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        if target_identity
+            .provider_params
+            .as_ref()
+            .is_none_or(|params| params.reasoning_effort.is_none())
+        {
+            return Ok(());
+        }
+        let (adapter, selection) = self
+            .build_adapter_for_session_llm_identity(session_id, target_identity)
+            .await?;
+        // The catalog row is read through the binding the client resolved
+        // with, as the apply names it.
+        let mut identity = target_identity.clone();
+        LlmCredentialSelection::bind_unselected(selection, &mut identity);
+        let config = self.load_config_for_hot_swap().await?;
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .map_err(|e| {
+                RuntimeDriverError::Internal(format!("Failed to resolve model registry: {e}"))
+            })?;
+        crate::factory::validate_reasoning_effort_for_route(
+            identity.provider,
+            &identity.model,
+            identity.provider_params.as_ref(),
+            adapter.reasoning_route().as_ref(),
+            registry
+                .profile_witness_for_identity(&config, &identity)
+                .and_then(|witness| witness.catalog_capabilities()),
+        )
+        .map_err(RuntimeDriverError::ReasoningEffortRefused)
+    }
+
     async fn switch_target_carries_session_transcript(
         &self,
         session_id: &SessionId,
@@ -1373,6 +1423,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+            reasoning_effort: None,
         };
         let target = self
             .resolve_target_llm_identity(&hydrated.current_identity, &request)
@@ -1741,6 +1792,7 @@ mod tests {
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding,
+            reasoning_effort: None,
         }
     }
 

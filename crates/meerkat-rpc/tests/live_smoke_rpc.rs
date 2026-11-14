@@ -420,6 +420,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
 #[ignore = "lane:e2e-live"]
 async fn e2e_diagnostics_projection_contract_across_cli_rest_rpc_mcp() {
     let run = meerkat_core::RunResult {
+        reasoning_effort: None,
         text: "ok".to_string(),
         session_id: meerkat_core::SessionId::new(),
         usage: Default::default(),

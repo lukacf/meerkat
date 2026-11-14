@@ -25015,6 +25015,7 @@ mod tests {
                 0,
                 None,
                 AgentEvent::RunStarted {
+                    reasoning_effort: None,
                     request_reasoning: None,
                     identity: Default::default(),
                     session_id: session_id.clone(),
@@ -25114,6 +25115,7 @@ mod tests {
                 0,
                 None,
                 AgentEvent::RunStarted {
+                    reasoning_effort: None,
                     request_reasoning: None,
                     identity: Default::default(),
                     session_id: session_id.clone(),
@@ -25216,6 +25218,7 @@ mod tests {
                 1,
                 None,
                 AgentEvent::RunStarted {
+                    reasoning_effort: None,
                     request_reasoning: None,
                     identity: Default::default(),
                     session_id: session_id.clone(),
@@ -28256,6 +28259,7 @@ mod tests {
                 std::future::pending::<()>().await;
             }
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "resumed".to_string(),
                 session_id,
                 usage: meerkat_core::types::Usage::default(),
@@ -28324,6 +28328,7 @@ mod tests {
                     },
                 ));
                 RunResult {
+                    reasoning_effort: None,
                     text: "ok".to_string(),
                     session_id,
                     usage: meerkat_core::types::Usage::default(),
@@ -28867,6 +28872,7 @@ mod tests {
             let session_id = self.inner.session_id();
             let _ = event_tx
                 .send(AgentEvent::RunStarted {
+                    reasoning_effort: None,
                     request_reasoning: None,
                     identity: Default::default(),
                     session_id: session_id.clone(),
@@ -30339,6 +30345,7 @@ mod tests {
                 },
             ));
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: session.id().clone(),
                 usage: meerkat_core::types::Usage::default(),
@@ -30556,6 +30563,7 @@ mod tests {
                 },
             ));
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id,
                 usage: meerkat_core::types::Usage::default(),

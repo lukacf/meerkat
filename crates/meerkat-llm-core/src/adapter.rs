@@ -367,6 +367,15 @@ impl LlmClientAdapter {
         temperature: Option<f32>,
         provider_params: Option<&ProviderParamsOverride>,
     ) -> Result<PreparedLlmRequest, AgentError> {
+        // A request that still carries the provider-neutral reasoning effort
+        // level was never resolved for the route this client serves. Every
+        // provider request is built here, so a path that forgets to resolve
+        // the level fails loudly instead of sending a request without it.
+        if provider_params.is_some_and(|params| params.reasoning_effort.is_some()) {
+            return Err(AgentError::InternalError(
+                "reasoning_effort reached the provider adapter unresolved".to_string(),
+            ));
+        }
         let effective_params = provider_params
             .and_then(|params| params.provider_tag.clone())
             .or_else(|| self.provider_params.clone());
@@ -386,6 +395,23 @@ impl LlmClientAdapter {
             .client
             .project_replay_request(messages)
             .map_err(|error| error.into_agent_error(self.provider.as_str()))?;
+        // A reasoning effort level that was resolved for a route is sent on
+        // that route only. The request carries what the client observed
+        // about its route when the level was resolved; the route this
+        // projection is bound to must be the same one. A difference means
+        // the route changed in between: the request is refused as a route
+        // change, so the agent prepares it again and resolves the level for
+        // the route as it is now.
+        if let Some(witness) =
+            provider_params.and_then(|params| params.reasoning_route_witness.as_deref())
+            && self.client.reasoning_route_of(&projection).as_ref() != Some(witness)
+        {
+            return Err(LlmError::AuthorizationRouteChanged {
+                message: "the route changed after the reasoning effort level was resolved for it"
+                    .to_string(),
+            }
+            .into_agent_error(self.provider.as_str()));
+        }
 
         Ok(PreparedLlmRequest::from_projection(
             LlmRequest {
@@ -672,6 +698,16 @@ impl AgentLlmClient for LlmClientAdapter {
             Arc::from(route.endpoint()),
             Arc::from(route.wire_model()),
         ))
+    }
+
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.client.reasoning_route()
+    }
+
+    /// The tag this adapter was configured with: it is applied to every
+    /// request that carries no tag of its own.
+    fn default_provider_tag(&self) -> Option<ProviderTag> {
+        self.provider_params.clone()
     }
 
     fn pin_controller(self: Arc<Self>) -> Option<meerkat_core::ControllerModelClient> {
@@ -994,6 +1030,90 @@ mod tests {
 
         assert!(error.to_string().contains("cannot back canonical identity"));
         Ok(())
+    }
+
+    /// A client that does not implement the route accessor reports no route,
+    /// and the adapter reports none for it.
+    #[test]
+    fn clients_report_no_route_by_default() {
+        let client = Arc::new(ScriptedClient { events: Vec::new() });
+        assert!(LlmClient::reasoning_route(client.as_ref()).is_none());
+
+        let adapter = LlmClientAdapter::new(client, "test-model".to_string());
+        assert!(AgentLlmClient::reasoning_route(&adapter).is_none());
+    }
+
+    /// The adapter reports exactly the route its client reports.
+    #[test]
+    fn adapter_forwards_the_route_its_client_reports() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::provider_matrix::OpenAiBackendKind;
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        struct RoutedClient {
+            observation: ReasoningRouteObservation,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        impl LlmClient for RoutedClient {
+            fn reasoning_route(&self) -> Option<ReasoningRouteObservation> {
+                Some(self.observation.clone())
+            }
+
+            fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
+                Box::pin(stream::iter(Vec::new()))
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Other
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                Ok(())
+            }
+        }
+
+        let observation = ReasoningRouteObservation {
+            backend: ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+            api: ModelApi::Responses,
+            account: AccountLevelStatement::Stated(vec![EffortLevel::Low, EffortLevel::High]),
+            operator_levels: None,
+        };
+        let adapter = LlmClientAdapter::new(
+            Arc::new(RoutedClient {
+                observation: observation.clone(),
+            }),
+            "test-model".to_string(),
+        );
+        assert_eq!(AgentLlmClient::reasoning_route(&adapter), Some(observation));
+    }
+
+    /// The adapter's default tag is the tag it was configured with, which it
+    /// applies to a request that carries none; an adapter configured with
+    /// none reports none.
+    #[test]
+    fn the_adapter_reports_the_tag_it_was_configured_with_as_its_default() {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag};
+
+        let plain = LlmClientAdapter::new(
+            Arc::new(ScriptedClient { events: Vec::new() }),
+            "test-model".to_string(),
+        );
+        assert_eq!(AgentLlmClient::default_provider_tag(&plain), None);
+
+        let tag = ProviderTag::OpenAi(OpenAiProviderTag {
+            seed: Some(7),
+            ..Default::default()
+        });
+        let configured = LlmClientAdapter::new(
+            Arc::new(ScriptedClient { events: Vec::new() }),
+            "test-model".to_string(),
+        )
+        .with_provider_params(Some(tag.clone()));
+        assert_eq!(AgentLlmClient::default_provider_tag(&configured), Some(tag));
     }
 
     #[tokio::test]
@@ -1827,5 +1947,264 @@ mod tests {
                 AgentEvent::Retrying { .. } | AgentEvent::RunFailed { .. }
             )));
         }
+    }
+
+    /// A request whose params carry the route witness of a resolved
+    /// reasoning effort level is built only while the route its projection
+    /// is bound to is the witnessed one. A different route is a route
+    /// change: the request is refused before anything is streamed, so the
+    /// agent prepares it again. The comparison is with the projection's own
+    /// route, not with the route the client reports request-free.
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn adapter_refuses_a_request_whose_route_changed_since_its_level_was_resolved() {
+        use meerkat_core::error::{LlmFailureReason, LlmProviderErrorKind};
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::provider_matrix::OpenAiBackendKind;
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Reports no route request-free; its projections are bound to
+        /// `bound`.
+        struct BoundRouteClient {
+            bound: ReasoningRouteObservation,
+            streams: Arc<AtomicUsize>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        impl LlmClient for BoundRouteClient {
+            fn reasoning_route_of(
+                &self,
+                _projection: &crate::types::LlmReplayProjection,
+            ) -> Option<ReasoningRouteObservation> {
+                Some(self.bound.clone())
+            }
+
+            fn project_replay_messages(
+                &self,
+                messages: &[Message],
+            ) -> Result<Vec<Message>, LlmError> {
+                Ok(messages.to_vec())
+            }
+
+            fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
+                self.streams.fetch_add(1, Ordering::SeqCst);
+                Box::pin(stream::iter([Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+                })]))
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Other
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                Ok(())
+            }
+        }
+
+        let observation = |api| ReasoningRouteObservation {
+            backend: ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+            api,
+            account: AccountLevelStatement::Stated(vec![EffortLevel::High]),
+            operator_levels: None,
+        };
+        let bound = observation(ModelApi::ChatCompletions);
+        let streams = Arc::new(AtomicUsize::new(0));
+        let adapter = Arc::new(LlmClientAdapter::new(
+            Arc::new(BoundRouteClient {
+                bound: bound.clone(),
+                streams: Arc::clone(&streams),
+            }),
+            "scripted-model".into(),
+        ));
+        let params = |witness: Option<ReasoningRouteObservation>| ProviderParamsOverride {
+            reasoning_route_witness: witness.map(Box::new),
+            ..Default::default()
+        };
+        let messages = vec![Message::User(UserMessage::text("hello"))];
+        let route_changed = |error: AgentError| {
+            assert!(
+                matches!(
+                    &error,
+                    AgentError::Llm {
+                        reason: LlmFailureReason::ProviderError(provider_error),
+                        ..
+                    } if provider_error.kind == LlmProviderErrorKind::AuthorizationRouteChanged
+                ),
+                "a stale route witness is a route change: {error:?}"
+            );
+        };
+
+        // The level was resolved for the Responses route; the projection is
+        // bound to the Chat Completions route.
+        let stale = params(Some(observation(ModelApi::Responses)));
+        route_changed(
+            adapter
+                .build_request(&messages, &[], 1024, None, Some(&stale))
+                .map(|_| ())
+                .expect_err("build_request refuses the stale witness"),
+        );
+        route_changed(
+            adapter
+                .stream_response(&messages, &[], 1024, None, Some(&stale))
+                .await
+                .map(|_| ())
+                .expect_err("stream_response refuses the stale witness"),
+        );
+        route_changed(
+            Arc::clone(&adapter)
+                .prepare_request_attempt_authorized(
+                    Arc::new(messages.clone()),
+                    Arc::from(Vec::new()),
+                    1024,
+                    None,
+                    Some(stale),
+                    None,
+                )
+                .map(|_| ())
+                .expect_err("prepare_request_attempt_authorized refuses the stale witness"),
+        );
+        assert_eq!(streams.load(Ordering::SeqCst), 0, "nothing is streamed");
+
+        // The witnessed route is the projection's route: the request is sent.
+        adapter
+            .stream_response(&messages, &[], 1024, None, Some(&params(Some(bound))))
+            .await
+            .expect("a request on the witnessed route is served");
+        assert_eq!(streams.load(Ordering::SeqCst), 1);
+
+        // A request without a witness carries no resolved level: no comparison.
+        adapter
+            .stream_response(&messages, &[], 1024, None, Some(&params(None)))
+            .await
+            .expect("a request without a witness is served");
+        assert_eq!(streams.load(Ordering::SeqCst), 2);
+    }
+
+    /// Counts what reaches the wire client: replay projections and streams.
+    struct CountingClient {
+        projections: Arc<std::sync::atomic::AtomicUsize>,
+        streams: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl LlmClient for CountingClient {
+        fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+            self.projections
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
+            self.streams
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(stream::iter([Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+            })]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A request whose params still carry the provider-neutral level was
+    /// never resolved for a route. The adapter refuses it before it builds
+    /// anything, on every entry that makes a provider request, and the wire
+    /// client sees neither a projection nor a stream.
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn adapter_refuses_an_untranslated_neutral_effort() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let projections = Arc::new(AtomicUsize::new(0));
+        let streams = Arc::new(AtomicUsize::new(0));
+        let adapter = Arc::new(LlmClientAdapter::new(
+            Arc::new(CountingClient {
+                projections: Arc::clone(&projections),
+                streams: Arc::clone(&streams),
+            }),
+            "scripted-model".into(),
+        ));
+        let params = ProviderParamsOverride {
+            reasoning_effort: Some(meerkat_core::model_profile::capabilities::EffortLevel::High),
+            ..Default::default()
+        };
+        let messages = vec![Message::User(UserMessage::text("hello"))];
+        let unresolved = |error: AgentError| {
+            assert!(
+                matches!(
+                    &error,
+                    AgentError::InternalError(message)
+                        if message == "reasoning_effort reached the provider adapter unresolved"
+                ),
+                "unexpected refusal: {error:?}"
+            );
+        };
+
+        unresolved(
+            adapter
+                .build_request(&messages, &[], 1024, None, Some(&params))
+                .map(|_| ())
+                .expect_err("build_request refuses the level"),
+        );
+        unresolved(
+            adapter
+                .stream_response(&messages, &[], 1024, None, Some(&params))
+                .await
+                .map(|_| ())
+                .expect_err("stream_response refuses the level"),
+        );
+        unresolved(
+            adapter
+                .stream_response_authorized(&messages, &[], 1024, None, Some(&params), None)
+                .await
+                .map(|_| ())
+                .expect_err("stream_response_authorized refuses the level"),
+        );
+        unresolved(
+            Arc::clone(&adapter)
+                .prepare_request_attempt(
+                    Arc::new(messages.clone()),
+                    Arc::from(Vec::new()),
+                    1024,
+                    None,
+                    Some(params.clone()),
+                )
+                .map(|_| ())
+                .expect_err("prepare_request_attempt refuses the level"),
+        );
+        unresolved(
+            Arc::clone(&adapter)
+                .prepare_request_attempt_authorized(
+                    Arc::new(messages.clone()),
+                    Arc::from(Vec::new()),
+                    1024,
+                    None,
+                    Some(params),
+                    None,
+                )
+                .map(|_| ())
+                .expect_err("prepare_request_attempt_authorized refuses the level"),
+        );
+        assert_eq!(projections.load(Ordering::SeqCst), 0);
+        assert_eq!(streams.load(Ordering::SeqCst), 0);
+
+        // The same request without the level is built and streamed.
+        adapter
+            .stream_response(&messages, &[], 1024, None, None)
+            .await
+            .expect("a request without the level is served");
+        assert_eq!(projections.load(Ordering::SeqCst), 1);
+        assert_eq!(streams.load(Ordering::SeqCst), 1);
     }
 }

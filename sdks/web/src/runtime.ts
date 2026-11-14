@@ -59,6 +59,7 @@ function sessionToWasm(config: SessionConfig): Record<string, unknown> {
     labels: config.labels,
     additional_instructions: config.additionalInstructions,
     app_context: config.appContext,
+    reasoning_effort: config.reasoningEffort,
   };
 }
 

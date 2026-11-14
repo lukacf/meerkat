@@ -3288,6 +3288,7 @@ describe("Parity wrappers", () => {
                     supports_web_search: true,
                     image_generation: true,
                     params_schema: {},
+                    reasoning_effort_levels: ["low", "medium", "high"],
                   },
                 },
               ],
@@ -3313,6 +3314,12 @@ describe("Parity wrappers", () => {
     assert.equal(catalog.providers[0].defaultModelId, "claude-sonnet-4-6");
     assert.equal(catalog.providers[0].models[0].profile?.imageGeneration, true);
     assert.equal(catalog.providers[0].models[0].profile?.webSearch, true);
+    // The direct route's reasoning effort levels, as the catalog lists them.
+    assert.deepEqual(catalog.providers[0].models[0].profile?.reasoningEffortLevels, [
+      "low",
+      "medium",
+      "high",
+    ]);
     assert.deepEqual(catalog.contractVersion, { major: 0, minor: 5, patch: 1 });
     assert.deepEqual(calls.map((c) => c.method), [
       "help/ask",

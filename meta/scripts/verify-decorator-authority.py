@@ -13,6 +13,18 @@ that do not exist yet - a new decorator added later inherits the same default an
 is silently wrong again, and no per-wrapper test can fail for a wrapper nobody
 has written.
 
+The same holds for `AgentLlmClient::reasoning_route`, whose DEFAULT reports no
+route: a decorator that omits it hides the route its client serves, and a
+`reasoning_effort` level set on the member then has no route to be checked
+against. Every production decorator defines it too: a forward to the client it
+wraps, or its own answer with the reason beside it.
+
+And for `AgentLlmClient::default_provider_tag`, whose DEFAULT reports no
+default tag: a decorator that omits it hides the default fields its client
+applies to a request that carries no tag, so a resolved `reasoning_effort`
+level replaces them instead of joining them. Every production decorator
+defines it as well.
+
 THREE TRAPS THIS AVOIDS, all found the hard way:
 
   FILE-LEVEL MATCHING IS NOT IMPL-LEVEL. Asking whether the FILE containing an
@@ -48,6 +60,16 @@ MOD_LINE = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{")
 # Production decorators that legitimately do NOT forward. Empty by design: add a
 # name here only with a reason, never to silence a failure.
 EXEMPT: dict[str, str] = {}
+
+# Impls that define no reasoning_route and no default_provider_tag, each with
+# the reason. The scan reads a
+# file that is a test module as a whole (`#[cfg(test)] #[path = ...] mod x;`)
+# as production, so its test doubles are named here; a production decorator
+# never is.
+ROUTE_EXEMPT: dict[str, str] = {
+    "ProbeClient": "test double: mob_handle_runtime_prepared_attempt_tests.rs is a #[cfg(test)] module",
+    "OrderWitness": "test double: mob_handle_runtime_prepared_attempt_tests.rs is a #[cfg(test)] module",
+}
 
 
 def test_regions(lines: list[str]) -> list[tuple[int, int]]:
@@ -103,12 +125,40 @@ def main() -> int:
                 continue
             production += 1
             body = "\n".join(lines[i:impl_block_end(lines, i)])
+            rel = path.relative_to(ROOT)
+            if "fn reasoning_route" not in body and name in ROUTE_EXEMPT:
+                print(f"  exempt   {name} reasoning_route ({ROUTE_EXEMPT[name]})")
+            elif "fn reasoning_route" not in body:
+                failures.append(
+                    f"{name} ({rel}:{i + 1}) does not define reasoning_route. "
+                    "The trait default reports no route, so this decorator hides "
+                    "the route of every client it wraps. Add the forward, or the "
+                    "decorator's own answer with the reason beside it:\n"
+                    "        fn reasoning_route(&self) "
+                    "-> Option<meerkat_core::ReasoningRouteObservation> {\n"
+                    "            self.inner.reasoning_route()\n"
+                    "        }"
+                )
+            if "fn default_provider_tag" not in body and name in ROUTE_EXEMPT:
+                print(f"  exempt   {name} default_provider_tag ({ROUTE_EXEMPT[name]})")
+            elif "fn default_provider_tag" not in body:
+                failures.append(
+                    f"{name} ({rel}:{i + 1}) does not define default_provider_tag. "
+                    "The trait default reports no default tag, so a resolved "
+                    "reasoning_effort level would replace the default fields of "
+                    "every client this decorator wraps instead of joining them. "
+                    "Add the forward, or the decorator's own answer with the "
+                    "reason beside it:\n"
+                    "        fn default_provider_tag(&self) "
+                    "-> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {\n"
+                    "            self.inner.default_provider_tag()\n"
+                    "        }"
+                )
             if "fn request_attempt_authority" in body:
                 continue
             if name in EXEMPT:
                 print(f"  exempt   {name} ({EXEMPT[name]})")
                 continue
-            rel = path.relative_to(ROOT)
             failures.append(
                 f"{name} ({rel}:{i + 1}) does not forward request_attempt_authority. "
                 "The trait default returns LegacySplit, so this decorator silently "
@@ -129,7 +179,11 @@ def main() -> int:
         return 1
 
     if failures:
-        print("production AgentLlmClient decorators must forward authority:", file=sys.stderr)
+        print(
+            "production AgentLlmClient decorators must forward authority and "
+            "define reasoning_route and default_provider_tag:",
+            file=sys.stderr,
+        )
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
         return 1

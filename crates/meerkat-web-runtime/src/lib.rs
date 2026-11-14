@@ -187,6 +187,10 @@ struct SessionConfig {
     /// Opaque application context passed through to the agent build pipeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<serde_json::Value>,
+    /// The session's provider-neutral reasoning effort level. The build
+    /// carries it in its provider params, where every surface puts it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<meerkat_core::model_profile::capabilities::EffortLevel>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -873,6 +877,15 @@ fn session_error_envelope(e: meerkat_core::SessionError) -> serde_json::Value {
             "details": meerkat_contracts::error::session_error_details(&error),
         }),
         meerkat_core::SessionError::CapabilityUnavailable(refusal) => serde_json::json!(refusal),
+        // A refused reasoning effort level keeps its typed wire form, as RPC
+        // answers it: invalid params, with the typed refusal as the details.
+        error @ meerkat_core::SessionError::Agent(
+            meerkat_core::AgentError::ReasoningEffortRefused(_),
+        ) => serde_json::json!({
+            "code": meerkat_contracts::error::session_transport_error_code(&error),
+            "message": error.to_string(),
+            "details": meerkat_contracts::error::session_error_details(&error),
+        }),
         meerkat_core::SessionError::NotFound { .. } => {
             serde_json::json!({ "code": "SESSION_NOT_FOUND", "message": "session not found" })
         }
@@ -1758,6 +1771,13 @@ fn build_session_request_with_auth_binding(
     }
     build_config.additional_instructions = config.additional_instructions.clone();
     build_config.app_context = config.app_context.clone();
+    build_config.provider_params = meerkat_core::resolve_build_provider_params(
+        None,
+        config
+            .reasoning_effort
+            .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set),
+    )
+    .map_err(|error| err_str("invalid_config", error))?;
 
     Ok(meerkat_core::service::CreateSessionRequest {
         injected_context: Vec::new(),
@@ -3399,6 +3419,109 @@ mod tests {
             )
             .expect("typed runtime intent");
             assert_eq!(config.keep_alive, Some(keep_alive));
+        }
+    }
+
+    /// A refused reasoning effort level reaches JavaScript typed: invalid
+    /// params, with the refusal object the Web SDK's `reasoningEffortRefusal`
+    /// reads, a refusal that names no route included.
+    #[test]
+    fn a_refused_reasoning_effort_level_keeps_its_typed_envelope() {
+        for (reason, route, retryable) in [
+            (
+                "unsupported_level",
+                json!({"backend": "anthropic_api", "api": "messages"}),
+                false,
+            ),
+            ("supported_levels_unavailable", json!(null), true),
+        ] {
+            let supported = if retryable {
+                json!(null)
+            } else {
+                json!(["low", "high"])
+            };
+            let facts = if retryable {
+                json!(null)
+            } else {
+                json!("catalog")
+            };
+            let refusal = json!({
+                "requested": "max",
+                "provider": "anthropic",
+                "model": "claude-opus-4-5",
+                "route": route,
+                "reason": reason,
+                "supported": supported,
+                "facts": facts,
+            });
+            let typed: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(refusal.clone()).expect("a refusal");
+            let envelope = super::session_error_envelope(meerkat_core::SessionError::Agent(
+                meerkat_core::AgentError::ReasoningEffortRefused(Box::new(typed)),
+            ));
+            assert_eq!(envelope["code"], "INVALID_PARAMS", "{envelope}");
+            assert!(
+                envelope["message"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("reasoning effort 'max'")),
+                "{envelope}"
+            );
+            assert_eq!(
+                envelope["details"],
+                json!({
+                    "kind": "reasoning_effort_refused",
+                    "retryable": retryable,
+                    "reasoning_effort_refusal": refusal,
+                }),
+                "{reason}"
+            );
+        }
+    }
+
+    /// The session config takes the provider-neutral `reasoning_effort`
+    /// level, and the session's build carries it where every other surface
+    /// does: in its provider params.
+    #[test]
+    fn session_config_reasoning_effort_reaches_the_session_build() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let level_of = |config_json: serde_json::Value| {
+            let config =
+                parse_session_config(&config_json.to_string()).expect("the config is read");
+            let request = match super::build_session_request_with_auth_binding(
+                None,
+                &config.model,
+                &config,
+                None,
+            ) {
+                Ok(request) => request,
+                Err(_) => unreachable!("the session request is built"),
+            };
+            request
+                .build
+                .and_then(|build| build.provider_params)
+                .and_then(|params| params.reasoning_effort)
+        };
+        assert_eq!(
+            level_of(json!({"model": "test", "reasoning_effort": "high"})),
+            Some(EffortLevel::High)
+        );
+        assert_eq!(
+            level_of(json!({"model": "test", "reasoning_effort": "xhigh"})),
+            Some(EffortLevel::Xhigh)
+        );
+        assert_eq!(level_of(json!({"model": "test"})), None);
+
+        for not_a_level in ["x_high", "extreme"] {
+            let refused = parse_session_config(
+                &json!({"model": "test", "reasoning_effort": not_a_level}).to_string(),
+            )
+            .expect_err("a word outside the level vocabulary is refused");
+            assert_eq!(refused["code"], "invalid_config");
+            assert!(
+                refused.to_string().contains("xhigh"),
+                "the refusal lists the levels: {refused}"
+            );
         }
     }
 
@@ -5285,6 +5408,7 @@ capabilities = [{capability_values}]
     #[test]
     fn start_turn_success_exposes_terminal_cause_kind_no_status_string() {
         let run = meerkat_core::RunResult {
+            reasoning_effort: None,
             text: "hello".to_string(),
             session_id: meerkat_core::SessionId::new(),
             usage: Default::default(),

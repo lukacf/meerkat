@@ -761,6 +761,14 @@ impl SessionError {
     /// `tool_grant_gate_refusal` member carries the typed refusal.
     pub const TOOL_GRANT_GATE_REFUSED_KIND: &'static str = "tool_grant_gate_refused";
 
+    /// Structured-data `kind` of a refused `reasoning_effort` level
+    /// ([`crate::error::AgentError::ReasoningEffortRefused`]) on the wire.
+    /// The `reasoning_effort_refusal` member carries the typed refusal; the
+    /// advisory `retryable` member beside it is `true` only for the
+    /// transient reason
+    /// ([`crate::ReasoningEffortRefusalReason::is_transient`]).
+    pub const REASONING_EFFORT_REFUSED_KIND: &'static str = "reasoning_effort_refused";
+
     /// Return a stable error code string for wire formats.
     pub fn code(&self) -> &'static str {
         match self {
@@ -836,6 +844,13 @@ impl SessionError {
                     "tool_grant_gate_refusal": refusal,
                 }))
             }
+            Self::Agent(crate::error::AgentError::ReasoningEffortRefused(refusal)) => {
+                Some(serde_json::json!({
+                    "kind": Self::REASONING_EFFORT_REFUSED_KIND,
+                    "retryable": refusal.reason.is_transient(),
+                    "reasoning_effort_refusal": refusal,
+                }))
+            }
             _ => None,
         }
     }
@@ -876,6 +891,22 @@ impl SessionError {
             return None;
         }
         serde_json::from_value(data.get("tool_grant_gate_refusal")?.clone()).ok()
+    }
+
+    /// Read a refused `reasoning_effort` level back off the wire: the typed
+    /// refusal of the [`Self::REASONING_EFFORT_REFUSED_KIND`] projection
+    /// [`Self::structured_data`] gives. The advisory `retryable` member is
+    /// not read: the refusal's reason states it. Other or malformed
+    /// structured data fails closed as `None`.
+    pub fn reasoning_effort_refusal_from_data(
+        data: &serde_json::Value,
+    ) -> Option<crate::ReasoningEffortRefusal> {
+        if data.get("kind").and_then(serde_json::Value::as_str)
+            != Some(Self::REASONING_EFFORT_REFUSED_KIND)
+        {
+            return None;
+        }
+        serde_json::from_value(data.get("reasoning_effort_refusal")?.clone()).ok()
     }
 
     /// Secret-free projection of a resume hold: the hold class, the session it
@@ -2339,6 +2370,11 @@ pub struct ResumeOverrideMask {
     pub max_tokens: bool,
     pub structured_output_retries: bool,
     pub provider_params: bool,
+    /// The build decides the session's provider-neutral reasoning effort
+    /// level: the level its params name, or none when they name none. Without
+    /// it the stored level stays, across a `provider_params` claim too,
+    /// unless the build's params name a level.
+    pub reasoning_effort: bool,
     pub auth_binding: bool,
     pub override_builtins: bool,
     pub override_shell: bool,
@@ -4823,6 +4859,111 @@ mod tests {
                 "{other}"
             );
         }
+    }
+
+    /// The `kind` of the wire data an agent error carries in its session
+    /// error's projection ([`SessionError::structured_data`]), or `None`.
+    ///
+    /// The match names every variant, so a new one does not compile until it
+    /// is placed here. A variant that carries wire data of its own needs its
+    /// arm in `structured_data`, and a decision on every surface that
+    /// reports an agent error without its session error: `rkat run` reads
+    /// the details of its failure document by variant (`owner_details` in
+    /// the CLI's exit status module, with its row
+    /// `agent_errors_with_wire_data_have_a_failure_document_decision`).
+    fn agent_error_wire_data_kind(error: &crate::error::AgentError) -> Option<&'static str> {
+        use crate::error::AgentError;
+        match error {
+            AgentError::ToolGrantGateRefused(_) => Some(SessionError::TOOL_GRANT_GATE_REFUSED_KIND),
+            AgentError::ReasoningEffortRefused(_) => {
+                Some(SessionError::REASONING_EFFORT_REFUSED_KIND)
+            }
+            AgentError::Llm { .. }
+            | AgentError::StoreError(..)
+            | AgentError::Tool { .. }
+            | AgentError::WithSettlementFailures { .. }
+            | AgentError::OperationRefused { .. }
+            | AgentError::PolicyIndeterminate { .. }
+            | AgentError::McpError(..)
+            | AgentError::SessionNotFound(..)
+            | AgentError::TokenBudgetExceeded { .. }
+            | AgentError::TimeBudgetExceeded { .. }
+            | AgentError::ToolCallBudgetExceeded { .. }
+            | AgentError::MaxTokensReached { .. }
+            | AgentError::ContentFiltered { .. }
+            | AgentError::MaxTurnsReached { .. }
+            | AgentError::Cancelled
+            | AgentError::InvalidStateTransition { .. }
+            | AgentError::OperationNotFound(..)
+            | AgentError::DepthLimitExceeded { .. }
+            | AgentError::ConcurrencyLimitExceeded
+            | AgentError::ConfigError(..)
+            | AgentError::InvalidToolAccess { .. }
+            | AgentError::SkillResolutionFailed { .. }
+            | AgentError::InternalError(..)
+            | AgentError::StickyModelFallbackAuthorityUnknown { .. }
+            | AgentError::ModelFallbackResumeHeld { .. }
+            | AgentError::SessionDurableProjectionAuthorityUnknown { .. }
+            | AgentError::BuildError(..)
+            | AgentError::SessionIdentityInUse(..)
+            | AgentError::DeclaredToolUnknown(..)
+            | AgentError::ToolArtifactRefused(..)
+            | AgentError::AuthReauthRequired { .. }
+            | AgentError::CallbackPending { .. }
+            | AgentError::CallbackBatchPending { .. }
+            | AgentError::StructuredOutputValidationFailed { .. }
+            | AgentError::InvalidOutputSchema(..)
+            | AgentError::HookDenied { .. }
+            | AgentError::HookTimeout { .. }
+            | AgentError::HookExecutionFailed { .. }
+            | AgentError::HookConfigInvalid { .. }
+            | AgentError::TerminalFailure { .. }
+            | AgentError::NoPendingBoundary
+            | AgentError::ControlAppendBlockedByCallbackBatch
+            | AgentError::DurableSnapshotSyncUnsupported
+            | AgentError::HookLaunchRefused { .. }
+            | AgentError::ClientModelChangeRequiresHotSwap { .. }
+            | AgentError::InstructionActivation(..)
+            | AgentError::StagedPromptDirectedTurnRefused
+            | AgentError::RunSuspended { .. } => None,
+        }
+    }
+
+    /// The agent errors that carry wire data of their own are the two the
+    /// list above names, and the session projection agrees with the list.
+    #[test]
+    fn the_agent_errors_with_wire_data_are_the_listed_ones() {
+        use crate::error::AgentError;
+        let refusal: crate::ReasoningEffortRefusal = serde_json::from_value(serde_json::json!({
+            "requested": "max", "provider": "anthropic", "model": "test-anthropic-default",
+            "route": {"backend": "anthropic_api", "api": "messages"},
+            "reason": "unsupported_level",
+            "supported": ["low", "medium", "high"], "facts": "catalog",
+        }))
+        .unwrap();
+        let samples = [
+            AgentError::ToolGrantGateRefused(Box::new(
+                crate::tool_grant::GrantGateRefusal::NoGrantService,
+            )),
+            AgentError::ReasoningEffortRefused(Box::new(refusal)),
+            AgentError::ConfigError("a configuration error".to_string()),
+            AgentError::InternalError("an internal error".to_string()),
+            AgentError::Cancelled,
+        ];
+        let mut with_data = 0;
+        for sample in samples {
+            let listed = agent_error_wire_data_kind(&sample);
+            let label = sample.to_string();
+            let projected = SessionError::Agent(sample).structured_data();
+            let kind = projected
+                .as_ref()
+                .and_then(|data| data.get("kind"))
+                .and_then(serde_json::Value::as_str);
+            assert_eq!(kind, listed, "{label}");
+            assert_eq!(projected.is_some(), listed.is_some(), "{label}");
+            with_data += usize::from(listed.is_some());
+        }
+        assert_eq!(with_data, 2);
     }
 
     #[test]

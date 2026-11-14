@@ -387,13 +387,20 @@ fn completion_outcome_to_cli_runtime_turn_result(
         meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, .. } => {
             Err(anyhow::anyhow!("turn abandoned: {reason}"))
         }
-        // A typed owner, so the JSON failure document carries the typed turn
-        // error; the stderr text and the exit status are what they were.
+        // A turn that ended because the session's reasoning effort level was
+        // refused before a provider request fails as a refused build does:
+        // the same typed owner, exit status and failure document. Any other
+        // failed turn is a typed owner too, so the JSON failure document
+        // carries the typed turn error; its stderr text and exit status are
+        // what they were.
         meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
-            Err(exit_status::typed_failure(
-                exit_status::FailedTurn::new(reason, error),
-                ToString::to_string,
-            ))
+            match exit_status::reasoning_effort_refused_turn(&error) {
+                Some(refused) => Err(session_err_to_anyhow(refused)),
+                None => Err(exit_status::typed_failure(
+                    exit_status::FailedTurn::new(reason, error),
+                    ToString::to_string,
+                )),
+            }
         }
         meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
             error,
@@ -2019,6 +2026,30 @@ enum Commands {
             help_heading = "Advanced options"
         )]
         provider_params_json: Option<String>,
+
+        /// Provider-neutral reasoning effort level for the session. Checked
+        /// against the model on the route that serves the request and
+        /// written as the provider's own field; a level the model or route
+        /// does not accept is refused before any provider request (exit
+        /// status 2). With --resume it changes the session's level from
+        /// this turn on.
+        #[arg(
+            long = "reasoning-effort",
+            value_name = "LEVEL",
+            value_parser = reasoning_effort_level_parser(),
+            conflicts_with = "no_reasoning_effort",
+            help_heading = "Common options"
+        )]
+        reasoning_effort: Option<meerkat_core::model_profile::capabilities::EffortLevel>,
+
+        /// With --resume: remove the session's reasoning effort level.
+        #[arg(
+            long = "no-reasoning-effort",
+            requires = "resume",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        no_reasoning_effort: bool,
 
         /// Structured output schema (wrapper or raw JSON schema; file path OR inline JSON)
         #[arg(
@@ -4597,6 +4628,8 @@ async fn cli_main() -> anyhow::Result<ExitCode> {
             export_atif,
             params,
             provider_params_json,
+            reasoning_effort,
+            no_reasoning_effort,
             output_schema,
             #[cfg(feature = "skills")]
             skills,
@@ -4705,6 +4738,7 @@ async fn cli_main() -> anyhow::Result<ExitCode> {
                 auth_binding,
                 None,
                 &cli_scope,
+                run_reasoning_effort_override(reasoning_effort, no_reasoning_effort),
             ))
             .await
         }
@@ -4920,6 +4954,7 @@ async fn handle_help_command(
         None,
         Some((help.tools, help.tool_access_policy)),
         scope,
+        None,
     )
     .await
 }
@@ -5011,6 +5046,11 @@ async fn handle_run_command(
         meerkat_core::ops::ToolAccessPolicy,
     )>,
     scope: &RuntimeScope,
+    reasoning_effort: Option<
+        meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<
+            meerkat_core::model_profile::capabilities::EffortLevel,
+        >,
+    >,
 ) -> anyhow::Result<()> {
     // One-time, idempotent: carry any pre-`global` (`dev`) login credentials
     // forward on the credential-READ path so users who upgraded but never
@@ -5096,6 +5136,7 @@ async fn handle_run_command(
             yolo,
             keep_alive,
             comms_overrides,
+            reasoning_effort,
         )
         .await;
     }
@@ -5164,6 +5205,15 @@ async fn handle_run_command(
     match (duration, provider_params, provider_params_json) {
         (Ok(dur), Ok(parsed_params), Ok(parsed_params_json)) => {
             let merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
+            // `--reasoning-effort` is the params' own `reasoning_effort`
+            // key: the level has one home, and a level named in both
+            // places must be the same one. The disagreement stays typed in
+            // the error chain, so the command exits as an invalid request.
+            let merged_provider_params = meerkat_core::resolve_build_provider_params(
+                merged_provider_params.as_ref(),
+                reasoning_effort,
+            )
+            .map_err(anyhow::Error::new)?;
             let mut limits = config.budget_limits();
             if let Some(max_duration) = dur {
                 limits.max_duration = Some(max_duration);
@@ -5260,6 +5310,41 @@ fn parse_cli_control_scopes(
 fn parse_cli_principal_id(raw: &str) -> anyhow::Result<meerkat_core::auth::PrincipalId> {
     meerkat_core::auth::PrincipalId::new(raw)
         .map_err(|e| anyhow::anyhow!("invalid principal '{raw}': {e}"))
+}
+
+/// The closed value set of `--reasoning-effort`: the seven level words, each
+/// in its one spelling. Any other word, `x_high` included, is an argument
+/// error that lists them.
+fn reasoning_effort_level_parser() -> clap::builder::ValueParser {
+    use clap::builder::TypedValueParser as _;
+    clap::builder::ValueParser::new(
+        clap::builder::PossibleValuesParser::new([
+            "none", "minimal", "low", "medium", "high", "xhigh", "max",
+        ])
+        .try_map(|word| {
+            meerkat_core::model_profile::capabilities::EffortLevel::from_wire_str(&word)
+                .ok_or_else(|| format!("'{word}' is not a reasoning effort level"))
+        }),
+    )
+}
+
+/// What the two reasoning effort flags of `rkat run` ask for: a level sets
+/// the session's level, `--no-reasoning-effort` removes it, and neither
+/// leaves it as it is. The argument parser refuses the two together.
+fn run_reasoning_effort_override(
+    reasoning_effort: Option<meerkat_core::model_profile::capabilities::EffortLevel>,
+    no_reasoning_effort: bool,
+) -> Option<
+    meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<
+        meerkat_core::model_profile::capabilities::EffortLevel,
+    >,
+> {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    match (reasoning_effort, no_reasoning_effort) {
+        (Some(level), _) => Some(TurnMetadataOverride::Set(level)),
+        (None, true) => Some(TurnMetadataOverride::Clear),
+        (None, false) => None,
+    }
 }
 
 /// Parse --param KEY=VALUE flags into a JSON object
@@ -16179,6 +16264,10 @@ async fn run_agent(
             grant_gated_tools: None,
             grant_gated_tools_where_mounted: None,
         };
+        build.resume_override_mask.reasoning_effort = build
+            .provider_params
+            .as_ref()
+            .is_some_and(|params| params.reasoning_effort.is_some());
         build.apply_generated_create_only_mob_operator_access(
             meerkat_core::ToolCategoryOverride::from_effective(effective_mob),
         );
@@ -16471,6 +16560,11 @@ async fn resume_session(
     yolo: bool,
     keep_alive: bool,
     comms_overrides: CommsOverrides,
+    reasoning_effort: Option<
+        meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<
+            meerkat_core::model_profile::capabilities::EffortLevel,
+        >,
+    >,
 ) -> anyhow::Result<()> {
     let stdin = resolve_stdin_mode(stdin);
     let prompt_file_base = match scope.context_root.clone() {
@@ -16517,6 +16611,7 @@ async fn resume_session(
         yolo,
         keep_alive,
         comms_overrides,
+        reasoning_effort,
     )
     .await
 }
@@ -16558,6 +16653,11 @@ async fn resume_session_with_llm_override(
     yolo: bool,
     keep_alive: bool,
     comms_overrides: CommsOverrides,
+    reasoning_effort: Option<
+        meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<
+            meerkat_core::model_profile::capabilities::EffortLevel,
+        >,
+    >,
 ) -> anyhow::Result<()> {
     #[cfg(not(feature = "session-store"))]
     {
@@ -16597,6 +16697,7 @@ async fn resume_session_with_llm_override(
             yolo,
             keep_alive,
             comms_overrides,
+            reasoning_effort,
         );
         anyhow::bail!("resume requires rkat built with session-store support");
     }
@@ -16929,6 +17030,9 @@ async fn resume_session_with_llm_override(
             provider: provider.map(Provider::as_core),
             provider_params: merged_provider_params
                 .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set),
+            // `--reasoning-effort` sets the session's level, and
+            // `--no-reasoning-effort` removes it; neither keeps it.
+            reasoning_effort,
             max_tokens,
             output_schema: parsed_output_schema,
             keep_alive: keep_alive_override,
@@ -16946,6 +17050,20 @@ async fn resume_session_with_llm_override(
             app_context: parsed_app_context,
             ..Default::default()
         };
+        // A resume that names the reasoning effort level in two places that
+        // disagree is the caller's request. The recovery applies this rule
+        // too, but reports its refusal as text; asked here first, with the
+        // same inputs, the typed refusal stays in the error chain and the
+        // command exits as an invalid request, as on a new session.
+        meerkat_core::resolve_session_provider_params(
+            stored_metadata.provider_params.as_ref(),
+            recovery_overrides
+                .provider_params
+                .as_ref()
+                .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::as_ref),
+            recovery_overrides.reasoning_effort.clone(),
+        )
+        .map_err(anyhow::Error::new)?;
         let recovered = meerkat_core::session_recovery::build_recovered_session(
             session,
             &recovery_overrides,
@@ -17966,6 +18084,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             transcript_identity: Default::default(),
             request_reasoning: None,
             request_reasoning_disposition: None,
+            reasoning_effort: None,
         };
         // The attention overlay is deliberately NOT composed here: a queued
         // prompt can sit behind a running turn that mutates the work item,
@@ -28861,6 +28980,7 @@ default_model = "gemma"
 
         fn run_result(&self, text: &str, turns: u32) -> RunResult {
             RunResult {
+                reasoning_effort: None,
                 text: text.to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -30587,6 +30707,7 @@ default_model = "gemma"
             }
 
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: sid,
                 usage: Usage::default(),
@@ -30649,6 +30770,7 @@ default_model = "gemma"
                 return Err(SessionError::NotFound { id: id.clone() });
             }
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: id.clone(),
                 usage: Usage::default(),
@@ -31057,6 +31179,7 @@ default_model = "gemma"
             _req: CreateSessionRequest,
         ) -> Result<RunResult, SessionError> {
             Ok(RunResult {
+                reasoning_effort: None,
                 text: String::new(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -31109,6 +31232,7 @@ default_model = "gemma"
                     .await;
             }
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "streamed".to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -31301,6 +31425,7 @@ default_model = "gemma"
             auth_binding,
             None,
             &scope,
+            None,
         )
         .await
         .expect_err("resume probe should fail in the expected layer")
@@ -31523,6 +31648,7 @@ default_model = "gemma"
         let temp = tempfile::tempdir().expect("temp dir");
         let scope = test_scope(temp.path().join("state"), "html-realm");
         let result = RunResult {
+            reasoning_effort: None,
             text: "<!doctype html><html><body>artifact</body></html>".to_string(),
             session_id: SessionId::new(),
             usage: Usage::default(),
@@ -31553,6 +31679,7 @@ default_model = "gemma"
         let temp = tempfile::tempdir().expect("temp dir");
         let scope = test_scope(temp.path().join("state"), "html-realm");
         let result = RunResult {
+            reasoning_effort: None,
             text: "<!doctype html><html><body>artifact</body></html>".to_string(),
             session_id: SessionId::new(),
             usage: Usage::default(),
@@ -32225,6 +32352,185 @@ default_model = "gemma"
             Commands::Run { no_comms, .. } => assert!(no_comms),
             _ => unreachable!(),
         }
+    }
+
+    /// `rkat run --reasoning-effort <LEVEL>` takes the seven levels and no
+    /// other word: `x_high` and any other word are argument errors (exit
+    /// status 2, the argument parser's text). `--no-reasoning-effort` clears
+    /// a resumed session's level, so it needs `--resume` and excludes the
+    /// level flag.
+    #[test]
+    fn test_run_reasoning_effort_flags_are_a_closed_value_set() {
+        for level in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            if let Err(error) =
+                Cli::try_parse_from(["rkat", "run", "--reasoning-effort", level, "hi"])
+            {
+                panic!("--reasoning-effort {level} parses: {error}");
+            }
+            if let Err(error) = Cli::try_parse_from([
+                "rkat",
+                "run",
+                "--resume",
+                "last",
+                "--reasoning-effort",
+                level,
+                "hi",
+            ]) {
+                panic!("--resume --reasoning-effort {level} parses: {error}");
+            }
+        }
+        for word in ["x_high", "extreme", "HIGH"] {
+            let Err(error) = Cli::try_parse_from(["rkat", "run", "--reasoning-effort", word, "hi"])
+            else {
+                panic!("--reasoning-effort '{word}' is an argument error");
+            };
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::InvalidValue,
+                "'{word}': {error}"
+            );
+            assert_eq!(error.exit_code(), 2, "'{word}'");
+            assert!(
+                error.to_string().contains("xhigh"),
+                "the parser lists the levels for '{word}': {error}"
+            );
+        }
+
+        if let Err(error) = Cli::try_parse_from([
+            "rkat",
+            "run",
+            "--resume",
+            "last",
+            "--no-reasoning-effort",
+            "hi",
+        ]) {
+            panic!("--resume --no-reasoning-effort parses: {error}");
+        }
+        let Err(error) = Cli::try_parse_from(["rkat", "run", "--no-reasoning-effort", "hi"]) else {
+            panic!("--no-reasoning-effort needs --resume");
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "{error}"
+        );
+        assert_eq!(error.exit_code(), 2);
+        let Err(error) = Cli::try_parse_from([
+            "rkat",
+            "run",
+            "--resume",
+            "last",
+            "--reasoning-effort",
+            "high",
+            "--no-reasoning-effort",
+            "hi",
+        ]) else {
+            panic!("a level and its removal exclude each other");
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "{error}"
+        );
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    /// The flags mean one tri-state (a level sets, `--no-reasoning-effort`
+    /// clears, neither keeps), and `--param reasoning_effort=<LEVEL>` is the
+    /// same setting as the flag: equal levels are accepted, different ones
+    /// refused.
+    #[test]
+    fn test_run_reasoning_effort_reaches_the_build_and_the_resume_overrides() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let flags = |args: &[&str]| {
+            let cli = match Cli::try_parse_from(args) {
+                Ok(cli) => cli,
+                Err(error) => panic!("{args:?} parses: {error}"),
+            };
+            match cli.command.expect("test invocation parses a subcommand") {
+                Commands::Run {
+                    reasoning_effort,
+                    no_reasoning_effort,
+                    ..
+                } => run_reasoning_effort_override(reasoning_effort, no_reasoning_effort),
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(
+            flags(&["rkat", "run", "--reasoning-effort", "xhigh", "hi"]),
+            Some(TurnMetadataOverride::Set(EffortLevel::Xhigh))
+        );
+        assert_eq!(
+            flags(&[
+                "rkat",
+                "run",
+                "--resume",
+                "last",
+                "--reasoning-effort",
+                "none",
+                "hi"
+            ]),
+            Some(TurnMetadataOverride::Set(EffortLevel::None))
+        );
+        assert_eq!(
+            flags(&[
+                "rkat",
+                "run",
+                "--resume",
+                "last",
+                "--no-reasoning-effort",
+                "hi"
+            ]),
+            Some(TurnMetadataOverride::Clear)
+        );
+        assert_eq!(flags(&["rkat", "run", "--resume", "last", "hi"]), None);
+        assert_eq!(flags(&["rkat", "run", "hi"]), None);
+
+        let params = |kv: &[&str]| {
+            let kv: Vec<String> = kv.iter().map(ToString::to_string).collect();
+            merge_provider_params(parse_provider_params(&kv).unwrap(), None).unwrap()
+        };
+        // The param alone is the level.
+        let as_param = params(&["reasoning_effort=high"]);
+        assert_eq!(
+            as_param.as_ref().and_then(|params| params.reasoning_effort),
+            Some(EffortLevel::High)
+        );
+        // The flag alone folds into the same place.
+        let as_flag = meerkat_core::resolve_build_provider_params(
+            params(&["temperature=0.2"]).as_ref(),
+            Some(TurnMetadataOverride::Set(EffortLevel::High)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(as_flag.reasoning_effort, Some(EffortLevel::High));
+        assert_eq!(as_flag.temperature, Some(0.2));
+        // Both, equal.
+        assert_eq!(
+            meerkat_core::resolve_build_provider_params(
+                as_param.as_ref(),
+                Some(TurnMetadataOverride::Set(EffortLevel::High)),
+            )
+            .unwrap(),
+            as_param
+        );
+        // Both, different.
+        let refused = meerkat_core::resolve_build_provider_params(
+            as_param.as_ref(),
+            Some(TurnMetadataOverride::Set(EffortLevel::Low)),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            refused,
+            "reasoning_effort is 'low' but provider_params.reasoning_effort is 'high': set one \
+             of them, or the same level in both"
+        );
+        // `x_high` is not a level as a param either.
+        let kv = vec!["reasoning_effort=x_high".to_string()];
+        assert!(merge_provider_params(parse_provider_params(&kv).unwrap(), None).is_err());
     }
 
     #[cfg(feature = "skills")]
@@ -41554,6 +41860,7 @@ supports_reasoning = true
     #[test]
     fn test_json_output_payload_includes_skill_diagnostics_field() {
         let result = RunResult {
+            reasoning_effort: None,
             text: "ok".to_string(),
             session_id: SessionId::new(),
             usage: Usage::default(),

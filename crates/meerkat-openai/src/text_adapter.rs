@@ -142,6 +142,29 @@ impl OpenAiRealtimeTextAdapter {
 
 #[async_trait]
 impl LlmClient for OpenAiRealtimeTextAdapter {
+    /// The adapter lowers its requests itself and serves one route: the
+    /// route of a projection is the route it reports.
+    fn reasoning_route_of(
+        &self,
+        _projection: &meerkat_llm_core::LlmReplayProjection,
+    ) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.reasoning_route()
+    }
+
+    /// The realtime API of the OpenAI API backend: the adapter connects
+    /// with an API key to the public realtime endpoint and is built for no
+    /// other backend.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        Some(meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::OpenAi(
+                meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
+            ),
+            api: meerkat_core::ModelApi::Realtime,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        })
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         project_realtime_replay_messages(messages)
     }
@@ -908,6 +931,36 @@ mod tests {
         let rendered = format!("{:?}", OpenAiRealtimeTextAdapter::new(SECRET));
         assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
         assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+
+    /// The realtime text adapter serves the OpenAI API's realtime route, on
+    /// which no account list and no operator states effort levels.
+    #[test]
+    fn every_adapter_reports_its_route() {
+        assert_eq!(
+            OpenAiRealtimeTextAdapter::new("test-key").reasoning_route(),
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::OpenAi(
+                    meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi
+                ),
+                api: meerkat_core::ModelApi::Realtime,
+                account: meerkat_core::AccountLevelStatement::NotApplicable,
+                operator_levels: None,
+            })
+        );
+    }
+
+    /// The realtime text adapter lowers its requests itself and serves one
+    /// route: the route of a projection is the route it reports.
+    #[test]
+    fn the_route_of_a_projection_is_the_route_the_adapter_reports() {
+        let adapter = OpenAiRealtimeTextAdapter::new("test-key");
+        let projection = meerkat_llm_core::LlmReplayProjection::new(Vec::new());
+        assert!(adapter.reasoning_route().is_some());
+        assert_eq!(
+            adapter.reasoning_route_of(&projection),
+            adapter.reasoning_route()
+        );
     }
     use meerkat_core::{
         AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, ImageData, MediaType,

@@ -9530,6 +9530,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         if defer_initial_turn {
             return Ok((
                 RunResult {
+                    reasoning_effort: None,
                     text: String::new(),
                     session_id,
                     turns: 0,
@@ -10871,6 +10872,50 @@ fn lock_turn_admission(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// The refusal of a turn whose metadata names a reasoning effort level the
+/// live session is not at.
+///
+/// A turn's `reasoning_effort` is session configuration: the executor that
+/// runs the turn applies it first, through an LLM reconfigure, so the session
+/// is at that state when the turn starts (`Set(level)`: the session's level
+/// is `level`; `Clear`: it has none). An executor that applies no per-turn
+/// reconfigure hands the metadata over unchanged; running its turn would drop
+/// the field, so the turn is refused instead. `None` when the field is absent
+/// or the session is where the field says.
+fn unapplied_turn_reasoning_effort(
+    turn: Option<
+        &meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<
+            meerkat_core::model_profile::capabilities::EffortLevel,
+        >,
+    >,
+    session_level: Option<meerkat_core::model_profile::capabilities::EffortLevel>,
+) -> Option<meerkat_core::error::AgentError> {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    // A level is quoted; the absent state is spelled out, so that it never
+    // reads as the level `none`.
+    let level = |level: Option<meerkat_core::model_profile::capabilities::EffortLevel>| {
+        level.map_or_else(
+            || "no level".to_string(),
+            |level| format!("'{}'", level.as_wire_str()),
+        )
+    };
+    let wanted = match turn? {
+        TurnMetadataOverride::Set(wanted) => Some(*wanted),
+        TurnMetadataOverride::Clear => None,
+    };
+    (wanted != session_level).then(|| {
+        meerkat_core::error::AgentError::ConfigError(format!(
+            "{TURN_REASONING_EFFORT_NOT_APPLIED}: the turn asks for {} and the session is at {}",
+            level(wanted),
+            level(session_level),
+        ))
+    })
+}
+
+/// How the refusal of [`unapplied_turn_reasoning_effort`] starts.
+const TURN_REASONING_EFFORT_NOT_APPLIED: &str =
+    "the turn's reasoning_effort was not applied to the session before the turn";
+
 /// Roll an admitted turn back to `Idle` from within the session task when a
 /// preflight check fails before the run starts.
 fn abort_admitted_turn(control: &SessionTaskControl) {
@@ -11606,6 +11651,30 @@ async fn session_task<A: SessionAgent>(
                             ));
                         continue;
                     }
+                }
+
+                // Every runtime-backed turn's metadata arrives here. A turn
+                // that names a reasoning effort level runs only on a session
+                // that is already at it: nothing below applies the field, so
+                // a turn whose executor did not is refused, never run without
+                // it. Nothing was consumed yet; the admitted turn rolls back.
+                let session_reasoning_effort = control
+                    .llm_identity_tx
+                    .borrow()
+                    .provider_params
+                    .as_ref()
+                    .and_then(|params| params.reasoning_effort);
+                if let Some(refusal) = unapplied_turn_reasoning_effort(
+                    metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.reasoning_effort.as_ref()),
+                    session_reasoning_effort,
+                ) {
+                    abort_admitted_turn(&control);
+                    let _ = result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                        Err(refusal),
+                    ));
+                    continue;
                 }
 
                 let mut consumed_deferred_inputs = {
@@ -13314,6 +13383,7 @@ mod runtime_turn_metadata_tests {
     fn success_with_machine_terminal_witness_is_rejected_for_every_session_backend() {
         let outcome = SessionTurnExecutionOutcome {
             result: Ok(RunResult {
+                reasoning_effort: None,
                 text: "impossible success".to_string(),
                 session_id: SessionId::new(),
                 usage: Usage::default(),
@@ -13476,6 +13546,7 @@ mod runtime_turn_metadata_tests {
                         .len(),
                 );
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -13902,6 +13973,7 @@ mod runtime_turn_metadata_tests {
             _event_tx: mpsc::Sender<AgentEvent>,
         ) -> Result<RunResult, AgentError> {
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -14392,6 +14464,7 @@ mod injected_context_turn_tests {
     impl InjectedContextProbeAgent {
         fn ok_result(&self) -> RunResult {
             RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -15211,6 +15284,7 @@ mod admission_window_tests {
             }
             self.run_calls.fetch_add(1, Ordering::SeqCst);
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ran".to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -15916,6 +15990,7 @@ mod archive_shutdown_drain_tests {
                 .expect("drain probe run release semaphore should stay open")
                 .forget();
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ran".to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -17008,6 +17083,7 @@ mod inline_video_admission_tests {
                 self.session_id = run_result_session_id.clone();
             }
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: self
                     .run_result_session_id
@@ -17621,3 +17697,6 @@ mod settled_fallback_event_tests;
 
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 mod operator_instruction_tests;
+
+#[cfg(test)]
+mod turn_reasoning_effort_tests;

@@ -557,6 +557,7 @@ type AgentEvent =
   | InteractionCompleteEvent
   | InteractionFailedEvent
   | StreamTruncatedEvent
+  | RequestReasoningEffortResolvedEvent // from 0.9.15
   | ToolConfigChangedEvent
   | BackgroundJobCompletedEvent
   | LiveChannelClosedEvent
@@ -966,7 +967,7 @@ class BinaryIntegrityError extends MeerkatError {
 | Class | When thrown |
 |-------|-------------|
 | `MeerkatError` | Base class for all SDK errors |
-| `CapabilityUnavailableError` | `client.requireCapability()` or `session.invokeSkill()` when the required capability is not available |
+| `CapabilityUnavailableError` | `client.requireCapability()` or `session.invokeSkill()` when the required capability is not available; a call that sets an option the connected server's contract is too old for (`idempotencyKey` before 0.9.5, `grantGatedTools` before 0.9.9 and, from 0.9.15, `reasoningEffort` before 0.9.15) |
 | `SessionNotFoundError` | Server reports that the requested session does not exist |
 | `SkillNotFoundError` | Server reports that a skill reference cannot be resolved |
 | `BinaryIntegrityError` | The auto-downloaded `rkat-rpc` archive, the binary inside it or its cached copy does not match the sha256 the package pins ([The rkat-rpc binary](/sdks/typescript/overview#the-rkat-rpc-binary)) |
@@ -977,7 +978,7 @@ class BinaryIntegrityError extends MeerkatError {
 |------|-------|
 | `NOT_CONNECTED` | Method called before `connect()` |
 | `VERSION_MISMATCH` | Server contract version incompatible with SDK |
-| `CAPABILITY_UNAVAILABLE` | Required capability not enabled in this build |
+| `CAPABILITY_UNAVAILABLE` | Required capability not enabled in this build, or the connected server's contract is older than an option the call sets |
 | `CLIENT_CLOSED` | Method called after `close()` |
 | `STREAM_NOT_CONSUMED` | `stream.result` accessed before iteration completed |
 | `BINARY_NOT_FOUND` | `rkat-rpc` not found and auto-download failed |

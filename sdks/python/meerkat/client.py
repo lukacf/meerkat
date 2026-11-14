@@ -5271,7 +5271,7 @@ class MeerkatClient:
     async def mob_snapshot(self, mob_id: str) -> dict[str, Any]:
         """Point-in-time aggregate of mob status plus member list.
 
-        Wraps the ``mob/snapshot`` RPC (DELETE_ME C2). Returns
+        Wraps the ``mob/snapshot`` RPC. Returns
         ``{mob_id, status, members}`` in one atomic call so consumers
         do not have to compose ``mob/status`` + ``mob/members`` or fall
         back to event-stream projection for point-in-time state.
@@ -5281,7 +5281,7 @@ class MeerkatClient:
     async def mob_destroy(self, mob_id: str) -> dict[str, Any]:
         """Destroy a mob and surface the structured ``MobDestroyReport``.
 
-        Wraps the ``mob/destroy`` RPC (DELETE_ME C3). Unlike
+        Wraps the ``mob/destroy`` RPC. Unlike
         ``mob/lifecycle`` with ``action="destroy"``, this dedicated
         endpoint has a predictable response shape
         (``{mob_id, ok, destroy_report}``) that does not require
@@ -5292,7 +5292,7 @@ class MeerkatClient:
     async def mob_rotate_supervisor(self, mob_id: str) -> MobRotateSupervisorResult:
         """Rotate the supervisor bridge for all members of a mob.
 
-        Wraps the ``mob/rotate_supervisor`` RPC (DELETE_ME C10). Returns
+        Wraps the ``mob/rotate_supervisor`` RPC. Returns
         the full ``SupervisorRotationReport`` so operators can inspect
         per-member rotation outcomes instead of getting a bare
         ``ok: true``.
@@ -5379,9 +5379,13 @@ class MeerkatClient:
         )
 
     async def mob_cancel_work(self, mob_id: str, work_ref: str) -> dict[str, Any]:
-        """Cancel a previously submitted unit of work.
+        """Always refused: the server does not cancel one unit of work.
 
-        Wraps the ``mob/cancel_work`` RPC (DELETE_ME C4).
+        Wraps the ``mob/cancel_work`` RPC. The server refuses every call and
+        cancels nothing; the submitted unit runs on. The refusal is raised as
+        ``MeerkatError``, with ``code`` ``"-32602"`` for an otherwise valid
+        call. To cancel all of a member's work, use
+        :meth:`mob_cancel_all_work`.
         """
         result = await self._request(
             "mob/cancel_work", {"mob_id": mob_id, "work_ref": work_ref}

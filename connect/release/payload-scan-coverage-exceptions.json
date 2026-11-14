@@ -1,0 +1,33 @@
+{
+  "schema": "release-payload-privacy-scan/coverage-exceptions/1",
+  "exceptions": [
+    {
+      "path": "libexec/meerkat-connect/runtime/python/lib/python3.11/test/testtar.tar",
+      "sha256": "760200dda3cfdff2cd31d8ab6c806794f3770faa465e7eae00a1cb3a2fbcbe3a",
+      "kind": "archive-layout",
+      "reason": "CPython regression test fixture, byte-equal to the pinned upstream archive member",
+      "accepted_by": "Core release lead, 2026-11-12, content proved byte-equal to public upstream or to the public repository"
+    },
+    {
+      "path": "libexec/meerkat-connect/runtime/python/lib/python3.11/test/ziptestdata/exe_with_z64",
+      "sha256": "b1a8382acacce4022b02daa25b293ddfc1dc6ce6a3ddb8b3d95b517592c5a428",
+      "kind": "unsupported-archive",
+      "reason": "CPython regression test fixture, byte-equal to the pinned upstream archive member",
+      "accepted_by": "Core release lead, 2026-11-12, content proved byte-equal to public upstream or to the public repository"
+    },
+    {
+      "path": "libexec/meerkat-connect/runtime/python/lib/python3.11/test/ziptestdata/exe_with_z64!-",
+      "sha256": "b1a8382acacce4022b02daa25b293ddfc1dc6ce6a3ddb8b3d95b517592c5a428",
+      "kind": "unsupported-archive",
+      "reason": "CPython regression test fixture, byte-equal to the pinned upstream archive member",
+      "accepted_by": "Core release lead, 2026-11-12, content proved byte-equal to public upstream or to the public repository"
+    },
+    {
+      "path": "libexec/meerkat-connect/runtime/python/lib/python3.11/test/ziptestdata/exe_with_z64!-",
+      "sha256": "b1a8382acacce4022b02daa25b293ddfc1dc6ce6a3ddb8b3d95b517592c5a428",
+      "kind": "archive-layout",
+      "reason": "CPython regression test fixture, byte-equal to the pinned upstream archive member",
+      "accepted_by": "Core release lead, 2026-11-12, content proved byte-equal to public upstream or to the public repository"
+    }
+  ]
+}

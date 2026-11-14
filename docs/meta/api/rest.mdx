@@ -4,7 +4,7 @@ description: "HTTP endpoints for console access, experience metadata, module ins
 icon: "globe"
 ---
 
-*Mirrored from Meerkat Meta main at [abdabeb8e978](https://github.com/lukacf/meerkat/commit/abdabeb8e97805385e71d66da7e78136c4b0e68c) on 2026-11-12; Meta version 0.9.14 at that commit.*
+*Mirrored from Meerkat Meta main at [225d539132a2](https://github.com/lukacf/meerkat/commit/225d539132a2ace672400cfa432d00adb43db1a7) on 2026-11-14; Meta version 0.9.14 at that commit.*
 
 Meta serves a REST API over HTTP using Axum. The API provides console access, runtime inspection, timeline replay, JSON-RPC ingress, legacy console send compatibility, multipart upload/send, and blob retrieval.
 
@@ -172,7 +172,9 @@ member tokens name it, which is Meta's comms-safe encoding of the identity and
 starts with `mk--` when the identity has a `:`; absent when Core holds no
 binding of the identity and on records of raw runtime members),
 `visibility`, `addressable`, `health`, `labels`, and
-`topology_peers` when non-empty. Use
+`topology_peers` when non-empty. `labels.role` is the member's role, and, from
+0.9.15, for an identity with no live member its profile unless its declared
+labels name a role. Use
 [`meta/console/inspect_identity`](/meta/api/rpc#meta%2Fconsole%2Finspect_identity)
 for identity/peer inspection and `/console/experience` for affordances;
 neither identities nor inspection records contain an affordances field.

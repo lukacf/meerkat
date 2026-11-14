@@ -120,10 +120,11 @@ not mean the declared team has been instantiated.
 
 ```bash
 cd examples/029-web-incident-war-room-sh/.work/incident-war-room-web
-python3 -m http.server 4173
+python3 -m http.server 4173 --bind 127.0.0.1
 ```
 
-Then open `http://127.0.0.1:4173`.
+Then open `http://127.0.0.1:4173`. The page is served on this machine only; to
+show it to others, host the bundle deliberately.
 
 Enter an API key to exercise runtime initialization. Provider calls do not run
 until a host application creates sessions or mob members.

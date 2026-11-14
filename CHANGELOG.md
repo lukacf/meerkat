@@ -1823,6 +1823,51 @@ them.
   is built again when its declaration changes, when a member of the mob is
   retired, or when a spawn in the mob is rolled back. Its convergence status
   carries the refusal.
+- `meerkat-contracts`, Python and TypeScript SDKs: the method catalog and
+  the documentation of the SDKs' `mob_cancel_work` / `mobCancelWork` no
+  longer say that `mob/cancel_work` cancels a unit of work. The method is
+  always refused and cancels nothing: an otherwise valid call is refused
+  with `-32602`, which the SDKs raise as `MeerkatError`.
+  `mob/cancel_all_work` cancels all of a member's work. Only the texts
+  changed; the method, its types and its error codes are as before.
+- Release binaries: the Linux x86_64 release archives of `rkat`, `rkat-rpc`,
+  `rkat-rest` and `rkat-mcp` registered no capability and no built-in skill.
+  The capability list was empty on every surface (`rkat capabilities`,
+  `capabilities/get`, `GET /capabilities`, `meerkat_capabilities`): a client
+  that reads it was told nothing is available, and the Python and TypeScript
+  SDKs, which download and start that `rkat-rpc`, refused
+  `Session.invoke_skill` / `session.invokeSkill` before sending anything
+  (`CapabilityUnavailableError`, "Capability 'skills' is not available").
+  `has_capability` / `hasCapability` answered false for every id except
+  `mob`, which the SDKs decide from the method list, so mob calls were sent.
+  Agents ran without the built-in skills: none was listed, the skill
+  inventory was missing from the prompt, `rkat run --skill <built-in id>`
+  ran without the skill and without a message, and a project or user skill
+  that declares `requires_capabilities` was dropped. Mob members, and the
+  members a session creates with `delegate`, were spawned and worked without
+  their `mob-communication` instructions and without their `task-workflow`
+  or `workgraph-workflow` instructions; the only sign was a warning in the
+  server's log. The skill text was in
+  the binaries and the registrations never ran: the lane that builds those
+  archives linked with a linker that leaves the constructors of link-time
+  registrations out of the table a process runs at start. That lane now
+  links with GNU ld, and every release binary is asked for its capabilities,
+  its built-in skills and, on `rkat-rpc`, a mob member's prompt before it is
+  published (`scripts/check-release-binary-registrations`, see the
+  [release guide](docs/guides/cd-and-distribution.md#binary-artifacts)).
+  Affects the Linux x86_64 release archives that lane built: every release
+  from 0.8.23 through 0.9.14, with two exceptions: 0.8.50 (the other build
+  lane; not affected, by reading) and 0.8.30 (not established: treat it as
+  affected until it is). This is read from the run history for each of the
+  44 releases; no archive was downloaded for this. By run: 0.8.52, 0.9.0,
+  0.9.10, 0.9.13 and 0.9.14. The
+  macOS arm64 archive of 0.9.14 is not affected, by run. The Linux aarch64,
+  Intel macOS and Windows archives and builds from source with Cargo
+  (`cargo install`, a host that embeds the crates) link another way and are
+  not affected, by reading; a Cargo build of the 0.9.14 sources carries
+  every registration, by run. The known issue on the
+  [0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
+  says what to do on an affected release.
 
 - `meerkat-copilot` (GitHub Copilot device sign-in): an account no longer
   keeps the model list and the API base of an earlier sign-in after a new
@@ -1846,6 +1891,16 @@ them.
 
 ### Security
 
+- Examples: a build of `examples/032-wasm-webcm-agent` no longer contains
+  provider keys. Its Vite config inlined `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY` and `GEMINI_API_KEY` from the environment for `vite build`
+  as well as for the dev server, so `npm run build` (or
+  `make -C examples web`) in a shell that held them wrote them in plain text
+  into `web/dist/assets/`. They are now inlined only by the local dev server.
+  Affects every release that ships the example, 0.4.2 through 0.9.14. For
+  what to do if you hosted or shared such a build, see the known issue on the
+  0.9.14 release page:
+  https://github.com/lukacf/meerkat/releases/tag/v0.9.14
 - `meerkat-core`, `rkat`: the configuration documents the engine writes are
   owner-only on Unix, whatever the process umask. They are a config document
   (`~/.rkat/config.toml`, a project's `.rkat/config.toml`, a realm's own
@@ -1997,6 +2052,21 @@ them.
   a name the mob does not hold, and nothing is forked. Before, `council`
   was not held to the audience. Affects 0.9.11 through 0.9.14.
 
+- Mob: a `mob_destroy` refused by the mob tells an agent nothing of a
+  member the host's member tool audience
+  (`MobBuilder::with_member_tool_audience`) hides from that agent. Before,
+  a destroy the mob refused because a member's state could not be restored
+  named that member, its session and the cause to every caller, in the
+  refusal's message and in its data. An agent is now answered such a
+  refusal whole only when it names a member the agent is shown. A refusal
+  whose fields can name no member (a count of pending cleanup, a closed
+  actor channel, the mob's own state) is answered whole as well. Every
+  other refusal the mob answers is answered to an agent as one fixed text
+  with no data, on a host with no audience too, and is logged whole on the
+  host. The host's own destroy is answered as before. The member lists of
+  the report `mob_destroy` answers an agent hold only members the agent
+  was shown when the destroy started. Affects 0.9.11 through 0.9.14.
+
 - `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486, in
   Cargo.lock and in the example workspaces' lockfiles. Releases through
   0.9.14 build with 1.1.5. `meerkat-core` depends on `rustix` directly and
@@ -2009,6 +2079,30 @@ them.
   crates Meerkat builds with only `xattr` does, and `tar`, the one crate
   that uses `xattr`, calls it only to set attributes while unpacking, so
   Meerkat's own use is not known to be affected.
+
+- Examples: a build of `examples/031-wasm-mini-diplomacy-sh` or
+  `examples/033-the-office-demo-sh` no longer contains provider keys. Both
+  pages pre-fill their key fields from `VITE_`-prefixed variables
+  (`VITE_ANTHROPIC_API_KEY`, `VITE_OPENAI_API_KEY`, `VITE_GEMINI_API_KEY`;
+  033 also `VITE_RKAT_ANTHROPIC_API_KEY`, `VITE_RKAT_OPENAI_API_KEY` and
+  `VITE_RKAT_GEMINI_API_KEY`), and `npm run build` (or
+  `make -C examples web`) wrote their values, in plain text, into
+  `web/dist/assets/`: 031 wrote every variable with the `VITE_` prefix that
+  was set, 033 the six key variables it reads. The READMEs did not mention
+  these variables, so a build is affected only if they were set in its
+  environment or in an env file Vite reads in `web/` (`.env`, `.env.local`,
+  `.env.production`, `.env.production.local`). In 0.4.4 only, the build of
+  033 also wrote `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `GEMINI_API_KEY`,
+  or their `RKAT_`-prefixed forms where those were set (confirmed by a build
+  of the 0.4.4 source). The `VITE_` prefix is now exposed only to the local
+  dev server; a build exposes only variables whose names start with
+  `VITE_BUILD_PUBLIC_`, so any other `VITE_` variable a build of these two
+  examples relied on is now empty in the built page. Affects every release
+  that ships the examples: 031 from 0.4.1 and 033 from 0.4.4, through
+  0.9.14 (read from the released sources; confirmed by a build of 0.9.14).
+  For what to do if you hosted or shared such a build, see the known issue
+  on the 0.9.14 release page:
+  https://github.com/lukacf/meerkat/releases/tag/v0.9.14
 
 ### Upgrade notes
 
@@ -2270,6 +2364,40 @@ them.
   member spec records are stated from the code of both releases, not from
   a run of 0.9.14.
 
+- Mob: an agent whose `mob_destroy` the mob refuses is now answered
+  `mob destroy refused. The destroy can be retried; the host's log has the
+  cause.`, with no data, for every refusal whose type does not show what it
+  names (an internal error's text, a pending lifecycle operation), also on
+  a host that installs no member tool audience. The host's log holds the
+  whole refusal at `warn`, with the mob's id; read the cause there. The
+  host's own destroy is answered as before.
+
+- Linux x86_64 release archives: the built-in skills and the capability
+  list are back (see Fixed), which changes what an agent started from that
+  download receives: the CLI, and the `rkat-rpc` the Python and TypeScript
+  SDKs download and start. The skill inventory is in its prompt again, so
+  prompt content and input token counts change on that platform against
+  the affected archives: every release from 0.8.23 through 0.9.14, with two
+  exceptions: 0.8.50 (the other build lane; not affected, by reading) and
+  0.8.30 (not established: treat it as affected until it is). With the
+  default configuration the first request
+  of a plain `rkat run` names all 6 built-in skills `rkat` lists by default
+  (none of them on 0.9.14) and is about 2.3 kB larger. `rkat run --skill
+  <built-in id>` loads the skill. Mob members and delegated members get
+  their `mob-communication` instructions and their `task-workflow` or
+  `workgraph-workflow` instructions. SDK calls that check a capability first
+  (`invoke_skill`, `has_capability`, `require_capability`) start working.
+  Project and user skills that declare `requires_capabilities`, which those
+  archives dropped without a message, load again. With the default
+  configuration and an empty project a binary lists this many built-in
+  skills: `rkat` 6, `rkat-rpc` 11, `rkat-rest` 7, `rkat-mcp` 11; the other
+  built-in skills require capabilities that surface leaves off by default.
+  A project's own copy of a built-in skill, kept under the built-in's id, is
+  harmless after the upgrade and not what `--skill <id>` loads:
+  `rkat skill list` shows the copy and the built-in side by side, both
+  active, and `rkat run --skill <id>` loads the built-in, not the copy,
+  without a message. The copy can be removed.
+
 ### Known limitations
 
 - An input queued behind a turn that fails at its start is not run. The
@@ -2398,6 +2526,19 @@ them.
   refusal's text only. The typed cause is on the Rust error
   (`MobError::MemberRestoreFailed`, `cause_data`). See the mobs guide for
   the member's state and how to recover.
+
+- Read from the source: a preloaded skill that cannot be resolved (a mistyped
+  name, a skill the build does not have, or a skill whose required
+  capability is off) is dropped without an error when a session is first
+  built, and the session starts without it. This applies to
+  `rkat run --skill`, JSON-RPC `session/create` (and the Python and
+  TypeScript SDK create calls), REST `POST /sessions`, the MCP server's
+  `meerkat_run`, a schedule's first occurrence and in-process mob member
+  spawns. The signs are a `skill_resolution_failed` event where the surface
+  delivers events and one warning in the server's log; `rkat run` itself
+  prints neither by default and, with `--verbose` or `RUST_LOG=warn`, only
+  the warning (by a run); when skills are disabled altogether there is
+  neither.
 
 - Until Connect 0.9.15 is published, Connect 0.9.14 is the Connect release
   for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in

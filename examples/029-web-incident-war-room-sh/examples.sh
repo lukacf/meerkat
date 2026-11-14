@@ -121,7 +121,7 @@ cat "$PROMPTS/incident-kickoff.md"
 
 echo ""
 echo "Serve locally:"
-echo "  cd '$WEB_OUT' && python3 -m http.server 4173"
+echo "  cd '$WEB_OUT' && python3 -m http.server 4173 --bind 127.0.0.1"
 echo ""
 echo "Then open:"
 echo "  http://127.0.0.1:4173"

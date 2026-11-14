@@ -20,7 +20,7 @@ const questions = normalizeQuestionSet({
 const request = normalizePendingApproval({ pending_id: "p1", action_id: "a1", action: "Deploy release", rationale: "Publish reviewed changes" })!;
 const approvals = (requests = [request]): PendingApprovalSnapshot => ({ scopeKey: "scope", status: "ready", requests, decisions: {}, readOnly: false });
 const sets = (extra: Partial<QuestionSetSnapshot> = {}): QuestionSetSnapshot => ({
-  scopeKey: "scope", status: "ready", sets: [questions], closed: [], decisions: {}, readOnly: false, ...extra,
+  scopeKey: "scope", status: "ready", sets: [questions], closed: [], decisions: {}, notices: [], slots: { [PENDING_ID]: 1 }, readOnly: false, ...extra,
 });
 
 describe("GatingInboxPanel question sets", () => {
@@ -88,6 +88,23 @@ describe("GatingInboxPanel question sets", () => {
     expect(view.queryByText(/question/i)).toBeNull();
     expect(view.getByTestId("gating-pending:p1")).toBeTruthy();
     expect(view.getByTestId("gating-tab:pending").textContent).toContain("1");
+  });
+
+  it("leaves one neutral line in the inbox when a set it showed is no longer listed", () => {
+    const value = (snapshot: QuestionSetSnapshot) => ({ snapshot, onAnswer: vi.fn(), onDismiss: vi.fn() });
+    const panel = (snapshot: QuestionSetSnapshot) => (
+      <GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={approvals()} questions={value(snapshot)} />
+    );
+    const view = render(panel(sets()));
+    expect(view.getByTestId(`question-set:${PENDING_ID}`)).toBeTruthy();
+    view.rerender(panel(sets({ sets: [], slots: {}, notices: [{ slot: 1, kind: "gone", atMs: 5 }] })));
+    expect(view.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
+    expect(view.getByTestId("question-set-notice").textContent).toBe("This question is no longer waiting for an answer.");
+    expect(view.queryByText("Release plan")).toBeNull();
+    expect(view.queryByText("Which region goes first?")).toBeNull();
+    // The set no longer counts with what waits; the approval still does.
+    expect(view.getByTestId("gating-tab:pending").textContent).toContain("1");
+    expect(view.getByTestId("gating-pending:p1")).toBeTruthy();
   });
 
   it("is unchanged without the question sets prop", () => {

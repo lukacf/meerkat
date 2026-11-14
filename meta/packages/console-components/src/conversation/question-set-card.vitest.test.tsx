@@ -9,7 +9,7 @@ import {
   type QuestionSetSnapshot,
 } from "../../../console-core/src/pending-questions";
 import { ConversationApprovals } from "./conversation-approvals";
-import { ConversationQuestionSets, QuestionSetCard, QuestionSetsProvider, type QuestionSetCardProps } from "./question-set-card";
+import { ConversationQuestionSets, QuestionSetCard, QuestionSetList, QuestionSetsProvider, type QuestionSetCardProps } from "./question-set-card";
 
 afterEach(cleanup);
 
@@ -198,16 +198,20 @@ describe("QuestionSetCard", () => {
     expect(view.queryByRole("button", { name: "Send answers" })).toBeNull();
   });
 
-  it("times out when the deadline passes on the clock or the set left the list at its deadline", () => {
-    const passed = show({ set: questions({ deadline_at_ms: Date.now() - 1_000 }) });
-    expect(passed.card.dataset.state).toBe("timed_out");
-    expect(passed.view.getByRole("status").textContent).toBe("Timed out");
-    expect(passed.view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent).toBe("This question set timed out before it was answered.");
-    expect(passed.view.queryByRole("button", { name: "Send answers" })).toBeNull();
-    expect((passed.view.getAllByRole("radio") as HTMLInputElement[]).every((input) => input.disabled)).toBe(true);
-    cleanup();
-    const closed = show({ closed: "timed_out" });
-    expect(closed.card.dataset.state).toBe("timed_out");
+  it("keeps a listed set answerable when the browser clock is past its deadline, and never says it timed out", () => {
+    const { view, card, onAnswer } = show({ set: questions({ deadline_at_ms: Date.now() - 60_000 }) });
+    expect(card.dataset.state).toBe("pending");
+    expect(view.getByRole("status").textContent).toBe("Answer needed");
+    // The deadline is the gateway's: past it on this clock the chip names the
+    // time and counts nothing down.
+    expect(view.getByTestId(`question-set-deadline:${PENDING_ID}`).textContent).toMatch(/^Answer by /);
+    expect(visibleText(card)).not.toMatch(/timed out|expired/i);
+    expect((view.getAllByRole("radio") as HTMLInputElement[]).every((input) => !input.disabled)).toBe(true);
+    fireEvent.click(radio(view, /^Europe/));
+    expect(send(view).disabled).toBe(false);
+    expect(dismiss(view).disabled).toBe(false);
+    fireEvent.click(send(view));
+    expect(onAnswer).toHaveBeenCalledWith(PENDING_ID, { "q-region": { kind: "choice", choiceId: "c-eu" } });
   });
 
   it("tells a caller who is not signed in as a person to sign in, with the questions shown and disabled", () => {
@@ -258,7 +262,7 @@ describe("QuestionSetCard", () => {
     const failed = show({ decision: { phase: "failed", action: "answer", error: "network" } });
     expect(failed.card.dataset.state).toBe("failed");
     expect(failed.view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent)
-      .toBe("The answer may not have been sent. This card updates when the gateway answers again.");
+      .toBe("The Console could not confirm that your answer arrived. If this question is still listed after the next refresh, send your answer again.");
     cleanup();
     const stale = show({ resourceStatus: "stale" });
     expect(stale.card.dataset.state).toBe("stale");
@@ -300,12 +304,79 @@ describe("QuestionSetCard", () => {
   });
 });
 
-describe("ConversationQuestionSets", () => {
-  const snapshot = (extra: Partial<QuestionSetSnapshot> = {}): QuestionSetSnapshot => ({
-    scopeKey: "a", status: "ready", readOnly: false, decisions: {}, closed: [],
-    sets: [questions(), questions({ pending_id: `decision:${"c".repeat(64)}`, origin: { identity: "identity:billing" }, title: "Billing check" })],
-    ...extra,
+const BILLING_ID = `decision:${"c".repeat(64)}`;
+/** Another agent's set, with no word or id of the first one. */
+const billing = () => questions({
+  pending_id: BILLING_ID, origin: { identity: "identity:billing" }, title: "Billing check", subject_digest: `sha256:${"d".repeat(64)}`,
+  questions: [{ id: "b-refund", prompt: "Refund the order?", choices: [{ id: "b-yes", label: "Yes" }, { id: "b-no", label: "No" }] }],
+});
+const listSnapshot = (extra: Partial<QuestionSetSnapshot> = {}): QuestionSetSnapshot => ({
+  scopeKey: "a", status: "ready", readOnly: false, decisions: {}, closed: [], notices: [],
+  sets: [questions(), billing()],
+  slots: { [PENDING_ID]: 1, [BILLING_ID]: 2 },
+  ...extra,
+});
+
+describe("QuestionSetList", () => {
+  const list = (snapshot: QuestionSetSnapshot, identity?: string, testId = "list") => (
+    <AgentDirectoryProvider directory={directory}>
+      <QuestionSetList view={{ snapshot, onAnswer: vi.fn(), onDismiss: vi.fn() }} identity={identity} testId={testId} />
+    </AgentDirectoryProvider>
+  );
+  const SET_WORDS = [
+    PENDING_ID, IDENTITY, DIGEST, "Release plan", "Release Planner", "Which region goes first?", "When should it start?",
+    "Europe", "United States", "Tonight", "q-region", "q-start", "c-eu", "c-night",
+  ];
+
+  it("takes the card of a set that left along and leaves one neutral line that names nothing of it", () => {
+    const view = render(list(listSnapshot()));
+    expect(view.getByTestId(`question-set:${PENDING_ID}`)).toBeTruthy();
+    expect(view.queryByTestId("question-set-notice")).toBeNull();
+    view.rerender(list(listSnapshot({ sets: [billing()], slots: { [BILLING_ID]: 2 }, notices: [{ slot: 1, kind: "gone", atMs: 5 }] })));
+    expect(view.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
+    expect(view.getByTestId(`question-set:${BILLING_ID}`)).toBeTruthy();
+    const lines = view.getAllByTestId("question-set-notice");
+    expect(lines.length).toBe(1);
+    expect(lines[0].textContent).toBe("This question is no longer waiting for an answer.");
+    expect(lines[0].getAttribute("role")).toBe("status");
+    // Nothing of the set is left in the page: no name, text or id, shown or hidden.
+    for (const word of SET_WORDS) expect(view.container.innerHTML).not.toContain(word);
+    expect(view.container.querySelector("[data-state='not_permitted'], [data-state='timed_out']")).toBeNull();
   });
+
+  it("says in the line when the set left after a send the Console could not confirm", () => {
+    const view = render(list(listSnapshot({ decisions: { [PENDING_ID]: { phase: "failed", action: "answer", error: "network" } } })));
+    view.rerender(list(listSnapshot({ sets: [], slots: {}, notices: [{ slot: 1, kind: "sent_unconfirmed", atMs: 5 }] })));
+    expect(view.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
+    expect(view.getByTestId("question-set-notice").textContent)
+      .toBe("This question is no longer waiting for an answer. The Console could not confirm whether your answer was the one that arrived.");
+    for (const word of SET_WORDS) expect(view.container.innerHTML).not.toContain(word);
+  });
+
+  it("shows the line only where the card was shown, and at most one", () => {
+    const mine = render(list(listSnapshot(), IDENTITY, "mine"));
+    const other = render(list(listSnapshot(), "identity:billing", "other"));
+    const left = listSnapshot({ sets: [], slots: {}, notices: [{ slot: 2, kind: "gone", atMs: 9 }, { slot: 1, kind: "sent_unconfirmed", atMs: 5 }] });
+    mine.rerender(list(left, IDENTITY, "mine"));
+    other.rerender(list(left, "identity:billing", "other"));
+    expect(within(mine.getByTestId("mine")).getAllByTestId("question-set-notice").map((line) => line.textContent))
+      .toEqual(["This question is no longer waiting for an answer. The Console could not confirm whether your answer was the one that arrived."]);
+    expect(within(other.getByTestId("other")).getAllByTestId("question-set-notice").map((line) => line.textContent))
+      .toEqual(["This question is no longer waiting for an answer."]);
+    cleanup();
+    // The inbox showed both cards: it shows one line, the newest.
+    const inbox = render(list(listSnapshot()));
+    inbox.rerender(list(left));
+    expect(inbox.getAllByTestId("question-set-notice").map((line) => line.textContent)).toEqual(["This question is no longer waiting for an answer."]);
+    cleanup();
+    // A list that never showed the card says nothing of it.
+    const late = render(list(left));
+    expect(late.container.textContent).toBe("");
+  });
+});
+
+describe("ConversationQuestionSets", () => {
+  const snapshot = listSnapshot;
 
   it("shows the sets of the conversation's agent, and answers through the provider", () => {
     const onAnswer = vi.fn(), onDismiss = vi.fn();

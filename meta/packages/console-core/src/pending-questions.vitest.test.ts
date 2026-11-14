@@ -59,6 +59,15 @@ const set = (): QuestionSet => normalizeQuestionSet(wire())!;
 const rpcError = (code: number, kind?: string, message = "refused by the gateway") => Object.assign(new Error(message), {
   rpcError: { code, message, ...(kind ? { data: { kind } } : {}) },
 });
+/** Whether a snapshot holds nothing of the wire set: no id, asking agent,
+ * digest, title, prompt, label or question and choice id. */
+const nothingKept = (snapshot: unknown) => {
+  const held = JSON.stringify(snapshot);
+  return ![
+    PENDING_ID, `decision:${"c".repeat(64)}`, "identity:release-planner", DIGEST, "Release plan",
+    "Which region goes first?", "When should it start?", "Europe", "United States", "Tonight", "\"q1\"", "\"q2\"", "\"eu\"", "\"night\"",
+  ].some((word) => held.includes(word));
+};
 
 describe("normalizeQuestionSet", () => {
   it("reads a valid set", () => {
@@ -372,16 +381,106 @@ describe("createQuestionSetResource", () => {
     resource.dispose();
   });
 
-  it("keeps a set that left the list at its deadline as timed out, and forgets one that left earlier", async () => {
-    const c = clock(); let listed: unknown[] = [wire(), wire(`decision:${"c".repeat(64)}`, { deadline_at_ms: 9_000_000 })];
+  it("drops a set the read no longer lists, before or after its deadline on the browser clock, and keeps nothing of it", async () => {
+    const other = `decision:${"c".repeat(64)}`;
+    const c = clock(); let listed: unknown[] = [wire(), wire(other, { deadline_at_ms: 9_000_000 })];
     const resource = createQuestionSetResource({ scopeKey: "a", environment: c.environment, load: async () => ({ question_sets: listed }), decide: async () => ({}) });
     await tick();
+    // Past the first set's deadline on this clock, before the second's.
     c.advance(3_600_000); await tick();
+    // The gateway still lists both: the browser clock ends neither.
+    expect(resource.getSnapshot().sets.map((entry) => entry.pendingId)).toEqual([PENDING_ID, other]);
     listed = [];
     await resource.refresh();
     const snapshot = resource.getSnapshot();
     expect(snapshot.sets).toEqual([]);
-    expect(snapshot.closed.map((entry) => [entry.set.pendingId, entry.outcome])).toEqual([[PENDING_ID, "timed_out"]]);
+    expect(snapshot.closed).toEqual([]);
+    expect(snapshot.decisions).toEqual({});
+    expect(questionSetEntries(snapshot)).toEqual([]);
+    // One neutral line per set that left: a kind, a time and the card's own
+    // place on this page, nothing of the set.
+    expect(snapshot.notices.map((notice) => notice.kind)).toEqual(["gone", "gone"]);
+    expect(nothingKept(snapshot)).toBe(true);
+    resource.dispose();
+  });
+
+  it("removes a set whose decide the gateway answered as an id that is not pending, once the read no longer lists it", async () => {
+    const c = clock(); let hidden = false; const phases: string[] = [];
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: hidden ? [] : [wire()] }),
+      decide: async () => { hidden = true; throw rpcError(-32602, undefined, "gating decision failed"); },
+    });
+    await tick();
+    resource.subscribe(() => { phases.push(resource.getSnapshot().decisions[PENDING_ID]?.phase ?? "none"); });
+    await resource.answer(PENDING_ID, { q2: { kind: "free_text", text: "After the freeze" } });
+    const snapshot = resource.getSnapshot();
+    expect(snapshot.sets).toEqual([]);
+    expect(snapshot.closed).toEqual([]);
+    expect(snapshot.decisions).toEqual({});
+    expect(snapshot.notices.map((notice) => notice.kind)).toEqual(["gone"]);
+    expect(nothingKept(snapshot)).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toContain("After the freeze");
+    expect(JSON.stringify(snapshot)).not.toContain("gating decision failed");
+    // The set was never shown as refused: it read as sending, then it was gone.
+    expect(new Set(phases)).toEqual(new Set(["submitting", "none"]));
+    // It stays gone on the reads that follow.
+    c.advance(15_000); await tick();
+    expect(questionSetEntries(resource.getSnapshot())).toEqual([]);
+    resource.dispose();
+  });
+
+  it("keeps a set the gateway still lists after it refused the answer, with the gateway's own message", async () => {
+    const c = clock();
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: [wire()] }),
+      decide: async () => { throw rpcError(-32602, undefined, "answers: unknown choice"); },
+    });
+    await tick(); await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    const snapshot = resource.getSnapshot();
+    expect(snapshot.sets.map((entry) => entry.pendingId)).toEqual([PENDING_ID]);
+    expect(snapshot.decisions[PENDING_ID]).toMatchObject({ phase: "refused", refusal: { detail: "answers: unknown choice" } });
+    expect(questionSetEntries(snapshot).map((entry) => entry.set.pendingId)).toEqual([PENDING_ID]);
+    resource.dispose();
+  });
+
+  it("says so in one line when a set leaves after a send it could not confirm", async () => {
+    const c = clock(); let listed = true;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: listed ? [wire()] : [] }),
+      decide: async () => { throw new Error("network"); },
+    });
+    await tick(); await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    expect(resource.getSnapshot().decisions[PENDING_ID].phase).toBe("failed");
+    listed = false; c.advance(15_000); await tick();
+    const snapshot = resource.getSnapshot();
+    expect(snapshot.sets).toEqual([]);
+    expect(snapshot.closed).toEqual([]);
+    expect(snapshot.decisions).toEqual({});
+    expect(snapshot.notices.map((notice) => notice.kind)).toEqual(["sent_unconfirmed"]);
+    expect(nothingKept(snapshot)).toBe(true);
+    resource.dispose();
+  });
+
+  it("drops a set answered in another tab at the next poll, and its line a minute later", async () => {
+    const c = clock(); let listed = true;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: listed ? [wire()] : [] }),
+      decide: async () => ({}),
+    });
+    await tick();
+    const slot = questionSetEntries(resource.getSnapshot())[0].slot;
+    expect(typeof slot).toBe("number");
+    listed = false; c.advance(15_000); await tick();
+    expect(resource.getSnapshot().sets).toEqual([]);
+    expect(resource.getSnapshot().notices).toEqual([{ slot, kind: "gone", atMs: 15_000 }]);
+    c.advance(45_000); await tick();
+    expect(resource.getSnapshot().notices.length).toBe(1);
+    c.advance(15_000); await tick();
+    expect(resource.getSnapshot().notices).toEqual([]);
     resource.dispose();
   });
 

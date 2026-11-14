@@ -10430,6 +10430,64 @@ mod tests {
         ));
     }
 
+    /// A typed turn is not a spoken request. Its rows reach the voice as
+    /// quiet text-chat context; when the provider then creates a client
+    /// delegation and the user has said nothing since the previous spoken
+    /// request's own delegation, that earlier request must not be handed to
+    /// the executor a second time: the user asked for it once, and the turn
+    /// after it was typed. (Seen in the Live gate's fork-and-merge scenario:
+    /// after the typed correction the voice model delegated with nothing
+    /// spoken, and the doubling request ran again.)
+    #[test]
+    fn a_delegation_after_a_text_chat_row_with_nothing_spoken_does_not_rerun_the_spoken_request() {
+        let mut state = SessionState::default();
+        // The spoken request and its delegation.
+        state
+            .apply_frame(frame(input_delta("double the number")))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_spoken", "client")))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span("one moment", 1500.0, 2000.0)))
+            .unwrap();
+        drain(&mut state);
+        // The typed turn's rows on the quiet lane: the prompt row goes out,
+        // the model starts to speak, and the reply row is held behind its
+        // audible response.
+        let (prompt, events) =
+            text_chat_append(&mut state, "From the text chat: change the number to 21");
+        assert!(
+            state.hold_or_send_text_chat(prompt, events).is_some(),
+            "sent: nothing is audible"
+        );
+        model_output(&mut state, true, 3);
+        let (reply, events) =
+            text_chat_append(&mut state, "From the text chat: The numbers are 21 and 42.");
+        assert!(
+            state.hold_or_send_text_chat(reply, events).is_none(),
+            "held while the response is audible"
+        );
+        drain(&mut state);
+        // The provider creates a client delegation; the user has said
+        // nothing since the spoken request's own delegation.
+        state
+            .apply_frame(frame(delegation_created("dlg_after_typed", "client")))
+            .unwrap();
+        let observed = drain(&mut state);
+        let rerun = observed.iter().any(|observation| {
+            matches!(
+                observation,
+                GptLiveBrokerObservation::ClientDelegationFinal { request_transcript, .. }
+                    if request_transcript == "double the number"
+            )
+        });
+        assert!(
+            !rerun,
+            "the spoken request before the typed turn was handed to the executor a second time: {observed:?}"
+        );
+    }
+
     #[test]
     fn context_fragments_cut_at_whitespace_and_rejoin_exactly() {
         let text = "alpha ".repeat(120) + "omega";

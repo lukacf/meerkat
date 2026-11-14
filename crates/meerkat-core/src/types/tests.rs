@@ -3431,3 +3431,44 @@ fn mcp_notice_block_derives_settled_from_its_phase_on_decode() {
         }
     }
 }
+
+/// The values the agent loop and the session task hold inline stay as small
+/// as they are. At opt-level 0 every temporary of an event, of provider
+/// params or of a run result has its own stack slot in a poll frame, the
+/// frames of one turn nest, and an embedding host's worker stack is bounded
+/// (the stack-budget rows of `meerkat-mob-mcp` run a restart on 1.5 MiB). A
+/// payload added inline to one of these values grows every such frame: box
+/// it at its definition instead (a `Box<T>` serializes as `T`). The bounds
+/// are the sizes on a 64-bit target; lower one when a value shrinks.
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn the_values_the_agent_loop_holds_inline_keep_their_sizes() {
+    use std::mem::size_of;
+
+    let sizes = [
+        (
+            "ProviderParamsOverride",
+            size_of::<crate::lifecycle::run_primitive::ProviderParamsOverride>(),
+            304,
+        ),
+        (
+            "SessionLlmIdentity",
+            size_of::<crate::SessionLlmIdentity>(),
+            440,
+        ),
+        ("AgentEvent", size_of::<crate::AgentEvent>(), 1024),
+        ("RunResult", size_of::<RunResult>(), 576),
+        ("AgentError", size_of::<crate::error::AgentError>(), 96),
+        (
+            "TurnErrorMetadata",
+            size_of::<crate::TurnErrorMetadata>(),
+            160,
+        ),
+    ];
+    let over: Vec<String> = sizes
+        .iter()
+        .filter(|(_, size, bound)| size > bound)
+        .map(|(name, size, bound)| format!("{name} is {size} bytes, over {bound}"))
+        .collect();
+    assert!(over.is_empty(), "{over:?} (all: {sizes:?})");
+}

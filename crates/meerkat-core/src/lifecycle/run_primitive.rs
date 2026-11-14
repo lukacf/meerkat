@@ -1121,10 +1121,14 @@ pub struct ProviderParamsOverride {
     /// request's own copy beside the route's typed field; the provider
     /// adapter compares it with the route the request is bound to and asks
     /// for a new preparation when they differ. Never serialized: it cannot
-    /// be persisted into session defaults or sent on a wire.
+    /// be persisted into session defaults or sent on a wire. Boxed: these
+    /// params are held inline by a session's identity, by a turn's metadata
+    /// and by the events that carry an identity, and at opt-level 0 every
+    /// temporary of one of those has its own stack slot; only a request's
+    /// own copy ever sets this field.
     #[serde(skip)]
     #[cfg_attr(feature = "schema", schemars(skip))]
-    pub reasoning_route_witness: Option<crate::ReasoningRouteObservation>,
+    pub reasoning_route_witness: Option<Box<crate::ReasoningRouteObservation>>,
 }
 
 impl ProviderParamsOverride {

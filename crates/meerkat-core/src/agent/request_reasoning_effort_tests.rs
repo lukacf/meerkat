@@ -98,7 +98,7 @@ impl Served {
             self.openai_tag().reasoning_effort_resolved,
             "the level is marked as resolved for the route"
         );
-        assert_eq!(params.reasoning_route_witness.as_ref(), Some(route));
+        assert_eq!(params.reasoning_route_witness.as_deref(), Some(route));
     }
 }
 
@@ -870,7 +870,7 @@ async fn a_route_change_resolves_the_level_again_before_sending() {
         ) -> Result<Arc<dyn meerkat_core::AgentLlmRequestAttempt>, AgentError> {
             let witness = provider_params
                 .as_ref()
-                .and_then(|params| params.reasoning_route_witness.clone());
+                .and_then(|params| params.reasoning_route_witness.as_deref().cloned());
             if witness != self.inner.reasoning_route() {
                 self.stale_preparations.fetch_add(1, Ordering::SeqCst);
                 return Err(AgentError::llm(

@@ -143,7 +143,7 @@ pub(crate) fn resolve_request_reasoning_effort(
         .map_err(Box::new)?,
     };
     if let Some(copy) = copy.as_mut() {
-        copy.reasoning_route_witness = target.observation.clone();
+        copy.reasoning_route_witness = target.observation.clone().map(Box::new);
     }
     *params = copy;
     Ok(Some(resolution))

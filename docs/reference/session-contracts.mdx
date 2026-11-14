@@ -100,7 +100,7 @@ Committed create failure must not be silently rewritten to “cancelled” or cl
   settled that run.
 - Committed success must not be rewritten to cancellation.
 - Runtime-backed surfaces may hot-swap supported live settings on an existing session where the surface contract says that is allowed.
-- Runtime-backed surfaces do not race `start_turn`: they admit each turn through the session's runtime queue, so a surface turn that arrives while another is running waits behind it and then runs.
+- Runtime-backed surfaces do not race `start_turn`: they admit each turn through the session's runtime queue, so a surface turn that arrives while another is running waits behind it and then runs. From 0.9.15 one kind of JSON-RPC turn is the exception: a turn that would change the session's model settings beside a provider-neutral reasoning effort level is answered `SESSION_BUSY` at once while the session has unfinished work (see [Reasoning effort](/concepts/providers#reasoning-effort)).
 
 <Warning>
 The runtime may coalesce multiple queued `Steer` inputs into one agent turn.

@@ -18414,7 +18414,7 @@ impl MobHandle {
         self.member_admission_backlog.snapshot()
     }
 
-    /// Cancel a previously submitted unit of work.
+    /// Always refused: per-unit cancellation is unsupported and nothing is cancelled.
     ///
     /// Per-unit cancellation has no backing work-tracking ledger, so this
     /// always fails closed with [`MobError::WorkCancellationUnsupported`]

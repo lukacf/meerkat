@@ -1488,8 +1488,14 @@ adopted instead of respawned, a respawn. `customize_build` runs:
   the customized spawn spec. It builds nothing, except a declared role
   migration's move of the member onto its session, which builds the member
   from it: a seat that revives the session of a member that was retired
-  after it was built (a respawn, for example) is a Dormant seat and builds
-  nothing.
+  after it was built (an identity listed again after its member was
+  retired, for example) is a Dormant seat and builds nothing. From 0.9.15
+  a respawn seats the identity's successor in one step, and
+  `customize_build` runs once for that seat, a Dormant seat on the session
+  the member keeps, with no archive in between; before 0.9.15, and still
+  for a member the same-session step does not serve (see Known limitations
+  in the changelog), a respawn retires the member and revives its archived
+  session with such a seat.
   `resolved_tools`, which reports the tools a build actually resolved,
   answers `no_build_recorded` until the member's first build. Your
   `after_create(identity,
@@ -1504,10 +1510,13 @@ adopted instead of respawned, a respawn. `customize_build` runs:
   and at start for the members that must be live then. No `after_create`
   follows a build.
 
-A respawn of a built member seats it again on the session the mob kept
-archived when it retired it, Dormant and building nothing, and the wake that
+From 0.9.15 a respawn of a built member seats its successor on the session
+it keeps, Dormant and building nothing, and the wake that
 follows builds it once, as for a lazily seated identity: `after_create` is
-called once, with the session the respawn keeps. A materialization, a warm
+called once, with the session the respawn keeps. Before 0.9.15, and still
+for a member the same-session step does not serve (see Known limitations in
+the changelog), the member is retired first and seated again on the session
+the mob kept archived. A materialization, a warm
 or a delivery of an identity the mob seats again on its archived session
 builds the member once, at its wake, and the roster pass builds nothing. A
 lazily seated identity (one seated with nothing built yet) gets two

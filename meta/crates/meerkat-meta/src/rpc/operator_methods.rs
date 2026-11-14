@@ -3207,6 +3207,101 @@ comms = true
         harness.teardown().await;
     }
 
+    /// A host customizer that refuses every build.
+    struct RefusesBuilds;
+
+    #[async_trait]
+    impl crate::identity_first::contracts::AgentCustomizer for RefusesBuilds {
+        async fn customize_build(
+            &self,
+            _context: &crate::identity_first::AgentBuildContext,
+            _spec: &DurableAgentSpec,
+            _draft: &mut crate::identity_first::AgentBuildDraft,
+        ) -> Result<(), crate::identity_first::CustomizerError> {
+            Err(crate::identity_first::CustomizerError::BuildFailed(
+                "the host refuses the build".to_string(),
+            ))
+        }
+    }
+
+    /// `meta/compact_member` on a configured identity whose host refuses the
+    /// build the verb's rebuild asks for, over the production bridge: the
+    /// verb fails at its first rebuild, and nothing of the identity has
+    /// changed. Core still holds its member on the session it had, and that
+    /// session does not read archived, by the reading a start's restore
+    /// takes of a session that owns mobs.
+    ///
+    /// RED when the rebuild retires a configured identity's member before
+    /// its wake: the wake's seat is then refused, Core holds no member, and
+    /// the session reads archived.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_member_whose_rebuild_the_host_refuses_keeps_the_member_on_its_session() {
+        let harness = operator_verb_harness("worker:main", "operator-compact-refused").await;
+        harness.run_turn("a first turn".to_string()).await;
+        let member =
+            crate::member_comms_id::roster_member_id_for_identity(harness.identity.as_str());
+        let seated = async || {
+            harness
+                .runtime
+                .mob_handle()
+                .get_member(&member)
+                .await
+                .expect("Core's roster reads")
+                .and_then(|entry| entry.bridge_session_id().cloned())
+        };
+        let session = seated().await.expect("Core holds the member on a session");
+        let observed = async || {
+            harness
+                .concrete
+                .observe_live_durable_source(&session)
+                .await
+                .expect("the session's durable source is observed")
+        };
+        assert!(
+            matches!(
+                observed().await,
+                meerkat_session::LiveDurableSourceObservation::Committed { .. }
+            ),
+            "before the verb the session reads committed"
+        );
+        harness
+            .identity_runtime
+            .set_agent_customizer(Some(Arc::new(RefusesBuilds)
+                as Arc<dyn crate::identity_first::contracts::AgentCustomizer>))
+            .await;
+
+        let response = rpc(
+            &harness,
+            "meta/compact_member",
+            serde_json::json!({
+                "identity": harness.member_alias,
+                "floor_tokens": 256,
+                "timeout_ms": 30_000,
+            }),
+        )
+        .await;
+
+        assert!(
+            response
+                .to_string()
+                .contains("compact_member_rebuild_failed"),
+            "the verb fails at its rebuild: {response:#?}"
+        );
+        let after = (seated().await, observed().await);
+        assert!(
+            matches!(
+                &after,
+                (
+                    Some(held),
+                    meerkat_session::LiveDurableSourceObservation::Committed { .. }
+                ) if *held == session
+            ),
+            "Core still holds the member on the session it had, and the session does not read \
+             archived: (the member's session, the session's durable source) = {after:?}"
+        );
+        harness.teardown().await;
+    }
+
     /// `meta/compact_member` with a compaction floor serves an identity whose
     /// record is its row in the mob's identity store as it serves a
     /// configured one, over the production bridge and its own floor

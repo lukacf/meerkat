@@ -23,6 +23,10 @@ pub enum LiveDurableSourceObservation {
     /// The store holds an absorbing archive terminal for the session: the
     /// catalog entry's lifecycle terminal, or a retired/destroyed lifecycle
     /// row.
+    ///
+    /// A retired mob member's session reads as archived too: its retirement
+    /// archives its session. The mobs an archived session owns end with it, at
+    /// the next start of the host.
     Archived,
     /// No current durable session authority exists for the session.
     Absent,

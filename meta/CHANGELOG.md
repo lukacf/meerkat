@@ -189,6 +189,9 @@ Security, Upgrade and Changed.
   `UnifiedRuntimeBuilder` and both gateway binaries complete the bootstrap
   themselves.
 
+- Hosts whose customizer has side effects: see Known limitations, respawn
+  during a pending role move.
+
 - The published 0.9.14 Meta Python and TypeScript SDKs (the source of tag
   `meta-v0.9.14`) were run against a development build of this release's
   gateway with no provider key: every row of their own suites that starts a
@@ -974,6 +977,29 @@ Security, Upgrade and Changed.
   reads the records. It was accepted before,
   and such an agent then failed each restore with a profile-not-found
   reason.
+- A respawn hands the inputs queued on the member to its successor, for
+  the members the respawn fix serves (see Fixed). A prompt sent just
+  before a respawn now runs afterwards, once, on the respawned identity;
+  in 0.9.14 it never ran. A host that used a respawn to discard queued
+  prompts must withdraw them another way. Core hands them over as its
+  same-session successor does: the durable prompts that are neither
+  directed nor bound to an objective are kept and run on the successor's
+  first wake, every other queued input ends stopped, and the turn in
+  flight is cancelled. A kept prompt runs only if the successor wakes
+  within 15 minutes of the respawn: after that it ends as expired and
+  does not run, so a respawn whose wake fails and whose identity is woken
+  later than that loses the prompt, with a typed answer. A sender that
+  waits for a kept prompt's completion is answered at the respawn that
+  the input stays queued and is not to be sent again (Core's
+  `MemberInputRequeuedAcrossStop`): sending it again would run it twice.
+
+  The successor's seat is also composed earlier than in 0.9.14: the
+  host's customizer is asked for it before the member is replaced. The
+  tools that answer publishes therefore reach the identity while its
+  earlier member is still live, and they stay published when Core then
+  refuses the respawn because another lifecycle operation of the member
+  is in progress (read from the source).
+
 - On the Console, a read, a plan and a change of one agent
   (`meta/identity/get`, `plan`, `update`, `archive`, `unarchive`, `remove`
   and `adopt`) answer an agent the caller may not view exactly as a name no
@@ -1107,9 +1133,9 @@ Security, Upgrade and Changed.
   edges an identity's row declares; default none), `holds_identity_entry`
   (whether Core holds a member id as an identity entry; default `false`)
   and `respawn_member_on_own_session` (Core's same-session successor;
-  default a refusal). A host's own wrapper of a session bridge forwards
-  them to the bridge it wraps. The identity runtime no longer calls
-  `created_identities`.
+  default `BridgeError::Unsupported`). A host's own wrapper of a session
+  bridge forwards them to the bridge it wraps. The identity runtime no
+  longer calls `created_identities`.
 
 - A held add (`IdentityFirstRuntimeContext::add_member_held`) of a name an
   identity holds through its row answers
@@ -1231,6 +1257,88 @@ Security, Upgrade and Changed.
   `activate_without_identity_context`, settle that the composition has no
   customizer and ask Core once to seat them from their records (see
   Upgrade).
+
+- A respawn of an identity keeps the mobs its session owns, for the
+  served members named below. In Meta 0.9.9 through 0.9.14, on a gateway
+  or a host that keeps its state on disk, a
+  respawn whose wake failed (the provider or a credential was unavailable,
+  or the host's build refused it), or whose process ended before the
+  identity had woken again, was followed at the next start by the loss of
+  the mobs the identity's session owned: the child mobs its agent created
+  with `mob_create`, with their members, and its implicit mob, which holds
+  its delegates and forks. The identity, its conversation and its memory
+  were kept. A respawn that completed lost nothing, and neither did one
+  whose identity woke again on its session before the process stopped.
+  Mobs lost this way are not restored by the upgrade. `meta/respawn`
+  (`MetaRuntime.respawn` in both SDKs, `IdentityRuntime::respawn`), the
+  Console's respawn and the two rebuilds of `meta/compact_member` were
+  affected: all of them end the member's incarnation through one shared
+  step. For the respawn the loss and the fix are confirmed by a test. For
+  the compact call, that its rebuild takes the shared step is confirmed
+  by a test (`a_roster_identitys_incarnation_ends_through_cores_one_step_successor`,
+  and `compact_member_whose_rebuild_the_host_refuses_keeps_the_member_on_its_session`,
+  which runs the call and reads that the member stays on its session and
+  the session does not read archived); the loss of mobs across a restart
+  through the compact call is read from the source. Every identity of
+  0.9.9 through 0.9.14 is a configured one, so every identity of those
+  releases was affected. Agents created at run time are new in 0.9.15
+  and were never affected: their respawn and the compact call's rebuilds
+  have used the one step since they exist. On 0.9.9 and 0.9.10 a gateway could enter the state by
+  itself: at each roster compile it respawned, once, every listed
+  identity whose live member had been created before an upgrade from an
+  older release and had not been respawned since. A respawn, the
+  Console's and the rebuilds now replace the member by its successor on
+  the same session in one step in Core, as they already did for an agent
+  created at run time: the identity is never without a member, and after
+  a failed wake it stays seated on the session it had, its next delivery
+  wakes it, and a restart keeps what its session owns. The host's
+  customizer is asked as before: once for the successor's seat, whose
+  build is composed before Core is asked (a build the host refuses now
+  refuses the respawn before anything changes, where it used to leave the
+  identity without a member), and once for its build; `after_create` is
+  told once, of the session the respawn keeps. That is the count of
+  0.9.14 (two calls: confirmed by a test for a served member; Known
+  limitations names one case that can differ). The successor is seated
+  with the customizer's current answer, as the seat of 0.9.14 was: its
+  labels and its profile and model overrides. A session a build already
+  created keeps the context, the instructions and the system prompt its
+  builds recorded, as in 0.9.14, and a member that was seated and never
+  built takes the current answer whole at its first build (its system
+  prompt, instructions and context: confirmed by a test; the inputs that
+  live in the process, such as a compaction curator, reach that build
+  through the build preparation, as after a restart: read from the
+  source).
+  - Served members: every configured identity whose member runs in this
+    process on a session the gateway's store keeps, over the stock
+    session bridge. That is the stock composition over a persistent state
+    directory.
+  - Not served, and handled as in 0.9.14 (the member is retired and then
+    woken; a line is logged each time, with the cause: a warning unless
+    the member is never exposed). Still exposed
+    to the loss (see Known limitations): an identity served through a
+    host's own `SessionBridge` that does not implement
+    `respawn_member_on_own_session` or does not say that its sessions
+    outlive their members (`session_outlives_member`), and a member
+    Core's same-session step refuses (its session's creation record or
+    spawn continuity cannot be read, for example). The host's customizer
+    is asked twice for such a member too: the seat composed for the step
+    seats the identity again at the wake (that the seat is composed once
+    is confirmed by a test over a test bridge; the count of two, with the
+    build's call, is read from the source: no stock composition reaches
+    this path). Unchanged, exposure not established: a
+    member placed on another host. Never exposed: a member whose sessions
+    are kept in memory only (`meta/respawn` refuses such a member before
+    anything is retired, as before) and a member without a session. Fork
+    children and side chats are not respawned.
+  - The inputs queued on a served member are handed to its successor
+    (see Changed).
+  - Rust: `SessionBridge::respawn_member_on_own_session` takes the
+    identity's spec and, for an identity the host's roster holds, the
+    seat's build the host composed (`Some(draft)`; `None` for an agent
+    created at run time, seated with its row's record), and its default
+    answers `BridgeError::Unsupported`. It uses the new
+    `MemberRespawn::with_profile_override`, `with_model_override` and
+    `with_build_inputs_of` of Meerkat's mob (see Meerkat's changelog).
 
 - A name an agent holds through its record in the mob's identity store
   that the host's roster lists too (the host adopted the agent into the
@@ -1650,6 +1758,62 @@ Security, Upgrade and Changed.
   change how such an agent runs, set the other explicit value
   (`autonomous_host` or `turn_driven`); clearing an override is not offered
   in this release.
+- The loss of an identity's mobs after a respawn (see Fixed) remains for
+  a member the fix does not serve whose session a store keeps. A member
+  the fix does not serve is retired and then woken, as in 0.9.14, and
+  each time one line is logged that begins "no same-session successor
+  serves the identity's member, so it is retired and then woken" and
+  carries the identity, its session, the step and a `cause` field. The
+  rest of the line differs by cause, as below. A cause is marked
+  "confirmed by a test" where a test confirms that the member is retired
+  and the line is logged at that level with that cause, and "read from
+  the source" otherwise.
+  - Exposed. The line is a warning that goes on: "until the wake succeeds
+    its session reads archived, and a restart in between ends the mobs
+    the session owns. Do not stop this process before the identity has
+    woken". It is logged for a host's own session bridge that lacks an
+    answer or the step, and for every refusal of Core's same-session
+    step. The list is open; for example:
+    - `its session bridge does not say whether the session outlives its
+      member (...)`: an identity served through a host's own
+      `SessionBridge` without that answer (confirmed by a test);
+    - `this session bridge does not implement
+      respawn_member_on_own_session`: an identity served through a host's
+      own `SessionBridge` without the same-session step (confirmed by a
+      test);
+    - `session bridge mob error: unsupported for runtime mode ...`: Core
+      refused the step, and the text that follows is Core's reason. Among
+      its reasons: the creation the member's session recorded cannot be
+      read; no spawn row records the member's current continuity; the
+      member's session is lost or archived (the line for a refusal of
+      this kind: confirmed by a test, over a test bridge that answers a
+      refusal with the first reason's words; Core's reasons themselves:
+      read from the source).
+
+    The two session bridge causes are exposed when that host keeps
+    sessions and child mobs on disk. For the causes of this group, as in
+    0.9.14: do not respawn the identity while its provider is
+    unavailable; after a respawn, do not stop or restart the gateway
+    until the identity has woken on the same session; and if a respawn's
+    wake failed, wake the identity successfully, on the same session,
+    before any restart. One of Core's reasons names a member placed on
+    another host whose spec names no placement: its line is this warning,
+    and its exposure is not established, as for the next group.
+  - Not established. `its member is placed on another host`: the line is
+    a warning that goes on: "as in 0.9.14: whether a restart before the
+    wake succeeds ends the mobs its session owns is not established"
+    (confirmed by a test).
+  - Not exposed. `its session is kept in memory only` and `its member
+    holds no session`: the line is a debug line with nothing after its
+    beginning, and no warning is logged (both confirmed by a test). That
+    nothing is lost is read from the source: `meta/respawn` refuses a
+    member whose sessions are kept in memory only before anything ends,
+    the mobs of a session no store holds are held, not ended, at the next
+    start, and a member without a session owns no mobs through one.
+- A respawn of an identity whose configured profile differs from its
+  seated member's (a role move not yet carried out) can call
+  `customize_build` three times instead of two (read from the source, not
+  confirmed by a run).
 - Schedules of an archived agent: Meta's own doors (the agents' schedule
   tools, the Console) point no schedule at an archived agent. Meerkat's own
   schedule methods (`schedule/create`, `schedule/update`, REST) do not judge

@@ -312,11 +312,16 @@ no system instruction besides the prompt: there a change applies only from a
 new conversation. A model the catalog does not know is treated as taking it
 only ahead of the conversation. The instruction status tells for a given
 agent. That compaction may never happen by itself: a conversation is
-compacted only when it has grown to about four fifths of the model's context
-window, never after a time or a number of turns. Until then the agent goes
+compacted only when it reaches its compaction threshold (by default about
+four fifths of the model's context window), never after a time or a number
+of turns. Until then the agent goes
 on following its earlier instructions. To bring the change into effect,
 reset the agent, which discards its conversation; **Instructions** below has
 it.
+
+One cost to know before you archive an agent: an archive removes the mobs
+the agent created at the gateway's next start (**Archive and unarchive**
+below). The agent in this block has created none.
 
 <CodeGroup>
 
@@ -446,10 +451,15 @@ is already in the agent's record.
   (`runtime.instruction_status(namespace="meerkat.identity.instructions", key="editor", identity="editor")`)
   shows where a change stands, in `status["members"][0]["slots"][0]["state"]`:
   `{"state": "pending", "reason": "leading_prefix_only_lowering"}` is
-  recorded and not yet followed; `{"state": "effective"}` is followed. A
-  reset (`runtime.reset("editor")`, or the roster's reset action in the
-  Console) is always available: the agent starts a new conversation led by
-  the current instructions, and the earlier conversation is lost. The change
+  recorded and not yet followed; `{"state": "effective"}` is followed. Right
+  after the update the reason is `delivery_owed` for a moment: the change is
+  not in the agent's conversation yet (the other values are on the
+  [roster page](/concepts/roster#changing-an-agents-instructions)). A reset
+  (`runtime.reset("editor")`; in the Console, the roster's reset action where
+  the console configuration shows it, `show_reset`, and the viewer may reset
+  the agent) starts a new conversation led by the current instructions, and
+  the earlier conversation is lost. The call is available for every agent
+  that is not archived. The change
   also takes effect at the agent's next compaction at the start of a run. A
   respawn does not bring the change into effect, and neither does an archive
   followed by an unarchive.
@@ -461,13 +471,18 @@ is already in the agent's record.
   promised between them and the archive's answer. Unarchive
   brings it back on the same conversation. While it is archived the
   identity's status (`runtime.status(name)`) reads `archived` true; the
-  member is left out otherwise.
+  member is left out otherwise. Archiving an agent removes the mobs it
+  created. They stay until the gateway next starts; then each of those mobs
+  is removed with its store, and unarchiving the agent does not bring them
+  back. Have the agent destroy its mobs before you archive it. Do not
+  archive an agent whose mobs must stay.
 - **Remove.** Removal is permanent: the name is never available again
   (`name_taken`). The agent's conversation and memory are kept, and no
   other agent can reach them. A removal owes what an archive owes (the
   harvest, the exit interview, the retirement hook); a removal of an
   archived agent owes nothing more. Archive an agent that may be needed
-  later.
+  later, once it has destroyed the mobs it created (**Archive and
+  unarchive** above).
 - **Schedules.** The schedules that target an agent follow these three
   changes, so that none keeps firing at an agent that takes no delivery: an
   archive pauses its Active schedules, an unarchive resumes exactly the

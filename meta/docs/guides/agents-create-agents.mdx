@@ -252,8 +252,13 @@ Three different things end an agent's current work, and they are not
 interchangeable:
 
 - **Archive** (`identity_archive`, `meta/identity/archive`) stops the agent
-  and keeps everything. Messages to it are refused until it is unarchived, and
-  it comes back on the same conversation with its current instructions.
+  and keeps its name, record, conversation and memory. Messages to it are
+  refused until it is unarchived, and it comes back on the same conversation
+  with its current instructions. Archiving an agent removes the mobs it
+  created. They stay until the gateway next starts; then each of those mobs
+  is removed with its store, and unarchiving the agent does not bring them
+  back. Have the agent destroy its mobs before you archive it. Do not
+  archive an agent whose mobs must stay.
 - **Remove** (`identity_remove`, `meta/identity/remove`) retires the name for
   good. The name is never an agent again, for anyone. The removed agent's
   conversation and memory are kept, and nothing can reach them.

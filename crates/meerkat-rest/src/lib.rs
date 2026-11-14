@@ -6446,7 +6446,8 @@ fn parse_label_filters(
 /// with the refusal's sentence), so the refusal has one answer on this door.
 /// The schedule types refuse the member when they are read, and a parser
 /// reports that as text only, so the refusal is recognised by its sentence
-/// ([`meerkat::direct_reasoning_effort_refusal`]). Every other rejection is
+/// (`meerkat_schedule::direct_reasoning_effort_refusal`, reached through the
+/// facade). Every other rejection is
 /// the JSON extractor's own, unchanged.
 struct ScheduleRequestJson<T>(T);
 

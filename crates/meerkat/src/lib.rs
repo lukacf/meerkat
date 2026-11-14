@@ -342,6 +342,11 @@ pub use meerkat_core::{
 pub use meerkat_client::{
     FactoryError, LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse,
 };
+/// A helper of the REST door, not an API of this crate: whether a failed
+/// read of a schedule request was the refusal of a `reasoning_effort` member
+/// written directly in a schedule spec.
+#[doc(hidden)]
+pub use meerkat_schedule::direct_reasoning_effort_refusal;
 pub use meerkat_schedule::{
     CalendarFieldSpec, CalendarTriggerSpec, ClaimDueRequest, ClaimDueResult, CreateScheduleRequest,
     DeliveryCompletion, DeliveryDispatch, DeliveryFailureReason, DeliveryReceipt,
@@ -361,8 +366,8 @@ pub use meerkat_schedule::{
     ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleToolDispatcher, ScheduleToolError,
     ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TargetProbeOutcome,
-    TriggerSpec, UpdateScheduleRequest, direct_reasoning_effort_refusal,
-    dispatch_schedule_list_where, handle_schedule_tools_call, schedule_tools_list,
+    TriggerSpec, UpdateScheduleRequest, dispatch_schedule_list_where, handle_schedule_tools_call,
+    schedule_tools_list,
 };
 pub use meerkat_tools::ToolError;
 #[cfg(not(target_arch = "wasm32"))]

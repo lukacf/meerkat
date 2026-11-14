@@ -78,6 +78,19 @@ fn spec(identity: &AgentIdentity) -> DurableAgentSpec {
 /// One seat call to Core: the identities and requested sessions it carried.
 type SeatCall = Vec<(AgentIdentity, Option<SessionId>)>;
 
+/// The compaction floor change a same-session successor's seat carries, as
+/// the bridge's step takes it: none, a floor to set, or the floor's removal.
+#[allow(
+    clippy::option_option,
+    reason = "the type of the bridge step's own parameter"
+)]
+type FloorChange = Option<Option<std::num::NonZeroU64>>;
+
+/// One same-session successor Core was asked for: the identity, the seat's
+/// build the host composed for it (none for a row's identity), and the
+/// compaction floor change.
+type SuccessorAsked = (AgentIdentity, Option<AgentBuildDraft>, FloorChange);
+
 /// A Core that seats, rotates and releases members over a
 /// [`CoreTestMembers`] history, and counts every other Core step a seat
 /// must never take: a create, a resume, a wake. It keeps Core's residency
@@ -183,16 +196,8 @@ struct SeatCore {
     /// Core refuses each same-session successor as one it cannot serve,
     /// before anything starts, with this detail.
     successor_unsupported_for_mode: Option<String>,
-    /// Each same-session successor Core was asked for: the identity, the
-    /// seat's build the host composed for it (none for a row's identity),
-    /// and the compaction floor change.
-    successors: StdMutex<
-        Vec<(
-            AgentIdentity,
-            Option<AgentBuildDraft>,
-            Option<Option<std::num::NonZeroU64>>,
-        )>,
-    >,
+    /// Each same-session successor Core was asked for.
+    successors: StdMutex<Vec<SuccessorAsked>>,
     /// Core's rotation fails with this error after it started: Core
     /// journaled the start of the live incarnation's retirement, and ended
     /// neither the retirement nor the rotation.

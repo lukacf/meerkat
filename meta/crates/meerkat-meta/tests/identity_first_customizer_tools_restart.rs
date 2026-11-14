@@ -3137,10 +3137,13 @@ impl AgentCustomizer for AnsweringCustomizer {
     }
 }
 
+/// The model and the temperature one request names.
+type RequestedModel = (String, Option<f32>);
+
 /// A model that records the model and the temperature of each request.
 #[derive(Clone, Default)]
 struct RequestRecordingModel {
-    requests: Arc<std::sync::Mutex<Vec<(String, Option<f32>)>>>,
+    requests: Arc<std::sync::Mutex<Vec<RequestedModel>>>,
 }
 
 impl meerkat_client::LlmClient for RequestRecordingModel {

@@ -10592,6 +10592,114 @@ mod tests {
         );
     }
 
+    /// A text-chat row HELD behind an audible response is the same boundary
+    /// as one sent at once: the typed turn happened when its rows were
+    /// reserved, not when the hold lets them go. Both rows of a typed turn
+    /// arrive while the model is audible and are held; the delegation the
+    /// provider then creates with nothing spoken is refused like a stray,
+    /// and the earlier spoken request is not handed to the executor again.
+    #[test]
+    fn a_delegation_after_held_text_chat_rows_with_nothing_spoken_is_refused_like_a_stray() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        let (prompt, events) =
+            text_chat_append(&mut state, "From the text chat: make it four people");
+        assert!(
+            state.hold_or_send_text_chat(prompt, events).is_none(),
+            "held while the response is audible"
+        );
+        let (reply, events) =
+            text_chat_append(&mut state, "From the text chat: The table is for four.");
+        assert!(
+            state.hold_or_send_text_chat(reply, events).is_none(),
+            "held behind the first"
+        );
+        drain(&mut state);
+        state
+            .apply_frame(frame(delegation_created("dlg_after_typed", "client")))
+            .unwrap();
+        let observed = drain(&mut state);
+        assert!(
+            observed.iter().any(|observation| matches!(
+                observation,
+                GptLiveBrokerObservation::DelegationActionableInputUnsupported { delegation }
+                    if delegation.__opaque_provider_id() == "dlg_after_typed"
+            )),
+            "the delegation after the held typed turn is refused like a stray: {observed:?}"
+        );
+        assert!(
+            !observed.iter().any(|observation| matches!(
+                observation,
+                GptLiveBrokerObservation::ClientDelegationFinal { .. }
+            )),
+            "a held typed turn let the earlier spoken request run again: {observed:?}"
+        );
+        assert_eq!(
+            state.held_text_chat.len(),
+            2,
+            "both rows are still held: the boundary did not wait for their release"
+        );
+    }
+
+    /// The release of a held text-chat row is not a second boundary. The
+    /// typed row is held behind an audible response; the user then speaks a
+    /// new request, whose delegation runs once; the response ends and the
+    /// held row is released. That request was spoken after the typed turn,
+    /// so a later delegation with nothing spoken still re-presents it.
+    #[test]
+    fn a_request_spoken_while_a_text_chat_row_is_held_is_still_re_presented_after_its_release() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        let (typed, events) =
+            text_chat_append(&mut state, "From the text chat: make it four people");
+        assert!(
+            state.hold_or_send_text_chat(typed, events).is_none(),
+            "held while the response is audible"
+        );
+        state
+            .apply_frame(frame(input_delta_at("and order a taxi", 3000.0)))
+            .unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(delegation_created_at("dlg_new", "client", 3000.5)))
+            .unwrap();
+        let first = drain(&mut state);
+        let requests: Vec<&str> = first
+            .iter()
+            .filter_map(|observation| match observation {
+                GptLiveBrokerObservation::ClientDelegationFinal {
+                    request_transcript, ..
+                } => Some(request_transcript.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            requests,
+            ["and order a taxi"],
+            "the request spoken while the typed row was held runs once: {first:?}"
+        );
+        // The response ends; the held row goes out.
+        model_output(&mut state, false, 8);
+        assert_eq!(released_text_chat(&mut state), [typed]);
+        // Nothing typed since that request was spoken.
+        state
+            .apply_frame(frame(output_delta_span("on it", 3500.0, 3600.0)))
+            .unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(delegation_created_at("dlg_again", "client", 3700.0)))
+            .unwrap();
+        let again = drain(&mut state);
+        assert!(
+            again.iter().any(|observation| matches!(
+                observation,
+                GptLiveBrokerObservation::ClientDelegationFinal { request_transcript, .. }
+                    if request_transcript == "and order a taxi"
+            )),
+            "the release of the held row ended the re-present rule for a request spoken after the typed turn: {again:?}"
+        );
+    }
+
     #[test]
     fn context_fragments_cut_at_whitespace_and_rejoin_exactly() {
         let text = "alpha ".repeat(120) + "omega";

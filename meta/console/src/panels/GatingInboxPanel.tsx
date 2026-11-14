@@ -2,6 +2,7 @@ import React from "react";
 import { ApprovalCard, DepartedApprovalCard, HostAttentionCard, PrivateReplyCard, deadlineWords, useApprovalClock, useApprovalViewer } from "../../../packages/console-components/src/conversation/approval-card";
 import { QuestionSetList, type QuestionSetsView } from "../../../packages/console-components/src/conversation/question-set-card";
 import { approvalAudience } from "../../../packages/console-core/src/pending-approvals";
+import { countedQuestionSets } from "../../../packages/console-core/src/pending-questions";
 import type { GatingAuditEntryView } from "../../../packages/console-core/src/control-plane";
 import type { ConsoleAttentionItem, ConsoleAttentionSnapshot } from "../../../packages/console-core/src/console-attention";
 import { hostDecideLinks, type HostAttentionSnapshot, type HostAttentionSourceConfig } from "../../../packages/console-core/src/host-attention";
@@ -595,12 +596,14 @@ export function GatingInboxPanel({
   ) : null;
   // The agents' question sets head Pending (the only tab that lists what
   // waits): each is answered on its card. The ones still open count with the
-  // requests that wait. A set the gateway no longer lists leaves one line
-  // where its card was; the list shows it only when it showed the card. A
-  // first read that failed is said there too, with a way to try again. What
-  // sits beside the list (the empty inbox, small or large) follows what the
-  // list shows, which only the list knows.
-  const openQuestions = questions?.snapshot.sets.length ?? 0;
+  // requests that wait, once their list was read: a list that may be out of
+  // date keeps its cards and is not counted, as on the sidebar's badge. A
+  // set the gateway no longer lists leaves one line where its card was; the
+  // list shows it only when it showed the card. A first read that failed is
+  // said there too, with a way to try again. What sits beside the list (the
+  // empty inbox, small or large) follows what the list shows, which only
+  // the list knows.
+  const openQuestions = countedQuestionSets(questions?.snapshot.status, questions?.snapshot.sets.length ?? 0);
   const [questionListShows, setQuestionListShows] = React.useState(false);
   const questionsShown = questions !== undefined && questionListShows;
   const questionList = questions !== undefined ? (

@@ -56,8 +56,8 @@ export interface QuestionSetCardProps {
   onAnswer(pendingId: string, answers: QuestionSetAnswers): void | Promise<void>;
   onDismiss(pendingId: string): void | Promise<void>;
   /** Told as the card leaves the screen while the focus is inside it, with
-   *  the card's place: the list moves the focus to the line that replaces
-   *  the card. */
+   *  the card's place: the list moves the focus to the line it shows for
+   *  the cards that left. */
   onLeaveFocused?(slot: number): void;
 }
 
@@ -347,7 +347,8 @@ export function QuestionSetCard({ set, resourceStatus, readFailed = false, decis
     if (state === "submitting" && acted !== null && Date.now() - acted < ACTED_FOCUS_MS) sentenceRef.current?.focus();
   }, [state]);
   // A card that leaves the screen while the focus is inside it tells its
-  // list, which moves the focus to the line that replaces the card. (The
+  // list, which moves the focus to the line it shows for the cards that
+  // left. (The
   // cleanup of a layout effect runs before the card's nodes are removed.)
   const cardRef = React.useRef<HTMLElement | null>(null);
   const leave = React.useRef({ slot, onLeaveFocused });
@@ -510,15 +511,17 @@ export function QuestionSetList({ view, identity, readOnly = false, className, t
   });
   // A list that is no longer on screen shows nothing.
   React.useEffect(() => () => { if (told.current) { told.current = null; tell.current?.(false); } }, []);
-  // The card that held the focus left: the focus goes to the line that
-  // replaces it, when this list shows that line.
+  // A card that held the focus left: the focus goes to the line this list
+  // shows. That is the card's own line, or, when several cards left in one
+  // read, the one line shown for them. With no line it goes to the list
+  // itself, where the host gave it an element; never to the page.
   const lineRef = React.useRef<HTMLDivElement | null>(null);
-  const leftFocused = React.useRef<number | null>(null);
-  const noticeSlot = notice?.slot;
+  const listRef = React.useRef<HTMLDivElement | null>(null);
+  const leftFocused = React.useRef(false);
   React.useEffect(() => {
-    const place = leftFocused.current;
-    leftFocused.current = null;
-    if (place !== null && place === noticeSlot) lineRef.current?.focus();
+    const left = leftFocused.current;
+    leftFocused.current = false;
+    if (left) (lineRef.current ?? listRef.current)?.focus();
   });
   if (!view || !shows) return null;
   const { snapshot } = view;
@@ -535,7 +538,7 @@ export function QuestionSetList({ view, identity, readOnly = false, className, t
       readOnlyReason={readOnly ? undefined : snapshot.readOnlyReason}
       onAnswer={view.onAnswer}
       onDismiss={view.onDismiss}
-      onLeaveFocused={(place) => { leftFocused.current = place; }}
+      onLeaveFocused={() => { leftFocused.current = true; }}
     />
   ));
   const line = notice ? (
@@ -551,7 +554,7 @@ export function QuestionSetList({ view, identity, readOnly = false, className, t
       The questions agents asked could not be loaded. The Console keeps trying; you can also try now.
     </Notice>
   ) : null;
-  return className || testId ? <div className={className} data-testid={testId}>{failed}{line}{cards}</div> : <>{failed}{line}{cards}</>;
+  return className || testId ? <div ref={listRef} tabIndex={-1} className={className} data-testid={testId}>{failed}{line}{cards}</div> : <>{failed}{line}{cards}</>;
 }
 
 /** The question sets the conversation's agent asked, from the provider:

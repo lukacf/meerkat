@@ -334,7 +334,10 @@ export function questionSetDismissParams(set: QuestionSet): QuestionSetDismissPa
 
 /** The gateway's refusals of a decide, in words for the person answering:
  * what happened, that nothing was sent, and what to do. They name nothing
- * of the set. */
+ * of the set. `not_sent` has four causes, and in one of them (the login had
+ * ended) the request left the browser and was refused at the gateway's
+ * door: its words claim only what holds for all four, that the reply was
+ * not accepted and that nothing was changed. */
 export const QUESTION_SET_REFUSAL_WORDS: Readonly<Record<QuestionSetRefusalKind, string>> = {
   not_open: "This question was already answered or closed, so nothing was sent. Nothing more is needed from you.",
   expired: "This question timed out before the gateway took your reply, so nothing was sent. If the answer still matters, tell the agent in its chat.",
@@ -346,7 +349,7 @@ export const QUESTION_SET_REFUSAL_WORDS: Readonly<Record<QuestionSetRefusalKind,
   access_denied: "You no longer have permission to answer questions here, so nothing was sent. Ask an administrator for the permission to decide, then send again.",
   caller_changed: "This browser is now signed in as someone else, so nothing was sent or changed. Answer again as the person signed in now.",
   caller_not_current: "Your sign-in ended before the reply was sent, so nothing was changed. Sign in again, then send again.",
-  not_sent: "This reply was not sent: the Console could not confirm your sign-in, so nothing was changed. Sign in again if you are asked to, then send again.",
+  not_sent: "This reply was not accepted. Nothing was changed. Sign in again if you are asked to, then send again.",
 };
 /** The typed refusals of the decision itself that this console reads by
  * name; every other one reads as `not_taken`. */
@@ -437,6 +440,16 @@ export function questionSetEntries(snapshot: QuestionSetSnapshot, identity?: str
     ...snapshot.sets.filter(mine).map((set) => ({ set, decision: own(snapshot.decisions, set.pendingId), ...slot(set) })),
     ...snapshot.closed.filter((entry) => mine(entry.set)).map((entry) => ({ set: entry.set, decision: own(snapshot.decisions, entry.set.pendingId), closed: entry.outcome, ...slot(entry.set) })),
   ];
+}
+
+/** How many open sets a count may hold: those of a list that was read. A
+ * list that is still being read, may be out of date or could not be read
+ * counts none (as approvals that are not read count none), and what shows
+ * the count says so in words. One rule for "Needs you", the Approvals badge
+ * and the inbox's Pending tab, so their numbers agree. A host that does not
+ * know the state of the read (`status` undefined) counts what it was given. */
+export function countedQuestionSets(status: QuestionSetSnapshot["status"] | undefined, open: number): number {
+  return status === undefined || status === "ready" ? open : 0;
 }
 
 /** One active scoped owner feeds the inbox and every conversation. It polls
@@ -671,6 +684,12 @@ export function createQuestionSetResource(input: {
           // The set reads as sending until a read has said whether it is
           // still listed; it is never shown as refused before that.
           unsettled.set(pendingId, { phase: "refused", action, ...sent, refusal, error: refusal.words });
+        } else if (refusal.kind === "not_sent" && previous?.phase === "failed") {
+          // Like the capability refusal above: a retry that never reached
+          // the gateway's decide says nothing about the earlier reply, which
+          // may have arrived. The card stays "Not confirmed", and the line
+          // of a set that then leaves still says so.
+          setDecision(pendingId, previous);
         } else {
           // What the gateway said of the person holds for every card: each
           // would be refused in turn.

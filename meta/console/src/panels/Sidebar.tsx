@@ -7,6 +7,7 @@ import { SearchField } from "../../../packages/console-components/src/panel-kit/
 import { ViewOptions, type ViewOptionsControl } from "../../../packages/console-components/src/panel-kit/view-options";
 import { Sparkline } from "../../../packages/console-components/src/viz/charts/sparkline";
 import { approvalAudience, type ApprovalViewer, type PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
+import { countedQuestionSets } from "../../../packages/console-core/src/pending-questions";
 import React from "react";
 import {
   DEFAULT_CONSOLE_SIDEBAR_VIEW,
@@ -117,7 +118,8 @@ interface SidebarProps {
   questionSetCount?: number;
   /** The state of the read of those sets. A list that is not ready is not
    * counted on the Approvals view (as approvals that are not read are
-   * not), and "Needs you" says so instead of a count. */
+   * not), and "Needs you" says so in words beside the count of what was
+   * read. */
   questionSetStatus?: "loading" | "ready" | "stale" | "unavailable" | "forbidden" | "unsupported";
   /** Comfortable (two-line 44 px rows) or compact (one-line 32 px rows). */
   density?: SidebarDensity;
@@ -2814,7 +2816,8 @@ export const Sidebar = React.memo(function Sidebar({
   const pendingApprovals = pendingApprovalCount(approvals, approvalViewer);
   const attentionByKind = React.useMemo<Partial<Record<NavKind, SidebarNavAttention>>>(() => {
     const out: Partial<Record<NavKind, SidebarNavAttention>> = { ...navAttention };
-    const questionSets = questionSetStatus === undefined || questionSetStatus === "ready" ? questionSetCount : 0;
+    // The sets of a list that was read: the same count as the inbox's Pending tab.
+    const questionSets = countedQuestionSets(questionSetStatus, questionSetCount);
     if (pendingApprovals > 0 || questionSets > 0) {
       // The Approvals view lists both: the requests that wait for a decision
       // and the sets of questions agents asked a person.

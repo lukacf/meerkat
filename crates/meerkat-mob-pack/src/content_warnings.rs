@@ -612,7 +612,7 @@ mod tests {
             assert!(!has_signing_key_form(content.as_bytes()), "{content:?}");
         }
         // Bytes that are not text are no key file.
-        let mut not_text = key.clone().into_bytes();
+        let mut not_text = key.into_bytes();
         not_text.push(0xff);
         assert!(!has_signing_key_form(&not_text));
     }

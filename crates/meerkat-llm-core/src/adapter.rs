@@ -403,7 +403,7 @@ impl LlmClientAdapter {
         // change, so the agent prepares it again and resolves the level for
         // the route as it is now.
         if let Some(witness) =
-            provider_params.and_then(|params| params.reasoning_route_witness.as_ref())
+            provider_params.and_then(|params| params.reasoning_route_witness.as_deref())
             && self.client.reasoning_route_of(&projection).as_ref() != Some(witness)
         {
             return Err(LlmError::AuthorizationRouteChanged {
@@ -2021,8 +2021,8 @@ mod tests {
             }),
             "scripted-model".into(),
         ));
-        let params = |witness| ProviderParamsOverride {
-            reasoning_route_witness: witness,
+        let params = |witness: Option<ReasoningRouteObservation>| ProviderParamsOverride {
+            reasoning_route_witness: witness.map(Box::new),
             ..Default::default()
         };
         let messages = vec![Message::User(UserMessage::text("hello"))];

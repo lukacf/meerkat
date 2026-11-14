@@ -36290,7 +36290,7 @@ mod tests {
                 served[1]
                     .1
                     .as_ref()
-                    .and_then(|params| params.reasoning_route_witness.as_ref()),
+                    .and_then(|params| params.reasoning_route_witness.as_deref()),
                 Some(&backup_observation),
                 "the attempt is resolved for the route the target's client observes"
             );
@@ -44442,7 +44442,7 @@ mod tests {
                 "{what}: the level is marked as resolved for the route"
             );
             assert_eq!(
-                params.reasoning_route_witness.as_ref(),
+                params.reasoning_route_witness.as_deref(),
                 Some(route),
                 "{what}: the witness is the route the level was resolved for"
             );

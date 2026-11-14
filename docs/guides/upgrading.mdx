@@ -1138,9 +1138,10 @@ What no step removes (beside the event replay above):
 
 - **The record of a turn that was admitted and then refused for its
   level.** A turn that asks for a level its route refuses stores nothing
-  0.9.14 cannot read: it is refused when a session is created, or at the
-  turn's start, on a live session and on a stored one, where the stored
-  input ends as abandoned with the reason `stopped` (confirmed by a run).
+  0.9.14 cannot read: it is refused when a session is created, or before
+  the turn's input is stored, on a live session and on a stored one; a
+  turn judged only at its start is refused there, and its stored input
+  ends as abandoned with the reason `stopped` (confirmed by a run).
   The record is another case: a turn is admitted, and its request is then
   refused, before anything is sent to the model, because the session
   holds a level that its model does not support. The shape that was run:

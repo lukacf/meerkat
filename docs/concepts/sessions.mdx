@@ -30,6 +30,11 @@ plain follow-up turn that arrives while another turn is running waits behind
 it in the session's runtime queue and then runs: JSON-RPC `turn/start`, and a
 REST `POST /sessions/{id}/messages` or MCP `meerkat_resume` that changes no
 build setting. The call returns that turn's own result, not `SESSION_BUSY`.
+From 0.9.15, one JSON-RPC turn is not queued: a turn that sets or changes
+the provider-neutral reasoning effort level, or changes the model of a
+session that holds one, is answered `SESSION_BUSY` at once while the
+session has unfinished work (see
+[Reasoning effort](/concepts/providers#reasoning-effort)).
 The in-process Rust `SessionService::start_turn` does not queue: a concurrent
 call fails with `SESSION_BUSY`. When delivery must not hold a caller open, use
 runtime ingress, scheduling, comms handling modes, or an application queue.

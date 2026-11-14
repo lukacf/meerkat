@@ -494,7 +494,19 @@ never the message text.
 The refusal has the same shape wherever it is raised: when the session is
 created or resumed, on a turn that changes the level or the model, and before
 a provider request inside a turn (a Copilot account's list can change between
-turns). A run refused inside a turn fails with `run_failed` reason
+turns). Over JSON-RPC a turn that names a refused level is answered when it
+is asked, also while another turn of the session runs and for a stored
+session that is not loaded: it changes nothing, and the running turn and
+what is queued behind it go on. A turn that sets or changes the
+provider-neutral level, or changes the model of a session that holds one,
+is taken when the session is idle; while another turn runs or is queued it
+is answered `SESSION_BUSY` (retryable, data kind
+`reasoning_effort_change_needs_idle_session`) and changes nothing: wait
+for the running turn's answer, then send it again. That answer is not a
+level refusal. A session that holds no provider-neutral level queues its
+turns as before, a model change and a provider's own effort parameter
+(`provider_tag`) included. REST answers such a message for a session it
+holds live with `session is busy`. A run refused inside a turn fails with `run_failed` reason
 `reasoning_effort_refused`. It is never retried and never triggers a model
 fallback. A provider-specific parameter the caller writes itself
 (`provider_params.provider_tag`) stays available on every route, including

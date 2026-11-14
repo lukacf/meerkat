@@ -1655,7 +1655,14 @@ Start a new turn on an existing session.
 Returns the same run-result shape as `session/create`. A `turn/start` that
 arrives while another turn on the same session is running is queued behind
 it: it runs once the running turn finishes, and the call returns its own
-result. It is not refused with `-32002` (`SESSION_BUSY`).
+result. It is not refused with `-32002` (`SESSION_BUSY`). From 0.9.15
+there is one exception: a turn that sets or changes the provider-neutral
+reasoning effort level (`reasoning_effort`, or the key of that name inside
+`provider_params`), or changes the model of a session that holds one, is
+not queued. It is answered `-32002` at once with the data
+`{"kind": "reasoning_effort_change_needs_idle_session"}`
+and stores nothing: wait for the running turn's answer, then send it again
+(see `reasoning_effort` below). A later release queues it.
 
 Since 0.9.5, `"session_events": false` asks that the turn's events not be
 written as `session/event` notifications. A caller that reads them from a
@@ -1793,7 +1800,19 @@ Only a mechanical failure is `-32603`.
   two different levels, or a clear beside a nested level, are refused as
   invalid params. A level the model or its route does not accept is refused
   with the `reasoning_effort_refused` data of `session/create`, and the
-  session keeps its identity. `mob/turn_start` takes the same field.
+  session keeps its identity; that refusal is answered when the request
+  arrives, also while another turn of the session runs. A turn that sets
+  or changes the provider-neutral level, or changes the model of a session
+  that holds one, is taken only when the session has no unfinished turn or
+  queued input: otherwise it is not queued, it is answered `-32002`
+  (`SESSION_BUSY`, retryable) with the data
+  `{"kind": "reasoning_effort_change_needs_idle_session"}`
+  at once, and nothing is stored. Wait for the running turn's answer, then
+  send it again; do not poll. A later release queues such a turn. A turn
+  that repeats the session's level, clears it or names none queues like
+  any turn, and so does every turn on a session that holds no
+  provider-neutral level. `mob/turn_start` takes the same field and is
+  answered the same.
 </ParamField>
 
 <ParamField body="auth_binding" type="TurnMetadataOverride | null" default="preserve">
@@ -4682,15 +4701,30 @@ invalid-params answer and no typed refusal data (see
 checked when its agent is built: `session/create` answers the refusal (a
 deferred create reports it at its first `turn/start`), and so does the build
 of a resumed or recovered session, whose stored identity stays as it was. A
-`turn/start` whose overrides move a live session to a model or level its
-route does not accept is refused the same way, before its input is stored:
-the session keeps its model, its level, its stored params and its live
-registration, and nothing is queued for the turn. A turn that has to build
-its session first (a deferred create's first turn, or a stored session that
-is not live), and a turn whose route changes between that check and its
-start, is judged when it starts: its stored input ends as abandoned with
-the reason `stopped`, not with the refusal (see Known limitations in the
-changelog). A run that fails for the refusal
+`turn/start` whose overrides move a session to a model or level its route
+does not accept is refused the same way, before its input is stored: the
+session keeps its model, its level, its stored params and its live
+registration, and nothing is queued for the turn. That holds on a live
+session, also while another turn of it runs (that turn and the requests
+behind it go on as they were), and on a stored session that is not live
+(after a restart); there a turn that names no level is judged too, for the
+level the session holds. A level the route does accept is taken only on a
+session with no unfinished turn or queued input, when the turn sets or
+changes the provider-neutral level or changes the model of a session that
+holds one: otherwise the turn is answered `-32002` (`SESSION_BUSY`,
+retryable) with the data
+`{"kind": "reasoning_effort_change_needs_idle_session"}`,
+at once, and nothing is stored. That answer is not a level refusal: it
+carries no `reasoning_effort_refusal`, and the same request is taken once
+the session is idle. The other surfaces answer the same request in their
+own way: REST answers a level on a message for a session it holds live
+with HTTP 500 `session is busy`, and the MCP server's `meerkat_resume`
+rebuilds the session (see [REST](/api/rest) and [MCP](/api/mcp)). Two
+turns are judged when they start, after their input was stored: a deferred
+create's first turn, and a turn on a stored session that is not live whose
+level cannot be judged yet (`supported_levels_unavailable`). Such a turn's
+stored input ends as abandoned with the reason `stopped`, not with the
+refusal (see Known limitations in the changelog). A run that fails for the refusal
 reports it in `run_failed` as the `error_report` reason
 `{"reason_type": "reasoning_effort_refused", "refusal": {...}}` with class
 `config`. No provider request is made for a refused level. The MCP server

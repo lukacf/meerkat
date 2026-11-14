@@ -899,7 +899,12 @@ them.
   refused before anything is published: no session is created, no provider
   request is made, a refused resume or recovery leaves the stored identity
   as it was, and a refused reconfiguration leaves the live session's
-  identity, client and stored params as they were. The stored params are
+  identity, client and stored params as they were. Through JSON-RPC a turn
+  that sets or changes the provider-neutral level, or changes the model of
+  a session that holds one, is taken only when the session has no
+  unfinished turn or queued input, and is answered `SESSION_BUSY` with the
+  data `{"kind": "reasoning_effort_change_needs_idle_session"}` otherwise
+  (see Known limitations). The stored params are
   never rewritten: the level stays in the neutral field. A build or a
   target that carries no level is not judged. A level that passes this
   check is resolved again for the route that serves each request (see the
@@ -1529,6 +1534,36 @@ them.
   `run_after_runtime_termination_scoped`.
 
 ### Fixed
+
+- `meerkat-rpc`, `meerkat`: a `turn/start` that names a reasoning effort
+  level is answered for that level when it arrives, in two cases where it
+  was not. Sent while another turn of the session runs, it waited for that
+  turn's end and was then answered `-32600` "the session runtime is
+  destroyed and does not admit this request", with no typed data, whether
+  the route refuses the level or takes it; the running turn, the requests
+  behind it and the session were not affected. The same happened to a
+  model change sent while a turn ran on a session created with the
+  provider-neutral level. Now a level the route
+  refuses is refused with the typed refusal (`-32602`,
+  `reasoning_effort_refused`) while that turn runs, and a level the route
+  takes is answered `-32002` (`SESSION_BUSY`, retryable) at once, with
+  the data `{"kind": "reasoning_effort_change_needs_idle_session"}`: a
+  turn that sets or changes the provider-neutral level, or changes the
+  model of a session that holds one, is taken only when the session has
+  no unfinished turn or queued input; wait for the running turn's answer,
+  then send it again (see Known limitations). A session that holds no
+  provider-neutral level queues its turns as in 0.9.14, a model change
+  and a provider's own effort parameter (`provider_tag`) included. On a
+  stored session that is not live (after a restart) a
+  refused level is refused before the turn's input is stored, as on a live
+  session, also for a turn that names no level on a session that holds
+  one: nothing is stored for the turn, and the session's runtime
+  registration and what is queued on it stay. Before, that refusal came at
+  the turn's start, which retired the session's live runtime. A level
+  whose source cannot be read yet (`supported_levels_unavailable`) is
+  still judged at the start of such a turn. Measured by tests of this
+  change, with the level named in `reasoning_effort` and inside
+  `provider_params`.
 
 - `meerkat-rpc`, `meerkat-rest`, `meerkat`: a session that was cleaned up
   without being archived no longer loses the agents it created to the
@@ -2669,20 +2704,35 @@ them.
 
 - A turn that asks for a reasoning effort level its session's route refuses
   is answered with the typed refusal and makes no provider request. Through
-  the JSON-RPC session runtime a turn on a live session is refused before
-  its input is stored. A turn that has to build its session first (a
-  deferred create's first turn, or a stored session that is not live), and
-  a turn whose route changes between that check and its start, is judged
-  when it starts: its stored input ends as abandoned with the reason
-  `stopped`, not with the refusal (confirmed by a test of this change for
-  a stored session
-  that is not live; the other two cases are read from the source). The
+  the JSON-RPC session runtime a turn is refused before its input is
+  stored, on a live session (also while another turn of it runs) and on a
+  stored session that is not live. A turn that sets or changes the
+  provider-neutral level (`reasoning_effort`, direct or inside
+  `provider_params`), or changes the model of a session that holds one, is
+  not queued behind unfinished work: while another turn of the session
+  runs or an input is queued it is answered `-32002` (`SESSION_BUSY`,
+  retryable, data `{"kind": "reasoning_effort_change_needs_idle_session"}`)
+  at once and nothing is stored; wait for the running turn's answer, then
+  send it again (confirmed by tests of this change, on a session and on a
+  mob member's session). A later release queues such a turn. The reason: a
+  level is judged again when its turn starts, anything queued ahead can
+  change the session's model, and a level refused at a turn's start still
+  ends the turn as a failed start.
+  Three turns are judged when they start: a deferred create's first turn;
+  a turn on a stored session that is not live whose level cannot be judged
+  yet (`supported_levels_unavailable`: an account's model list that is not
+  loaded; confirmed by a test of this change); and a turn whose route
+  changes in the moment between its admission on an idle session and its
+  start (read from the source). Its stored input ends as abandoned with
+  the reason `stopped`, not with the refusal. The
   refused start costs the session
   that one turn and nothing it owns: its mobs and their members stay. The
   runtime retires the session's live runtime (its registration and its
   MCP adapter) after the refused start, and the next turn builds it again
-  from the stored session. The refusal reason is in the typed details of
-  the answer (`reasoning_effort_refusal`).
+  from the stored session; an input queued on that registration behind the
+  refused turn ends with it, without a run, and its sender sends it again.
+  The refusal reason is in the typed details of the answer
+  (`reasoning_effort_refusal`).
 
 - MCP server: `meerkat_resume` rebuilds the session whenever it names a
   reasoning effort level, and retires the live session before that build.

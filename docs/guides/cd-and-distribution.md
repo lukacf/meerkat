@@ -298,8 +298,12 @@ run.
 The check has no version condition, and it reads the registrations it
 expects from `crates/` of the checked-out release. Read from the workflow and
 the script, not run: an asset recovery of 0.8.23 through 0.8.41, whose trees
-have no `crates/` directory, stops in the check on either backend before a
-binary is asked. For a later one of those releases the BuildBuddy backend
+have no `crates/` directory, gets no binary asked on either backend. On the
+GitHub-hosted backend it stops in the check, which finds no `crates/`
+directory to read. On the BuildBuddy backend it stops earlier in the
+packaging step: the step looks for the built binaries under `crates/` in the
+build output, finds none and fails before the check runs. For a later one of
+those releases the BuildBuddy backend
 builds with that release's own launcher, which links Linux x86_64 as before,
 so the check fails the rebuilt binaries; on the GitHub-hosted backend the
 rebuilt binaries are built with Cargo and are not linked that way. Whether

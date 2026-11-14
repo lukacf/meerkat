@@ -308,11 +308,7 @@ async fn prepared_effect_launch(
         .prepare_workflow_parent_source(&c.parent.original)
         .await
         .unwrap();
-    let p =
-        c.f.source
-            .submit_authenticated_original(c.parent.clone())
-            .await
-            .unwrap();
+    let p = submit_planning_parent(&c.f.source, &c.parent).await;
     super::idle_restore_tests::finish(c, "planning_parent", &p).await;
     let probe = c.f.probe.as_ref().unwrap();
     probe.arm_next_input();
@@ -320,16 +316,15 @@ async fn prepared_effect_launch(
     c.f.finish(&a).await.unwrap();
     let dispatch = probe.captured();
     let original = c.f.source.acquisition_original(&dispatch).await.unwrap();
-    let planning =
-        c.f.source
-            .prepare_workflow_planning(
-                &c.parent.original,
-                c.lead.clone(),
-                c.terms.clone(),
-                c.lineage.clone(),
-            )
-            .await
-            .unwrap();
+    let planning = prepare_planning(
+        &c.f.source,
+        &c.parent.original,
+        &c.lead,
+        &c.terms,
+        &c.lineage,
+    )
+    .await
+    .unwrap();
     let (_, snapshot) = join_waiter(
         &c.f, &planning, &original, &dispatch, &c.backend, &c.work, label,
     )
@@ -398,11 +393,7 @@ async fn prepared_operational_public_effect_launch(
         .configure_workflow_parent(&c.f.source, &c.parent.original, &selected)
         .await
         .unwrap();
-    let p =
-        c.f.source
-            .submit_authenticated_original(c.parent.clone())
-            .await
-            .unwrap();
+    let p = submit_planning_parent(&c.f.source, &c.parent).await;
     super::idle_restore_tests::finish(c, "planning_parent", &p).await;
     let parent =
         c.f.source
@@ -422,16 +413,15 @@ async fn prepared_operational_public_effect_launch(
     c.f.finish(&a).await.unwrap();
     let dispatch = probe.captured();
     let original = c.f.source.acquisition_original(&dispatch).await.unwrap();
-    let planning =
-        c.f.source
-            .prepare_workflow_planning(
-                &c.parent.original,
-                c.lead.clone(),
-                c.terms.clone(),
-                c.lineage.clone(),
-            )
-            .await
-            .unwrap();
+    let planning = prepare_planning(
+        &c.f.source,
+        &c.parent.original,
+        &c.lead,
+        &c.terms,
+        &c.lineage,
+    )
+    .await
+    .unwrap();
     let (_, snapshot) = join_waiter(
         &c.f, &planning, &original, &dispatch, &c.backend, &c.work, label,
     )

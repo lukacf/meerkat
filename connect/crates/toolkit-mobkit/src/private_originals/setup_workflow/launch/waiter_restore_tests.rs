@@ -161,11 +161,7 @@ pub(in crate::private_originals) async fn selected_fixture_then_close(
             .prepare_workflow_parent_source(&c.parent.original)
             .await
             .unwrap();
-        let p =
-            c.f.source
-                .submit_authenticated_original(c.parent.clone())
-                .await
-                .unwrap();
+        let p = submit_planning_parent(&c.f.source, &c.parent).await;
         finish(&c, "planning_parent", &p).await;
         let probe = c.f.probe.as_ref().unwrap();
         assert_eq!(
@@ -188,16 +184,15 @@ pub(in crate::private_originals) async fn selected_fixture_then_close(
             original.original.association(),
             &c.f.binding().await.unwrap().unwrap()
         );
-        let planning =
-            c.f.source
-                .prepare_workflow_planning(
-                    &c.parent.original,
-                    c.lead.clone(),
-                    c.terms.clone(),
-                    c.lineage.clone(),
-                )
-                .await
-                .unwrap();
+        let planning = prepare_planning(
+            &c.f.source,
+            &c.parent.original,
+            &c.lead,
+            &c.terms,
+            &c.lineage,
+        )
+        .await
+        .unwrap();
         let (membership, snapshot) = join_waiter(
             &c.f,
             &planning,

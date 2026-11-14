@@ -522,11 +522,68 @@ struct Witness {
     custody: Arc<Mutex<Vec<Weak<PendingOriginalAdmission>>>>,
 }
 
+/// Waits until `custody` is released by its last owner or `settled` says it
+/// settled, at most `bound`, and says whether it did.
+///
+/// A control's fixture is not a custody's last owner. Native shutdown joins
+/// the native owners, but a runtime task that only observes (the mob's
+/// structural event subscription) ends on its own shortly after. Until then
+/// it holds the machine and, through the machine's work authorization host,
+/// this source and the custody the source retains: seen as a custody still
+/// held a few milliseconds after the fixture's drop, in 9 of 100 runs on 4
+/// CPUs shared with 8 busy loops.
+async fn released_or_settled<T>(
+    custody: &Weak<T>,
+    settled: impl Fn(&T) -> bool,
+    bound: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + bound;
+    loop {
+        if custody.upgrade().is_none_or(|held| settled(held.as_ref())) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+/// The wait of a control's custody check: a release and a settlement end it,
+/// and a custody still held and unsettled at the bound fails it.
+#[tokio::test]
+async fn a_custody_check_waits_for_release_or_settlement_within_its_bound() {
+    let bound = Duration::from_millis(200);
+    // Released by its last owner a moment later: waited for.
+    let held = Arc::new(false);
+    let custody = Arc::downgrade(&held);
+    let (released, ()) = tokio::join!(
+        released_or_settled(&custody, |settled| *settled, GUARD),
+        async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drop(held);
+        }
+    );
+    assert!(released);
+    // Settled while its owner still holds it: no release is waited for.
+    let held = Arc::new(true);
+    assert!(released_or_settled(&Arc::downgrade(&held), |settled| *settled, bound).await);
+    drop(held);
+    // Still held and unsettled at the bound: refused, at the bound.
+    let held = Arc::new(false);
+    let started = tokio::time::Instant::now();
+    assert!(!released_or_settled(&Arc::downgrade(&held), |settled| *settled, bound).await);
+    assert!(started.elapsed() >= bound);
+    drop(held);
+}
+
 /// One bounded control on a fresh fixture. On every exit a selected recovery
 /// is stopped, native is shut down and the recovery is joined, in that order.
 /// Once those owners joined, every bound attempt's source custody is settled
 /// (withdrawn, moved to its replay, or promoted), and no hold of the launch's
-/// review custody remains.
+/// review custody remains. An attempt the recovery did not own has no phase
+/// to reach: its custody ends with its last owner, which the check waits for
+/// within the control's guard.
 async fn control(
     name: &str,
     recovery: Recovery,
@@ -586,9 +643,11 @@ async fn control(
         );
     }
     drop(f);
-    for (attempt, custody) in witness.custody.lock().unwrap().iter().enumerate() {
+    // The fixture is not a custody's last owner (see `released_or_settled`).
+    let custodies = witness.custody.lock().unwrap().clone();
+    for (attempt, custody) in custodies.iter().enumerate() {
         assert!(
-            custody.upgrade().is_none_or(|pending| settled(&pending)),
+            released_or_settled(custody, settled, GUARD).await,
             "{name}: attempt {attempt}'s source custody settled once its owners joined"
         );
     }

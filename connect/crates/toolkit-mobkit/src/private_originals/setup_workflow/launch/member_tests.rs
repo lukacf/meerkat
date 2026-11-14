@@ -168,11 +168,7 @@ async fn dedicated_held_member_admits_exact_g_and_refuses_foreign_history() {
         custody_promoted(f, f.original_reference()).await;
         let dispatch = f.probe.as_ref().unwrap().captured();
         let original = f.source.acquisition_original(&dispatch).await.unwrap();
-        let p = f
-            .source
-            .submit_authenticated_original(c.parent.clone())
-            .await
-            .unwrap();
+        let p = submit_planning_parent(&f.source, &c.parent).await;
         finish(f, "planning_parent", &p).await;
         // P's custody settles in the background too: the planning
         // preparation does not wait, and starts once P is promoted.
@@ -187,16 +183,10 @@ async fn dedicated_held_member_admits_exact_g_and_refuses_foreign_history() {
         assert_ne!(a_history, p_history, "different actual request transcripts");
         assert_eq!(input_count(f, &c.parent_session).await, 1);
         assert_eq!(input_count(f, &f.session).await, 1);
-        let planning = f
-            .source
-            .prepare_workflow_planning(
-                &c.parent.original,
-                c.lead.clone(),
-                c.terms.clone(),
-                c.lineage.clone(),
-            )
-            .await
-            .unwrap();
+        let planning =
+            prepare_planning(&f.source, &c.parent.original, &c.lead, &c.terms, &c.lineage)
+                .await
+                .unwrap();
         let (_membership, snapshot) = join_waiter(
             f, &planning, &original, &dispatch, &c.backend, &c.work, "waiter-a",
         )

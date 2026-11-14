@@ -499,6 +499,16 @@ impl Fixture {
             .member_classes[0]
             .clone();
         self.close().await;
+        // Every join of this host returned. The gateway's join does not end
+        // the native custody: the close's final release does, as the
+        // process's close makes it after its joins. Without it the grant
+        // store's owner lease ends only when the last reference to this
+        // host's owner drops, and the fresh host opened below can find it
+        // still held (its restore open answers unavailable). Only the reopen
+        // makes it: a row that closes and then reads this host's store keeps
+        // the custody its reads need.
+        let released = self.gateway.release_native_custody().await;
+        assert!(released.is_ok(), "{released:?}");
         let exclusive = self._exclusive.take().unwrap();
         drop(self);
         Self::construct(

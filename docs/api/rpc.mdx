@@ -3103,7 +3103,8 @@ with `-32602` and `data.kind` `resume_session_bound_to_another_member`
 seated.
 
 <Warning>
-Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, a
+Known issue, noted 2026-11-13: in Meerkat 0.7.29 through 0.9.14 (0.6.0 through
+0.7.28 not established), a
 `mob/spawn` that resumes an existing session can archive that session if the
 mob is stopped or the host shuts down while the spawn is still in progress.
 Read from the source and not yet confirmed by a test: the mobs that session

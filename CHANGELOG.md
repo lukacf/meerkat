@@ -1033,10 +1033,13 @@ them.
   nothing spoken is refused like one on a channel that has heard no request
   (nothing runs for it and the call continues), and a request spoken after
   the typed turn runs once, as before. Affects 0.8.38 through 0.9.14, every
-  release with the public GPT Live channel: from 0.8.51 a typed turn reaches
-  the voice as quiet text-chat context, the form the new tests drive; in
-  0.8.38 through 0.8.50 it was voiced as commentary and the same rule
-  ignored it (established by reading the code, not by a test).
+  release with the public GPT Live channel. From 0.9.2 a typed turn's rows
+  pass the adapter's hold, the form the new tests drive on the current
+  source; for 0.8.38 through 0.9.1 it is established by reading the code,
+  not by a test: through 0.8.50 a typed turn was voiced as commentary, from
+  0.8.51 it was sent as quiet text-chat context without the hold, and in
+  both forms the same rule ignored it. See Known limitations for what the
+  fix does not cover.
 - `meerkat-contracts`, Python and TypeScript SDKs: the method catalog and
   the documentation of the SDKs' `mob_cancel_work` / `mobCancelWork` no
   longer say that `mob/cancel_work` cancels a unit of work. The method is
@@ -1593,6 +1596,21 @@ them.
   for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in
   either direction: it rests on the version requirements Connect 0.9.14
   published.
+
+- GPT Live voice channels: the fix that stops a typed message from making
+  the previous spoken request run again (see Fixed) covers a typed turn
+  whose rows reach the voice as quiet text-chat context. Not covered: when
+  the turn since the last spoken request reaches the voice as spoken
+  commentary instead (a reply a peer's message drove), or when the model
+  delegates while a typed turn is still running and none of its rows has
+  reached the voice yet, a delegation with nothing spoken can still run
+  the earlier spoken request again. In the other direction, when a typed
+  turn's reply row arrives after the user has spoken a newer request and
+  that request's delegation was created, a later delegation with nothing
+  spoken is refused instead of running the newer request again: nothing
+  runs twice, and the user has to ask again. A refused delegation gets no
+  answer on the voice channel; how the voice model carries on after one is
+  not established (no recording holds one).
 
 ## [0.9.14] - 2026-11-11
 

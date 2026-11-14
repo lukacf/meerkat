@@ -560,6 +560,23 @@ pub(crate) struct InputTerminalCompletion {
     pub(crate) candidate: Option<InteractionTerminalCandidate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) completion_input_ids: Option<Vec<InputId>>,
+    /// The finalized outcome, kept for as long as the row is stored.
+    ///
+    /// Stored-form rule. An earlier release decodes this value with its
+    /// own types and recomputes the receipt digest (and, where the
+    /// candidate is kept, the candidate digest) from what it decoded. A new
+    /// optional member anywhere under the outcome (the run result and its
+    /// nested types, the error metadata and its nested types) is dropped
+    /// there and changes the digest; a new enum value is a decode error
+    /// there. Either makes every row that holds it unreadable by the
+    /// earlier release, with no step that repairs it. A change that adds
+    /// one decides how the row stays readable: left out of the digests,
+    /// as the run result's reasoning effort report is (see
+    /// [`InteractionTerminalDigestPayload`]), or not stored in this form.
+    /// It also adds a rollback row: a stored row, read the way the
+    /// previous release's shape decodes it, still verifies
+    /// (`a_finished_level_turns_stored_row_verifies_without_its_report`
+    /// is the model).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) outcome: Option<crate::completion::CompletionOutcome>,
     pub(crate) phase: InputTerminalCompletionPhase,
@@ -573,7 +590,7 @@ impl InputTerminalCompletion {
         &self,
         candidate: &InteractionTerminalCandidate,
     ) -> Result<(), String> {
-        if interaction_terminal_payload_digest(candidate)? != self.candidate_digest {
+        if !interaction_terminal_payload_digest_matches(candidate, &self.candidate_digest)? {
             return Err("terminal completion candidate digest mismatch".into());
         }
         match (&self.batch_key, candidate.is_runless()) {
@@ -671,8 +688,10 @@ impl InputTerminalCompletion {
                 if let Some(candidate) = candidate {
                     self.validate_owner_candidate(candidate)?;
                 }
-                if interaction_terminal_payload_digest(&(outcome, finalization))? != *receipt_digest
-                {
+                if !interaction_terminal_payload_digest_matches(
+                    &(outcome, finalization),
+                    receipt_digest,
+                )? {
                     return Err("terminal completion receipt digest mismatch".into());
                 }
                 match (finalization, outcome) {
@@ -915,12 +934,188 @@ impl InteractionTerminalPlacement {
     }
 }
 
-pub(crate) fn interaction_terminal_payload_digest<T: Serialize>(
-    payload: &T,
+/// What an interaction terminal digest covers.
+///
+/// Implemented by exactly the payloads a stored row digests: the terminal
+/// candidate, the finalized outcome with its verdict, the recipient set and
+/// a terminal event. The bytes are the value's own JSON, with one
+/// exception: a run result's reasoning effort report is NOT part of them.
+/// An earlier release's run result has no member for the report: it drops
+/// the member when it decodes a stored row and recomputes the row's digests
+/// from what it decoded, so a digest over the report would make every
+/// finished turn that ran with a level unreadable there. The report stays
+/// in the stored value; these digests do not bind it.
+pub(crate) trait InteractionTerminalDigestPayload {
+    /// The bytes the digest is computed over.
+    fn digest_bytes(&self) -> Result<Vec<u8>, serde_json::Error>;
+
+    /// The bytes of the whole value, where they differ from
+    /// [`Self::digest_bytes`]. Pre-release builds of this release digested
+    /// the whole value; a store they wrote is still read (see
+    /// [`interaction_terminal_payload_digest_matches`]).
+    fn whole_value_bytes(&self) -> Option<Result<Vec<u8>, serde_json::Error>> {
+        None
+    }
+}
+
+impl<T: InteractionTerminalDigestPayload + ?Sized> InteractionTerminalDigestPayload for &T {
+    fn digest_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        (**self).digest_bytes()
+    }
+
+    fn whole_value_bytes(&self) -> Option<Result<Vec<u8>, serde_json::Error>> {
+        (**self).whole_value_bytes()
+    }
+}
+
+/// `result` as the digests see it: without its reasoning effort report.
+///
+/// Every member of the run result is named here on purpose. A member that
+/// is added to the run result does not compile here until its place under
+/// the digests is decided: an earlier release drops a member it does not
+/// know and recomputes the digests without it (the rule is written at
+/// `RunResult::reasoning_effort` and at `InputTerminalCompletion::outcome`).
+fn run_result_without_level_report(
+    result: &meerkat_core::types::RunResult,
+) -> Box<meerkat_core::types::RunResult> {
+    let meerkat_core::types::RunResult {
+        text,
+        session_id,
+        usage,
+        run_usage,
+        request_usage,
+        turns,
+        tool_calls,
+        terminal_cause_kind,
+        structured_output,
+        extraction_error,
+        schema_warnings,
+        skill_diagnostics,
+        reasoning_effort: _,
+    } = result.clone();
+    Box::new(meerkat_core::types::RunResult {
+        text,
+        session_id,
+        usage,
+        run_usage,
+        request_usage,
+        turns,
+        tool_calls,
+        terminal_cause_kind,
+        structured_output,
+        extraction_error,
+        schema_warnings,
+        skill_diagnostics,
+        reasoning_effort: None,
+    })
+}
+
+impl InteractionTerminalDigestPayload for InteractionTerminalCandidate {
+    fn digest_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        match self {
+            Self::RunResult { result } if result.reasoning_effort.is_some() => {
+                serde_json::to_vec(&Self::RunResult {
+                    result: run_result_without_level_report(result),
+                })
+            }
+            candidate => serde_json::to_vec(candidate),
+        }
+    }
+
+    fn whole_value_bytes(&self) -> Option<Result<Vec<u8>, serde_json::Error>> {
+        matches!(self, Self::RunResult { result } if result.reasoning_effort.is_some())
+            .then(|| serde_json::to_vec(self))
+    }
+}
+
+/// The finalized outcome with its finalization verdict: the receipt.
+impl<O, V> InteractionTerminalDigestPayload for (O, V)
+where
+    O: std::borrow::Borrow<crate::completion::CompletionOutcome>,
+    V: std::borrow::Borrow<InputTerminalCompletionFinalizationVerdict>,
+{
+    fn digest_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        let (outcome, verdict) = (self.0.borrow(), self.1.borrow());
+        match outcome {
+            crate::completion::CompletionOutcome::Completed(result)
+                if result.reasoning_effort.is_some() =>
+            {
+                serde_json::to_vec(&(
+                    &crate::completion::CompletionOutcome::Completed(
+                        run_result_without_level_report(result),
+                    ),
+                    verdict,
+                ))
+            }
+            outcome => serde_json::to_vec(&(outcome, verdict)),
+        }
+    }
+
+    fn whole_value_bytes(&self) -> Option<Result<Vec<u8>, serde_json::Error>> {
+        let (outcome, verdict) = (self.0.borrow(), self.1.borrow());
+        matches!(
+            outcome,
+            crate::completion::CompletionOutcome::Completed(result)
+                if result.reasoning_effort.is_some()
+        )
+        .then(|| serde_json::to_vec(&(outcome, verdict)))
+    }
+}
+
+impl InteractionTerminalDigestPayload for [InputId] {
+    fn digest_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+}
+
+impl InteractionTerminalDigestPayload for Vec<InputId> {
+    fn digest_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+}
+
+impl InteractionTerminalDigestPayload for AgentEvent {
+    fn digest_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+}
+
+fn interaction_terminal_digest_of(
+    bytes: Result<Vec<u8>, serde_json::Error>,
 ) -> Result<String, String> {
-    serde_json::to_vec(payload)
+    bytes
         .map(|encoded| format!("{:x}", Sha256::digest(encoded)))
         .map_err(|error| format!("failed to encode interaction terminal payload: {error}"))
+}
+
+/// The digest a stored row carries for `payload`: the one this release
+/// writes.
+pub(crate) fn interaction_terminal_payload_digest<T>(payload: &T) -> Result<String, String>
+where
+    T: InteractionTerminalDigestPayload + ?Sized,
+{
+    interaction_terminal_digest_of(payload.digest_bytes())
+}
+
+/// Whether `stored` is the digest of `payload`: the digest this release
+/// writes, or, for a payload whose run result carries a reasoning effort
+/// report, the digest over the whole value. The second form exists for
+/// stores written by pre-release builds of this release, which digested
+/// the report too; no release writes it.
+pub(crate) fn interaction_terminal_payload_digest_matches<T>(
+    payload: &T,
+    stored: &str,
+) -> Result<bool, String>
+where
+    T: InteractionTerminalDigestPayload + ?Sized,
+{
+    if interaction_terminal_payload_digest(payload)? == stored {
+        return Ok(true);
+    }
+    match payload.whole_value_bytes() {
+        Some(bytes) => Ok(interaction_terminal_digest_of(bytes)? == stored),
+        None => Ok(false),
+    }
 }
 
 pub(crate) fn interaction_terminal_event_id(event: &AgentEvent) -> Option<InteractionId> {
@@ -1027,7 +1222,8 @@ impl InteractionTerminalOutbox {
         // a legacy row.
         match (&self.released_0831_candidate, owns_candidate, published) {
             (Some(candidate), true, false) => {
-                if interaction_terminal_payload_digest(candidate)? != self.candidate_digest {
+                if !interaction_terminal_payload_digest_matches(candidate, &self.candidate_digest)?
+                {
                     return Err(
                         "released 0.8.31 interaction terminal candidate digest mismatch".into(),
                     );
@@ -1189,7 +1385,7 @@ pub(crate) fn validate_interaction_terminal_outbox_batch_against_candidate(
 ) -> Result<(), String> {
     validate_interaction_terminal_outbox_batch_shape(outboxes)?;
     let owner = &outboxes[0];
-    if interaction_terminal_payload_digest(candidate)? != owner.candidate_digest {
+    if !interaction_terminal_payload_digest_matches(candidate, &owner.candidate_digest)? {
         return Err("interaction terminal batch candidate digest mismatch".into());
     }
     match (&owner.batch_key, candidate.is_runless()) {
@@ -2987,6 +3183,203 @@ mod tests {
                 "8cfcc1586eb7b5e1206b7d36c1d0c41fd2a58a67f29037b0f5d3a5250be7cd43".to_string()
             ),
             "(candidate digest, receipt digest)"
+        );
+    }
+
+    /// A run result that carries a reasoning effort report, as a run that
+    /// sent `requests` requests with a level has it; the session id is fixed.
+    fn run_result_with_level_report(text: &str, requests: u64) -> meerkat_core::types::RunResult {
+        serde_json::from_value(serde_json::json!({
+            "text": text,
+            "session_id": "018f7b9a-1c2d-7e3f-8a4b-5c6d7e8f9a0b",
+            "usage": meerkat_core::Usage::default(),
+            "turns": 1,
+            "tool_calls": 0,
+            "reasoning_effort": {
+                "requested": "high",
+                "sent": [{
+                    "level": "high",
+                    "provider": "openai",
+                    "model": "test-openai-default",
+                    "route": {"backend": "openai_api", "api": "responses"},
+                    "fields": ["reasoning.effort"],
+                    "facts": "catalog",
+                    "decided_by": "request",
+                    "requests": requests
+                }]
+            },
+        }))
+        .unwrap()
+    }
+
+    /// The finalized terminal completion of one input whose run produced
+    /// `result`, its candidate kept. `whole_value` digests the candidate and
+    /// the receipt over the whole value, report included, as a pre-release
+    /// build of this release did; otherwise they are the digests this
+    /// release writes.
+    fn finalized_completion_of(
+        result: &meerkat_core::types::RunResult,
+        whole_value: bool,
+    ) -> InputTerminalCompletion {
+        let input_id = InputId::new();
+        let candidate = InteractionTerminalCandidate::RunResult {
+            result: Box::new(result.clone()),
+        };
+        let outcome = crate::completion::CompletionOutcome::Completed(Box::new(result.clone()));
+        let finalization = InputTerminalCompletionFinalizationVerdict::Succeeded;
+        let (candidate_digest, receipt_digest) = if whole_value {
+            (
+                interaction_terminal_digest_of(serde_json::to_vec(&candidate)).unwrap(),
+                interaction_terminal_digest_of(serde_json::to_vec(&(&outcome, &finalization)))
+                    .unwrap(),
+            )
+        } else {
+            (
+                interaction_terminal_payload_digest(&candidate).unwrap(),
+                interaction_terminal_payload_digest(&(&outcome, &finalization)).unwrap(),
+            )
+        };
+        let input_ids = vec![input_id.clone()];
+        InputTerminalCompletion {
+            input_id: input_id.clone(),
+            batch_ordinal: 0,
+            batch_key: InputTerminalCompletionBatchKey::Run {
+                run_id: RunId::new(),
+            },
+            owner_input_id: input_id,
+            candidate_digest,
+            completion_input_ids_digest: interaction_terminal_payload_digest(&input_ids).unwrap(),
+            requires_session_checkpoint: true,
+            candidate: Some(candidate),
+            completion_input_ids: Some(input_ids),
+            outcome: Some(outcome),
+            phase: InputTerminalCompletionPhase::Finalized {
+                receipt_digest,
+                finalization,
+            },
+        }
+    }
+
+    /// A run result's reasoning effort report is not part of the digests of
+    /// a terminal completion: the candidate's digest and the receipt's are
+    /// the same with the report and without it. An earlier release, whose
+    /// run result has no member for the report, therefore recomputes the
+    /// digests the row stores. Everything else in the result still moves
+    /// both digests.
+    #[test]
+    fn a_level_report_is_not_part_of_the_terminal_digests() {
+        let with_report = run_result_with_level_report("answer", 1);
+        let mut without_report = with_report.clone();
+        without_report.reasoning_effort = None;
+        let other_text = run_result_with_level_report("another answer", 1);
+        let finalization = InputTerminalCompletionFinalizationVerdict::Succeeded;
+        let candidate =
+            |result: &meerkat_core::types::RunResult| InteractionTerminalCandidate::RunResult {
+                result: Box::new(result.clone()),
+            };
+        let outcome = |result: &meerkat_core::types::RunResult| {
+            crate::completion::CompletionOutcome::Completed(Box::new(result.clone()))
+        };
+
+        assert_eq!(
+            interaction_terminal_payload_digest(&candidate(&with_report)).unwrap(),
+            interaction_terminal_payload_digest(&candidate(&without_report)).unwrap(),
+            "the candidate's digest"
+        );
+        assert_eq!(
+            interaction_terminal_payload_digest(&(&outcome(&with_report), &finalization)).unwrap(),
+            interaction_terminal_payload_digest(&(&outcome(&without_report), &finalization))
+                .unwrap(),
+            "the receipt's digest"
+        );
+        assert_ne!(
+            interaction_terminal_payload_digest(&candidate(&with_report)).unwrap(),
+            interaction_terminal_payload_digest(&candidate(&other_text)).unwrap(),
+            "the candidate's digest covers the result's text"
+        );
+        assert_ne!(
+            interaction_terminal_payload_digest(&(&outcome(&with_report), &finalization)).unwrap(),
+            interaction_terminal_payload_digest(&(&outcome(&other_text), &finalization)).unwrap(),
+            "the receipt's digest covers the result's text"
+        );
+        // Only a value with a report has a second, whole-value form.
+        assert!(candidate(&with_report).whole_value_bytes().is_some());
+        assert!(candidate(&without_report).whole_value_bytes().is_none());
+        assert!(
+            (&outcome(&with_report), &finalization)
+                .whole_value_bytes()
+                .is_some()
+        );
+        assert!(
+            (&outcome(&without_report), &finalization)
+                .whole_value_bytes()
+                .is_none()
+        );
+    }
+
+    /// A store written by a pre-release build of this release holds rows
+    /// whose digests cover the whole value, report included. The row check
+    /// accepts them beside the rows this release writes.
+    #[test]
+    fn a_row_digested_over_the_whole_value_still_verifies() {
+        let result = run_result_with_level_report("answer", 1);
+        let written_now = finalized_completion_of(&result, false);
+        let written_by_a_pre_release_build = finalized_completion_of(&result, true);
+        assert_ne!(
+            written_now.candidate_digest,
+            written_by_a_pre_release_build.candidate_digest
+        );
+        assert_eq!(written_now.validate_row(), Ok(()));
+        assert_eq!(written_by_a_pre_release_build.validate_row(), Ok(()));
+
+        // A result without a report has one form only.
+        let mut plain = result;
+        plain.reasoning_effort = None;
+        assert_eq!(
+            finalized_completion_of(&plain, false).candidate_digest,
+            finalized_completion_of(&plain, true).candidate_digest
+        );
+    }
+
+    /// The limit of leaving the report out of the digests, pinned: a changed
+    /// report in a stored row is NOT detected by the row check. A changed
+    /// byte of anything else in the result still is, in the outcome and in
+    /// the candidate.
+    #[test]
+    fn the_terminal_digests_do_not_bind_the_level_report_and_bind_the_rest() {
+        let stored = finalized_completion_of(&run_result_with_level_report("answer", 1), false);
+        assert_eq!(stored.validate_row(), Ok(()));
+
+        let other_report = run_result_with_level_report("answer", 7);
+        let mut changed_report = stored.clone();
+        changed_report.candidate = Some(InteractionTerminalCandidate::RunResult {
+            result: Box::new(other_report.clone()),
+        });
+        changed_report.outcome = Some(crate::completion::CompletionOutcome::Completed(Box::new(
+            other_report,
+        )));
+        assert_eq!(
+            changed_report.validate_row(),
+            Ok(()),
+            "the digests do not bind the report"
+        );
+
+        let other_text = run_result_with_level_report("another answer", 1);
+        let mut changed_outcome = stored.clone();
+        changed_outcome.outcome = Some(crate::completion::CompletionOutcome::Completed(Box::new(
+            other_text.clone(),
+        )));
+        assert_eq!(
+            changed_outcome.validate_row(),
+            Err("terminal completion receipt digest mismatch".to_string())
+        );
+        let mut changed_candidate = stored;
+        changed_candidate.candidate = Some(InteractionTerminalCandidate::RunResult {
+            result: Box::new(other_text),
+        });
+        assert_eq!(
+            changed_candidate.validate_row(),
+            Err("terminal completion candidate digest mismatch".to_string())
         );
     }
 

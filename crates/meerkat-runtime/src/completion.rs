@@ -1370,9 +1370,12 @@ pub(crate) fn authorize_runtime_terminal_bundle(
         }
         _ => crate::input_state::InteractionTerminalCandidate::from_core_apply_terminal(terminal),
     };
-    let candidate_digest = crate::input_state::interaction_terminal_payload_digest(&candidate)
-        .map_err(CompletionWaitError::AuthorityUnavailable)?;
-    if candidate_digest != terminal_completion_witness.candidate_digest() {
+    if !crate::input_state::interaction_terminal_payload_digest_matches(
+        &candidate,
+        terminal_completion_witness.candidate_digest(),
+    )
+    .map_err(CompletionWaitError::AuthorityUnavailable)?
+    {
         return Err(CompletionWaitError::AuthorityUnavailable(
             "generated runtime completion payload did not match the exact pending batch candidate"
                 .to_string(),

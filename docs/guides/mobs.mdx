@@ -241,6 +241,14 @@ Profiles are role contracts. Spawn requests may override selected profile
 fields, but the definition remains the durable source for the mob's intended
 shape.
 
+From 0.9.15 a mob id that starts with `council--` is reserved: it is the id
+form of the
+mob a [temporary council](/guides/temporary-councils#real-temporary-mobs)
+runs in. A create under such an id is refused, on every surface, as an
+invalid definition (`reserved_system_identifier` at `id`). A mob an earlier
+release created under such an id keeps loading and working; the mob state
+logs one warning that names it.
+
 <Warning>
 **Every profile that spawns a member must set `comms = true` under `tools`.**
 A member's identity, roster entry, peer wiring, peer messaging, and the

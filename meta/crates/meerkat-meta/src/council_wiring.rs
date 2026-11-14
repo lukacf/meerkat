@@ -173,6 +173,9 @@ mod tests {
                 council_id: council_id.clone(),
                 request_fingerprint: fingerprint,
                 temporary_mob_id: council_id.temporary_mob_id(),
+                temporary_mob_custody: Some(
+                    meerkat_mob::temporary_council::TemporaryCouncilMobCustody::NotCreated,
+                ),
                 deadline: created + chrono::Duration::seconds(1200),
                 machine_state: authority.state().clone(),
                 durability: TemporaryCouncilDurability::Durable,
@@ -182,6 +185,7 @@ mod tests {
                 result: None,
                 cleanup: None,
                 detached_job: None,
+                convener: None,
                 revision: 0,
                 created_at: created,
                 updated_at: created,

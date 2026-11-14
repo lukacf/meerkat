@@ -279,6 +279,48 @@ label keys that differ. A seat whose owed restamp 0.9.15 recorded itself
 `seats_stale` too and needs no step here: its builds are compared with the
 row's labels.
 
+### Temporary council mob ids and records
+
+No action is needed to upgrade, unless a mob definition of yours has an id
+that starts with `council--`.
+
+**Mob ids of the council form.** From 0.9.15 a create under an id that
+starts with `council--` is refused as an invalid definition (diagnostic
+`reserved_system_identifier` at `id`): by the agent tool `mob_create`,
+`mob/create`, `meerkat_mob_create`, the Web runtime's `mob_create`,
+`rkat mob run`, `rkat mob deploy` and the Rust create entries of the mob
+state. The form belongs to the mob a
+[temporary council](/guides/temporary-councils#real-temporary-mobs) creates
+for itself. 0.9.14 and earlier releases refused no mob id of this form, so
+a deployment may hold such a mob. It keeps loading and working: it is
+restored, listed and managed as before, its members run, and it can be
+stopped, resumed and destroyed; the mob state logs one warning that names
+it. Once that mob is destroyed no mob can be created under its id again,
+and while it exists a temporary council whose council id matches it ends at
+seating and leaves the mob untouched. A pack whose definition has such an id
+can no longer be deployed with `rkat mob deploy`, which builds its mob anew
+each time.
+
+**Do:** give a mob definition whose id starts with `council--` another id
+before its next create.
+
+**The council record.** The stored record of a temporary council gains two
+optional keys. `temporary_mob_custody` says whether the council issued the
+create of its mob and names the incarnation that create made
+(`{"state": "not_created"}`, `{"state": "creating"}`, or
+`{"state": "created", "incarnation": "..."}`). `convener` names the session
+whose `council` tool call convened the council (`{"session_id": "..."}`);
+a council a host runs directly has none. Nothing is migrated and no other
+key of the record changes. A record that 0.9.14 or an earlier release wrote
+has neither key, and 0.9.15 reads it as a council with no convener that
+names no mob of its own: recovery seals and cleans up such a council and
+does not run it again, its cleanup finds its mob by id under the guards
+[Temporary councils](/guides/temporary-councils#real-temporary-mobs)
+describes, and a host's create hook is told no convener for it. 0.9.15
+reads `temporary_mob_custody` strictly: a record whose custody holds a
+state it does not know does not decode, and the council's recovery cannot
+read it. 0.9.15 writes the three states above.
+
 ### Operator instruction limits bound a member's snapshot
 
 No action is needed to upgrade. A mob's operator instruction limits (64
@@ -754,6 +796,24 @@ a run, on a record written again on 0.9.14 with the same text and without the
 fork scope; a host store was not run). Forks of the agent seated before the
 rollback keep no lineage root on a host store and are not selected by the
 rewritten record, as in the `include_forks` item (read from the source).
+
+**Temporary council records.** 0.9.14 reads a council record that 0.9.15
+wrote: its record type refuses no key it does not know, so it ignores
+`temporary_mob_custody` and `convener` and reads the rest as stored. When
+0.9.14 writes such a record again (it seals an interrupted council, or
+records a cleanup), it writes it without the two keys and changes nothing
+else. Back on 0.9.15 that council has no convener and names no mob of its
+own, like a record an earlier release wrote (see
+[Temporary council mob ids and records](#temporary-council-mob-ids-and-records)).
+A record that 0.9.14 does not write again keeps both keys. What is lost
+with `temporary_mob_custody` is the fence. While rolled back, 0.9.14 does
+not refuse a create under a `council--` id, and a council's seating and
+cleanup find the council's mob by id alone, as before 0.9.15: a council can
+again retire seats in, and destroy, another mob that holds its mob id.
+After the return, a record that 0.9.14 wrote again is cleaned up by id
+under the two guards, so it can still destroy a mob with no members that
+took the id. Losing `convener` changes nothing Meerkat does itself; a host
+that reads the record sees no convener. No step is needed.
 
 **Changes of agents that wait for approval.** A change of an agent that the
 identity policy holds for approval is a pending decision of kind

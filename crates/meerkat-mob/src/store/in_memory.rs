@@ -6812,6 +6812,12 @@ mod tests {
         temporary_council_contract::unfinished_listing_tracks_settlement(&store).await;
     }
 
+    #[tokio::test]
+    async fn temporary_council_convener_survives_insert_load_and_commit() {
+        let store = InMemoryTemporaryCouncilStore::new();
+        temporary_council_contract::convener_survives_insert_load_and_commit(&store).await;
+    }
+
     // --- Cursor reads of the event log ---
 
     // A cursor poll finds its first event by binary search: from every

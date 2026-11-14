@@ -65,6 +65,17 @@ bazel_path() {
   esac
 }
 
+# Release-build case suffix -> the target triple its binaries are built for.
+target_triple() {
+  case "$1" in
+    linux-x86) echo "x86_64-unknown-linux-gnu" ;;
+    linux-arm64) echo "aarch64-unknown-linux-gnu" ;;
+    macos-arm64) echo "aarch64-apple-darwin" ;;
+    macos-x86) echo "x86_64-apple-darwin" ;;
+    *) echo "unknown-${1}" ;;
+  esac
+}
+
 echo "Release binaries check of ${checkout} at ${commit}; logs and outputs in ${work}"
 pids=()
 for target in "${targets[@]}"; do
@@ -126,6 +137,19 @@ for target in "${targets[@]}"; do
       verdict="FAIL"
     fi
   done
+  # Each binary's link-time registrations (a checkout that has the check):
+  # a binary this host runs is asked for its capabilities and skills, an ELF
+  # file of another target is read for a second init-array table, and the
+  # log says which targets were not run.
+  if [[ -x "${checkout}/scripts/check-release-binary-registrations" ]]; then
+    for index in "${!found[@]}"; do
+      if ! "${checkout}/scripts/check-release-binary-registrations" \
+        --if-runnable-target "$(target_triple "${target}")" --source-root "${checkout}" \
+        --surface "${binaries[${index}]}" "${found[${index}]}" >>"${guard_log}" 2>&1; then
+        verdict="FAIL"
+      fi
+    done
+  fi
   notes=""
   # Only a checkout older than 0.9.2 allows a marker (tokio's test-util)
   # without a VERSION; its own guard reports it.

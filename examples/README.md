@@ -5,9 +5,35 @@ from "Hello World" to production-shaped multi-agent systems.
 
 ## Quick Start
 
+The quickest first run needs no build: the released Python SDK downloads the
+`rkat-rpc` runtime of its own version on first use and checks it against a
+digest pinned in the package (unless `MEERKAT_BIN_PATH` is set or an
+`rkat-rpc` is on `PATH`; such a binary is used as it is). From the repository
+root:
+
 ```bash
-# Set the API key. The quick-start examples below (002, 003, 010) select
-# claude-sonnet-4-6 and need only the Anthropic key.
+# The quick-start examples (002, 003, 010) select claude-sonnet-4-6 and need
+# only the Anthropic key.
+export ANTHROPIC_API_KEY=sk-...
+
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install meerkat-sdk
+python examples/002-hello-meerkat-py/main.py
+```
+
+The TypeScript equivalent, with the released `@rkat/sdk` in a directory of
+its own, is in [003](003-hello-meerkat-ts/). The examples follow the main
+branch; if one uses something newer than the SDK you installed, run the copy
+at the release tag that matches your SDK's version.
+
+To run the examples against this checkout, which the shell and Rust examples
+need and which is the way to work on the repository itself, build the
+binaries and the SDKs from the repository root. An SDK built from source pins
+no runtime digest and refuses to download one, so point it at the runtime you
+build:
+
+```bash
 export ANTHROPIC_API_KEY=sk-...
 
 # Build the repo-local CLI/RPC binaries used by shell and SDK examples

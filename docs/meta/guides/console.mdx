@@ -4,7 +4,7 @@ description: "Embedded Meta console with configurable branding, grouped roster, 
 icon: "desktop"
 ---
 
-*Mirrored from Meerkat Meta main at [abdabeb8e978](https://github.com/lukacf/meerkat/commit/abdabeb8e97805385e71d66da7e78136c4b0e68c) on 2026-11-12; Meta version 0.9.14 at that commit.*
+*Mirrored from Meerkat Meta main at [225d539132a2](https://github.com/lukacf/meerkat/commit/225d539132a2ace672400cfa432d00adb43db1a7) on 2026-11-14; Meta version 0.9.14 at that commit.*
 
 Meta ships a web-based operator console through its HTTP composition. The
 console/admin `meta_gateway` serves it directly. A persistent, SDK-driven
@@ -672,6 +672,15 @@ which asks you to confirm. An edit keeps the timing unless you change it.
 - An agent whose input is governed takes no schedule (a governed send needs
   its human present, and a scheduled send has none), and an agent that
   takes no console messages cannot be scheduled.
+- From 0.9.15, an archive pauses the agent's schedules, and its unarchive resumes
+  exactly those. A schedule paused that way says so in words ("Paused
+  because its agent is archived. It resumes when the agent is
+  unarchived."), in the agent's section and in the Schedules panel; a
+  schedule somebody paused by name says nothing more than Paused. A
+  schedule cannot be created for an archived agent, and a schedule of one
+  cannot be edited: the form says that the agent is archived and that its
+  schedules cannot be created or changed until it is unarchived. A pause,
+  a resume and a delete of such a schedule are still served.
 - The pane lists the schedules defined in the Console only. The agent's own
   schedules (its schedule tools) are not listed, and the agent's tools
   neither see nor change the Console's.
@@ -680,6 +689,149 @@ The section appears where the gateway keeps console schedules. A gateway
 that sends none of them (a candidate launch, for one) lists them read-only.
 Schedules are the `meta/schedule/*` methods on the console RPC (see
 [Console schedules](/meta/api/rpc#console-schedules-console)).
+
+### Long-term agents
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+Available from Meerkat Meta 0.9.15.
+
+Where the team's host lets its agents be changed at run time (its
+[identity policy](/meta/reference/identity-policy)), the roster creates and
+changes the team's long-term agents. A long-term agent is listed, opened
+and messaged like every other agent of the team: the roster marks no agent
+by how it came to exist.
+
+- **New agent**, in the roster's header, asks for a profile of the team and
+  a name, and takes a display name, instructions, the agents it can message
+  (its peers) and a first message. Each profile and each peer is shown with
+  what the host's rules give a new agent of it: allowed, needs a decision
+  (with the decision's lines), or not allowed (with the rule's reason; such
+  an entry cannot be picked). A name cannot be changed later. A first
+  message is given to the agent once, when it starts; what an agent does at
+  its start, with or without one, follows from how it runs, which its
+  profile decides unless you choose.
+- New agent and Edit list two more settings, each choice in words.
+  **Reachability**: the agent can receive messages, or it is internal only
+  (nobody messages it, and it works only on what the team itself hands
+  it). **How it runs**: as its profile says, on its own (it works through
+  what it is sent by itself), or turn by turn (one turn for each thing it
+  is given). A create writes `addressability` and `runtime_mode_override`
+  only where you chose something else than the default, and an edit only
+  where you changed them. An edit can change how an agent runs but cannot
+  hand it back to the profile, so Edit lists "As its profile says" only
+  for an agent whose record names no way.
+- **Edit**, **Archive** and **Remove** are on an agent, in its roster drawer
+  and in the menu of its details. Edit changes the display name, the
+  instructions, the context, the labels, the profile, the peers and the
+  two settings above, and sends only what you changed, against the agent
+  as it was when the form
+  opened. If someone changed the agent in the meantime the change is
+  refused and the form offers **Read it again**: nothing is sent on its
+  own, and what you typed is replaced by the agent as it is now. The result
+  of an edit says when new instructions reach the agent.
+- A profile change is a change of its own under the host's rules. When you
+  pick another profile the Console asks the gateway what that change of
+  that agent would get and shows the answer at the field: allowed, a person
+  must decide it, or the refusal. Asking changes nothing; **Save changes**
+  is the change. A profile whose agents the host prepares before their
+  first use takes no agent that was not prepared for it: the field says
+  so, and a new agent is created in that profile instead.
+- **Archive** stops the agent and keeps its name, its record, its
+  conversation and its memory; **Unarchive** brings it back. **Remove** is
+  for good: its confirmation says that the name can never be used again and
+  offers **Archive instead**. The confirmation of an archive and of a
+  removal says that the agent's last conversation is harvested and
+  distilled, as for any agent that leaves the team, and so does the result
+  of an archive, beside what the agent keeps. An archived agent left the
+  team at its archive: the confirmation of its removal says that its last
+  conversation was already harvested and distilled when it was archived,
+  and that it keeps what it has while it stays archived. A confirmation
+  takes focus on **Cancel**, and Escape or a click outside cancels it.
+- The confirmation of an archive, an unarchive and a removal says what the
+  change will do to the schedules that target the agent, before anything is
+  sent: how many will be paused, will run again or will be ended, and which
+  by name ("Its schedule Morning report will be paused until it is
+  unarchived."). The Console reads the agent's record when the confirmation
+  opens and asks the gateway what the change would take with it
+  (`meta/identity/plan`, which changes nothing); the change is then sent at
+  the record it read. Where the plan lists no schedule, is refused or
+  cannot be read, the confirmation says nothing of schedules and the change
+  is made all the same. An agent that waits for its host has no schedule,
+  and nothing is asked for it.
+- The result of an archive, an unarchive and a removal says what became of
+  the schedules that target the agent, where the gateway's answer states it
+  (`schedules`): how many were paused, run again or were ended, and which
+  by name. A schedule without a name is counted; ids are among the
+  technical details. Where the answer counts schedules it does not list,
+  the result says the count, names the ones it lists and counts the rest
+  as more. Where the Console has access rules, the gateway gives the list
+  of the schedules to a viewer with `runtime.admin` only (see
+  [Access control](/meta/concepts/access-control)): any other viewer is told
+  what becomes of them and how many, so the confirmation and the result say
+  the count and no name ("Its 2 schedules will be paused until it is
+  unarchived."). If not every schedule could be read or changed, the
+  result says so and offers **Try again**, which sends the same request so
+  the team follows the rest. Only the first answer of a change states its
+  schedules: after a lost answer, or after **Try again**, the Console shows
+  what it was told and takes no later answer in place of the first.
+- **Archived and waiting agents**, under the roster, lists the agents that
+  have no member and so no row of the roster: the archived agents, with
+  **Unarchive** and **Remove**, and the agents whose host still prepares
+  them, each by name with the state "Waiting for its host"
+  (such an agent joins the roster when its host is done). An agent that
+  waits can be given up, for one whose host will not finish preparing it:
+  **Remove** on its row asks first and says that the agent never started,
+  so nothing is harvested and its name is spent all the same. It has no
+  other control. Only the host
+  settles an agent's preparation: the Console shows the state and offers no
+  settle. They are read when you open the list. If the team's open requests
+  cannot be read just then, the list says that it could not be read and to
+  try again; it never reads as if nobody waited.
+- A change answers in one of four ways. It is made. A person must decide it
+  first: nothing has changed, the notice shows until when the decision is
+  open, and **Withdraw request** takes the request back. The agent is being
+  prepared by its host. Or it is refused. A person cannot approve their own
+  request: the request's card under **Approvals** says so and offers the
+  withdrawal, from the page that made the request, for as long as that page
+  is open.
+- A refusal is shown at the field it concerns, or as the form's notice, in
+  the Console's own sentence for its kind; **Details** under it holds the
+  gateway's own sentence. A change the gateway allows to be sent again
+  offers **Try again**.
+- If no answer comes, the notice says that the change may or may not have
+  been made. **Try again** sends the same request, so nothing is done
+  twice.
+- The details pane of an agent has a **Record** section: how it runs, and,
+  for an agent that was asked for at run time, who asked for it, when, and
+  whether the host's rules allowed it or a person decided it. It says how
+  many requests wait for the agent (a change held for a person's decision,
+  for one); their ids are among its technical details.
+- An agent whose record says `roster_listing_superseded` (the host's
+  configuration lists its name while the agent runs from its own record)
+  reads a note at its status in the details pane: that entry is not
+  applied, and a change made in the Console changes the agent's record.
+  The pane reads it with the agent's record (`meta/identity/get`), and
+  from the details answer where that says it.
+
+What a viewer is offered is the gateway's answer and nothing the Console
+works out: `identity_changes` of the experience read (`available`,
+`can_create`, `can_change`, `can_remove`) and each agent's
+`can_change_identity` and `can_remove_identity` (see
+[Experience metadata](#experience-metadata)). Under an access policy the
+three permissions are `agent.identity.create`, `agent.identity.manage` and
+`agent.identity.remove` (see [Access control](/meta/concepts/access-control)). A
+read-only console offers no change; the archived agents and an agent's
+record can still be read.
+
+The changes are the `meta/identity/*` methods on the console RPC (see
+[Agent changes](/meta/api/rpc#agent-changes)). A custom panel reaches them
+through the commands `createAgent`, `updateAgent`, `archiveAgent`,
+`unarchiveAgent`, `removeAgent`, `withdrawAgentChange`, `getAgentRecord`,
+`listAgentRecords`, `getAgentChange`, `listAgentDirectory` and
+`planAgentChange`, from the roster and from an agent's chat and details.
+Every change carries a `request_id`: the same request under the same id
+answers the same state again and writes nothing twice.
 
 ### Local action feedback
 
@@ -1096,11 +1248,19 @@ interface ConsoleAgent {
     can_manage_schedules?: boolean; // under enforced access: agent.send and schedule.manage
     can_retire?: boolean;
     can_respawn?: boolean;
+    can_change_identity?: boolean; // from 0.9.15: edit and archive this agent at run time (agent.identity.manage)
+    can_remove_identity?: boolean; // from 0.9.15: remove this agent for good (agent.identity.remove)
     runtime_mode?: string;
   };
   labels?: Record<string, string>;
 }
 ```
+
+From 0.9.15, `identity_changes` of the same read says what the console offers for the
+team's [long-term agents](#long-term-agents): `available` (the host changes
+agents at run time and the console is writable), and `can_create`,
+`can_change` and `can_remove` for this viewer. A flag that is absent reads
+as false.
 
 Identity-first status and inspect payloads use lowercase wire enums for addressability:
 `"addressable"` and `"internal_only"`.
@@ -1258,7 +1418,9 @@ Primary RPC methods on `/console/rpc`:
   gateway's [`meta/identity/warm`](/meta/api/rpc#meta%2Fidentity%2Fwarm). Gated by the
   `agent.respawn` action.
 - `meta/retire`, `meta/respawn`, `meta/reset`, and `meta/reset_all` -
-  operator lifecycle actions. `meta/retire` releases the member, which stays
+  operator lifecycle actions. Known issue, noted 2026-11-13: on Meta 0.9.9 through 0.9.14, respawning an identity on a gateway that keeps its state on disk, or on an embedding host that keeps its state on disk and uses identities, can destroy the mobs it created and its delegates. See the
+  [known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+  for the affected releases, how it happens and what to do. `meta/retire` releases the member, which stays
   seated on its session at its generation. A member that no identity holds
   and no host adopted, such as a side chat, is retired by Core instead: it
   leaves the roster with the members it spawned. `reset_all` resets every

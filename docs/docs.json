@@ -279,8 +279,10 @@
                 "group": "Guides",
                 "pages": [
                   "meta/guides/unified-runtime",
+                  "meta/guides/agents-create-agents",
                   "meta/guides/module-system",
                   "meta/guides/console",
+                  "meta/guides/long-term-agents",
                   "meta/guides/flow-editor",
                   "meta/guides/authentication",
                   "meta/guides/deployment",
@@ -341,6 +343,7 @@
                 "group": "Governance",
                 "pages": [
                   "meta/reference/decisions",
+                  "meta/reference/identity-policy",
                   "meta/reference/governance"
                 ]
               }

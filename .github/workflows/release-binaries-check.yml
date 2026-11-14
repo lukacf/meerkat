@@ -98,13 +98,36 @@ jobs:
               ./scripts/check-linux-release-binary-portability.sh "${src}"
             fi
             scripts/check-release-binary-markers "${src}"
+            # The binary's link-time registrations run. This runner runs
+            # Linux x86_64: of the Linux aarch64 binaries the file is read
+            # for a second init-array table, and nothing is read from a
+            # Mach-O file (Intel macOS is run by macos-x86-buildbuddy below;
+            # the release runs both arm64 targets on runners of their own,
+            # verify_critical_native_binaries).
+            python3 scripts/check-release-binary-registrations \
+              --if-runnable-target "${TARGET}" --surface "${bin}" "${src}"
             # Intel macOS runs only on a Mac: macos-x86-buildbuddy below.
             if [[ "${TARGET}" == x86_64-apple-darwin ]]; then
               mkdir -p "${RUNNER_TEMP}/macos-x86"
               cp "${src}" "${RUNNER_TEMP}/macos-x86/${bin}"
             fi
+            # The arm64 targets run only on their own runners:
+            # native-arm64-buildbuddy below.
+            if [[ "${TARGET}" == aarch64-* ]]; then
+              mkdir -p "${RUNNER_TEMP}/native-arm64"
+              cp "${src}" "${RUNNER_TEMP}/native-arm64/${bin}"
+            fi
           done
           echo "All four ${TARGET} release binaries pass the release packaging guards"
+
+      - name: Hand the arm64 binaries to a runner of their target
+        if: startsWith(matrix.target, 'aarch64-')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-check-${{ matrix.target }}
+          path: ${{ runner.temp }}/native-arm64/*
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Hand the Intel macOS binaries to the Apple silicon runner
         if: matrix.target == 'x86_64-apple-darwin'
@@ -153,8 +176,51 @@ jobs:
             if [[ "${bin}" == rkat ]]; then
               scripts/check-release-binary-sqlite-profile "${src}"
             fi
+            python3 scripts/check-release-binary-registrations "${src}"
           done
           echo "Ran and inspected the four BuildBuddy Intel macOS release binaries"
+
+  # The release runs its BuildBuddy Linux aarch64 and macOS arm64 binaries on
+  # runners of their own target before it publishes them
+  # (verify_critical_native_binaries): the same check here, on the binaries
+  # the build job above made. Only a hosted run proves these two targets: no
+  # other lane runs an arm64 release binary.
+  native-arm64-buildbuddy:
+    name: Run the BuildBuddy release binaries on a runner of their target (${{ matrix.target }})
+    needs: build
+    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Download the binaries of this target
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-check-${{ matrix.target }}
+          path: ${{ runner.temp }}/native-arm64
+
+      - name: Require the registrations of each binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in rkat rkat-rpc rkat-rest rkat-mcp; do
+            src="${RUNNER_TEMP}/native-arm64/${bin}"
+            chmod +x "${src}"
+            python3 scripts/check-release-binary-registrations "${src}"
+          done
+          echo "Ran the four ${{ matrix.target }} release binaries and found their registrations"
 
   # The release's GitHub-hosted backend cross-compiles Intel macOS on Apple
   # silicon (build_binaries_macos_x86_cross): check it the same way, one job
@@ -214,3 +280,4 @@ jobs:
           ' Cargo.toml)"
           scripts/check-release-binary-markers "${src}"
           scripts/check-macos-x86-release-binary "${src}" "${version}"
+          python3 scripts/check-release-binary-registrations "${src}"

@@ -2909,7 +2909,14 @@ mod tests {
                 .get(&meerkat_core::BlobId::new(result_ref.as_str()))
                 .await
                 .unwrap();
-            let result: serde_json::Value = serde_json::from_str(&output.data).unwrap();
+            // A blob payload carries its bytes base64-encoded
+            // (`meerkat_core::BlobPayload::data`); decode before parsing.
+            let bytes = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                &output.data,
+            )
+            .expect("shell result blob is base64");
+            let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(result["exit_code"], 0);
             assert!(
                 result["stdout"]

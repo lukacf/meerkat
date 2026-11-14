@@ -3,7 +3,9 @@ from pathlib import Path
 import copy
 import importlib.util
 import json
+import atexit
 import shutil
+import tempfile
 
 import pytest
 
@@ -19,7 +21,13 @@ p = load("candidate_cli", Path(__file__).with_name("connect-candidate.py"))
 f = load("inert_assembler_cli", Path(__file__).with_name("test_assemble_connect_product.py"))
 # Release mode scans the assembled product; these rules are synthetic test data (a made-up marker).
 PRIVACY = Path(__file__).with_name("fixtures") / "release-payload-privacy-scan"
-SCAN = {"rules": PRIVACY / "synthetic-rules.json", "exemptions": PRIVACY / "synthetic-exemptions.json"}
+# The list of members a library leaves out is private to a release lane; an empty one stands in here.
+NON_PUBLISHED = Path(tempfile.mkdtemp(prefix="candidate-cli-test-")) / "non-published.json"
+atexit.register(shutil.rmtree, NON_PUBLISHED.parent, True)
+NON_PUBLISHED.write_text(json.dumps({"schema": "package-library-release/non-published-source-members/1", "trees": {},
+                                     "original_snapshots": {}}) + "\n")
+SCAN = {"rules": PRIVACY / "synthetic-rules.json", "exemptions": PRIVACY / "synthetic-exemptions.json",
+        "non_published_list": NON_PUBLISHED}
 
 
 def dump(path, value):

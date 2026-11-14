@@ -7308,7 +7308,13 @@ class SseBridge:
             response = await asyncio.to_thread(urllib_request.urlopen, req)
             try:
                 while True:
-                    chunk = await asyncio.to_thread(response.read, 4096)
+                    # read1 returns the bytes that have arrived (at most
+                    # 4096) and blocks only while there are none. read(4096)
+                    # waits until 4096 bytes have accumulated, which holds
+                    # back every event of a short run, and the last events of
+                    # a longer one, until later activity fills the buffer.
+                    # At the end of the stream both return b"".
+                    chunk = await asyncio.to_thread(response.read1, 4096)
                     if not chunk:
                         break
                     yield chunk

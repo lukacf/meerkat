@@ -92,6 +92,20 @@ All notable changes to the Python SDK are documented here.
   and cross-mob delivery between gateways) or in tests that need a provider
   key. The methods for agents created at run time (meta/identity) need a
   0.9.15 gateway: upgrade the gateway before the SDKs that call them.
+- `MobHandle.subscribe_agent` and `subscribe_mob` deliver each event when
+  it arrives, and so do the event routes of the ASGI app (`runtime.asgi()`:
+  `GET /agents/<id>/events` and `GET /mob/events`). The SDK read the
+  gateway's event stream in blocks of 4096 bytes and waited for each block
+  to fill, so it handed nothing on until that many bytes had arrived. A
+  short run showed no event at all; a longer run showed its first events
+  and not its last, usually `run_completed`, until later activity on the
+  stream; and the ASGI routes could get no response at all, because their
+  response starts with the first event. The stream is now read as it
+  arrives. The gateway and the TypeScript SDK were not affected. Affects
+  every release of the Python SDK `meerkat-meta`, 0.9.0 through 0.9.14 (read
+  from the released sources; confirmed by a run on 0.9.14). For what to do
+  on an affected release, see the known issue on the Meta 0.9.14 release
+  page: https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14
 
 ## 0.9.14
 

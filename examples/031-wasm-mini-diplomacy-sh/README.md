@@ -124,9 +124,12 @@ This will:
 
 Then serve and open:
 ```bash
-python3 -m http.server 4173 --directory web/dist
+python3 -m http.server 4173 --bind 127.0.0.1 --directory web/dist
 open http://127.0.0.1:4173
 ```
+
+The page is served on this machine only; to show it to others, host the
+build deliberately.
 
 ### Rebuild after Rust changes
 
@@ -141,6 +144,14 @@ The SDK build step compiles the WASM runtime. `rkat mob web build` then assemble
 the prebuilt runtime and mobpack into the browser bundle.
 
 ## Usage
+
+The key fields can be pre-filled for local work: the dev server (`npm --prefix web run dev`,
+on 127.0.0.1) fills them from `VITE_ANTHROPIC_API_KEY`, `VITE_OPENAI_API_KEY` and
+`VITE_GEMINI_API_KEY` when they are set. A build never does: these variables are not
+exposed to `vite build`, so none of them is written into `web/dist` and a built page
+starts with empty key fields. A build exposes only variables whose names start with
+`VITE_BUILD_PUBLIC_`; any other `VITE_` variable is empty in a built page. Keys typed
+into the page stay in the browser and go to the providers from there.
 
 1. Click **Enter the War Room**, open settings (gear icon), and enter at least one provider API key
 2. Select models for France, Prussia, Russia and the narrator (available models depend on your keys)

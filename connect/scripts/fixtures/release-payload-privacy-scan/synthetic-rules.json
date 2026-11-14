@@ -6,6 +6,11 @@
       "rules": [
         {"id": "synthetic-marker-1", "kind": "token", "value": "zq-synthetic-marker-7f3a"}
       ]
+    },
+    "home_paths": {
+      "rules": [
+        {"id": "home-paths", "kind": "regex", "value": "/(?:home|Users)/[^/\\s\"'<>]+/", "prefilter": ["/home/", "/users/"]}
+      ]
     }
   }
 }

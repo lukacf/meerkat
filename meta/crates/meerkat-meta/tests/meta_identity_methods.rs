@@ -2102,6 +2102,319 @@ fn an_older_copy_of_the_store_yields_agents_records_and_sessions_that_agree() {
 }
 
 // ---------------------------------------------------------------------------
+// When a changed instructions text reaches an agent: what the update answers
+// and what `meta/instruction_status` reads for the same agent, on a real
+// gateway (its own session service and agent builder, a real member session).
+// ---------------------------------------------------------------------------
+
+/// The rows' mob: the roster's two profiles, on a model that takes a system
+/// instruction after conversation rows, and two profiles on a model that
+/// takes one only ahead of the conversation, turn-driven and autonomous.
+const INSTRUCTION_MOB_CONFIG: &str = r#"
+[mob]
+id = "meta-identity-instruction-outcome-test"
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
+
+[profiles.reviewer]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.reviewer.tools]
+comms = true
+
+[profiles.prefix]
+model = "claude-sonnet-4-6"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.prefix.tools]
+comms = true
+
+[profiles.prefix_autonomous]
+model = "claude-sonnet-4-6"
+external_addressable = true
+runtime_mode = "autonomous_host"
+
+[profiles.prefix_autonomous.tools]
+comms = true
+"#;
+
+/// The namespace of the records the gateway keeps for agents' instructions.
+const INSTRUCTIONS_NAMESPACE: &str = "meerkat.identity.instructions";
+/// The agent the rows create.
+const KEEPER: &str = "keeper";
+
+/// The rows' policy: the stdio host may change agents of the three profiles
+/// the rows create agents on, at once.
+fn instruction_rows_policy() -> Value {
+    json!({
+        "enabled": true,
+        "approval": {"rules": [{
+            "change": ["create", "descriptive", "capability", "peers", "profile", "archive",
+                       "remove", "adopt"],
+            "requester": {"kind": "host", "surface": "rpc"},
+            "target": {"profile": ["worker", "prefix", "prefix_autonomous"]},
+            "outcome": {"kind": "allow"},
+        }]},
+        "peers": {"default": "allow"},
+    })
+}
+
+impl Gateway {
+    /// A gateway launched on `scratch` with [`INSTRUCTION_MOB_CONFIG`] and
+    /// [`instruction_rows_policy`].
+    fn launched_for_instruction_rows(scratch: &Path) -> Self {
+        let mut gateway = Self::start(scratch);
+        let init = gateway.init_mob(
+            &scratch.join("state"),
+            INSTRUCTION_MOB_CONFIG,
+            Some(instruction_rows_policy()),
+        );
+        assert!(
+            init["error"].is_null() && init["result"]["contract_version"].is_string(),
+            "the launch is accepted: {init:#}"
+        );
+        gateway
+    }
+
+    /// Create [`KEEPER`] on `profile` with its first instructions and, when
+    /// the row gives one, a first message.
+    fn create_keeper(&mut self, profile: &str, first_message: Option<&str>) {
+        let mut agent = json!({"name": KEEPER, "profile": profile,
+                               "instructions": ["Keep ALPHA records."]});
+        if let Some(first_message) = first_message {
+            agent["first_message"] = json!(first_message);
+        }
+        self.create("create-keeper", json!([agent]));
+    }
+
+    /// [`Self::launched_for_instruction_rows`] with [`KEEPER`] created on
+    /// `profile`, with no first message.
+    fn launched_with_keeper_on(scratch: &Path, profile: &str) -> Self {
+        let mut gateway = Self::launched_for_instruction_rows(scratch);
+        gateway.create_keeper(profile, None);
+        gateway
+    }
+
+    /// Update [`KEEPER`]'s instructions to `Keep BETA records.` through
+    /// `meta/identity/update`, and answer what the update says became of the
+    /// change: the `instructions` member of the agent's outcome.
+    fn update_keeper_instructions(&mut self) -> Value {
+        let digest = self.digest(KEEPER);
+        let updated = self.ok(
+            "meta/identity/update",
+            json!({"request_id": "update-keeper", "name": KEEPER,
+                   "expected_spec_digest": digest,
+                   "set": {"instructions": ["Keep BETA records."]}}),
+        );
+        assert_eq!(updated["outcome"], json!("done"), "{updated:#}");
+        outcome_agent(&updated, KEEPER)["instructions"].clone()
+    }
+
+    /// `meta/instruction_status` for [`KEEPER`]'s record and member.
+    fn keeper_instruction_status(&mut self) -> Value {
+        self.ok(
+            "meta/instruction_status",
+            json!({"namespace": INSTRUCTIONS_NAMESPACE, "key": KEEPER, "identity": KEEPER}),
+        )
+    }
+
+    /// The state of [`KEEPER`]'s slot once its session recorded the mob's
+    /// current snapshot (the member's delivery reads `current`).
+    fn keeper_slot_state_once_recorded(&mut self) -> Value {
+        let deadline = std::time::Instant::now() + LINE_WAIT;
+        loop {
+            let status = self.keeper_instruction_status();
+            let member = &status["members"][0];
+            if member["delivery"].to_string().contains("\"current\"") {
+                return member["slots"][0]["state"].clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the agent's session records its snapshot: {status:#}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// The state of a slot whose change waits on a model that takes a system
+/// instruction only ahead of the conversation.
+fn pending_for_the_prefix() -> Value {
+    json!({"state": "pending", "reason": "leading_prefix_only_lowering"})
+}
+
+/// The state of a slot whose change the agent's next run puts in effect.
+fn pending_for_the_next_run() -> Value {
+    json!({"state": "pending", "reason": "awaiting_run_start"})
+}
+
+/// The state of a slot whose change is in effect.
+fn in_effect() -> Value {
+    json!({"state": "effective"})
+}
+
+/// An agent on a model that takes a system instruction only ahead of the
+/// conversation, with a conversation: an update of its instructions through
+/// `meta/identity/update` answers `applies_after_compaction`, which is what
+/// `meta/instruction_status` says of the same agent's slot (`pending`,
+/// `leading_prefix_only_lowering`), and a further run leaves the slot so.
+#[test]
+fn an_instructions_update_of_a_prefix_only_agent_with_a_conversation_answers_after_compaction_as_its_status_reads()
+ {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::launched_with_keeper_on(scratch.path(), "prefix");
+    gateway.turn(KEEPER, "FIRST-TURN");
+    let answered = gateway.update_keeper_instructions();
+    let slot = gateway.keeper_slot_state_once_recorded();
+    assert_eq!(
+        (answered, slot),
+        (
+            json!({"kind": "applies_after_compaction"}),
+            pending_for_the_prefix(),
+        ),
+        "the update's answer and the status read's slot state agree: the change is recorded \
+         and waits for a compaction"
+    );
+    gateway.turn(KEEPER, "SECOND-TURN");
+    assert_eq!(
+        gateway.keeper_slot_state_once_recorded(),
+        pending_for_the_prefix(),
+        "a further run does not put the change in effect"
+    );
+}
+
+/// The same for an autonomous agent on such a model: the answer does not
+/// depend on how the agent's runs start. An autonomous agent starts itself,
+/// so its create answered once its session existed and it has a
+/// conversation when the update arrives. The status read never contradicts
+/// the answer: the slot waits for the prefix, or is in effect already when
+/// the record reached the session before the agent's first run started.
+#[test]
+fn an_instructions_update_of_an_autonomous_prefix_only_agent_answers_after_compaction() {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::launched_with_keeper_on(scratch.path(), "prefix_autonomous");
+    let answered = gateway.update_keeper_instructions();
+    let slot = gateway.keeper_slot_state_once_recorded();
+    assert_eq!(
+        answered,
+        json!({"kind": "applies_after_compaction"}),
+        "the update's answer for an autonomous agent on such a model; its slot reads {slot}"
+    );
+    assert!(
+        slot == pending_for_the_prefix() || slot == in_effect(),
+        "the status read does not contradict the answer: {slot}"
+    );
+}
+
+/// The sequence of the long-term agents guide: an agent created with a
+/// first message and updated at once. A create with a first message answers
+/// once the agent's session exists, so the agent has a conversation when
+/// the update arrives, and the update answers by its model: on a model that
+/// takes a system instruction only ahead of the conversation
+/// `applies_after_compaction`, on one that takes it after conversation rows
+/// `applies_at_next_run`. The status read never contradicts the answer: the
+/// slot waits as the answer says, or is in effect already when the record
+/// reached the session before the first run started.
+#[test]
+fn an_instructions_update_right_after_a_create_with_a_first_message_answers_by_the_agents_model() {
+    for (profile, expected, waiting) in [
+        (
+            "prefix",
+            "applies_after_compaction",
+            pending_for_the_prefix(),
+        ),
+        ("worker", "applies_at_next_run", pending_for_the_next_run()),
+    ] {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut gateway = Gateway::launched_for_instruction_rows(scratch.path());
+        gateway.create_keeper(profile, Some("Introduce yourself."));
+        let answered = gateway.update_keeper_instructions();
+        let slot = gateway.keeper_slot_state_once_recorded();
+        assert_eq!(
+            answered,
+            json!({"kind": expected}),
+            "the update's answer on the profile {profile}; its slot reads {slot}"
+        );
+        assert!(
+            slot == waiting || slot == in_effect(),
+            "the status read does not contradict the answer on the profile {profile}: {slot}"
+        );
+    }
+}
+
+/// An agent on a model that takes a system instruction after conversation
+/// rows, with a conversation, on the same gateway: the update answers
+/// `applies_at_next_run`, the status read says the slot waits for a run
+/// start, and the agent's next run puts it in effect.
+#[test]
+fn an_instructions_update_of_a_mid_conversation_agent_answers_next_run_and_its_next_run_applies_it()
+{
+    let scratch = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::launched_with_keeper_on(scratch.path(), "worker");
+    gateway.turn(KEEPER, "FIRST-TURN");
+    let answered = gateway.update_keeper_instructions();
+    let slot = gateway.keeper_slot_state_once_recorded();
+    assert_eq!(
+        (answered, slot),
+        (
+            json!({"kind": "applies_at_next_run"}),
+            json!({"state": "pending", "reason": "awaiting_run_start"}),
+        ),
+        "the update's answer and the status read's slot state agree: the change is recorded \
+         and waits for the agent's next run"
+    );
+    gateway.turn(KEEPER, "SECOND-TURN");
+    assert_eq!(
+        gateway.keeper_slot_state_once_recorded(),
+        json!({"state": "effective"}),
+        "the agent's next run put the change in effect"
+    );
+}
+
+/// An agent on a model that takes a system instruction only ahead of the
+/// conversation, with no conversation yet: the update answers
+/// `applies_at_next_run` and no record is written, because the agent's first
+/// run is built from the current text.
+#[test]
+fn an_instructions_update_of_a_prefix_only_agent_that_never_ran_answers_next_run_and_writes_no_record()
+ {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::launched_with_keeper_on(scratch.path(), "prefix");
+    assert_eq!(
+        gateway.update_keeper_instructions(),
+        json!({"kind": "applies_at_next_run"}),
+        "the agent's first run takes the current text"
+    );
+    let status = gateway.keeper_instruction_status();
+    assert_eq!(
+        status["desired"],
+        json!([]),
+        "an agent with no conversation needs no record: {status:#}"
+    );
+    assert_eq!(
+        gateway.get(KEEPER)["instructions"],
+        json!(["Keep BETA records."]),
+        "the agent's record holds the new text for its first build"
+    );
+    gateway.turn(KEEPER, "FIRST-TURN");
+    let status = gateway.keeper_instruction_status();
+    assert_eq!(
+        status["desired"],
+        json!([]),
+        "the first run needed no record either: {status:#}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Rows on the gateway's runtime composition, in process: what a stdio
 // request cannot show (two requesters, an agent requester, the host's own
 // hooks, a first message that does not start, a governed runtime).

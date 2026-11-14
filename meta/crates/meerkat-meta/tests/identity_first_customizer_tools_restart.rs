@@ -4834,13 +4834,16 @@ async fn a_refused_build_preparation_on_the_doors_own_wake_is_retried_once() {
 /// is the asking identity's.
 const OWN_TOOLS_TURN: &str = "USE-YOUR-OWN-MOB-TOOLS";
 
+/// One queued call of [`OwnToolsModel`]: its id, the tool and its arguments.
+type OwnToolsCall = (String, &'static str, serde_json::Value);
+
 /// A scripted model: on a request whose transcript holds [`OWN_TOOLS_TURN`]
 /// it makes, once each and in order, the queued calls whose id the
 /// transcript does not hold yet, and it records every tool result a
 /// transcript holds.
 #[derive(Clone, Default)]
 struct OwnToolsModel {
-    script: Arc<std::sync::Mutex<Vec<(String, &'static str, serde_json::Value)>>>,
+    script: Arc<std::sync::Mutex<Vec<OwnToolsCall>>>,
     tool_results: Arc<std::sync::Mutex<BTreeMap<String, (bool, String)>>>,
 }
 
@@ -5377,7 +5380,7 @@ async fn moved_agent_successor_after(
     after: meerkat_mob::Generation,
     what: &str,
 ) -> meerkat_mob::Generation {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         let seated = runtime.mob_handle().member_of_session(session).await;
         if let Some((identity, generation)) = &seated

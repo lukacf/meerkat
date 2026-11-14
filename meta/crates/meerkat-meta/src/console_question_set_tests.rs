@@ -2022,6 +2022,200 @@ fn every_member_build_mounts_the_tool() {
     assert!(mounted.tool_catalog_capabilities().exact_catalog);
 }
 
+/// A dispatcher with a declared catalog. `deferred` makes its tools
+/// deferred-eligible session entries, as a surface the factory composes
+/// beside a build's own tools declares them (the WorkGraph surface, for
+/// one); `pending` names sources it is still connecting.
+struct Declared {
+    tools: Arc<[Arc<meerkat_core::types::ToolDef>]>,
+    exact: bool,
+    deferred: bool,
+    pending: Vec<String>,
+}
+
+impl Declared {
+    fn of(
+        names: &[&str],
+        exact: bool,
+        deferred: bool,
+        pending: &[&str],
+    ) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+        Arc::new(Self {
+            tools: names
+                .iter()
+                .map(|name| {
+                    Arc::new(meerkat_core::types::ToolDef::new(
+                        *name,
+                        "a declared tool with a description long enough to count",
+                        json!({"type": "object", "properties": {"value": {"type": "string"}}}),
+                    ))
+                })
+                .collect(),
+            exact,
+            deferred,
+            pending: pending.iter().map(ToString::to_string).collect(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::AgentToolDispatcher for Declared {
+    fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
+        Arc::clone(&self.tools)
+    }
+
+    async fn dispatch(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        Err(meerkat_core::ToolError::not_found(call.name))
+    }
+
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        meerkat_core::ToolCatalogCapabilities {
+            exact_catalog: self.exact,
+            may_require_catalog_control_plane: self.deferred,
+        }
+    }
+
+    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        self.tools
+            .iter()
+            .map(|tool| {
+                if self.deferred {
+                    meerkat_core::ToolCatalogEntry::session_deferred(
+                        Arc::clone(tool),
+                        true,
+                        meerkat_core::ToolProvenance {
+                            kind: meerkat_core::ToolSourceKind::Callback,
+                            source_id: "declared".into(),
+                            artifact: None,
+                        },
+                    )
+                } else {
+                    meerkat_core::ToolCatalogEntry::session_inline(Arc::clone(tool), true)
+                }
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        self.pending.clone().into()
+    }
+}
+
+/// What Core judges of a composed tool surface: whether its catalog is
+/// exact and may need the catalog's control plane, the catalog mode, whether
+/// the control plane is composed, the sources still connecting, and the
+/// tool names.
+fn judged(tools: &dyn meerkat_core::AgentToolDispatcher) -> (String, Vec<String>) {
+    let capabilities = tools.tool_catalog_capabilities();
+    let mut names: Vec<String> = tools
+        .tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    names.sort();
+    (
+        format!(
+            "exact={} may_require_control_plane={} mode={:?} control_plane_composed={} pending={:?}",
+            capabilities.exact_catalog,
+            capabilities.may_require_catalog_control_plane,
+            meerkat_core::select_tool_catalog_mode(tools),
+            meerkat_core::should_compose_tool_catalog_control_plane(tools),
+            tools.pending_catalog_sources(),
+        ),
+        names,
+    )
+}
+
+/// Mounting the tool changes nothing about a member's tool catalog but the
+/// one tool: the catalog reads exact or not, inline or deferred, with or
+/// without the catalog's control tools and with the same sources still
+/// connecting, as the same build without the tool, and the tool list is the
+/// same list plus `ask_user`. Judged as Core judges a build: the build's
+/// base tools composed with a surface beside them that declares two
+/// deferred-eligible tools. Without external tools the factory's base is
+/// its builtin composite when the build composes a builtin surface (exact
+/// when its external tools are, or when it has none) and its empty
+/// dispatcher otherwise (not exact).
+#[test]
+fn the_mount_leaves_the_builds_catalog_as_it_was() {
+    let slot = AskUserSlot::default();
+    let beside = || Declared::of(&["beside_one", "beside_two"], true, true, &[]);
+    let mut differing = Vec::new();
+    for (case, external, builtins) in [
+        ("no external tools, no builtin surface", None, false),
+        ("no external tools, builtins on", None, true),
+        (
+            "exact external tools",
+            Some(Declared::of(&["probe"], true, false, &[])),
+            false,
+        ),
+        (
+            "external tools that are not exact",
+            Some(Named::of(&["probe"])),
+            false,
+        ),
+        (
+            "exact external tools with deferred entries, builtins on",
+            Some(Declared::of(&["later_one", "later_two"], true, true, &[])),
+            true,
+        ),
+        (
+            "exact external tools still connecting",
+            Some(Declared::of(&["probe"], true, false, &["server-a"])),
+            false,
+        ),
+    ] {
+        let mut request = build_request(Some("agent-a"), external.clone());
+        if builtins {
+            request
+                .build
+                .as_mut()
+                .expect("build options")
+                .override_builtins = meerkat_core::ToolCategoryOverride::Enable;
+        }
+        slot.mount(&mut request);
+        let mounted = request
+            .build
+            .as_ref()
+            .and_then(|build| build.external_tools.clone())
+            .expect("mounted");
+        // The base the factory builds without the tool. A builtin composite
+        // reads as its external tools do, and as exact without any: an
+        // exact dispatcher of no tools stands in for it here.
+        let base_without: Arc<dyn meerkat_core::AgentToolDispatcher> = match (&external, builtins) {
+            (Some(external), _) => Arc::clone(external),
+            (None, true) => Declared::of(&[], true, false, &[]),
+            (None, false) => Arc::new(meerkat_tools::EmptyToolDispatcher),
+        };
+        let (judgement_without, mut names_without) =
+            judged(&meerkat_core::DynamicToolComposite::new(vec![
+                base_without,
+                beside(),
+            ]));
+        let (judgement_with, names_with) = judged(&meerkat_core::DynamicToolComposite::new(vec![
+            mounted,
+            beside(),
+        ]));
+        names_without.push(ASK_USER_TOOL.to_string());
+        names_without.sort();
+        if judgement_with != judgement_without || names_with != names_without {
+            differing.push(format!(
+                "{case}: with the tool {judgement_with} {names_with:?}; without it \
+                 {judgement_without} {names_without:?} (the tool added)"
+            ));
+        }
+    }
+    assert!(
+        differing.is_empty(),
+        "mounting the tool leaves the build's catalog as it was:\n{}",
+        differing.join("\n")
+    );
+}
+
 /// The pins this feature leaves as they are, named for the record: the
 /// Console serves no `meta/decisions/decide`
 /// (`tests/decisions_console.rs`), and every Console method is in the

@@ -506,6 +506,23 @@ async fn a_member_asks_a_person_and_reads_the_answer_on_its_next_turn() {
         tools.iter().any(|tool| tool == "ask_user"),
         "the member's model is offered the tool: {tools:?}"
     );
+    // A plain member's first turn: the tools its profile gives it (comms)
+    // and `ask_user`, nothing else. Mounting the tool composes no catalog
+    // control tools and moves nothing behind the tool catalog.
+    let mut offered = tools.clone();
+    offered.sort();
+    assert_eq!(
+        offered,
+        vec![
+            "ask_user",
+            "peers",
+            "reply_to_peer",
+            "send_message",
+            "send_request",
+            "send_response",
+        ],
+        "the member's tool list is its list without the tool, plus the tool"
+    );
     assert!(asked.contains("answer_by"), "{asked}");
     assert_eq!(set["origin"], json!({ "identity": IDENTITY }), "{listed}");
     assert_eq!(set["title"], json!("Release plan"), "{listed}");

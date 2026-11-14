@@ -358,16 +358,23 @@ println!("Answer: {}", result.text);
 
 ### Run with event streaming
 
+Text deltas are emitted by the model adapter, not by the run. Give one
+channel to both: build the adapter with `build_llm_adapter_with_events` and
+pass the same sender to `run_with_events`. With an adapter built by
+`build_llm_adapter`, which has no channel, the run delivers `TextComplete`,
+`TurnCompleted` and the tool events, and no `TextDelta`.
+
 ```rust
+use std::sync::Arc;
 use tokio::sync::mpsc;
-use meerkat::AgentEvent;
+use meerkat::{AgentBuilder, AgentEvent};
 
 let (tx, mut rx) = mpsc::channel::<AgentEvent>(100);
 
 tokio::spawn(async move {
     while let Some(event) = rx.recv().await {
         match event {
-            AgentEvent::TextDelta { delta } => print!("{}", delta),
+            AgentEvent::TextDelta { delta, .. } => print!("{}", delta),
             AgentEvent::ToolExecutionStarted { name, .. } => {
                 println!("[Calling {}...]", name);
             }
@@ -390,8 +397,24 @@ tokio::spawn(async move {
     }
 });
 
+// Text deltas are emitted by the model adapter, turn-level events by the
+// agent: give both the same channel.
+let llm = factory
+    .build_llm_adapter_with_events(client, "claude-sonnet-4-6", Some(tx.clone()))
+    .await;
+let mut agent = AgentBuilder::new()
+    .model("claude-sonnet-4-6")
+    .build(Arc::new(llm), tool_dispatcher, session_store)
+    .await?;
+
 let result = agent.run_with_events("Tell me a story".into(), tx).await?;
 ```
+
+The adapter keeps its sender for as long as the agent lives, so the receiving
+loop ends when the agent is dropped, not when the run returns. Its channel is
+fixed when it is built: a later run of the same agent that is given another
+channel sends that channel its turn-level events, and its text deltas still
+go to the first.
 
 <Note>
 `turn_completed` carries optional usage for one provider call while `run_completed`
@@ -414,20 +437,50 @@ turn, not zero usage. Read
 
 ### Error handling
 
+Use this dependency set for the sample. The explicit `meerkat-core`
+dependency supplies `TurnTerminalCauseKind` and `TurnTerminalOutcome`, which
+`meerkat` does not re-export; transitive dependencies are not available as
+direct crate imports. The `meerkat_core` imports under
+[Core types](#core-types) need the same dependency.
+
+```toml
+[dependencies]
+meerkat = "=0.9.14"
+meerkat-core = "=0.9.14"
+tokio = { version = "1", features = ["full"] }
+```
+
 ```rust
 use meerkat::AgentError;
+use meerkat_core::{TurnTerminalCauseKind, TurnTerminalOutcome};
 
 match agent.run("prompt".into()).await {
+    // A spent token or tool-call budget is a success with a cause. Read the
+    // cause before `text`.
+    Ok(result) if result.terminal_cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted) => {
+        println!("Budget spent before the run finished");
+    }
     Ok(result) => println!("Success: {}", result.text),
     Err(AgentError::Llm { provider, message, .. }) => {
         println!("LLM error ({}): {}", provider, message);
     }
-    Err(AgentError::TokenBudgetExceeded { used, limit }) => {
-        println!("Token budget exceeded: {} / {}", used, limit);
+    Err(AgentError::TerminalFailure { outcome: TurnTerminalOutcome::TimeBudgetExceeded, .. }) => {
+        println!("Time budget exceeded");
     }
     Err(e) => println!("Other error: {}", e),
 }
 ```
+
+`Err(AgentError::TokenBudgetExceeded { .. })` is returned only by `Budget::check()` if you call it yourself. A token or tool-call budget spent during a run, or already spent at its start, ends as `Ok(RunResult)` with `terminal_cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted)`; a spent time budget ends as `Err(AgentError::TerminalFailure { outcome: TimeBudgetExceeded, .. })`.
+
+The answer of the model call that takes a run past its token budget is
+discarded: it is not committed to the session and not returned, although its
+tokens are counted. The result's `text` is then the latest assistant text
+the session already held: text from an earlier step of the same run, else the
+answer of an earlier turn, else empty. Check `terminal_cause_kind` before
+using `text`: on `BudgetExhausted` the text is not this call's answer.
+A streaming caller has by then received the discarded answer's text deltas;
+no `TextComplete` and no `TurnCompleted` follow them.
 
 ---
 
@@ -442,6 +495,8 @@ match event {
     AgentEvent::RunStarted { session_id, input, .. } => {}
     AgentEvent::RunCompleted { session_id, result, structured_output, extraction_required, usage, .. } => {}
     AgentEvent::RunFailed { session_id, error_report, .. } => {}
+    // A run continued from a resume point after an interruption
+    AgentEvent::RunResumed { session_id, run_id, round, resume_point, .. } => {}
 
     // Structured-output extraction (after a completed main run)
     AgentEvent::ExtractionSucceeded { session_id, structured_output, schema_warnings, origin, .. } => {}
@@ -452,18 +507,25 @@ match event {
     AgentEvent::HookCompleted { hook_id, point, duration_ms } => {}
     AgentEvent::HookFailed { hook_id, point, reason } => {}
     AgentEvent::HookDenied { hook_id, point, reason_code, message, .. } => {}
+    // A hook prerequisite was refused before the hook's code was entered
+    AgentEvent::HookLaunchRefused { hook_id, point, reason, tool_use_id } => {}
 
     // LLM interaction
-    AgentEvent::TurnStarted { turn_number } => {}
-    AgentEvent::ReasoningDelta { delta } => {}
-    AgentEvent::ReasoningComplete { content } => {}
-    AgentEvent::TextDelta { delta } => {}
-    AgentEvent::TextComplete { content } => {}
-    AgentEvent::ServerToolContent { id, kind, content } => {}
-    AgentEvent::AssistantImageAppended { image } => {}
+    AgentEvent::TurnStarted { turn_number, assistant_message_id } => {}
+    AgentEvent::ReasoningDelta { delta, assistant_message_id } => {}
+    AgentEvent::ReasoningComplete { content, assistant_message_id } => {}
+    AgentEvent::TextDelta { delta, assistant_message_id } => {}
+    AgentEvent::TextComplete { content, assistant_message_id } => {}
+    AgentEvent::ServerToolContent { id, kind, content, assistant_message_id } => {}
+    AgentEvent::AssistantImageAppended { image, assistant_message_id } => {}
     AgentEvent::ToolCallRequested { id, name, args } => {}
     AgentEvent::ToolResultReceived { id, name, content, is_error } => {}
-    AgentEvent::TurnCompleted { stop_reason, usage } => {}
+    AgentEvent::TurnCompleted { stop_reason, usage, assistant_message_id } => {}
+    // One provider attempt of a turn with a reasoning-effort preference: what
+    // was requested and what the attempt sent
+    AgentEvent::RequestReasoningLowered {
+        turn_number, fallback_attempt, provider, model, requested, baseline, outcome,
+    } => {}
 
     // Tool execution
     AgentEvent::ToolExecutionStarted { id, name } => {}
@@ -487,7 +549,7 @@ match event {
     AgentEvent::BudgetWarning { budget_type, used, limit, percent } => {}
 
     // Retry (typed LlmRetrySchedule owns failure kind + attempt/delay plan)
-    AgentEvent::Retrying { retry } => {}
+    AgentEvent::Retrying { retry, assistant_message_id } => {}
 
     // Model fallback
     AgentEvent::ModelFallbackSkipped { retry, target } => {}
@@ -518,6 +580,13 @@ match event {
     AgentEvent::PeerContentIngested { kind, peer, request_id, sender_taint, delivery_id } => {}
     AgentEvent::TurnUsageAccountingUnmeasured { session_id, unmeasured } => {}
     AgentEvent::TurnUsageAccountingIdentityDisputed { session_id, dispute } => {}
+
+    // A live channel of the session was closed by the runtime, with the cause
+    // and whether it may be reopened
+    AgentEvent::LiveChannelClosed { session_id, channel_id, reason, reopen_recommended } => {}
+
+    // An operation returned, but its audit outcome could not be retained
+    AgentEvent::OperationObservationFailed { operation_id, phase } => {}
 
     // Durable steer: mid-turn appends and exact discarded applications
     AgentEvent::BoundaryAppendApplied {

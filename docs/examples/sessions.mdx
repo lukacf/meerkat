@@ -620,7 +620,7 @@ archived targets successful no-ops, and direct substrate calls differ.
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
-                AgentEvent::TextDelta { delta } => print!("{}", delta),
+                AgentEvent::TextDelta { delta, .. } => print!("{}", delta),
                 AgentEvent::TurnCompleted { usage: Some(usage), .. } => {
                     // Per-call usage: `accounting` names the resolved model and
                     // the normalized presented input for this one call.
@@ -634,6 +634,16 @@ archived targets successful no-ops, and direct substrate calls differ.
             }
         }
     });
+
+    // Text deltas are emitted by the model adapter, turn-level events by the
+    // agent: give both the same channel.
+    let llm = factory
+        .build_llm_adapter_with_events(client, "claude-sonnet-4-6", Some(tx.clone()))
+        .await;
+    let mut agent = AgentBuilder::new()
+        .model("claude-sonnet-4-6")
+        .build(Arc::new(llm), tool_dispatcher, session_store)
+        .await?;
 
     let result = agent.run_with_events("Tell me a story".into(), tx).await?;
     ```

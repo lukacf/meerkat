@@ -478,7 +478,7 @@ async fn handle_chat(
                 Err(broadcast::error::RecvError::Closed) => break,
             };
             match event {
-                AgentEvent::TextDelta { delta } => yield sse_event("delta", &delta),
+                AgentEvent::TextDelta { delta, .. } => yield sse_event("delta", &delta),
                 AgentEvent::RunCompleted { ref result, .. } => {
                     yield sse_event("done", result);
                     break;

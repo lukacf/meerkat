@@ -5,6 +5,7 @@ import {
   questionSetAnswersOffered,
   questionSetAnswersSendable,
   questionSetEntries,
+  questionSetShownWhole,
   utf8ByteLength,
 } from "../../../console-core/src/pending-questions";
 import type {
@@ -273,6 +274,9 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, slot, r
   const identity = set.origin.identity;
   const agentName = agentDisplayName(identity, directory) || "an agent";
   const refusal = decision?.phase === "refused" ? decision.refusal : undefined;
+  // A set the reader cut is read-only for everyone: a reply would send back
+  // the digest of the whole set, which the card did not show.
+  const partial = !questionSetShownWhole(set);
   // The state is the gateway's and this console's own decisions: never the
   // browser clock. A list that could not be read again comes before what an
   // earlier reply said of the set.
@@ -282,17 +286,19 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, slot, r
         : decision?.phase === "failed" ? "failed"
           : resourceStatus !== "ready" ? "stale"
             : refusal ? "refused"
-              : readOnly ? "read_only"
+              : readOnly || partial ? "read_only"
                 : "pending";
-  const locked = READ_ONLY_WORDS[readOnlyReason ?? "read_only"];
+  const locked = partial
+    ? { chip: READ_ONLY_WORDS.read_only.chip, sentence: `This set of questions is larger than the Console shows, so it cannot be answered here. Reply to ${agentName} in its chat instead.` }
+    : READ_ONLY_WORDS[readOnlyReason ?? "read_only"];
   const words = state === "read_only" ? { text: locked.chip, tone: "locked" as Tone } : STATE_WORDS[state];
   const sentence = state === "refused" ? refusal?.words ?? "" : state === "read_only" ? locked.sentence
     : stateSentence(state, agentName, decision?.action, set.deadlineAtMs !== undefined && now < set.deadlineAtMs ? set.deadlineAtMs : undefined);
   const open = !closed && state !== "answered" && state !== "dismissed";
   // A person changes the draft while the set waits, after an uncertain send,
   // and after a refusal the set outlives (they may correct and send again),
-  // unless the cards are read-only.
-  const editable = open && !readOnly && (state === "pending" || state === "failed" || state === "refused");
+  // unless the cards are read-only or the set is not shown whole.
+  const editable = open && !readOnly && !partial && (state === "pending" || state === "failed" || state === "refused");
   // What the set offers now: a set that changed may have dropped a question
   // or a choice the draft still holds.
   const answers = questionSetAnswersOffered(set, draft);

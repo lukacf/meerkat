@@ -256,6 +256,13 @@ export function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length;
 }
 
+/** Whether this console shows the set whole: no question or choice was
+ * left out by the reader and no text was cut. A reply sends back the digest
+ * of the whole set, so only a set shown whole takes one from here. */
+export function questionSetShownWhole(set: QuestionSet): boolean {
+  return !set.omittedQuestions && !set.shortened && set.questions.every((question) => !question.omittedChoices);
+}
+
 /** The answers of the set's own questions, in the set's order, as the wire
  * carries them. Free text goes without the whitespace at its ends. */
 function wireAnswers(set: QuestionSet, answers: QuestionSetAnswers): QuestionSetWireAnswer[] {
@@ -584,6 +591,9 @@ export function createQuestionSetResource(input: {
     if (existing) return existing;
     const set = snapshot.sets.find((candidate) => candidate.pendingId === pendingId);
     if (snapshot.readOnly || denied || snapshot.status !== "ready" || !set || unsettled.has(pendingId)
+      // A reply attests the whole set by its digest: none is sent for a set
+      // this console shows only in part.
+      || !questionSetShownWhole(set)
       || (action === "answer" && (!answers || !questionSetAnswersSendable(set, answers)))) {
       return Promise.resolve();
     }

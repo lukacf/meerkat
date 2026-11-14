@@ -513,8 +513,11 @@ like the approvals, and again after each of its own replies. If the first
 read fails, the Pending tab says that the questions could not be loaded and
 offers **Try again**. After **Send answers** or **Dismiss** the focus moves to
 the card's sentence. A set larger than the gateway's limits (10 questions, 8
-choices each) is shown up to them, and the card says how many questions or
-choices are not shown. A gateway older than question sets (no
+choices each, or text longer than its lengths) is shown up to them, the card
+says how many questions or choices are not shown, and it cannot be answered
+or dismissed from the Console: a reply attests the whole set, and the card
+shows only part of it. The card reads **Read only** and says to reply to the
+agent in its chat instead. A gateway older than question sets (no
 `meta/gating/questions`) shows no cards and no error.
 
 ### Dock — Chat panels

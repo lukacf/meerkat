@@ -509,7 +509,7 @@ export function PrivateReplyCard({ item, onDismiss }: {
   );
 }
 
-export function ApprovalAttention({ snapshot, onOpen, hostItems = 0, replies = 0, questionSets = 0 }: {
+export function ApprovalAttention({ snapshot, onOpen, hostItems = 0, replies = 0, questionSets = 0, questionStatus }: {
   snapshot?: PendingApprovalSnapshot;
   onOpen(pendingId?: string): void;
   /** Host-provided attention items, counted with the approvals. */
@@ -519,6 +519,12 @@ export function ApprovalAttention({ snapshot, onOpen, hostItems = 0, replies = 0
   /** The open sets of questions agents asked a person, counted with them
    *  too: a question waits for someone as an approval does. */
   questionSets?: number;
+  /** The state of the read of the question sets, when the host knows it.
+   *  While it is not ready the row shows no count, as for approvals that
+   *  are not ready: a count is shown only when everything it counts was
+   *  read. A gateway without question sets and a denied read show
+   *  nothing of them. */
+  questionStatus?: "loading" | "ready" | "stale" | "unavailable" | "forbidden" | "unsupported";
 }) {
   // Approvals count only where the connection can show them; host items,
   // replies and question sets count on any connection, so an aggregate
@@ -527,28 +533,39 @@ export function ApprovalAttention({ snapshot, onOpen, hostItems = 0, replies = 0
   // A request routed to an approver the viewer does not hold waits for
   // someone else: it does not need this viewer.
   const viewer = useApprovalViewer();
-  if (!approvalsShown && hostItems === 0 && replies === 0 && questionSets === 0) return null;
+  const questionsShown = questionStatus !== "forbidden" && questionStatus !== "unsupported";
+  const sets = questionsShown ? questionSets : 0;
+  const questionsReady = !questionsShown || questionStatus === undefined || questionStatus === "ready";
+  // A read of the question sets that failed, or a list that may be out of
+  // date, is said even where nothing else is shown.
+  const questionsUnread = questionsShown && (questionStatus === "stale" || questionStatus === "unavailable");
+  if (!approvalsShown && hostItems === 0 && replies === 0 && sets === 0 && !questionsUnread) return null;
   const requests = approvalsShown && snapshot ? snapshot.requests.filter((request) => request.status === "pending"
     && snapshot.decisions[request.pendingId]?.phase !== "settled"
     && (!viewer || approvalAudience(request, viewer).kind === "you")) : [];
   const ready = !approvalsShown || snapshot?.status === "ready";
   const approvalStatus = !approvalsShown ? "" : ready ? `${requests.length} pending approval${requests.length === 1 ? "" : "s"}` : snapshot?.status === "loading" ? "Checking approvals" : snapshot?.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable";
-  const questionStatus = questionSets ? `${questionSets} question set${questionSets === 1 ? "" : "s"}` : "";
+  const questionWords = questionsReady ? (sets ? `${sets} question set${sets === 1 ? "" : "s"}` : "")
+    : questionStatus === "loading" ? "Checking questions" : questionStatus === "stale" ? "Questions may be out of date" : "Questions unavailable";
   const hostStatus = hostItems ? `${hostItems} item${hostItems === 1 ? "" : "s"} from the host` : "";
   const replyStatus = replies ? `${replies} ${replies === 1 ? "reply" : "replies"} for you` : "";
-  const status = [approvalStatus, questionStatus, hostStatus, replyStatus].filter(Boolean).join(", ");
-  const count = requests.length + questionSets + hostItems + replies;
+  const status = [approvalStatus, questionWords, hostStatus, replyStatus].filter(Boolean).join(", ");
+  const count = requests.length + sets + hostItems + replies;
+  // One placeholder for both reads: "..." while what is not ready is only
+  // still being read, "!" when a list is out of date or could not be read.
+  const allReady = ready && questionsReady;
+  const reading = (ready || snapshot?.status === "loading") && (questionsReady || questionStatus === "loading");
   return (
-    <section className="cc-approval-attention" aria-label="Needs you" data-testid="approval-attention" data-state={approvalsShown ? snapshot?.status : "ready"} data-pending={ready && count > 0}>
+    <section className="cc-approval-attention" aria-label="Needs you" data-testid="approval-attention" data-state={approvalsShown ? snapshot?.status : "ready"} data-pending={allReady && count > 0}>
       <button className="cc-approval-attention__open" type="button" aria-label={`Needs you, ${status}`} title={status}
         // One approval and nothing else opens on that approval; question
         // sets head the inbox's Pending list, so with them the list opens.
-        onClick={() => onOpen(ready && requests.length === 1 && questionSets === 0 ? requests[0].pendingId : undefined)}>
+        onClick={() => onOpen(allReady && requests.length === 1 && sets === 0 ? requests[0].pendingId : undefined)}>
         <svg className="cc-approval-attention__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <path d="m4 5-2 9v5h20v-5l-2-9H4Z" /><path d="M2 14h6l2 3h4l2-3h6" />
         </svg>
         <span className="cc-approval-attention__label">Needs you</span>
-        <span className="cc-approval-attention__count" aria-hidden="true">{ready ? count : snapshot?.status === "loading" ? "..." : "!"}</span>
+        <span className="cc-approval-attention__count" aria-hidden="true">{allReady ? count : reading ? "..." : "!"}</span>
         <svg className="cc-approval-attention__chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
       </button>
       <span className="cc-approval-attention__status" role="status">{status}</span>

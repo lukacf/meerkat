@@ -66,16 +66,22 @@ export interface QuestionSetDismissParams {
  *   the gateway still lists.
  * - `approver_unauthenticated`, `access_denied`: the person (not signed in
  *   as a person; lost the permission to decide).
- * - `caller_changed`, `caller_not_current`: the request's caller. */
+ * - `caller_changed`, `caller_not_current`: the request's caller.
+ * - `not_sent`: the request never reached the gateway's decide (the
+ *   console did not know whom it sends for and sent nothing, a sign-in
+ *   page answered instead of the gateway, or the login had ended). */
 export type QuestionSetRefusalKind =
   | "not_open" | "expired" | "subject_changed" | "not_eligible" | "not_taken" | "not_accepted"
-  | "approver_unauthenticated" | "access_denied" | "caller_changed" | "caller_not_current";
+  | "approver_unauthenticated" | "access_denied" | "caller_changed" | "caller_not_current" | "not_sent";
 /** A decision the gateway refused: nothing was sent to the agent. */
 export interface QuestionSetRefusal {
   kind: QuestionSetRefusalKind;
   /** The reason in words for the person answering, with what to do. */
   words: string;
-  /** The gateway's own message, where the words do not say it all. */
+  /** What the gateway said, where the words do not say it all: its own
+   * sentence for a reply it did not accept, and only the kind of a refusal
+   * this console does not know by name (the gateway's message for one
+   * carries the decision's id). */
   detail?: string;
 }
 export interface QuestionSetDecisionState {
@@ -335,16 +341,20 @@ export const QUESTION_SET_REFUSAL_WORDS: Readonly<Record<QuestionSetRefusalKind,
   subject_changed: "These questions changed after you opened them, so nothing was sent. Read them again, then answer.",
   not_eligible: "You are not one of the people who can answer this question, so nothing was sent. Ask an administrator if you should be.",
   not_taken: "The gateway did not take this reply, so nothing was sent. Try again; if it happens again, tell an administrator.",
-  not_accepted: "The gateway did not accept this reply, so nothing was sent. Check your choices and send again.",
+  not_accepted: "The gateway did not accept this reply, so nothing was sent. Check it, then send again.",
   approver_unauthenticated: "Only a signed-in person can answer, so nothing was sent. Sign in as yourself, then send again.",
   access_denied: "You no longer have permission to answer questions here, so nothing was sent. Ask an administrator for the permission to decide, then send again.",
   caller_changed: "This browser is now signed in as someone else, so nothing was sent or changed. Answer again as the person signed in now.",
   caller_not_current: "Your sign-in ended before the reply was sent, so nothing was changed. Sign in again, then send again.",
+  not_sent: "This reply was not sent: the Console could not confirm your sign-in, so nothing was changed. Sign in again if you are asked to, then send again.",
 };
 /** The typed refusals of the decision itself that this console reads by
  * name; every other one reads as `not_taken`. */
 const DECISION_REFUSALS: ReadonlySet<string> = new Set(["not_open", "expired", "subject_changed", "not_eligible"]);
-type RpcFailure = { httpStatus?: unknown; rpcError?: { code?: unknown; message?: unknown; data?: unknown }; responseRpcError?: { code?: unknown; message?: unknown; data?: unknown } };
+/** A refusal kind as the gateway writes one: a short word. Anything else
+ * is not shown. */
+const KIND_WORD = /^[a-z][a-z_]{0,63}$/;
+type RpcFailure = { httpStatus?: unknown; transportFailure?: unknown; rpcError?: { code?: unknown; message?: unknown; data?: unknown }; responseRpcError?: { code?: unknown; message?: unknown; data?: unknown } };
 function rpcFailure(error: unknown): { code?: unknown; kind: string; message?: string; data?: Record<string, unknown> } {
   const failure = error as RpcFailure | null;
   const rpc = failure?.rpcError ?? failure?.responseRpcError;
@@ -362,13 +372,22 @@ const isDenied = (error: unknown) => {
  * `kind` (`data.decision_refusal.kind`). */
 export function questionSetRefusal(error: unknown): QuestionSetRefusal | null {
   const { code, kind, message, data } = rpcFailure(error);
-  const refusal = (name: QuestionSetRefusalKind, detailed = false): QuestionSetRefusal => (
-    { kind: name, words: QUESTION_SET_REFUSAL_WORDS[name], ...(detailed && message ? { detail: message } : {}) }
+  const refusal = (name: QuestionSetRefusalKind, detail?: string): QuestionSetRefusal => (
+    { kind: name, words: QUESTION_SET_REFUSAL_WORDS[name], ...(detail ? { detail } : {}) }
   );
   if (kind === "decision_refused") {
     const token = record(data?.decision_refusal)?.kind;
-    return typeof token === "string" && DECISION_REFUSALS.has(token) ? refusal(token as QuestionSetRefusalKind) : refusal("not_taken", true);
+    if (typeof token === "string" && DECISION_REFUSALS.has(token)) return refusal(token as QuestionSetRefusalKind);
+    // A refusal this console does not know by name: its kind is all that
+    // is kept. The gateway's message for it names the decision by its id.
+    return refusal("not_taken", typeof token === "string" && KIND_WORD.test(token) ? `The gateway's refusal: ${token}` : undefined);
   }
+  // The request never reached the gateway's decide: the console sent
+  // nothing (it did not know whom it sends for), a sign-in page answered in
+  // the gateway's place, or the login had ended.
+  const failure = error as RpcFailure | null;
+  if (failure?.transportFailure === "caller_unknown" || failure?.transportFailure === "sign_in_redirect"
+    || failure?.httpStatus === 401 || kind === "unauthenticated") return refusal("not_sent");
   if (kind === "caller_changed" || kind === "caller_not_current") return refusal(kind);
   if (kind === "approver_unauthenticated" || code === -32057) return refusal("approver_unauthenticated");
   // A question set's decide is denied for one reason: the person lost the
@@ -376,7 +395,7 @@ export function questionSetRefusal(error: unknown): QuestionSetRefusal | null {
   if (isDenied(error)) return refusal("access_denied");
   // Invalid params that say no more: an answer the gateway does not accept,
   // or an id that is not pending. The next read tells them apart.
-  if (code === -32602) return refusal("not_accepted", true);
+  if (code === -32602) return refusal("not_accepted", message);
   return null;
 }
 function unavailableCapability(error: unknown): { method: string; availableMethods: readonly string[] } | null {

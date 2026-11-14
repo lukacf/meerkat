@@ -115,6 +115,10 @@ interface SidebarProps {
   /** The open sets of questions agents asked a person, counted in "Needs
    * you" and on the Approvals view, where each is answered. */
   questionSetCount?: number;
+  /** The state of the read of those sets. A list that is not ready is not
+   * counted on the Approvals view (as approvals that are not read are
+   * not), and "Needs you" says so instead of a count. */
+  questionSetStatus?: "loading" | "ready" | "stale" | "unavailable" | "forbidden" | "unsupported";
   /** Comfortable (two-line 44 px rows) or compact (one-line 32 px rows). */
   density?: SidebarDensity;
   /** The view the focused pane shows: its nav entry wears the accent rule. */
@@ -2142,6 +2146,7 @@ export const Sidebar = React.memo(function Sidebar({
   hostAttentionCount = 0,
   attentionReplyCount = 0,
   questionSetCount = 0,
+  questionSetStatus,
   density = "comfortable",
   activeControl = null,
   openControls,
@@ -2809,15 +2814,16 @@ export const Sidebar = React.memo(function Sidebar({
   const pendingApprovals = pendingApprovalCount(approvals, approvalViewer);
   const attentionByKind = React.useMemo<Partial<Record<NavKind, SidebarNavAttention>>>(() => {
     const out: Partial<Record<NavKind, SidebarNavAttention>> = { ...navAttention };
-    if (pendingApprovals > 0 || questionSetCount > 0) {
+    const questionSets = questionSetStatus === undefined || questionSetStatus === "ready" ? questionSetCount : 0;
+    if (pendingApprovals > 0 || questionSets > 0) {
       // The Approvals view lists both: the requests that wait for a decision
       // and the sets of questions agents asked a person.
       out.gating = {
-        count: pendingApprovals + questionSetCount,
+        count: pendingApprovals + questionSets,
         tone: "warn",
         description: [
           pendingApprovals > 0 ? `${pendingApprovals} pending ${pendingApprovals === 1 ? "approval" : "approvals"}` : "",
-          questionSetCount > 0 ? `${questionSetCount} question ${questionSetCount === 1 ? "set" : "sets"}` : "",
+          questionSets > 0 ? `${questionSets} question ${questionSets === 1 ? "set" : "sets"}` : "",
         ].filter(Boolean).join(", "),
       };
     }
@@ -2830,7 +2836,7 @@ export const Sidebar = React.memo(function Sidebar({
       };
     }
     return out;
-  }, [healthAttention, logsErrors, navAttention, pendingApprovals, questionSetCount]);
+  }, [healthAttention, logsErrors, navAttention, pendingApprovals, questionSetCount, questionSetStatus]);
   const workbenchAttention = React.useMemo(() => {
     let count = 0;
     let tone: SidebarNavAttention["tone"] = "warn";
@@ -2914,7 +2920,7 @@ export const Sidebar = React.memo(function Sidebar({
       >
         {orderAnnouncement}
       </div>
-      {approvals || hostAttentionCount || attentionReplyCount || questionSetCount ? <ApprovalAttention snapshot={approvals} hostItems={hostAttentionCount} replies={attentionReplyCount} questionSets={questionSetCount} onOpen={onOpenApproval || (() => onOpenControl("gating"))} /> : null}
+      {approvals || hostAttentionCount || attentionReplyCount || questionSetCount || questionSetStatus === "stale" || questionSetStatus === "unavailable" ? <ApprovalAttention snapshot={approvals} hostItems={hostAttentionCount} replies={attentionReplyCount} questionSets={questionSetCount} questionStatus={questionSetStatus} onOpen={onOpenApproval || (() => onOpenControl("gating"))} /> : null}
       {/* The roster's mast and search: the view menu's trigger shows while
           either is hovered or focused, and always while the view is not
           the default (A5). */}

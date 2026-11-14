@@ -4076,6 +4076,7 @@ input and the member's acknowledgement.
 
 For an identity that created mobs, a completed call has a cost of its own.
 After the call has completed, the identity no longer lists a mob it created and its calls that name the mob are refused; the mobs' stores are kept (seen in runs on 0.9.14 and on 0.9.15's code).
+A call that fails after its first rebuild has the same cost (read from the source, not run).
 Before the call, have the identity retire the members of, or destroy, a mob
 it created whose members act on their own (not run).
 
@@ -4202,12 +4203,15 @@ For an identity that created mobs each clearing step has a cost of its own:
   identity no longer lists a mob it created, and the calls tried that name
   the mob were refused, while the mob's members can go on running; the mobs'
   stores stay. A completed `meta/compact_member` has the same cost (see the
-  top of this section). If the identity must go on managing those mobs,
-  weigh that against the failing messages before you respawn: none of the
-  three steps above is known to keep it.
+  top of this section).
 
-Before either step, have the identity retire the members of, or destroy, a
-mob it created whose members act on their own (not run).
+A `meta/compact_member` that failed has rebuilt the identity once before its
+maintenance turn, so the identity has probably paid that cost already (read
+from the source, not run): check whether it still lists the mobs it created.
+If it does and must go on managing them, weigh that against the failing
+messages before you respawn: none of the three steps is known to keep it; and
+before the respawn have it retire the members of, or destroy, a mob it
+created whose members act on their own (not run).
 
 ### `meta/bound_member_transcript`
 

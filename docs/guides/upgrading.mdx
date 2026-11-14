@@ -1912,11 +1912,14 @@ compiling. A Meta probe that must keep the earlier rule checks
   the identity no longer lists a mob it created, and the calls tried that
   name the mob were refused, while the mob's members can go on running; the
   mobs' stores stay. A completed `compact_member` has the same cost (see
-  the `meta/compact_member` section of Meta's RPC reference). If the
-  identity must go on managing those mobs, weigh that against the failing
-  messages before you respawn: none of the three steps (a respawn, a second
-  call that completes, a reset) is known to keep it. Before either step,
-  have the identity retire the members of, or destroy, a mob it created
+  the `meta/compact_member` section of Meta's RPC reference). A
+  `meta/compact_member` that failed has rebuilt the identity once before
+  its maintenance turn, so the identity has probably paid that cost already
+  (read from the source, not run): check whether it still lists the mobs it
+  created. If it does and must go on managing them, weigh that against the
+  failing messages before you respawn: none of the three steps (a respawn,
+  a second call that completes, a reset) is known to keep it; and before
+  the respawn have it retire the members of, or destroy, a mob it created
   whose members act on their own (not run). **From 0.9.15** the call
   restores the member's threshold before it answers such a failure
   (`error.data.stage` is `profile_restored`) and a second call is taken at

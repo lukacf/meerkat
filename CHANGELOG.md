@@ -699,6 +699,30 @@ them.
   Meerkat Meta mounts that tool where the host's identity policy enables it.
   No tool's behavior or schema changes.
 
+- `rkat`: `rkat mob pack` now reports on standard error how many files it
+  packed (`packed<TAB><n> files`) and warns about packed files whose names
+  look like secrets, repository metadata, local state or an earlier pack:
+  one `warning<TAB><path> is in the pack: <why>` line for each, then one
+  `note` line that points at `rkat mob inspect <pack>`. `rkat mob web
+  build` repeats the warnings for the pack it copies into the bundle, which
+  serves the whole pack to everyone who can load the page. The pack's
+  contents and digest are unchanged, and so are the standard output of both
+  commands (the digest alone for `mob pack`) and their exit status; nothing
+  is refused. The one thing a script can notice is new lines on standard
+  error. A warning names a path and never prints a file's content. The
+  names are a short heuristic list: env files (`.env`, `.env.<name>`),
+  key-like names (`id_rsa` and the other SSH key names, `*.pem`, `*.key`,
+  `*.p12`, `*.pfx`, and a name that is `key` or ends in `-key`, `_key` or
+  `.key` before its extension), `.npmrc`, `.netrc`, `.pypirc`,
+  `.git-credentials`, `.htpasswd`, `*.mobpack` and `mobpack.bin`, the
+  directories `.git/`, `.rkat/`, `.ssh/`, `.aws/` and `.gnupg/` (one line
+  each, with the number of files), and every other hidden file or
+  directory. No warning does not mean the pack is clean: `rkat mob inspect
+  <pack>` lists every file in it and is the check. New in
+  `meerkat-mob-pack` for the same names:
+  `content_warnings::pack_content_warnings`, `classify_packed_path`,
+  `PackContentWarning` and `PackedPathConcern`.
+
 - `meerkat-comms`: for a sender with no namespace, two live registrations
   of the SAME inbox under one key are one route (a member's own, and the
   route a host that links two namespaces holds to that inbox in the linked
@@ -1481,6 +1505,16 @@ them.
   completes the retirement, and the next start is clean. A host that lifts a
   stopped mob when it starts (the Meta gateways do) always meets this: retire
   the member, then restart the host.
+
+- `rkat mob pack` still packs every regular file under the mob directory,
+  hidden files included, except the key the pack is signed with and its own
+  output file. Env files and other secrets, key files the pack is not
+  signed with, `.git/`, and `.rkat/` with its stored conversations and
+  configuration all go into the pack when they are in the directory, and a
+  web bundle serves the pack whole. This release warns about a short list
+  of names (see Changed) and removes nothing. Keep such files out of the
+  mob directory, and read `rkat mob inspect <pack>` before a pack leaves
+  your machine.
 
 - Until Connect 0.9.15 is published, Connect 0.9.14 is the Connect release
   for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in

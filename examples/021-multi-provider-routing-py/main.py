@@ -6,9 +6,12 @@ OpenAI, and Gemini — you can switch between them per-session.
 
 What you'll learn:
 - Routing to different providers (Anthropic, OpenAI, Gemini)
-- Provider-specific parameters (thinking, reasoning effort)
+- One reasoning-effort setting for every provider, and what a refusal says
+- A provider-specific parameter (Anthropic thinking budget)
 - Comparing responses across providers
 - Model selection strategies
+
+Needs Meerkat 0.9.15 or later for the reasoning-effort part.
 
 Run:
     ANTHROPIC_API_KEY=sk-... OPENAI_API_KEY=sk-... python3 main.py
@@ -16,7 +19,7 @@ Run:
 
 import asyncio
 import os
-from meerkat import MeerkatClient
+from meerkat import MeerkatClient, MeerkatError, reasoning_effort_refusal
 
 
 async def query_provider(client: MeerkatClient, model: str, prompt: str) -> dict:
@@ -75,33 +78,51 @@ async def main():
                 print(f"  Tokens: {result['tokens']}")
             print()
 
-        # ── Provider-specific parameters ──
-        print("=== Provider-Specific Parameters ===\n")
+        # ── One reasoning-effort setting for every provider ──
+        print("=== Reasoning Effort: One Setting, Every Provider ===\n")
+
+        # `reasoning_effort` is provider-neutral. Meerkat checks the level
+        # against the model, writes the provider field itself and reports what
+        # it sent. It never lowers a level: one the model does not accept is
+        # refused before any provider request, and the refusal lists the
+        # levels the model does accept.
+        for model in models:
+            print(f"--- {model} with reasoning_effort=high ---")
+            try:
+                session = await client.create_session(
+                    prompt="What is the optimal data structure for a LRU cache?",
+                    model=model,
+                    reasoning_effort="high",
+                )
+            except MeerkatError as error:
+                refusal = reasoning_effort_refusal(error)
+                if refusal is None:
+                    raise
+                accepted = ", ".join(refusal.supported) if refusal.supported else "no level"
+                print(f"  Refused: {refusal.reason}; this model accepts: {accepted}")
+                print()
+                continue
+            print(f"  Response: {session.text[:200]}...")
+            print(f"  Tokens: {session.usage.input_tokens + session.usage.output_tokens}")
+            report = session.last_result.reasoning_effort
+            for sent in report.sent if report else ():
+                fields = ", ".join(sent.fields)
+                print(f"  Sent to {sent.provider} as {sent.level} ({fields})")
+            print()
+
+        # ── A provider-specific parameter ──
+        print("=== Provider-Specific Parameter ===\n")
 
         if os.environ.get("ANTHROPIC_API_KEY"):
-            print("--- Anthropic with extended thinking ---")
+            print("--- Anthropic with a thinking budget ---")
             session = await client.create_session(
                 prompt="What is the optimal data structure for a LRU cache? Think step by step.",
                 model="claude-sonnet-4-6",
                 provider_params={
-                    # Top-level typed knob: enables Anthropic extended thinking
-                    # with the given token budget (ProviderParamsOverride).
+                    # A token budget for Anthropic extended thinking. It is a
+                    # different control from the level above: a request that
+                    # carries both is refused, so use one or the other.
                     "thinking_budget_tokens": 5000
-                },
-            )
-            print(f"  Response: {session.text[:200]}...")
-            print(f"  Tokens: {session.usage.input_tokens + session.usage.output_tokens}")
-            print()
-
-        if os.environ.get("OPENAI_API_KEY"):
-            print("--- OpenAI with reasoning effort ---")
-            session = await client.create_session(
-                prompt="What is the optimal data structure for a LRU cache?",
-                model="gpt-5.5",
-                provider_params={
-                    # OpenAI-specific knobs travel under the typed provider_tag,
-                    # discriminated by the snake_case provider name "open_ai".
-                    "provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}
                 },
             )
             print(f"  Response: {session.text[:200]}...")
@@ -119,7 +140,7 @@ Model selection strategies:
 
 2. CAPABILITY-BASED
    - Code generation → claude-sonnet-4-6 (strong at code)
-   - Reasoning → claude-opus-4-8 with thinking, or gpt-5.5 high effort
+   - Reasoning → claude-opus-4-8 or gpt-5.5 with reasoning_effort set to high
    - Speed → gemini-3.5-flash
 
 3. FALLBACK CHAIN

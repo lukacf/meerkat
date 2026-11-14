@@ -1,17 +1,25 @@
 # 021 — Multi-Provider Routing (Python SDK)
 
 Route to different LLM providers per-session. Compare Anthropic, OpenAI,
-and Gemini responses. Use provider-specific parameters.
+and Gemini responses. Set one reasoning-effort level for all of them.
 
 ## Concepts
 - Provider auto-detection from model name
-- Provider-specific parameters (thinking, reasoning effort)
+- One provider-neutral `reasoning_effort` level, sent to every configured
+  provider, with the report of what each request carried
+- What a refusal looks like: a level a model does not accept is refused with
+  the levels it does accept, never lowered
+- A provider-specific parameter: the Anthropic thinking budget, as a request
+  of its own (a budget and a level on one request are refused)
 - Per-session model routing across configured providers
-- Typed Anthropic and OpenAI provider parameters
 
-The runnable calls compare configured providers and demonstrate typed provider
-parameters. The final printed routing guide discusses cost and fallback
-patterns; it does not execute an automatic fallback chain.
+The runnable calls compare configured providers, set the level and use one
+typed provider parameter. The final printed routing guide discusses cost and
+fallback patterns; it does not execute an automatic fallback chain.
+
+The reasoning-effort part needs Meerkat 0.9.15 or later, in the SDK and in
+the runtime it talks to: an older runtime makes the SDK raise
+`CapabilityUnavailableError` before it sends anything.
 
 ## Supported Providers
 | Provider | Models | Env Var |

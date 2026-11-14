@@ -88,7 +88,7 @@ consult(question: "What about the edge case?", session_id: "<id from previous ca
 - `system_prompt` — Custom persona (default: general technical advisor)
 - `shell` — Enable shell access for running commands
 - `skills` — Inject domain knowledge (e.g. `["meerkat-platform", "rct-methodology"]`)
-- `provider_params` — Typed **new-session-only** provider settings (e.g. `{"temperature": 0.2}`, or `{"provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}}`). Continuation inherits these settings; passing this field with `session_id` is rejected rather than silently ignored.
+- `provider_params` — Typed **new-session-only** provider settings (e.g. `{"temperature": 0.2}`, or `{"reasoning_effort": "high"}`). Continuation inherits these settings; passing this field with `session_id` is rejected rather than silently ignored.
 - `session_id` — Continue a previous session (model/system prompt/shell/provider settings inherited)
 
 ### `deliberate`
@@ -228,13 +228,13 @@ continuations inherit the existing settings, and a request that combines
 deliberate(
   pack: "architect",
   task: "...",
-  provider_params: {"provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}}
+  provider_params: {"reasoning_effort": "high"}
 )
 
 consult(
   question: "...",
   model: "gpt-5.5-pro",
-  provider_params: {"provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}}
+  provider_params: {"reasoning_effort": "high"}
 )
 ```
 

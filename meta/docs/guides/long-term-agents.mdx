@@ -409,7 +409,9 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   `applies_at_next_run`, `applies_after_compaction`, `applies_at_next_session`
   (with a `reason`) or `unchanged`.
 - **Archive and unarchive.** An archived agent keeps its name, record,
-  conversation and memory, and messages to it are refused. Like any agent
+  conversation and memory, and messages to it are refused. The mobs it
+  created with its own tools are not kept: they end at the gateway's next
+  start, and an unarchive does not restore them. Like any agent
   that leaves, it is owed the harvest and distillation of its last
   conversation, an exit interview and the retirement hook (cause
   `unlisted`); they start right after its member retired, and no order is

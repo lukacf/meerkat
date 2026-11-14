@@ -6179,3 +6179,177 @@ async fn a_created_agents_next_build_after_a_label_only_update_is_composed_with_
          handed at the next build: {built:?}"
     );
 }
+
+/// What an archive does to the mob an agent created with its own tool. This
+/// row pins the behaviour as it was measured; it does not judge it.
+///
+/// An agent created at run time creates a mob with a member. The host
+/// archives the agent: in the same process the mob stays hosted and its
+/// member stays active. After a restart of the gateway the mob is gone: the
+/// archive retired the agent's member and archived its session, and the mobs
+/// an archived session owns end at the next start. An unarchive then seats
+/// the agent again on the same conversation at a later generation, and does
+/// not bring the mob back: the agent's own tools list no mob.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archived_agents_mob_ends_at_the_next_start_and_an_unarchive_does_not_restore_it() {
+    const MOB_ID: &str = "customizer-tools-restart-own-d";
+    const NAME: &str = "archived-agent";
+    let child = format!("{MOB_ID}-child");
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let model = OwnToolsModel::default();
+    let allow = || {
+        meerkat_mob::IdentityChangeConsentInput::Policy(meerkat_mob::IdentityPolicyOutcome::Allow)
+    };
+    let committed = |what: &str, outcome: Result<meerkat_mob::IdentityChangeOutcome, _>| {
+        let outcome: Result<_, meerkat_mob::MobError> = outcome;
+        assert!(
+            matches!(
+                outcome,
+                Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+            ),
+            "{what} commits: {outcome:?}"
+        );
+    };
+    // Whether the host still manages the created mob, and its members.
+    let hosted = |runtime: &meerkat_meta::UnifiedRuntime| {
+        let mobs = runtime
+            .mob_runtime()
+            .agent_mob_mcp_state()
+            .expect("the agent mob tools' state");
+        let child = child.clone();
+        async move {
+            match mobs
+                .handle_for(&meerkat_mob::MobId::from(child.as_str()))
+                .await
+            {
+                Ok(handle) => Some(
+                    handle
+                        .list_members()
+                        .await
+                        .iter()
+                        .map(|member| member.agent_identity.to_string())
+                        .collect::<Vec<_>>(),
+                ),
+                Err(_) => None,
+            }
+        }
+    };
+
+    let before = {
+        let runtime = boot_own_tools(MOB_ID, &state, model.clone()).await;
+        committed(
+            "the create",
+            runtime
+                .mob_handle()
+                .create_store_owned_identities(
+                    meerkat_mob::StoreOwnedIdentityCreate::new(
+                        identity_operation("create-archived-agent"),
+                        meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                        vec![meerkat_mob::CreatedIdentityRequest::new(
+                            meerkat_mob::CreatedIdentitySpec::new(NAME, "personal"),
+                        )],
+                    ),
+                    allow(),
+                )
+                .await
+                .map(|created| created.change),
+        );
+        runtime
+            .identity_first_context()
+            .expect("identity-first context installed")
+            .refresh_desired_topology()
+            .await
+            .expect("the roster pass registers the created agent");
+        creates_a_mob_with_its_own_tool(&runtime, &model, NAME, &child).await;
+        let before = seat_of(&runtime, NAME).await;
+        assert_eq!(
+            hosted(&runtime).await,
+            Some(vec![OWNED_WORKER.to_string()]),
+            "before the archive the mob is hosted with its member"
+        );
+
+        committed(
+            "the archive",
+            runtime
+                .mob_handle()
+                .archive_identity(
+                    meerkat_mob::IdentityArchiveChange::new(
+                        identity_operation("archive-agent"),
+                        meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                        NAME,
+                    ),
+                    allow(),
+                )
+                .await,
+        );
+        assert_eq!(
+            hosted(&runtime).await,
+            Some(vec![OWNED_WORKER.to_string()]),
+            "after the archive, in the same process, the mob is still hosted with its member"
+        );
+        runtime.shutdown().await;
+        before
+    };
+
+    let runtime = boot_own_tools(MOB_ID, &state, model.clone()).await;
+    assert_eq!(
+        hosted(&runtime).await,
+        None,
+        "after the archive and a restart the mob is gone"
+    );
+    committed(
+        "the unarchive",
+        runtime
+            .mob_handle()
+            .unarchive_identity(
+                meerkat_mob::IdentityArchiveChange::new(
+                    identity_operation("unarchive-agent"),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    NAME,
+                ),
+                allow(),
+            )
+            .await,
+    );
+    runtime
+        .identity_first_context()
+        .expect("identity-first context installed")
+        .refresh_desired_topology()
+        .await
+        .expect("the roster pass");
+    assert_eq!(
+        hosted(&runtime).await,
+        None,
+        "the unarchive does not bring the mob back"
+    );
+    let answers = own_tools_turn(
+        &runtime,
+        &model,
+        NAME,
+        "after-unarchive",
+        vec![
+            ("mob_list", serde_json::json!({})),
+            ("mob_list_members", serde_json::json!({ "mob_id": child })),
+        ],
+    )
+    .await;
+    let after = seat_of(&runtime, NAME).await;
+    assert_eq!(
+        after.0, before.0,
+        "the unarchived agent runs on its conversation"
+    );
+    assert!(after.1 > before.1, "at a later generation: {after:?}");
+    let [list, members] = answers.as_slice() else {
+        panic!("two answers: {answers:?}");
+    };
+    assert!(
+        !list.0 && !list.1.contains(&child),
+        "the unarchived agent lists no mob: {list:?}"
+    );
+    assert!(
+        members.0 && members.1.contains("mob not found"),
+        "there is no such mob any more: {members:?}"
+    );
+    runtime.shutdown().await;
+}

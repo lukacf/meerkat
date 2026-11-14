@@ -77,7 +77,7 @@ async def main() -> None:
     async with MeerkatClient() as client:
         session = await client.create_session(
             "What is the capital of France?",
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5-5",
         )
         print(session.text)
 

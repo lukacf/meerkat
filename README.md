@@ -133,8 +133,8 @@ guarantee access for an API organization or through Azure, Copilot or custom
 backends, so select an available model explicitly when needed:
 
 ```bash
-rkat run --model gpt-5.5 "Explain async/await"
-rkat run --model claude-sonnet-4-6 "Explain async/await"
+rkat run --model gpt-6-luna "Explain async/await"
+rkat run --model claude-sonnet-5-5 "Explain async/await"
 rkat run --model gemini-3.8-flash "Explain async/await"
 rkat models
 

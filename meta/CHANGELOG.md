@@ -1274,7 +1274,7 @@ Security, Upgrade and Changed.
   were kept. A respawn that completed removed no mobs, and neither did one
   whose identity woke again on its session before the process stopped. This
   entry is about whether the mobs exist: what a respawned identity's own
-  tools list and manage of the mobs it created is not changed by this fix.
+  tools list and manage of the mobs it created is the next entry's subject.
   Mobs lost this way are not restored by the upgrade. `meta/respawn`
   (`MetaRuntime.respawn` in both SDKs, `IdentityRuntime::respawn`), the
   Console's respawn and the two rebuilds of `meta/compact_member` were
@@ -1346,6 +1346,39 @@ Security, Upgrade and Changed.
     answers `BridgeError::Unsupported`. It uses the new
     `MemberRespawn::with_profile_override`, `with_model_override` and
     `with_build_inputs_of` of Meerkat's mob (see Meerkat's changelog).
+
+- An identity keeps managing the mobs it created with its own `mob_create`
+  after it is respawned. In Meta 0.9.9 through 0.9.14, once an identity
+  that had created a mob was respawned (`meta/respawn`, the Console's
+  respawn, each rebuild of `meta/compact_member`), its own mob tools no
+  longer listed that mob and refused its calls on it (`mob_list_members`,
+  `mob_check_member`, `mob_retire_member`, `mob_destroy`), at once and
+  after a restart, while the mob and its members went on running and no
+  gateway call listed, stopped or destroyed it. From this release an
+  identity whose member is replaced by its successor on its own session
+  keeps that management (the fix is Meerkat's: see its changelog, Fixed,
+  `meerkat-mob-mcp`).
+  - Keeps it: `meta/respawn` and the Console's respawn of a served member
+    (see the entry above for which members are served); the rebuilds of
+    `meta/compact_member`, which take the same step; a move of an agent
+    created at run time to another profile and a change of its runtime
+    mode (`meta/identity/update`, the `identity_update` tool). The
+    respawn, the profile move and the mode change are confirmed by tests;
+    the compact call's rebuilds are read from the source.
+  - Still ends it: `meta/reset`, `meta/reset_all` and
+    `meta/delete_identity`, which take a fresh session; a respawn of a
+    member that is not served (it is retired and then woken, as in
+    0.9.14); a raw member that is retired and attached again
+    (`meta/retire_member`, then `meta/attach_existing_session` or
+    `meta/ensure_member` with a resume session); an identity the roster
+    unlisted and lists again; an agent that is archived and unarchived.
+    The reset and the delete are confirmed by a test; the others are read
+    from the source.
+  - Not brought back: a mob whose creator lost its management on 0.9.14
+    stays as it is. Upgrading does not bring the mob back into its
+    creator's reach, and on a stock gateway nothing ends it short of a
+    reset or a delete of the identity, followed by the gateway's next
+    start.
 
 - A name an agent holds through its record in the mob's identity store
   that the host's roster lists too (the host adopted the agent into the

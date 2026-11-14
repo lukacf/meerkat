@@ -934,7 +934,10 @@ so the mobs the old incarnation created and its delegates are not carried
 over to the successor.
 An identity entry's member is respawned on its own session
 (`MobHandle::respawn_member`, and `respawn` of such a member) and keeps its
-mobs. Which side a member is on follows from how it was created: a member a
+mobs, and its agent keeps managing the mobs it created with `mob_create`:
+that management follows a member through its same-session successors, and
+ends when the member is reset onto a fresh session or is retired and later
+seated again. Which side a member is on follows from how it was created: a member a
 host seats through an identity entry (a declared or store-owned identity, the
 way a host keeps a durable roster) is an entry's member; a member spawned
 directly (a host's spawn call, an agent's `mob_spawn_member`, a helper) is a

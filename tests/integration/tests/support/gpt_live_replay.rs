@@ -202,6 +202,24 @@ impl Fixture {
             })
             .collect()
     }
+
+    /// What the provider heard the user say on `ordinal`, in order: the text
+    /// of every input transcript delta on the channel's sideband. The
+    /// browser peer of a live run hears the same provider events on its data
+    /// channel, as a separately ordered copy; a replay has no browser, and
+    /// the sideband is the copy the runtime commits user rows from.
+    pub fn heard_user_text(&self, ordinal: u32) -> String {
+        self.lines
+            .iter()
+            .filter(|line| line.channel_ordinal == ordinal)
+            .filter_map(|line| match &line.entry {
+                Entry::ServerFrame { raw } if raw["type"] == "session.input_transcript.delta" => {
+                    raw["delta"].as_str()
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// How one recorded open carried its context summary. The pre-open summary
@@ -411,6 +429,22 @@ impl Cassette {
     /// tape is parked at exactly that marker (every frame recorded before it
     /// has been served), then let it continue.
     pub async fn release(&self, ordinal: u32, step: &str) -> Result<(), String> {
+        self.reached(ordinal, step).await?;
+        self.shared.update(|state| {
+            state
+                .released
+                .entry(ordinal)
+                .or_default()
+                .push_back(step.to_owned());
+        });
+        Ok(())
+    }
+
+    /// Wait until channel `ordinal`'s tape is parked at the marker `step`,
+    /// without letting it continue: every frame the recording holds before
+    /// that test step has been served, and none after it. A typed tape
+    /// state for a test that reads what Meerkat did up to that step.
+    pub async fn reached(&self, ordinal: u32, step: &str) -> Result<(), String> {
         let want = Parked::Marker(step.to_owned());
         let reached = timeout(
             STEP_BOUND,
@@ -426,13 +460,6 @@ impl Cassette {
                 self.parked(ordinal)
             ));
         }
-        self.shared.update(|state| {
-            state
-                .released
-                .entry(ordinal)
-                .or_default()
-                .push_back(step.to_owned());
-        });
         Ok(())
     }
 

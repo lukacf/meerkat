@@ -2819,6 +2819,97 @@ mod tests {
         assert_eq!(listed["schedules"], json!([]));
     }
 
+    /// The schedule tools refuse a `reasoning_effort` member written directly
+    /// in a `create` spec or on a prompt action as invalid arguments, at
+    /// create and at update: a refused create stores nothing, and a refused
+    /// update leaves the schedule as it was. The same request with another
+    /// unknown member in those places is taken as before.
+    #[tokio::test]
+    async fn schedule_tools_refuse_a_direct_reasoning_effort_member() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let target = |create_extra: Option<(&str, Value)>, action_extra: Option<(&str, Value)>| {
+            let mut target = json!({
+                "target_kind": "session",
+                "type": "materialize_on_demand_session",
+                "create": {"model": "claude-sonnet-4-6"},
+                "action": {"type": "prompt", "prompt": "Check."}
+            });
+            if let Some((key, value)) = create_extra {
+                target["create"][key] = value;
+            }
+            if let Some((key, value)) = action_extra {
+                target["action"][key] = value;
+            }
+            target
+        };
+        let refused_targets = [
+            (
+                target(Some(("reasoning_effort", json!("high"))), None),
+                "not accepted in a schedule's session settings",
+            ),
+            (
+                target(None, Some(("reasoning_effort", json!("high")))),
+                "not accepted on a schedule's prompt action",
+            ),
+        ];
+        let assert_refused = |error: ScheduleToolError, sentence: &str| {
+            assert_eq!(error.code, INVALID_ARGUMENTS, "{error:?}");
+            assert!(
+                error.message.contains("reasoning_effort") && error.message.contains(sentence),
+                "{error:?}"
+            );
+        };
+
+        for (refused, sentence) in &refused_targets {
+            let mut request = serde_json::to_value(schedule_request()).expect("valid request");
+            request["target"] = refused.clone();
+            let error = handle_schedule_tools_call(&service, "meerkat_schedule_create", &request)
+                .await
+                .expect_err("the create is refused");
+            assert_refused(error, sentence);
+        }
+        let listed = handle_schedule_tools_call(&service, "meerkat_schedule_list", &json!({}))
+            .await
+            .expect("list");
+        assert_eq!(listed["schedules"], json!([]), "nothing is stored");
+
+        let mut request = serde_json::to_value(schedule_request()).expect("valid request");
+        request["target"] = target(
+            Some(("colour", json!("blue"))),
+            Some(("colour", json!("blue"))),
+        );
+        let created = handle_schedule_tools_call(&service, "meerkat_schedule_create", &request)
+            .await
+            .expect("another unknown member is taken as before");
+        let schedule_id = created["schedule_id"]
+            .as_str()
+            .expect("create returns schedule_id")
+            .to_string();
+        let read = || async {
+            handle_schedule_tools_call(
+                &service,
+                "meerkat_schedule_get",
+                &json!({ "schedule_id": schedule_id }),
+            )
+            .await
+            .expect("get")
+        };
+        let before = read().await;
+        assert!(!before.to_string().contains("colour"), "{before}");
+
+        for (refused, sentence) in &refused_targets {
+            let error = handle_schedule_tools_call(
+                &service,
+                "meerkat_schedule_update",
+                &json!({ "schedule_id": schedule_id, "target": refused }),
+            )
+            .await
+            .expect_err("the update is refused");
+            assert_refused(error, sentence);
+        }
+        assert_eq!(read().await, before, "a refused update changes nothing");
+    }
+
     /// Tool visibility is decided per tool name, so `meerkat_schedule_update`
     /// can be visible while `meerkat_schedule_create` is filtered out (for
     /// example `--block-tool meerkat_schedule_create`, a per-turn allow list,

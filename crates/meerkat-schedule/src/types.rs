@@ -3522,6 +3522,198 @@ mod tests {
         }
     }
 
+    /// A create request, as the wire carries it, for a schedule on `target`.
+    fn create_request_on(target: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "trigger": {
+                "type": "interval",
+                "start_at_utc": "2026-04-21T09:00:00Z",
+                "every_seconds": 3600
+            },
+            "target": target
+        })
+    }
+
+    /// Each target a schedule can deliver a prompt action to, with `create`
+    /// and `action` as given: a session created on demand (the one target
+    /// with a `create` spec), an exact and a resumable session, and a
+    /// resumable identity.
+    fn prompt_targets(
+        create: serde_json::Value,
+        action: serde_json::Value,
+    ) -> Vec<(&'static str, serde_json::Value)> {
+        vec![
+            (
+                "materialize_on_demand_session",
+                serde_json::json!({
+                    "target_kind": "session",
+                    "type": "materialize_on_demand_session",
+                    "create": create,
+                    "action": action
+                }),
+            ),
+            (
+                "exact_session",
+                serde_json::json!({
+                    "target_kind": "session",
+                    "type": "exact_session",
+                    "session_id": SessionId::new(),
+                    "action": action
+                }),
+            ),
+            (
+                "resumable_session",
+                serde_json::json!({
+                    "target_kind": "session",
+                    "type": "resumable_session",
+                    "session_id": SessionId::new(),
+                    "action": action
+                }),
+            ),
+            (
+                "resumable_identity",
+                serde_json::json!({
+                    "target_kind": "identity",
+                    "type": "resumable_identity",
+                    "identity": "domain:ops",
+                    "action": action
+                }),
+            ),
+        ]
+    }
+
+    /// What reading `target` as a create request and as an update request
+    /// answers: the two parse errors, or `None` where the request reads.
+    fn create_and_update_parse_errors(target: serde_json::Value) -> [Option<String>; 2] {
+        let create =
+            serde_json::from_value::<CreateScheduleRequest>(create_request_on(target.clone()))
+                .err()
+                .map(|error| error.to_string());
+        let update =
+            serde_json::from_value::<UpdateScheduleRequest>(serde_json::json!({"target": target}))
+                .err()
+                .map(|error| error.to_string());
+        [create, update]
+    }
+
+    /// A `reasoning_effort` member written directly in a schedule's `create`
+    /// spec, the form `session/create` takes, is refused when the request is
+    /// read, at create and at update, whether or not its value is a level:
+    /// it was read as an unknown member and dropped without a word. The text
+    /// names the member and says where it is not accepted.
+    #[test]
+    fn a_reasoning_effort_member_written_directly_in_a_schedule_create_spec_is_refused() {
+        for level in [
+            serde_json::json!("high"),
+            serde_json::json!("not-a-level"),
+            serde_json::json!({"action": "clear"}),
+        ] {
+            let target = prompt_targets(
+                serde_json::json!({"model": "claude-sonnet-4-6", "reasoning_effort": level}),
+                serde_json::json!({"type": "prompt", "prompt": "Check."}),
+            )
+            .remove(0)
+            .1;
+            for refused in create_and_update_parse_errors(target) {
+                let refused = refused.unwrap_or_else(|| panic!("{level}: the request is refused"));
+                assert!(
+                    refused.contains("`create.reasoning_effort`")
+                        && refused.contains("not accepted in a schedule's session settings"),
+                    "{level}: {refused}"
+                );
+            }
+        }
+    }
+
+    /// A `reasoning_effort` member written directly on a schedule's prompt
+    /// action, the form a turn request takes, is refused the same way on
+    /// every target that delivers a prompt: a session created on demand, an
+    /// exact session, a resumable session and a resumable identity.
+    #[test]
+    fn a_reasoning_effort_member_written_directly_on_a_schedule_prompt_action_is_refused() {
+        for (name, target) in prompt_targets(
+            serde_json::json!({"model": "claude-sonnet-4-6"}),
+            serde_json::json!({"type": "prompt", "prompt": "Check.", "reasoning_effort": "high"}),
+        ) {
+            for refused in create_and_update_parse_errors(target) {
+                let refused = refused.unwrap_or_else(|| panic!("{name}: the request is refused"));
+                assert!(
+                    refused.contains("`action.reasoning_effort`")
+                        && refused.contains("not accepted on a schedule's prompt action"),
+                    "{name}: {refused}"
+                );
+            }
+        }
+    }
+
+    /// Only that one member is refused, and only in those two places. Another
+    /// unknown member in `create` or on the action is read and dropped as
+    /// before, so the stored target does not carry it, and so is a
+    /// `reasoning_effort` that is `null`, which names no level. An event
+    /// action is not a prompt: a `reasoning_effort` member on it is an
+    /// unknown member like any other, and a payload that names one is the
+    /// event's own data and is kept.
+    #[test]
+    fn only_a_direct_reasoning_effort_member_of_a_schedule_spec_is_refused() {
+        for (create_extra, action_extra) in [
+            (
+                ("colour", serde_json::json!("blue")),
+                ("colour", serde_json::json!("blue")),
+            ),
+            (
+                ("reasoning_effort", serde_json::Value::Null),
+                ("reasoning_effort", serde_json::Value::Null),
+            ),
+        ] {
+            let mut create = serde_json::json!({"model": "claude-sonnet-4-6"});
+            create[create_extra.0] = create_extra.1;
+            let mut action = serde_json::json!({"type": "prompt", "prompt": "Check."});
+            action[action_extra.0] = action_extra.1;
+            for (name, target) in prompt_targets(create, action) {
+                assert_eq!(
+                    create_and_update_parse_errors(target.clone()),
+                    [None, None],
+                    "{name}"
+                );
+                let request: CreateScheduleRequest =
+                    serde_json::from_value(create_request_on(target)).unwrap();
+                assert_eq!(request.validate_public_api(), Ok(()), "{name}");
+                let stored = serde_json::to_string(&request.target).unwrap();
+                assert!(
+                    !stored.contains("colour") && !stored.contains("reasoning_effort"),
+                    "{name}: {stored}"
+                );
+                let read_back: TargetBinding = serde_json::from_str(&stored).unwrap();
+                assert_eq!(read_back, request.target, "{name}");
+            }
+        }
+
+        let event = serde_json::json!({
+            "type": "event",
+            "event_type": "tick",
+            "payload": {"reasoning_effort": "high"},
+            "reasoning_effort": "high"
+        });
+        for (name, target) in
+            prompt_targets(serde_json::json!({"model": "claude-sonnet-4-6"}), event)
+        {
+            assert_eq!(
+                create_and_update_parse_errors(target.clone()),
+                [None, None],
+                "{name}"
+            );
+            let request: CreateScheduleRequest =
+                serde_json::from_value(create_request_on(target)).unwrap();
+            let stored = serde_json::to_value(&request.target).unwrap();
+            assert_eq!(
+                stored["action"]["payload"],
+                serde_json::json!({"reasoning_effort": "high"}),
+                "{name}"
+            );
+            assert!(stored["action"].get("reasoning_effort").is_none(), "{name}");
+        }
+    }
+
     // -----------------------------------------------------------------------
     // role_name backward compat
     // -----------------------------------------------------------------------

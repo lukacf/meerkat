@@ -573,6 +573,123 @@ mod tests {
         );
     }
 
+    /// `schedule/create` and `schedule/update` refuse a `reasoning_effort`
+    /// member written directly in a `create` spec or on a prompt action as
+    /// invalid params, with a text that names the member: a refused create
+    /// stores nothing, and a refused update leaves the schedule as it was.
+    /// The same request with another unknown member in those places is taken
+    /// as before. The SDK helpers send a request's target as it is given, so
+    /// this is what they answer too.
+    #[tokio::test]
+    async fn schedule_create_and_update_refuse_a_direct_reasoning_effort_member() {
+        let temp = TempDir::new().expect("temp dir");
+        let runtime = test_runtime(&temp);
+        let raw = |value: Value| {
+            serde_json::value::RawValue::from_string(value.to_string()).expect("raw params")
+        };
+        let target = |create_extra: Option<(&str, Value)>, action_extra: Option<(&str, Value)>| {
+            let mut target = json!({
+                "target_kind": "session",
+                "type": "materialize_on_demand_session",
+                "create": {"model": "claude-sonnet-4-6"},
+                "action": {"type": "prompt", "prompt": "Check."}
+            });
+            if let Some((key, value)) = create_extra {
+                target["create"][key] = value;
+            }
+            if let Some((key, value)) = action_extra {
+                target["action"][key] = value;
+            }
+            target
+        };
+        let create_request = |target: Value| {
+            json!({
+                "name": "nightly",
+                "trigger": {
+                    "type": "once",
+                    "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+                },
+                "target": target,
+                "planning_horizon_days": 1,
+                "planning_horizon_occurrences": 1
+            })
+        };
+        let refused_targets = [
+            (
+                target(Some(("reasoning_effort", json!("high"))), None),
+                "not accepted in a schedule's session settings",
+            ),
+            (
+                target(None, Some(("reasoning_effort", json!("high")))),
+                "not accepted on a schedule's prompt action",
+            ),
+        ];
+        let assert_refused = |response: RpcResponse, sentence: &str| {
+            let refusal = response.error.expect("the request is refused");
+            assert_eq!(refusal.code, crate::error::INVALID_PARAMS, "{refusal:?}");
+            assert!(
+                refusal.message.contains("reasoning_effort") && refusal.message.contains(sentence),
+                "{refusal:?}"
+            );
+        };
+
+        for (refused, sentence) in &refused_targets {
+            let params = raw(create_request(refused.clone()));
+            let response =
+                handle_create(Some(RpcId::Num(1)), Some(params.as_ref()), runtime.clone()).await;
+            assert_refused(response, sentence);
+        }
+        assert!(
+            schedule_service(&runtime)
+                .list()
+                .await
+                .expect("list schedules")
+                .is_empty(),
+            "nothing is stored"
+        );
+
+        let mut accepted = missing_target_schedule_tool_args();
+        accepted["trigger"] = json!({
+            "type": "once",
+            "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+        });
+        accepted["target"]["action"]["colour"] = json!("blue");
+        let params = raw(accepted);
+        let response =
+            handle_create(Some(RpcId::Num(2)), Some(params.as_ref()), runtime.clone()).await;
+        assert!(
+            response.error.is_none(),
+            "another unknown member is taken as before: {:?}",
+            response.error
+        );
+        let stored = schedule_service(&runtime)
+            .list()
+            .await
+            .expect("list schedules");
+        assert_eq!(stored.len(), 1);
+        let before = serde_json::to_value(WireSchedule::from(&stored[0])).expect("wire schedule");
+        assert!(!before.to_string().contains("colour"), "{before}");
+
+        for (refused, sentence) in &refused_targets {
+            let params = raw(json!({
+                "schedule_id": stored[0].schedule_id.to_string(),
+                "target": refused,
+            }));
+            let response =
+                handle_update(Some(RpcId::Num(3)), Some(params.as_ref()), runtime.clone()).await;
+            assert_refused(response, sentence);
+        }
+        let after = schedule_service(&runtime)
+            .get(&stored[0].schedule_id)
+            .await
+            .expect("stored schedule");
+        assert_eq!(
+            serde_json::to_value(WireSchedule::from(&after)).expect("wire schedule"),
+            before,
+            "a refused update changes nothing"
+        );
+    }
+
     #[tokio::test]
     async fn schedule_pause_and_resume_round_trip() {
         let temp_result = TempDir::new();

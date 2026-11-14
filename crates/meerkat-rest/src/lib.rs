@@ -14077,6 +14077,164 @@ mod tests {
         );
     }
 
+    /// `POST /schedules` and `PATCH /schedules/{id}` refuse a
+    /// `reasoning_effort` member written directly in a `create` spec or on a
+    /// prompt action with HTTP 400 and a text that names the member: the
+    /// answer the `provider_params` form gets. A refused create stores
+    /// nothing, and a refused update leaves the schedule as it was. The same
+    /// request with another unknown member is taken as before, and a body
+    /// that does not read for another reason keeps the answer it had (422).
+    #[tokio::test]
+    async fn schedule_create_and_update_refuse_a_direct_reasoning_effort_member() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let app = router(state.clone());
+        let send = |method: &'static str, uri: String, body: Value| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
+        };
+        let on_demand = |create: Value, action: Value| {
+            json!({
+                "target_kind": "session",
+                "type": "materialize_on_demand_session",
+                "create": create,
+                "action": action
+            })
+        };
+        let create_request = |target: Value| {
+            json!({
+                "name": "nightly",
+                "trigger": {
+                    "type": "once",
+                    "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+                },
+                "target": target,
+                "planning_horizon_days": 1,
+                "planning_horizon_occurrences": 1
+            })
+        };
+        // The two direct forms, and the `provider_params` form beside them.
+        let refused_targets = [
+            (
+                on_demand(
+                    json!({"model": "claude-sonnet-4-6", "reasoning_effort": "high"}),
+                    json!({"type": "prompt", "prompt": "Check."}),
+                ),
+                "not accepted in a schedule's session settings",
+            ),
+            (
+                on_demand(
+                    json!({"model": "claude-sonnet-4-6"}),
+                    json!({"type": "prompt", "prompt": "Check.", "reasoning_effort": "high"}),
+                ),
+                "not accepted on a schedule's prompt action",
+            ),
+            (
+                on_demand(
+                    json!({
+                        "model": "claude-sonnet-4-6",
+                        "provider_params": {"reasoning_effort": "high"}
+                    }),
+                    json!({"type": "prompt", "prompt": "Check."}),
+                ),
+                "not accepted in a schedule's session settings",
+            ),
+        ];
+        let assert_refused = |(status, body): (StatusCode, String), sentence: &str| {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(
+                body.contains("reasoning_effort") && body.contains(sentence),
+                "{body}"
+            );
+        };
+
+        for (refused, sentence) in &refused_targets {
+            let answer = send(
+                "POST",
+                "/schedules".to_string(),
+                create_request(refused.clone()),
+            )
+            .await;
+            assert_refused(answer, sentence);
+        }
+        assert!(
+            state.schedule_service.list().await.unwrap().is_empty(),
+            "nothing is stored"
+        );
+
+        let mut accepted = missing_target_schedule_tool_args();
+        accepted["trigger"] = json!({
+            "type": "once",
+            "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+        });
+        accepted["target"]["action"]["colour"] = json!("blue");
+        let (status, body) = send("POST", "/schedules".to_string(), accepted).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "another unknown member is taken as before: {body}"
+        );
+        let stored = state.schedule_service.list().await.unwrap();
+        assert_eq!(stored.len(), 1);
+        let before = serde_json::to_value(meerkat_contracts::wire::Schedule::from(&stored[0]))
+            .expect("wire schedule");
+        assert!(!before.to_string().contains("colour"), "{before}");
+
+        let schedule_uri = format!("/schedules/{}", stored[0].schedule_id);
+        for (refused, sentence) in &refused_targets {
+            let answer = send("PATCH", schedule_uri.clone(), json!({ "target": refused })).await;
+            assert_refused(answer, sentence);
+        }
+        let after = state
+            .schedule_service
+            .get(&stored[0].schedule_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(meerkat_contracts::wire::Schedule::from(&after))
+                .expect("wire schedule"),
+            before,
+            "a refused update changes nothing"
+        );
+
+        // A body that does not read for another reason: the answer it had.
+        let (status, body) = send(
+            "POST",
+            "/schedules".to_string(),
+            create_request(json!({"target_kind": "session", "type": "no_such_target"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        let (status, body) = send(
+            "PATCH",
+            schedule_uri,
+            json!({ "target": {"target_kind": "session", "type": "no_such_target"} }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
+
     #[tokio::test]
     async fn test_config_envelope_redacts_paths_by_default() {
         let temp = TempDir::new().unwrap();

@@ -26599,6 +26599,18 @@ mod tests {
         keep_alive: bool,
         comms_name: Option<&str>,
     ) -> meerkat::Occurrence {
+        fire_scheduled_action_with_params(runtime, action, keep_alive, comms_name, None).await
+    }
+
+    /// [`fire_scheduled_action_on_a_new_session`] with the provider params of
+    /// the session the schedule materializes.
+    async fn fire_scheduled_action_with_params(
+        runtime: &Arc<SessionRuntime>,
+        action: meerkat::ScheduledSessionAction,
+        keep_alive: bool,
+        comms_name: Option<&str>,
+        provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    ) -> meerkat::Occurrence {
         let schedule = runtime
             .schedule_service()
             .create(meerkat::CreateScheduleRequest {
@@ -26616,7 +26628,7 @@ mod tests {
                             provider: None,
                             output_schema: None,
                             structured_output_retries: None,
-                            provider_params: None,
+                            provider_params,
                             comms_name: comms_name.map(str::to_string),
                             peer_meta: None,
                             labels: Default::default(),
@@ -26743,6 +26755,78 @@ mod tests {
                 "the scheduled {kind} must complete on its new session: {occurrence:?}"
             );
         }
+    }
+
+    /// A reasoning effort level in a schedule's session materialization spec
+    /// is judged when the occurrence is delivered, by the build of the
+    /// session the fire materializes, as a session create judges it: a level
+    /// the route accepts is sent with the scheduled turn's request, and a
+    /// level the route refuses reaches no provider and fails the delivery.
+    /// Nothing judges the level when the schedule is written.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_scheduled_sessions_level_is_judged_when_its_occurrence_is_delivered() {
+        use meerkat_core::lifecycle::run_primitive::{AnthropicEffort, ProviderParamsOverride};
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let mut observed = Vec::new();
+        for route_states_high in [true, false] {
+            let (_temp, runtime) = scheduled_delivery_runtime().await;
+            let client = RecordingHighStatingMockLlmClient::new();
+            client
+                .states_levels
+                .store(route_states_high, AtomicOrdering::SeqCst);
+            runtime.set_default_llm_client(Some(client.clone()));
+            let occurrence = fire_scheduled_action_with_params(
+                &runtime,
+                scheduled_prompt(),
+                false,
+                None,
+                Some(ProviderParamsOverride {
+                    reasoning_effort: Some(EffortLevel::High),
+                    ..Default::default()
+                }),
+            )
+            .await;
+            observed.push((
+                route_states_high,
+                occurrence.phase,
+                occurrence.failure_class,
+                occurrence.failure_detail.clone(),
+                client.sent_efforts(),
+            ));
+        }
+        // Read first, asserted second: a failure prints both outcomes.
+        let (_, phase, failure_class, failure_detail, sent) = &observed[0];
+        assert_eq!(
+            (phase, failure_class, failure_detail, sent),
+            (
+                &meerkat::OccurrencePhase::Completed,
+                &None,
+                &None,
+                &vec![Some(AnthropicEffort::High)]
+            ),
+            "a level the route accepts is applied to the scheduled turn: {observed:#?}"
+        );
+        // A level the route refuses: the delivery fails as rejected by the
+        // runtime, the failure detail carries the refusal's text and its
+        // typed reason, and no provider was reached.
+        let (_, phase, failure_class, failure_detail, sent) = &observed[1];
+        assert_eq!(
+            (phase, failure_class, sent.is_empty()),
+            (
+                &meerkat::OccurrencePhase::DeliveryFailed,
+                &Some(meerkat::OccurrenceFailureClass::RuntimeRejected),
+                true
+            ),
+            "a level the route refuses fails the delivery and reaches no provider: {observed:#?}"
+        );
+        let detail = failure_detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("reasoning effort 'high' cannot be checked")
+                && detail.contains(r#""reason_type":"reasoning_effort_refused""#)
+                && detail.contains(r#""reason":"supported_levels_unknown""#),
+            "the failure detail names the refusal: {observed:#?}"
+        );
     }
 
     /// The fire's turn honours the materialized session's own keep-alive
@@ -44513,6 +44597,81 @@ mod tests {
             session.facts_after_the_failed_turn(queued).await,
             FailedStartFacts::nothing_lost(),
             "the failed turn was answered {failed:?}"
+        );
+    }
+
+    /// A turn that names the reasoning effort level in two places that
+    /// disagree (a level beside params that name another level, or a clear
+    /// beside params that name one) is the caller's request: it is answered
+    /// as invalid params with both places named, on a live session and on a
+    /// stored session that is not live, where the turn's recovery reports
+    /// the disagreement. No model request is made.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_that_names_the_level_in_two_places_that_disagree_is_invalid_params() {
+        use meerkat_core::lifecycle::run_primitive::{
+            ProviderParamsOverride, TurnMetadataOverride,
+        };
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let session = FailedStartSession::materialized().await;
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let both =
+            |level: TurnMetadataOverride<EffortLevel>| crate::handlers::turn::TurnOverrides {
+                reasoning_effort: Some(level),
+                provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
+                    reasoning_effort: Some(EffortLevel::Low),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+        // Read first, asserted second: a failure prints all four answers.
+        let mut observed = Vec::new();
+        for stored in [false, true] {
+            if stored {
+                session
+                    .runtime
+                    .service
+                    .discard_live_session(&session.session_id)
+                    .await
+                    .expect("the session is stored and no longer live");
+            }
+            for level in [
+                TurnMetadataOverride::Set(EffortLevel::High),
+                TurnMetadataOverride::Clear,
+            ] {
+                let refused = session
+                    .spawn_turn("names the level twice", Some(both(level.clone())))
+                    .await
+                    .unwrap()
+                    .expect_err("two places that disagree are refused");
+                observed.push((
+                    stored,
+                    matches!(level, TurnMetadataOverride::Clear),
+                    refused.code,
+                    refused.message,
+                    refused.data,
+                ));
+            }
+        }
+        let set_text = "reasoning_effort is 'high' but provider_params.reasoning_effort is 'low'";
+        let clear_text =
+            "reasoning_effort is cleared but provider_params.reasoning_effort is 'low'";
+        for (stored, clear, code, message, data) in &observed {
+            assert_eq!(
+                (
+                    *code,
+                    message.contains(if *clear { clear_text } else { set_text }),
+                    data
+                ),
+                (error::INVALID_PARAMS, true, &None),
+                "stored={stored} clear={clear}: {observed:#?}"
+            );
+        }
+        assert_eq!(
+            session.client.calls.load(AtomicOrdering::SeqCst),
+            requests,
+            "no refused turn made a model request"
         );
     }
 

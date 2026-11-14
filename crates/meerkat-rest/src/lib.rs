@@ -18628,6 +18628,94 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         );
     }
 
+    /// A continue that names a level on a session this server still holds
+    /// live (the ordinary case after a completed turn) is answered busy
+    /// before any build, as every field that rebuilds the session is: HTTP
+    /// 500, `INTERNAL_ERROR`, "session is busy". Nothing is changed: the
+    /// session is live and registered as before. A documented limit (Known
+    /// limitations), pinned here as it is.
+    #[tokio::test]
+    async fn test_continue_session_level_on_a_live_session_answers_500_session_is_busy() {
+        use meerkat_contracts::wire::runtime::WireTurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_completed_rest_runtime_session(&state).await;
+        assert_eq!(
+            (
+                state
+                    .session_service
+                    .has_live_session(&session_id)
+                    .await
+                    .expect("check the live session"),
+                state.runtime_adapter.contains_session(&session_id).await,
+            ),
+            (true, true),
+            "the server holds the session live after its completed turn"
+        );
+
+        let outcome = Box::pin(continue_session_inner(
+            &state,
+            &session_id.to_string(),
+            ContinueSessionRequest {
+                injected_context: None,
+                transient_turn_context: None,
+                session_id: session_id.to_string(),
+                prompt: ContentInput::Text("Continue".to_string()),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                reasoning_effort: Some(WireTurnMetadataOverride::Set(EffortLevel::High)),
+                keep_alive: None,
+                comms_name: None,
+                peer_meta: None,
+                verbose: false,
+                model: None,
+                provider: None,
+                auth_binding: None,
+                max_tokens: None,
+                hooks_override: None,
+                enable_web_search: None,
+                skill_refs: None,
+                turn_tool_overlay: None,
+                additional_instructions: None,
+            },
+            None,
+        ))
+        .await;
+
+        match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(error)) => {
+                let (status, payload) = api_error_status_and_payload(error).await;
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{payload}");
+                assert_eq!(payload["code"], "INTERNAL_ERROR", "{payload}");
+                assert!(
+                    payload["error"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("session is busy")),
+                    "{payload}"
+                );
+            }
+            other => panic!("expected the busy answer, got {other:?}"),
+        }
+        assert_eq!(
+            (
+                state
+                    .session_service
+                    .has_live_session(&session_id)
+                    .await
+                    .expect("check the live session"),
+                state.runtime_adapter.contains_session(&session_id).await,
+            ),
+            (true, true),
+            "the refused continue changes nothing: the session is live and registered"
+        );
+    }
+
     #[tokio::test]
     async fn test_continue_session_rebuild_waits_for_runtime_registration_lock_before_prepare() {
         let temp = TempDir::new().unwrap();

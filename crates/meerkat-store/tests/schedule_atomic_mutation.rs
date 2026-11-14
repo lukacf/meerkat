@@ -429,9 +429,8 @@ async fn sqlite_stored_large_ack_set_loads_and_the_next_revise_drops_it()
 /// lifecycle authority (`Schedule::apply`) takes the request as it is; the
 /// service's public-API validation, where the level is refused, is not part
 /// of it. The stored schedule reads back with the level, its due occurrence
-/// is claimed, and the claimed occurrence carries the stored spec with the
-/// level unchanged: the spec a delivery hands to the scheduled session's
-/// build is the stored one.
+/// is claimed, and the claimed occurrence's target snapshot equals the
+/// stored target, the level included.
 #[tokio::test]
 async fn sqlite_stored_session_spec_level_reaches_the_claimed_occurrence_unchanged()
 -> Result<(), Box<dyn std::error::Error>> {

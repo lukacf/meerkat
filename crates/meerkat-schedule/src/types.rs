@@ -3452,18 +3452,28 @@ mod tests {
     /// The provider-neutral reasoning effort level is not accepted in a
     /// schedule's session settings in this release: a create that names it is
     /// refused, and the text names the key and says where it is not accepted.
+    /// The level is refused alone and beside a provider's own effort under
+    /// `provider_tag`, which is accepted on its own.
     #[test]
     fn a_schedule_session_spec_that_names_a_reasoning_effort_level_is_refused_at_create() {
-        let request: CreateScheduleRequest = serde_json::from_value(
-            create_request_with_provider_params(serde_json::json!({"reasoning_effort": "high"})),
-        )
-        .unwrap();
-        let refused = request.validate_public_api().unwrap_err();
-        assert!(
-            refused.contains("reasoning_effort")
-                && refused.contains("not accepted in a schedule's session settings"),
-            "{refused}"
-        );
+        for provider_params in [
+            serde_json::json!({"reasoning_effort": "high"}),
+            serde_json::json!({
+                "reasoning_effort": "high",
+                "provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}
+            }),
+        ] {
+            let request: CreateScheduleRequest = serde_json::from_value(
+                create_request_with_provider_params(provider_params.clone()),
+            )
+            .unwrap();
+            let refused = request.validate_public_api().unwrap_err();
+            assert!(
+                refused.contains("reasoning_effort")
+                    && refused.contains("not accepted in a schedule's session settings"),
+                "{provider_params}: {refused}"
+            );
+        }
     }
 
     /// An update that gives a schedule such a target is refused the same

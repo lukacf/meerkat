@@ -2319,6 +2319,11 @@ pub(super) struct RecorderTicketCapture {
     met: Mutex<Option<Result<(), meerkat_core::ToolError>>>,
     release: tokio::sync::watch::Sender<bool>,
     outcomes: AtomicUsize,
+    /// A row's control: the publication on which the gate begins an owner
+    /// change of its own right before its check after the effect, once
+    /// (`current_in_an_owner_change`). `None`, the default, forces nothing.
+    owner_change_at_outcome:
+        Mutex<Option<meerkat_authorization::publication::LocalAuthorizationPublication>>,
 }
 impl RecorderTicketCapture {
     pub(super) fn new() -> Self {
@@ -2330,6 +2335,7 @@ impl RecorderTicketCapture {
             met: Mutex::new(None),
             release: tokio::sync::watch::channel(false).0,
             outcomes: AtomicUsize::new(0),
+            owner_change_at_outcome: Mutex::new(None),
         }
     }
     /// Wake the body with what a gate step met. The body waits on
@@ -2367,6 +2373,60 @@ impl RecorderTicketCapture {
         site: &'static str,
     ) -> Result<(), meerkat_core::ToolError> {
         let mut churn = meerkat_core::authorization::OwnerChangeChurn::default();
+        crate::current_check::check_after_owner_change(context, call, None, &mut churn, site)
+            .await
+            .map(|_| ())
+    }
+    /// [`Self::current`] with an owner change that the check is certain to
+    /// meet: the control begins one on `publication` from a thread of its
+    /// own and holds it until the gate's first check has answered. The steps
+    /// are those of the waited check, in its order (`current_check::waiting`:
+    /// check, on a refusal to rebuild wait, check again), with the change
+    /// released between the first check and its wait, so the first check
+    /// meets the change on any host, whatever its load.
+    ///
+    /// A first check that did not refuse to rebuild is an error for the
+    /// body, never a pass: the row forced nothing then.
+    async fn current_in_an_owner_change(
+        context: &meerkat_core::ToolDispatchContext,
+        call: meerkat_core::ToolCallView<'_>,
+        publication: meerkat_authorization::publication::LocalAuthorizationPublication,
+        site: &'static str,
+    ) -> Result<(), meerkat_core::ToolError> {
+        let (begun, has_begun) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let change = publication.begin_owner_change();
+            let _ = begun.send(change.is_ok());
+            // Held until the gate's first check has answered, or the gate
+            // is gone.
+            let _ = released.recv();
+            drop(change);
+        });
+        let held = has_begun.await.unwrap_or(false);
+        let first = held.then(|| crate::current_check::check(context, call, None));
+        drop(release);
+        let _ = holder.join();
+        let refused = match first {
+            None => {
+                return Err(meerkat_core::ToolError::outcome_uncertain(
+                    call.name,
+                    "the control's owner change did not begin",
+                ));
+            }
+            Some(Err(error)) if crate::current_check::refuses_to_rebuild(&error) => error,
+            Some(Err(error)) => return Err(error),
+            Some(Ok(_)) => {
+                return Err(meerkat_core::ToolError::outcome_uncertain(
+                    call.name,
+                    "the check made inside the control's owner change did not refuse to rebuild",
+                ));
+            }
+        };
+        let mut churn = meerkat_core::authorization::OwnerChangeChurn::default();
+        if !crate::current_check::wait_after_refusal(context, &mut churn, site).await {
+            return Err(refused);
+        }
         crate::current_check::check_after_owner_change(context, call, None, &mut churn, site)
             .await
             .map(|_| ())
@@ -2417,7 +2477,19 @@ impl meerkat_core::ToolDispatchAdmission for RecorderTicketCapture {
         assert_eq!(outcome, meerkat_core::LiveBridgeEffectOutcome::Committed);
         // The real Recorder body has returned. Its exact prepared check is
         // still current; the stored single-use ticket has never been entered.
-        let checked = Self::current(context.unwrap(), call, "test.recorder_gate.outcome").await;
+        let forced = self.owner_change_at_outcome.lock().unwrap().take();
+        let checked = match forced {
+            None => Self::current(context.unwrap(), call, "test.recorder_gate.outcome").await,
+            Some(publication) => {
+                Self::current_in_an_owner_change(
+                    context.unwrap(),
+                    call,
+                    publication,
+                    "test.recorder_gate.outcome",
+                )
+                .await
+            }
+        };
         if checked.is_ok() {
             assert_eq!(self.outcomes.fetch_add(1, Ordering::SeqCst), 0);
         }
@@ -2576,6 +2648,245 @@ async fn completed_peer_run_refuses_unused_recorder_effect_ticket_without_revoki
     fixture.close().await;
     match checked {
         Ok(result) => result.expect("Recorder ticket control did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// The audit rows of the native tool `name` in `row`, when a check made
+/// after the tool's effect met an owner change: the shape
+/// `a_tool_checked_again_during_an_owner_change_after_its_preparation_still_succeeded`
+/// accepts as "a check after the tool's effect", here as a run leaves it.
+///
+/// A success entry is one layer's record that the dispatch call returned to
+/// it, not a count of effects: every layer of the dispatch chain appends its
+/// own once the one call comes back (each execution policy gate, then the
+/// root dispatch). The Recorder's chain in this fixture has three layers:
+/// the gate a row wraps around the Recorder (`RecorderTicketCapture`), the
+/// installed gate around that, and the root. The innermost gate records its
+/// success and only then settles its admission, which is where the row's
+/// gate checks. So the one return leaves one success before the refusal and
+/// two behind the re-preparation. A second return of the Recorder through
+/// the gate would leave a fourth.
+fn checked_after_its_effect_in_an_owner_change(row: &StoredInputState, name: &str) {
+    use meerkat_authorization_contracts::audit::AuditRefusalBasis;
+    use meerkat_core::authorization::OperationRefusalKind;
+    let audit: Vec<StoredAuthorizationAuditObservation> =
+        serde_json::from_value(serde_json::to_value(row).unwrap()["authorization_audit"].clone())
+            .unwrap();
+    let operation = audit
+        .iter()
+        .find_map(|row| match &row.observation.observation {
+            AuditObservation::Prepared { target, .. }
+                if matches!(target.as_ref(), AuditTarget::Tool { tool_name, .. } if tool_name == name) =>
+            {
+                Some(row.observation.operation_id.clone())
+            }
+            _ => None,
+        })
+        .expect("the tool prepared");
+    let own = audit
+        .iter()
+        .filter(|row| row.observation.operation_id == operation)
+        .map(|row| &row.observation.observation)
+        .collect::<Vec<_>>();
+    let shape = serde_json::to_string(&own).unwrap();
+    // One flag per row of the operation: this layer saw the dispatch call
+    // return a result that is not an error.
+    let succeeded = own
+        .iter()
+        .map(|observation| {
+            matches!(
+                observation,
+                AuditObservation::Outcome {
+                    outcome: OperationObservedOutcome::ToolDispatchReturned {
+                        result_is_error: false,
+                        terminal_error: None,
+                        ..
+                    }
+                }
+            )
+        })
+        .collect::<Vec<bool>>();
+    let successes = |flags: &[bool]| flags.iter().filter(|flag| **flag).count();
+    let first_success = succeeded
+        .iter()
+        .position(|flag| *flag)
+        .unwrap_or_else(|| panic!("the tool's operation returned a success: {shape}"));
+    // The gate's first check, made inside the owner change the control held.
+    let refused = first_success
+        + own[first_success..]
+            .iter()
+            .position(|observation| matches!(observation, AuditObservation::Refused { .. }))
+            .unwrap_or_else(|| panic!("a refusal follows the first success: {shape}"));
+    assert!(
+        matches!(
+            own[refused],
+            AuditObservation::Refused {
+                reason: OperationRefusalKind::ReprepareRequired,
+                read: Some(read),
+                ..
+            } if matches!(read.basis, AuditRefusalBasis::ChangeInProgress)
+        ),
+        "the check after the effect refused to rebuild inside an owner change in progress: {shape}"
+    );
+    assert_eq!(
+        successes(&succeeded[..refused]),
+        1,
+        "one success, the innermost gate's, precedes the check after the effect: {shape}"
+    );
+    // The waited re-preparation: the operation's last preparation.
+    let prepared_again = own
+        .iter()
+        .rposition(|observation| matches!(observation, AuditObservation::Prepared { .. }))
+        .unwrap();
+    assert!(
+        prepared_again > refused,
+        "the operation was prepared again behind the refusal: {shape}"
+    );
+    assert!(
+        own[refused..prepared_again]
+            .iter()
+            .all(|observation| matches!(
+                observation,
+                AuditObservation::Refused {
+                    reason: OperationRefusalKind::ReprepareRequired,
+                    ..
+                } | AuditObservation::Prepared { .. }
+            )),
+        "only refusals to rebuild and preparations lie between the check's refusal and the last preparation: {shape}"
+    );
+    assert_eq!(
+        successes(&succeeded[prepared_again..]),
+        2,
+        "the outer gate's and the root's successes follow the re-preparation: {shape}"
+    );
+    assert!(
+        succeeded[prepared_again + 1..].iter().all(|flag| *flag),
+        "nothing but those successes follows the re-preparation: {shape}"
+    );
+}
+
+/// The widened audit shape as a run leaves it, forced on every run, and the
+/// tool's effect counted beside it: the Recorder's gate makes its check
+/// after the effect inside an owner change that the row's control holds on
+/// the source's publication (`RecorderTicketCapture::current_in_an_owner_change`).
+/// The check refuses to rebuild, the change ends, the waited check prepares
+/// the operation again, and the audit shows the operation's success on both
+/// sides of the refusal.
+///
+/// That is one run of the Recorder, not two. The audit check does not say
+/// so (`tool_succeeded_in` counts neither successes nor effects), and the
+/// one memory record does not either (an identical write returns the
+/// existing record). The gate's counter does: it counts the Recorder
+/// dispatches that returned through the gate with a check after the effect
+/// that passed, is zero before the delivery and exactly one after the run's
+/// terminal. The success entries say the same: one per layer of the chain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recorder_effect_checked_inside_an_owner_change_ran_once() {
+    let fixture = Box::pin(start()).await;
+    let capture = fixture.factory.recorder_ticket.clone();
+    capture.enabled.store(true, Ordering::SeqCst);
+    *capture.owner_change_at_outcome.lock().unwrap() =
+        Some(fixture.source.owner.publication_for_test().clone());
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            let receiver = add(&fixture, ADDED).await;
+            let sender = add(&fixture, SENDER).await;
+            ready(&fixture, &receiver).await;
+            ready(&fixture, &sender).await;
+            wire_pair(&fixture).await;
+            let recipient = peer(&fixture, ADDED).await;
+            *fixture.factory.next_call.lock().unwrap() = Some("memory");
+            *fixture.factory.next_args.lock().unwrap() = serde_json::json!({
+                "action": "remember",
+                "title": "Effect checked inside an owner change",
+                "body": "One Recorder write, checked inside an owner change",
+            });
+            assert_eq!(
+                capture.outcomes.load(Ordering::SeqCst),
+                0,
+                "no Recorder dispatch has returned through the gate before the delivery"
+            );
+            assert!(matches!(
+                send(&fixture, &sender, &recipient).await.unwrap(),
+                meerkat_core::SendReceipt::PeerMessageSent {
+                    delivery: meerkat_core::comms::PeerDeliveryOutcome::DurablyResolved {
+                        outcome:
+                            meerkat_core::interaction::PeerIngressTerminalOutcomeKind::Accepted
+                    },
+                    ..
+                }
+            ));
+            capture
+                .effect_checked()
+                .await
+                .expect("the gate's check after the effect met the owner change and waited it out");
+            assert!(
+                capture.owner_change_at_outcome.lock().unwrap().is_none(),
+                "the gate took the control's owner change"
+            );
+            assert_eq!(
+                capture.outcomes.load(Ordering::SeqCst),
+                1,
+                "the Recorder's dispatch returned through the gate once"
+            );
+            use meerkat_mobkit::identity_first::agent_memory::{
+                AgentMemoryProvider, AgentMemoryRecallRequest, AgentMemorySelection,
+            };
+            let memory = meerkat_mobkit::memory::SqliteAgentMemoryStore::open(
+                fixture._directory.path().join("selected-recorder"),
+            )
+            .unwrap();
+            let query = AgentMemoryRecallRequest {
+                realm: fixture
+                    .lifetime
+                    .selected_policy()
+                    .native_host
+                    .as_ref()
+                    .unwrap()
+                    .realm
+                    .to_string(),
+                identity: AgentIdentity::parse(ADDED).unwrap(),
+                query_text: None,
+                query_terms: vec![],
+                selection: AgentMemorySelection::Always,
+                max_entries: 16,
+            };
+            // The effect happened; how often is the counter's to say.
+            let written = memory.recall(query.clone()).await.unwrap();
+            assert_eq!(written.len(), 1);
+            assert_eq!(
+                written[0].body,
+                "One Recorder write, checked inside an owner change"
+            );
+            capture.release.send_replace(true);
+            let terminal = completed(&fixture, &receiver, 1).await;
+            assert_eq!(
+                terminal.seed.terminal_outcome,
+                Some(meerkat_runtime::input_state::InputTerminalOutcome::Consumed)
+            );
+            tool_succeeded(&terminal, "memory");
+            checked_after_its_effect_in_an_owner_change(&terminal, "memory");
+            assert_eq!(
+                capture.outcomes.load(Ordering::SeqCst),
+                1,
+                "the Recorder's effect ran once: one dispatch returned through the gate"
+            );
+            assert_eq!(memory.recall(query).await.unwrap(), written);
+            assert_eq!(native_input_states(&fixture, &receiver).await.len(), 1);
+            assert!(native_input_states(&fixture, &sender).await.is_empty());
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    // Release an outcome callback even if a preceding assertion failed; native
+    // shutdown then joins the real dispatch and the existing fixture owners.
+    capture.release.send_replace(true);
+    drop(capture.ticket.lock().unwrap().take());
+    fixture.close().await;
+    match checked {
+        Ok(result) => result.expect("the forced Recorder control did not settle"),
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }

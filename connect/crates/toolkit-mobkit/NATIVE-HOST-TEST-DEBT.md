@@ -130,6 +130,21 @@ The check examines the one operation that prepared the named tool. Another
 operation's `Prepared` or success never excuses the checked operation's
 refusal, and a second operation of the same tool fails "must prepare once".
 
+The check does not count effects. A success entry is one layer's record
+that the dispatch call returned to it: each execution policy gate and then
+the root dispatch append one for the one call. An operation that ran once
+therefore shows as many successes as its dispatch chain has layers, and a
+check made after the effect by the innermost gate falls between that gate's
+success and the others': the successes on both sides of the refusal are one
+return, not two. That the effect ran once on that path is held by a row,
+not by the check. The row
+`recorder_effect_checked_inside_an_owner_change_ran_once` makes the
+Recorder's gate check after the effect inside an owner change on every run,
+and asserts the gate's count of returned Recorder dispatches (0 before the
+delivery, 1 after the run's terminal) beside the shape (one success, the
+refusal, the re-preparation, two successes). The memory record cannot hold
+it: an identical write returns the existing record.
+
 Kept fatal, and these are real product outcomes, not only test shapes: a
 `reprepare_required` refusal after `Prepared` that no later `Prepared` and
 success follow. Product paths leave it, among them:

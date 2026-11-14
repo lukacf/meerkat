@@ -36,8 +36,11 @@ hosts:
 	cd "$(ROOT)" && "$(CARGO)" build --locked -p rkat -p meerkat-rpc -p meerkat-rest \
 		--bins --features meerkat-rpc/live-webrtc
 
+# wasm-pack compiles with the cargo on PATH but asks $(CARGO) where the
+# output is. Name the target directory, so that both agree when
+# CARGO_TARGET_DIR is not already set.
 web-runtime:
-	cd "$(ROOT)" && CARGO="$(CARGO)" npm --prefix sdks/web run build
+	cd "$(ROOT)" && $(if $(RKAT_TARGET),CARGO_TARGET_DIR="$(RKAT_TARGET)") CARGO="$(CARGO)" npm --prefix sdks/web run build
 
 shell: hosts web-runtime
 	cd "$(ROOT)/examples" && git ls-files --cached --others --exclude-standard -z -- '*.sh' | xargs -0 -n 1 bash -n

@@ -69,12 +69,24 @@ export interface QuestionSetDecisionState {
   refusal?: QuestionSetRefusal;
 }
 /** How a set this console still shows ended: answered or dismissed here,
- * timed out at its deadline, or ended elsewhere after a refused decision. */
-export type ClosedQuestionSetOutcome = "answered" | "dismissed" | "timed_out" | "ended";
+ * with the gateway's own result. A set that left the list any other way is
+ * not kept. */
+export type ClosedQuestionSetOutcome = "answered" | "dismissed";
 export interface ClosedQuestionSet {
   set: QuestionSet;
   outcome: ClosedQuestionSetOutcome;
   closedAtMs: number;
+}
+/** Why a card left the screen: the read no longer lists its set (`gone`),
+ * and it did so after a send this console could not confirm
+ * (`sent_unconfirmed`). */
+export type QuestionSetNoticeKind = "gone" | "sent_unconfirmed";
+/** One neutral line for a card that left. It holds nothing of the set: the
+ * card's own place on this page (`slot`), why it left, and when. */
+export interface QuestionSetNotice {
+  slot: number;
+  kind: QuestionSetNoticeKind;
+  atMs: number;
 }
 export interface QuestionSetSnapshot {
   scopeKey: string;
@@ -83,9 +95,15 @@ export interface QuestionSetSnapshot {
   status: "loading" | "ready" | "stale" | "unavailable" | "forbidden" | "unsupported";
   /** The open sets, as the gateway lists them: soonest deadline first. */
   sets: readonly QuestionSet[];
-  /** Sets that ended while this console showed them, newest first. */
+  /** Sets this console answered or dismissed, newest first. */
   closed: readonly ClosedQuestionSet[];
   decisions: Readonly<Record<string, QuestionSetDecisionState>>;
+  /** The lines of the cards that left, newest first; each goes a minute
+   * after its card. */
+  notices: readonly QuestionSetNotice[];
+  /** The place of each listed or closed set's card on this page: a number
+   * this console counts, by the set's `pendingId`. */
+  slots: Readonly<Record<string, number>>;
   readOnly: boolean;
   /** Why the sets are read-only, when the console knows it: `sign_in` when
    * the caller is no signed-in person (only a person answers). */
@@ -93,11 +111,13 @@ export interface QuestionSetSnapshot {
   updatedAtMs?: number;
   error?: string;
 }
-/** One card: an open set, or one that ended while this console showed it. */
+/** One card: an open set, or one this console answered or dismissed. */
 export interface QuestionSetEntry {
   set: QuestionSet;
   decision?: QuestionSetDecisionState;
   closed?: ClosedQuestionSetOutcome;
+  /** The card's place on this page (see the snapshot's `slots`). */
+  slot?: number;
 }
 export interface QuestionSetResource {
   getSnapshot(): QuestionSetSnapshot;
@@ -110,8 +130,11 @@ export interface QuestionSetResource {
 
 const POLL_MS = 15_000;
 const STALE_MS = 2 * POLL_MS;
-/** How many ended sets the snapshot keeps. */
+/** How many answered and dismissed sets the snapshot keeps. */
 const CLOSED_LIMIT = 20;
+/** How many lines of cards that left the snapshot keeps, and for how long. */
+const NOTICE_LIMIT = 5;
+const NOTICE_KEEP_MS = 60_000;
 const text = (value: unknown) => typeof value === "string" && value.trim() ? value : undefined;
 const millis = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 8_640_000_000_000_000 ? value : undefined;
 const record = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -252,13 +275,18 @@ function browserEnvironment(): ApprovalResourceEnvironment {
   };
 }
 
-/** The cards of a snapshot: the open sets as listed, then the ended ones,
- * newest first. With `identity`, only the sets that agent asked. */
+/** The cards of a snapshot: the open sets as listed, then the ones this
+ * console answered or dismissed, newest first. With `identity`, only the
+ * sets that agent asked. */
 export function questionSetEntries(snapshot: QuestionSetSnapshot, identity?: string): QuestionSetEntry[] {
   const mine = (set: QuestionSet) => identity === undefined || set.origin.identity === identity;
+  const slot = (set: QuestionSet) => {
+    const place = Object.prototype.hasOwnProperty.call(snapshot.slots, set.pendingId) ? snapshot.slots[set.pendingId] : undefined;
+    return place === undefined ? {} : { slot: place };
+  };
   return [
-    ...snapshot.sets.filter(mine).map((set) => ({ set, decision: snapshot.decisions[set.pendingId] })),
-    ...snapshot.closed.filter((entry) => mine(entry.set)).map((entry) => ({ set: entry.set, decision: snapshot.decisions[entry.set.pendingId], closed: entry.outcome })),
+    ...snapshot.sets.filter(mine).map((set) => ({ set, decision: snapshot.decisions[set.pendingId], ...slot(set) })),
+    ...snapshot.closed.filter((entry) => mine(entry.set)).map((entry) => ({ set: entry.set, decision: snapshot.decisions[entry.set.pendingId], closed: entry.outcome, ...slot(entry.set) })),
   ];
 }
 
@@ -277,7 +305,7 @@ export function createQuestionSetResource(input: {
 }): QuestionSetResource {
   const env = input.environment || browserEnvironment();
   let snapshot: QuestionSetSnapshot = {
-    scopeKey: input.scopeKey, status: "loading", sets: [], closed: [], decisions: {}, readOnly: input.readOnly === true,
+    scopeKey: input.scopeKey, status: "loading", sets: [], closed: [], decisions: {}, notices: [], slots: {}, readOnly: input.readOnly === true,
     ...(input.readOnly === true && input.readOnlyReason ? { readOnlyReason: input.readOnlyReason } : {}),
   };
   const listeners = new Set<() => void>();
@@ -289,6 +317,9 @@ export function createQuestionSetResource(input: {
   let invalidated = false;
   let decisionGeneration = 0;
   const decisionJobs = new Map<string, Promise<void>>();
+  // The place of each card on this page: counted here, never read from a set.
+  const places = new Map<string, number>();
+  let lastPlace = 0;
   const publish = (patch: Partial<QuestionSetSnapshot>) => {
     if (disposed) return;
     snapshot = { ...snapshot, ...patch };
@@ -300,13 +331,24 @@ export function createQuestionSetResource(input: {
   /** Ends the resource for this scope: nothing is listed and nothing more is read. */
   const end = (status: "forbidden" | "unsupported", error?: unknown) => {
     denied = true;
-    publish({ sets: [], closed: [], decisions: {}, status, readOnly: true, error: error === undefined ? undefined : errorText(error) });
+    places.clear();
+    publish({ sets: [], closed: [], decisions: {}, notices: [], slots: {}, status, readOnly: true, error: error === undefined ? undefined : errorText(error) });
     lifetime.abort();
   };
   const close = (sets: readonly QuestionSet[], outcome: ClosedQuestionSetOutcome): ClosedQuestionSet[] => [
     ...sets.map((set) => ({ set, outcome, closedAtMs: env.now() })),
     ...snapshot.closed.filter((old) => !sets.some((set) => set.pendingId === old.set.pendingId)),
   ].slice(0, CLOSED_LIMIT);
+  /** The decisions and the places of the listed and the closed sets, and of
+   * no other: what a set had here goes with it. */
+  const keptFor = (sets: readonly QuestionSet[], closed: readonly ClosedQuestionSet[], decisions: QuestionSetSnapshot["decisions"]) => {
+    const kept = new Set([...sets.map((set) => set.pendingId), ...closed.map((entry) => entry.set.pendingId)]);
+    for (const id of Array.from(places.keys())) if (!kept.has(id)) places.delete(id);
+    return {
+      decisions: Object.fromEntries(Object.entries(decisions).filter(([id]) => kept.has(id))),
+      slots: Object.fromEntries(places),
+    };
+  };
   const schedule = () => {
     if (timer !== undefined) env.clearTimeout(timer);
     timer = undefined;
@@ -340,19 +382,27 @@ export function createQuestionSetResource(input: {
           const set = normalizeQuestionSet(row);
           if (set && !ids.has(set.pendingId)) { ids.add(set.pendingId); sets.push(set); }
         }
-        // A set that left the list without this console deciding it: at its
-        // deadline it timed out; after a decision the gateway refused it
-        // ended elsewhere; otherwise someone else answered it and its card goes.
-        const left = snapshot.status === "loading" ? [] : snapshot.sets.filter((old) => !ids.has(old.pendingId));
         const now = env.now();
-        const timedOut = left.filter((old) => old.deadlineAtMs !== undefined && now >= old.deadlineAtMs);
-        const ended = left.filter((old) => !timedOut.includes(old) && snapshot.decisions[old.pendingId]?.phase === "refused");
-        const closed = [
-          ...timedOut.map((set) => ({ set, outcome: "timed_out" as const, closedAtMs: now })),
-          ...ended.map((set) => ({ set, outcome: "ended" as const, closedAtMs: now })),
-          ...snapshot.closed.filter((old) => !ids.has(old.set.pendingId)),
-        ].slice(0, CLOSED_LIMIT);
-        publish({ sets, closed, status: "ready", updatedAtMs: now, error: undefined });
+        // A set the gateway no longer lists leaves, whatever this clock says
+        // about its deadline, and nothing of it is kept: its card's place gets
+        // one line. Only a set this console answered or dismissed, with the
+        // gateway's own result, stays as a closed card.
+        const left = snapshot.sets.filter((old) => !ids.has(old.pendingId));
+        const lines: QuestionSetNotice[] = [];
+        for (const old of left) {
+          const slot = places.get(old.pendingId);
+          places.delete(old.pendingId);
+          if (slot === undefined) continue;
+          // After a send this console could not confirm, the line says so.
+          lines.push({ slot, kind: snapshot.decisions[old.pendingId]?.phase === "failed" ? "sent_unconfirmed" : "gone", atMs: now });
+        }
+        for (const set of sets) if (!places.has(set.pendingId)) places.set(set.pendingId, ++lastPlace);
+        const closed = snapshot.closed.filter((old) => !ids.has(old.set.pendingId));
+        publish({
+          sets, closed, ...keptFor(sets, closed, snapshot.decisions),
+          notices: [...lines, ...snapshot.notices.filter((line) => now - line.atMs < NOTICE_KEEP_MS)].slice(0, NOTICE_LIMIT),
+          status: "ready", updatedAtMs: now, error: undefined,
+        });
       } catch (error) {
         if (disposed || denied) return;
         if (isUnsupported(error)) end("unsupported");
@@ -362,13 +412,14 @@ export function createQuestionSetResource(input: {
         }
       } finally {
         activeRead = undefined;
-        if (invalidated && !disposed && !denied) { invalidated = false; void refresh(false); }
+        // A read a decision overtook is read again before the caller goes on.
+        if (invalidated && !disposed && !denied) { invalidated = false; await refresh(false); }
       }
     })();
     return activeRead;
   };
   const setDecision = (id: string, value: QuestionSetDecisionState) => {
-    // Only the listed and the ended sets keep a decision.
+    // Only the listed and the closed sets keep a decision.
     const kept = new Set([id, ...snapshot.sets.map((set) => set.pendingId), ...snapshot.closed.map((entry) => entry.set.pendingId)]);
     publish({ decisions: Object.fromEntries(Object.entries({ ...snapshot.decisions, [id]: value }).filter(([key]) => kept.has(key))) });
   };
@@ -386,6 +437,10 @@ export function createQuestionSetResource(input: {
     ++decisionGeneration;
     setDecision(pendingId, { phase: "submitting", action, ...sent });
     const job = (async () => {
+      // A refusal that does not say whether the set is still there: the
+      // gateway answers an id that is not pending the same way as an answer
+      // it does not accept. The next read says which.
+      let unsettled: QuestionSetRefusal | undefined;
       try {
         const params = action === "answer" ? questionSetAnswerParams(set, answers!) : questionSetDismissParams(set);
         const result = record(await Promise.resolve().then(() => input.decide(params, lifetime.signal)));
@@ -396,10 +451,11 @@ export function createQuestionSetResource(input: {
         }
         const decidedAtMs = millis(result.decided_at_ms);
         // The response is authoritative for this set: it is no longer open.
+        const open = snapshot.sets.filter((candidate) => candidate.pendingId !== pendingId);
+        const closed = close([set], outcome);
         publish({
-          sets: snapshot.sets.filter((candidate) => candidate.pendingId !== pendingId),
-          closed: close([set], outcome),
-          decisions: { ...snapshot.decisions, [pendingId]: { phase: outcome, action, ...sent, ...(decidedAtMs !== undefined ? { decidedAtMs } : {}) } },
+          sets: open, closed,
+          ...keptFor(open, closed, { ...snapshot.decisions, [pendingId]: { phase: outcome, action, ...sent, ...(decidedAtMs !== undefined ? { decidedAtMs } : {}) } }),
         });
       } catch (error) {
         if (disposed || denied) return;
@@ -411,17 +467,25 @@ export function createQuestionSetResource(input: {
           setDecision(pendingId, previous?.phase === "failed" ? previous : {
             phase: "unavailable", action, error: "Answers are unavailable with current access",
           });
+        } else if (refusal?.kind === "refused") {
+          // The set reads as sending until the read has said whether it is
+          // still listed; it is never shown as refused before that.
+          unsettled = refusal;
         } else {
-          // A refusal names this one set (the asking agent may be one the
-          // caller cannot view): the set and the others stay listed.
           setDecision(pendingId, refusal
             ? { phase: "refused", action, ...sent, refusal, error: refusal.words }
             : { phase: "failed", action, ...sent, error: errorText(error) });
         }
       } finally {
         ++decisionGeneration;
-        decisionJobs.delete(pendingId);
         if (!disposed && !denied) await refresh(true);
+        // Still listed (or the read failed and the last list stands): the
+        // answer itself was not accepted. No longer listed: the read took the
+        // card and everything of the set with it.
+        if (unsettled && !disposed && !denied && snapshot.sets.some((candidate) => candidate.pendingId === pendingId)) {
+          setDecision(pendingId, { phase: "refused", action, ...sent, refusal: unsettled, error: unsettled.words });
+        }
+        decisionJobs.delete(pendingId);
       }
     })();
     decisionJobs.set(pendingId, job);
@@ -444,9 +508,10 @@ export function createQuestionSetResource(input: {
       if (timer !== undefined) env.clearTimeout(timer);
       unsubscribeVisibility();
       listeners.clear();
+      places.clear();
       // Preserve a stable detached empty snapshot for references retained by a
       // view while React swaps to the next authority-scoped resource.
-      snapshot = { scopeKey: input.scopeKey, status: "unavailable", sets: [], closed: [], decisions: {}, readOnly: true };
+      snapshot = { scopeKey: input.scopeKey, status: "unavailable", sets: [], closed: [], decisions: {}, notices: [], slots: {}, readOnly: true };
     },
   };
   schedule();

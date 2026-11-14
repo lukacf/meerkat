@@ -13,6 +13,7 @@ import type {
   QuestionSet,
   QuestionSetAnswers,
   QuestionSetDecisionState,
+  QuestionSetNoticeKind,
   QuestionSetSnapshot,
 } from "../../../console-core/src/pending-questions";
 import {
@@ -20,6 +21,7 @@ import {
   Button,
   Chip,
   KeyValueList,
+  KitGlyph,
   Notice,
   agentDisplayName,
   cx,
@@ -36,8 +38,11 @@ export interface QuestionSetCardProps {
   set: QuestionSet;
   resourceStatus: QuestionSetSnapshot["status"];
   decision?: QuestionSetDecisionState;
-  /** How the set ended, once it is no longer listed as open. */
+  /** Set once this console answered or dismissed the set. */
   closed?: ClosedQuestionSetOutcome;
+  /** The card's place on this page, for what the card remembers of itself
+   *  (whether its Technical details are open). */
+  slot?: number;
   readOnly?: boolean;
   /** Why the card is read-only, when known: `sign_in` names what lets the
    *  caller answer (only a signed-in person answers). */
@@ -61,7 +66,7 @@ export function useQuestionSetsView(): QuestionSetsView | undefined {
   return React.useContext(QuestionSetsContext);
 }
 
-type QuestionSetCardState = "pending" | "submitting" | "stale" | "failed" | "answered" | "dismissed" | "timed_out" | "not_permitted";
+type QuestionSetCardState = "pending" | "submitting" | "stale" | "failed" | "answered" | "dismissed" | "not_permitted";
 
 const STATE_WORDS: Record<QuestionSetCardState, { text: string; tone: Tone }> = {
   pending: { text: "Answer needed", tone: "warn" },
@@ -70,7 +75,6 @@ const STATE_WORDS: Record<QuestionSetCardState, { text: string; tone: Tone }> = 
   failed: { text: "Not confirmed", tone: "crit" },
   answered: { text: "Answered", tone: "ok" },
   dismissed: { text: "Dismissed", tone: "neutral" },
-  timed_out: { text: "Timed out", tone: "neutral" },
   not_permitted: { text: "Not permitted", tone: "locked" },
 };
 
@@ -78,11 +82,17 @@ const SENTENCES = {
   pending: "Pick one choice per question. A question you leave out reaches the agent as unanswered.",
   submitting: "Sending your decision to the agent.",
   stale: "The question sets could not be refreshed. Answers can be sent once they are read again.",
-  failed: "The answer may not have been sent. This card updates when the gateway answers again.",
+  failed: "The Console could not confirm that your answer arrived. If this question is still listed after the next refresh, send your answer again.",
   answered: "Answers sent.",
   dismissed: "Dismissed. The agent was told no answer is coming.",
-  timed_out: "This question set timed out before it was answered.",
 } satisfies Record<Exclude<QuestionSetCardState, "not_permitted">, string>;
+
+/** The one line a card that left the screen leaves where it was. It names
+ * nothing of the set. */
+const NOTICE_WORDS: Record<QuestionSetNoticeKind, string> = {
+  gone: "This question is no longer waiting for an answer.",
+  sent_unconfirmed: "This question is no longer waiting for an answer. The Console could not confirm whether your answer was the one that arrived.",
+};
 
 /** Show the byte counter from here on: near the limit, not before. */
 const FREE_TEXT_COUNTER_FROM = 200;
@@ -198,10 +208,23 @@ function AnswerSummary({ set, answers }: { set: QuestionSet; answers: QuestionSe
   );
 }
 
+/** The set's deadline, which is the gateway's. Before it on this clock, a
+ * countdown; past it, only the time: this clock ends no set, and a set
+ * stays answerable while the gateway lists it. */
+function AnswerByChip({ deadlineAtMs, now, testId }: { deadlineAtMs: number; now: number; testId: string }) {
+  if (now < deadlineAtMs) return <DeadlineChip deadlineAtMs={deadlineAtMs} now={now} testId={testId} />;
+  return (
+    <span className="cc-countdown cc-countdown--chip cc-approval__deadline" data-tone="neutral" data-testid={testId}>
+      <KitGlyph name="clock" className="cc-countdown__glyph" />
+      <time dateTime={new Date(deadlineAtMs).toISOString()}>{`Answer by ${formatAbsoluteTime(deadlineAtMs)}`}</time>
+    </span>
+  );
+}
+
 /** One set of questions an agent asked a person, in the approval card's
  * family. The same set and decision owner can feed an inbox and several
  * panes; each card keeps its own draft until it is sent. */
-export function QuestionSetCard({ set, resourceStatus, decision, closed, readOnly = false, readOnlyReason, onAnswer, onDismiss }: QuestionSetCardProps) {
+export function QuestionSetCard({ set, resourceStatus, decision, closed, slot, readOnly = false, readOnlyReason, onAnswer, onDismiss }: QuestionSetCardProps) {
   const directory = useAgentDirectory();
   const navigation = useConsoleNavigation();
   const now = useApprovalClock([set.deadlineAtMs]);
@@ -209,23 +232,24 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, readOnl
   const identity = set.origin.identity;
   const agentName = agentDisplayName(identity, directory) || "an agent";
   const refusal = decision?.phase === "refused" ? decision.refusal : undefined;
+  // The state is the gateway's and this console's own decisions: never the
+  // browser clock. A list that could not be read again comes before what an
+  // earlier answer said of the set.
   const state: QuestionSetCardState = closed === "answered" || decision?.phase === "answered" ? "answered"
     : closed === "dismissed" || decision?.phase === "dismissed" ? "dismissed"
       : decision?.phase === "submitting" ? "submitting"
-        : closed === "timed_out" || (set.deadlineAtMs !== undefined && now >= set.deadlineAtMs) ? "timed_out"
-          : decision?.phase === "failed" ? "failed"
-            : refusal || closed === "ended" || readOnly ? "not_permitted"
-              : resourceStatus !== "ready" ? "stale"
-                : "pending";
+        : decision?.phase === "failed" ? "failed"
+          : resourceStatus !== "ready" ? "stale"
+            : refusal || readOnly ? "not_permitted"
+              : "pending";
   const words = STATE_WORDS[state];
   // Not permitted has three forms: sign in, no access to this agent, and
   // the gateway's refusal of this decision (its own message under Details).
   const refusalKind = state !== "not_permitted" ? null
     : refusal ? refusal.kind
-      : closed === "ended" ? "refused"
-        : readOnlyReason === "sign_in" ? "approver_unauthenticated" : "access_denied";
+      : readOnlyReason === "sign_in" ? "approver_unauthenticated" : "access_denied";
   const sentence = refusalKind ? QUESTION_SET_REFUSAL_WORDS[refusalKind] : SENTENCES[state as Exclude<QuestionSetCardState, "not_permitted">];
-  const open = !closed && state !== "answered" && state !== "dismissed" && state !== "timed_out";
+  const open = !closed && state !== "answered" && state !== "dismissed";
   // A person changes the draft while the set waits, after an uncertain send,
   // and after a refusal of the answer itself (they may correct and resend).
   const editable = open && !readOnly && (state === "pending" || state === "failed" || (state === "not_permitted" && refusalKind === "refused"));
@@ -247,7 +271,7 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, readOnl
           </span>
         </div>
         {open && set.deadlineAtMs !== undefined ? (
-          <DeadlineChip deadlineAtMs={set.deadlineAtMs} now={now} testId={`question-set-deadline:${set.pendingId}`} />
+          <AnswerByChip deadlineAtMs={set.deadlineAtMs} now={now} testId={`question-set-deadline:${set.pendingId}`} />
         ) : null}
       </header>
       <p className="cc-approval__asked" data-testid={`question-set-asked:${set.pendingId}`}>
@@ -316,7 +340,7 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, readOnl
             </Button>
           </div>
         ) : null}
-        <RowDetails part={`question-set-details:${set.pendingId}`} className="cc-approval__details cc-tech" data-testid={`question-set-details:${set.pendingId}`}>
+        <RowDetails part={`question-set-details:${slot ?? "card"}`} className="cc-approval__details cc-tech" data-testid={`question-set-details:${set.pendingId}`}>
           <summary className="cc-tech__summary">Technical details</summary>
           <div className="cc-tech__body">
             <KeyValueList
@@ -341,7 +365,9 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, readOnl
 
 /** The cards of a snapshot, for the inbox (every agent) or one agent's
  * conversation. A gateway without question sets, a denied read and a read
- * that has not answered yet show nothing. */
+ * that has not answered yet show nothing. A card whose set the gateway no
+ * longer lists is gone, and where this list showed it one neutral line
+ * stays for a while: the newest, when several cards left. */
 export function QuestionSetList({ view, identity, readOnly = false, className, testId }: {
   view?: QuestionSetsView;
   /** Only the sets this agent asked. */
@@ -351,10 +377,24 @@ export function QuestionSetList({ view, identity, readOnly = false, className, t
   className?: string;
   testId?: string;
 }): React.JSX.Element | null {
+  // The places of the cards this list has shown: numbers the console
+  // counts, so the list can tell which lines are for cards it showed
+  // without keeping anything of a set.
+  const shown = React.useRef(new Set<number>());
+  const entries = view ? questionSetEntries(view.snapshot, identity) : [];
+  const notices = view?.snapshot.notices;
+  React.useEffect(() => {
+    // The places of the cards on screen now, and of the cards this list
+    // showed whose lines are still kept: nothing older.
+    const places = new Set<number>();
+    for (const entry of entries) if (entry.slot !== undefined) places.add(entry.slot);
+    for (const line of notices ?? []) if (shown.current.has(line.slot)) places.add(line.slot);
+    shown.current = places;
+  });
   if (!view) return null;
   const { snapshot } = view;
-  const entries = questionSetEntries(snapshot, identity);
-  if (!entries.length) return null;
+  const notice = snapshot.notices.find((line) => shown.current.has(line.slot));
+  if (!entries.length && !notice) return null;
   const cards = entries.map((entry) => (
     <QuestionSetCard
       key={entry.set.pendingId}
@@ -362,13 +402,17 @@ export function QuestionSetList({ view, identity, readOnly = false, className, t
       resourceStatus={snapshot.status}
       decision={entry.decision}
       closed={entry.closed}
+      slot={entry.slot}
       readOnly={readOnly || snapshot.readOnly}
       readOnlyReason={readOnly ? undefined : snapshot.readOnlyReason}
       onAnswer={view.onAnswer}
       onDismiss={view.onDismiss}
     />
   ));
-  return className || testId ? <div className={className} data-testid={testId}>{cards}</div> : <>{cards}</>;
+  const line = notice ? (
+    <Notice key="notice" tone="neutral" role="status" className="cc-question-set__notice" testId="question-set-notice">{NOTICE_WORDS[notice.kind]}</Notice>
+  ) : null;
+  return className || testId ? <div className={className} data-testid={testId}>{line}{cards}</div> : <>{line}{cards}</>;
 }
 
 /** The question sets the conversation's agent asked, from the provider:

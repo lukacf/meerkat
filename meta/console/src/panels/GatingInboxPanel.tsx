@@ -596,10 +596,12 @@ export function GatingInboxPanel({
   ) : null;
   // The agents' question sets head Pending (the only tab that lists what
   // waits): each is answered on its card. The ones still open count with the
-  // requests that wait.
+  // requests that wait. A set the gateway no longer lists leaves one line
+  // where its card was; the list shows it only when it showed the card.
   const openQuestions = questions?.snapshot.sets.length ?? 0;
-  const questionsShown = questions !== undefined && questionSetEntries(questions.snapshot).length > 0;
-  const questionList = questionsShown ? (
+  const questionsShown = questions !== undefined
+    && (questionSetEntries(questions.snapshot).length > 0 || questions.snapshot.notices.length > 0);
+  const questionList = questions !== undefined ? (
     <QuestionSetList view={questions} readOnly={readOnly} className="gating-inbox__cards gating-inbox__questions" testId="question-set-list" />
   ) : null;
 

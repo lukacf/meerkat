@@ -1118,6 +1118,133 @@ pub(crate) fn durable_fork_unsupported() -> SessionError {
     )
 }
 
+/// Proof that a session is an earlier session of one member's rewind
+/// lineage: in the member's rewind chain, and not the session the member is
+/// seated on.
+///
+/// The lineage is MobMachine state, so only the mob runtime can prove it,
+/// and only the mob runtime builds a witness: its fields are private and
+/// its constructor is crate-private, so code outside this crate can name
+/// the type (a [`MobSessionService`] implementation receives one) and can
+/// never make one. A witness is an argument of one read, never a stored
+/// fact: it is not `Clone`, and each entry that takes one consumes it
+/// ([`MemberRewindFork`]'s lineage constructor and
+/// [`MobSessionService::read_member_rewind_lineage_session`]), so every
+/// read needs a witness built in the step that read the machine. What it
+/// proves is who built it, not that the chain still holds the session a
+/// step later.
+///
+/// A session service sees only what it owns: it checks that the session is
+/// bound to the member the witness names
+/// ([`meerkat_core::service::MemberRewindSource::ArchivedLineage`]).
+#[derive(Debug)]
+pub struct MemberRewindLineageWitness {
+    member_binding: meerkat_core::MobMemberBinding,
+    session_id: SessionId,
+}
+
+impl MemberRewindLineageWitness {
+    /// The witness for `session_id`, a session MobMachine holds in the
+    /// rewind chain of the member `member_binding` names and that is not
+    /// the member's current session. The caller has read both facts from
+    /// the machine in the step that builds the witness.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn proven_by_machine(
+        member_binding: meerkat_core::MobMemberBinding,
+        session_id: SessionId,
+    ) -> Self {
+        Self {
+            member_binding,
+            session_id,
+        }
+    }
+
+    /// The member whose lineage holds the session.
+    #[must_use]
+    pub fn member_binding(&self) -> &meerkat_core::MobMemberBinding {
+        &self.member_binding
+    }
+
+    /// The lineage session.
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+}
+
+/// One member rewind fork, as a mob asks its session service for it
+/// ([`MobSessionService::preflight_member_rewind_fork`],
+/// [`MobSessionService::fork_member_rewind_child`]).
+///
+/// Only the mob runtime builds one: the constructors are crate-private, so
+/// a caller outside this crate cannot ask a [`MobSessionService`] for a
+/// member rewind fork, and an archived source is asked for through this
+/// trait only with a lineage witness, for the member the witness names. A
+/// session service implementation reads what is asked from
+/// [`Self::request`]; a wrapper forwards the value as it is.
+///
+/// This seals the trait's entry, not the store: code that holds the
+/// concrete persistent service can still call its own entries.
+#[derive(Debug)]
+pub struct MemberRewindFork {
+    request: meerkat_core::service::MemberRewindForkRequest,
+}
+
+impl MemberRewindFork {
+    /// A fork of `source_session_id`, the session the member
+    /// `member_binding` names is seated on, at `message_count`, into the
+    /// child session id the mob reserved.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn of_current_session(
+        member_binding: meerkat_core::MobMemberBinding,
+        source_session_id: SessionId,
+        message_count: usize,
+        planned_child_session_id: SessionId,
+    ) -> Self {
+        Self {
+            request: meerkat_core::service::MemberRewindForkRequest {
+                source_session_id,
+                message_count,
+                planned_child_session_id,
+                member_binding,
+                source: meerkat_core::service::MemberRewindSource::Current,
+            },
+        }
+    }
+
+    /// A fork of an earlier session of a member's rewind lineage, which may
+    /// be archived, at `message_count`, into the child session id the mob
+    /// reserved. The member and the session are the witness's, which is
+    /// consumed: the fork can name no other member's session.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn of_lineage_session(
+        witness: MemberRewindLineageWitness,
+        message_count: usize,
+        planned_child_session_id: SessionId,
+    ) -> Self {
+        let MemberRewindLineageWitness {
+            member_binding,
+            session_id,
+        } = witness;
+        Self {
+            request: meerkat_core::service::MemberRewindForkRequest {
+                source_session_id: session_id,
+                message_count,
+                planned_child_session_id,
+                member_binding,
+                source: meerkat_core::service::MemberRewindSource::ArchivedLineage,
+            },
+        }
+    }
+
+    /// What the fork asks: the source, the boundary, the planned child,
+    /// the member, and how the source is read.
+    #[must_use]
+    pub fn request(&self) -> &meerkat_core::service::MemberRewindForkRequest {
+        &self.request
+    }
+}
+
 /// A member's agent event subscription, with the exact live actor
 /// incarnation its stream belongs to when the session service knows it.
 ///
@@ -2173,6 +2300,87 @@ pub trait MobSessionService:
         target: meerkat_core::DurableSessionForkTarget,
         bound: std::time::Duration,
     ) -> Result<meerkat_core::DurableForkAtTurnBoundary, SessionError>;
+
+    /// Decide, before anything is recorded, every refusal a member rewind
+    /// fork can answer, and return the evidence the planned child must
+    /// show.
+    ///
+    /// Only the mob runtime can build the argument ([`MemberRewindFork`]),
+    /// so only the mob runtime asks; an implementation reads what is asked
+    /// from [`MemberRewindFork::request`].
+    ///
+    /// The durable owner runs the fork's own checks on a clone of the
+    /// planned prefix and writes no session row: first that the source is
+    /// the member's session (a session of another member, of no member, or
+    /// without session metadata is answered as a session that does not
+    /// exist, before the busy answer and before anything of it is read or
+    /// repaired), then the busy guard once, a pending input boundary,
+    /// the complete boundary, the inherited instruction policy, the
+    /// source's comms name, and the blob preflight. The evidence's digest
+    /// is over the prefix as the child will commit it.
+    ///
+    /// The default refuses as a durable fork does: a service without
+    /// durable transcript fork authority forks nothing. A wrapper around a
+    /// durable owner must forward this method and the three below.
+    async fn preflight_member_rewind_fork(
+        &self,
+        _fork: &MemberRewindFork,
+    ) -> Result<meerkat_core::service::MemberRewindForkEvidence, SessionError> {
+        Err(durable_fork_unsupported())
+    }
+
+    /// Fork a member's own session into the child session id its mob
+    /// reserved, born bound to the same member, and return what the
+    /// committed child shows.
+    ///
+    /// A planned child that already exists is returned as it is, without
+    /// reading the source, so a retried fork reaches the same child. The
+    /// durable owner looks for the child under the source's busy guard,
+    /// the guard its fork runs under: of two calls for one planned child
+    /// the second waits for the first for at most one second, then
+    /// observes the child the first committed and never forks over it;
+    /// when the wait runs out it answers busy and forks nothing. Only a
+    /// child bound to the fork's member is returned: any other session
+    /// under the planned child id is answered as a session that does not
+    /// exist and is left as it is. The caller verifies what is returned
+    /// against its record
+    /// ([`meerkat_core::service::MemberRewindForkEvidence::verify_child`]).
+    /// The fork inherits: the child keeps the source's effective tool
+    /// access policy and re-activates the instruction keys effective at the
+    /// boundary. It holds no fork seed: its first run delivers no fork
+    /// notice.
+    async fn fork_member_rewind_child(
+        &self,
+        _fork: &MemberRewindFork,
+    ) -> Result<meerkat_core::service::MemberRewindChildObservation, SessionError> {
+        Err(durable_fork_unsupported())
+    }
+
+    /// What a planned member rewind fork child shows, or `None` when no
+    /// such session exists. Reads the child only, and writes nothing.
+    async fn observe_member_rewind_child(
+        &self,
+        _planned_child_session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::service::MemberRewindChildObservation>, SessionError> {
+        Err(durable_fork_unsupported())
+    }
+
+    /// Read what source resolution needs of an earlier session of a
+    /// member's rewind lineage: its length and the digest of its first
+    /// `prefix_message_count` messages. The session is read whether or not
+    /// it is archived, and no session row is written to it. A session that
+    /// is not bound to the member the witness names is answered not found.
+    ///
+    /// Only the mob runtime can build the witness
+    /// ([`MemberRewindLineageWitness`]): the lineage is machine state the
+    /// session service cannot see. The read consumes it.
+    async fn read_member_rewind_lineage_session(
+        &self,
+        _witness: MemberRewindLineageWitness,
+        _prefix_message_count: usize,
+    ) -> Result<meerkat_core::service::MemberRewindLineageRead, SessionError> {
+        Err(durable_fork_unsupported())
+    }
 
     /// Load an archived session only for an explicit resume/revival operation.
     /// Ordinary reads remain archive-filtered.
@@ -4409,6 +4617,53 @@ where
             tool_access_policy,
             target,
             bound,
+        )
+        .await
+    }
+
+    async fn preflight_member_rewind_fork(
+        &self,
+        fork: &MemberRewindFork,
+    ) -> Result<meerkat_core::service::MemberRewindForkEvidence, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::preflight_member_rewind_fork(
+            self,
+            fork.request(),
+        )
+        .await
+    }
+
+    async fn fork_member_rewind_child(
+        &self,
+        fork: &MemberRewindFork,
+    ) -> Result<meerkat_core::service::MemberRewindChildObservation, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::fork_member_rewind_child(
+            self,
+            fork.request(),
+        )
+        .await
+    }
+
+    async fn observe_member_rewind_child(
+        &self,
+        planned_child_session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::service::MemberRewindChildObservation>, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::observe_member_rewind_child(
+            self,
+            planned_child_session_id,
+        )
+        .await
+    }
+
+    async fn read_member_rewind_lineage_session(
+        &self,
+        witness: MemberRewindLineageWitness,
+        prefix_message_count: usize,
+    ) -> Result<meerkat_core::service::MemberRewindLineageRead, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::read_member_rewind_lineage_session(
+            self,
+            witness.session_id(),
+            witness.member_binding(),
+            prefix_message_count,
         )
         .await
     }

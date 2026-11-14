@@ -482,6 +482,12 @@ pub use runtime::{MemberToolGrant, MemberToolGrantError};
 pub use runtime::{MobBeforeActivation, MobLifecycleObservation, MobReadHandle};
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};
+
+// The sealed arguments of the member rewind fork seam of `MobSessionService`.
+// A blank line keeps this export apart from the rotation exports above (a
+// formatter sorts a `use` only within its group); it shares its group with
+// the feature-gated exports below.
+pub use runtime::{MemberRewindFork, MemberRewindLineageWitness};
 #[cfg(all(any(test, feature = "test-support"), feature = "runtime-adapter"))]
 #[doc(hidden)]
 pub use runtime::{

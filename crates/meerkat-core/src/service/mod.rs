@@ -704,6 +704,46 @@ impl SessionError {
         )
     }
 
+    /// Structured-data `kind` of [`Self::member_rewind_source_audit_incomplete`].
+    pub const MEMBER_REWIND_SOURCE_AUDIT_INCOMPLETE_KIND: &'static str =
+        "member_rewind_source_audit_incomplete";
+
+    /// A member rewind fork refused before anything was committed: its
+    /// source is an archived session of the member's rewind lineage whose
+    /// committed transcript rewrites are not all audited
+    /// (`missing_audit_receipts` of them have no audit receipt). A member
+    /// rewind reads an archived session without writing to it, so the
+    /// missing receipts are not appended, and nothing else repairs an
+    /// archived session's audit: this source is refused for good. The data
+    /// names the session the caller asked for and the count, nothing else.
+    pub fn member_rewind_source_audit_incomplete(
+        source_session_id: &SessionId,
+        missing_audit_receipts: usize,
+    ) -> Self {
+        Self::FailedWithData {
+            message: format!(
+                "archived session {source_session_id} has {missing_audit_receipts} transcript \
+                 rewrite commit(s) without an audit receipt; a member rewind fork reads an \
+                 archived session without repairing its audit log"
+            ),
+            data: serde_json::json!({
+                "kind": Self::MEMBER_REWIND_SOURCE_AUDIT_INCOMPLETE_KIND,
+                "source_session_id": source_session_id.to_string(),
+                "missing_audit_receipts": missing_audit_receipts,
+            }),
+        }
+    }
+
+    /// Whether this error is a [`Self::member_rewind_source_audit_incomplete`].
+    pub fn is_member_rewind_source_audit_incomplete(&self) -> bool {
+        matches!(
+            self.primary_error(),
+            Self::FailedWithData { data, .. }
+                if data.get("kind").and_then(serde_json::Value::as_str)
+                    == Some(Self::MEMBER_REWIND_SOURCE_AUDIT_INCOMPLETE_KIND)
+        )
+    }
+
     /// Structured-data `kind` of [`Self::mob_member_session_addressed_by_id`].
     pub const MOB_MEMBER_SESSION_ADDRESSED_BY_ID_KIND: &'static str =
         "mob_member_session_addressed_by_id";
@@ -3552,6 +3592,173 @@ pub struct DurableSessionForkTarget {
     /// runs without activating them, so a fork without an activation
     /// window strips them under the default instead of refusing.
     pub declared_instructions: crate::ForkInstructionPolicy,
+}
+
+/// How a member rewind fork reads its source session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberRewindSource {
+    /// The member's current session. An archived session is refused, as
+    /// every durable fork refuses one.
+    Current,
+    /// An earlier session of the member's rewind lineage, which its mob
+    /// archived when the member moved on. The mob proves the lineage before
+    /// it asks; the session owner checks that the session is bound to the
+    /// member the request names, reads it without writing to it, and takes
+    /// an archived session.
+    ArchivedLineage,
+}
+
+/// One member rewind fork: a durable fork of a mob member's own session at
+/// `message_count`, into a child session id its owner reserved first, born
+/// bound to the same member.
+///
+/// The fork inherits: its instruction policy is
+/// [`crate::ForkInstructionPolicy::ReactivateInherited`], the child keeps
+/// the source's effective tool access policy, and the source must be
+/// quiescent. None of the three is the caller's to choose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRewindForkRequest {
+    /// The session to fork.
+    pub source_session_id: SessionId,
+    /// The complete message boundary the child's prefix ends at.
+    pub message_count: usize,
+    /// The child session id, reserved by the caller before the fork.
+    pub planned_child_session_id: SessionId,
+    /// The member the source is bound to and the child is born bound to.
+    pub member_binding: crate::MobMemberBinding,
+    /// How the source is read.
+    pub source: MemberRewindSource,
+}
+
+/// What a member rewind fork child must show: the prefix it was cut at and
+/// the execution references it inherits. References only: no transcript
+/// text, no blob content and no credential material.
+///
+/// `prefix_digest` is taken over the prefix as the child commits it, after
+/// the fork's blob preflight has normalized its images, so it equals the
+/// committed child's [`crate::Session::transcript_prefix_digest`] at
+/// `prefix_message_count`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRewindForkEvidence {
+    /// Number of source messages the child's prefix holds.
+    pub prefix_message_count: usize,
+    /// Content digest of that prefix, normalized as the child commits it.
+    pub prefix_digest: String,
+    /// The effective tool access policy the child inherits.
+    pub tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
+    /// The auth binding reference the child inherits.
+    pub auth_binding: Option<crate::AuthBindingRef>,
+    /// The realm the child inherits.
+    pub realm_id: Option<crate::RealmId>,
+}
+
+/// What a planned member rewind fork child shows, read from its committed
+/// session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRewindChildObservation {
+    /// The session that was observed. A verification of the observation
+    /// proves something about this session and about no other.
+    pub session_id: SessionId,
+    /// The child's own evidence.
+    pub evidence: MemberRewindForkEvidence,
+    /// The member the child is bound to, if any.
+    pub member_binding: Option<crate::MobMemberBinding>,
+    /// Whether the child is archived.
+    pub archived: bool,
+}
+
+/// One field of a member rewind fork child's evidence, in the order a
+/// verification compares them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MemberRewindEvidenceField {
+    PrefixMessageCount,
+    PrefixDigest,
+    ToolAccessPolicy,
+    AuthBinding,
+    RealmId,
+    MemberBinding,
+}
+
+impl MemberRewindEvidenceField {
+    /// Stable name of the field, for logs and typed causes.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PrefixMessageCount => "prefix_message_count",
+            Self::PrefixDigest => "prefix_digest",
+            Self::ToolAccessPolicy => "tool_access_policy",
+            Self::AuthBinding => "auth_binding",
+            Self::RealmId => "realm_id",
+            Self::MemberBinding => "member_binding",
+        }
+    }
+}
+
+impl std::fmt::Display for MemberRewindEvidenceField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A planned member rewind fork child that is not the child its record
+/// describes: the first evidence field that differs. It names the field
+/// only, never either value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the planned member rewind child differs from its record in {field}")]
+pub struct MemberRewindChildConflict {
+    /// The first field that differs.
+    pub field: MemberRewindEvidenceField,
+}
+
+impl MemberRewindForkEvidence {
+    /// Prove that an observed child is the child this evidence describes,
+    /// bound to `member`.
+    ///
+    /// Every field is compared, the prefix digest and the member binding
+    /// included, in the order of [`MemberRewindEvidenceField`]; the first
+    /// that differs is named. Whether the child is archived is not part of
+    /// the evidence: the caller decides what an archived child means.
+    pub fn verify_child(
+        &self,
+        member: &crate::MobMemberBinding,
+        observed: &MemberRewindChildObservation,
+    ) -> Result<(), MemberRewindChildConflict> {
+        let conflict = |field| Err(MemberRewindChildConflict { field });
+        let child = &observed.evidence;
+        if child.prefix_message_count != self.prefix_message_count {
+            return conflict(MemberRewindEvidenceField::PrefixMessageCount);
+        }
+        if child.prefix_digest != self.prefix_digest {
+            return conflict(MemberRewindEvidenceField::PrefixDigest);
+        }
+        if child.tool_access_policy != self.tool_access_policy {
+            return conflict(MemberRewindEvidenceField::ToolAccessPolicy);
+        }
+        if child.auth_binding != self.auth_binding {
+            return conflict(MemberRewindEvidenceField::AuthBinding);
+        }
+        if child.realm_id != self.realm_id {
+            return conflict(MemberRewindEvidenceField::RealmId);
+        }
+        if observed.member_binding.as_ref() != Some(member) {
+            return conflict(MemberRewindEvidenceField::MemberBinding);
+        }
+        Ok(())
+    }
+}
+
+/// What source resolution reads of one session of a member's rewind
+/// lineage: its length, and the digest of its first messages when it holds
+/// that many.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRewindLineageRead {
+    /// Number of messages the session holds.
+    pub message_count: usize,
+    /// Content digest of the session's first `prefix_message_count`
+    /// messages as the read asked for them; `None` when the session holds
+    /// fewer.
+    pub prefix_digest: Option<String>,
 }
 
 /// Outcome of a durable fork that first waited, bounded, for the source

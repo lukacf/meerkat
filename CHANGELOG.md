@@ -692,6 +692,29 @@ them.
   it drives by the same rule. `MobLifecycleObservation` is non-exhaustive,
   so code that reads it compiles unchanged.
 
+- `meerkat-core`, `meerkat-mob`: the session-service seam of a same-identity
+  member rewind (a mob member continuing on a durable fork of its own
+  session). No surface calls it yet. `meerkat_core::service` gains
+  `MemberRewindForkRequest`, `MemberRewindSource`, `MemberRewindForkEvidence`
+  (with `verify_child`), `MemberRewindChildObservation`,
+  `MemberRewindEvidenceField`, `MemberRewindChildConflict` and
+  `MemberRewindLineageRead`. `MobSessionService` gains four provided methods,
+  `preflight_member_rewind_fork`, `fork_member_rewind_child`,
+  `observe_member_rewind_child` and `read_member_rewind_lineage_session`;
+  their defaults refuse as a service without durable transcript fork
+  authority does, so an implementation that wraps a durable service must
+  forward them before a member rewind can run through it. The two fork
+  methods take a `meerkat_mob::MemberRewindFork` and the lineage read takes
+  a `meerkat_mob::MemberRewindLineageWitness`; only the mob runtime can
+  build either, so a caller outside `meerkat-mob` cannot ask a
+  `MobSessionService` for a member rewind fork, and an implementation reads
+  what is asked from `MemberRewindFork::request`. `SessionError` gains the
+  typed cause `member_rewind_source_audit_incomplete` (with
+  `MEMBER_REWIND_SOURCE_AUDIT_INCOMPLETE_KIND` and
+  `is_member_rewind_source_audit_incomplete`): an archived source whose
+  transcript rewrites are not all audited is refused, and its audit log is
+  not repaired.
+
 - `meerkat-core`, `meerkat-llm-core`: the vocabulary of a provider-neutral
   `reasoning_effort` option. The entries below are built from these types:
   the resolver, the route every client reports, the typed refusal and the

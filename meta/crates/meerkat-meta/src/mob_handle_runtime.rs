@@ -5617,6 +5617,42 @@ macro_rules! delegate_mob_session_service {
             ) -> meerkat_core::fork_notice::ForkSeedSourceTools {
                 self.inner.fork_source_tools(session_id).await
             }
+            // The member rewind fork seam (four methods). The trait defaults
+            // refuse as a service without durable fork authority does:
+            // unforwarded, every member rewind through this decorator is
+            // refused. Forwarded as they are: the child is the same member,
+            // so no other member's place is claimed and no runtime-plane
+            // identity is taken.
+            async fn preflight_member_rewind_fork(
+                &self,
+                fork: &meerkat_mob::MemberRewindFork,
+            ) -> Result<meerkat_core::service::MemberRewindForkEvidence, SessionError> {
+                self.inner.preflight_member_rewind_fork(fork).await
+            }
+            async fn fork_member_rewind_child(
+                &self,
+                fork: &meerkat_mob::MemberRewindFork,
+            ) -> Result<meerkat_core::service::MemberRewindChildObservation, SessionError> {
+                self.inner.fork_member_rewind_child(fork).await
+            }
+            async fn observe_member_rewind_child(
+                &self,
+                planned_child_session_id: &meerkat_core::types::SessionId,
+            ) -> Result<Option<meerkat_core::service::MemberRewindChildObservation>, SessionError>
+            {
+                self.inner
+                    .observe_member_rewind_child(planned_child_session_id)
+                    .await
+            }
+            async fn read_member_rewind_lineage_session(
+                &self,
+                witness: meerkat_mob::MemberRewindLineageWitness,
+                prefix_message_count: usize,
+            ) -> Result<meerkat_core::service::MemberRewindLineageRead, SessionError> {
+                self.inner
+                    .read_member_rewind_lineage_session(witness, prefix_message_count)
+                    .await
+            }
             async fn authorize_revivable_retired_session(
                 &self,
                 session_id: &meerkat_core::types::SessionId,
@@ -7047,6 +7083,37 @@ impl MobSessionService for AfterCreateMobSessionService {
         session_id: &meerkat_core::types::SessionId,
     ) -> meerkat_core::fork_notice::ForkSeedSourceTools {
         self.inner.fork_source_tools(session_id).await
+    }
+    // Forwarded, as in `delegate_mob_session_service!`: the four methods of
+    // the member rewind fork seam, whose trait defaults refuse.
+    async fn preflight_member_rewind_fork(
+        &self,
+        fork: &meerkat_mob::MemberRewindFork,
+    ) -> Result<meerkat_core::service::MemberRewindForkEvidence, SessionError> {
+        self.inner.preflight_member_rewind_fork(fork).await
+    }
+    async fn fork_member_rewind_child(
+        &self,
+        fork: &meerkat_mob::MemberRewindFork,
+    ) -> Result<meerkat_core::service::MemberRewindChildObservation, SessionError> {
+        self.inner.fork_member_rewind_child(fork).await
+    }
+    async fn observe_member_rewind_child(
+        &self,
+        planned_child_session_id: &meerkat_core::types::SessionId,
+    ) -> Result<Option<meerkat_core::service::MemberRewindChildObservation>, SessionError> {
+        self.inner
+            .observe_member_rewind_child(planned_child_session_id)
+            .await
+    }
+    async fn read_member_rewind_lineage_session(
+        &self,
+        witness: meerkat_mob::MemberRewindLineageWitness,
+        prefix_message_count: usize,
+    ) -> Result<meerkat_core::service::MemberRewindLineageRead, SessionError> {
+        self.inner
+            .read_member_rewind_lineage_session(witness, prefix_message_count)
+            .await
     }
     async fn authorize_revivable_retired_session(
         &self,

@@ -1,0 +1,192 @@
+/* Question set card: a set of multiple-choice questions an agent asked a
+   person. It is drawn in the approval card's frame (.cc-approval: the 1 px
+   rule, the header, who asked, the status row), so the two read as one
+   system; this file adds the questions, their choices, the free-text field
+   and the read-only summary. Tokens only, so every variant applies. */
+
+/* What to do, under who asked. */
+.cc-question-set__hint {
+  margin: 10px 0 0;
+  font-size: var(--_cc-text-xs);
+  line-height: 1.45;
+  color: var(--_cc-foreground-muted);
+}
+.cc-question-set .cc-approval__status { flex: none; }
+.cc-question-set__questions {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+/* One question: the prompt as the group's legend, its choices below. */
+.cc-question {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.cc-question__prompt {
+  padding: 0;
+  margin-bottom: 6px;
+  font-size: var(--_cc-text-sm);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--_cc-foreground);
+  overflow-wrap: anywhere;
+}
+.cc-question__choices {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-canvas);
+}
+/* A choice is its whole row: the native radio, the label, and the
+   recommendation as a chip. The row wraps in a narrow card. */
+.cc-question__choice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-height: var(--_cc-panel-control-h);
+  padding: 6px 10px;
+  line-height: 1.4;
+  color: var(--_cc-foreground);
+  cursor: pointer;
+}
+.cc-question__choice + .cc-question__choice { border-top: 1px solid var(--_cc-border-soft); }
+.cc-question__choice:hover { background: var(--_cc-surface-hover); }
+.cc-question__choice:has(input:checked) { background: var(--_cc-member-accent-soft); }
+.cc-question__choice:has(input:focus-visible) {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: -2px;
+}
+.cc-question__choice input {
+  flex: none;
+  margin: 0;
+  accent-color: var(--_cc-member-accent);
+}
+.cc-question__label { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.cc-question__recommended { flex: none; }
+/* A set that cannot be answered (read-only, sent, timed out) keeps its
+   questions readable and quiet. */
+.cc-question:disabled .cc-question__choice {
+  color: var(--_cc-foreground-muted);
+  cursor: default;
+}
+.cc-question:disabled .cc-question__choice:hover { background: none; }
+
+/* The person's own answer: shown once "Something else" is chosen. */
+.cc-question__free {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.cc-question__free-text {
+  width: 100%;
+  min-height: 52px;
+  font-size: var(--_cc-text-sm);
+}
+.cc-question__free-text[aria-invalid="true"] { border-color: var(--_cc-negative); }
+/* The byte count, near the limit; past it, in the negative ink. */
+.cc-question__count {
+  align-self: flex-end;
+  font-size: var(--_cc-text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--_cc-foreground-meta);
+}
+.cc-question__count[data-tone="crit"] { color: var(--_cc-negative-ink); font-weight: 500; }
+/* Clears the question's answer: a plain text button, always visible while
+   the question has one. */
+.cc-question__clear {
+  margin-top: 4px;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--_cc-foreground-muted);
+  font: inherit;
+  font-size: var(--_cc-text-xs);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--_cc-border-strong);
+  text-underline-offset: 2px;
+}
+.cc-question__clear:hover { color: var(--_cc-foreground); text-decoration-color: currentColor; }
+.cc-question__clear:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}
+
+/* What was sent: each prompt with its answer, read-only. */
+.cc-question-set__summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  margin: 12px 0 0;
+}
+.cc-question-set__asked {
+  font-size: var(--_cc-text-xs);
+  color: var(--_cc-foreground-muted);
+  overflow-wrap: anywhere;
+}
+.cc-question-set__sent {
+  margin: 0 0 8px;
+  color: var(--_cc-foreground);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cc-question-set__sent.is-empty { color: var(--_cc-foreground-meta); font-style: italic; }
+
+/* The gateway's own sentence of a refusal, behind its disclosure. */
+.cc-question-set__refusal { margin-top: 4px; }
+.cc-question-set__refusal summary {
+  width: fit-content;
+  font-size: var(--_cc-text-xs);
+  color: var(--_cc-foreground-muted);
+  cursor: pointer;
+}
+.cc-question-set__refusal summary:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}
+.cc-question-set__gateway {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--_cc-text-xs);
+  line-height: 1.4;
+  color: var(--_cc-foreground-meta);
+  overflow-wrap: anywhere;
+}
+
+/* What the card does not show of a set larger than the reader's limits. */
+.cc-question__more {
+  margin: 4px 0 0;
+  font-size: var(--_cc-text-xs);
+  line-height: 1.4;
+  color: var(--_cc-foreground-muted);
+}
+/* The card's sentence takes the focus after Send and Dismiss, which disable
+   themselves; the line that replaces a card takes it when that card held it. */
+.cc-question-set__sentence:focus,
+.cc-question-set__line:focus { outline: none; }
+.cc-question-set__sentence:focus-visible,
+.cc-question-set__line:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}
+
+/* In the inbox the question sets head the Pending tab, above the approvals.
+   The list itself takes the focus when a card that held it left and no line
+   is shown for it. */
+.gating-inbox__questions .cc-question-set { margin: 0; }
+.gating-inbox__questions:focus { outline: none; }
+.gating-inbox__questions:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}

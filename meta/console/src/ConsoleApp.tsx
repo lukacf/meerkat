@@ -281,6 +281,8 @@ import { ConsoleNavigationProvider, PanelPreferencesProvider } from "@console-co
 import { NavigationFocusProvider, buildConsoleNavigation, useNavigationFocusSource, type ConsoleNavigationHost } from "./lib/console-navigation";
 import { QuoteContextChips } from "../../packages/console-components/src/conversation/context-chips";
 import { ApprovalViewerProvider, HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
+import { QuestionSetsProvider } from "../../packages/console-components/src/conversation/question-set-card";
+import { useQuestionSets } from "./lib/use-question-sets";
 import { editConsoleContextQuote } from "../../packages/console-core/src/context-edit";
 import type { ConsoleQuoteSelection } from "../../packages/console-components/src/conversation/context-selection";
 import { consoleSendStorageKey, loadConsoleSendAttempts, saveConsoleSendAttempts, readLegacyConsoleQueue, readPredecessorConsoleQueue, consoleLegacyQueueImported, consoleComposerTabId, loadConsoleComposerDraft, saveConsoleComposerDraft, legacyConsoleQueueKey, purgeConsoleSendScope, removeOlderConsoleQueues } from "./lib/send-attempt-storage";
@@ -3368,6 +3370,21 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // Scope changes hide the previous principal's snapshot before effects run.
   const activeApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope
     ? approvalSnapshot.snapshot : undefined;
+  // The question sets agents asked (`meta/gating/questions`), read and
+  // answered like the approvals: for this scope, as the signed-in person.
+  const questionSets = useQuestionSets({
+    scopeKey: approvalScope, owner: consoleController,
+    enabled: Boolean(experience) && hasMobControlSurface && approvalsDecidable !== undefined,
+    readOnly: consoleReadOnly || !approvalsDecidable,
+    readOnlyReason: !consoleReadOnly && signInToDecide ? "sign_in" : undefined,
+    load: async (signal) => (await consoleController.commands.execute({
+      command: CONSOLE_COMMAND_NAMES.listQuestionSets, target: controlWorkbenchTarget("gating"), signal,
+    })).result,
+    // No approver in the request: the gateway decides as the signed-in person.
+    decide: async (params, signal) => (await consoleController.commands.execute({
+      command: CONSOLE_COMMAND_NAMES.decideGating, target: controlWorkbenchTarget("gating"), signal, params: { ...params },
+    })).result,
+  });
   // Host-provided attention items ("Needs you"): read from the configured
   // same-origin sources every 30 s while the page is visible. Each source
   // fails alone; approvals never depend on them.
@@ -6668,6 +6685,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         <GatingInboxPanel
           pending={activeApprovals?.requests.map(request => request.raw) || []}
           resource={activeApprovals}
+          questions={questionSets}
           selectedPendingId={selectedApprovalId}
           onRefresh={() => {
             void approvalResourceRef.current?.refresh();
@@ -6790,6 +6808,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         <GatingInboxPanel
           pending={activeApprovals?.requests.map(request => request.raw) || []}
           resource={activeApprovals}
+          questions={questionSets}
           selectedPendingId={selectedApprovalId}
           onRefresh={() => {
             void approvalResourceRef.current?.refresh();
@@ -6996,6 +7015,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     <PanelPreferencesProvider scope={sidebarPreferenceScope}>
     <HostDecideSourcesProvider value={hostAttentionSources}>
     <ApprovalViewerProvider value={approvalViewer}>
+    <QuestionSetsProvider value={questionSets}>
     <div
       className={`cc-theme-scope meta-shell${display.settings.motion === "reduced" ? " reduced-motion" : ""}`}
       data-cc-theme={theme}
@@ -7068,6 +7088,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onOpenApproval={openApproval}
           hostAttentionCount={hostAttention?.items.length || 0}
           attentionReplyCount={consoleAttention?.items.length || 0}
+          questionSetCount={questionSets?.snapshot.sets.length || 0}
+          questionSetStatus={questionSets?.snapshot.status}
           density={display.settings.density}
           activeControl={sidebarActiveControl}
           openControls={sidebarOpenControls}
@@ -7134,6 +7156,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         ) : null}
       </div>
     </div>
+    </QuestionSetsProvider>
     </ApprovalViewerProvider>
     </HostDecideSourcesProvider>
     </PanelPreferencesProvider>

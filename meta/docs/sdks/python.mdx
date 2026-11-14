@@ -1777,6 +1777,9 @@ Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`re
 | `gating_decide(...)` | `GatingDecisionResult` | Submit a gating decision |
 | `gating_withdraw(pending_id, reason=None)` | `GatingWithdrawResult` | Withdraw a pending request this host minted, with no decision |
 | `gating_audit(limit)` | `list[GatingAuditEntry]` | Retrieve gating audit log |
+| `gating_questions()` | `list[GatingQuestionSet]` | List the open question sets agents asked with `ask_user` |
+| `gating_answer(pending_id, *, approver_id, presented_digest, answers)` | `GatingQuestionSetResult` | Answer an open question set |
+| `gating_dismiss(pending_id, *, approver_id, presented_digest)` | `GatingQuestionSetResult` | Dismiss an open question set: the agent is told no answer is coming |
 | `memory_query(filters)` | `MemoryQueryResult` | Query the assertion ledger by `entity`, `topic`, and `store` filters |
 | `remember_agent_memory(identity, ...)` | `AgentMemoryRecord` | Persist durable memory for an identity |
 | `recall_agent_memory(identity, ...)` | `list[AgentMemoryRecord]` | Recall identity-scoped durable memory |
@@ -1789,6 +1792,43 @@ Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`re
 fields leave them as `None`; an absent or unrecognized outcome must not be treated
 as permission. Escalation returns `pending_approval` with a successor
 `next_pending_id`. The SDK makes no automatic follow-up request.
+
+`gating_questions()` lists the open [question sets](/concepts/gating#question-sets)
+(they are not part of `gating_pending()`). Each `GatingQuestionSet` carries the
+`pending_id` a decision takes, the asking agent as `origin`, an optional
+`title`, its `questions` (`GatingQuestion`: `id`, `prompt`, `choices`,
+`allow_free_text`, `recommended`), `created_at_ms`, `deadline_at_ms` and the
+`subject_digest` a decision sends back as `presented_digest`. Both decisions
+go through `meta/gating/decide`, so the host names `approver_id`:
+
+```python
+from meerkat_meta import GatingQuestionAnswer
+
+for question_set in await handle.gating_questions():
+    result = await handle.gating_answer(
+        question_set.pending_id,
+        approver_id="operator",
+        presented_digest=question_set.subject_digest,
+        answers=[
+            GatingQuestionAnswer.choice("region", "eu"),
+            GatingQuestionAnswer.free_text("start", "After the 16:00 freeze"),
+        ],
+    )
+    assert result.outcome == "answered"
+```
+
+`answers` takes `GatingQuestionAnswer` values or their wire form
+(`{"question_id": ..., "answer": {...}}`). At least one answer is needed
+(`ValueError` otherwise, before anything is sent); a question left out reaches
+the agent as `unanswered`, and free text is allowed only where the question
+sets `allow_free_text`. `gating_dismiss()` returns the same
+`GatingQuestionSetResult` with `outcome` `dismissed`. The gateway refuses an
+invalid answer set as invalid params (`-32602`). A set that itself refuses
+the decide (it is no longer open, or `presented_digest` is not its digest) is
+refused `-32602` with the typed refusal in the error's data:
+`data.kind = "decision_refused"` and `data.decision_refusal.kind` (`not_open`,
+`subject_changed`, `expired` or `not_eligible`); see
+[Answering a question set](/api/rpc#answering-a-question-set).
 
 Approval records a decision and does not execute the action. These methods expose
 [Meta gating](/concepts/gating); native retained-action consent and model-review

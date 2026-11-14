@@ -137,6 +137,7 @@ export const CONSOLE_COMMAND_NAMES = {
   listGatingPending: "listGatingPending",
   listGatingAudit: "listGatingAudit",
   decideGating: "decideGating",
+  listQuestionSets: "listQuestionSets",
   listDecisions: "listDecisions",
   getDecisionRendering: "getDecisionRendering",
   listConsoleAttention: "listConsoleAttention",
@@ -318,6 +319,12 @@ const CONSOLE_COMMAND_SPECS: Record<ConsoleCommandName, ConsoleCommandSpec> = {
   },
   [CONSOLE_COMMAND_NAMES.decideGating]: {
     method: CONSOLE_RPC_METHODS.gatingDecide,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>(["meta/gating"]),
+  },
+  // The open question sets agents asked; a set is answered or dismissed
+  // through decideGating.
+  [CONSOLE_COMMAND_NAMES.listQuestionSets]: {
+    method: CONSOLE_RPC_METHODS.gatingQuestions,
     targetKinds: new Set<MetaWorkbenchTarget["kind"]>(["meta/gating"]),
   },
   [CONSOLE_COMMAND_NAMES.listDecisions]: {

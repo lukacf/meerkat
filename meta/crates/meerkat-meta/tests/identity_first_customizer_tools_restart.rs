@@ -3743,3 +3743,609 @@ async fn a_refused_build_preparation_on_the_doors_own_wake_is_retried_once() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// A created agent's reach to a mob it created, across an update of itself
+// ---------------------------------------------------------------------------
+
+/// The agent the reach row creates at run time, of the profile that carries
+/// the mob tools.
+const KEEPER: &str = "keeper";
+/// The member the keeper spawns into the mob it creates.
+const KEEPER_WORKER: &str = "kept-worker";
+/// The host turn marker of the reach row: a request whose transcript holds
+/// it is the keeper's.
+const REACH_TURN: &str = "REACH-TURN";
+
+/// The scripted model of the reach row: on the keeper's requests it makes,
+/// once each and in order, the queued calls whose id its transcript does
+/// not hold yet, and it records every tool result a transcript holds.
+#[derive(Clone, Default)]
+struct ReachModel {
+    script: Arc<std::sync::Mutex<Vec<(String, &'static str, serde_json::Value)>>>,
+    tool_results: Arc<std::sync::Mutex<BTreeMap<String, (bool, String)>>>,
+}
+
+impl ReachModel {
+    fn queue(&self, id: &str, tool: &'static str, args: serde_json::Value) {
+        self.script
+            .lock()
+            .unwrap()
+            .push((id.to_string(), tool, args));
+    }
+
+    /// The result the keeper's model received for the call `id`: whether it
+    /// is an error, and its text.
+    fn result(&self, id: &str) -> (bool, String) {
+        self.tool_results
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| panic!("the keeper's call {id} was answered"))
+    }
+}
+
+impl meerkat_client::LlmClient for ReachModel {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+    fn stream<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+        let transcript = serde_json::to_string(&request.messages).unwrap_or_default();
+        {
+            let mut recorded = self.tool_results.lock().unwrap();
+            for message in &request.messages {
+                if let meerkat_core::Message::ToolResults { results, .. } = message {
+                    for result in results {
+                        recorded.insert(
+                            result.tool_use_id.clone(),
+                            (result.is_error, result.text_content()),
+                        );
+                    }
+                }
+            }
+        }
+        let call = if transcript.contains(REACH_TURN) {
+            self.script
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _, _)| !transcript.contains(id.as_str()))
+                .cloned()
+        } else {
+            None
+        };
+        let [usage, done] = llm_usage::usage_then_done(
+            request,
+            meerkat::Provider::OpenAI,
+            if call.is_some() {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            },
+        );
+        Box::pin(async_stream::stream! {
+            match call {
+                Some((id, name, args)) => {
+                    yield Ok(LlmEvent::ToolCallComplete {
+                        id,
+                        name: name.to_string(),
+                        args,
+                        meta: None,
+                    });
+                }
+                None => {
+                    yield Ok(LlmEvent::TextDelta { delta: "ok".to_string(), meta: None });
+                }
+            }
+            yield Ok(usage);
+            yield Ok(done);
+        })
+    }
+    fn provider(&self) -> meerkat::Provider {
+        meerkat::Provider::OpenAI
+    }
+    fn health_check<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), LlmError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// What the keeper's own mob tools answer about the mob it created, after
+/// one turn of its own that asks them.
+struct Reach {
+    /// `mob_list`.
+    list: (bool, String),
+    /// `mob_list_members` of the mob it created.
+    members: (bool, String),
+    /// The keeper's seat as Core reads it by the keeper's session: its
+    /// identity and generation.
+    seat: Option<(meerkat_mob::AgentIdentity, meerkat_mob::Generation)>,
+}
+
+impl Reach {
+    /// Whether the keeper lists the mob `child` and reads its member.
+    fn holds(&self, child: &str) -> bool {
+        !self.list.0
+            && self.list.1.contains(child)
+            && !self.members.0
+            && self.members.1.contains(KEEPER_WORKER)
+    }
+}
+
+/// One turn of the keeper that makes the queued calls, in order.
+async fn keeper_turn(runtime: &meerkat_meta::UnifiedRuntime, stage: &str) {
+    runtime
+        .identity_runtime()
+        .expect("identity runtime")
+        .send_awaiting_commit(
+            &id(KEEPER),
+            &meerkat_core::ContentInput::Text(format!("{REACH_TURN} {stage}")),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("the keeper's turn ({stage}) commits: {error}"));
+}
+
+/// Ask the keeper, in a turn of its own, to list its mobs and the members
+/// of `child`, and read its seat.
+async fn keeper_reach(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    model: &ReachModel,
+    stage: &str,
+    child: &str,
+) -> Reach {
+    let (list, members) = (
+        format!("reach-{stage}-list"),
+        format!("reach-{stage}-members"),
+    );
+    model.queue(&list, "mob_list", serde_json::json!({}));
+    model.queue(
+        &members,
+        "mob_list_members",
+        serde_json::json!({ "mob_id": child }),
+    );
+    keeper_turn(runtime, stage).await;
+    let session = runtime
+        .identity_runtime()
+        .expect("identity runtime")
+        .status(&id(KEEPER))
+        .await
+        .expect("the keeper's status")
+        .session_id
+        .expect("the keeper holds a session");
+    let reach = Reach {
+        list: model.result(&list),
+        members: model.result(&members),
+        seat: runtime.mob_handle().member_of_session(&session).await,
+    };
+    println!(
+        "LU-REACH [{stage}] mob_list: is_error={} {}",
+        reach.list.0, reach.list.1
+    );
+    println!(
+        "LU-REACH [{stage}] mob_list_members: is_error={} {}",
+        reach.members.0, reach.members.1
+    );
+    println!(
+        "LU-REACH [{stage}] seat(identity, generation)={:?}",
+        reach.seat
+    );
+    reach
+}
+
+/// Update the keeper's record from `before` to `after` through Core's
+/// store-owned update, the call `meta/identity/update` and the agent tool
+/// `identity_update` end in.
+async fn update_keeper(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    operation: &str,
+    before: &meerkat_mob::CreatedIdentitySpec,
+    after: &meerkat_mob::CreatedIdentitySpec,
+) {
+    let updated = runtime
+        .mob_handle()
+        .update_store_owned_identity(
+            meerkat_mob::StoreOwnedIdentityUpdate::new(
+                meerkat_mob::IdentityOperation::new(
+                    operation,
+                    meerkat_core::approval::decision::Sha256Digest::of(operation.as_bytes())
+                        .as_str(),
+                ),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                after.clone(),
+                before.spec_digest().expect("the record's digest"),
+            ),
+            meerkat_mob::IdentityChangeConsentInput::Policy(
+                meerkat_mob::IdentityPolicyOutcome::Allow,
+            ),
+        )
+        .await;
+    println!(
+        "LU-REACH update {operation}: {:?}",
+        updated.as_ref().map(|updated| &updated.applied)
+    );
+    assert!(
+        matches!(
+            updated.as_ref().map(|updated| &updated.change),
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "Core commits the update {operation}: {updated:?}"
+    );
+}
+
+/// A created agent that created a mob with its own tools still lists it,
+/// reads its members and can destroy it after a label-only update of
+/// itself. `keeper` is created at run time of the profile that carries the
+/// mob tools; in a turn of its own it creates a mob and spawns a member
+/// into it. A display-name-only update of the keeper is the control: its
+/// tools answer as before. A label-only update then changes the keeper's
+/// record, and the keeper's next turn lists the mob, reads its member and
+/// destroys it: the update seated no successor of the keeper, so Core still
+/// reads the keeper's session as the member that created the mob.
+///
+/// RED before a label change kept the seat: the label update seated a
+/// same-session successor of the keeper (one generation up), and the mob's
+/// creator check compares the member's generation exactly, so `mob_list`
+/// answered no mob and `mob_list_members` and `mob_destroy` were refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_created_agent_still_manages_the_mob_it_created_after_a_label_only_update() {
+    const MOB_ID: &str = "customizer-tools-restart-label-reach";
+    let child = format!("{MOB_ID}-child");
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let model = ReachModel::default();
+    let runtime = Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(
+                MobDefinition::from_toml(&AGENT_SPAWN_MOB_TOML.replace("{MOB_ID}", MOB_ID))
+                    .expect("definition"),
+            )
+            .persistent_state(&state)
+            .continuity_from_state_dir(&state)
+            .await
+            .expect("open the state-dir identity substrate")
+            .roster_provider(Arc::new(ListedRoster(&[CREATOR])))
+            .identity_runtime_instance_id(MOB_ID)
+            .comms(true)
+            .default_llm_client(Arc::new(model.clone()))
+            .build(),
+    )
+    .await
+    .expect("build the reach runtime");
+
+    let created = meerkat_mob::CreatedIdentitySpec::new(KEEPER, "personal")
+        .with_display_name("Keeper")
+        .with_labels(BTreeMap::from([("team".to_string(), "alpha".to_string())]));
+    let committed = runtime
+        .mob_handle()
+        .create_store_owned_identities(
+            meerkat_mob::StoreOwnedIdentityCreate::new(
+                meerkat_mob::IdentityOperation::new(
+                    "create-keeper",
+                    meerkat_core::approval::decision::Sha256Digest::of(b"create-keeper").as_str(),
+                ),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                vec![meerkat_mob::CreatedIdentityRequest::new(created.clone())],
+            ),
+            meerkat_mob::IdentityChangeConsentInput::Policy(
+                meerkat_mob::IdentityPolicyOutcome::Allow,
+            ),
+        )
+        .await
+        .map(|created| created.change);
+    assert!(
+        matches!(
+            committed,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "Core creates the keeper: {committed:?}"
+    );
+    runtime
+        .identity_first_context()
+        .expect("identity-first context installed")
+        .refresh_desired_topology()
+        .await
+        .expect("the roster pass registers the keeper");
+
+    // The keeper creates a mob and spawns a member into it, by its own tools.
+    model.queue(
+        "reach-create",
+        "mob_create",
+        serde_json::json!({ "definition": {
+            "id": child,
+            "profiles": { "worker": {
+                "model": "gpt-5.5",
+                "runtime_mode": "turn_driven",
+                "tools": { "comms": true }
+            } }
+        } }),
+    );
+    model.queue(
+        "reach-spawn",
+        "mob_spawn_member",
+        serde_json::json!({ "mob_id": child, "profile": "worker", "member_id": KEEPER_WORKER }),
+    );
+    let at_first = keeper_reach(&runtime, &model, "0-created", &child).await;
+    for call in ["reach-create", "reach-spawn"] {
+        let (failed, text) = model.result(call);
+        assert!(!failed, "the keeper's {call} is answered: {text}");
+    }
+    assert!(
+        at_first.holds(&child),
+        "the keeper lists the mob it created and reads its member: mob_list {:?}, \
+         mob_list_members {:?}",
+        at_first.list,
+        at_first.members
+    );
+    assert!(
+        at_first.seat.is_some(),
+        "the keeper is a member by its session"
+    );
+
+    // The control: a display-name-only update.
+    let renamed = created.clone().with_display_name("Keeper of the desk");
+    update_keeper(&runtime, "rename-keeper", &created, &renamed).await;
+    let after_rename = keeper_reach(&runtime, &model, "1-renamed", &child).await;
+    assert!(
+        after_rename.holds(&child),
+        "control: after a display-name-only update the keeper lists its mob and reads its \
+         member: mob_list {:?}, mob_list_members {:?}",
+        after_rename.list,
+        after_rename.members
+    );
+    assert_eq!(
+        after_rename.seat, at_first.seat,
+        "control: a display-name-only update keeps the keeper's seat"
+    );
+
+    // The label-only update.
+    let relabelled = renamed
+        .clone()
+        .with_labels(BTreeMap::from([("team".to_string(), "beta".to_string())]));
+    update_keeper(&runtime, "relabel-keeper", &renamed, &relabelled).await;
+    let labels = runtime
+        .mob_handle()
+        .get_member(&meerkat_mob::AgentIdentity::from(KEEPER))
+        .await
+        .expect("roster read")
+        .expect("the keeper is a member")
+        .labels;
+    assert_eq!(
+        labels.get("team").map(String::as_str),
+        Some("beta"),
+        "the roster reads the keeper's new label at once"
+    );
+    model.queue(
+        "reach-destroy",
+        "mob_destroy",
+        serde_json::json!({ "mob_id": child }),
+    );
+    let after_relabel = keeper_reach(&runtime, &model, "2-relabelled", &child).await;
+    let destroyed = model.result("reach-destroy");
+    println!(
+        "LU-REACH [2-relabelled] mob_destroy: is_error={} {}",
+        destroyed.0, destroyed.1
+    );
+    runtime.shutdown().await;
+    assert!(
+        after_relabel.holds(&child),
+        "after a label-only update the keeper still lists the mob it created and reads its \
+         member: mob_list {:?} (before the update: {:?}), mob_list_members {:?} (before the \
+         update: {:?}), seat {:?} (before the update: {:?})",
+        after_relabel.list,
+        after_rename.list,
+        after_relabel.members,
+        after_rename.members,
+        after_relabel.seat,
+        after_rename.seat
+    );
+    assert!(
+        !destroyed.0,
+        "after a label-only update the keeper can destroy the mob it created: {}",
+        destroyed.1
+    );
+    assert_eq!(
+        after_relabel.seat, after_rename.seat,
+        "a label-only update keeps the keeper's seat: the same member at the same generation"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// What a created agent's next build is composed with after a label update
+// ---------------------------------------------------------------------------
+
+/// A host customizer that records the labels each `customize_build` of the
+/// keeper is handed: the registered row's (`spec.labels`) and the build
+/// draft's (`draft.labels`).
+#[derive(Default)]
+struct LabelRecordingCustomizer {
+    builds: std::sync::Mutex<Vec<(BTreeMap<String, String>, BTreeMap<String, String>)>>,
+}
+
+impl LabelRecordingCustomizer {
+    fn builds(&self) -> Vec<(BTreeMap<String, String>, BTreeMap<String, String>)> {
+        self.builds.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl AgentCustomizer for LabelRecordingCustomizer {
+    async fn customize_build(
+        &self,
+        context: &AgentBuildContext,
+        spec: &DurableAgentSpec,
+        draft: &mut AgentBuildDraft,
+    ) -> Result<(), CustomizerError> {
+        if context.identity == id(KEEPER) {
+            self.builds
+                .lock()
+                .unwrap()
+                .push((spec.labels.clone(), draft.labels.clone()));
+        }
+        Ok(())
+    }
+}
+
+/// The next build of a created agent after a label-only update is composed
+/// with its new labels, for a label added and for a label removed, and the
+/// update seats nothing. `keeper` is created at run time and runs a turn,
+/// so it is live and idle. A label-only update that adds a label releases
+/// it; its next turn builds it again, and the host's customizer is handed
+/// the row and the draft with the added label. A label-only update that
+/// removes a label does the same, and that build's row and draft no longer
+/// carry it: a host that composes an agent by its labels takes a label
+/// away with the agent's next build, not at some later seat. Core reads
+/// the keeper's session as the same member at the same generation
+/// throughout.
+///
+/// A guard: it passes before a label change kept the seat too (the update
+/// then seated a successor, whose first build was composed the same way).
+/// It fails if the update leaves an idle live agent running on its old
+/// build.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_created_agents_next_build_after_a_label_only_update_is_composed_with_its_new_labels() {
+    const MOB_ID: &str = "customizer-tools-restart-label-build";
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let model = ReachModel::default();
+    let customizer = Arc::new(LabelRecordingCustomizer::default());
+    let runtime = Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(
+                MobDefinition::from_toml(&AGENT_SPAWN_MOB_TOML.replace("{MOB_ID}", MOB_ID))
+                    .expect("definition"),
+            )
+            .persistent_state(&state)
+            .continuity_from_state_dir(&state)
+            .await
+            .expect("open the state-dir identity substrate")
+            .roster_provider(Arc::new(ListedRoster(&[CREATOR])))
+            .identity_runtime_instance_id(MOB_ID)
+            .agent_customizer(customizer.clone())
+            .comms(true)
+            .default_llm_client(Arc::new(model.clone()))
+            .build(),
+    )
+    .await
+    .expect("build the runtime");
+
+    let labels = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    };
+    let created = meerkat_mob::CreatedIdentitySpec::new(KEEPER, "personal")
+        .with_labels(labels(&[("team", "alpha"), ("tier", "bronze")]));
+    let committed = runtime
+        .mob_handle()
+        .create_store_owned_identities(
+            meerkat_mob::StoreOwnedIdentityCreate::new(
+                meerkat_mob::IdentityOperation::new(
+                    "create-keeper",
+                    meerkat_core::approval::decision::Sha256Digest::of(b"create-keeper").as_str(),
+                ),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                vec![meerkat_mob::CreatedIdentityRequest::new(created.clone())],
+            ),
+            meerkat_mob::IdentityChangeConsentInput::Policy(
+                meerkat_mob::IdentityPolicyOutcome::Allow,
+            ),
+        )
+        .await
+        .map(|created| created.change);
+    assert!(
+        matches!(
+            committed,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "Core creates the keeper: {committed:?}"
+    );
+    runtime
+        .identity_first_context()
+        .expect("identity-first context installed")
+        .refresh_desired_topology()
+        .await
+        .expect("the roster pass registers the keeper");
+    let seat = || async {
+        let session = runtime
+            .identity_runtime()
+            .expect("identity runtime")
+            .status(&id(KEEPER))
+            .await
+            .expect("the keeper's status")
+            .session_id
+            .expect("the keeper holds a session");
+        runtime.mob_handle().member_of_session(&session).await
+    };
+    // Whether `labels` carries every label of `row` that the host gave it.
+    let carries = |labels: &BTreeMap<String, String>, row: &BTreeMap<String, String>| {
+        row.iter()
+            .all(|(key, value)| labels.get(key) == Some(value))
+    };
+
+    keeper_turn(&runtime, "0-first").await;
+    let first = customizer.builds();
+    let built = first.last().expect("the first turn builds the keeper");
+    assert!(
+        carries(&built.0, &created.labels) && carries(&built.1, &created.labels),
+        "the first build is composed with the labels of the create: {first:?}"
+    );
+    let seated = seat().await;
+    assert!(seated.is_some(), "the keeper is a member by its session");
+
+    // A label is added.
+    let added = created.clone().with_labels(labels(&[
+        ("team", "alpha"),
+        ("tier", "bronze"),
+        ("zone", "north"),
+    ]));
+    update_keeper(&runtime, "add-zone", &created, &added).await;
+    keeper_turn(&runtime, "1-added").await;
+    let builds = customizer.builds();
+    assert!(
+        builds.len() > first.len(),
+        "the keeper's next turn after the update builds it again: {builds:?}"
+    );
+    let built = builds.last().expect("a build");
+    assert!(
+        carries(&built.0, &added.labels) && carries(&built.1, &added.labels),
+        "the next build is composed with the added label, in the row and in the draft: {built:?}"
+    );
+    let after_added = builds.len();
+    assert_eq!(seat().await, seated, "the update seated nothing");
+
+    // A label is removed.
+    let removed = added
+        .clone()
+        .with_labels(labels(&[("team", "alpha"), ("zone", "north")]));
+    update_keeper(&runtime, "remove-tier", &added, &removed).await;
+    keeper_turn(&runtime, "2-removed").await;
+    let builds = customizer.builds();
+    runtime.shutdown().await;
+    assert!(
+        builds.len() > after_added,
+        "the keeper's next turn after the update builds it again: {builds:?}"
+    );
+    let built = builds.last().expect("a build");
+    assert!(
+        carries(&built.0, &removed.labels) && carries(&built.1, &removed.labels),
+        "the next build keeps the labels the row keeps: {built:?}"
+    );
+    assert!(
+        !built.0.contains_key("tier") && !built.1.contains_key("tier"),
+        "the removed label is gone from the row and from the draft the host's customizer is \
+         handed at the next build: {built:?}"
+    );
+}

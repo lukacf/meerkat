@@ -1067,6 +1067,53 @@ mod tests {
     }
 
     #[test]
+    fn test_pack_exclusion_guard_key_this_pack_is_not_signed_with_is_an_ordinary_file() {
+        let temp = exclusion_fixture();
+        let mob = temp.path().join("mob");
+        write_throwaway_key(&mob.join("key.hex"));
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        write_throwaway_key(&outside.join("other-key.hex"));
+        let mut expected = EXCLUSION_SOURCES.to_vec();
+        expected.push("key.hex");
+
+        // An unsigned pack is told of no key.
+        let unsigned: Vec<String> =
+            extract_targz_safe(&pack_directory(&mob, None).unwrap().archive_bytes)
+                .unwrap()
+                .into_keys()
+                .collect();
+        assert_eq!(unsigned, sorted_names(&expected));
+
+        // A pack signed with another key leaves out that key alone.
+        let files = signed_pack_files(
+            &mob,
+            &outside.join("other-key.hex"),
+            &outside.join("out.mobpack"),
+        );
+        expected.push("signature.toml");
+        assert_eq!(files, sorted_names(&expected));
+    }
+
+    #[test]
+    fn test_pack_exclusion_guard_earlier_pack_under_another_name_is_an_ordinary_file() {
+        let temp = exclusion_fixture();
+        let mob = temp.path().join("mob");
+        std::fs::write(mob.join("earlier.mobpack"), b"earlier output").unwrap();
+
+        // Only the output this pack is written to is left out.
+        let packed =
+            pack_directory_with_excludes(&mob, None, &[mob.join("out.mobpack").as_path()]).unwrap();
+        let files: Vec<String> = extract_targz_safe(&packed.archive_bytes)
+            .unwrap()
+            .into_keys()
+            .collect();
+        let mut expected = EXCLUSION_SOURCES.to_vec();
+        expected.push("earlier.mobpack");
+        assert_eq!(files, sorted_names(&expected));
+    }
+
+    #[test]
     fn test_pack_exclusion_is_by_file_not_by_name() {
         let temp = exclusion_fixture_with_key_and_output();
         let mob = temp.path().join("mob");

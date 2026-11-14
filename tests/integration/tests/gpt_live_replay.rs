@@ -1791,7 +1791,7 @@ async fn s104_replay_opens_append_nothing_before_the_first_user_turn()
 /// S106 replayed, the open rule over two reopen cycles: see
 /// [`assert_open_rule`].
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn s106_replay_reopens_seed_the_retained_summary_and_append_nothing()
+async fn s106_replay_reopens_seed_their_summary_and_append_nothing()
 -> Result<(), Box<dyn std::error::Error>> {
     assert_open_rule(&replay_s106().await?)
 }
@@ -1928,23 +1928,43 @@ async fn s104_replay_commits_the_typed_turn_and_merges_the_job_result_into_the_s
 /// the runtime's prefix.
 const DELEGATION_EXECUTION_CONTEXT_START: &str = "Live delegation execution context:";
 
-/// S106 replayed, what the final channel's model was given (S106 C18): each
-/// planted fact (two spoken on the first channel, one typed while the call
-/// was down) reaches the third channel as typed input, in its startup input
-/// or in an owned thinking append.
+/// S106 replayed, what a reopened channel's model is given at its start:
+/// - the note typed while the call was down rides the next open's startup
+///   input verbatim, as a row of its own (the reopen contract, as in S104);
+/// - the final channel's startup input is the summary the summarizer
+///   produced for that open, and nothing else.
+///
+/// The live scenario's check that every planted fact reaches the final
+/// channel (S106 C18) is not stated here on purpose. On the final channel
+/// the facts ride the summary's wording, and a replay's summarizer returns
+/// the recorded summary: a row over them would pass whatever the session
+/// held. What the product owns is that the summary it was given is what the
+/// channel starts with, and that a typed row is carried verbatim.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn s106_replay_final_channel_is_given_every_planted_fact()
+async fn s106_replay_reopen_seeds_the_typed_row_and_the_final_channel_its_summary()
 -> Result<(), Box<dyn std::error::Error>> {
     let replayed = replay_s106().await?;
-    let mut delivered = replayed.evidence.session_input_texts(3)?;
-    delivered.extend(replayed.evidence.owned_thinking_appends(3)?);
-    let delivered = delivered.join("\n").to_lowercase();
-    for fact in ["saffron", "lisbon", "kestrel"] {
-        assert!(
-            delivered.contains(fact),
-            "the planted fact {fact:?} never reached the final channel as typed input: {delivered:?}"
+    let reopen = replayed.evidence.session_input_texts(2)?;
+    assert!(
+        reopen.iter().any(|text| text == S106_TYPED_PROMPT),
+        "the note typed during the first closure rides the reopen's startup input verbatim: {reopen:?}"
+    );
+    let RecordedSummary::Seeded(summary) = replayed
+        .fixture
+        .recorded_summary(2, LIVE_LATE_SUMMARY_PREFIX)
+    else {
+        return Err("the recording's third open is not seeded with a summary".into());
+    };
+    let last = replayed.evidence.session_input_texts(3)?;
+    let [only] = last.as_slice() else {
+        return Err(
+            format!("the final channel starts with its summary item alone: {last:?}").into(),
         );
-    }
+    };
+    assert!(
+        only.ends_with(&summary),
+        "the final channel's summary item carries the summary produced for that open: {only:?}"
+    );
     Ok(())
 }
 

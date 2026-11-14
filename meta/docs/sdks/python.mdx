@@ -99,8 +99,9 @@ without end. See the
 for the affected releases and what to do.
 </Warning>
 
-On an affected release, replace the send and the watch loop: read the
-member's `tokens_used` before the send, then wait until it is greater:
+On an affected release, keep the `ensure_member` line and replace the
+`handle.send(...)` line and the watch loop: read the member's `tokens_used`
+before the send, then wait until it is greater:
 
 ```python
         # Read the member's token count before the send

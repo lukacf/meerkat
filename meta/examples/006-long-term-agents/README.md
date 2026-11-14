@@ -97,9 +97,14 @@ the record.
 
 - `applies_at_next_run` is what the update answers here, where the agent has
   no conversation yet: its first run is built from the new instructions.
-  For an agent that already has a conversation, read the agent's
-  instruction status (`runtime.instruction_status(identity=...)`) to see
-  whether a change is in effect; the guide says what each outcome means.
+  For an agent that already has a conversation the answer depends on its
+  model. On a model that takes a system instruction only ahead of the
+  conversation (`claude-haiku-4-5`, which this example's profiles name, is
+  one) the update answers `applies_after_compaction`: the agent follows the
+  change only once that conversation is compacted or reset. Read the
+  agent's instruction status (`runtime.instruction_status(identity=...)`)
+  to see whether a change is in effect; the guide lists the models and says
+  what each outcome means.
 - If you archive or remove an agent within moments of changing its
   instructions while it has a conversation, the gateway log may show one or
   two `operator_instruction_delivery` warnings. This program does not cause

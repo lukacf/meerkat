@@ -4076,8 +4076,8 @@ input and the member's acknowledgement.
 
 For an identity that created mobs, a completed call has a cost of its own.
 After the call has completed, the identity no longer lists a mob it created and its calls that name the mob are refused; the mobs' stores are kept (seen in runs on 0.9.14 and on 0.9.15's code).
-Before the call, have the identity stop or destroy a mob it created whose
-members act on their own (not run).
+Before the call, have the identity retire the members of, or destroy, a mob
+it created whose members act on their own (not run).
 
 <Warning>
 Known issue, noted 2026-11-13, read from the source and not yet confirmed by
@@ -4206,8 +4206,8 @@ For an identity that created mobs each clearing step has a cost of its own:
   weigh that against the failing messages before you respawn: none of the
   three steps above is known to keep it.
 
-Before either step, have the identity stop or destroy a mob it created whose
-members act on their own (not run).
+Before either step, have the identity retire the members of, or destroy, a
+mob it created whose members act on their own (not run).
 
 ### `meta/bound_member_transcript`
 

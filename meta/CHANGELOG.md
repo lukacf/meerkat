@@ -1773,8 +1773,8 @@ Security, Upgrade and Changed.
   `meta/compact_member` section). If the identity must go on managing those
   mobs, weigh that against the failing messages before you respawn: none of
   the three steps is known to keep it. Before either step, have the
-  identity stop or destroy a mob it created whose members act on their own
-  (not run).
+  identity retire the members of, or destroy, a mob it created whose
+  members act on their own (not run).
 - An update cannot hand an agent's runtime mode back to its profile: to
   change how such an agent runs, set the other explicit value
   (`autonomous_host` or `turn_driven`); clearing an override is not offered

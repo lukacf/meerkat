@@ -1916,9 +1916,9 @@ compiling. A Meta probe that must keep the earlier rule checks
   identity must go on managing those mobs, weigh that against the failing
   messages before you respawn: none of the three steps (a respawn, a second
   call that completes, a reset) is known to keep it. Before either step,
-  have the identity stop or destroy a mob it created whose members act on
-  their own (not run). **From 0.9.15** the call restores
-  the member's threshold before it answers such a failure
+  have the identity retire the members of, or destroy, a mob it created
+  whose members act on their own (not run). **From 0.9.15** the call
+  restores the member's threshold before it answers such a failure
   (`error.data.stage` is `profile_restored`) and a second call is taken at
   once; the call still answers the failure. The upgrade repairs nothing
   stored: a member that 0.9.9 through 0.9.14 left with the threshold keeps

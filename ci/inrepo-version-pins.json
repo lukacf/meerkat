@@ -4,7 +4,7 @@
     "Configuration of scripts/check_inrepo_version_pins.py, run by scripts/verify-version-parity.sh.",
     "Every product of this repository consumes the others at the version this tree builds: in development and CI the build of the same commit, in a release the same release's artifacts. A pin of an in-repo package is a same-commit reference or names exactly the package's version in this tree.",
     "former_names: earlier names of in-repo packages, read as the package they became. products: product words the check reads beside ci/products.json. release_tags: release tag prefixes beside the products' own. release_assets: release asset name prefixes and the package whose version they carry (wheel and npm tarball names are derived).",
-    "allow: pins that stay below the version in this tree, each with its reason: upgrade-test fixtures, recorded history, tests that feed recorded or synthetic versions to the code they test, and code that reads installations recorded by earlier releases. An entry without match or key covers whole files, which are not read; one with match covers the pins it matches. In a JSON file key scopes an entry to the pins of the values under the key paths it matches (object keys joined by /, array items by their index). removed_by names the change that removes a temporary entry's pins. An entry that covers nothing fails the check.",
+    "allow: pins that stay below the version in this tree, each with its reason: upgrade-test fixtures, recorded history, tests that feed recorded or synthetic versions to the code they test, and code that reads installations recorded by earlier releases. An entry without match, key or context covers whole files, which are not read; one with match covers the pins it matches. In a JSON file key scopes an entry to the pins of the values under the key paths it matches (object keys joined by /, array items by their index). context scopes an entry to the pins that stand in the text it matches (the pin's line and the line after it, white space read as one space). at makes an entry a hold for one release: it covers its pins only while the package they pin is at that version in this tree, waits while the package is below it, and fails the check with its pins once the package is past it. removed_by names the change that removes a temporary entry's pins. An entry that covers nothing fails the check.",
     "published_release_inputs: files that record a published release of an in-repo product (they pin its assets by digest, so they move only after a publication). They are judged together, per product: they all name one release, the one a version constant among them names or, without one, the newest they name; an input that names another release, a release newer than the version in this tree or no single release fails the check; a selected release older than the version in this tree is a warning and fails nothing. A path given with a match puts only the pins it matches in that class, the file's other pins follow the ordinary rule, and it fails the check when it applies to none. They are read even under a whole-file allow entry. A path that matches no tracked file fails the check.",
     "version_constants: per file, the package a version constant pins when its name names no product (VERSION = \"X.Y.Z\"); a constant the file no longer holds fails the check."
   ],
@@ -285,6 +285,27 @@
       "match": "v0\\.9\\.10$",
       "reason": "Connect's README describes and installs the Connect 0.9.10 release with Core 0.9.10.",
       "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
+    },
+    {
+      "path": "connect/README.md",
+      "match": "^lukacf/meerkat release v0\\.9\\.14$",
+      "context": "\\[Meerkat Core 0\\.9\\.14\\]\\(https://github\\.com/lukacf/meerkat/releases/tag/v0\\.9\\.14\\), the Core release Connect 0\\.9\\.14 was built and released with\\b",
+      "at": "0.9.15",
+      "reason": "Connect's README describes Connect 0.9.14, the Connect release there is when Core 0.9.15 is released, and names the Core release to install beside it in the sentence's own words, which the entry requires next to the link. The hold is for the Core 0.9.15 release alone: the next Core version bump stops on the line and the hold is decided again."
+    },
+    {
+      "path": "connect/docs/site/quickstart.mdx",
+      "match": "^lukacf/meerkat release v0\\.9\\.14$",
+      "context": "\\[Meerkat Core 0\\.9\\.14\\]\\(https://github\\.com/lukacf/meerkat/releases/tag/v0\\.9\\.14\\), the Core release Connect 0\\.9\\.14 was built and released with\\b",
+      "at": "0.9.15",
+      "reason": "Connect's quickstart describes Connect 0.9.14, the Connect release there is when Core 0.9.15 is released, and names the Core release to install beside it in the sentence's own words, which the entry requires next to the link. The hold is for the Core 0.9.15 release alone: the next Core version bump stops on the line and the hold is decided again."
+    },
+    {
+      "path": "docs/connect/quickstart.mdx",
+      "match": "^lukacf/meerkat release v0\\.9\\.14$",
+      "context": "\\[Meerkat Core 0\\.9\\.14\\]\\(https://github\\.com/lukacf/meerkat/releases/tag/v0\\.9\\.14\\), the Core release Connect 0\\.9\\.14 was built and released with\\b",
+      "at": "0.9.15",
+      "reason": "The docs site's copy of Connect's quickstart: it describes Connect 0.9.14, the Connect release there is when Core 0.9.15 is released, and names the Core release to install beside it in the sentence's own words, which the entry requires next to the link. The hold is for the Core 0.9.15 release alone: the next Core version bump stops on the line and the hold is decided again."
     },
     {
       "path": "connect/sdk/python/HOME_ASSISTANT.md",

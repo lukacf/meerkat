@@ -335,7 +335,8 @@ class ShapeTests(GuardTest):
             f"See the [{known}]({releases}/download/v1.4.1/checksums.sha256).",
             f"See the {known}: {releases}/tag/v1.4.1",
             f"See the [known issue on the Tool 0.3.0 release page]({releases}/tag/tool-v0.3.0).",
-            "See the [known issue on the 1.0.0 release page](https://github.com/lukacf/meerkat-meta/releases/tag/v1.0.0).",
+            "See the [known issue on the 1.0.0 release page]"
+            "(https://github.com/lukacf/meerkat-meta/releases/tag/v1.0.0).",
         ]
         self.repo.write("docs/get.md", "\n".join(lines) + "\n")
         err = self.assertFindings()
@@ -403,7 +404,8 @@ class AllowlistTests(GuardTest):
     def test_a_context_entry_covers_only_the_pins_in_that_text(self):
         # Two lines pin the same release; the entry names the words that stand beside one of them.
         url = "https://github.com/lukacf/meerkat/releases/tag/v1.4.1"
-        self.repo.write("docs/pair.md", f"Use [Demo Core 1.4.1]({url}), the release the\nadd-on 1.4.1 was made with.\n\n"
+        self.repo.write("docs/pair.md", f"Use [Demo Core 1.4.1]({url}), the release the\n"
+                        "add-on 1.4.1 was made with.\n\n"
                         f"Install [Demo Core 1.4.1]({url}) first.\n")
         self.repo.allow(path="docs/pair.md", match=r"^lukacf/meerkat release v1\.4\.1$",
                         context=r"/tag/v1\.4\.1\), the release the add-on 1\.4\.1 was made with",

@@ -31,17 +31,43 @@ Pins it finds in every tracked text file:
   - version constants whose name names a product (`CORE_REQUIREMENT =
     "=0.9.3"`, `MOBKIT_VERSION = "0.8.47"`).
 
+A known-issue link is recorded history and no pin: a Markdown link whose
+text is `known issue on the X.Y.Z release page` and whose target is the page
+of Core's release X.Y.Z (`https://github.com/lukacf/meerkat/releases/tag/vX.Y.Z`),
+or, with the product's name before the version (`known issue on the Meta
+X.Y.Z release page`), the page of that product's release X.Y.Z
+(`.../releases/tag/meta-vX.Y.Z`). It tells the reader of a later version what
+an earlier release's page says, so it keeps its target whatever the version
+of the tree. The text and the target make the form together: any other
+text, a target of another product or version, a download URL, and a release
+URL outside such a link are pins as before, and so is everything else on the
+link's line.
+
 The allowlist covers upgrade-test fixtures and recorded history, each entry
-with its reason. An entry without `match` or `key` covers whole files, which
-are not read; it is stale when it matches no tracked file. An entry with
-`match` (a regular expression searched in the pin) covers those pins only. In
-a JSON file an entry may also carry `key`, a regular expression searched in
-the key path of the value that starts on the pin's line (object keys joined
-by `/`, array items by their index): it then covers only the pins of the
-values under those keys, so two rows of one file that pin the same release
-keep apart. An entry with `match` or `key` is stale when it covers no pin. A
-temporary entry names, in `removed_by`, the change that removes its pins;
-when that change lands the entry is stale and goes.
+with its reason. An entry without `match`, `key` or `context` covers whole
+files, which are not read; it is stale when it matches no tracked file. An
+entry with `match` (a regular expression searched in the pin) covers those
+pins only. In a JSON file an entry may also carry `key`, a regular expression
+searched in the key path of the value that starts on the pin's line (object
+keys joined by `/`, array items by their index): it then covers only the pins
+of the values under those keys, so two rows of one file that pin the same
+release keep apart. An entry may carry `context`, a regular expression
+searched in the text beside the pin (the pin's line and the line after it,
+each run of white space read as one space): it then covers only the pins
+that stand in that text, so a sentence that says why it names an older
+release is told from a line that only names it. An entry with `match`, `key`
+or `context` is stale when it covers no pin. A temporary entry names, in
+`removed_by`, the change that removes its pins; when that change lands the
+entry is stale and goes.
+
+An entry with `at` (a version; beside `match` or `context`, never `key`) is a
+hold decided for one release: it covers its pins only while the package they
+pin is at exactly that version in this tree. While that package is still
+below the version the entry waits: its pins are no findings yet, and it is
+not stale as long as its path and `match` still find such a pin. Once the
+package is past the version the entry covers nothing: its pins are findings
+again and the entry is stale, so the next version bump stops on both and the
+hold is decided again.
 
 Published release inputs (`published_release_inputs` in the configuration,
 with its reason) are files that record a published release of an in-repo
@@ -126,6 +152,13 @@ OWNER = "lukacf"
 MONOREPO = "meerkat"
 # The standalone repositories the products came from, and the product each held.
 RETIRED_REPOSITORIES = {"meerkat-meta": "meta", "meerkat-mobkit": "meta", "meerkat-connect": "connect"}
+# A Markdown link that calls itself the known-issue note of a release and targets a release page of the
+# monorepo: the product's name (none for Core), the version, and the tag of the page. Scanner.known_issue_spans
+# admits it when the tag is that product's release tag of that version.
+KNOWN_ISSUE_LINK_RE = re.compile(
+    rf"\[known issue on the (?:([A-Z][a-z]+) )?({RELEASE_VERSION}) release page\]"
+    rf"\(https://github\.com/{OWNER}/{MONOREPO}/releases/tag/([^/\s\"'`)<>\]\\]+)\)")
+WHITE_SPACE_RE = re.compile(r"\s+")
 
 
 class PinError(Exception):
@@ -259,6 +292,8 @@ class Finding:
     excludes: bool = False
     # In a JSON file a `key` entry scopes: the key path of the value that starts on the line.
     key: str | None = None
+    # In a file a `context` entry scopes: the pin's line and the line after it, white space as one space.
+    context: str | None = None
 
     def describe(self) -> str:
         where = f"{self.path}:{self.line}" if self.line else self.path
@@ -497,11 +532,13 @@ def alternatives(names) -> str:
 
 
 class Scanner:
-    def __init__(self, root: Path, inventory: Inventory, published=(), constants=None):
+    def __init__(self, root: Path, inventory: Inventory, published=(), constants=None, holds=()):
         self.root = root
         self.inventory = inventory
         # The published release inputs (PublishedEntry: a path pattern and an optional match).
         self.published = list(published)
+        # The allow entries with `at`: each waits on the pins of a package still below its version.
+        self.holds = list(holds)
         # Version constants without a product word, configured per file: {path: {name: package key}}.
         self.constants = constants or {}
         self.constants_seen: set[tuple[str, str]] = set()
@@ -538,6 +575,11 @@ class Scanner:
         if key is None:
             return
         name, expected = self.inventory.expected(key)
+        for hold in self.holds:
+            # A hold for a later version of this package waits on the pin: it is no finding
+            # of the hold's yet, and the entry is not stale while the pin is there.
+            if below(expected, hold.at) and hold.path.match(path) and (hold.match is None or hold.match.search(pin)):
+                hold.used += 1
         published = next((entry for entry in self.published if entry.applies(path, pin)), None)
         if published is not None:
             published.used += 1
@@ -661,8 +703,26 @@ class Scanner:
             self.scan_line(path, number, text[start:end], name, manifest, code)
             number += 1
 
+    def known_issue_spans(self, line: str) -> list[tuple[int, int]]:
+        """Where the line holds a known-issue link: recorded history, not a pin.
+
+        `[known issue on the X.Y.Z release page](<the page of Core's release X.Y.Z>)`, or with
+        a product's name before the version, the page of that product's release X.Y.Z.
+        """
+        spans = []
+        for match in KNOWN_ISSUE_LINK_RE.finditer(line):
+            resolved = self.inventory.tag(match.group(3))
+            if resolved is None or resolved[0][0] != "product" or resolved[1] != match.group(2):
+                continue
+            if (match.group(1) or "Core") == resolved[0][1].capitalize():
+                spans.append(match.span())
+        return spans
+
     def scan_line(self, path, number, line, name, manifest, code) -> None:
+        recorded = self.known_issue_spans(line) if "release page](" in line else ()
         for match in self.release_re.finditer(line):
+            if any(start <= match.start() < end for start, end in recorded):
+                continue
             self.release(path, number, match.group(1), match.group(2),
                          f"{OWNER}/{match.group(1)} release {match.group(2)}")
         for match in self.retired_git_re.finditer(line):
@@ -812,16 +872,19 @@ class AllowEntry:
     path: re.Pattern
     match: re.Pattern | None
     key: re.Pattern | None = None
+    context: re.Pattern | None = None
+    # A hold: the one version of the pinned package at which the entry covers its pins.
+    at: str | None = None
     used: int = 0
 
     @property
     def whole(self) -> bool:
-        """An entry without match or key covers whole files, which are not read."""
-        return self.match is None and self.key is None
+        """An entry without match, key or context covers whole files, which are not read."""
+        return self.match is None and self.key is None and self.context is None
 
     def label(self) -> str:
         return (self.path_text + (f" ({self.match.pattern})" if self.match else "")
-                + (f" [key {self.key.pattern}]" if self.key else ""))
+                + (f" [key {self.key.pattern}]" if self.key else "") + (f" [at {self.at}]" if self.at else ""))
 
 
 @dataclasses.dataclass
@@ -844,7 +907,7 @@ def load_allowlist(config: dict) -> list[AllowEntry]:
     for index, raw in enumerate(config.get("allow") or []):
         if not isinstance(raw, dict) or not isinstance(raw.get("path"), str) or not raw["path"]:
             raise PinError(f"allow entry {index} needs a path")
-        unknown = set(raw) - {"path", "match", "key", "reason", "removed_by"}
+        unknown = set(raw) - {"path", "match", "key", "context", "at", "reason", "removed_by"}
         if unknown:
             raise PinError(f"allow entry {index} ({raw['path']}) has unknown keys {sorted(unknown)}")
         if not isinstance(raw.get("reason"), str) or len(raw["reason"].split()) < 4:
@@ -852,12 +915,21 @@ def load_allowlist(config: dict) -> list[AllowEntry]:
         if "removed_by" in raw and (not isinstance(raw["removed_by"], str) or len(raw["removed_by"].split()) < 3):
             raise PinError(f"allow entry {index} ({raw['path']}) removed_by must name the change that removes it")
         patterns = {}
-        for field in ("match", "key"):
+        for field in ("match", "key", "context"):
             value = raw.get(field)
             if value is not None and (not isinstance(value, str) or not value):
                 raise PinError(f"allow entry {index} ({raw['path']}) {field} must be a regular expression")
             patterns[field] = re.compile(value) if value else None
-        entries.append(AllowEntry(index, raw["path"], glob_regex(raw["path"]), patterns["match"], patterns["key"]))
+        at = raw.get("at")
+        if at is not None:
+            if version_key(at) is None:
+                raise PinError(f"allow entry {index} ({raw['path']}) at must be a version")
+            if patterns["key"] is not None:
+                raise PinError(f"allow entry {index} ({raw['path']}) at takes no key")
+            if patterns["match"] is None and patterns["context"] is None:
+                raise PinError(f"allow entry {index} ({raw['path']}) at needs a match or a context")
+        entries.append(AllowEntry(index, raw["path"], glob_regex(raw["path"]), patterns["match"], patterns["key"],
+                                  patterns["context"], at))
     return entries
 
 
@@ -909,7 +981,7 @@ def tracked_files(root: Path) -> list[str]:
 def scan(root: Path, inventory: Inventory, tracked: list[str], allowlist: list[AllowEntry],
          published=(), constants=None) -> Scanner:
     whole = [entry for entry in allowlist if entry.whole]
-    scanner = Scanner(root, inventory, published, constants)
+    scanner = Scanner(root, inventory, published, constants, [entry for entry in allowlist if entry.at is not None])
     for path in tracked:
         # A published release input is always read: its pins follow their own rule, which
         # no whole-file entry waives.
@@ -938,16 +1010,35 @@ def attach_keys(root: Path, findings: list[Finding], allowlist: list[AllowEntry]
         finding.key = files[finding.path].get(finding.line, "")
 
 
+def attach_context(root: Path, findings: list[Finding], allowlist: list[AllowEntry]) -> None:
+    """Give each finding in a file that a `context` entry scopes the text beside its pin.
+
+    The text is the pin's line and the line after it, each run of white space read as one
+    space, so a sentence that wraps after the pin is read as it is written.
+    """
+    scoped = [entry.path for entry in allowlist if entry.context is not None]
+    files: dict[str, list[str]] = {}
+    for finding in findings:
+        if not finding.line or not any(pattern.match(finding.path) for pattern in scoped):
+            continue
+        if finding.path not in files:
+            files[finding.path] = (root / finding.path).read_text(encoding="utf-8").split("\n")
+        beside = files[finding.path][finding.line - 1:finding.line + 1]
+        finding.context = WHITE_SPACE_RE.sub(" ", " ".join(beside)).strip()
+
+
 def move_version(text: str, pinned: str, expected: str) -> str:
     return re.sub(rf"(?<![0-9.]){re.escape(pinned)}(?![0-9]|\.[0-9])", expected, text, count=1)
 
 
 def covering(finding: Finding, allowlist: list[AllowEntry]) -> list[AllowEntry]:
-    """The allow entries with a `match` or a `key` that cover a finding."""
+    """The allow entries with a `match`, a `key` or a `context` that cover a finding."""
     return [entry for entry in allowlist
             if not entry.whole and entry.path.match(finding.path)
             and (entry.match is None or entry.match.search(finding.pin))
-            and (entry.key is None or (finding.key is not None and entry.key.search(finding.key)))]
+            and (entry.key is None or (finding.key is not None and entry.key.search(finding.key)))
+            and (entry.context is None or (finding.context is not None and entry.context.search(finding.context)))
+            and (entry.at is None or version_key(entry.at) == version_key(finding.expected))]
 
 
 def judge_published(pins: list[Finding]) -> tuple[list[Finding], list[str]]:
@@ -1045,6 +1136,7 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
         constants = load_constants(config, inventory)
         scanner = scan(root, inventory, tracked, allowlist, published, constants)
         attach_keys(root, scanner.findings + scanner.published_pins, allowlist)
+        attach_context(root, scanner.findings + scanner.published_pins, allowlist)
         if write:
             # An allowed pin (an upgrade fixture, or a pin another change removes)
             # stays as it is: only the pins the check would report move.
@@ -1055,6 +1147,7 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
             published = load_published(config)
             scanner = scan(root, inventory, tracked, allowlist, published, constants)
             attach_keys(root, scanner.findings + scanner.published_pins, allowlist)
+            attach_context(root, scanner.findings + scanner.published_pins, allowlist)
         findings = scanner.findings
     except (PinError, OSError, ValueError, tomllib.TOMLDecodeError, re.error) as error:
         print(f"check_inrepo_version_pins: {error}", file=err)

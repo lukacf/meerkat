@@ -2730,7 +2730,9 @@ struct SessionState {
     last_request: Option<String>,
     /// Provider id of the client delegation created while a user turn was
     /// open (mid-utterance): the next user turn to finish before another
-    /// client delegation continues that utterance.
+    /// client delegation continues that utterance. A later client
+    /// delegation ends it whether it is accepted or refused for want of a
+    /// request.
     continuation_of: Option<String>,
     window: DelegationWindow,
     seen_delegation_ids: HashSet<String>,
@@ -4263,7 +4265,11 @@ impl SessionState {
             match self.last_request.as_ref() {
                 Some(previous) => previous.clone(),
                 None => {
-                    // No spoken request exists to become the task.
+                    // No spoken request exists to become the task. Like an
+                    // accepted client delegation (below), this one ends any
+                    // earlier continuation: the user's next turn is not
+                    // more words for the job before it.
+                    self.continuation_of = None;
                     self.queued_observations.push_back(
                         GptLiveBrokerObservation::DelegationActionableInputUnsupported {
                             delegation: reference,

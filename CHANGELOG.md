@@ -1603,7 +1603,8 @@ them.
   the turn since the last spoken request reaches the voice as spoken
   commentary instead (a reply a peer's message drove), or when the model
   delegates while a typed turn is still running and none of its rows has
-  reached the voice yet, a delegation with nothing spoken can still run
+  been handed to the voice channel yet (a row held behind the model's
+  speech already counts), a delegation with nothing spoken can still run
   the earlier spoken request again. In the other direction, when a typed
   turn's reply row arrives after the user has spoken a newer request and
   that request's delegation was created, a later delegation with nothing

@@ -439,22 +439,12 @@ reading the 0.9.14 source, not by running a 0.9.14 binary over state that
 0.9.15 wrote.
 
 0.9.14 and earlier releases read most of what 0.9.15 writes without a
-refusal. The ten items below are where a rollback differs:
+refusal. The items below are where a rollback differs: configurations that
+make a 0.9.14 gateway refuse to start, stored forms an earlier release
+refuses, and what it reads without a refusal but serves differently while
+rolled back or changes by what it writes.
 
-- Two configurations make a 0.9.14 gateway refuse to start: access rules
-  that name the new agent actions, and an identity policy that names
-  `archive` or `adopt`.
-- Two stored forms are refused: a created agent's row that records an owed
-  label restamp, and a mob whose operator instruction records are past what
-  an earlier release holds in one mob.
-- Six are read without a refusal and behave differently while rolled back,
-  or are changed by what the earlier release writes: operator instruction
-  records written with `include_forks`, agents' instruction records,
-  changes of agents that wait for approval, agents created at run time,
-  access rules for agents without a seated member, and a schedule paused
-  for its target.
-
-Before you roll back, on 0.9.15:
+Most items have a step to take before the rollback, on 0.9.15:
 
 - settle every owed label restamp;
 - bring each mob within the earlier totals of operator instruction records,

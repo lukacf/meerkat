@@ -3212,6 +3212,68 @@ mod tests {
         .unwrap()
     }
 
+    /// [`run_result_with_level_report`] with every optional member of the
+    /// run result set. The destructuring names every member, so a member
+    /// added to the run result does not compile here until this sample
+    /// sets it.
+    fn full_run_result_with_level_report() -> meerkat_core::types::RunResult {
+        let mut usage = serde_json::to_value(meerkat_core::Usage::default()).unwrap();
+        usage["input_tokens"] = serde_json::json!(11);
+        usage["output_tokens"] = serde_json::json!(7);
+        let mut request_usage = usage.clone();
+        request_usage["accounting"] = serde_json::to_value(
+            meerkat_core::provider_evidence::ProviderTokenAccounting::openai(
+                "test-openai-default",
+                11,
+            ),
+        )
+        .unwrap();
+        let mut value = serde_json::to_value(run_result_with_level_report("answer", 2)).unwrap();
+        value["run_usage"] = usage;
+        value["request_usage"] = serde_json::json!([request_usage]);
+        value["terminal_cause_kind"] = serde_json::json!("turn_limit_reached");
+        value["structured_output"] = serde_json::json!({"answer": 42});
+        value["extraction_error"] =
+            serde_json::json!({"last_output": "raw", "attempts": 2, "reason": "no JSON"});
+        value["schema_warnings"] = serde_json::json!([{
+            "provider": meerkat_core::Provider::OpenAI,
+            "path": "/answer",
+            "message": "lowered",
+        }]);
+        value["skill_diagnostics"] = serde_json::json!({
+            "source_health": meerkat_core::skills::SourceHealthSnapshot::default(),
+            "quarantined": [],
+        });
+        let result: meerkat_core::types::RunResult = serde_json::from_value(value).unwrap();
+        let meerkat_core::types::RunResult {
+            text: _,
+            session_id: _,
+            usage: _,
+            run_usage,
+            request_usage,
+            turns: _,
+            tool_calls: _,
+            terminal_cause_kind,
+            structured_output,
+            extraction_error,
+            schema_warnings,
+            skill_diagnostics,
+            reasoning_effort,
+        } = &result;
+        assert!(
+            run_usage.is_some()
+                && !request_usage.is_empty()
+                && terminal_cause_kind.is_some()
+                && structured_output.is_some()
+                && extraction_error.is_some()
+                && schema_warnings.is_some()
+                && skill_diagnostics.is_some()
+                && reasoning_effort.is_some(),
+            "the sample sets every optional member: {result:?}"
+        );
+        result
+    }
+
     /// The finalized terminal completion of one input whose run produced
     /// `result`, its candidate kept. `whole_value` digests the candidate and
     /// the receipt over the whole value, report included, as a pre-release
@@ -3302,6 +3364,42 @@ mod tests {
             interaction_terminal_payload_digest(&(&outcome(&other_text), &finalization)).unwrap(),
             "the receipt's digest covers the result's text"
         );
+        // The same for a result with every optional member set: the report
+        // is the one member the digests leave out, and the digested form is
+        // the whole value without it.
+        let full = full_run_result_with_level_report();
+        let mut full_without_report = full.clone();
+        full_without_report.reasoning_effort = None;
+        assert_eq!(
+            interaction_terminal_payload_digest(&candidate(&full)).unwrap(),
+            interaction_terminal_payload_digest(&candidate(&full_without_report)).unwrap(),
+            "the candidate's digest, every optional member set"
+        );
+        assert_eq!(
+            interaction_terminal_payload_digest(&(&outcome(&full), &finalization)).unwrap(),
+            interaction_terminal_payload_digest(&(&outcome(&full_without_report), &finalization))
+                .unwrap(),
+            "the receipt's digest, every optional member set"
+        );
+        assert_ne!(
+            interaction_terminal_payload_digest(&candidate(&full)).unwrap(),
+            interaction_terminal_payload_digest(&candidate(&with_report)).unwrap(),
+            "the optional members are digested"
+        );
+        let mut whole = serde_json::to_value(&full).unwrap();
+        assert!(
+            whole
+                .as_object_mut()
+                .unwrap()
+                .remove("reasoning_effort")
+                .is_some()
+        );
+        assert_eq!(
+            serde_json::to_value(run_result_without_level_report(&full)).unwrap(),
+            whole,
+            "the digested form drops the report and nothing else"
+        );
+
         // Only a value with a report has a second, whole-value form.
         assert!(candidate(&with_report).whole_value_bytes().is_some());
         assert!(candidate(&without_report).whole_value_bytes().is_none());
@@ -3341,10 +3439,51 @@ mod tests {
         );
     }
 
-    /// The limit of leaving the report out of the digests, pinned: a changed
-    /// report in a stored row is NOT detected by the row check. A changed
-    /// byte of anything else in the result still is, in the outcome and in
-    /// the candidate.
+    /// The rollback case for a row that still keeps its candidate and has
+    /// no outcome yet: a terminal completion that is staged and not
+    /// finalized. An earlier release's decoder drops the report from the
+    /// stored candidate and digests the whole value it decoded. With the
+    /// report removed that way the row passes the row check, and the digest
+    /// over what was decoded is the digest the row stores.
+    #[test]
+    fn a_staged_level_turns_row_verifies_without_its_report() {
+        for result in [
+            run_result_with_level_report("answer", 1),
+            full_run_result_with_level_report(),
+        ] {
+            let mut staged = finalized_completion_of(&result, false);
+            staged.outcome = None;
+            staged.phase = InputTerminalCompletionPhase::Pending;
+            assert_eq!(staged.validate_row(), Ok(()));
+
+            let mut stored = serde_json::to_value(&staged).unwrap();
+            assert!(stored.get("outcome").is_none_or(serde_json::Value::is_null));
+            let dropped = stored["candidate"]["result"]
+                .as_object_mut()
+                .unwrap()
+                .remove("reasoning_effort");
+            assert!(
+                dropped.is_some(),
+                "the stored candidate holds the report: {stored}"
+            );
+            let decoded: InputTerminalCompletion = serde_json::from_value(stored).unwrap();
+            assert_eq!(decoded.validate_row(), Ok(()));
+            assert_eq!(
+                interaction_terminal_digest_of(serde_json::to_vec(
+                    decoded.candidate.as_ref().unwrap()
+                ))
+                .unwrap(),
+                staged.candidate_digest,
+                "the digest over the decoded candidate is the stored one"
+            );
+        }
+    }
+
+    /// The limit of leaving the report out of the digests, pinned. The row
+    /// check does NOT detect a report that was changed, removed or added in
+    /// a stored row, nor a candidate and an outcome of one row that carry
+    /// different reports. A changed byte of anything else in the result
+    /// still is detected, in the outcome and in the candidate.
     #[test]
     fn the_terminal_digests_do_not_bind_the_level_report_and_bind_the_rest() {
         let stored = finalized_completion_of(&run_result_with_level_report("answer", 1), false);
@@ -3362,6 +3501,42 @@ mod tests {
             changed_report.validate_row(),
             Ok(()),
             "the digests do not bind the report"
+        );
+
+        // A removed report, in both places and in one of them.
+        let mut no_report = run_result_with_level_report("answer", 1);
+        no_report.reasoning_effort = None;
+        let mut removed_report = stored.clone();
+        removed_report.candidate = Some(InteractionTerminalCandidate::RunResult {
+            result: Box::new(no_report.clone()),
+        });
+        assert_eq!(
+            removed_report.validate_row(),
+            Ok(()),
+            "a candidate without the report beside an outcome with it"
+        );
+        removed_report.outcome = Some(crate::completion::CompletionOutcome::Completed(Box::new(
+            no_report.clone(),
+        )));
+        assert_eq!(removed_report.validate_row(), Ok(()), "a removed report");
+
+        // An added report: the row was written for a result without one.
+        let mut added_report = finalized_completion_of(&no_report, false);
+        assert_eq!(added_report.validate_row(), Ok(()));
+        added_report.outcome = Some(crate::completion::CompletionOutcome::Completed(Box::new(
+            run_result_with_level_report("answer", 1),
+        )));
+        assert_eq!(added_report.validate_row(), Ok(()), "an added report");
+
+        // A candidate and an outcome that carry different reports.
+        let mut two_reports = stored.clone();
+        two_reports.outcome = Some(crate::completion::CompletionOutcome::Completed(Box::new(
+            run_result_with_level_report("answer", 7),
+        )));
+        assert_eq!(
+            two_reports.validate_row(),
+            Ok(()),
+            "a candidate and an outcome with different reports"
         );
 
         let other_text = run_result_with_level_report("another answer", 1);

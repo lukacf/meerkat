@@ -1,4 +1,7 @@
-#![cfg(all(feature = "openai-live-e2e", not(target_arch = "wasm32")))]
+#![cfg(all(
+    any(feature = "openai-live-e2e", feature = "gpt-live-replay"),
+    not(target_arch = "wasm32")
+))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 //! Scenarios 97/98/99: public GPT Live (`gpt-live-1`) real-audio verticals.
@@ -652,6 +655,54 @@ fn record_metric(
     Ok(())
 }
 
+/// What a scenario's own body ended with, for the line printed next to a
+/// void verdict.
+trait BodyOutcome {
+    fn body_outcome(&self) -> String;
+}
+
+impl<E: std::fmt::Display> BodyOutcome for Result<(), E> {
+    fn body_outcome(&self) -> String {
+        match self {
+            Ok(()) => "passed".to_owned(),
+            Err(error) => format!("failed error={:?}", error.to_string()),
+        }
+    }
+}
+
+impl<E: std::fmt::Display> BodyOutcome for Result<Result<(), E>, tokio::time::error::Elapsed> {
+    fn body_outcome(&self) -> String {
+        match self {
+            Ok(body) => body.body_outcome(),
+            Err(_) => "timed_out".to_owned(),
+        }
+    }
+}
+
+/// Information only: a run the provider degraded is void whatever its body
+/// did, and its verdict line says nothing about the body. This prints the
+/// body's own outcome beside the verdict, so a void run still shows whether
+/// the scenario's checks had failed. It changes no verdict: the gate's
+/// verdict script matches the degraded verdict line, which is printed as
+/// before, and the scenario returns the same error as before.
+fn print_void_body(scenario: &str, body: &impl BodyOutcome) {
+    println!(
+        "GPT_LIVE_VOID_BODY scenario={scenario} body={}",
+        body.body_outcome()
+    );
+}
+
+/// Mark a test-driven step that is not a browser action (a typed turn, a
+/// playback completion, a truncation) in the provider stream of the
+/// journal's current channel, before the step runs. A marker write only: it
+/// reads the journal's channel number and appends one recorder line; it
+/// returns nothing, waits for nothing and cannot fail the scenario.
+fn mark_provider_step(evidence: &Journal, step: &str) {
+    if let Ok(channel) = evidence.current_channel() {
+        evidence.provider_step(channel, step);
+    }
+}
+
 /// Acknowledge one published assistant output, through the member live host
 /// that owns the channel, so the machine can admit the next synthesized
 /// assistant turn.
@@ -739,6 +790,13 @@ impl PublicLiveHarness {
             journal.exchange_started(label)?;
         }
         Ok(())
+    }
+
+    /// [`mark_provider_step`] on this harness's journal, when it has one.
+    fn mark_provider_step(&self, step: &str) {
+        if let Some(journal) = &self.evidence {
+            mark_provider_step(journal, step);
+        }
     }
 
     /// Settle one scheduled exchange's provider health evidence after its
@@ -897,6 +955,7 @@ impl PublicLiveHarness {
     }
 
     async fn complete_output(&mut self, output: &Value) -> Result<(), Box<dyn std::error::Error>> {
+        self.mark_provider_step(support::PLAYBACK_COMPLETE_STEP);
         let (shared, exact) = self.shared()?;
         assert_eq!(output["channel_id"], json!(exact.id));
         timeout(
@@ -1742,6 +1801,7 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
         Err(_) => evidence::Outcome::Failed,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S97", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result?;
@@ -1824,6 +1884,7 @@ async fn run_s97_client_context_vertical(
         }
     };
     assert_eq!(interrupted_output["channel_id"], channel_id);
+    mark_provider_step(&evidence, support::TRUNCATE_STEP);
     let truncated = timeout(
         Duration::from_secs(30),
         shared.member_host.truncate_live_output(
@@ -1896,6 +1957,7 @@ async fn run_s97_client_context_vertical(
         .poll_output(Duration::from_secs(45))
         .await?
         .ok_or("the barge-in reply published no assistant output within 45 seconds")?;
+    mark_provider_step(&evidence, support::PLAYBACK_COMPLETE_STEP);
     complete_playback(&shared, &exact, &greeting_output).await?;
     assert!(
         !greeting[before..].iter().any(is_client_delegation),
@@ -1945,6 +2007,7 @@ async fn run_s97_client_context_vertical(
         // Keep acknowledging assistant outputs (spoken acknowledgement and
         // result readout) so the machine can admit each synthesized turn.
         while let Some(output) = shared.poll_output(Duration::from_millis(500)).await? {
+            mark_provider_step(&evidence, support::PLAYBACK_COMPLETE_STEP);
             complete_playback(&shared, &exact, &output).await?;
             delegation_outputs += 1;
         }
@@ -2034,6 +2097,7 @@ async fn run_s97_client_context_vertical(
     })?;
     wait_for_spoken_output(&mut peer, ack_audio, 60).await?;
     while let Some(output) = shared.poll_output(Duration::from_secs(5)).await? {
+        mark_provider_step(&evidence, support::PLAYBACK_COMPLETE_STEP);
         complete_playback(&shared, &exact, &output).await?;
         delegation_outputs += 1;
     }
@@ -2504,6 +2568,7 @@ async fn s99_commit_followups(
     live: &mut PublicLiveHarness,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for prompt in s99_seed_followups() {
+        live.mark_provider_step(support::TYPED_TURN_STEP);
         live.rpc
             .call(
                 "turn/start",
@@ -3569,6 +3634,7 @@ async fn e2e_scenario_99_gpt_live_public_concurrent_context()
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
     })? {
+        print_void_body("S99", &result);
         return Err(evidence.provider_degraded_verdict(&degradation).into());
     }
     result
@@ -3665,6 +3731,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // Commit newer ordinary context through the existing source session while
     // its immutable opening snapshot is still blocked in the summarizer.
     evidence.stage(EvidenceStage::TypedCorrection)?;
+    live.mark_provider_step(support::TYPED_TURN_STEP);
     live.rpc.call("turn/start", json!({
         "session_id":live.session_id,
         "prompt":"A newer ordinary text update changes the current code word from Tangerine to Violet and my current favorite flower from Daffodil to Marigold. Acknowledge Violet and Marigold briefly. Do not repeat other historical facts and do not use tools."
@@ -7003,6 +7070,7 @@ async fn e2e_scenario_100_gpt_live_public_morning_standup() -> Result<(), Box<dy
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S100", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S100 overall deadline expired")??;
@@ -8559,6 +8627,7 @@ async fn e2e_scenario_102_gpt_live_public_who_are_you() -> Result<(), Box<dyn st
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S102", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S102 overall deadline expired")??;
@@ -8930,6 +8999,7 @@ async fn e2e_scenario_103_gpt_live_public_interrupt_and_recover()
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S103", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S103 overall deadline expired")??;
@@ -9424,6 +9494,7 @@ async fn e2e_scenario_107_gpt_live_public_stuck_close_convergence()
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S107", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S107 overall deadline expired")??;
@@ -9801,6 +9872,7 @@ async fn e2e_scenario_104_gpt_live_public_handoff_voice_typed_voice()
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S104", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S104 overall deadline expired")??;
@@ -9916,6 +9988,7 @@ async fn run_s104_handoff_voice_typed_voice(
 
         // Typed follow-up during the closure.
         evidence.stage(EvidenceStage::HandoffTyped)?;
+        live.mark_provider_step(support::TYPED_TURN_STEP);
         let typed_started = Instant::now();
         let typed = live
             .rpc
@@ -10413,6 +10486,7 @@ async fn s106_reopen_cycle(
     let texts_before = evidence.instructions_append_attempt_texts()?.len();
     if let Some(prompt) = typed_prompt {
         user_text.push(normalize_words(prompt));
+        live.mark_provider_step(support::TYPED_TURN_STEP);
         let typed = live
             .rpc
             .call_raw(
@@ -10546,6 +10620,7 @@ async fn e2e_scenario_106_gpt_live_public_long_haul() -> Result<(), Box<dyn std:
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S106", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S106 overall deadline expired")??;
@@ -11502,6 +11577,7 @@ async fn e2e_scenario_101_gpt_live_public_busy_backend() -> Result<(), Box<dyn s
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S101", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S101 overall deadline expired")??;
@@ -12023,6 +12099,7 @@ async fn e2e_scenario_105_gpt_live_public_fork_and_merge_parallel()
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S105", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S105 overall deadline expired")??;
@@ -12251,6 +12328,7 @@ async fn run_s105_fork_and_merge_parallel(
         // Typed correction while live, then the voice recall.
         evidence.stage(EvidenceStage::ForkCorrection)?;
         wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(60)).await?;
+        live.mark_provider_step(support::TYPED_TURN_STEP);
         let typed_started = Instant::now();
         let typed = live
             .rpc
@@ -12432,6 +12510,7 @@ async fn e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen()
         Err(_) => evidence::Outcome::TimedOut,
     });
     if let Ok(Some(degradation)) = &finished {
+        print_void_body("S98", &result);
         return Err(evidence.provider_degraded_verdict(degradation).into());
     }
     result.map_err(|_| "S98 overall deadline expired; no completed real-audio qualification")??;
@@ -12746,6 +12825,7 @@ async fn run_s98_real_audio_and_context(
     // A later ordinary background turn is a new canonical context update,
     // not another result for the already completed voice delegation.
     let before_update = live.peer.events().await?.len();
+    live.mark_provider_step(support::TYPED_TURN_STEP);
     live.rpc
         .call(
             "turn/start",

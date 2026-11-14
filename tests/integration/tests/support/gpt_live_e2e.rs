@@ -634,6 +634,11 @@ impl BrowserPeer {
     }
 
     pub async fn call(&mut self, command: Value) -> Result<Value, Box<dyn std::error::Error>> {
+        // A direct play is a test-driven step like a scheduled one: mark it
+        // in the channel's provider stream before the browser runs it.
+        if command["type"] == "play" {
+            self.provider_step(&play_step(command["name"].as_str().unwrap_or("unknown")));
+        }
         let id = self.next_id;
         self.next_id += 1;
         let mut command = command;
@@ -1063,6 +1068,24 @@ pub fn play_at_step(name: &str) -> String {
 pub fn queue_step(names: &[&str]) -> String {
     format!("queue:{}", names.join(","))
 }
+
+/// The provider-stream step a direct play of fixture `name` records before
+/// the browser plays it.
+pub fn play_step(name: &str) -> String {
+    format!("play:{name}")
+}
+
+/// The provider-stream step recorded before a typed turn is sent to the
+/// session. Between two channels it lands after the closed channel's end.
+pub const TYPED_TURN_STEP: &str = "typed_turn";
+
+/// The provider-stream step recorded before the harness completes the
+/// playback of a published assistant output.
+pub const PLAYBACK_COMPLETE_STEP: &str = "playback_complete";
+
+/// The provider-stream step recorded before the harness truncates a
+/// published assistant output.
+pub const TRUNCATE_STEP: &str = "truncate";
 
 pub fn format_timeline(timeline: &[TimelineEntry]) -> String {
     let mut out = String::new();

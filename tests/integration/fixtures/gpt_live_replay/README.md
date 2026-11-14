@@ -23,7 +23,9 @@ One JSON line per adapter crossing:
 | `server_frame`    | A server frame as the provider sent it (lossless `raw`) |
 | `receiver_end`    | The sideband ended (`error` set when it failed)          |
 | `marker`          | A test-driven step: `play_at:<fixture>`, `queue:<a,b>`,  |
-|                   | `disconnect:<graceful\|hard>`, recorded before it runs  |
+|                   | `disconnect:<graceful\|hard>`, `play:<fixture>` (a      |
+|                   | direct play), `typed_turn`, `playback_complete`,         |
+|                   | `truncate`, recorded before it runs                      |
 
 Each line also carries `seq` (global order), `channel_ordinal` (the journal's
 channel) and `elapsed_ms` (informational only; replay never keys on time).
@@ -31,7 +33,11 @@ channel) and `elapsed_ms` (informational only; replay never keys on time).
 Markers make replay causal without a clock: a frame recorded after a client
 event is served only once Meerkat sent that event (matched on event type and
 deterministic `event_id`), and a frame recorded after a marker only once the
-replaying test reached that step.
+replaying test reached that step. A `typed_turn` made between two channels is
+recorded after the closed channel's `receiver_end`; it holds no frame and
+tells a replay where the typed turn fell. The two committed recordings were
+made before `play`, `typed_turn`, `playback_complete` and `truncate` existed
+and do not carry them.
 
 A raw recording that lost a line is renamed `provider-stream.jsonl.incomplete`
 at journal finish and is never a fixture.
@@ -39,7 +45,7 @@ at journal finish and is never a fixture.
 ## Re-capture (one command)
 
 ```bash
-OPENAI_API_KEY=... scripts/gpt-live-recapture-replay-fixture S104   # or S106
+OPENAI_API_KEY=... scripts/gpt-live-recapture-replay-fixture S104   # any of S97 to S107
 ```
 
 It builds the live e2e binary, runs the scenario once against gpt-live-1, and

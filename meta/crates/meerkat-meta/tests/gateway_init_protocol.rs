@@ -49,14 +49,26 @@ struct Gateway {
 
 impl Gateway {
     fn spawn() -> Self {
+        Self::spawn_with_identity_root(None)
+    }
+
+    /// `spawn`, with the comms identity root at `identity_root` instead of
+    /// a directory of this gateway's own. No provider key reaches the
+    /// gateway, whichever its test process holds.
+    fn spawn_with_identity_root(identity_root: Option<&std::path::Path>) -> Self {
         let workspace = tempfile::tempdir().expect("workspace tempdir");
         let state = tempfile::tempdir().expect("state tempdir");
+        let identity_root = identity_root.map_or_else(
+            || workspace.path().join("xdg-state"),
+            std::path::Path::to_path_buf,
+        );
         let mut child = Command::new(env!("CARGO_BIN_EXE_rpc_gateway"))
             .arg("--persistent")
             .current_dir(workspace.path())
-            .env("ANTHROPIC_API_KEY", "sk-ant-regression-test")
-            .env("OPENAI_API_KEY", "sk-regression-test")
-            .env("XDG_STATE_HOME", workspace.path().join("xdg-state"))
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("GEMINI_API_KEY")
+            .env("XDG_STATE_HOME", identity_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -272,6 +284,556 @@ fn opted_in_init_is_accepted_then_progresses_then_settles_ready() {
             .all(|m| m.get("id").and_then(Value::as_str) != Some("init")),
         "the init request is answered once"
     );
+}
+
+// -- The ready report names the members the start left broken --------------
+//
+// Each row boots real gateways over one state directory and one comms
+// identity root, as the restarts of one installation do. The first boot of a
+// row seats its roster under the default restore, which builds no member, so
+// the session limit is not reached; a later boot restores the members as its
+// row says. The members answer from the demo model: no provider key is set.
+
+/// The mob of the ready-report rows: turn-driven members a roster seats.
+const READY_REPORT_MOB_CONFIG: &str = r#"
+[mob]
+id = "gateway-ready-report-test"
+
+[profiles.default]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.default.tools]
+comms = true
+"#;
+
+/// Core's refusal of a session past `runtime_options.max_sessions = 2`.
+const SESSION_LIMIT_REASON: &str = "Max sessions reached (2/2)";
+
+/// The gateway's ready-time warning about the members its mob holds broken.
+const READY_LOG_MESSAGE: &str = "the mob's start left members broken";
+
+/// The most members that warning names; it counts the rest.
+const READY_LOG_NAMED_MEMBERS: usize = 8;
+
+/// The keys of the init result of a start that left no member broken.
+const HEALTHY_INIT_RESULT_KEYS: [&str; 11] = [
+    "contract_version",
+    "control_listen_address",
+    "http_base_url",
+    "http_public_base_url",
+    "identity_bootstrap",
+    "loaded_modules",
+    "member_restore",
+    "runtime_fingerprint",
+    "runtime_origin",
+    "stdio_shutdown_handshake",
+    "stdio_shutdown_horizon_ms",
+];
+
+fn roster_identities(members: usize) -> Vec<String> {
+    (1..=members).map(|index| format!("m{index:02}")).collect()
+}
+
+fn object_keys(value: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = value
+        .as_object()
+        .unwrap_or_else(|| panic!("an object: {value}"))
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// The `broken_members` entries of an init result or a `meta/status`
+/// result, by member id. Empty when the field is absent.
+fn broken_members(report: &Value) -> std::collections::BTreeMap<String, Value> {
+    report
+        .get("broken_members")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| {
+                    let member = entry["member_id"].as_str().unwrap_or_else(|| {
+                        panic!("a broken member entry names its member: {entry}")
+                    });
+                    (member.to_string(), entry.clone())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The directories the boots of one ready-report row share.
+struct ReadyReportHome {
+    root: TempDir,
+}
+
+impl ReadyReportHome {
+    fn new() -> Self {
+        Self {
+            root: tempfile::tempdir().expect("ready-report home"),
+        }
+    }
+
+    /// Boot a gateway over this home with a roster of `members` identities
+    /// and `runtime_options`, through its ready settlement. With
+    /// `customizer` the SDK side also answers the agent customizer, and
+    /// counts the member builds it is asked for.
+    fn boot(
+        &self,
+        init_id: &str,
+        members: usize,
+        mut runtime_options: Value,
+        customizer: bool,
+    ) -> ReadyReportBoot {
+        let state = self.root.path().join("state");
+        std::fs::create_dir_all(&state).expect("state directory");
+        let gateway = Gateway::spawn_with_identity_root(Some(&self.root.path().join("xdg-state")));
+        runtime_options["demo_llm"] = json!(true);
+        let mut params = json!({
+            "init_protocol": "accepted_then_settled",
+            "init_id": init_id,
+            "mob_config": READY_REPORT_MOB_CONFIG,
+            "persistent_state": state,
+            "has_roster_provider": true,
+            "runtime_options": runtime_options,
+        });
+        if customizer {
+            params["has_agent_customizer"] = json!(true);
+        }
+        let roster = roster_identities(members)
+            .into_iter()
+            .map(|identity| {
+                json!({
+                    "identity": identity,
+                    "profile": "default",
+                    "addressability": "addressable",
+                    "display_name": null,
+                    "labels": {},
+                    "context": null,
+                    "additional_instructions": [],
+                })
+            })
+            .collect();
+        let mut boot = ReadyReportBoot {
+            gateway,
+            roster: Value::Array(roster),
+            customizer_builds: 0,
+            settled: Value::Null,
+        };
+        boot.gateway.send(json!({
+            "jsonrpc": "2.0", "id": "init", "method": "meta/init", "params": params,
+        }));
+        let seen = boot.pump("the ready settlement", is_settled);
+        boot.settled = seen.last().expect("a settlement")["params"].clone();
+        assert_eq!(
+            boot.settled["outcome"], "ready",
+            "{init_id}: {}",
+            boot.settled
+        );
+        boot
+    }
+}
+
+/// One boot of a ready-report row, past its ready settlement.
+struct ReadyReportBoot {
+    gateway: Gateway,
+    /// What the roster callback answers.
+    roster: Value,
+    /// The member builds the agent customizer was asked for so far.
+    customizer_builds: usize,
+    /// The `meta/init_settled` params.
+    settled: Value,
+}
+
+impl ReadyReportBoot {
+    /// Read messages until `done` accepts one, answering the roster and the
+    /// agent customizer callbacks on the way. Returns every message seen,
+    /// the accepted one last.
+    fn pump(&mut self, waiting_for: &str, mut done: impl FnMut(&Value) -> bool) -> Vec<Value> {
+        let mut seen = Vec::new();
+        loop {
+            let message = self.gateway.next(waiting_for);
+            if let (Some(method), Some(id)) = (
+                message.get("method").and_then(Value::as_str),
+                message.get("id").cloned(),
+            ) {
+                let reply = match method {
+                    "callback/roster_provider/roster" => {
+                        json!({ "jsonrpc": "2.0", "id": id, "result": self.roster })
+                    }
+                    "callback/agent_customizer/customize_build" => {
+                        self.customizer_builds += 1;
+                        json!({ "jsonrpc": "2.0", "id": id, "result": message["params"]["draft"] })
+                    }
+                    "callback/agent_customizer/after_create" => {
+                        json!({ "jsonrpc": "2.0", "id": id, "result": null })
+                    }
+                    other => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "error": { "code": -32601, "message": format!("no handler for {other}") },
+                    }),
+                };
+                self.gateway.send(reply);
+            }
+            let finished = done(&message);
+            seen.push(message);
+            if finished {
+                return seen;
+            }
+        }
+    }
+
+    /// Send a request and return its response.
+    fn call(&mut self, id: &str, method: &str, params: Value) -> Value {
+        self.gateway.send(json!({
+            "jsonrpc": "2.0", "id": id, "method": method, "params": params,
+        }));
+        let mut seen = self.pump(method, |message| {
+            message.get("method").is_none() && message["id"] == id
+        });
+        seen.pop().expect("the response")
+    }
+
+    /// Send every `(id, method, params)` request at once and return the
+    /// responses in request order.
+    fn call_all(&mut self, requests: &[(String, &str, Value)]) -> Vec<Value> {
+        for (id, method, params) in requests {
+            self.gateway.send(json!({
+                "jsonrpc": "2.0", "id": id, "method": method, "params": params,
+            }));
+        }
+        let mut pending: std::collections::BTreeSet<&str> =
+            requests.iter().map(|(id, _, _)| id.as_str()).collect();
+        let seen = self.pump("the responses of the requests sent together", |message| {
+            if message.get("method").is_none()
+                && let Some(id) = message["id"].as_str()
+            {
+                pending.remove(id);
+            }
+            pending.is_empty()
+        });
+        requests
+            .iter()
+            .map(|(id, _, _)| {
+                seen.iter()
+                    .find(|message| message.get("method").is_none() && message["id"] == id.as_str())
+                    .cloned()
+                    .expect("the response")
+            })
+            .collect()
+    }
+
+    /// The members `meta/list_members` reads broken.
+    fn members_listed_broken(&mut self) -> std::collections::BTreeSet<String> {
+        let listed = self.call("list-members", "meta/list_members", json!({}));
+        listed["result"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a member list: {listed}"))
+            .iter()
+            .filter(|member| member["state"] == "broken")
+            .map(|member| {
+                member["agent_identity"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("a listed member names itself: {member}"))
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The gateway's stderr lines that carry `needle`, waiting a while for
+    /// the first: the gateway writes its log before the line it answers with,
+    /// and this process reads the two pipes on separate threads.
+    fn stderr_lines_with(&self, needle: &str) -> Vec<String> {
+        let start = Instant::now();
+        loop {
+            let lines: Vec<String> = self
+                .gateway
+                .stderr_lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .filter(|line| line.contains(needle))
+                .cloned()
+                .collect();
+            if !lines.is_empty() || start.elapsed() > Duration::from_secs(10) {
+                return lines;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Shut the gateway down and require an ordinary exit.
+    fn stop(mut self) {
+        let answer = self.call("bye", "meta/shutdown", json!({}));
+        assert_eq!(answer["result"]["shutdown"], true, "{answer}");
+        let status = self.gateway.wait_exit();
+        assert!(status.success(), "gateway exit status: {status}");
+    }
+}
+
+/// A start that restores more members than `max_sessions` admits is ready,
+/// and its ready report names exactly the members Core holds broken, each
+/// with Core's reason: the same entries `meta/status` answers with. The
+/// session limit's refusal carries no machine code, so the entries carry
+/// none. The gateway also warns once, with the count and the names.
+#[test]
+fn ready_report_names_exactly_the_members_the_start_left_broken() {
+    let home = ReadyReportHome::new();
+    let seated = home.boot("init-rr1-seat", 3, json!({ "max_sessions": 2 }), false);
+    assert!(
+        seated.settled.get("broken_members").is_none(),
+        "a start that builds no member leaves none broken: {}",
+        seated.settled
+    );
+    seated.stop();
+
+    let mut eager = home.boot(
+        "init-rr1-eager",
+        3,
+        json!({ "member_restore": "eager", "max_sessions": 2 }),
+        false,
+    );
+    let listed_broken = eager.members_listed_broken();
+    assert_eq!(
+        listed_broken.len(),
+        1,
+        "two sessions for three restored members leave one broken: {listed_broken:?}"
+    );
+    assert!(
+        eager.settled.get("broken_members").is_some(),
+        "the ready report names the members the start left broken: {}",
+        eager.settled
+    );
+    let named = broken_members(&eager.settled);
+    assert_eq!(
+        named
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        listed_broken,
+        "{}",
+        eager.settled
+    );
+    for (member, entry) in &named {
+        assert_eq!(
+            object_keys(entry),
+            ["error", "member_id"],
+            "{member}: a session limit refusal has no machine code: {entry}"
+        );
+        assert!(
+            entry["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(SESSION_LIMIT_REASON)),
+            "{member}: {entry}"
+        );
+    }
+
+    let status = eager.call("status", "meta/status", json!({}));
+    assert_eq!(
+        status["result"]["broken_members"], eager.settled["broken_members"],
+        "meta/status names the same members: {status}"
+    );
+
+    let warnings = eager.stderr_lines_with(READY_LOG_MESSAGE);
+    assert_eq!(warnings.len(), 1, "one ready-time warning: {warnings:?}");
+    assert!(
+        warnings[0].contains("broken_member_count=1"),
+        "{warnings:?}"
+    );
+    for member in named.keys() {
+        assert!(warnings[0].contains(member.as_str()), "{warnings:?}");
+    }
+    eager.stop();
+}
+
+/// A start that left no member broken writes the init result it wrote
+/// before a ready report could name one: the same keys with no
+/// `broken_members`, as the legacy response and as the ready settlement,
+/// with or without restored members.
+#[test]
+fn ready_report_of_a_healthy_start_is_unchanged() {
+    let mut legacy = Gateway::spawn();
+    legacy.init(json!({}));
+    let response = legacy.next("the legacy init response");
+    assert_eq!(
+        object_keys(&response["result"]),
+        HEALTHY_INIT_RESULT_KEYS,
+        "{response}"
+    );
+
+    let home = ReadyReportHome::new();
+    home.boot("init-rr2-seat", 3, json!({}), false).stop();
+    let eager = home.boot(
+        "init-rr2-eager",
+        3,
+        json!({ "member_restore": "eager" }),
+        false,
+    );
+    let mut settled_keys: Vec<&str> = HEALTHY_INIT_RESULT_KEYS.to_vec();
+    settled_keys.extend(["init_id", "outcome"]);
+    settled_keys.sort_unstable();
+    assert_eq!(
+        object_keys(&eager.settled),
+        settled_keys,
+        "{}",
+        eager.settled
+    );
+    assert_eq!(
+        eager.settled["identity_bootstrap"]["counts"]["broken"], 0,
+        "{}",
+        eager.settled
+    );
+    assert_eq!(
+        eager.settled["member_restore"],
+        json!({ "boot_set": "observed" })
+    );
+    assert!(
+        eager.stderr_lines_with(READY_LOG_MESSAGE).is_empty(),
+        "a healthy start warns of no broken member"
+    );
+    eager.stop();
+}
+
+/// The ready report is a snapshot of the moment the gateway became ready. A
+/// member that breaks later (here: its first wake finds no session left) is
+/// named by `meta/status`, which reads the mob when it is asked; the
+/// settlement written at ready named none.
+#[test]
+fn a_member_broken_after_ready_is_named_by_status_and_not_by_the_ready_report() {
+    let home = ReadyReportHome::new();
+    home.boot("init-rr3-seat", 3, json!({ "max_sessions": 2 }), false)
+        .stop();
+
+    let mut lazy = home.boot("init-rr3-lazy", 3, json!({ "max_sessions": 2 }), false);
+    assert!(
+        lazy.settled.get("broken_members").is_none(),
+        "the default restore builds no member, so none is broken at ready: {}",
+        lazy.settled
+    );
+    let before = lazy.call("status-before", "meta/status", json!({}));
+    assert!(before["result"].get("broken_members").is_none(), "{before}");
+
+    // Three deliveries sent together wake three members at once, and the
+    // limit admits two sessions. What a delivery itself answers is not this
+    // row's subject: the answers are kept for the failure text only.
+    let requests: Vec<(String, &str, Value)> = roster_identities(3)
+        .into_iter()
+        .map(|identity| {
+            (
+                format!("send-{identity}"),
+                "meta/send",
+                json!({ "identity": identity, "content": "wake" }),
+            )
+        })
+        .collect();
+    let deliveries = lazy.call_all(&requests);
+    let start = Instant::now();
+    let broken = loop {
+        let status = lazy.call("status-after", "meta/status", json!({}));
+        let broken = broken_members(&status["result"]);
+        if !broken.is_empty() {
+            break broken;
+        }
+        if start.elapsed() >= BACKSTOP {
+            let listed = lazy.call("list-after", "meta/list_members", json!({}));
+            let limit_lines = lazy.stderr_lines_with(SESSION_LIMIT_REASON);
+            panic!(
+                "no member read broken after its wake met the session limit\n\
+                 deliveries: {deliveries:?}\nmembers: {listed}\n\
+                 gateway log lines naming the limit: {limit_lines:?}"
+            );
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(broken.len(), 1, "{broken:?}");
+    for (member, entry) in &broken {
+        assert!(
+            entry["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(SESSION_LIMIT_REASON)),
+            "{member}: {entry}"
+        );
+    }
+    assert!(
+        lazy.settled.get("broken_members").is_none(),
+        "the settlement is not rewritten"
+    );
+    lazy.stop();
+}
+
+/// The ready-time warning names at most `READY_LOG_NAMED_MEMBERS` members
+/// and counts the rest; the ready report itself lists every one.
+#[test]
+fn ready_log_line_names_a_bounded_number_of_members_and_counts_the_rest() {
+    let members = READY_LOG_NAMED_MEMBERS + 3;
+    let home = ReadyReportHome::new();
+    home.boot(
+        "init-rr4-seat",
+        members,
+        json!({ "max_sessions": 2 }),
+        false,
+    )
+    .stop();
+
+    let eager = home.boot(
+        "init-rr4-eager",
+        members,
+        json!({ "member_restore": "eager", "max_sessions": 2 }),
+        false,
+    );
+    let named = broken_members(&eager.settled);
+    assert_eq!(
+        named.len(),
+        members - 2,
+        "the ready report lists every broken member: {}",
+        eager.settled
+    );
+    let warnings = eager.stderr_lines_with(READY_LOG_MESSAGE);
+    assert_eq!(warnings.len(), 1, "one ready-time warning: {warnings:?}");
+    let line = &warnings[0];
+    assert!(
+        line.contains(&format!("broken_member_count={}", named.len())),
+        "{line}"
+    );
+    let named_in_line = named
+        .keys()
+        .filter(|member| line.contains(member.as_str()))
+        .count();
+    assert_eq!(named_in_line, READY_LOG_NAMED_MEMBERS, "{line}");
+    assert!(line.contains("and 1 more"), "{line}");
+    eager.stop();
+}
+
+/// Reading the broken members builds no member: a restart under the default
+/// restore asks the agent customizer for no member build before ready, and
+/// for none when `meta/status` reads the same list.
+#[test]
+fn the_ready_report_and_the_status_read_build_no_member() {
+    let home = ReadyReportHome::new();
+    home.boot("init-rr5-seat", 3, json!({}), true).stop();
+
+    let mut lazy = home.boot("init-rr5-lazy", 3, json!({}), true);
+    assert_eq!(
+        lazy.customizer_builds, 0,
+        "the default restore builds no member before ready"
+    );
+    assert!(
+        lazy.settled.get("broken_members").is_none(),
+        "{}",
+        lazy.settled
+    );
+    let status = lazy.call("status", "meta/status", json!({}));
+    assert!(status["result"].get("broken_members").is_none(), "{status}");
+    assert_eq!(
+        lazy.customizer_builds, 0,
+        "reading the broken members built a member"
+    );
+    lazy.stop();
 }
 
 #[test]

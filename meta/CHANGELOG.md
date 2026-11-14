@@ -306,6 +306,13 @@ Security, Upgrade and Changed.
   caller is answered "access denied: the session has no established owner"
   where access rules are enforced, and as for a session that does not
   exist otherwise.
+- The `meta/init` result can carry a new optional member, `broken_members`
+  (see Added). It is additive: an SDK of an earlier release ignores it (the
+  Python and TypeScript SDKs read `http_base_url` and
+  `http_public_base_url` from the init result by name and nothing else),
+  and a start that left no member broken writes the result it wrote
+  before.
+
 - A reasoning effort level in a mob definition is a one-way step with
   respect to 0.9.14. A Meta gateway on 0.9.14 does not start on the state
   directory of a mob whose stored definition holds a level
@@ -321,6 +328,35 @@ Security, Upgrade and Changed.
   notes) for sessions, Core hosts and realm profiles.
 
 ### Added
+
+- The gateway's ready report names the members its start left broken. The
+  `meta/init` result (the legacy response and the `ready`
+  `meta/init_settled` notification) carries `broken_members` when Core
+  holds members Broken at the moment the gateway becomes ready: the
+  entries `meta/status` already answers with (`member_id`, `error`), for
+  the same reader, the process that launched the gateway. A start that
+  builds more members than `runtime_options.max_sessions` admits (16 by
+  default, so an eager restore of a larger mob) was ready with the members
+  past the limit broken and said so only in `meta/status` and in
+  `identity_bootstrap`; it now lists them, each with
+  `Max sessions reached` in `error`. The field is absent when no member is
+  broken, so a start that left none broken writes the result it wrote
+  before. The Python and TypeScript SDKs ignore the key, as they ignore
+  `broken_members` of `meta/status`: a host that speaks the protocol
+  itself reads it. The list
+  is a snapshot of that moment: a member that breaks later is named by
+  `meta/status` only, and a member `member_restore` leaves dormant is never
+  in it. The gateway also logs one warning at ready with the count and the
+  names of up to 8 of them. The list is Core's, in the init result and in
+  `meta/status`: it can name a member the member list leaves out, an
+  earlier incarnation of an identity that list shows under its current one.
+
+- A `broken_members` entry, in the init result and in `meta/status`, gains
+  `code`: Core's stable refusal code, present only when the failure was a
+  refusal that named one (a refused runtime binding, or the host's refusal
+  of the member's registration), at a restore or at a wake. Advisory: most
+  causes have none (the session limit is read from `error`), and the
+  vocabulary may grow.
 
 - `meta/identity/list`, `get` and `directory` say `roster_listing_superseded:
   true` on an agent the host's roster lists while it is served from its

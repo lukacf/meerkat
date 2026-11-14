@@ -313,6 +313,44 @@ pub(crate) async fn broken_members_of(
         .collect()
 }
 
+/// A member Core holds Broken, as the gateway's init result and
+/// `meta/status` name it: Core's reason, and MobMachine's stable refusal
+/// code when the failure was a refusal that named one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BrokenMember {
+    pub(crate) member: meerkat_mob::AgentIdentity,
+    pub(crate) reason: String,
+    pub(crate) code: Option<String>,
+}
+
+/// [`broken_members_of`], each member with the refusal code MobMachine
+/// recorded for it, if any. The code is read from the machine state the
+/// mob's actor last published (`MobHandle::identity_entry`), so the read
+/// wakes no member and never waits on the mob actor. The code is advisory:
+/// a member whose entry this read cannot answer is named without one.
+pub(crate) async fn broken_member_facts_of(handle: &MobHandle) -> Vec<BrokenMember> {
+    broken_members_of(handle)
+        .await
+        .into_iter()
+        .map(|(member, reason)| {
+            let code = match handle.identity_entry(&member) {
+                Ok(meerkat_mob::IdentityEntryRead::Entry(entry)) => {
+                    entry.broken.and_then(|fact| fact.code)
+                }
+                Ok(meerkat_mob::IdentityEntryRead::NotAnEntry {
+                    worker: Some(worker),
+                }) => worker.broken.and_then(|fact| fact.code),
+                _ => None,
+            };
+            BrokenMember {
+                member,
+                reason,
+                code,
+            }
+        })
+        .collect()
+}
+
 /// The boot answer of a root mob whose stored state could not be restored.
 ///
 /// A failure of the mob's store (a read the store could not serve now, or

@@ -1662,8 +1662,9 @@ settings beside a provider-neutral reasoning effort level
 not queued behind unfinished work. It is answered `-32002` at once with
 the data `{"kind": "reasoning_effort_change_needs_idle_session"}` and
 stores nothing: wait for the running turn's answer, then send it again.
-The cases are listed under `reasoning_effort` below. A later release
-queues it.
+The cases are in the table under
+[Model settings on a busy session](#model-settings-on-a-busy-session). A
+later release queues it.
 
 Since 0.9.5, `"session_events": false` asks that the turn's events not be
 written as `session/event` notifications. A caller that reads them from a
@@ -1804,29 +1805,14 @@ Only a mechanical failure is `-32603`.
   session keeps its identity; that refusal is answered when the request
   arrives, also while another turn of the session runs. A turn that would
   change the session's model settings beside a provider-neutral level is
-  taken only when the session has no unfinished work. It is answered
-  `session busy` at once (code `-32002`, `data.kind`
-  `reasoning_effort_change_needs_idle_session`), and nothing is stored,
-  when the session has an unfinished turn or queued input and:
-
-  - the session holds a provider-neutral level and the request changes the
-    model, the provider, the self-hosted server, the provider params, the
-    auth binding or the level itself (sets, changes or clears it; a level
-    named inside `provider_params` counts as a change even when it equals
-    the held one);
-  - the session holds none and the request sets one;
-  - the session's first turn is still building it (a deferred create) and
-    the request names a level.
-
-  Still queued: a plain turn; a turn that repeats the session's level with
-  this field; and on a session that holds no level: a model change, a
-  provider's own effort inside `provider_tag`, a clear. The one `kind`
-  names the level in every case, also for a request that only changed the
-  model of a session that holds a level. Wait for the running turn's
-  answer, then send the request again; do not poll. A session with
-  standing work may never be idle for such a request: stop sending, let
-  its queue drain, then change the level. A later release queues such a
-  turn. `mob/turn_start` takes the same field and is answered the same.
+  taken only when the session has no unfinished work; otherwise it is
+  answered `session busy` at once (code `-32002`, `data.kind`
+  `reasoning_effort_change_needs_idle_session`) and nothing is stored. The
+  cases are in the table under
+  [Model settings on a busy session](#model-settings-on-a-busy-session).
+  `mob/turn_start` takes the same field and is answered the same; a member
+  built from a profile whose `provider_params` carry a level holds that
+  level.
 </ParamField>
 
 <ParamField body="auth_binding" type="TurnMetadataOverride | null" default="preserve">
@@ -4726,8 +4712,9 @@ level the session holds, and a turn that clears the level or names one the
 route accepts is the way out. A request the route does accept can still be
 answered `-32002` (`SESSION_BUSY`) with the data
 `{"kind": "reasoning_effort_change_needs_idle_session"}`
-when the session has unfinished work (the cases are listed under
-`turn/start`, `reasoning_effort`): that answer is not a level refusal, it
+when the session has unfinished work (the cases are in the table under
+[Model settings on a busy session](#model-settings-on-a-busy-session)):
+that answer is not a level refusal, it
 carries no `reasoning_effort_refusal`, and the same request is taken once
 the session is idle. The other surfaces answer the same request in their
 own way: REST answers a level on a message for a session it holds live
@@ -4754,6 +4741,50 @@ reports it in `run_failed` as the `error_report` reason
 `config`. No provider request is made for a refused level. The MCP server
 answers a refused level on `meerkat_run` and `meerkat_resume` as a tool
 error with the same code and data.
+
+### Model settings on a busy session
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+On a session that holds a provider-neutral reasoning effort level, anything
+that changes the model identity needs an idle session; plain turns and true
+repeats of the level queue. On a session that holds none, only setting a
+level needs an idle session; everything else queues as on 0.9.14. "Busy" in
+the table is `-32002` (`SESSION_BUSY`) with `error.data`
+`{"kind": "reasoning_effort_change_needs_idle_session"}`,
+answered at once, with nothing stored. It applies to `turn/start` and
+`mob/turn_start` while the session has an unfinished turn or queued input,
+and on a deferred session while its first turn is still building it (there:
+to a request that names a level).
+
+| The session | A plain turn | Repeats its level with `reasoning_effort` | Sets or changes the level | Clears the level | Changes the model, the provider, the self-hosted server, the provider params or the auth binding |
+|---|---|---|---|---|---|
+| holds a provider-neutral level | queued | queued | busy | busy | busy |
+| holds none | queued | nothing to repeat | busy | queued | queued |
+
+- The model identity is the model, the provider, the self-hosted server,
+  the provider params, the auth binding, and the level itself (set, change,
+  clear).
+- A level named inside `provider_params` replaces the provider params and
+  is never a repeat: on a busy session that holds a level it is answered
+  busy even when it equals the held level. A client repeats its level with
+  the field `reasoning_effort`.
+- A session holds a level when a request set one (on create or on a turn),
+  when it was forked from or resumed as a session that holds one, and when
+  it is a mob member built from a profile whose `provider_params` carry
+  `reasoning_effort`. No host or realm configuration gives sessions a
+  level.
+- The price of holding a level: a client that sets a level once and then
+  varies `provider_params` per turn (a temperature, say) is answered busy
+  whenever another turn of the session runs or is queued, and so is a
+  `mob/turn_start` with a model override on a busy member built from a
+  profile with a level. Wait for the running turn's answer, then send the
+  request again; do not poll. A session with standing work may never be
+  idle for such a request: stop sending, let its queue drain, then make
+  the change.
+- The one `kind` names the level in every busy cell, also when the request
+  only changed the model.
+- A later release queues these turns.
 
 ### comms/send error data
 

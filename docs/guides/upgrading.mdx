@@ -378,6 +378,25 @@ route (the four differences are listed under Changed in the changelog).
   the model, which can be fewer than the provider's own API accepts.
 - **Spelling.** The neutral level is `xhigh` only. The Claude-specific
   effort keeps accepting `xhigh` and `x_high`.
+- **The price of holding a level (JSON-RPC).** On a session that holds a
+  provider-neutral level, anything that changes the model identity (the
+  model, the provider, the self-hosted server, the provider params, the
+  auth binding, or the level itself: set, change, clear) needs an idle
+  session: sent while another turn of the session runs or is queued, such
+  a `turn/start` or `mob/turn_start` is not queued, it is answered
+  `-32002` (`SESSION_BUSY`) with the data
+  `{"kind": "reasoning_effort_change_needs_idle_session"}` at once and
+  stores nothing. So a client that sets a level once and then varies
+  `provider_params` per turn (a temperature, say) is answered busy
+  whenever another turn runs or is queued: wait for the running turn's
+  answer, then send the request again. Plain turns and repeats of the
+  level with the field `reasoning_effort` queue; a level named inside
+  `provider_params` is never a repeat. A mob member built from a profile
+  whose `provider_params` carry a level holds that level. A session that
+  holds no provider-neutral level queues everything as on 0.9.14, except
+  a turn that sets a level. The table is in the
+  [JSON-RPC reference](/api/rpc#model-settings-on-a-busy-session). A
+  later release queues these turns.
 - **Older servers.** A server before 0.9.15 refuses the `reasoning_effort`
   field on `turn/start` and `mob/turn_start` and ignores it on
   `session/create` and in REST bodies. The nested key

@@ -1559,7 +1559,10 @@ them.
   (`supported_levels_unavailable`) is still judged at the start of such a
   turn. In the code of this release before this fix, queued requests that
   changed a session's level or model could end other work queued on that
-  session; such requests are no longer queued. A session that holds no
+  session; such requests are no longer queued, and no client sequence
+  reaches that any more; one race between two requests sent without
+  waiting for each other remains until a later release (see Known
+  limitations). A session that holds no
   provider-neutral level queues its turns as in 0.9.14, a model change and
   a provider's own effort parameter (`provider_tag`) included. Measured by
   tests of this change, with the level named in `reasoning_effort` and
@@ -2708,31 +2711,38 @@ them.
   stored, on a live session (also while another turn of it runs) and on a
   stored session that is not live.
 
-  A JSON-RPC turn that would change the session's model settings beside a
-  provider-neutral level is not queued behind unfinished work. It is
-  answered `session busy` at once (code `-32002`, `data.kind`
-  `reasoning_effort_change_needs_idle_session`), and nothing is stored,
-  when the session has an unfinished turn or queued input and:
+  A JSON-RPC turn (`turn/start`, `mob/turn_start`) that would change the
+  session's model settings beside a provider-neutral level is not queued
+  behind unfinished work. On a session that holds a provider-neutral
+  level, anything that changes the model identity needs an idle session;
+  plain turns and true repeats of the level queue. On a session that holds
+  none, only setting a level needs an idle session; everything else queues
+  as on 0.9.14. "Busy" is `-32002` (`SESSION_BUSY`) with `data.kind`
+  `reasoning_effort_change_needs_idle_session`, answered at once, with
+  nothing stored, while the session has an unfinished turn or queued input
+  (a deferred session: while its first turn is still building it, for a
+  request that names a level):
 
-  - the session holds a provider-neutral level and the request changes
-    the model, the provider, the self-hosted server, the provider params,
-    the auth binding or the level itself (sets, changes or clears it; a
-    level named inside `provider_params` counts as a change even when it
-    equals the held one);
-  - the session holds none and the request sets one;
-  - the session's first turn is still building it (a deferred create) and
-    the request names a level.
+  | The session | A plain turn | Repeats its level with `reasoning_effort` | Sets or changes the level | Clears the level | Changes the model, the provider, the self-hosted server, the provider params or the auth binding |
+  |---|---|---|---|---|---|
+  | holds a provider-neutral level | queued | queued | busy | busy | busy |
+  | holds none | queued | nothing to repeat | busy | queued | queued |
 
-  Still queued: a plain turn; a turn that repeats the session's level
-  with the field `reasoning_effort`; and on a session that holds no
-  level: a model change, a provider's own effort inside `provider_tag`, a
-  clear. The one `kind` names the level also for a request that only
-  changed the model of a session that holds a level. Wait for the running
-  turn's answer, then send the request again; do not poll. A session with
-  standing work may never be idle for such a request: stop sending, let
-  the queue drain, then change the level. A later release queues such a
-  turn. (Confirmed by tests of this change, on a session, on a mob
-  member's session and through the JSON-RPC router.)
+  A level named inside `provider_params` is never a repeat: on a busy
+  session that holds a level it is answered busy even when equal; a client
+  repeats its level with the field `reasoning_effort`. A session holds a
+  level when a request set one, when it was forked from or resumed as one
+  that does, and when it is a mob member built from a profile whose
+  `provider_params` carry `reasoning_effort`; no host or realm
+  configuration gives sessions a level. The price of holding a level: a
+  client that sets a level once and then varies `provider_params` per turn
+  is answered busy whenever another turn runs or is queued. The one `kind`
+  names the level also for a request that only changed the model. Wait for
+  the running turn's answer, then send the request again; do not poll. A
+  session with standing work may never be idle for such a request: stop
+  sending, let the queue drain, then make the change. A later release
+  queues these turns. (Confirmed by tests of this change, on a session, on
+  a mob member's session and through the JSON-RPC router.)
 
   The reason: a level is judged again when its turn starts, and a level
   refused at a turn's start is still a failed start, which ends the

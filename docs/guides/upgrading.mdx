@@ -240,6 +240,38 @@ the schedules of the targets that take deliveries again and are still
 paused. The loss is on the safe side: such a schedule never fires at a
 target that takes no delivery.
 
+### Schedule tick reports are non-exhaustive (Rust)
+
+`meerkat_schedule::ScheduleTickReport` gains the field `executor_lockout`
+and is now `#[non_exhaustive]`. Code outside the crate that builds a report
+with a struct literal starts from `ScheduleTickReport::default()` and assigns
+the fields it needs, and a pattern that names its fields ends with `..`.
+Code that only reads a report needs no change. The field is set when a
+schedule driver finds itself locked out behind its own executor lease; see
+[Executor Lease And Crash Recovery](/guides/scheduling#executor-lease-and-crash-recovery).
+
+### The occurrence lifecycle machine gains an input (Rust)
+
+The occurrence machine gains the input `ReleaseClaimBeforeDispatch`, which
+the schedule driver sends to give a claim back when its dispatch cannot
+start. In `meerkat-schedule` it is
+`OccurrenceLifecycleInput::ReleaseClaimBeforeDispatch { admission_evidence,
+at_utc }`: `admission_evidence` is what the occurrence's receipt history
+proves about earlier attempts (the machine admits the release only when no
+dispatch was recorded), and `at_utc` is the store's time of the release.
+Exhaustive matches on these enums need the new arms:
+`OccurrenceLifecycleInput` in `meerkat-schedule`; `OccurrenceLifecycleInput`
+and `OccurrenceLifecycleInputVariant` in `meerkat-machine-schema`
+(`catalog::dsl::occurrence_lifecycle`); `Input`, `InputKind`,
+`OccurrenceLifecycleInputVariant` and `TransitionId`
+(`ReleaseClaimBeforeDispatchFromClaimed` and
+`ReleaseClaimBeforeDispatchAfterSupersession`) in `meerkat-machine-kernels`
+(`generated::occurrence_lifecycle`). Every new variant is appended last, so
+no existing variant's implicit discriminant moves. No stored occurrence or
+receipt changes shape, so there is nothing to migrate and an earlier release
+reads the same rows: a claim given back is recorded as a `lease_expired`
+receipt with the detail `claim released because dispatch could not start`.
+
 ### Store-owned agents: seats an earlier release recorded
 
 A store-owned identity is an agent whose record is its row in the mob's

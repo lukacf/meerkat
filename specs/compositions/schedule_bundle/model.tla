@@ -1987,7 +1987,7 @@ occurrence_ClassifyTransitionFailureNotClaimedPending(arg_refusal_kind, arg_trig
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Pending"
-       /\ ((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "Pending"
        /\ UnchangedFrame_13848a6fab8ddf5f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2007,7 +2007,7 @@ occurrence_ClassifyTransitionFailureNotClaimedClaimed(arg_refusal_kind, arg_trig
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Claimed"
-       /\ ((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "Claimed"
        /\ UnchangedFrame_13848a6fab8ddf5f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2027,7 +2027,7 @@ occurrence_ClassifyTransitionFailureNotClaimedDispatching(arg_refusal_kind, arg_
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Dispatching"
-       /\ ((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "Dispatching"
        /\ UnchangedFrame_13848a6fab8ddf5f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2047,7 +2047,7 @@ occurrence_ClassifyTransitionFailureNotClaimedAwaitingCompletion(arg_refusal_kin
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "AwaitingCompletion"
-       /\ ((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "AwaitingCompletion"
        /\ UnchangedFrame_13848a6fab8ddf5f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2067,7 +2067,7 @@ occurrence_ClassifyTransitionFailureNotClaimedCompleted(arg_refusal_kind, arg_tr
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Completed"
-       /\ ((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "Completed"
        /\ UnchangedFrame_13848a6fab8ddf5f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2087,7 +2087,7 @@ occurrence_ClassifyTransitionFailureNotClaimedSkipped(arg_refusal_kind, arg_trig
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Skipped"
-       /\ ((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "Skipped"
        /\ UnchangedFrame_13848a6fab8ddf5f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2107,7 +2107,7 @@ occurrence_ClassifyTransitionFailureNotClaimedMisfired(arg_refusal_kind, arg_tri
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Misfired"
-       /\ ((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "Misfired"
        /\ UnchangedFrame_13848a6fab8ddf5f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2127,7 +2127,7 @@ occurrence_ClassifyTransitionFailureNotClaimedSuperseded(arg_refusal_kind, arg_t
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Superseded"
-       /\ ((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "Superseded"
        /\ UnchangedFrame_13848a6fab8ddf5f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2147,7 +2147,7 @@ occurrence_ClassifyTransitionFailureNotClaimedDeliveryFailed(arg_refusal_kind, a
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "DeliveryFailed"
-       /\ ((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "DeliveryFailed"
        /\ UnchangedFrame_13848a6fab8ddf5f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -5526,6 +5526,55 @@ occurrence_ReleaseLeaseForPausedScheduleAfterSupersession(arg_at_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
+occurrence_ReleaseClaimBeforeDispatchFromClaimed(arg_admission_evidence, arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ReleaseClaimBeforeDispatch"
+       /\ packet.payload.admission_evidence = arg_admission_evidence
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ (packet.payload.admission_evidence = "Unrecorded")
+       /\ occurrence_phase' = "Pending"
+       /\ occurrence_claimed_by' = None
+       /\ occurrence_lease_expires_at_utc_ms' = None
+       /\ occurrence_claimed_at_utc_ms' = None
+       /\ occurrence_claim_token' = None
+       /\ occurrence_delivery_correlation_id' = None
+       /\ occurrence_receipt_recorded_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ occurrence_receipt_stage' = Some("LeaseExpired")
+       /\ occurrence_receipt_failure_class' = Some("LeaseLost")
+       /\ occurrence_receipt_detail' = Some("claim released because dispatch could not start")
+       /\ occurrence_dispatched_at_utc_ms' = None
+       /\ UnchangedFrame_d29df5823e762e98
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "LeaseExpired", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ReleaseClaimBeforeDispatchFromClaimed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ReleaseClaimBeforeDispatchFromClaimed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Pending"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ReleaseClaimBeforeDispatchAfterSupersession(arg_admission_evidence, arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ReleaseClaimBeforeDispatch"
+       /\ packet.payload.admission_evidence = arg_admission_evidence
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Superseded"
+       /\ occurrence_phase' = "Superseded"
+       /\ UnchangedFrame_13848a6fab8ddf5f
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ReleaseClaimBeforeDispatchAfterSupersession", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Superseded"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 occurrence_live_claim_requires_owner == (IF ~(occurrence__is_live_claim_phase(occurrence_phase)) THEN TRUE ELSE (occurrence_claimed_by # None))
 occurrence_superseded_records_revision == (IF (occurrence_phase # "Superseded") THEN TRUE ELSE (occurrence_superseded_by_revision # None))
 occurrence_delivery_failed_records_failure_class == (IF (occurrence_phase # "DeliveryFailed") THEN TRUE ELSE (occurrence_failure_class # None))
@@ -5626,15 +5675,15 @@ EntryPacketAdmissible_occurrence(packet) ==
     \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Misfired") /\ (((packet.payload.trigger = "Claim") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
     \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Superseded") /\ (((packet.payload.trigger = "Claim") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
     \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "DeliveryFailed") /\ (((packet.payload.trigger = "Claim") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Pending") /\ (((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Claimed") /\ (((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Dispatching") /\ (((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "AwaitingCompletion") /\ (((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Completed") /\ (((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Skipped") /\ (((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Misfired") /\ (((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Superseded") /\ (((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "DeliveryFailed") /\ (((packet.payload.trigger = "DispatchStarted") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Pending") /\ (((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Claimed") /\ (((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Dispatching") /\ (((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "AwaitingCompletion") /\ (((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Completed") /\ (((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Skipped") /\ (((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Misfired") /\ (((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Superseded") /\ (((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "DeliveryFailed") /\ (((IF (packet.payload.trigger = "DispatchStarted") THEN TRUE ELSE (packet.payload.trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
     \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Pending") /\ (((IF (packet.payload.trigger = "DispatchAccepted") THEN TRUE ELSE (packet.payload.trigger = "AwaitCompletion")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
     \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Claimed") /\ (((IF (packet.payload.trigger = "DispatchAccepted") THEN TRUE ELSE (packet.payload.trigger = "AwaitCompletion")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
     \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Dispatching") /\ (((IF (packet.payload.trigger = "DispatchAccepted") THEN TRUE ELSE (packet.payload.trigger = "AwaitCompletion")) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
@@ -5778,6 +5827,8 @@ EntryPacketAdmissible_occurrence(packet) ==
     \/ /\ (packet.variant = "ReleaseLeaseForPausedSchedule") /\ (occurrence_phase = "Dispatching")
     \/ /\ (packet.variant = "ReleaseLeaseForPausedSchedule") /\ (occurrence_phase = "AwaitingCompletion")
     \/ /\ (packet.variant = "ReleaseLeaseForPausedSchedule") /\ (occurrence_phase = "Superseded")
+    \/ /\ (packet.variant = "ReleaseClaimBeforeDispatch") /\ (occurrence_phase = "Claimed") /\ ((packet.payload.admission_evidence = "Unrecorded"))
+    \/ /\ (packet.variant = "ReleaseClaimBeforeDispatch") /\ (occurrence_phase = "Superseded")
 
 EntryPacketAdmissible(packet) ==
     CASE
@@ -6118,6 +6169,8 @@ CoreNext ==
     \/ \E arg_at_utc_ms \in 0..2 : occurrence_ReleaseLeaseForPausedScheduleFromDispatching(arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : occurrence_ReleaseLeaseForPausedScheduleFromAwaitingCompletion(arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : occurrence_ReleaseLeaseForPausedScheduleAfterSupersession(arg_at_utc_ms)
+    \/ \E arg_admission_evidence \in AdmissionEvidenceValues : \E arg_at_utc_ms \in 0..2 : occurrence_ReleaseClaimBeforeDispatchFromClaimed(arg_admission_evidence, arg_at_utc_ms)
+    \/ \E arg_admission_evidence \in AdmissionEvidenceValues : \E arg_at_utc_ms \in 0..2 : occurrence_ReleaseClaimBeforeDispatchAfterSupersession(arg_admission_evidence, arg_at_utc_ms)
     \/ QuiescentStutter
 
 InjectNext ==

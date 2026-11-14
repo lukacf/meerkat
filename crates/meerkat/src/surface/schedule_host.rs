@@ -1543,6 +1543,9 @@ pub fn schedule_host_supported(kind: ScheduleStoreKind) -> bool {
 enum ScheduleHostIncidentClass {
     DriverTickFailed,
     DriverRowFaults,
+    /// The store holds the firing lease under the driver's own executor
+    /// owner id and the driver holds no witness for it.
+    ExecutorLeaseSelfLockout,
     NextActionReadFailed,
     DurableWakeFailed,
     WorkerExited,
@@ -1554,6 +1557,7 @@ impl ScheduleHostIncidentClass {
         match self {
             Self::DriverTickFailed => "driver_tick_failed",
             Self::DriverRowFaults => "driver_row_faults",
+            Self::ExecutorLeaseSelfLockout => "executor_lease_self_lockout",
             Self::NextActionReadFailed => "next_action_read_failed",
             Self::DurableWakeFailed => "durable_wake_failed",
             Self::WorkerExited => "worker_exited",
@@ -1868,6 +1872,31 @@ fn incident_from_tick_report(
     })
 }
 
+/// A tick that found the driver locked out behind its own executor lease is
+/// an incident for the health log, never a healthy standby. It is kept apart
+/// from [`incident_from_tick_report`] because the tick itself succeeded: the
+/// host paces a locked-out driver exactly as it paces any standby.
+fn executor_lockout_incident(
+    report: &meerkat_schedule::ScheduleTickReport,
+) -> Option<ScheduleHostIncident> {
+    report.executor_lockout.as_ref().map(|lockout| {
+        let held_since = lockout.held_since_utc.map_or_else(
+            || "at an unknown time".to_string(),
+            |held_since| held_since.to_rfc3339(),
+        );
+        ScheduleHostIncident::new(
+            ScheduleHostIncidentClass::ExecutorLeaseSelfLockout,
+            format!(
+                "schedule driver is locked out behind its own executor lease: the store holds it \
+                 under this driver's executor owner id {} (acquired {held_since}, expires {}) and \
+                 the driver holds no witness for it; nothing is claimed until that lease expires",
+                lockout.holder_owner_id,
+                lockout.expires_at_utc.to_rfc3339(),
+            ),
+        )
+    })
+}
+
 async fn optional_schedule_host_sleep(delay: Option<Duration>) {
     match delay {
         Some(delay) => schedule_host_tokio::time::sleep(delay).await,
@@ -2088,7 +2117,7 @@ async fn run_schedule_host_worker(
                                     backoff.current,
                                     timing.base_interval,
                                 ),
-                                incident,
+                                incident.or_else(|| executor_lockout_incident(&report)),
                             )
                         }
                     },
@@ -3883,11 +3912,9 @@ mod tests {
         assert_eq!(backoff.observe(&failure), cap);
 
         // A progressing tick resets to the base interval at once.
-        let progressing: Result<_, meerkat_schedule::ScheduleDomainError> =
-            Ok(meerkat_schedule::ScheduleTickReport {
-                claimed_occurrences: 1,
-                ..meerkat_schedule::ScheduleTickReport::default()
-            });
+        let mut claimed_one = meerkat_schedule::ScheduleTickReport::default();
+        claimed_one.claimed_occurrences = 1;
+        let progressing: Result<_, meerkat_schedule::ScheduleDomainError> = Ok(claimed_one);
         assert_eq!(backoff.observe(&progressing), base);
         // And the next failure starts escalating from the base again.
         assert_eq!(backoff.observe(&failure), Duration::from_millis(500));
@@ -3905,11 +3932,9 @@ mod tests {
         let mut backoff = TickBackoff::new(base, cap, grace);
         let idle: Result<_, meerkat_schedule::ScheduleDomainError> =
             Ok(meerkat_schedule::ScheduleTickReport::default());
-        let progressing: Result<_, meerkat_schedule::ScheduleDomainError> =
-            Ok(meerkat_schedule::ScheduleTickReport {
-                planned_occurrences: 1,
-                ..meerkat_schedule::ScheduleTickReport::default()
-            });
+        let mut planned_one = meerkat_schedule::ScheduleTickReport::default();
+        planned_one.planned_occurrences = 1;
+        let progressing: Result<_, meerkat_schedule::ScheduleDomainError> = Ok(planned_one);
 
         // Grace run: the base interval holds for `grace` idle ticks.
         for _ in 0..grace {
@@ -4293,6 +4318,429 @@ mod tests {
         assert!(
             logs.contains("durable_wake_failed"),
             "worker push-wait termination must be visible, got: {logs}"
+        );
+    }
+
+    /// The store holds the firing lease under the host driver's own executor
+    /// owner id and the driver holds no witness for it, as after an acquire
+    /// whose reply was lost. The host loop must log that as an incident of
+    /// its own class instead of idling as a healthy standby, and the ticks
+    /// stay successful.
+    #[tokio::test]
+    async fn schedule_host_worker_logs_a_lockout_behind_its_own_executor_lease() {
+        #[derive(Clone)]
+        struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for SharedBuf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("log buffer lock")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let writer_buf = SharedBuf(Arc::clone(&buf));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(move || writer_buf.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(Arc::clone(&store));
+        let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(PanicOnMaterializeHost {
+            materialize_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(NoopScheduleMobHost::new(
+            "mob targets unsupported in this test",
+        ));
+        let adapter = Arc::new(SharedScheduleTargetAdapter::new(
+            service.clone(),
+            session_host,
+            mob_host,
+        ));
+        let lease_duration = ChronoDuration::seconds(SCHEDULE_HOST_LEASE_SECONDS);
+        let driver = Arc::new(ScheduleDriver::new(
+            service.clone(),
+            service.store(),
+            adapter.clone(),
+            adapter,
+            "lockout-host",
+            ScheduleDriverConfig {
+                claim_limit: 32,
+                lease_duration,
+            },
+        ));
+
+        // Learn the driver's executor owner id from the store, have the
+        // driver give its witness up, and commit an acquisition under that id
+        // whose reply the driver never sees.
+        let report = driver.tick_once().await.expect("the first tick acquires");
+        assert!(report.executor_authorized);
+        let own_executor_id = store
+            .observe_executor_lease()
+            .await
+            .expect("the executor lease view reads")
+            .active
+            .expect("the driver holds the lease")
+            .owner_id;
+        driver
+            .release_executor_lease()
+            .await
+            .expect("the driver releases");
+        let orphaned = store
+            .acquire_executor_lease(meerkat_schedule::AcquireScheduleExecutorLeaseRequest {
+                owner_id: own_executor_id.clone(),
+                lease_duration,
+            })
+            .await
+            .expect("the store commits the acquisition");
+        assert!(matches!(
+            orphaned,
+            meerkat_schedule::AcquireScheduleExecutorLeaseOutcome::Acquired(_)
+        ));
+        drop(orphaned);
+
+        // A locked-out tick succeeds and carries no row fault: it must not
+        // feed the failure backoff, so a standby's tick pacing stays as it is.
+        let report = driver
+            .tick_once()
+            .await
+            .expect("a locked-out tick is not an error");
+        assert!(!report.executor_authorized);
+        assert!(
+            incident_from_tick_report(&report).is_none(),
+            "a lockout is not a row-fault incident"
+        );
+
+        let shutdown = ScheduleHostWorkerShutdown::default();
+        let worker = tokio::spawn(run_schedule_host_worker(
+            service,
+            Arc::clone(&driver),
+            ScheduleHostTiming {
+                wake_mode: ScheduleStoreWakeMode::ProcessLocal,
+                base_interval: Duration::from_millis(20),
+                backoff_cap: Duration::from_millis(100),
+                stable_window: Duration::from_millis(200),
+            },
+            shutdown.subscribe(),
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        shutdown.signal();
+        let exit = worker.await.expect("the worker task joins");
+        assert!(exit.is_ok(), "the worker stops cleanly: {exit:?}");
+
+        let logs = String::from_utf8(buf.lock().expect("log buffer lock").clone())
+            .expect("captured logs should be utf8");
+        assert!(
+            logs.contains("executor_lease_self_lockout"),
+            "the host must log the lockout behind its own lease as an incident, got: {logs}"
+        );
+        assert!(
+            logs.contains(&own_executor_id),
+            "the incident names the driver's own executor owner id, got: {logs}"
+        );
+        assert!(
+            !logs.contains("driver_tick_failed"),
+            "a locked-out tick is not a failed tick, got: {logs}"
+        );
+        assert_eq!(
+            logs.matches("schedule host entered an unhealthy state")
+                .count(),
+            1,
+            "one incident, rate limited while it persists, got: {logs}"
+        );
+    }
+
+    /// Who the store says holds the firing lease when a driver asks for it.
+    #[derive(Clone, Copy)]
+    enum BusyLeaseHolder {
+        /// Another executor: the asking driver is a plain standby.
+        AnotherExecutor,
+        /// The asking driver's own executor owner id: it is locked out.
+        TheAskingDriver,
+    }
+
+    /// A store whose firing lease is always held, with work due now. Every
+    /// tick of a driver on it is unauthorized, so only the executor lease
+    /// and the next action time are ever read; it counts the lease requests,
+    /// one per tick.
+    struct BusyExecutorLeaseStore {
+        holder: BusyLeaseHolder,
+        lease_requests: AtomicUsize,
+    }
+
+    fn unread_by_an_unauthorized_tick() -> meerkat_schedule::ScheduleStoreError {
+        meerkat_schedule::ScheduleStoreError::Internal(
+            "an unauthorized tick must not reach this store call".to_string(),
+        )
+    }
+
+    #[async_trait]
+    impl ScheduleStore for BusyExecutorLeaseStore {
+        fn kind(&self) -> meerkat_schedule::ScheduleStoreKind {
+            meerkat_schedule::ScheduleStoreKind::Custom
+        }
+
+        fn wake_mode(&self) -> ScheduleStoreWakeMode {
+            ScheduleStoreWakeMode::ProcessLocal
+        }
+
+        async fn wait_for_durable_wake(&self) -> Result<(), meerkat_schedule::ScheduleStoreError> {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn acquire_executor_lease(
+            &self,
+            request: meerkat_schedule::AcquireScheduleExecutorLeaseRequest,
+        ) -> Result<
+            meerkat_schedule::AcquireScheduleExecutorLeaseOutcome,
+            meerkat_schedule::ScheduleStoreError,
+        > {
+            self.lease_requests.fetch_add(1, Ordering::SeqCst);
+            let current_owner_id = match self.holder {
+                BusyLeaseHolder::AnotherExecutor => "another-executor:1".to_string(),
+                BusyLeaseHolder::TheAskingDriver => request.owner_id,
+            };
+            Ok(
+                meerkat_schedule::AcquireScheduleExecutorLeaseOutcome::Busy {
+                    current_owner_id,
+                    expires_at_utc: chrono::Utc::now() + request.lease_duration,
+                },
+            )
+        }
+
+        async fn get_store_time_utc(
+            &self,
+        ) -> Result<chrono::DateTime<chrono::Utc>, meerkat_schedule::ScheduleStoreError> {
+            Ok(chrono::Utc::now())
+        }
+
+        async fn next_action_time_utc(
+            &self,
+        ) -> Result<meerkat_schedule::ScheduleStoreActionTime, meerkat_schedule::ScheduleStoreError>
+        {
+            // Work is due now, so the host's wait is its backoff delay.
+            let now = chrono::Utc::now();
+            Ok(meerkat_schedule::ScheduleStoreActionTime {
+                store_now_utc: now,
+                next_action_at_utc: Some(now),
+            })
+        }
+
+        async fn read_due_refill_candidates(
+            &self,
+            _limit: usize,
+        ) -> Result<meerkat_schedule::ScheduleRefillBatch, meerkat_schedule::ScheduleStoreError>
+        {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn commit_schedule_write(
+            &self,
+            _write: meerkat_schedule::AuthorizedScheduleWrite,
+        ) -> Result<meerkat_schedule::ScheduleTransitionCommit, meerkat_schedule::ScheduleStoreError>
+        {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn get_schedule(
+            &self,
+            _schedule_id: &meerkat_schedule::ScheduleId,
+        ) -> Result<Option<meerkat_schedule::Schedule>, meerkat_schedule::ScheduleStoreError>
+        {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn list_schedules(
+            &self,
+            _filter: meerkat_schedule::ScheduleFilter,
+        ) -> Result<Vec<meerkat_schedule::Schedule>, meerkat_schedule::ScheduleStoreError> {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn commit_occurrence_write(
+            &self,
+            _write: meerkat_schedule::AuthorizedOccurrenceWrite,
+        ) -> Result<
+            meerkat_schedule::OccurrenceTransitionCommit,
+            meerkat_schedule::ScheduleStoreError,
+        > {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn commit_schedule_mutation(
+            &self,
+            _schedule: meerkat_schedule::AuthorizedScheduleWrite,
+            _occurrences: Vec<meerkat_schedule::AuthorizedOccurrenceWrite>,
+        ) -> Result<meerkat_schedule::ScheduleMutationCommit, meerkat_schedule::ScheduleStoreError>
+        {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn commit_schedule_refill(
+            &self,
+            _schedule: meerkat_schedule::AuthorizedScheduleWrite,
+            _occurrences: Vec<meerkat_schedule::AuthorizedOccurrenceWrite>,
+            _next_refill_at_utc: Option<chrono::DateTime<chrono::Utc>>,
+        ) -> Result<meerkat_schedule::ScheduleMutationCommit, meerkat_schedule::ScheduleStoreError>
+        {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn record_refill_deadline_if_current(
+            &self,
+            _schedule_id: &meerkat_schedule::ScheduleId,
+            _expected_revision: meerkat_schedule::ScheduleRevision,
+            _expected_refill_at_utc: chrono::DateTime<chrono::Utc>,
+            _next_refill_at_utc: Option<chrono::DateTime<chrono::Utc>>,
+        ) -> Result<(), meerkat_schedule::ScheduleStoreError> {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn get_occurrence(
+            &self,
+            _occurrence_id: &meerkat_schedule::OccurrenceId,
+        ) -> Result<Option<Occurrence>, meerkat_schedule::ScheduleStoreError> {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn list_occurrences(
+            &self,
+            _filter: meerkat_schedule::OccurrenceFilter,
+        ) -> Result<Vec<Occurrence>, meerkat_schedule::ScheduleStoreError> {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn list_receipts(
+            &self,
+            _occurrence_id: &meerkat_schedule::OccurrenceId,
+        ) -> Result<Vec<meerkat_schedule::DeliveryReceipt>, meerkat_schedule::ScheduleStoreError>
+        {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn claim_due_occurrences(
+            &self,
+            _lease: &meerkat_schedule::ScheduleExecutorLease,
+            _request: meerkat_schedule::ClaimDueRequest,
+        ) -> Result<meerkat_schedule::ClaimDueResult, meerkat_schedule::ScheduleStoreError>
+        {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn renew_occurrence_lease_if_current(
+            &self,
+            _request: meerkat_schedule::RenewOccurrenceLeaseRequest,
+        ) -> Result<
+            meerkat_schedule::RenewOccurrenceLeaseResult,
+            meerkat_schedule::ScheduleStoreError,
+        > {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn transition_occurrence_if_current(
+            &self,
+            _occurrence_id: &meerkat_schedule::OccurrenceId,
+            _expected_attempt: u32,
+            _expected_claim_token: Option<uuid::Uuid>,
+            _transition: meerkat_schedule::OccurrenceLifecycleInput,
+        ) -> Result<
+            Option<meerkat_schedule::OccurrenceTransitionCommit>,
+            meerkat_schedule::ScheduleStoreError,
+        > {
+            Err(unread_by_an_unauthorized_tick())
+        }
+
+        async fn transition_occurrence_with_receipt_if_current(
+            &self,
+            _occurrence_id: &meerkat_schedule::OccurrenceId,
+            _expected_attempt: u32,
+            _expected_claim_token: Option<uuid::Uuid>,
+            _transition: meerkat_schedule::OccurrenceLifecycleInput,
+            _runtime_outcome: Option<meerkat_schedule::RuntimeDeliveryOutcome>,
+        ) -> Result<
+            Option<meerkat_schedule::OccurrenceTransitionCommit>,
+            meerkat_schedule::ScheduleStoreError,
+        > {
+            Err(unread_by_an_unauthorized_tick())
+        }
+    }
+
+    /// How many ticks the host worker runs in `window` of paused time for a
+    /// driver that never gets the firing lease.
+    async fn unauthorized_ticks_in(holder: BusyLeaseHolder, window: Duration) -> usize {
+        let counting = Arc::new(BusyExecutorLeaseStore {
+            holder,
+            lease_requests: AtomicUsize::new(0),
+        });
+        let store: Arc<dyn ScheduleStore> = counting.clone();
+        let service = ScheduleService::new(Arc::clone(&store));
+        let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(PanicOnMaterializeHost {
+            materialize_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(NoopScheduleMobHost::new(
+            "mob targets unsupported in this test",
+        ));
+        let adapter = Arc::new(SharedScheduleTargetAdapter::new(
+            service.clone(),
+            session_host,
+            mob_host,
+        ));
+        let driver = Arc::new(ScheduleDriver::new(
+            service.clone(),
+            store,
+            adapter.clone(),
+            adapter,
+            "paced-host",
+            ScheduleDriverConfig {
+                claim_limit: 32,
+                lease_duration: ChronoDuration::seconds(SCHEDULE_HOST_LEASE_SECONDS),
+            },
+        ));
+        let shutdown = ScheduleHostWorkerShutdown::default();
+        let worker = tokio::spawn(run_schedule_host_worker(
+            service,
+            driver,
+            ScheduleHostTiming {
+                wake_mode: ScheduleStoreWakeMode::ProcessLocal,
+                base_interval: Duration::from_millis(50),
+                backoff_cap: Duration::from_millis(400),
+                stable_window: Duration::from_millis(200),
+            },
+            shutdown.subscribe(),
+        ));
+        tokio::time::sleep(window).await;
+        shutdown.signal();
+        let exit = worker.await.expect("the worker task joins");
+        assert!(exit.is_ok(), "the worker stops cleanly: {exit:?}");
+        counting.lease_requests.load(Ordering::SeqCst)
+    }
+
+    /// A lockout is reported, and changes nothing about when the host ticks:
+    /// with work due and the lease held, the worker loop runs a locked-out
+    /// driver on the standby's cadence (the base interval through the idle
+    /// grace run, then the doubling backoff), not on a failing tick's
+    /// (doubling from the first tick).
+    #[tokio::test(start_paused = true)]
+    async fn schedule_host_worker_paces_a_locked_out_driver_like_a_plain_standby() {
+        let window = Duration::from_secs(1);
+        let standby = unauthorized_ticks_in(BusyLeaseHolder::AnotherExecutor, window).await;
+        let locked_out = unauthorized_ticks_in(BusyLeaseHolder::TheAskingDriver, window).await;
+        // Base 50 ms for the first nine ticks (the grace run of eight), then
+        // 100 ms and 200 ms: ticks at 50..=450, 550 and 750 ms.
+        assert_eq!(standby, 11, "the standby's cadence in one second");
+        assert_eq!(
+            locked_out, standby,
+            "a locked-out driver is paced exactly like a standby"
         );
     }
 

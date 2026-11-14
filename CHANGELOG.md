@@ -134,6 +134,34 @@ them.
   host did not build in this process. An implementation adds the two
   parameters; one that decides by identity alone ignores them.
 
+- Rust API of `meerkat-schedule`: `ScheduleTickReport` gains the field
+  `executor_lockout` and is now `#[non_exhaustive]`, so later report fields
+  are additions. Code outside the crate that builds a report with a struct
+  literal starts from `ScheduleTickReport::default()` and assigns the
+  fields it needs; a pattern that names its fields ends with `..`. See
+  Added.
+
+- Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
+  `meerkat-machine-kernels`: the occurrence lifecycle machine gains one
+  input, and its public types follow.
+  `meerkat_schedule::OccurrenceLifecycleInput` gains the variant
+  `ReleaseClaimBeforeDispatch { admission_evidence, at_utc }`
+  (`admission_evidence`: what the occurrence's receipt history proves about
+  earlier attempts; `at_utc`: the store's time of the release). In
+  `meerkat-machine-schema`
+  (`catalog::dsl::occurrence_lifecycle`), `OccurrenceLifecycleInput` and
+  `OccurrenceLifecycleInputVariant` gain `ReleaseClaimBeforeDispatch`. In
+  `meerkat-machine-kernels` (`generated::occurrence_lifecycle`), `Input`,
+  `InputKind` and `OccurrenceLifecycleInputVariant` gain
+  `ReleaseClaimBeforeDispatch`, and `TransitionId` gains
+  `ReleaseClaimBeforeDispatchFromClaimed` and
+  `ReleaseClaimBeforeDispatchAfterSupersession`. In all three crates every
+  new variant is appended last, so no existing variant's implicit
+  discriminant moves. The machine gains no state field, phase,
+  effect, receipt stage or failure class, and no stored occurrence or
+  receipt changes shape: the input name is carried by no stored row.
+  Exhaustive matches must add the new variants. See Fixed.
+
 - `meerkat-core`: `OpenAiProviderTag` gains the public field
   `reasoning_effort_resolved: bool`, a request-local marker for the
   provider-neutral `reasoning_effort` option (see Added). Code that builds
@@ -290,6 +318,29 @@ them.
   value, so the schema stays the released one.
 
 ### Added
+
+- `meerkat-schedule`, `meerkat`: a schedule driver that is locked out
+  behind its own executor lease says so. When a reply on the executor
+  lease is lost (the store committed an acquisition or a renewal and the
+  driver saw an error), a tick is dropped while its acquisition or
+  renewal is in flight, or a release fails after the driver gave its
+  witness up, the store holds the firing lease under that driver's own
+  executor owner id and the driver has nothing to renew or release it
+  with. Until that lease expired, every tick reported a healthy standby,
+  and occurrences due in the gap misfired under the default policy with
+  nothing logged as a fault. Such a tick now carries
+  `ScheduleTickReport::executor_lockout`, a
+  `ScheduleExecutorLockout` with the driver's own executor owner id as
+  the store names it, the lease's expiry, and its acquisition time when
+  the store's lease view (`ScheduleStore::observe_executor_lease`) shows
+  it. The schedule host logs it as the incident class
+  `executor_lease_self_lockout`: an error when it starts, a rate-limited
+  warning while it lasts, and the recovery. This is a report only: the
+  tick still succeeds with `executor_authorized` false, the lease is not
+  taken back and ends by expiry as before, and a standby's tick pacing is
+  unchanged. A driver behind another executor's lease, a restarted host
+  behind the lease of its previous incarnation included, stays a plain
+  standby, and the report names no other holder.
 
 - `meerkat`: `session_runtime::runtime_state::RuntimeCleanupScope`
   (`ArchivedSession`, `KeptSession`) says what became of the session whose
@@ -1657,6 +1708,42 @@ them.
   `run_after_runtime_termination_scoped`.
 
 ### Fixed
+
+- `meerkat-schedule`: one transient fault between a claim and its dispatch
+  start no longer costs the occurrence under the default settings. When the
+  schedule driver had claimed an occurrence and then could not start its
+  dispatch (the schedule could not be read, the target probe failed, or the
+  write that records the dispatch start failed), it returned the error and
+  left the occurrence claimed for the rest of its lease. With the default
+  60 second claim lease and the 30 second `skip` grace that lapse is always
+  past the misfire deadline, so the occurrence ended `misfired`. The driver
+  now gives the claim back at once, through the occurrence machine's new
+  input `ReleaseClaimBeforeDispatch` (legal only while nothing is
+  dispatched, and only for an occurrence with no recorded dispatch): the
+  occurrence is pending again, and the next tick claims and delivers it
+  while its misfire window is open. The release itself counts no attempt;
+  the claim that follows does, as every claim does. The release is
+  recorded as a `lease_expired` receipt with
+  failure class `lease_lost` and the detail `claim released because
+  dispatch could not start`. What does not change: the misfire window is
+  not widened (a claim given back past its deadline ends `misfired`, and
+  is not reclaimed), the tick that met the fault still fails and the host
+  still logs it, and a store outage longer than the window still ends the
+  occurrence `misfired`. The driver tries the release once and remembers
+  nothing: it reads the occurrence's receipt history and then writes the
+  release, and if that read or that write fails too, the claim lapses with
+  its lease as before, so one transient fault is covered, not two in a row. An
+  occurrence that fails before dispatch on every tick is given back on
+  every tick while its window is open and gains one `lease_expired`
+  receipt per failed tick, at the pace of the host's failure backoff.
+  Each of those claims counts an attempt, and the five attempts an
+  occurrence with a recorded dispatch has past its misfire deadline count
+  them too: an occurrence given back four times inside its window and
+  then admitted has no reclaim left if that run loses its executor past
+  the deadline. A reclaim of an occurrence whose earlier attempt recorded
+  its dispatch is not given back: the machine refuses the release, the
+  claim lapses with its lease as before, and those attempts are still
+  spent one per claim lease.
 
 - `meerkat-rpc`, `meerkat-rest`, `meerkat`: a session that was cleaned up
   without being archived no longer loses the agents it created to the

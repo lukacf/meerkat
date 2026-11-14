@@ -718,6 +718,10 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "ReclaimExhaustedAfterUnprovenDispatch",
             "UnprovenLateNotAdmittedFromClaimed",
             "UnprovenLateNotAdmittedFromDispatching",
+            // The claim given back before its dispatch start: after every
+            // variant 0.9.14 published.
+            "ReleaseClaimBeforeDispatchFromClaimed",
+            "ReleaseClaimBeforeDispatchAfterSupersession",
         ],
     ),
     // The member residency twins (archive-only retirements, a Dormant

@@ -61,7 +61,13 @@ token fails instead of silently downgrading execution.
 ### What is packed
 
 `rkat mob pack` archives every regular file under the mob directory, at any
-depth. It prints no warning and no list of them. Hidden files are included:
+depth. Through 0.9.14 it prints no warning and no list of them. From 0.9.15
+it reports on standard error how many files it packed and warns, by path,
+about packed files whose names look like secrets, repository metadata,
+local state or an earlier pack; `rkat mob web build` repeats the warnings
+for the pack it copies. The names are a short heuristic list and the pack is
+the same with or without a warning: no warning does not mean the pack is
+clean. Hidden files are included:
 an env file placed there (`.env`, `.env.local`) is in the pack with its
 contents, and so is the whole `.git` directory when the mob directory is a
 repository of its own.

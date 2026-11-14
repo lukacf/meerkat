@@ -1630,14 +1630,17 @@ them.
   its own output file, and nothing else. A copy of the key, a key file the
   pack is not signed with (an unsigned pack, or another key) and a pack
   written earlier under another name are packed like every other file in
-  the mob directory. On Windows the two files are recognized by their
-  resolved paths only, so a hard link to the key under another name is
-  packed there. Whether Windows recognizes a key or an output typed in
-  another case than it is stored is not established: the standard library
-  resolves a path there by opening it and asking the system for the final
-  path of the handle, and what case that answer has was neither run nor
-  found in the sources at hand. Keep keys and packs outside the mob
-  directory, and check a pack with `rkat mob inspect <pack>`.
+  the mob directory. `rkat mob pack` now warns about key-like names and
+  about `.mobpack` files among the packed files (see Changed); the warning
+  goes by the name alone and removes nothing. On Windows the two files are
+  recognized by their resolved paths only, so a hard link to the key under
+  another name is packed there. Whether Windows recognizes a key or an
+  output typed in another case than it is stored is not established: the
+  standard library resolves a path there by opening it and asking the
+  system for the final path of the handle, and what case that answer has
+  was neither run nor found in the sources at hand. Keep keys and packs
+  outside the mob directory, and check a pack with
+  `rkat mob inspect <pack>`.
 
 - Mob: an explicit resume of a stopped mob (`MobHandle::resume`) rebuilds
   each member from its seat as the host's spawn customizer makes it and

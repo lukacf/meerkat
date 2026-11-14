@@ -1572,3 +1572,222 @@ async fn the_observation_survives_restart_and_refuses_a_broken_batch_as_the_rece
         other => panic!("a lost recipient row is refused by both readers, got {other:?}"),
     }
 }
+
+/// Executor whose apply answers at once with a `RunResult` that carries a
+/// reasoning effort report, as a run that sent a request with a level does.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+struct LevelReportExecutor {
+    session_id: SessionId,
+}
+
+/// The run result of a turn that ran with a level, built through serde like
+/// [`run_result`], with the report in its documented shape.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+fn run_result_with_level_report(session_id: &SessionId, text: &str) -> meerkat_core::RunResult {
+    serde_json::from_value(serde_json::json!({
+        "text": text,
+        "session_id": session_id,
+        "usage": meerkat_core::Usage::default(),
+        "turns": 1,
+        "tool_calls": 0,
+        "reasoning_effort": {
+            "requested": "high",
+            "sent": [{
+                "level": "high",
+                "provider": "openai",
+                "model": "test-openai-default",
+                "route": {"backend": "openai_api", "api": "responses"},
+                "fields": ["reasoning.effort"],
+                "facts": "catalog",
+                "decided_by": "request",
+                "requests": 1
+            }]
+        },
+    }))
+    .expect("RunResult with a level report")
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[async_trait::async_trait]
+impl CoreExecutor for LevelReportExecutor {
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        let contributors = primitive.contributing_input_ids().to_vec();
+        Ok(CoreApplyOutput::with_run_result(
+            RunBoundaryReceiptDraft {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: contributors,
+                conversation_digest: None,
+                message_count: 0,
+            },
+            None,
+            run_result_with_level_report(&self.session_id, "answer-with-level"),
+        ))
+    }
+
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+}
+
+/// Remove the level's report from every run result under `value`, the way a
+/// decoder whose run result has no such member drops it: an object that has
+/// a run result's own members loses its `reasoning_effort` key. Returns how
+/// many reports were removed.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+fn drop_level_reports(value: &mut serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Object(object) => {
+            let is_run_result = ["text", "session_id", "usage", "turns", "tool_calls"]
+                .iter()
+                .all(|member| object.contains_key(*member));
+            let mut dropped = 0;
+            if is_run_result && object.remove("reasoning_effort").is_some() {
+                dropped += 1;
+            }
+            dropped + object.values_mut().map(drop_level_reports).sum::<usize>()
+        }
+        serde_json::Value::Array(items) => items.iter_mut().map(drop_level_reports).sum(),
+        _ => 0,
+    }
+}
+
+/// A turn that ran with a reasoning effort level, finished and finalized,
+/// leaves a stored input row whose run result holds the level's report. An
+/// earlier release's run result has no member for the report: its decoder
+/// drops the member, and its row check recomputes the row's digests from
+/// what it decoded. So the stored row must verify without the report: with
+/// the report removed the way that decoder drops it, the row decodes, passes
+/// the row check, and a machine over the store reads the session's inputs
+/// and the input's finalized receipt from it. The turn's own answer and the
+/// stored row as written keep the report.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[tokio::test]
+async fn a_finished_level_turns_stored_row_verifies_without_its_report() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("runtime.sqlite3");
+    let store = Arc::new(crate::store::SqliteRuntimeStore::new(path.clone()).expect("store"))
+        as Arc<dyn crate::store::RuntimeStore>;
+    let machine = Arc::new(
+        MeerkatMachine::persistent(
+            Arc::clone(&store),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        )
+        .expect("persistent machine"),
+    );
+    let session_id = SessionId::new();
+    machine
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(LevelReportExecutor {
+                session_id: session_id.clone(),
+            }),
+        )
+        .await
+        .expect("register the executor");
+    let input = keyed_external_event("level-turn");
+    let input_id = input.id().clone();
+    let outcome =
+        <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(&machine, &session_id, input)
+            .await
+            .expect("accept the turn's input");
+    assert!(outcome.is_accepted());
+    let live = match tokio::time::timeout(
+        BOUND,
+        machine.wait_input_terminal_receipt(&session_id, &input_id),
+    )
+    .await
+    .expect("the receipt wait resolves")
+    .expect("the receipt wait succeeds")
+    {
+        Some(InputTerminalReceiptWait::Resolved(read)) => read,
+        other => panic!("expected a resolved receipt, got {other:?}"),
+    };
+    match finalized(&live.report).outcome() {
+        CompletionOutcome::Completed(result) => assert!(
+            result.reasoning_effort.is_some(),
+            "the turn's own answer keeps the level's report"
+        ),
+        other => panic!("expected a completed outcome, got {other:?}"),
+    }
+    machine
+        .unregister_session(&session_id)
+        .await
+        .expect("unregister the session");
+    drop(machine);
+    drop(store);
+
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let connection = rusqlite::Connection::open(&path).expect("open the store's file");
+    let written: Vec<u8> = connection
+        .query_row(
+            "SELECT state_json FROM runtime_input_states WHERE runtime_id=?1 AND input_id=?2",
+            rusqlite::params![runtime_id.to_string(), input_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("the turn's stored input row");
+    let mut row: serde_json::Value =
+        serde_json::from_slice(&written).expect("the stored row is JSON");
+    assert!(
+        serde_json::from_value::<crate::input_state::StoredInputState>(row.clone()).is_ok(),
+        "the row as written decodes"
+    );
+    let dropped = drop_level_reports(&mut row);
+    assert!(
+        dropped >= 1,
+        "the stored row holds the level's report in its run result: {row}"
+    );
+    // What an earlier release's decoder sees, checked by this release's row
+    // check: every other type under the outcome is the same in both.
+    let decoded = serde_json::from_value::<crate::input_state::StoredInputState>(row.clone());
+    assert!(
+        decoded.is_ok(),
+        "the stored row without its report decodes and passes the row check: {:?}",
+        decoded.err().map(|error| error.to_string())
+    );
+
+    // The same through the store: the row as that decoder would read it.
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE runtime_input_states SET state_json=?3 WHERE runtime_id=?1 AND input_id=?2",
+                rusqlite::params![
+                    runtime_id.to_string(),
+                    input_id.to_string(),
+                    serde_json::to_vec(&row).expect("the row encodes")
+                ],
+            )
+            .expect("write the row without its report"),
+        1
+    );
+    drop(connection);
+    let reopened = MeerkatMachine::persistent(
+        Arc::new(crate::store::SqliteRuntimeStore::new(path).expect("reopen"))
+            as Arc<dyn crate::store::RuntimeStore>,
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+    )
+    .expect("persistent machine");
+    let inputs = reopened
+        .session_input_states(&session_id)
+        .await
+        .expect("every stored input of the session decodes");
+    assert_eq!(inputs.source, TerminalWitnessSource::DurableStore);
+    assert_eq!(inputs.report.len(), 1);
+    let read = reopened
+        .input_terminal_receipt(&session_id, InteractionSelector::InputId(input_id.clone()))
+        .await
+        .expect("the durable read of the input's receipt")
+        .expect("the input is known");
+    assert_eq!(
+        completed_text(finalized(&read.report).outcome()),
+        "answer-with-level"
+    );
+}

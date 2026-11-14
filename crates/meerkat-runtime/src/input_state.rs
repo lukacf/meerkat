@@ -2957,6 +2957,39 @@ mod tests {
         .expect("an admission recorded without the witness keeps key-only replay");
     }
 
+    /// The bytes a terminal digest covers are fixed. A run result without a
+    /// reasoning effort level has the candidate digest and the receipt
+    /// digest it had before the level existed (the literals were computed by
+    /// the code as it was then), so a change of field order or of any byte
+    /// of the digested form fails here.
+    #[test]
+    fn a_run_result_without_a_level_keeps_its_terminal_digests() {
+        let result: meerkat_core::types::RunResult = serde_json::from_value(serde_json::json!({
+            "text": "pinned answer",
+            "session_id": "018f7b9a-1c2d-7e3f-8a4b-5c6d7e8f9a0b",
+            "usage": meerkat_core::Usage::default(),
+            "turns": 1,
+            "tool_calls": 0,
+        }))
+        .unwrap();
+        let candidate = InteractionTerminalCandidate::RunResult {
+            result: Box::new(result.clone()),
+        };
+        let outcome = crate::completion::CompletionOutcome::Completed(Box::new(result));
+        let finalization = InputTerminalCompletionFinalizationVerdict::Succeeded;
+        assert_eq!(
+            (
+                interaction_terminal_payload_digest(&candidate).unwrap(),
+                interaction_terminal_payload_digest(&(&outcome, &finalization)).unwrap(),
+            ),
+            (
+                "48361bbf24f7a638ad944804e284c2190243ca341e9ddebac836e926d7e54ca5".to_string(),
+                "8cfcc1586eb7b5e1206b7d36c1d0c41fd2a58a67f29037b0f5d3a5250be7cd43".to_string()
+            ),
+            "(candidate digest, receipt digest)"
+        );
+    }
+
     fn terminal_outbox_batch_fixture() -> Vec<InteractionTerminalOutbox> {
         let mut completion_input_ids = vec![InputId::new(), InputId::new(), InputId::new()];
         completion_input_ids.sort_by_key(|input_id| input_id.0);

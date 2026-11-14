@@ -276,6 +276,17 @@ them.
 
 ### Added
 
+- `meerkat`: `session_runtime::runtime_state::RuntimeCleanupScope`
+  (`ArchivedSession`, `KeptSession`) says what became of the session whose
+  live runtime a cleanup retires, and
+  `ArchiveRuntimeCleanup::run_scoped` and
+  `run_after_runtime_termination_scoped` take it: the mob hook, which
+  destroys the mobs a session owns, runs for an archived session only.
+  `RuntimeCleanupScope::of_completion_cleanup` reads the scope from the
+  completion cleanup authority's archive fact. `ArchiveRuntimeCleanup::run`
+  stays the archive's cleanup; `run_after_runtime_termination` is deprecated
+  in favour of the scoped form (see Deprecated and Fixed).
+
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
   requests themselves (see Security).
   `meerkat_core::redact::redact_credentials` removes credentials from text
@@ -1440,7 +1451,85 @@ them.
   `turn/start` and the MCP tools, 0.9.14 refused the key as an unknown
   field.
 
+### Deprecated
+
+- `meerkat`:
+  `session_runtime::runtime_state::ArchiveRuntimeCleanup::run_after_runtime_termination`.
+  It is the cleanup of an archived session and destroys the mobs the session
+  owns; a completion cleanup says what became of the session with
+  `run_after_runtime_termination_scoped`.
+
 ### Fixed
+
+- `meerkat-rpc`, `meerkat-rest`, `meerkat`: a session that was cleaned up
+  without being archived no longer loses the agents it created to the
+  cleanup that the JSON-RPC and REST servers run after a turn. That cleanup
+  retires the session's live runtime, and it also ran the step that belongs
+  to archiving the session: it destroyed every mob the session owned (the
+  mobs its agent had created, with their members, and the session's implicit
+  mob, which holds its delegates and forks), although the session itself
+  stayed. In that cleanup the step now runs only when the session is
+  archived. The loss happened whenever a session that had not been archived
+  was cleaned up after a turn: when the turn could not be started (measured
+  by tests); when a request was cancelled while its turn was still queued
+  (measured by tests on JSON-RPC and on REST), which includes a client that
+  closes its connection to a shared `rkat-rpc` runtime with a turn still
+  queued (by reading the source), and `mob/cancel_all_work` on a member
+  while a client's turn request was queued on that member's session, which
+  destroyed the mobs that member's session owned (measured by a test for a
+  turn started with `turn/start` on the member's session; `mob/turn_start`
+  reaches the same path, by reading the source); when a step right after
+  saving a turn's result failed, or, in 0.6.x, when the result could not be
+  saved; when a turn was cancelled or abandoned while the session was not
+  running; when the host stopped while a result, an event or a peer response
+  was being delivered to the session; and when a single run was stopped
+  while one of its follow-up inputs was pending (these four by reading the
+  source; no way to reach the cancelled or abandoned case is known). A turn
+  could not be started, on JSON-RPC, when a stored session that was not live
+  (after a restart or an eviction) could not be rebuilt by its next turn,
+  for example because the provider, a credential or the account's model list
+  was not available right after a restart, or the realm's configuration
+  could not be read (measured by a test for an unavailable provider client);
+  when a turn's `model`, `provider`, `provider_params` or `auth_binding`
+  override could not be applied to a running session (measured by a test);
+  and when a realtime open of a stored session could not rebuild it
+  (measured by a test). The session of a mob member was affected in the same
+  way when a client started the member's turn (`mob/turn_start`, or
+  `turn/start` with the member's session) and that turn's override could not
+  be applied: the mobs that member had created, and its implicit mob once it
+  had delegated, were destroyed (measured by a test for `turn/start` on the
+  member's session; `mob/turn_start` reaches the same path, by reading the
+  source). Turns a mob gives its own members were not affected (by reading
+  the source), and a member whose stored session cannot be rebuilt is
+  refused before its turn is admitted (measured by a test). On REST it
+  happened when a turn's apply failed before its run on a running session
+  (measured by a test); a stored REST session that cannot be rebuilt is
+  refused before its turn is admitted, and REST's realtime open was not
+  affected (by reading the source). An application that embeds the JSON-RPC
+  session runtime of `meerkat-rpc` with a mob state runs the same cleanup
+  and was affected like `rkat-rpc`, whatever its transport (by reading the
+  source). Not affected: a stop of `rkat-rpc` or of the REST server with
+  turns in flight or queued, which are kept for the next start (measured by
+  tests on JSON-RPC, and by a test on REST for a queued request); a caller's
+  interrupt of a running turn, and a cancel of a request whose turn is
+  running (measured by tests on JSON-RPC); a turn that fails inside its run
+  on a running session (measured by a test); the MCP server, the `rkat`
+  commands and the browser runtime (by reading the source). A failed start
+  still retires the session's runtime registration and its live MCP
+  connections, which the next turn builds again (see Known limitations for
+  an input queued behind the failed turn, and for a request cancelled while
+  its turn is queued). Affects 0.6.0 through 0.9.14 on JSON-RPC and REST:
+  since 0.6.0 for a turn whose result could not be saved and for a stored
+  session whose rebuild fails, since 0.6.2 for a realtime open of a stored
+  session that cannot be rebuilt (JSON-RPC only), since 0.7.0 for any turn
+  that fails while it is applied on a running session, since 0.8.0 for a
+  request cancelled while its turn was queued, and since 0.8.51 for
+  `mob/cancel_all_work`. On JSON-RPC a turn request is queued behind a
+  running turn for certain only from 0.9.5, once that turn has completed a
+  round; before that it was queued only when it arrived while another
+  request's turn was being started (the version ranges and this are read
+  from the released sources). Mobs that were destroyed this way are not
+  restored by upgrading.
 
 - `meerkat-core`: a turn that fails because a provider failure outlasted the
   retries now says what failed. Its typed turn error (`error.data.error` of
@@ -2180,6 +2269,33 @@ them.
   a run of 0.9.14.
 
 ### Known limitations
+
+- An input queued behind a turn that fails at its start is not run. The
+  failed start retires the session's runtime registration, and an input
+  that was queued on it (a peer message, a delegate, fork or job result, a
+  scheduled delivery) ends without a run: its sender is answered
+  `runtime terminated` or that the input was abandoned, and has to send it
+  again. Event streams that were pending on the session close with the
+  registration and have to be opened again. The session's next turn builds
+  the runtime again.
+
+- Cancelling a request whose turn is still queued also ends the turn that
+  is running on that session and the session's other queued requests. The
+  cancelled request is answered as cancelled; the running turn's request
+  and each other queued request are answered with an internal error
+  (`-32603`) and are not completed (measured by a test on JSON-RPC, on
+  0.9.14's cleanup and on this release's). The session and everything it
+  owns stay, and its next turn runs. Do not cancel a request while its
+  turn is queued: let it start, or interrupt the running turn
+  (`turn/interrupt`).
+
+- A mob that belongs to a session which never became durable stays until
+  that session id is archived. Before this release the cleanup of a failed
+  first start destroyed such a mob; a cleanup of a session that is not
+  archived no longer destroys any mob, and the startup scan removes only
+  the mobs of an archived owner. To remove one, archive its owner's session
+  id (the archive removes the mobs bound to an id even when no session is
+  stored under it), or destroy the mob itself.
 
 - The owner-only rule of this release (see Security) covers the
   configuration documents, the comms binding file and `identity.key`. Two

@@ -112,6 +112,14 @@ read from the session's stored metadata, which `rkat` and the JSON-RPC, REST
 and MCP servers keep; a session on the in-memory ephemeral session service,
 which keeps none, delegates on the route it was built with.
 
+A session's implicit mob (its delegates and the forks seated there) and the
+mobs its agent created belong to the session, and they end with it: they are
+destroyed when the session is archived. Besides that, only the route change
+described above replaces the implicit mob, and a mob the agent created ends
+when it is destroyed by name. From 0.9.15, a turn that fails, is cancelled
+or is abandoned, a request that is cancelled, and a stop of the host end
+none of them: the session keeps its mobs for its next turn.
+
 <Warning>
 Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, a turn
 that cannot be started can permanently destroy the mobs its session owns. See

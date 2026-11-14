@@ -45,6 +45,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
+use meerkat::session_runtime::runtime_state::RuntimeCleanupScope;
 use meerkat::surface::{
     RequestAdmissionError, RequestContext, RequestTerminal, RequestTerminalResolution,
     SurfaceRequestExecutor, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides,
@@ -1520,13 +1521,23 @@ async fn discard_rebuilt_rest_session_after_api_error_locked(
     }
 }
 
+/// Take back the runtime of a session whose create failed after it was
+/// registered. The session was not archived, so this is the cleanup of a
+/// session that stays ([`RuntimeCleanupScope::KeptSession`]): it destroys no
+/// mob.
 async fn cleanup_rest_session_after_api_error(
     state: &AppState,
     session_id: &SessionId,
     primary: ApiError,
     operation: &str,
 ) -> ApiError {
-    match cleanup_archived_session_runtime(state, session_id).await {
+    match cleanup_rest_session_runtime_until_terminal(
+        state,
+        session_id,
+        RuntimeCleanupScope::KeptSession,
+    )
+    .await
+    {
         Ok(()) => primary,
         Err(cleanup) => ApiError::Internal(runtime_cleanup_failure_message(
             api_error_message(&primary),
@@ -1763,10 +1774,14 @@ async fn cleanup_rest_runtime_after_completion_outcome(
             if runtime_termination_cleanup
                 && !state.runtime_adapter.contains_session(session_id).await =>
         {
+            // No cleanup authority was generated; the archive read above is
+            // the fact it would have been given. A session that is not
+            // archived keeps what it owns.
             cleanup_rest_runtime_after_verified_termination(
                 state,
                 session_id,
                 &runtime_termination_proof,
+                RuntimeCleanupScope::of_completion_cleanup(archived_now),
             )
             .await?;
             return Ok(true);
@@ -1778,6 +1793,13 @@ async fn cleanup_rest_runtime_after_completion_outcome(
         }
     };
     if cleanup_authority.requires_runtime_cleanup() {
+        // A cleanup the authority asks for is the session's archive only when
+        // the authority says the session is archived. A turn whose apply
+        // failed retires the session's live runtime, which its next turn
+        // builds again, and leaves the session what it owns: its mobs are
+        // destroyed by its archive, never by a failed turn.
+        let scope =
+            RuntimeCleanupScope::of_completion_cleanup(cleanup_authority.archived_by_authority);
         match state.session_service.discard_live_session(session_id).await {
             Ok(()) | Err(SessionError::NotFound { .. }) => {}
             Err(error) => return Err(error),
@@ -1788,10 +1810,11 @@ async fn cleanup_rest_runtime_after_completion_outcome(
                 state,
                 session_id,
                 &runtime_termination_proof,
+                scope,
             )
             .await?;
         } else {
-            cleanup_archived_session_runtime_until_terminal(state, session_id).await?;
+            cleanup_rest_session_runtime_until_terminal(state, session_id, scope).await?;
         }
     }
     Ok(cleanup_authority.releases_pre_admission())
@@ -8824,7 +8847,12 @@ async fn cleanup_archived_session_runtime(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<(), SessionError> {
-    cleanup_archived_session_runtime_until_terminal(state, session_id).await
+    cleanup_rest_session_runtime_until_terminal(
+        state,
+        session_id,
+        RuntimeCleanupScope::ArchivedSession,
+    )
+    .await
 }
 
 /// [`cleanup_archived_session_runtime`] for a completed turn's cleanup: join
@@ -8834,9 +8862,14 @@ async fn cleanup_archived_session_runtime(
 /// outcome); and once the outcome is delivered the runtime is gone, so a
 /// client reusing the session cannot race a half-torn-down registration. The
 /// wait ends on the saga's typed terminal result.
-async fn cleanup_archived_session_runtime_until_terminal(
+///
+/// `scope` says what became of the session: the cleanup of a session that
+/// stays (a turn whose apply failed) retires its live runtime and destroys
+/// none of its mobs.
+async fn cleanup_rest_session_runtime_until_terminal(
     state: &AppState,
     session_id: &SessionId,
+    scope: RuntimeCleanupScope,
 ) -> Result<(), SessionError> {
     if let Some(registration) = state
         .runtime_adapter
@@ -8857,7 +8890,7 @@ async fn cleanup_archived_session_runtime_until_terminal(
             Err(error) => return Err(runtime_driver_error_to_session_error(error)),
         }
     }
-    cleanup_rest_runtime_after_unregistered(state, session_id).await
+    cleanup_rest_runtime_after_unregistered(state, session_id, scope).await
 }
 
 /// Retire an archived REST session without erasing either required cleanup
@@ -8879,6 +8912,7 @@ async fn cleanup_rest_runtime_after_verified_termination(
     state: &AppState,
     session_id: &SessionId,
     cleanup_observation: &meerkat_runtime::CompletionCleanupObservation,
+    scope: RuntimeCleanupScope,
 ) -> Result<(), SessionError> {
     if !cleanup_observation.proves_runtime_termination_for(session_id) {
         return Err(SessionError::Unsupported(format!(
@@ -8890,23 +8924,32 @@ async fn cleanup_rest_runtime_after_verified_termination(
             "REST runtime termination cleanup for {session_id} expected an already-absent registration"
         )));
     }
-    cleanup_rest_runtime_after_unregistered(state, session_id).await
+    cleanup_rest_runtime_after_unregistered(state, session_id, scope).await
 }
 
+/// The surface steps that follow the runtime's unregister. The mobs the
+/// session owns are destroyed for an archived session only
+/// ([`RuntimeCleanupScope::ArchivedSession`]); the MCP and comms steps run
+/// for a session that stays too, and its next turn builds them again.
 async fn cleanup_rest_runtime_after_unregistered(
     state: &AppState,
     session_id: &SessionId,
+    scope: RuntimeCleanupScope,
 ) -> Result<(), SessionError> {
     #[cfg(feature = "mob")]
-    state
-        .mob_state
-        .destroy_bridge_session_mobs(&session_id.to_string())
-        .await
-        .map_err(|error| {
-            error.into_session_error(
-                "failed to destroy bridge session mobs during REST runtime cleanup",
-            )
-        })?;
+    if scope == RuntimeCleanupScope::ArchivedSession {
+        state
+            .mob_state
+            .destroy_bridge_session_mobs(&session_id.to_string())
+            .await
+            .map_err(|error| {
+                error.into_session_error(
+                    "failed to destroy bridge session mobs during REST runtime cleanup",
+                )
+            })?;
+    }
+    #[cfg(not(feature = "mob"))]
+    let _ = scope;
     #[cfg(feature = "mcp")]
     cleanup_mcp_session(state, session_id).await;
     #[cfg(feature = "comms")]
@@ -15595,6 +15638,761 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             mob_state.handle_for(&child_mob_id).await.is_err(),
             "successful retry must remove the child cleanup retry anchor"
         );
+    }
+
+    /// The fault an armed [`ArmedFaultConfigStore`] answers its reads with.
+    #[cfg(feature = "mob")]
+    const FAILED_TURN_START_CONFIG_FAULT: &str =
+        "the realm config cannot be read at this turn's start";
+
+    /// A config store that serves `inner` until it is armed. An armed read
+    /// is refused with [`FAILED_TURN_START_CONFIG_FAULT`].
+    #[cfg(feature = "mob")]
+    struct ArmedFaultConfigStore {
+        inner: Arc<dyn ConfigStore>,
+        armed: AtomicBool,
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl ConfigStore for ArmedFaultConfigStore {
+        async fn get(&self) -> Result<Config, meerkat_core::ConfigError> {
+            if self.armed.load(AtomicOrdering::SeqCst) {
+                return Err(meerkat_core::ConfigError::Validation(
+                    FAILED_TURN_START_CONFIG_FAULT.to_string(),
+                ));
+            }
+            self.inner.get().await
+        }
+
+        async fn set(&self, config: Config) -> Result<(), meerkat_core::ConfigError> {
+            self.inner.set(config).await
+        }
+
+        async fn patch(&self, delta: ConfigDelta) -> Result<Config, meerkat_core::ConfigError> {
+            self.inner.patch(delta).await
+        }
+
+        fn metadata(&self) -> Option<meerkat_core::ConfigStoreMetadata> {
+            self.inner.metadata()
+        }
+
+        async fn set_held(
+            &self,
+            guard: &meerkat_core::AdmissionGuard,
+            config: Config,
+        ) -> Result<(), meerkat_core::ConfigError> {
+            self.inner.set_held(guard, config).await
+        }
+
+        async fn patch_held(
+            &self,
+            guard: &meerkat_core::AdmissionGuard,
+            delta: ConfigDelta,
+        ) -> Result<Config, meerkat_core::ConfigError> {
+            self.inner.patch_held(guard, delta).await
+        }
+    }
+
+    /// The definition of the child mob a [`RestSessionWithOwnedMobs`] owns:
+    /// one turn-driven `worker` profile. The mob id is unique per owner
+    /// session, because a mob's supervisor registers under its mob id in the
+    /// process-wide in-process comms registry.
+    #[cfg(feature = "mob")]
+    fn rest_owned_child_mob_definition(owner: &SessionId) -> meerkat_mob::MobDefinition {
+        let mut definition = meerkat_mob::MobDefinition::explicit(meerkat_mob::MobId::from(
+            format!("rest-owned-child-mob-{owner}"),
+        ));
+        definition.profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
+                model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                auth_binding: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+                durable: false,
+            })),
+        );
+        definition
+    }
+
+    /// A live REST session whose turns ran, which owns a child mob (destroyed
+    /// when its owner is archived, as a mob an agent creates is) and holds
+    /// its implicit mob.
+    ///
+    /// The session's runtime executor keeps the context it was attached
+    /// with. It is attached from a copy of the server state whose config
+    /// runtime reads through `config_fault`, while the continue handler
+    /// keeps the server's own. A continue made while the fault is armed
+    /// therefore passes every check the handler makes before it admits the
+    /// input, and fails where the executor's apply reads the realm config,
+    /// before the agent runs.
+    #[cfg(feature = "mob")]
+    struct RestSessionWithOwnedMobs {
+        _temp: TempDir,
+        state: AppState,
+        session_id: SessionId,
+        child_mob: meerkat_mob::MobId,
+        implicit_mob: meerkat_mob::MobId,
+        config_fault: Arc<ArmedFaultConfigStore>,
+        llm_calls: Arc<tokio::sync::watch::Sender<usize>>,
+    }
+
+    #[cfg(feature = "mob")]
+    impl RestSessionWithOwnedMobs {
+        async fn live() -> Self {
+            let temp = TempDir::new().unwrap();
+            let mut state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            // The mock counts each model request and returns its permit
+            // after use, so the one permit serves every request unheld.
+            let llm_calls = Arc::new(tokio::sync::watch::channel(0).0);
+            state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+                calls: Arc::clone(&llm_calls),
+                release: Arc::new(tokio::sync::Semaphore::new(1)),
+            }));
+            let config_fault = Arc::new(ArmedFaultConfigStore {
+                inner: Arc::clone(&state.config_store),
+                armed: AtomicBool::new(false),
+            });
+            let mut executor_state = state.clone();
+            executor_state.config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+                Arc::clone(&config_fault) as Arc<dyn ConfigStore>,
+                temp.path().join("failed-turn-start-config-state.json"),
+            ));
+            let session_id = create_completed_rest_runtime_session(&executor_state).await;
+
+            let child_mob = state
+                .mob_state
+                .mob_create_definition_with_owner_bridge_session(
+                    rest_owned_child_mob_definition(&session_id),
+                    session_id.clone(),
+                    true,
+                    false,
+                )
+                .await
+                .expect("create a child mob the session owns");
+            let implicit_mob = state
+                .mob_state
+                .get_or_create_implicit_mob_for_bridge_session(
+                    &session_id.to_string(),
+                    &resolved_default_model(&state).await,
+                )
+                .await
+                .expect("the session's implicit mob");
+            let session = Self {
+                _temp: temp,
+                state,
+                session_id,
+                child_mob,
+                implicit_mob,
+                config_fault,
+                llm_calls,
+            };
+
+            // A plain continue: the attached executor applies the session's
+            // turns, and a turn that runs costs the session neither mob.
+            let plain = session.continue_turn("a plain turn").await;
+            assert!(
+                matches!(plain, RequestTerminal::Publish(Ok(_))),
+                "a plain turn runs before any turn fails: {plain:?}"
+            );
+            assert_eq!(
+                (
+                    session.child_mob_kept().await,
+                    session.implicit_mob_kept().await,
+                    session.stored_and_not_archived().await,
+                ),
+                (true, true, true),
+                "(child mob, implicit mob, stored session) before any turn fails"
+            );
+            session
+        }
+
+        /// One plain continue of the session through the continue handler's
+        /// body, with the handler's own answer.
+        async fn continue_turn(
+            &self,
+            prompt: &str,
+        ) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
+            let session_id = self.session_id.to_string();
+            Box::pin(continue_session_inner(
+                &self.state,
+                &session_id,
+                ContinueSessionRequest {
+                    injected_context: None,
+                    transient_turn_context: None,
+                    session_id: session_id.clone(),
+                    prompt: ContentInput::Text(prompt.to_string()),
+                    system_prompt: None,
+                    output_schema: None,
+                    structured_output_retries: None,
+                    keep_alive: None,
+                    comms_name: None,
+                    peer_meta: None,
+                    verbose: false,
+                    model: None,
+                    provider: None,
+                    auth_binding: None,
+                    max_tokens: None,
+                    hooks_override: None,
+                    enable_web_search: None,
+                    skill_refs: None,
+                    turn_tool_overlay: None,
+                    additional_instructions: None,
+                },
+                None,
+            ))
+            .await
+        }
+
+        /// The model requests the session's turns have made.
+        fn model_requests(&self) -> usize {
+            *self.llm_calls.borrow()
+        }
+
+        /// Whether the child mob the session owns is still there.
+        async fn child_mob_kept(&self) -> bool {
+            self.state
+                .mob_state
+                .handle_for(&self.child_mob)
+                .await
+                .is_ok()
+        }
+
+        /// Whether the session's implicit mob is still the one it held.
+        async fn implicit_mob_kept(&self) -> bool {
+            self.state
+                .mob_state
+                .find_implicit_mob_for_bridge_session(&self.session_id.to_string())
+                .await
+                == Some(self.implicit_mob.clone())
+        }
+
+        /// Whether the session is stored and not archived: the body-free
+        /// read the completion cleanup itself makes.
+        async fn stored_and_not_archived(&self) -> bool {
+            matches!(
+                committed_source_archived(&self.state.session_service, &self.session_id).await,
+                Ok(Some(false))
+            )
+        }
+    }
+
+    /// A turn whose apply fails at its start, after its input was admitted,
+    /// is that one turn failed and no archive of the session. The session's
+    /// executor cannot read the realm config where it validates the turn, so
+    /// the apply fails before the agent runs. The session keeps the child mob
+    /// it owns and its implicit mob, stays stored and not archived, and runs
+    /// its next turn. The child mob holds no member here: that a mob's
+    /// members and their sessions stay is measured by the JSON-RPC rows.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn a_failed_turn_start_keeps_the_mobs_a_rest_session_owns() {
+        let session = RestSessionWithOwnedMobs::live().await;
+        let requests_before = session.model_requests();
+
+        session
+            .config_fault
+            .armed
+            .store(true, AtomicOrdering::SeqCst);
+        let failed = session.continue_turn("a turn whose start fails").await;
+        session
+            .config_fault
+            .armed
+            .store(false, AtomicOrdering::SeqCst);
+
+        // The handler answers a continue it refuses before admission without
+        // publishing. A published `TURN_ABANDONED` whose error is a
+        // `runtime_apply_failure` is the completion of an admitted input
+        // whose apply failed, here on the armed config read.
+        match &failed {
+            RequestTerminal::Publish(Err(ApiError::InternalWithData { code, details, .. })) => {
+                assert_eq!(code.as_str(), "TURN_ABANDONED", "{failed:?}");
+                assert_eq!(
+                    details["error"]["kind"], "runtime_apply_failure",
+                    "{failed:?}"
+                );
+                assert!(
+                    details.to_string().contains(FAILED_TURN_START_CONFIG_FAULT),
+                    "the turn failed on the armed config read: {failed:?}"
+                );
+            }
+            other => panic!(
+                "the turn is admitted and its apply fails at its start, but it was answered \
+                 {other:?}"
+            ),
+        }
+        assert_eq!(
+            session.model_requests(),
+            requests_before,
+            "the failed turn made no model request"
+        );
+
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+            ),
+            (true, true),
+            "(child mob, implicit mob) after the failed turn start, which is no archive of the \
+             session"
+        );
+        assert!(
+            session.stored_and_not_archived().await,
+            "the session is still stored, and not archived, after the failed turn start"
+        );
+        let next = session.continue_turn("the next turn").await;
+        assert!(
+            matches!(next, RequestTerminal::Publish(Ok(_))),
+            "the session's next turn runs: {next:?}"
+        );
+        assert!(
+            session.model_requests() > requests_before,
+            "the next turn reached the model"
+        );
+    }
+
+    /// The guard of the row above: archiving the session through the archive
+    /// route still destroys the child mob it owns and its implicit mob.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn an_archive_still_destroys_the_mobs_a_rest_session_owns() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let session = RestSessionWithOwnedMobs::live().await;
+
+        let response = router(session.state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/sessions/{}", session.session_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::OK, "the archive answers: {payload}");
+        assert_eq!(payload["archived"], true, "{payload}");
+
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+                session.stored_and_not_archived().await,
+            ),
+            (false, false, false),
+            "(child mob, implicit mob, stored and not archived session) after the archive"
+        );
+    }
+
+    /// The input of `session_id` that is admitted and queued, not yet
+    /// running, other than the inputs in `ahead`. The bound is only a failure
+    /// backstop.
+    #[cfg(feature = "mob")]
+    async fn wait_for_rest_queued_input(
+        state: &AppState,
+        session_id: &SessionId,
+        ahead: &[meerkat_core::lifecycle::InputId],
+    ) -> meerkat_core::lifecycle::InputId {
+        for _ in 0..3000 {
+            let active_inputs = state
+                .runtime_adapter
+                .list_active_inputs(session_id)
+                .await
+                .unwrap_or_default();
+            for input_id in active_inputs {
+                if ahead.contains(&input_id) {
+                    continue;
+                }
+                let queued = matches!(
+                    state
+                        .runtime_adapter
+                        .input_state(session_id, &input_id)
+                        .await,
+                    Ok(Some(stored))
+                        if stored.seed.phase == meerkat_runtime::InputLifecycleState::Queued
+                );
+                if queued {
+                    return input_id;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("no further input of {session_id} was admitted and left queued");
+    }
+
+    /// Wait until `session_id` has no active input left: every input it
+    /// admitted has ended. The bound is only a failure backstop.
+    #[cfg(feature = "mob")]
+    async fn wait_for_rest_inputs_to_end(state: &AppState, session_id: &SessionId) {
+        for _ in 0..3000 {
+            let ended = matches!(
+                state.runtime_adapter.list_active_inputs(session_id).await,
+                Ok(active_inputs) if active_inputs.is_empty()
+            );
+            if ended {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the inputs of {session_id} did not end");
+    }
+
+    /// A caller's cancel of a request whose input is still queued is that one
+    /// request cancelled and no archive of the session. A turn is held at the
+    /// model, a second tracked `POST /sessions/{id}/messages` is admitted to
+    /// the runtime and queued behind it, and `POST /requests/{id}/cancel`
+    /// cancels it: the real route, by the request's id, whose cancel action
+    /// abandons the request's exact queued input. That input ends as a
+    /// runtime termination, and the request's completion cleanup answers
+    /// that outcome by retiring the session's runtime. The session keeps the
+    /// child mob it owns and its implicit mob, stays stored and not archived,
+    /// and runs its next turn.
+    ///
+    /// The completion cleanup takes the session's runtime registration lock
+    /// first. The row holds that lock from before the cancel until the turn
+    /// ahead of the queued request has ended, so the cleanup retires a
+    /// runtime with no turn in flight: the row measures what the cleanup
+    /// does to the session's mobs, not what becomes of a turn whose runtime
+    /// is retired under it. That turn's own answer is not asserted.
+    ///
+    /// The fixture's model never holds a turn, so the row first unloads the
+    /// session (its live session and its runtime registration, as for a
+    /// stored session nothing serves) and continues it through a copy of the
+    /// server state whose model waits on a gate the row holds: the continue
+    /// attaches the session again with that model.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn a_cancelled_queued_request_keeps_the_mobs_a_rest_session_owns() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
+        const CANCELLED_REQUEST: &str = "cancelled-queued-request";
+
+        let session = RestSessionWithOwnedMobs::live().await;
+        let session_id = session.session_id.clone();
+
+        session
+            .state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live session");
+        unregister_rest_runtime_session_until_terminal_for_test(&session.state, &session_id).await;
+        let model_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut state = session.state.clone();
+        state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&session.llm_calls),
+            release: Arc::clone(&model_gate),
+        }));
+        let requests_before = session.model_requests();
+
+        // The turn ahead: it attaches the session again and is held at the
+        // model.
+        let running = spawn_tracked_rest_continue(
+            &state,
+            &session_id,
+            "turn-ahead-of-the-cancelled-request",
+            "the running turn",
+        );
+        wait_for_rest_llm_calls(
+            &session.llm_calls,
+            requests_before + 1,
+            "the running turn reaches the model",
+        )
+        .await;
+        let ahead = state
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("the running turn's inputs");
+        assert!(
+            !ahead.is_empty(),
+            "the running turn's input is an active input of the session"
+        );
+
+        // The request under test: admitted to the runtime, its input queued
+        // behind the running turn.
+        let cancelled =
+            spawn_tracked_rest_continue(&state, &session_id, CANCELLED_REQUEST, "the queued turn");
+        let queued_input = wait_for_rest_queued_input(&state, &session_id, &ahead).await;
+        // The request's handler holds this lock until it has admitted its
+        // input, installed its cancel action and attached its completion
+        // cleanup. From here both requests' completion cleanups wait for it.
+        let registration_lock = rest_runtime_registration_lock(&state, &session_id);
+        let registration_guard = registration_lock.mutex().lock().await;
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+                session.stored_and_not_archived().await,
+            ),
+            (true, true, true),
+            "(child mob, implicit mob, stored session) while the request is queued, before its \
+             cancel"
+        );
+
+        let response = tokio::time::timeout(
+            FAILURE_BOUND,
+            router(state.clone()).oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/requests/{CANCELLED_REQUEST}/cancel"))
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("the cancel of a queued request does not wait for the running turn")
+        .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::OK, "the cancel answers: {payload}");
+        assert_eq!(payload["cancelled"], true, "{payload}");
+        let active_after_cancel = state
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("the session's inputs after the cancel");
+        assert!(
+            !active_after_cancel.contains(&queued_input),
+            "the cancel ended the request's exact queued input: {active_after_cancel:?}"
+        );
+
+        // The running turn ends on its own, then the cleanups run.
+        model_gate.add_permits(1);
+        wait_for_rest_inputs_to_end(&state, &session_id).await;
+        drop(registration_guard);
+        drop(registration_lock);
+
+        let (cancelled_status, cancelled_body) = tokio::time::timeout(FAILURE_BOUND, cancelled)
+            .await
+            .expect("the cancelled request is answered")
+            .expect("cancelled request task");
+        assert_eq!(
+            cancelled_status,
+            StatusCode::from_u16(499).expect("499 is a valid status"),
+            "{cancelled_body}"
+        );
+        assert_eq!(
+            cancelled_body["code"], "REQUEST_CANCELLED",
+            "{cancelled_body}"
+        );
+        let _running_answer = tokio::time::timeout(FAILURE_BOUND, running)
+            .await
+            .expect("the running turn's request is answered")
+            .expect("running turn task");
+        assert_eq!(
+            session.model_requests(),
+            requests_before + 1,
+            "only the running turn reached the model: the cancelled request never ran"
+        );
+        // The cleanup under test ran to its end: the cancelled input's
+        // outcome retired the session's runtime. Nothing else here does.
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "the cancelled request's completion cleanup retired the session's runtime"
+        );
+
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+            ),
+            (true, true),
+            "(child mob, implicit mob) after the cancelled queued request, which is no archive \
+             of the session"
+        );
+        assert!(
+            session.stored_and_not_archived().await,
+            "the session is still stored, and not archived, after the cancelled queued request"
+        );
+        let next = session.continue_turn("the next turn").await;
+        assert!(
+            matches!(next, RequestTerminal::Publish(Ok(_))),
+            "the session's next turn runs: {next:?}"
+        );
+        assert!(
+            session.model_requests() > requests_before + 1,
+            "the next turn reached the model"
+        );
+    }
+
+    /// The server's ordinary stop with a request still queued ends nothing
+    /// the session owns. A turn is held at the model and a second tracked
+    /// `POST /sessions/{id}/messages` is admitted to the runtime and queued
+    /// behind it, as in the row above, and nothing is cancelled. The stop is
+    /// the server's own at its shutdown signal: schedule delivery stops and
+    /// every runtime registration is unregistered with the runtime's
+    /// graceful disposition, which requeues on this stored realm. The model
+    /// is never released before the stop. The queued request is answered as
+    /// kept for the session's next start (`409` `SESSION_NOT_RUNNING`, kind
+    /// `requeued_across_stop`), the stop leaves no runtime registration, no
+    /// further model request is made, and the session keeps the child mob it
+    /// owns and its implicit mob and stays stored and not archived.
+    ///
+    /// The running turn's request is answered by the stop too. Whether its
+    /// run is kept suspended for the next start or ended is the runtime
+    /// stop's decision per run, so its answer is reported in the messages
+    /// below and not asserted.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn an_ordinary_stop_with_a_queued_request_keeps_the_mobs_a_rest_session_owns() {
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
+
+        let session = RestSessionWithOwnedMobs::live().await;
+        let session_id = session.session_id.clone();
+
+        // The fixture's model never holds a turn: unload the session and
+        // continue it through a copy of the server state whose model waits
+        // on a gate the row holds, which attaches the session again.
+        session
+            .state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live session");
+        unregister_rest_runtime_session_until_terminal_for_test(&session.state, &session_id).await;
+        let model_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut state = session.state.clone();
+        state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&session.llm_calls),
+            release: Arc::clone(&model_gate),
+        }));
+        let requests_before = session.model_requests();
+        assert!(
+            state.runtime_adapter.has_runtime_persistence(),
+            "the runtime has a persistence store, so its graceful stop requeues"
+        );
+
+        // The turn ahead: held at the model.
+        let running = spawn_tracked_rest_continue(
+            &state,
+            &session_id,
+            "turn-running-at-the-ordinary-stop",
+            "the running turn",
+        );
+        wait_for_rest_llm_calls(
+            &session.llm_calls,
+            requests_before + 1,
+            "the running turn reaches the model",
+        )
+        .await;
+        let ahead = state
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("the running turn's inputs");
+        assert!(
+            !ahead.is_empty(),
+            "the running turn's input is an active input of the session"
+        );
+
+        // The queued request: admitted to the runtime, its input queued
+        // behind the running turn.
+        let queued = spawn_tracked_rest_continue(
+            &state,
+            &session_id,
+            "request-queued-at-the-ordinary-stop",
+            "the queued turn",
+        );
+        wait_for_rest_queued_input(&state, &session_id, &ahead).await;
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+                session.stored_and_not_archived().await,
+            ),
+            (true, true, true),
+            "(child mob, implicit mob, stored session) while the request is queued, before the \
+             stop"
+        );
+
+        // The server's stop at its shutdown signal, before its HTTP drain.
+        // The model gate is still held: the stop does not wait for the turn.
+        state.shutdown_schedule_host().await;
+        tokio::time::timeout(
+            FAILURE_BOUND,
+            crate::unregister_runtime_sessions_for_shutdown(&state),
+        )
+        .await
+        .expect("the stop does not wait for the turn held at the model");
+        let (queued_status, queued_body) = tokio::time::timeout(FAILURE_BOUND, queued)
+            .await
+            .expect("the queued request is answered by the stop")
+            .expect("queued request task");
+        let (running_status, running_body) = tokio::time::timeout(FAILURE_BOUND, running)
+            .await
+            .expect("the running turn's request is answered by the stop")
+            .expect("running turn task");
+        // After the drain the server unregisters once more, for a session
+        // registered meanwhile. It then cancels the requests still tracked:
+        // none is left here, and the row cancels nothing.
+        crate::unregister_runtime_sessions_for_shutdown(&state).await;
+
+        assert_eq!(
+            queued_status,
+            StatusCode::CONFLICT,
+            "the queued request is kept across the stop, not ended: {queued_body}; the running \
+             turn's request was answered {running_status} {running_body}"
+        );
+        assert_eq!(queued_body["code"], "SESSION_NOT_RUNNING", "{queued_body}");
+        assert_eq!(
+            queued_body["details"]["kind"], "requeued_across_stop",
+            "{queued_body}"
+        );
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "the stop unregistered the session's runtime"
+        );
+        assert_eq!(
+            session.model_requests(),
+            requests_before + 1,
+            "only the running turn reached the model: nothing ran after the stop"
+        );
+
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+            ),
+            (true, true),
+            "(child mob, implicit mob) after the ordinary stop, which is no archive of the \
+             session; the running turn's request was answered {running_status} {running_body}"
+        );
+        assert!(
+            session.stored_and_not_archived().await,
+            "the session is still stored, and not archived, after the ordinary stop"
+        );
+
+        // Released only now, so that nothing still waiting on the model
+        // outlives the row.
+        model_gate.add_permits(1);
     }
 
     #[test]

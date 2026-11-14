@@ -251,14 +251,21 @@ own `request_id` or by the outcome's `operation_id`.
 <CodeGroup>
 
 ```python Python
+from meerkat_meta import (
+    IdentityDone,
+    IdentityOperationUnknown,
+    IdentityPendingDecision,
+    IdentityRefused,
+)
+
 state = await identities.operation(request_id="adopt-scout-1")
-if state.outcome == "done":
+if isinstance(state, IdentityDone):
     ...
-elif state.outcome == "pending_decision":
+elif isinstance(state, IdentityPendingDecision):
     ...  # still held; state.deadline_ms
-elif state.outcome == "refused":
+elif isinstance(state, IdentityRefused):
     state.refusal.kind  # for example decision_closed
-elif state.outcome == "unknown":
+elif isinstance(state, IdentityOperationUnknown):
     ...  # nothing committed and nothing is held: asking it commits at most once
 ```
 
@@ -295,7 +302,7 @@ decision of an SDK host renders without them.
 <CodeGroup>
 
 ```python Python
-from meerkat_meta import AgentSet, AgentSpec
+from meerkat_meta import AgentSet, AgentSpec, IdentityDone
 
 created = await identities.create(
     [
@@ -310,7 +317,9 @@ created = await identities.create(
     ],
     request_id="create-editor-1",
 )
-digest = created.agents[0].spec_digest
+digest = ""
+if isinstance(created, IdentityDone):
+    digest = created.agents[0].spec_digest or ""
 
 updated = await identities.update(
     "editor",
@@ -318,9 +327,12 @@ updated = await identities.update(
     request_id="update-editor-1",
     set=AgentSet(instructions=["Edit for clarity.", "Keep the author's voice."]),
 )
-agent = updated.agents[0]
-agent.instructions.kind        # "applies_at_next_run", ...
-digest = agent.spec_digest
+if isinstance(updated, IdentityDone):
+    agent = updated.agents[0]
+    if agent.instructions:
+        # "applies_at_next_run", "applies_after_compaction", ...
+        agent.instructions.kind
+    digest = agent.spec_digest or digest
 
 await identities.archive("editor", expected_spec_digest=digest, request_id="archive-editor-1")
 await identities.unarchive("editor", expected_spec_digest=digest, request_id="unarchive-editor-1")
@@ -350,7 +362,8 @@ const updated = await identities.update("editor", {
 });
 if (updated.outcome === "done") {
   const agent = updated.agents[0];
-  agent.instructions?.kind; // "applies_at_next_run", ...
+  // "applies_at_next_run", "applies_after_compaction", ...
+  agent.instructions?.kind;
   digest = agent.specDigest!;
 }
 
@@ -360,6 +373,13 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
 ```
 
 </CodeGroup>
+
+This block archives and removes the agent moments after changing its
+instructions, so the gateway log may show one or two
+`operator_instruction_delivery` warnings (`failure=AGENT_ERROR`,
+`failure=SESSION_NOT_FOUND`): the change was on its way into the agent's
+conversation when the conversation was archived. Nothing is lost: the change
+is already in the agent's record.
 
 - **Create.** One call creates 1 to 256 agents, all or nothing; they may name
   each other as peers. A new agent is dormant: nothing is loaded and nothing

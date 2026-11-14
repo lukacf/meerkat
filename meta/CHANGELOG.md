@@ -237,6 +237,28 @@ Security, Upgrade and Changed.
 
 ### Upgrade
 
+- Agents' mob tools: every mob of a Meta host has a member tool audience,
+  with or without private members, so every agent of a Meta host now
+  reads a refused mob tool (`mob_spawn_member`, `fork_off`,
+  `council`, `conclude_objective`, `mob_check_member`,
+  `mob_retire_member`, `mob_list_members`, `mob_wire`, `mob_unwire`) this
+  way. What it still sees: a refusal with a type of its own (a member or a
+  profile not found, a member that already exists, a scope denial), a
+  provider authentication failure with its kind, provider, realm and
+  binding, `retryable: true` for a retirement still in progress, and for
+  any other refusal the text `the mob refused the call. The host's log has
+  the cause.` with `Refusal class: <class>.` (`wiring_error`,
+  `session_error`, `storage_error` and the like) when the refusal has such
+  a class. What it no longer sees: the refusal's free text (why a wire, a
+  spawn or a retire was refused in words), the outcome text of a failed
+  `fork_off` run and the error of a `council` that could not run. A
+  refusal for a reserved runtime-plane member name is answered like any
+  other refusal of the mob, with its class: the agent is not told that the
+  name is reserved. A
+  `council` that started and then failed still answers its outcome with
+  the mob's own text. The host reads the whole refusal in its log, at
+  `warn`, with the mob's id and the tool's name.
+
 - A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
   or the `bootstrap_with_*` family must complete the bootstrap before an
   agent created at run time can be built: an identity bootstrap

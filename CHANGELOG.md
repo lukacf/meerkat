@@ -692,6 +692,11 @@ them.
   it drives by the same rule. `MobLifecycleObservation` is non-exhaustive,
   so code that reads it compiles unchanged.
 
+- `meerkat-mob`: `MobHandle::has_member_tool_audience()` answers whether
+  the mob's host installed a member tool audience
+  (`MobBuilder::with_member_tool_audience`). The agent mob tools read it to
+  decide how a mob's refusal is answered (see Security).
+
 - `meerkat-core`, `meerkat-mob`: the session-service seam of a same-identity
   member rewind (a mob member continuing on a durable fork of its own
   session). No surface calls it yet. `meerkat_core::service` gains
@@ -2365,6 +2370,71 @@ them.
   the report `mob_destroy` answers an agent hold only members the agent
   was shown when the destroy started. Affects 0.9.11 through 0.9.14.
 
+- Mob: an agent's own mob tools tell it less of a mob it holds no authority
+  over. A tool that names a mob by id (`mob_destroy`, `mob_list_members`,
+  `mob_check_member`, `mob_retire_member`, `mob_wire`, `mob_unwire`,
+  `mob_spawn_member`, `council`), a `mob_create` under an id such a mob
+  holds, and a `delegate` whose own implicit mob did not restore, answered
+  a quarantined mob's refusal with the cause of its failed restore, and a
+  held child mob's refusal with the session that owns it.
+  The cause can name a member, its session and a path on the host. An agent
+  is now answered the same kinds with `mob_id`, `class` (a quarantine) or
+  `reason` (a hold), `retryable` and `content_retained`, and no longer with
+  `cause`, `cause_data` or `owner_session_id`; the quarantine answer also
+  loses `code`, which was the code of the cause. A lookup that fails in any
+  other way is answered as a fixed text and logged whole on the host. Such
+  a call also started the restore re-attempt of a quarantined store for any
+  agent: it now starts it only when the agent's authority names the mob (a
+  manage grant, a spawn profile scope or a recorded incarnation under the
+  id) or the agent's session is the creator the mob's creation record
+  names. A refusal the tools' own state answers an agent's `mob_destroy`
+  before the mob is asked (a mob that is quarantined or held by then, a
+  store's error, the ids of active WorkGraph bindings, a path on the host)
+  is answered as the destroy's fixed text and logged whole. A `mob_create`,
+  a `delegate` or the seating of a `council` that the host cannot admit
+  because of a mob the call did not name was answered that mob's id: it
+  is now answered the reason without the id, also in the council's
+  recorded outcome, and the host's log names the mob. The host's own
+  surfaces (RPC, REST, MCP) and the SDKs' error helpers are answered as
+  before. Affects 0.9.0 through 0.9.14 for the owner session, 0.9.9
+  through 0.9.14 for the quarantine and 0.9.4 through 0.9.14 for the id
+  of a mob the call did not name. The destroy's own refusals affect
+  releases through 0.9.14: the text with the binding ids is older than
+  0.9.0, the text with the storage path dates from 0.9.0.
+
+- Mob: for a mob whose host installs a member tool audience
+  (`MobBuilder::with_member_tool_audience`), a refusal the mob answers one
+  of the agent mob tools listed here carries no free text and no cause
+  about a member the audience hides from that agent. Before, such a
+  refusal was passed on as the mob returned it, and some carry a free text
+  or another error (a member's retirement that is stuck, with its cause).
+  `mob_spawn_member`, `fork_off`, `council`,
+  `conclude_objective`, `mob_check_member`, `mob_retire_member`,
+  `mob_list_members`, `mob_wire` and `mob_unwire` now pass a refusal of
+  such a mob on whole only when its type shows that it names nothing but
+  the mob and the members the call itself names. Any other is answered as
+  `the mob refused the call. The host's log has the cause.` and is logged
+  whole at `warn` on the host. When the refusal has a class that describes
+  the refused operation (`wiring_error`, `session_error`, `storage_error`
+  and the like, the vocabulary of a `mob/spawn_many` failure's `cause`),
+  the answer names it, as `Refusal class: <class>.` after the fixed text
+  and as `class` in its data; it carries no free text. Two typed facts
+  that name no member are kept: a provider authentication failure is
+  answered with its kind, provider, realm and binding, and a retirement
+  still in progress says `retryable: true`. The outcome of a `fork_off`
+  run follows the same rule, and so does the error of a `council` that
+  could not run, in both delivery modes. A `council` that started and then
+  failed answers an outcome, which keeps the mob's own texts (see Known
+  limitations). A mob
+  with no audience answers these tools as before, with one exception on
+  every host: a failed read of the calling session's own seat (`fork_off`,
+  `conclude_objective`) is answered as a fixed text unless its type names
+  nothing. A `delegate` acts in the session's own implicit mob, which has
+  no audience. The member operator
+  tools a profile gives a member (`spawn_member`, `retire_member`,
+  `wire_members` and the others) are not changed by this entry. Affects
+  0.9.11 through 0.9.14.
+
 - `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486, in
   Cargo.lock and in the example workspaces' lockfiles. Releases through
   0.9.14 build with 1.1.5. `meerkat-core` depends on `rustix` directly and
@@ -2752,7 +2822,48 @@ them.
   active, and `rkat run --skill <id>` loads the built-in, not the copy,
   without a message. The copy can be removed.
 
+- Mob: on a host that installs a member tool audience, an agent whose mob
+  tool (`mob_spawn_member`, `fork_off`, `council`,
+  `conclude_objective`, `mob_check_member`, `mob_retire_member`,
+  `mob_list_members`, `mob_wire`, `mob_unwire`) is refused by the mob for a
+  reason carried as a free text now reads `the mob refused the call. The
+  host's log has the cause.` in place of that text: why a wire, a spawn or
+  a retire was refused is no longer in the agent's answer. When
+  the refusal has a class that describes the operation, the answer ends
+  with `Refusal class: <class>.` (`wiring_error`, `session_error`,
+  `storage_error` and the like) and carries the same value as `class` in
+  its data. A provider authentication failure keeps its typed data, and a
+  retirement still in progress keeps `retryable: true`. The host reads the
+  whole refusal in its log, at `warn`, with
+  the mob's id and the tool's name. A refusal with a type of its own (a
+  member or a profile not found, a member that already exists, a scope
+  denial) is passed on as before, and so is every refusal of a mob with no
+  audience. On every host, an agent's `mob_destroy` that the tools' own
+  state refuses before the mob is asked, for a reason carried as a text
+  (active WorkGraph bindings, a storage path, a store's error), reads the
+  destroy's fixed text; the host's log has the reason. When the seating of
+  a `council` cannot be admitted because of a mob the call did not name
+  (see Security), a Rust host that runs the council through
+  `MobMcpState::temporary_council()` reads the same reason without the
+  mob's id in the outcome and in the council's record; its log names the
+  mob. The host's own creates answer `MobError::ProvenanceUnavailable`
+  with the id as before.
+
 ### Known limitations
+
+- Mob: on a host that installs a member tool audience, a call that seats
+  a member (`mob_spawn_member`, `fork_off`) tells whether a member, shown
+  or not, holds the name it seats under. A seat cannot be given twice, so
+  this stays.
+
+- Mob: on a host that installs a member tool audience, the outcome a
+  `council` answers its convener's agent keeps the texts of its source
+  mobs. A council that started and then failed (a participant that could
+  not be seated, a wiring or an exchange that failed) answers an outcome,
+  in both delivery modes, that carries the reason it ended and its cleanup
+  report as the source mob gave them, and either can hold a text about a
+  member that agent is not shown. Only the error of a council that could
+  not run is answered as the fixed text.
 
 - An input queued behind a turn that fails at its start is not run. The
   failed start retires the session's runtime registration, and an input

@@ -2332,7 +2332,10 @@ impl CouncilRun {
         {
             return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
                 participant_order: 0,
-                detail: format!("temporary mob creation failed: {error}"),
+                detail: temporary_mob_creation_failure_detail(
+                    &self.record.temporary_mob_id,
+                    &error,
+                ),
             });
         }
 
@@ -2750,6 +2753,35 @@ impl CouncilRun {
                 ),
             })
         }
+    }
+}
+
+/// The detail of a seating failure whose cause is the create of the
+/// council's temporary mob `temporary_mob_id`. A create the host could not
+/// admit because of a mob the council did not name (the creator's
+/// provenance is not known while that mob's roster cannot be read) says
+/// why, and not which mob that is: the refusal, which names the mob, is
+/// logged whole. The detail is what the council records, so the outcome
+/// answered now and every later delivery carry the same text. Every other
+/// cause is the create's own text.
+pub(crate) fn temporary_mob_creation_failure_detail(
+    temporary_mob_id: &MobId,
+    error: &MobError,
+) -> String {
+    match error {
+        MobError::ProvenanceUnavailable { mob_id: Some(_) } => {
+            tracing::warn!(
+                temporary_mob_id = %temporary_mob_id,
+                error = %error,
+                "a council's temporary mob could not be created because of a mob the council \
+                 did not name; the council's outcome carries the reason without that mob's id"
+            );
+            format!(
+                "temporary mob creation failed: {}",
+                crate::CREATOR_NOT_RECORDED
+            )
+        }
+        error => format!("temporary mob creation failed: {error}"),
     }
 }
 

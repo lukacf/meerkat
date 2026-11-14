@@ -1654,7 +1654,11 @@ quarantined.
   manage, and only a mob's actor can answer that, so it never lists a
   quarantined mob: it fails closed. Its structured data carries `kind:
   "mob_quarantined"`, `mob_id`, `class`, `retryable`, `content_retained`,
-  `cause` (the failure the last restore attempt met) and `code`. Only a mob
+  `cause` (the failure the last restore attempt met) and `code`. From
+  0.9.15: an agent's own mob tool that names the id is answered the same
+  kind with `mob_id`, `class`, `retryable` and `content_retained` only, no
+  `cause` and no `code`; the cause is in the host's list and in the host's
+  log. Through 0.9.14 an agent's tool is answered every field. Only a mob
   root that cannot be created, read or listed still fails the whole restore.
 
 The class says why a mob is quarantined:
@@ -1669,7 +1673,13 @@ The class says why a mob is quarantined:
   that meets a re-attempt in flight answers the refusal at once and never
   waits for it. Any call that addresses a `store_unavailable` mob by id can
   start the re-attempt, before the call checks what its caller may do with
-  the mob. A re-attempt runs to its end even when the call that started it
+  the mob. From 0.9.15: an agent's own mob tool is the exception (through
+  0.9.14 it starts the re-attempt like any other call): it starts the
+  re-attempt only when the agent's authority names the mob (a manage grant,
+  a spawn profile scope or a recorded incarnation under the id) or the
+  agent's session is the creator the mob's creation record names; any other
+  agent's call is answered the refusal and starts nothing. A re-attempt runs
+  to its end even when the call that started it
   goes away (a client that disconnects), and a call that meets a mob a
   re-attempt is restoring answers the refusal or the restored mob, never
   that the mob does not exist. A list never re-attempts, and a
@@ -2645,7 +2655,7 @@ wasm-pack output into that bundle; it does not compile wasm32.
 | External spawn rejected | Verify the external binding includes address, Ed25519 identity, and typed bootstrap token |
 | Flow run missing | Use `mob/flows` first and confirm the `flow_id` exists in the definition |
 | Live open fails | Confirm the member's model has realtime capability and `rkat-rpc --live-ws` is enabled when using RPC audio |
-| `delegate` answers `mob_quarantined` for the session's `implicit-<session id>` mob, cause `unknown_model` | An implicit mob made before implicit mobs named their provider, on a model that has since left the catalog, fails its restore and stays quarantined. With no process serving the realm, remove its store (`mob--implicit-<session id>.db` and its `-wal` and `-shm` files in the realm's state directory); the next `delegate` creates the mob again |
+| `delegate` answers `mob_quarantined` for the session's `implicit-<session id>` mob, cause `unknown_model` (from 0.9.15: the answer names the class only, and the host's mob list shows that mob quarantined with cause `unknown_model`) | An implicit mob made before implicit mobs named their provider, on a model that has since left the catalog, fails its restore and stays quarantined. With no process serving the realm, remove its store (`mob--implicit-<session id>.db` and its `-wal` and `-shm` files in the realm's state directory); the next `delegate` creates the mob again |
 
 ## See Also
 

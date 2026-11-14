@@ -11571,6 +11571,15 @@ impl MobHandle {
         }
     }
 
+    /// Whether the mob's host installed a member tool audience
+    /// ([`MobBuilder::with_member_tool_audience`](super::MobBuilder::with_member_tool_audience)).
+    /// The audience is given to the builder, so this is a fact of the mob
+    /// as this handle's build made it: a mob with none hides no member from
+    /// any caller.
+    pub fn has_member_tool_audience(&self) -> bool {
+        self.member_tool_audience.is_some()
+    }
+
     /// The members among `targets` that the host's member tool audience
     /// ([`MobBuilder::with_member_tool_audience`](super::MobBuilder::with_member_tool_audience))
     /// hides from `caller`: the one place the audience is asked. The member

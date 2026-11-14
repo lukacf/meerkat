@@ -336,6 +336,26 @@ impl HostedMob {
     }
 }
 
+/// Why the lookup of a mob an agent mob tool names answered no handle, as
+/// far as an agent caller is told: the typed facts of the set that holds
+/// the mob, never the owner session of a held mob or the cause of a
+/// quarantine ([`MobMcpState::handle_for_agent`]).
+#[derive(Debug)]
+pub(crate) enum AgentMobLookupRefusal {
+    /// No set holds the id.
+    NotFound,
+    /// A restored child mob held before activation, with the bounded token
+    /// of why it is held.
+    Held { reason: &'static str },
+    /// A quarantined persisted mob, with the class of its quarantine.
+    Quarantined {
+        class: meerkat_mob::MobQuarantineClass,
+    },
+    /// The lookup itself failed (the restore of this state's mobs). The
+    /// error is for the host's log; an agent caller is not shown it.
+    Unshown(MobError),
+}
+
 /// Why one persisted mob store was quarantined: the class it gets, the mob
 /// id its store names (`None` when it could not be read), and the typed
 /// failure.
@@ -846,14 +866,18 @@ const DESTROY_REFUSED: &str =
     "mob destroy refused. The destroy can be retried; the host's log has the cause.";
 
 /// A type no value of which carries a member's name, a session id or a
-/// text made from either: counts, epochs and cursors, fixed texts of the
-/// code, the mob's lifecycle state and incarnation, and closed kinds. A
-/// field of a destroy's refusal passes [`names_no_member`] only when its
-/// type is listed here, so a classified variant whose field changes its
-/// type stops compiling until it is classified again.
+/// text made from either: counts, sizes, epochs and cursors, fixed texts
+/// of the code, the mob's lifecycle state and incarnation, closed kinds,
+/// the names the mob's definition gives its profiles, flows, steps and
+/// loops, and the id of a flow run. A field of a refusal passes
+/// [`names_no_member`] only when its type is listed here, so a classified
+/// variant whose field changes its type stops compiling until it is
+/// classified again.
 trait NamesNoMember {}
 
 impl NamesNoMember for usize {}
+impl NamesNoMember for u8 {}
+impl NamesNoMember for u32 {}
 impl NamesNoMember for u64 {}
 impl NamesNoMember for Option<u64> {}
 impl NamesNoMember for &'static str {}
@@ -867,17 +891,26 @@ impl NamesNoMember for meerkat_mob::ForkedParticipantLeaseOperation {}
 impl NamesNoMember for meerkat_mob::machines::mob_machine::MobSpawnMemberAdmissionKind {}
 impl NamesNoMember for meerkat_core::service::MobIncarnationId {}
 impl NamesNoMember for Option<meerkat_core::service::MobIncarnationId> {}
+impl NamesNoMember for ProfileName {}
+impl NamesNoMember for meerkat_mob::FlowId {}
+impl NamesNoMember for meerkat_mob::StepId {}
+impl NamesNoMember for meerkat_mob::LoopId {}
+impl NamesNoMember for RunId {}
+impl NamesNoMember for meerkat_mob::error::MobMemberCapability {}
 
 /// Compiles only for a field whose type is [`NamesNoMember`].
 fn names_no_member<T: NamesNoMember>(_field: &T) {}
 
-/// What a destroy's refusal names, as far as the fields of its variant say.
-enum DestroyRefusalSubject<'a> {
+/// What a mob's refusal names, as far as the fields of its variant say.
+enum RefusalSubject<'a> {
     /// No member, no session and no free text: the variant has no field, or
     /// every field is [`NamesNoMember`].
     Nothing,
     /// As [`Self::Nothing`], and the id of one mob.
     Mob(&'a MobId),
+    /// As [`Self::Nothing`], and the name of one member: the member the
+    /// refusal is about, with no session and no cause.
+    Member(&'a AgentIdentity),
     /// One member's deferred custody restore
     /// ([`MobError::MemberCustodyDeferred`]): that member, its own session
     /// and the cause its own restore met.
@@ -890,9 +923,9 @@ enum DestroyRefusalSubject<'a> {
 /// Classify `error` by its variant and the types of its fields, never by a
 /// text. Every classified variant is matched with all of its fields, so a
 /// field added to one stops this from compiling; a variant not listed here,
-/// also one added later, is [`DestroyRefusalSubject::Unclassified`].
-fn destroy_refusal_subject(error: &MobError) -> DestroyRefusalSubject<'_> {
-    use DestroyRefusalSubject::{DeferredMember, Mob, Nothing, Unclassified};
+/// also one added later, is [`RefusalSubject::Unclassified`].
+fn refusal_subject(error: &MobError) -> RefusalSubject<'_> {
+    use RefusalSubject::{DeferredMember, Member, Mob, Nothing, Unclassified};
     match error {
         MobError::MemberCustodyDeferred {
             member_id,
@@ -988,6 +1021,104 @@ fn destroy_refusal_subject(error: &MobError) -> DestroyRefusalSubject<'_> {
             Nothing
         }
 
+        // Names of the mob's definition and ids of its flow runs.
+        MobError::ProfileNotFound(profile) => {
+            names_no_member(profile);
+            Nothing
+        }
+        MobError::FlowNotFound(flow) => {
+            names_no_member(flow);
+            Nothing
+        }
+        MobError::RunNotFound(run) | MobError::RunCanceled(run) => {
+            names_no_member(run);
+            Nothing
+        }
+        MobError::FlowRunIdempotencyConflict { run_id, flow_id } => {
+            names_no_member(run_id);
+            names_no_member(flow_id);
+            Nothing
+        }
+        MobError::FrameDepthLimitExceeded {
+            loop_id,
+            max_frame_depth,
+            current_depth,
+        } => {
+            names_no_member(loop_id);
+            names_no_member(max_frame_depth);
+            names_no_member(current_depth);
+            Nothing
+        }
+        MobError::InsufficientTargets {
+            step_id,
+            required,
+            available,
+        } => {
+            names_no_member(step_id);
+            names_no_member(required);
+            names_no_member(available);
+            Nothing
+        }
+        MobError::TopologyViolation { from_role, to_role } => {
+            names_no_member(from_role);
+            names_no_member(to_role);
+            Nothing
+        }
+
+        // One member's name, alone or beside fields that name no member.
+        MobError::MemberNotFound(member)
+        | MobError::MemberAlreadyExists(member)
+        | MobError::NotExternallyAddressable(member)
+        | MobError::IdentityMember { member_id: member }
+        | MobError::IdentityArchived { member_id: member }
+        | MobError::ApprovalBranchReserved { identity: member }
+        | MobError::GovernedInputUnbound { member_id: member }
+        | MobError::IdentityConvergenceAdmissionClosed { member_id: member }
+        | MobError::ResumeProviderParamsRequireResume { identity: member }
+        | MobError::DispatchAdmissionRequired { member_id: member }
+        | MobError::IdentityAdoptionRequiresPersistentRuntime { member_id: member } => {
+            Member(member)
+        }
+        MobError::MemberAdmissionBacklogFull { member_id, depth } => {
+            names_no_member(depth);
+            Member(member_id)
+        }
+        MobError::MissingMemberCapability {
+            member_id,
+            capability,
+            context,
+        } => {
+            names_no_member(capability);
+            names_no_member(context);
+            Member(member_id)
+        }
+        MobError::InjectedContextUndeliverable { member_id, reason } => {
+            names_no_member(reason);
+            Member(member_id)
+        }
+        MobError::NonDurableService { member_id, profile } => {
+            names_no_member(profile);
+            Member(member_id)
+        }
+        MobError::MemberRoleMigrationRequired {
+            member_id,
+            stored_role,
+            requested_role,
+        } => {
+            names_no_member(stored_role);
+            names_no_member(requested_role);
+            Member(member_id)
+        }
+        MobError::ForkContextTooLarge {
+            source_member_id,
+            max_bytes,
+            required_bytes,
+        } => {
+            names_no_member(max_bytes);
+            names_no_member(required_bytes);
+            Member(source_member_id)
+        }
+
         // One mob's id beside fields that name no member.
         MobError::MobNotFound(mob_id) | MobError::ShutdownInProgress { mob_id } => Mob(mob_id),
         MobError::AdmissionClosed { mob_id, reason } => {
@@ -1039,7 +1170,7 @@ fn destroy_refusal_subject(error: &MobError) -> DestroyRefusalSubject<'_> {
 /// is answered it. A caller shown every member is answered `error` itself.
 ///
 /// An agent caller is answered `error` itself only when its variant and
-/// the types of its fields say what it names ([`destroy_refusal_subject`])
+/// the types of its fields say what it names ([`refusal_subject`])
 /// and the caller is shown all of it: a refusal that names no member, a
 /// refusal that names no member and this mob, and a member's deferred
 /// custody restore when the member is one the caller is shown. Every other
@@ -1057,11 +1188,13 @@ fn destroy_refusal_for_caller(
     let DestroyMemberView::Only { shown, .. } = view else {
         return error;
     };
-    let answered_whole = match destroy_refusal_subject(&error) {
-        DestroyRefusalSubject::Nothing => true,
-        DestroyRefusalSubject::Mob(named) => named == mob_id,
-        DestroyRefusalSubject::DeferredMember(member) => shown.contains(member),
-        DestroyRefusalSubject::Unclassified => false,
+    let answered_whole = match refusal_subject(&error) {
+        RefusalSubject::Nothing => true,
+        RefusalSubject::Mob(named) => named == mob_id,
+        RefusalSubject::DeferredMember(member) => shown.contains(member),
+        // A destroy names no member; of the refusals about one member it
+        // answers only the deferral, as before.
+        RefusalSubject::Member(_) | RefusalSubject::Unclassified => false,
     };
     if answered_whole {
         return error;
@@ -1073,6 +1206,268 @@ fn destroy_refusal_for_caller(
          this refusal, which may name a member the caller is not shown"
     );
     MobError::Internal(DESTROY_REFUSED.to_string())
+}
+
+/// What an agent is answered in place of a refusal of a mob that has a
+/// member tool audience, when the refusal is not known to name only what
+/// the call itself names: no member, no session and no cause. One text for
+/// all of them.
+pub(crate) const MOB_REFUSED: &str = "the mob refused the call. The host's log has the cause.";
+
+/// What an agent's `mob_list` row carries in place of the failure of a
+/// stopped mob that has a member tool audience, when the failure is not
+/// known to name no member.
+pub(crate) const MOB_STOPPED: &str = "the mob stopped. The host's log has the cause.";
+
+/// What an agent is answered when its create is refused because the roster
+/// of a mob its call did not name could not be read: why, and not which
+/// mob that is.
+pub(crate) const CREATOR_NOT_RECORDED: &str = "the creator of this mob cannot be recorded: the \
+     roster of another mob this host holds could not be read. Nothing was created; the host's \
+     log names that mob.";
+
+/// Whether an agent's call that names the members `named` is answered
+/// `error`, a refusal or failure of the mob `mob_id`, as it is. Only when
+/// the variant and the types of its fields say what it names
+/// ([`refusal_subject`]) and that is nothing, this mob, or one member the
+/// call itself names. A refusal about any other member, a free text,
+/// another error, another mob, or a variant this code does not classify
+/// is not.
+fn names_only_what_the_call_names(
+    mob_id: &MobId,
+    named: &[&AgentIdentity],
+    error: &MobError,
+) -> bool {
+    match refusal_subject(error) {
+        RefusalSubject::Nothing => true,
+        RefusalSubject::Mob(named_mob) => named_mob == mob_id,
+        RefusalSubject::Member(member) | RefusalSubject::DeferredMember(member) => {
+            named.contains(&member)
+        }
+        RefusalSubject::Unclassified => false,
+    }
+}
+
+/// Whether the variant of `error` and the types of its fields say that it
+/// names no mob, no member, no session and no free text.
+pub(crate) fn refusal_names_nothing(error: &MobError) -> bool {
+    matches!(refusal_subject(error), RefusalSubject::Nothing)
+}
+
+/// A mob's refusal as an agent's tool call is answered it.
+#[derive(Debug)]
+pub(crate) enum AgentMobRefusal {
+    /// As the mob returned it.
+    Whole(MobError),
+    /// Not passed on: the agent is answered the fixed text
+    /// ([`MOB_REFUSED`]) and, when the refusal has a class an agent may be
+    /// told ([`refusal_class_for_agent`]), that class.
+    /// `retryable` is true only for a retirement that is still in
+    /// progress ([`MobError::is_retirement_in_progress`]): a fact of the
+    /// refusal's type that says a later call can succeed and nothing of
+    /// a member.
+    NotShown {
+        class: Option<meerkat_contracts::MobSpawnManyFailureCause>,
+        retryable: bool,
+    },
+}
+
+impl AgentMobRefusal {
+    /// The text of a refusal that is not passed on: the fixed text, then
+    /// the class by its stable name when there is one.
+    pub(crate) fn not_shown_text(
+        class: Option<meerkat_contracts::MobSpawnManyFailureCause>,
+        retryable: bool,
+    ) -> String {
+        let name = class
+            .and_then(|class| serde_json::to_value(class).ok())
+            .and_then(|name| name.as_str().map(str::to_owned));
+        let mut text = MOB_REFUSED.to_string();
+        if let Some(name) = name {
+            text.push_str(&format!(" Refusal class: {name}."));
+        }
+        if retryable {
+            text.push_str(" The call can be retried.");
+        }
+        text
+    }
+}
+
+/// The class of `error` that an agent of a mob with a member tool audience
+/// is told in place of the refusal: the mob machine's own classification
+/// ([`meerkat_mob::mob_error_wire_code`]), a closed vocabulary that
+/// carries no text. Only a class that describes the refused operation is
+/// told (a wiring, definition, session, storage or comms refusal, and the
+/// like). A class that speaks of a member (not found, already exists, not
+/// addressable, a failed restore, a wait for members), the catch-all
+/// `internal`, and a class added later are not: the answer is then the
+/// fixed text alone, so it does not say that the refusal was about a
+/// member.
+fn refusal_class_for_agent(
+    error: &MobError,
+) -> Option<meerkat_contracts::MobSpawnManyFailureCause> {
+    class_told_an_agent(meerkat_mob::mob_error_wire_code(error))
+}
+
+/// `class` when an agent may be told it, by the closed list of
+/// [`refusal_class_for_agent`].
+fn class_told_an_agent(
+    class: meerkat_contracts::MobSpawnManyFailureCause,
+) -> Option<meerkat_contracts::MobSpawnManyFailureCause> {
+    use meerkat_contracts::MobSpawnManyFailureCause as Class;
+    match class {
+        Class::WiringError
+        | Class::BridgeCommandRejected
+        | Class::BridgeDeliveryRejected
+        | Class::DefinitionError
+        | Class::SchemaValidation
+        | Class::FlowFailed
+        | Class::UnsupportedForMode
+        | Class::SupervisorEscalation
+        | Class::StorageError
+        | Class::SessionError
+        | Class::CommsError
+        | Class::CallbackPending
+        | Class::StaleFenceToken => Some(class),
+        _ => None,
+    }
+}
+
+/// The refusal `error` the mob `mob_id` answered the agent tool `tool`, as
+/// the calling agent is answered it.
+///
+/// A mob whose host installed no member tool audience (`has_audience` is
+/// false) hides no member from any caller, and its refusal is answered
+/// whole. A mob that has one is answered whole only when the refusal
+/// names nothing but what the call names
+/// ([`names_only_what_the_call_names`]; `named` are the members the call
+/// names by argument, each of which the tool asked the audience about
+/// before the mob). Every other refusal is logged whole and not passed on:
+/// the agent is answered one fixed text ([`MOB_REFUSED`]) and the
+/// refusal's class when it has one an agent may be told
+/// ([`refusal_class_for_agent`]).
+pub(crate) fn mob_refusal_for_agent(
+    tool: &str,
+    mob_id: &MobId,
+    has_audience: bool,
+    named: &[&AgentIdentity],
+    error: MobError,
+) -> AgentMobRefusal {
+    if !has_audience || names_only_what_the_call_names(mob_id, named, &error) {
+        return AgentMobRefusal::Whole(error);
+    }
+    // Typed facts of the refusal that carry no member identity are kept.
+    // A provider authentication failure is answered as the refusal
+    // rebuilt from its typed fields alone: the failure's kind, the
+    // provider, the realm and the binding name a credential, not a
+    // member.
+    let rebuilt = matches!(
+        &error,
+        MobError::SessionError(session) if session.provider_auth_failure_data().is_some()
+    );
+    tracing::warn!(
+        mob_id = %mob_id,
+        tool,
+        error = %error,
+        answered = if rebuilt {
+            "a provider authentication failure rebuilt from its typed fields"
+        } else {
+            "a fixed text"
+        },
+        "a mob with a member tool audience refused an agent's tool call; this refusal, \
+         which may name a member the agent is not shown, is not passed on as it stands"
+    );
+    if let MobError::SessionError(session) = &error
+        && let Some(failure) = session.provider_auth_failure_data()
+    {
+        return AgentMobRefusal::Whole(MobError::SessionError(
+            SessionError::provider_auth_failure(failure),
+        ));
+    }
+    AgentMobRefusal::NotShown {
+        class: refusal_class_for_agent(&error),
+        retryable: error.is_retirement_in_progress(),
+    }
+}
+
+/// A failure text `text` the mob `mob_id` answered the agent tool `tool`
+/// in a form that carries no typed refusal (an error of a bounded run, a
+/// council or a delegation), as the calling agent is answered it: whole
+/// from a mob with no member tool audience, and logged whole and answered
+/// as [`MOB_REFUSED`] from a mob that has one.
+pub(crate) fn mob_failure_text_for_agent(
+    tool: &str,
+    mob_id: &MobId,
+    has_audience: bool,
+    text: String,
+) -> String {
+    if !has_audience {
+        return text;
+    }
+    tracing::warn!(
+        mob_id = %mob_id,
+        tool,
+        failure = %text,
+        "an agent's tool call on a mob with a member tool audience failed; the agent is \
+         answered a fixed text in place of this failure, which may name a member the \
+         agent is not shown"
+    );
+    format!("tool '{tool}' failed: {MOB_REFUSED}")
+}
+
+/// Why the stopped mob `mob_id` stopped, as a row of an agent's `mob_list`
+/// carries it: `failure` itself from a mob with no member tool audience
+/// or when it is known to name no member, and otherwise [`MOB_STOPPED`]
+/// with no data and the failure's class when it has one an agent may be
+/// told, the whole failure logged.
+pub(crate) fn wire_mob_lifecycle_failure_for_agent(
+    mob_id: &MobId,
+    has_audience: bool,
+    failure: &MobError,
+) -> meerkat_contracts::WireMobLifecycleFailure {
+    if !has_audience || names_only_what_the_call_names(mob_id, &[], failure) {
+        return wire_mob_lifecycle_failure(failure);
+    }
+    tracing::warn!(
+        mob_id = %mob_id,
+        error = %failure,
+        "a stopped mob with a member tool audience is listed to an agent; its row \
+         carries a fixed text in place of this failure, which may name a member the \
+         agent is not shown"
+    );
+    meerkat_contracts::WireMobLifecycleFailure {
+        cause: refusal_class_for_agent(failure)
+            .unwrap_or(meerkat_contracts::MobSpawnManyFailureCause::Internal),
+        message: MOB_STOPPED.to_string(),
+        code: None,
+        structured_data: None,
+    }
+}
+
+/// A refusal the tools' own state answers a destroy of the mob `mob_id`
+/// before the mob is asked (the lookup of a mob that is quarantined or
+/// held by then, the mob's mailbox gate, the restore of the mob set, the
+/// WorkGraph bindings read, the look at the mob's storage), as `caller` is
+/// answered it. The host's own destroy is answered it whole. An agent is
+/// answered it whole only when its type says that it names nothing or this
+/// mob (a scope denial, a closed or timed out actor command, the mob not
+/// found): the lookup's refusal carries the cause of a failed restore or
+/// an owner session, and the others carry a store's own error text, the
+/// ids of WorkGraph bindings or a path on the host, so they are logged
+/// whole and answered as the destroy's fixed text.
+fn destroy_state_refusal_for_caller(
+    mob_id: &MobId,
+    caller: &MobDestroyCaller,
+    error: MobError,
+) -> MobMcpDestroyError {
+    MobMcpDestroyError::Mob(match caller {
+        MobDestroyCaller::Console => error,
+        MobDestroyCaller::Agent { .. } => destroy_refusal_for_caller(
+            mob_id,
+            error,
+            &DestroyMemberView::of_agent(Vec::new(), BTreeSet::new()),
+        ),
+    })
 }
 
 impl AdmittedDestroy {
@@ -2835,6 +3230,18 @@ impl MobMcpState {
                 return false;
             }
         };
+        self.provenance_proves_creator(provenance, session_id).await
+    }
+
+    /// Whether the creation record `provenance` proves that `session_id`
+    /// created its mob with its own create: the rule of
+    /// [`Self::session_is_recorded_creator`], for a record however it was
+    /// read.
+    async fn provenance_proves_creator(
+        &self,
+        provenance: meerkat_mob::MobProvenance,
+        session_id: &SessionId,
+    ) -> bool {
         match provenance {
             meerkat_mob::MobProvenance::OperatorSession {
                 session_id: creator,
@@ -2858,6 +3265,57 @@ impl MobMcpState {
             }
             _ => false,
         }
+    }
+
+    /// Whether the durable creation record of the quarantined mob `mob_id`
+    /// proves that `session_id` created it with its own create
+    /// ([`Self::provenance_proves_creator`]). The record is read from the
+    /// quarantined store as it is, without building a runtime: the store is
+    /// not restored and no member is loaded. A mob that is not quarantined,
+    /// and a record that cannot be read, prove nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn quarantined_mob_recorded_creator(
+        &self,
+        mob_id: &MobId,
+        session_id: &SessionId,
+    ) -> bool {
+        let path = self
+            .quarantined_stores
+            .read()
+            .await
+            .iter()
+            .find(|(_, quarantined)| &quarantined.mob_id == mob_id)
+            .map(|(path, _)| path.clone());
+        let Some(path) = path else {
+            return false;
+        };
+        let provenance = match MobStorage::persistent(&path) {
+            Ok(storage) => storage.creation_provenance().await,
+            Err(error) => Err(error),
+        };
+        match provenance {
+            Ok(Some(provenance)) => self.provenance_proves_creator(provenance, session_id).await,
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(
+                    mob_id = %mob_id,
+                    %error,
+                    "a quarantined mob's creation record could not be read to decide whether \
+                     its creator asks"
+                );
+                false
+            }
+        }
+    }
+
+    /// A build without persistent stores quarantines none.
+    #[cfg(target_arch = "wasm32")]
+    async fn quarantined_mob_recorded_creator(
+        &self,
+        _mob_id: &MobId,
+        _session_id: &SessionId,
+    ) -> bool {
+        false
     }
 
     /// The member of a held child's stored roster whose session is
@@ -6962,7 +7420,8 @@ impl MobMcpState {
         // destructive verb first so an ungranted principal cannot use the
         // guard to distinguish implicit from explicit mobs.
         self.admitted_handle_for(mob_id, ControlScope::Retire)
-            .await?;
+            .await
+            .map_err(|error| destroy_state_refusal_for_caller(mob_id, &caller, error))?;
         if self.is_implicit_mob(mob_id).await {
             return Err(MobMcpDestroyError::Mob(MobError::Internal(
                 "Cannot destroy implicit delegation mob directly. \
@@ -6970,7 +7429,9 @@ impl MobMcpState {
                     .to_string(),
             )));
         }
-        self.ensure_restored().await?;
+        self.ensure_restored()
+            .await
+            .map_err(|error| destroy_state_refusal_for_caller(mob_id, &caller, error))?;
         self.mob_destroy_unchecked_loaded(mob_id, caller, admitted_incarnation)
             .await
     }
@@ -7053,7 +7514,7 @@ impl MobMcpState {
         }
         self.workgraph_destroy_preflight(mob_id)
             .await
-            .map_err(MobMcpDestroyError::Mob)?;
+            .map_err(|error| destroy_state_refusal_for_caller(mob_id, &caller, error))?;
         let managed = {
             let mobs = self.mobs.read().await;
             mobs.get(mob_id)
@@ -7074,7 +7535,7 @@ impl MobMcpState {
             Some(path) => {
                 let owed = OwedStorageCleanup::before_destroy(&path, actor_task.clone())
                     .await
-                    .map_err(MobMcpDestroyError::Mob)?;
+                    .map_err(|error| destroy_state_refusal_for_caller(mob_id, &caller, error))?;
                 Some(RetiredMobStorage {
                     path,
                     owed: Mutex::new(Some(owed)),
@@ -9246,6 +9707,70 @@ impl MobMcpState {
     pub async fn handle_for(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
         self.ensure_restored().await?;
         self.managed_handle(mob_id).await
+    }
+
+    /// [`Self::handle_for`] for an agent mob tool: the handle of the managed
+    /// mob `mob_id`, or the typed refusal an agent caller is told
+    /// ([`AgentMobLookupRefusal`]), which carries neither a held mob's
+    /// owner session nor a quarantine's cause. A quarantined mob gets its
+    /// one on-demand restore re-attempt only for a caller with authority
+    /// over it, decided before the mob is restored: `names_mob` (the
+    /// caller's own authority names the mob), or `creator` is the session
+    /// the mob's durable creation record names as the creator of its own
+    /// create ([`Self::quarantined_mob_recorded_creator`]; pass the calling
+    /// session only while it may still create mobs).
+    pub(crate) async fn handle_for_agent(
+        &self,
+        mob_id: &MobId,
+        names_mob: bool,
+        creator: Option<&SessionId>,
+    ) -> Result<MobHandle, AgentMobLookupRefusal> {
+        self.ensure_restored()
+            .await
+            .map_err(AgentMobLookupRefusal::Unshown)?;
+        match self.agent_lookup(mob_id).await {
+            Err(refusal @ AgentMobLookupRefusal::Quarantined { .. }) => {
+                let reattempt = names_mob
+                    || match creator {
+                        Some(session) => {
+                            self.quarantined_mob_recorded_creator(mob_id, session).await
+                        }
+                        None => false,
+                    };
+                if !reattempt {
+                    return Err(refusal);
+                }
+                self.reattempt_quarantine_on_demand(mob_id).await;
+                self.agent_lookup(mob_id).await
+            }
+            answer => answer,
+        }
+    }
+
+    /// The one hosted set that holds `mob_id`, read as [`Self::hosted_mob`]
+    /// reads it, as an agent caller is told it.
+    async fn agent_lookup(&self, mob_id: &MobId) -> Result<MobHandle, AgentMobLookupRefusal> {
+        let _moves = self.set_moves.read().await;
+        if let Some(handle) = self.console_bound_handle(mob_id).await {
+            return Ok(handle);
+        }
+        if let Some(held) = self.held_child_mobs.read().await.get(mob_id) {
+            return Err(AgentMobLookupRefusal::Held {
+                reason: held.reason.token(),
+            });
+        }
+        match self
+            .quarantined_stores
+            .read()
+            .await
+            .values()
+            .find(|quarantined| &quarantined.mob_id == mob_id)
+        {
+            Some(quarantined) => Err(AgentMobLookupRefusal::Quarantined {
+                class: quarantined.class(),
+            }),
+            None => Err(AgentMobLookupRefusal::NotFound),
+        }
     }
 
     /// The managed mob `mob_id`'s handle, rebound to the console principal.
@@ -26568,6 +27093,1365 @@ mod tests {
                     .any(|line| line.contains("the member's session id")),
             "the host's refusal names the member and its session:\n{}",
             told.join("\n")
+        );
+    }
+
+    /// An agent mob tool surface for a session that may create mobs and
+    /// holds no grant over any mob.
+    fn ungranted_surface(state: &Arc<MobMcpState>) -> AgentMobToolSurface {
+        destroy_surface(
+            state,
+            SessionId::new(),
+            meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
+                .expect("generated create-only mob authority"),
+        )
+    }
+
+    /// The agent mob tools that take the id of an existing mob from their
+    /// arguments, each with arguments that name `mob_id`.
+    fn tool_calls_that_name_a_mob(mob_id: &MobId) -> Vec<(&'static str, serde_json::Value)> {
+        let member = json!({ "mob_id": mob_id, "member_id": "worker-1" });
+        let edge = json!({
+            "mob_id": mob_id,
+            "member_id": "worker-1",
+            "peer": { "local": "worker-2" },
+        });
+        vec![
+            ("mob_destroy", json!({ "mob_id": mob_id })),
+            ("mob_list_members", json!({ "mob_id": mob_id })),
+            ("mob_check_member", member.clone()),
+            ("mob_retire_member", member),
+            ("mob_wire", edge.clone()),
+            ("mob_unwire", edge),
+            (
+                "mob_spawn_member",
+                json!({ "mob_id": mob_id, "profile": "worker", "member_id": "worker-3" }),
+            ),
+            // A create names the mob inside its definition.
+            (
+                "mob_create",
+                json!({
+                    "definition": {
+                        "id": mob_id,
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true },
+                                "peer_description": "worker",
+                                "runtime_mode": "turn_driven"
+                            }
+                        }
+                    }
+                }),
+            ),
+        ]
+    }
+
+    /// The refusal of one agent mob tool call, answered within a minute.
+    async fn mob_tool_refusal(
+        surface: &AgentMobToolSurface,
+        tool: &'static str,
+        args: &serde_json::Value,
+    ) -> ToolError {
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
+        let call = surface.dispatch(ToolCallView {
+            id: "refused-call",
+            name: tool,
+            args: &raw,
+        });
+        let answer = tokio::time::timeout(Duration::from_mins(1), call)
+            .await
+            .unwrap_or_else(|_| panic!("{tool} answers within a minute"));
+        match answer {
+            Err(refusal) => refusal,
+            Ok(outcome) => panic!(
+                "{tool} is refused for a mob that is not managed: {}",
+                outcome.result.text_content()
+            ),
+        }
+    }
+
+    /// An agent that holds the mob tools and no grant over a mob whose store
+    /// is quarantined is told nothing of why the restore failed: no tool
+    /// that takes the mob's id answers the cause of the quarantine or the
+    /// path of the store, in its message or in its data. The quarantine's
+    /// kind, its class and whether a retry can help are still answered,
+    /// typed, with no cause field.
+    #[tokio::test]
+    async fn an_agent_is_told_a_quarantined_mobs_class_and_nothing_of_its_cause() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_root = MobMcpState::persistent_mob_root(root.path());
+        tokio::fs::create_dir_all(&mob_root)
+            .await
+            .expect("create the mob store root");
+        let broken_store =
+            mob_root.join(format!("{}broken.db", MobMcpState::MOB_STORE_FILE_PREFIX));
+        tokio::fs::write(&broken_store, b"not a sqlite database")
+            .await
+            .expect("write an undecodable mob store");
+        let state = restored_state(&svc, root.path());
+        let broken = MobId::from("broken");
+        // What the host's own lookup is answered: the quarantine with its
+        // cause.
+        let MobError::MobQuarantined { cause, .. } = state
+            .mob_status(&broken)
+            .await
+            .expect_err("the quarantined mob has no actor")
+        else {
+            panic!("the host's lookup answers the typed quarantine");
+        };
+        let cause = cause.to_string();
+        let store_path = broken_store.display().to_string();
+        assert!(!cause.is_empty(), "the quarantine has a cause");
+
+        let surface = ungranted_surface(&state);
+        let mut told = Vec::new();
+        for (tool, args) in tool_calls_that_name_a_mob(&broken) {
+            let refusal = mob_tool_refusal(&surface, tool, &args).await;
+            for (surface_name, text) in tool_error_surfaces(&refusal) {
+                for (what, fact) in [
+                    ("the quarantine's cause", cause.as_str()),
+                    ("the store's path", store_path.as_str()),
+                ] {
+                    if text.contains(fact) {
+                        told.push(format!("{tool}: {surface_name} carries {what}: {text}"));
+                    }
+                }
+            }
+            let data = refusal.structured_data().unwrap_or_default();
+            if data["kind"] != MOB_QUARANTINED_KIND
+                || data["class"] != "store_unreadable"
+                || data["retryable"] != false
+                || data.get("cause").is_some()
+                || data.get("cause_data").is_some()
+            {
+                told.push(format!(
+                    "{tool}: the refusal's data is the quarantine's kind, class and retryable \
+                     flag with no cause: {data}"
+                ));
+            }
+        }
+        assert!(
+            told.is_empty(),
+            "an agent with no grant is told the class of a quarantine and nothing of its \
+             cause:\n{}",
+            told.join("\n")
+        );
+    }
+
+    /// A `delegate` of a session whose own implicit mob did not restore is
+    /// answered the same way: the quarantine's kind, its class and whether
+    /// a retry can help, and nothing of the cause or of the store's path.
+    #[tokio::test]
+    async fn a_delegate_is_told_its_quarantined_implicit_mobs_class_and_nothing_of_its_cause() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_root = MobMcpState::persistent_mob_root(root.path());
+        tokio::fs::create_dir_all(&mob_root)
+            .await
+            .expect("create the mob store root");
+        let session = SessionId::new();
+        let implicit = MobId::from(format!("implicit-{session}"));
+        let broken_store = mob_root.join(format!(
+            "{}{implicit}.db",
+            MobMcpState::MOB_STORE_FILE_PREFIX
+        ));
+        tokio::fs::write(&broken_store, b"not a sqlite database")
+            .await
+            .expect("write an undecodable mob store");
+        let state = restored_state(&svc, root.path());
+        let MobError::MobQuarantined { cause, .. } = state
+            .mob_status(&implicit)
+            .await
+            .expect_err("the quarantined mob has no actor")
+        else {
+            panic!("the host's lookup answers the typed quarantine");
+        };
+        let cause = cause.to_string();
+        let store_path = broken_store.display().to_string();
+        assert!(!cause.is_empty(), "the quarantine has a cause");
+
+        let surface = destroy_surface(
+            &state,
+            session,
+            meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
+                .expect("generated create-only mob authority"),
+        );
+        let refusal = mob_tool_refusal(
+            &surface,
+            "delegate",
+            &json!({
+                "task": "say hello",
+                "result_label": "greeting",
+                "max_text_bytes": 256,
+                "member_id": "helper-1",
+            }),
+        )
+        .await;
+        for (form, text) in tool_error_surfaces(&refusal) {
+            assert!(
+                !text.contains(&cause) && !text.contains(&store_path),
+                "{form} carries nothing of the quarantine's cause or the store's path: {text}"
+            );
+        }
+        let data = refusal.structured_data().unwrap_or_default();
+        assert_eq!(data["kind"], MOB_QUARANTINED_KIND, "{refusal:?}");
+        assert_eq!(data["class"], "store_unreadable", "{refusal:?}");
+        assert_eq!(data["retryable"], false, "{refusal:?}");
+        assert!(
+            data.get("cause").is_none() && data.get("cause_data").is_none(),
+            "{refusal:?}"
+        );
+    }
+
+    /// A state whose host holds one mob it could not restore, with that
+    /// mob's id: a mob no call of the rows below names.
+    async fn state_that_holds_a_mob_no_call_names(
+        svc: &Arc<MockSessionSvc>,
+        root: &std::path::Path,
+    ) -> (Arc<MobMcpState>, MobId) {
+        let mob_root = MobMcpState::persistent_mob_root(root);
+        tokio::fs::create_dir_all(&mob_root)
+            .await
+            .expect("create the mob store root");
+        let unnamed = MobId::from("kept-elsewhere");
+        tokio::fs::write(
+            mob_root.join(format!(
+                "{}{unnamed}.db",
+                MobMcpState::MOB_STORE_FILE_PREFIX
+            )),
+            b"not a sqlite database",
+        )
+        .await
+        .expect("write an undecodable mob store");
+        let state = restored_state(svc, root);
+        assert!(
+            matches!(
+                state.mob_status(&unnamed).await,
+                Err(MobError::MobQuarantined { .. })
+            ),
+            "the host holds the mob as quarantined"
+        );
+        (state, unnamed)
+    }
+
+    /// What a refused create tells an agent of the mob `unnamed`, which its
+    /// call did not name: every form of the refusal that carries that
+    /// mob's id. The refusal still says why the create was refused.
+    fn told_of_a_mob_the_call_did_not_name(refusal: &ToolError, unnamed: &MobId) -> Vec<String> {
+        let mut told = Vec::new();
+        for (form, text) in tool_error_surfaces(refusal) {
+            if text.contains(unnamed.as_str()) {
+                told.push(format!("{form} carries the id of another mob: {text}"));
+            }
+        }
+        if !refusal
+            .to_string()
+            .contains("the creator of this mob cannot be recorded")
+        {
+            told.push(format!("the refusal does not say why: {refusal}"));
+        }
+        told
+    }
+
+    /// An agent's `mob_create` that the host cannot admit because of a mob
+    /// the call does not name is told why, and not which mob that is.
+    #[tokio::test]
+    async fn an_agents_refused_create_names_no_mob_the_call_did_not_name() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (state, unnamed) = state_that_holds_a_mob_no_call_names(&svc, root.path()).await;
+        let surface = ungranted_surface(&state);
+        let fresh = MobId::from("fresh-mob");
+        let (_, create) = tool_calls_that_name_a_mob(&fresh)
+            .into_iter()
+            .find(|(tool, _)| *tool == "mob_create")
+            .expect("the create call");
+        let refusal = mob_tool_refusal(&surface, "mob_create", &create).await;
+        let told = told_of_a_mob_the_call_did_not_name(&refusal, &unnamed);
+        assert!(
+            told.is_empty(),
+            "a refused create names no mob the call did not name:\n{}",
+            told.join("\n")
+        );
+    }
+
+    /// An agent's `delegate` whose implicit mob the host cannot create
+    /// because of a mob the call does not name is told why, and not which
+    /// mob that is.
+    #[tokio::test]
+    async fn an_agents_refused_delegate_names_no_mob_the_call_did_not_name() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (state, unnamed) = state_that_holds_a_mob_no_call_names(&svc, root.path()).await;
+        let surface = ungranted_surface(&state);
+        let refusal = mob_tool_refusal(
+            &surface,
+            "delegate",
+            &json!({
+                "task": "say hello",
+                "result_label": "greeting",
+                "max_text_bytes": 256,
+                "member_id": "helper-1",
+            }),
+        )
+        .await;
+        let told = told_of_a_mob_the_call_did_not_name(&refusal, &unnamed);
+        assert!(
+            told.is_empty(),
+            "a refused delegate names no mob the call did not name:\n{}",
+            told.join("\n")
+        );
+    }
+
+    /// The outcome of a `council` an agent convenes over `shown-worker` of
+    /// a mob with no member tool audience that `state` hosts, as the
+    /// tool's answer text. No participant of it can be seated here.
+    async fn council_outcome_over_a_shown_worker(
+        svc: &Arc<MockSessionSvc>,
+        state: &Arc<MobMcpState>,
+        mob_id: &str,
+    ) -> String {
+        let source = seat_a_worker_whose_archive_fails(svc, state, mob_id, false).await;
+        state.declare_mob_set_restored();
+        let surface = destroy_surface(
+            state,
+            SessionId::new(),
+            managing_authority(source.mob_id(), source.live_incarnation()),
+        );
+        let args = json!({
+            "topic": "What were you asked so far?",
+            "timeout_seconds": 5,
+            "max_rounds": 1,
+            "participants": [{
+                "mob_id": source.mob_id(),
+                "member_id": "shown-worker",
+                "role": "witness",
+            }],
+        });
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
+        let call = surface.dispatch(ToolCallView {
+            id: "council-call",
+            name: "council",
+            args: &raw,
+        });
+        tokio::time::timeout(Duration::from_mins(1), call)
+            .await
+            .expect("the council answers within a minute")
+            .expect("a council that seats nobody answers its outcome")
+            .result
+            .text_content()
+    }
+
+    /// A `council` whose temporary mob the host cannot create because of
+    /// a mob the call does not name answers an outcome that says why, and
+    /// not which mob that is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_council_that_seats_nobody_names_no_mob_the_call_did_not_name() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (state, unnamed) = state_that_holds_a_mob_no_call_names(&svc, root.path()).await;
+        let outcome = council_outcome_over_a_shown_worker(&svc, &state, "council-source").await;
+        assert!(
+            outcome.contains("participant_seating_failed")
+                && outcome.contains("temporary mob creation failed")
+                && outcome.contains("the creator of this mob cannot be recorded"),
+            "the outcome says why nobody was seated: {outcome}"
+        );
+        assert!(
+            !outcome.contains(unnamed.as_str()),
+            "the outcome carries the id of a mob the call did not name: {outcome}"
+        );
+    }
+
+    /// Every other reason a council seats nobody is answered as before:
+    /// the outcome carries the seating failure's own text.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_council_that_seats_nobody_for_another_reason_answers_its_own_text() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
+        let outcome = council_outcome_over_a_shown_worker(&svc, &state, "council-source").await;
+        assert!(
+            outcome.contains("participant_seating_failed")
+                && outcome.contains(
+                    "capability creation failed: forked participant source 'shown-worker' is \
+                     not eligible"
+                ),
+            "the outcome carries the seating failure's own text: {outcome}"
+        );
+    }
+
+    /// The detail of a council's seating failure whose cause is the
+    /// temporary mob's create names no mob for exactly one cause: a mob
+    /// the council did not name, whose roster could not be read. The
+    /// host's log holds that refusal whole. Every other cause is the
+    /// create's own text, as before, and writes nothing.
+    #[test]
+    fn the_detail_of_a_temporary_mob_that_could_not_be_created_is_cut_for_one_cause_only() {
+        use crate::temporary_council::temporary_mob_creation_failure_detail as creation_detail;
+        let temporary = MobId::from("council--seats-nobody");
+        let logged = |error: &MobError| {
+            let log = CapturedLog::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .with_writer(log.clone())
+                .finish();
+            let detail = tracing::subscriber::with_default(subscriber, || {
+                creation_detail(&temporary, error)
+            });
+            (detail, log.text())
+        };
+        let (cut, log) = logged(&MobError::ProvenanceUnavailable {
+            mob_id: Some(MobId::from("kept-elsewhere")),
+        });
+        assert_eq!(
+            cut,
+            format!("temporary mob creation failed: {CREATOR_NOT_RECORDED}")
+        );
+        assert!(!cut.contains("kept-elsewhere"), "{cut}");
+        for held in ["WARN", "kept-elsewhere", "council--seats-nobody"] {
+            assert!(
+                log.contains(held),
+                "the host's log holds {held:?} of the refusal that is not passed on: {log:?}"
+            );
+        }
+        for whole in [
+            MobError::ProvenanceUnavailable { mob_id: None },
+            MobError::Internal("mob already exists: council--seats-nobody".into()),
+            MobError::MobNotFound(MobId::from("council--seats-nobody")),
+            MobError::ActorCommandChannelClosed,
+        ] {
+            let (detail, log) = logged(&whole);
+            assert_eq!(detail, format!("temporary mob creation failed: {whole}"));
+            assert!(log.is_empty(), "a cause answered whole: {log:?}");
+        }
+    }
+
+    /// An agent that holds the mob tools and no grant over a child mob held
+    /// before activation is not told the session that owns it: no tool that
+    /// takes the mob's id answers the owner's session id, in its message or
+    /// in its data. The hold's kind, its reason and that a retry can help
+    /// are still answered, typed, with no owner field.
+    #[tokio::test]
+    async fn an_agent_is_told_a_held_mobs_reason_and_not_its_owner_session() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (svc, mob_id, owner, _worker_session) =
+            seat_child_worker_then_exit(&svc, root.path(), "held-from-agents").await;
+        svc.script_observation(
+            &owner,
+            Ok(meerkat_mob::LiveDurableSourceObservation::Absent),
+        );
+        let state = restored_state(&svc, root.path());
+        assert_held_before_activation(state.handle_for(&mob_id).await, "owner_absent");
+        let owner = owner.to_string();
+
+        let surface = ungranted_surface(&state);
+        let mut told = Vec::new();
+        for (tool, args) in tool_calls_that_name_a_mob(&mob_id) {
+            let refusal = mob_tool_refusal(&surface, tool, &args).await;
+            for (surface_name, text) in tool_error_surfaces(&refusal) {
+                if text.contains(&owner) {
+                    told.push(format!(
+                        "{tool}: {surface_name} carries the owner's session id: {text}"
+                    ));
+                }
+            }
+            let data = refusal.structured_data().unwrap_or_default();
+            if data["kind"] != MobError::HELD_BEFORE_ACTIVATION_KIND
+                || data["reason"] != "owner_absent"
+                || data["retryable"] != true
+                || data.get("owner_session_id").is_some()
+            {
+                told.push(format!(
+                    "{tool}: the refusal's data is the hold's kind, reason and retryable flag \
+                     with no owner: {data}"
+                ));
+            }
+        }
+        assert!(
+            told.is_empty(),
+            "an agent with no grant is told why a mob is held and not who owns it:\n{}",
+            told.join("\n")
+        );
+    }
+
+    /// An agent's call starts the on-demand restore re-attempt of a
+    /// quarantined mob only when the caller's own authority names the mob.
+    /// No tool call of a caller with no grant under the id moves the
+    /// store's attempt count; a call of a caller that holds a grant under
+    /// the id moves it by one, and is answered the retryable quarantine
+    /// when the re-attempt fails again.
+    #[tokio::test]
+    async fn an_agent_starts_a_quarantined_mobs_restore_only_when_its_authority_names_the_mob() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        // The mob runs, and the incarnation it runs at is witnessed by its
+        // own handle before the restart.
+        let (running, incarnation) = {
+            let state = restored_state(&svc, root.path());
+            let running = state
+                .mob_create_definition(explicit_definition("reattempt-running"))
+                .await
+                .expect("create the running mob");
+            let handle = state
+                .handle_for(&running)
+                .await
+                .expect("predecessor mob handle");
+            let incarnation = handle.live_incarnation();
+            // A restart: the predecessor gives up its supervisor route.
+            handle
+                .shutdown()
+                .await
+                .expect("retire the predecessor supervisor route");
+            (running, incarnation)
+        };
+        let restored = restored_state(&svc, root.path());
+        // The restore pass and every re-attempt of this row meet the outage.
+        svc.fail_next_lists(16);
+        let row = quarantine_row(&restored, &running).await;
+        assert_eq!(row.class, meerkat_mob::MobQuarantineClass::StoreUnavailable);
+        assert_eq!(row.attempts, 0);
+
+        let ungranted = ungranted_surface(&restored);
+        for (tool, args) in tool_calls_that_name_a_mob(&running) {
+            let refusal = mob_tool_refusal(&ungranted, tool, &args).await;
+            let data = refusal.structured_data().unwrap_or_default();
+            assert_eq!(data["kind"], MOB_QUARANTINED_KIND, "{tool}: {refusal:?}");
+            assert_eq!(data["retryable"], true, "{tool}: {refusal:?}");
+            assert_eq!(
+                quarantine_row(&restored, &running).await.attempts,
+                0,
+                "{tool}: a caller whose authority does not name the mob starts no re-attempt"
+            );
+        }
+
+        // A caller whose authority holds a manage grant under the mob's id,
+        // for the incarnation the mob ran at before the restart.
+        let named = destroy_surface(
+            &restored,
+            SessionId::new(),
+            managing_authority(&running, incarnation),
+        );
+        let refusal =
+            mob_tool_refusal(&named, "mob_list_members", &json!({ "mob_id": running })).await;
+        let data = refusal.structured_data().unwrap_or_default();
+        assert_eq!(data["kind"], MOB_QUARANTINED_KIND, "{refusal:?}");
+        assert_eq!(data["class"], "store_unavailable", "{refusal:?}");
+        assert_eq!(data["retryable"], true, "{refusal:?}");
+        assert_eq!(
+            quarantine_row(&restored, &running).await.attempts,
+            1,
+            "a caller whose authority names the mob starts one re-attempt"
+        );
+    }
+
+    /// The session that created a mob with its own `mob_create` starts the
+    /// restore re-attempt of that mob when it is quarantined after a
+    /// restart, though its persisted authority names no mob: the mob's
+    /// durable creation record names the session. A session the record does
+    /// not name starts none. Once the store serves again, the creator's
+    /// next call restores the mob and the creator manages it.
+    #[tokio::test]
+    async fn a_recorded_creator_starts_its_quarantined_mobs_restore_after_a_restart() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_id = MobId::from("creator-quarantined");
+        let creator_session = {
+            let state = restored_state(&svc, root.path());
+            let creator = OperatorSession::new(&state);
+            creator.create(mob_id.as_str()).await;
+            // A restart: the predecessor gives up its supervisor route.
+            state
+                .handle_for(&mob_id)
+                .await
+                .expect("predecessor mob handle")
+                .shutdown()
+                .await
+                .expect("retire the predecessor supervisor route");
+            creator.session_id.clone()
+        };
+        let restored = restored_state(&svc, root.path());
+        // The creator's session is still there after the restart, so the mob
+        // it owns is resumed, not held or torn down.
+        svc.script_observation(
+            &creator_session,
+            Ok(meerkat_mob::LiveDurableSourceObservation::Committed { revision: None }),
+        );
+        // The restore pass and the re-attempts of this row meet the outage.
+        svc.fail_next_lists(16);
+        let row = quarantine_row(&restored, &mob_id).await;
+        assert_eq!(row.class, meerkat_mob::MobQuarantineClass::StoreUnavailable);
+        assert_eq!(row.attempts, 0);
+        let list_members = json!({ "mob_id": mob_id });
+
+        // A session the creation record does not name.
+        let stranger = ungranted_surface(&restored);
+        mob_tool_refusal(&stranger, "mob_list_members", &list_members).await;
+        assert_eq!(
+            quarantine_row(&restored, &mob_id).await.attempts,
+            0,
+            "a session the creation record does not name starts no re-attempt"
+        );
+
+        // The creator's session after the restart: an authority that may
+        // create mobs and names none.
+        let creator = destroy_surface(
+            &restored,
+            creator_session,
+            meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
+                .expect("generated create-only mob authority"),
+        );
+        let refusal = mob_tool_refusal(&creator, "mob_list_members", &list_members).await;
+        let data = refusal.structured_data().unwrap_or_default();
+        assert_eq!(data["kind"], MOB_QUARANTINED_KIND, "{refusal:?}");
+        assert_eq!(data["retryable"], true, "{refusal:?}");
+        assert_eq!(
+            quarantine_row(&restored, &mob_id).await.attempts,
+            1,
+            "the recorded creator's call starts one re-attempt"
+        );
+
+        // The store serves again: the creator's next call restores the mob,
+        // and the creator manages it.
+        svc.fail_next_lists(0);
+        let raw =
+            serde_json::value::RawValue::from_string(list_members.to_string()).expect("raw args");
+        let listed = tokio::time::timeout(
+            Duration::from_mins(1),
+            creator.dispatch(ToolCallView {
+                id: "creator-list",
+                name: "mob_list_members",
+                args: &raw,
+            }),
+        )
+        .await
+        .expect("the creator's call answers")
+        .expect("the creator manages its restored mob");
+        assert!(
+            listed.result.text_content().contains("members"),
+            "the creator lists its mob's members: {}",
+            listed.result.text_content()
+        );
+    }
+
+    /// The text a member's failed archive carries in these rows: a free
+    /// text that names another member of the mob.
+    const ARCHIVE_FAILED_BESIDE_A_PEER: &str =
+        "archive refused while member kept-peer held the store";
+
+    /// What an agent is answered in place of a refusal of a mob that has a
+    /// member tool audience, when the refusal's type does not say what it
+    /// names.
+    const A_MOB_REFUSAL_NOT_SHOWN: &str = "the mob refused the call. The host's log has the cause.";
+
+    /// A running mob that seats `shown-worker`, whose archive fails with
+    /// [`ARCHIVE_FAILED_BESIDE_A_PEER`], and `kept-peer`, a member kept for
+    /// another; built with the host's member tool audience
+    /// [`HideKeptMembers`] or with none, and registered with `state`.
+    async fn seat_a_worker_whose_archive_fails(
+        svc: &Arc<MockSessionSvc>,
+        state: &Arc<MobMcpState>,
+        mob_id: &str,
+        audience: bool,
+    ) -> MobHandle {
+        const STEP: Duration = Duration::from_secs(10);
+        let mut builder = MobBuilder::new(explicit_definition(mob_id), MobStorage::in_memory())
+            .with_session_service(svc.clone())
+            .allow_ephemeral_sessions(true)
+            .with_network_member_comms();
+        if audience {
+            builder = builder.with_member_tool_audience(Arc::new(HideKeptMembers));
+        }
+        let handle = tokio::time::timeout(STEP, builder.create())
+            .await
+            .expect("the create answers")
+            .expect("create the mob");
+        for (member, keeper) in [("shown-worker", None), ("kept-peer", Some("ann"))] {
+            let spec = SpawnMemberSpec::new("worker", AgentIdentity::from(member))
+                .with_runtime_mode(MobRuntimeMode::TurnDriven)
+                .with_labels(kept_for_labels(keeper));
+            tokio::time::timeout(STEP, handle.spawn_spec(spec))
+                .await
+                .expect("the spawn answers")
+                .expect("spawn the member");
+        }
+        let session = handle
+            .resolve_bridge_session_id(&AgentIdentity::from("shown-worker"))
+            .await
+            .expect("the shown member's session");
+        svc.fail_archive(session, ARCHIVE_FAILED_BESIDE_A_PEER)
+            .await;
+        state
+            .mob_insert_handle(handle.mob_id().clone(), handle.clone())
+            .await;
+        handle
+    }
+
+    /// A refusal a mob answers an agent's tool call with a free text is
+    /// answered whole only from a mob whose host installed no member tool
+    /// audience: nothing is hidden from any agent there. From a mob that has
+    /// one, the same refusal is answered as one fixed text with no data, so
+    /// a text that names a member the caller is not shown does not reach
+    /// it. The fact is the mob's own: one surface, managing both mobs of
+    /// one state, is answered each way. A refusal whose type says what it
+    /// names (a member the call itself names, a profile) stays whole in
+    /// both.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_free_text_refusal_reaches_an_agent_only_from_a_mob_with_no_member_tool_audience() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
+        let guarded =
+            seat_a_worker_whose_archive_fails(&svc, &state, "refusal-guarded", true).await;
+        let open = seat_a_worker_whose_archive_fails(&svc, &state, "refusal-open", false).await;
+        state.declare_mob_set_restored();
+        let authority = meerkat_runtime::mob_operator_authority::grant_manage_mob(
+            &managing_authority(guarded.mob_id(), guarded.live_incarnation()),
+            open.mob_id().as_str(),
+            open.live_incarnation(),
+        )
+        .expect("manage scope over both mobs");
+        let surface = destroy_surface(&state, SessionId::new(), authority);
+        let retire =
+            |mob: &MobHandle, member: &str| json!({ "mob_id": mob.mob_id(), "member_id": member });
+
+        // The typed refusals, the same from both mobs.
+        for mob in [&guarded, &open] {
+            let absent =
+                mob_tool_refusal(&surface, "mob_retire_member", &retire(mob, "absent-worker"))
+                    .await;
+            assert!(
+                absent.to_string().contains("absent-worker"),
+                "{}: a refusal that names the member the call names stays whole: {absent}",
+                mob.mob_id()
+            );
+            let no_profile = mob_tool_refusal(
+                &surface,
+                "mob_spawn_member",
+                &json!({
+                    "mob_id": mob.mob_id(),
+                    "profile": "no-such-profile",
+                    "member_id": "new-worker",
+                }),
+            )
+            .await;
+            assert!(
+                no_profile.to_string().contains("no-such-profile"),
+                "{}: a refusal that names a profile stays whole: {no_profile}",
+                mob.mob_id()
+            );
+        }
+
+        let whole = mob_tool_refusal(
+            &surface,
+            "mob_retire_member",
+            &retire(&open, "shown-worker"),
+        )
+        .await;
+        assert!(
+            whole.to_string().contains(ARCHIVE_FAILED_BESIDE_A_PEER),
+            "a mob with no member tool audience answers its refusal as before: {whole}"
+        );
+
+        let cut = mob_tool_refusal(
+            &surface,
+            "mob_retire_member",
+            &retire(&guarded, "shown-worker"),
+        )
+        .await;
+        for (form, text) in tool_error_surfaces(&cut) {
+            assert!(
+                !text.contains("kept-peer") && !text.contains(ARCHIVE_FAILED_BESIDE_A_PEER),
+                "{form} of a refusal of a mob with a member tool audience carries no free \
+                 text: {text}"
+            );
+        }
+        assert!(
+            cut.to_string().contains(A_MOB_REFUSAL_NOT_SHOWN) && cut.structured_data().is_none(),
+            "the refusal is answered as the fixed text with no data: {cut:?}"
+        );
+    }
+
+    /// An agent's `mob_list` leaves out a mob whose actor has stopped: each
+    /// row's admission is asked of the mob's own actor, and a stopped actor
+    /// answers none. So the agent's list tells nothing of why a mob stopped
+    /// (the host's own list carries it), and it still lists the live mob
+    /// the same authority manages.
+    #[tokio::test]
+    async fn an_agents_mob_list_leaves_out_a_mob_whose_actor_stopped() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = persistent_destroy_state(&svc, root.path());
+        let live = state
+            .mob_create_definition(explicit_definition("agent-listed-live"))
+            .await
+            .expect("create the live mob");
+        let (stopped, reported) =
+            managed_mob_whose_actor_fail_stopped_at_start(&state, "agent-listed-fail-stopped")
+                .await;
+        let host_list: BTreeMap<MobId, meerkat_mob::MobLifecycleObservation> = state
+            .mob_list()
+            .await
+            .expect("owner list")
+            .into_iter()
+            .collect();
+        assert!(
+            host_list[&stopped].failure.is_some(),
+            "the host's list carries why the mob stopped: {reported:?}"
+        );
+
+        let authority = meerkat_runtime::mob_operator_authority::grant_manage_mob(
+            &managing_authority(&live, live_incarnation(&state, &live).await),
+            stopped.as_str(),
+            live_incarnation(&state, &stopped).await,
+        )
+        .expect("manage scope over both mobs");
+        let surface = destroy_surface(&state, SessionId::new(), authority);
+        let raw = serde_json::value::RawValue::from_string("{}".to_string()).expect("raw args");
+        let listed = surface
+            .dispatch(ToolCallView {
+                id: "list-call",
+                name: "mob_list",
+                args: &raw,
+            })
+            .await
+            .expect("the agent's list answers");
+        let listed: serde_json::Value =
+            serde_json::from_str(&listed.result.text_content()).expect("json list");
+        let ids: Vec<&str> = listed["mobs"]
+            .as_array()
+            .expect("the listed mobs")
+            .iter()
+            .filter_map(|row| row["mob_id"].as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![live.as_str()],
+            "the agent's list holds the live mob and not the stopped one: {listed}"
+        );
+        assert!(
+            !listed.to_string().contains("failure"),
+            "no row of the agent's list carries a failure: {listed}"
+        );
+    }
+
+    /// How an agent is answered a refusal, for a row to compare: whole,
+    /// or not passed on, with the class told beside the fixed text.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Answered {
+        Whole,
+        NotShown(Option<meerkat_contracts::MobSpawnManyFailureCause>),
+    }
+
+    fn answered_as(answered: &AgentMobRefusal) -> Answered {
+        match answered {
+            AgentMobRefusal::Whole(_) => Answered::Whole,
+            AgentMobRefusal::NotShown { class, .. } => Answered::NotShown(*class),
+        }
+    }
+
+    /// The forms of a refusal that is passed on whole.
+    fn whole_forms(answered: &AgentMobRefusal) -> String {
+        match answered {
+            AgentMobRefusal::Whole(error) => mob_error_forms(error),
+            AgentMobRefusal::NotShown { class, .. } => format!("not shown, class {class:?}"),
+        }
+    }
+
+    /// The decision for a refusal a mob answers an agent's tool call. From
+    /// a mob with no member tool audience every refusal is answered whole.
+    /// From a mob that has one, a refusal is answered whole only when its
+    /// type says that it names nothing, this mob, or one member the call
+    /// itself names; a refusal about another member, another mob, a free
+    /// text, another error, or a member's retirement with its cause is not
+    /// passed on: the agent is answered the fixed text, with the refusal's
+    /// class only when the class describes the operation (a wiring or a
+    /// session refusal) and not when it speaks of a member, and the whole
+    /// refusal is in the host's log, at warn.
+    #[test]
+    fn a_mobs_refusal_is_answered_an_agent_whole_only_for_what_its_call_names() {
+        let id = AgentIdentity::from;
+        let mob_id = MobId::from("guarded-mob");
+        let session = SessionId::new();
+        let named = id("named-worker");
+        let answer = |has_audience: bool, error: MobError| {
+            mob_refusal_for_agent("mob_retire_member", &mob_id, has_audience, &[&named], error)
+        };
+        // Each refusal that is not passed on, with the class told for it.
+        let not_shown = || {
+            use meerkat_contracts::MobSpawnManyFailureCause as Class;
+            vec![
+                (
+                    MobError::Internal("restore of member other-worker failed".into()),
+                    None,
+                ),
+                (
+                    MobError::WiringError("member other-worker is wired to named-worker".into()),
+                    Some(Class::WiringError),
+                ),
+                (
+                    MobError::SessionError(SessionError::NotFound {
+                        id: session.clone(),
+                    }),
+                    Some(Class::SessionError),
+                ),
+                (
+                    MobError::MemberRetirementStuck {
+                        member_id: id("named-worker"),
+                        stage: "retire-session-archive".into(),
+                        cause: Arc::new(MobError::Internal("other-worker held the store".into())),
+                    },
+                    None,
+                ),
+                (MobError::MemberNotFound(id("other-worker")), None),
+                (MobError::MemberAlreadyExists(id("other-worker")), None),
+                // The machine classes a deferral by the session error it
+                // waits on: a class of the operation, not of a member.
+                (
+                    custody_deferred("other-worker", &session),
+                    Some(Class::SessionError),
+                ),
+                (MobError::MobNotFound(MobId::from("another-mob")), None),
+            ]
+        };
+        let shown = || {
+            vec![
+                MobError::ProfileNotFound(ProfileName::from("no-such-profile")),
+                MobError::RunNotFound(RunId::new()),
+                MobError::TopologyViolation {
+                    from_role: ProfileName::from("worker"),
+                    to_role: ProfileName::from("lead"),
+                },
+                MobError::ActorCommandChannelClosed,
+                MobError::MobNotFound(mob_id.clone()),
+                MobError::MemberNotFound(id("named-worker")),
+                MobError::MemberAlreadyExists(id("named-worker")),
+                MobError::NonDurableService {
+                    member_id: id("named-worker"),
+                    profile: ProfileName::from("worker"),
+                },
+                custody_deferred("named-worker", &session),
+            ]
+        };
+
+        // A mob with no member tool audience: every refusal, whole.
+        for whole in not_shown()
+            .into_iter()
+            .map(|(refusal, _)| refusal)
+            .chain(shown())
+        {
+            let before = mob_error_forms(&whole);
+            assert_eq!(whole_forms(&answer(false, whole)), before);
+        }
+        // A mob that has one: whole only for what the call names.
+        for whole in shown() {
+            let before = mob_error_forms(&whole);
+            assert_eq!(whole_forms(&answer(true, whole)), before);
+        }
+        for (cut, class) in not_shown() {
+            let before = format!("{cut:?}");
+            let answered = answer(true, cut);
+            assert_eq!(
+                answered_as(&answered),
+                Answered::NotShown(class),
+                "{before} is answered {answered:?}"
+            );
+        }
+        // The text of an answer that is not passed on: the fixed text, and
+        // the class by its stable name when one is told.
+        assert_eq!(AgentMobRefusal::not_shown_text(None, false), MOB_REFUSED);
+        assert_eq!(
+            AgentMobRefusal::not_shown_text(
+                Some(meerkat_contracts::MobSpawnManyFailureCause::WiringError),
+                false
+            ),
+            format!("{MOB_REFUSED} Refusal class: wiring_error.")
+        );
+        assert_eq!(
+            AgentMobRefusal::not_shown_text(None, true),
+            format!("{MOB_REFUSED} The call can be retried.")
+        );
+
+        // Typed facts that carry no member identity are kept. A
+        // retirement still in progress says that a retry can help, and
+        // nothing of its member or stage; no other refusal says so.
+        let in_progress = answer(
+            true,
+            MobError::MemberRetirementInProgress {
+                member_id: id("other-worker"),
+                stage: "waiting on other-worker".into(),
+            },
+        );
+        assert!(
+            matches!(
+                in_progress,
+                AgentMobRefusal::NotShown {
+                    retryable: true,
+                    ..
+                }
+            ),
+            "{in_progress:?}"
+        );
+        let stuck = answer(
+            true,
+            MobError::Internal("restore of member other-worker failed".into()),
+        );
+        assert!(
+            matches!(
+                stuck,
+                AgentMobRefusal::NotShown {
+                    retryable: false,
+                    ..
+                }
+            ),
+            "{stuck:?}"
+        );
+        // A provider authentication failure is answered as the refusal
+        // rebuilt from its typed fields, whatever text came with it.
+        let failure = meerkat_core::service::SessionProviderAuthFailure {
+            kind: meerkat_core::AuthErrorKind::InteractiveLoginRequired,
+            provider: meerkat_core::Provider::OpenAI,
+            realm_id: Some(meerkat_core::RealmId::parse("project").expect("realm")),
+            binding_id: Some(meerkat_core::BindingId::parse("openai").expect("binding")),
+        };
+        let canonical = MobError::SessionError(SessionError::provider_auth_failure(failure));
+        let canonical_forms = mob_error_forms(&canonical);
+        let data = canonical.structured_data().expect("typed data");
+        let carried = MobError::SessionError(SessionError::FailedWithData {
+            message: "login needed while other-worker held the session".into(),
+            data,
+        });
+        let answered = answer(true, carried);
+        assert_eq!(whole_forms(&answered), canonical_forms);
+        assert!(
+            !whole_forms(&answered).contains("other-worker"),
+            "{answered:?}"
+        );
+        // A call that names no member is answered no refusal about one.
+        let unnamed = mob_refusal_for_agent(
+            "mob_list_members",
+            &mob_id,
+            true,
+            &[],
+            MobError::MemberNotFound(id("named-worker")),
+        );
+        assert_eq!(
+            answered_as(&unnamed),
+            Answered::NotShown(None),
+            "{unnamed:?}"
+        );
+
+        // The host's log holds what the fixed text stands for, at warn; a
+        // refusal answered whole writes nothing.
+        let logged = |has_audience: bool, error: MobError| {
+            let log = CapturedLog::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .with_writer(log.clone())
+                .finish();
+            let answered =
+                tracing::subscriber::with_default(subscriber, || answer(has_audience, error));
+            (answered, log.text())
+        };
+        let free_text = || MobError::Internal("restore of member other-worker failed".into());
+        let (answered, log) = logged(true, free_text());
+        assert_eq!(
+            answered_as(&answered),
+            Answered::NotShown(None),
+            "{answered:?}"
+        );
+        for held in [
+            "WARN",
+            "guarded-mob",
+            "mob_retire_member",
+            "restore of member other-worker failed",
+            "a fixed text",
+        ] {
+            assert!(
+                log.contains(held),
+                "the host's log holds {held:?} of a refusal answered as the fixed text: {log:?}"
+            );
+        }
+        // The line says what the agent was answered: for a provider
+        // authentication failure, the failure rebuilt from its typed
+        // fields and not a fixed text.
+        let data = canonical.structured_data().expect("typed data");
+        let (_, log) = logged(
+            true,
+            MobError::SessionError(SessionError::FailedWithData {
+                message: "login needed while other-worker held the session".into(),
+                data,
+            }),
+        );
+        assert!(
+            log.contains("WARN")
+                && log.contains("rebuilt from its typed fields")
+                && !log.contains("a fixed text"),
+            "{log:?}"
+        );
+        let (_, log) = logged(false, free_text());
+        assert!(log.is_empty(), "a mob with no audience: {log:?}");
+        let (_, log) = logged(true, MobError::MemberNotFound(id("named-worker")));
+        assert!(log.is_empty(), "a refusal answered whole: {log:?}");
+    }
+
+    /// The classes an agent of a mob with a member tool audience is told
+    /// are exactly the thirteen that describe a refused operation. Every
+    /// class that speaks of a member, the catch-all and every other class
+    /// of the vocabulary is withheld. The row's table is one list that is
+    /// also a match with no wildcard arm: a class added to the vocabulary
+    /// does not compile here until it has a line.
+    #[test]
+    fn the_classes_told_an_agent_are_the_ones_that_describe_an_operation() {
+        use meerkat_contracts::MobSpawnManyFailureCause as Class;
+        macro_rules! classes {
+            ($($class:ident => $told:literal,)*) => {{
+                fn told_by_the_table(class: Class) -> bool {
+                    match class {
+                        $(Class::$class => $told,)*
+                    }
+                }
+                [$((Class::$class, told_by_the_table(Class::$class)),)*]
+            }};
+        }
+        let table = classes! {
+            WiringError => true,
+            BridgeCommandRejected => true,
+            BridgeDeliveryRejected => true,
+            DefinitionError => true,
+            SchemaValidation => true,
+            FlowFailed => true,
+            UnsupportedForMode => true,
+            SupervisorEscalation => true,
+            StorageError => true,
+            SessionError => true,
+            CommsError => true,
+            CallbackPending => true,
+            StaleFenceToken => true,
+            // Classes that speak of a member.
+            MemberNotFound => false,
+            MemberAlreadyExists => false,
+            NotExternallyAddressable => false,
+            MemberRestoreFailed => false,
+            KickoffWaitTimedOut => false,
+            ReadyWaitTimedOut => false,
+            MissingMemberCapability => false,
+            // The catch-all, and classes of refusals that are passed on
+            // whole by their type or are not about the call.
+            Internal => false,
+            ProfileNotFound => false,
+            InvalidTransition => false,
+            FlowNotFound => false,
+            RunNotFound => false,
+            RunCanceled => false,
+            FlowTurnTimedOut => false,
+            FrameDepthLimitExceeded => false,
+            FrameAtomicPersistenceUnavailable => false,
+            SpecRevisionConflict => false,
+            InsufficientTargets => false,
+            TopologyViolation => false,
+            ResetBarrier => false,
+            StaleEventCursor => false,
+            WorkNotFound => false,
+        };
+        assert_eq!(
+            table.iter().filter(|(_, told)| *told).count(),
+            13,
+            "the classes that describe a refused operation"
+        );
+        for (class, told) in table {
+            assert_eq!(
+                class_told_an_agent(class),
+                told.then_some(class),
+                "{class:?}"
+            );
+        }
+    }
+
+    /// The two other forms a mob's failure reaches an agent in follow the
+    /// same rule. A failure with no typed refusal is answered as its text
+    /// from a mob with no member tool audience and as the fixed text from a
+    /// mob that has one. A stopped mob's failure on an agent's list row is
+    /// the host's own row from a mob with no audience, or when its type
+    /// says that it names nothing; otherwise the row carries a fixed text
+    /// and no data.
+    #[test]
+    fn a_mobs_failure_text_and_list_failure_follow_the_mobs_audience() {
+        let mob_id = MobId::from("guarded-mob");
+        let text = || "delegated turn failed: other-worker held the store".to_string();
+        assert_eq!(
+            mob_failure_text_for_agent("delegate", &mob_id, false, text()),
+            text()
+        );
+        let cut = mob_failure_text_for_agent("delegate", &mob_id, true, text());
+        assert!(
+            cut.contains(MOB_REFUSED) && !cut.contains("other-worker"),
+            "{cut}"
+        );
+
+        let free_text = MobError::Internal("recovery of member other-worker failed".into());
+        let typed = MobError::ActorCommandChannelClosed;
+        for (has_audience, failure, whole) in [
+            (false, &free_text, true),
+            (true, &free_text, false),
+            (false, &typed, true),
+            (true, &typed, true),
+        ] {
+            let row = wire_mob_lifecycle_failure_for_agent(&mob_id, has_audience, failure);
+            if whole {
+                assert_eq!(row, wire_mob_lifecycle_failure(failure));
+            } else {
+                assert!(
+                    row.message.contains(MOB_STOPPED)
+                        && !row.message.contains("other-worker")
+                        && row.structured_data.is_none(),
+                    "{row:?}"
+                );
+            }
+        }
+
+        assert!(refusal_names_nothing(&typed));
+        assert!(!refusal_names_nothing(&free_text));
+        assert!(!refusal_names_nothing(&MobError::MobNotFound(
+            mob_id.clone()
+        )));
+        assert!(!refusal_names_nothing(&MobError::MemberNotFound(
+            AgentIdentity::from("named-worker")
+        )));
+    }
+
+    /// An agent caller of a destroy that holds no mob: the caller the
+    /// state's own refusals are decided for.
+    fn agent_destroy_caller() -> MobDestroyCaller {
+        MobDestroyCaller::Agent {
+            control_principal: MobControlPrincipal::Owner,
+            owner_bridge_session_id: SessionId::new(),
+            principal_token:
+                meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
+                    .expect("generated create-only mob authority")
+                    .principal_token()
+                    .clone(),
+        }
+    }
+
+    /// A refusal the tools' own state answers a destroy before the mob is
+    /// asked is answered an agent whole only when its type says that it
+    /// names nothing or this mob. A text built from the ids of WorkGraph
+    /// bindings, a store's own error or a path on the host is answered as
+    /// the destroy's fixed text. The host's own destroy reads each whole.
+    #[test]
+    fn a_destroys_state_refusal_is_answered_an_agent_only_when_its_type_names_nothing() {
+        let mob_id = MobId::from("state-refused");
+        let agent = agent_destroy_caller();
+        let texts = || {
+            vec![
+                MobError::Internal(
+                    "mob state-refused has active WorkGraph Flow bindings and cannot be \
+                     destroyed: binding-of-other-worker"
+                        .into(),
+                ),
+                MobError::Internal(
+                    "mob storage '/host/state/mob--state-refused.db' could not be looked at \
+                     before destroy: permission denied"
+                        .into(),
+                ),
+                MobError::Internal("work graph store: row of other-worker is unreadable".into()),
+            ]
+        };
+        let typed = || {
+            vec![
+                MobError::ScopeDenied(ScopeDenial {
+                    required: ControlScope::Retire,
+                    presented: BTreeSet::new(),
+                }),
+                MobError::ActorCommandChannelClosed,
+                MobError::MobNotFound(mob_id.clone()),
+            ]
+        };
+        for text in texts() {
+            let before = format!("{text:?}");
+            let MobMcpDestroyError::Mob(answered) =
+                destroy_state_refusal_for_caller(&mob_id, &agent, text)
+            else {
+                panic!("a state refusal is a mob error");
+            };
+            assert!(
+                is_fixed_refusal(&answered),
+                "{before} is answered {answered:?}"
+            );
+        }
+        for whole in typed() {
+            let before = mob_error_forms(&whole);
+            let MobMcpDestroyError::Mob(answered) =
+                destroy_state_refusal_for_caller(&mob_id, &agent, whole)
+            else {
+                panic!("a state refusal is a mob error");
+            };
+            assert_eq!(mob_error_forms(&answered), before);
+        }
+        for whole in texts().into_iter().chain(typed()) {
+            let before = mob_error_forms(&whole);
+            let MobMcpDestroyError::Mob(answered) =
+                destroy_state_refusal_for_caller(&mob_id, &MobDestroyCaller::Console, whole)
+            else {
+                panic!("a state refusal is a mob error");
+            };
+            assert_eq!(mob_error_forms(&answered), before);
+        }
+    }
+
+    /// An agent's destroy that reaches a mob which is quarantined by then
+    /// is answered the destroy's fixed text by the state: nothing of the
+    /// cause of the failed restore or of the store's path. The host's own
+    /// destroy is answered the quarantine with its cause.
+    #[tokio::test]
+    async fn an_agents_destroy_of_a_quarantined_mob_is_told_nothing_of_its_cause() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_root = MobMcpState::persistent_mob_root(root.path());
+        tokio::fs::create_dir_all(&mob_root)
+            .await
+            .expect("create the mob store root");
+        let broken_store =
+            mob_root.join(format!("{}broken.db", MobMcpState::MOB_STORE_FILE_PREFIX));
+        tokio::fs::write(&broken_store, b"not a sqlite database")
+            .await
+            .expect("write an undecodable mob store");
+        let state = restored_state(&svc, root.path());
+        let broken = MobId::from("broken");
+
+        let host = state
+            .mob_destroy(&broken)
+            .await
+            .expect_err("a quarantined mob is not destroyed");
+        let MobMcpDestroyError::Mob(MobError::MobQuarantined { cause, .. }) = &host else {
+            panic!("the host's destroy is answered the typed quarantine: {host:?}");
+        };
+        let cause = cause.to_string();
+        let store_path = broken_store.display().to_string();
+
+        let refusal = state
+            .mob_destroy_for(&broken, agent_destroy_caller(), None)
+            .await
+            .expect_err("a quarantined mob is not destroyed");
+        for (form, text) in destroy_error_surfaces(&refusal) {
+            assert!(
+                !text.contains(&cause) && !text.contains(&store_path),
+                "{form} carries nothing of the quarantine's cause or the store's path: {text}"
+            );
+        }
+        assert!(
+            matches!(&refusal, MobMcpDestroyError::Mob(answered) if is_fixed_refusal(answered)),
+            "{refusal:?}"
         );
     }
 

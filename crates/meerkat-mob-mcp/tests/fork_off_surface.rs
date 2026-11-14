@@ -1908,6 +1908,103 @@ async fn forker_checks_lists_and_retires_only_its_own_children() {
     fixture.teardown().await;
 }
 
+/// A member's hold on its own children, and its owner view of the member
+/// list, rest on its seat in the mob and on the spawn record, not on an
+/// authority that names the mob. The forker's session with an authority
+/// that names no mob at all checks, lists and retires its own child, is
+/// still denied a member it does not own, and a bystander with such an
+/// authority still gets its empty owner view: none of them is answered as
+/// a caller of a mob it has nothing to do with.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_whose_authority_names_no_mob_keeps_its_owner_view_and_its_children() {
+    let fixture = CouncilFixture::new_runtime_backed(routed_script(
+        RequestLog::default(),
+        vec![(CHILD_TASK, ChildReply::Text(CHILD_REPLY))],
+    ));
+    fixture.seed_source_mob(&["forker", "bystander"]).await;
+    let mob_id = fixture.source_mob_id().to_string();
+    let forker = member_surface(&fixture, "forker").await;
+    let job_id =
+        start_detached_fork(&forker, "kept-child", fork_args("kept-child", CHILD_TASK)).await;
+    wait_for_completion(&fixture, &forker.session, &job_id).await;
+
+    let names_no_mob = || {
+        let authority =
+            meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
+                .expect("generated authority");
+        let authority =
+            meerkat_runtime::mob_operator_authority::set_create_authority(&authority, false)
+                .expect("no create scope");
+        assert!(
+            authority.managed_mob_scope().is_empty()
+                && authority.spawn_profile_scope().is_empty()
+                && authority.mob_incarnations().is_empty(),
+            "the authority names no mob"
+        );
+        authority
+    };
+    let forker = bind_surface(&fixture.state, forker.session.clone(), names_no_mob());
+    let bystander = bind_surface(
+        &fixture.state,
+        member_session(&fixture, "bystander").await,
+        names_no_mob(),
+    );
+
+    let checked = call(
+        &forker.surface,
+        "mob_check_member",
+        json!({"mob_id": mob_id, "member_id": "kept-child"}),
+    )
+    .await
+    .expect("the forker checks its own child");
+    assert_eq!(checked["output_preview"], CHILD_REPLY, "{checked}");
+    let listed = call(
+        &forker.surface,
+        "mob_list_members",
+        json!({"mob_id": mob_id}),
+    )
+    .await
+    .expect("owner view of the member list");
+    assert_eq!(member_names(&listed), vec!["kept-child"], "{listed}");
+    let listed = call(
+        &bystander.surface,
+        "mob_list_members",
+        json!({"mob_id": mob_id}),
+    )
+    .await
+    .expect("a member without children gets an empty owner view");
+    assert!(member_names(&listed).is_empty(), "{listed}");
+    for (surface, target) in [
+        (&forker.surface, "bystander"),
+        (&bystander.surface, "kept-child"),
+    ] {
+        for tool in ["mob_check_member", "mob_retire_member"] {
+            assert!(
+                matches!(
+                    call(
+                        surface,
+                        tool,
+                        json!({"mob_id": mob_id, "member_id": target})
+                    )
+                    .await,
+                    Err(ToolError::AccessDenied { .. })
+                ),
+                "{tool} on {target} is denied to a member that does not own it"
+            );
+        }
+    }
+
+    call(
+        &forker.surface,
+        "mob_retire_member",
+        json!({"mob_id": mob_id, "member_id": "kept-child"}),
+    )
+    .await
+    .expect("the forker retires its own child");
+    assert_not_seated(&source_handle(&fixture).await, "kept-child").await;
+    fixture.teardown().await;
+}
+
 fn assert_member_absence(
     result: Result<Value, ToolError>,
     kind: &str,

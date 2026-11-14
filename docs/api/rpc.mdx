@@ -4718,8 +4718,13 @@ that answer is not a level refusal, it
 carries no `reasoning_effort_refusal`, and the same request is taken once
 the session is idle. The other surfaces answer the same request in their
 own way: REST answers a level on a message for a session it holds live
-with HTTP 500 `session is busy`, and the MCP server's `meerkat_resume`
-rebuilds the session (see [REST](/api/rest) and [MCP](/api/mcp)).
+with HTTP 500 `session is busy`. The MCP server's `meerkat_resume` that
+names the level while a turn of the session runs is answered the same busy
+kind at once, by the MCP server's own rule: every resume that names the
+level then, whatever the session holds (a repeat, and a clear on a session
+that holds no level, are busy there, where the table below queues them);
+with no turn running it rebuilds the session (see [REST](/api/rest) and
+[MCP](/api/mcp)).
 
 A level is judged again when its turn starts. A `turn/start` refused
 there, after its input was stored, is a failed start: its stored input ends

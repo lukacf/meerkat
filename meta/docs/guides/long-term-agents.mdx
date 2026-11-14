@@ -330,7 +330,8 @@ updated = await identities.update(
 if isinstance(updated, IdentityDone):
     agent = updated.agents[0]
     if agent.instructions:
-        agent.instructions.kind    # "applies_at_next_run", ...
+        # "applies_at_next_run", "applies_after_compaction", ...
+        agent.instructions.kind
     digest = agent.spec_digest or digest
 
 await identities.archive("editor", expected_spec_digest=digest, request_id="archive-editor-1")
@@ -361,7 +362,8 @@ const updated = await identities.update("editor", {
 });
 if (updated.outcome === "done") {
   const agent = updated.agents[0];
-  agent.instructions?.kind; // "applies_at_next_run", ...
+  // "applies_at_next_run", "applies_after_compaction", ...
+  agent.instructions?.kind;
   digest = agent.specDigest!;
 }
 

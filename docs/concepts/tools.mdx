@@ -422,7 +422,11 @@ consequence. Both still apply to a call a scoped grant opened.
 and continue once they are answered. It is a stock tool that a host mounts:
 `meerkat-core` defines the tool, its typed questions, answers and outcomes
 and the seam a host implements (`AskUserHost`), and no build has the tool
-until its host mounts it. [Meerkat Meta](/meta/concepts/gating) mounts it for
+until its host mounts it. A Rust host mounts it by putting an
+`AskUserDispatcher` over its `AskUserHost` into the build's host tools
+(`SessionBuildOptions::host_tools`), which the agent factory composes beside
+the build's own tools and which leave the build's tool catalog as it is.
+[Meerkat Meta](/meta/concepts/gating) mounts it for
 mob members and answers it in its Console (see "Question sets" on that
 page). `rkat`, `rkat-rpc`, the REST server
 and the Web SDK do not mount it.

@@ -144,6 +144,17 @@ them.
   row that carries an answer and reports that one row unreadable; other rows
   are unaffected.
 
+- Rust API of `meerkat-core` and `meerkat`: a build can carry tools of the
+  embedding host's own (see Added: host tools). `SessionBuildOptions`
+  (`meerkat_core::service`) and `AgentBuildConfig` (`meerkat`) gain the
+  public field `host_tools: Option<Arc<dyn AgentToolDispatcher>>`. Source
+  only: code that builds either struct with a literal that names every field
+  adds `host_tools: None`, which keeps the build it had; code that starts
+  from `SessionBuildOptions::default()`, from `AgentBuildConfig::new` or
+  from a `..` rest is unaffected. Nothing changes on the wire, in a schema
+  or in a stored form: the field is a dispatcher of the host's process, and
+  no session record carries it.
+
 ### Added
 
 - `meerkat-core`: the stock tool `ask_user`, with which an agent asks a
@@ -160,6 +171,23 @@ them.
   `dismissed`, `timed_out` or `withdrawn` and whose answers are a choice,
   the person's free text (1 to 280 bytes, data and not instructions) or
   `unanswered`. See [Asking a person](docs/concepts/tools.mdx#asking-a-person-ask_user).
+
+- `meerkat-core`, `meerkat`: host tools. A build can carry a tool dispatcher
+  of the embedding host's own, `SessionBuildOptions::host_tools`
+  (`AgentBuildConfig::host_tools` on the facade), which the agent factory
+  composes as one more part of the build's tool surface, beside whatever
+  the build's own tools are: its builtins, its external tools, the tools of
+  its MCP servers, or none. The dispatcher's tools join the build's tool
+  list, and its catalog joins the build's as any composed part's does: one
+  that declares an exact catalog of inline entries leaves the build's tool
+  catalog as it is without it (the same mode and the same catalog control
+  tools), and one that does not declare an exact catalog makes the build's
+  catalog not exact. A host uses it for a tool every agent it builds gets,
+  such as a host-mounted `ask_user`, without wrapping the build's external
+  tools. A name the dispatcher shares with another part of the build is
+  offered by neither. It is not stored: a resumed or recovered build has
+  none until its host sets it again. A build that does not set it is
+  unchanged.
 
 - `meerkat-runtime`: the durable decision kind `ask_user.questions`, decided
   by people only, with its hold (the question set, the asking agent and the

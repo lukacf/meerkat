@@ -295,9 +295,13 @@ run.
   checkouts of the release tree. Only a hosted run proves the Windows, macOS
   and Linux aarch64 legs.
 
-The check has no version condition: an asset recovery that rebuilds one of
-those releases fails it on Linux x86_64, since those rebuilt archives are the
-defect.
+The check has no version condition: an asset recovery on the BuildBuddy
+backend that rebuilds one of those releases builds with that release's own
+launcher, which links Linux x86_64 as before, so the check fails the rebuilt
+binaries (read from the workflow, not run). On the GitHub-hosted backend the
+rebuilt binaries are built with Cargo and are not linked that way. Recover
+such a release on the GitHub-hosted backend
+(`RELEASE_BACKEND=github-hosted`).
 
 ## Homebrew Tap
 

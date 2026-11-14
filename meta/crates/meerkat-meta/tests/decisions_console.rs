@@ -1634,6 +1634,22 @@ actions = ["decisions.view", "decisions.admin"]
         json!({"decision_id": absent}),
     )
     .await;
+    // The withdraw of such a row, by its id.
+    let withdraw = |subject: &'static str, decision_id: String| {
+        let app = app.clone();
+        async move {
+            rpc(
+                &app,
+                Some(subject),
+                "meta/decisions/withdraw",
+                json!({"decision_id": decision_id}),
+            )
+            .await
+        }
+    };
+    let by_rule_withdraw = withdraw(ERIN, broken.decision_id.to_string()).await;
+    let by_rule_withdraw_absent = withdraw(ERIN, absent.clone()).await;
+    let access_admin_withdraw = withdraw(ADMIN, broken.decision_id.to_string()).await;
     drop(app);
     runtime.shutdown().await;
 
@@ -1650,6 +1666,21 @@ actions = ["decisions.view", "decisions.admin"]
     assert_eq!(
         by_rule_get, by_rule_absent,
         "by its id the row answers as an id that names no decision"
+    );
+    assert_eq!(
+        by_rule_withdraw, by_rule_withdraw_absent,
+        "a rule administrator's withdraw of such a row answers as an id that names no decision"
+    );
+    assert_eq!(
+        by_rule_withdraw_absent["error"]["data"]["kind"],
+        json!("decision_not_found"),
+        "{by_rule_withdraw_absent}"
+    );
+    assert_eq!(
+        access_admin_withdraw["error"]["data"]["kind"],
+        json!("decision_unreadable"),
+        "an access administrator's withdraw is told the row cannot be decoded: \
+         {access_admin_withdraw}"
     );
 }
 

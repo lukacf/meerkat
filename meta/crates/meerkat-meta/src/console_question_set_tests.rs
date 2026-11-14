@@ -873,8 +873,16 @@ async fn only_a_person_who_may_view_the_asker_answers() {
     let open_pending = open_console.asked(ASKER, "call-1").await;
     let anonymous = open_console.answer(None, &open_pending).await;
     let open_phase = open_console.row(&open_pending).state.phase;
+    // This open Console has an access controller and a trusted issuer: a
+    // person who volunteers a token is identified, and answers.
+    let volunteered = open_console.answer(Some(&bob()), &open_pending).await;
     open_console.stop().await;
 
+    assert_eq!(
+        volunteered["result"]["outcome"],
+        json!("answered"),
+        "a person who signs in on an open Console answers: {volunteered}"
+    );
     assert_eq!(
         refusal_shape(&carol_unread, &pending_id),
         refusal_shape(&carol_unread_unknown, &unknown),

@@ -61,30 +61,34 @@ token fails instead of silently downgrading execution.
 ### What is packed
 
 `rkat mob pack` archives every regular file under the mob directory, at any
-depth. Through 0.9.14 it prints no warning and no list of them. From 0.9.15
-it reports on standard error how many files it packed and warns, by path,
-about packed files that look like secrets, repository metadata, local state
-or an earlier pack; `rkat mob web build` repeats the warnings for the pack
-it copies. Files are flagged by name, and for one form by content: a file
-that `--sign` would accept as a key (its text, with the white space around
-it trimmed, is exactly 64 hex digits) is flagged whatever it is called. Any
-file that is only a 64-digit hex value is flagged so, a key or not: this
-command's own digest saved to a file, for example. By name: env files
-(`.env`, `.env.<name>`, `<name>.env`); key-like names (`id_rsa`, `id_dsa`,
-`id_ecdsa`, `id_ed25519`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, and a name that
-is `key` or ends in `-key`, `_key` or `.key` before its extension, but no
-`.pub` file); `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, `.htpasswd`;
-`*.mobpack` and `mobpack.bin`; the directories `.git/`, `.rkat/`, `.ssh/`,
-`.aws/` and `.gnupg/`, each with one line that stands for every file under
-it, a key-shaped one included; and every other hidden file or directory (the
-template names `.env.example`, `.env.sample` and `.env.template` among
-them). The list is a heuristic and misses much (`credentials.json`,
-`terraform.tfstate`, `secrets.yaml`, `*.jks` and `*.ppk` get no warning), and
-the pack is the same with or without a warning: no warning does not mean the
-pack is clean. Hidden files are included:
-an env file placed there (`.env`, `.env.local`) is in the pack with its
-contents, and so is the whole `.git` directory when the mob directory is a
-repository of its own.
+depth. Hidden files are included: an env file placed there (`.env`,
+`.env.local`) is in the pack with its contents, and so is the whole `.git`
+directory when the mob directory is a repository of its own. Through 0.9.14
+the command prints no warning and no list of them.
+
+From 0.9.15 it reports on standard error how many files it packed and warns,
+by path, about packed files that look like secrets, repository metadata,
+local state or an earlier pack; `rkat mob web build` repeats the warnings for
+the pack it copies. The pack is the same with or without a warning, and the
+list behind the warnings is a heuristic that misses much (`credentials.json`,
+`terraform.tfstate`, `secrets.yaml`, `*.jks` and `*.ppk` get no warning): no
+warning does not mean the pack is clean. What is flagged:
+
+- By content, whatever the file is called: a file that `--sign` would accept
+  as a key (its text, with the white space around it trimmed, is exactly 64
+  hex digits). Any file that is only a 64-digit hex value is flagged so, a
+  key or not: this command's own digest saved to a file, for example.
+- Env files: `.env`, `.env.<name>`, `<name>.env`.
+- Key-like names: `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `*.pem`,
+  `*.key`, `*.p12`, `*.pfx`, and a name that is `key` or ends in `-key`,
+  `_key` or `.key` before its extension, but no `.pub` file.
+- `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, `.htpasswd`.
+- `*.mobpack` and `mobpack.bin`.
+- The directories `.git/`, `.rkat/`, `.ssh/`, `.aws/` and `.gnupg/`, each
+  with one line that stands for every file under it, a key-shaped one
+  included.
+- Every other hidden file or directory (the template names `.env.example`,
+  `.env.sample` and `.env.template` among them).
 
 rkat's own state directory is packed like any other. A command such as
 `rkat run` that is started inside the mob directory creates `.rkat/` there

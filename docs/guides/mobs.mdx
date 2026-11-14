@@ -926,8 +926,8 @@ session owns (the mobs its agent created with `mob_create`, and the session's
 implicit mob with its delegates and forks) end with it at the next start of
 the host: the mob's retire archives the session and leaves its mobs to that
 start. The archive of a store-owned identity is such a retirement: the mobs
-its agent created end at the host's next start, and its unarchive does not
-bring them back. A session archived through a surface's own archive call (JSON-RPC
+its agent created are removed with their stores at the host's next start,
+and its unarchive does not restore them. A session archived through a surface's own archive call (JSON-RPC
 `session/archive`, the REST and MCP archive) has its mobs destroyed at that
 call. A
 worker's respawn (`respawn`, `mob/respawn`, the `mob_respawn` tool of

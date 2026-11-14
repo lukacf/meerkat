@@ -4170,6 +4170,10 @@ Result: `identity`, `session_id`, `floor_tokens`, `messages_before`,
 `last_rewrite_reason` (message counts and revision facts are `null` when the
 gateway has no concrete transcript-edit service).
 
+From 0.9.15 the SDKs call it as `MetaRuntime.compact_member` (Python) and
+`MetaRuntime.compactMember` (TypeScript); each waits for the reply for
+`timeout_ms` plus 30 seconds, past the secondary observation budget.
+
 #### A conversation the compaction cannot make smaller
 
 A compaction folds at least the oldest turn into a summary and keeps the

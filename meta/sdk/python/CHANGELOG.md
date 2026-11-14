@@ -4,6 +4,30 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `MetaRuntime.compact_member(identity, *, floor_tokens=None, timeout=None)`
+  calls `meta/compact_member`: the member's conversation is compacted now
+  (the older turns summarized, the most recent ones kept) in one
+  maintenance turn, at the cost of one model turn and two in-place rebuilds
+  of the member.
+  A `meta/compact_member` call that is admitted rebuilds the identity,
+  whether it then compacts, compacts nothing or fails; for an identity that
+  created mobs with its own
+  tools that costs it the listing and management of those mobs (see the
+  `meta/compact_member` section of the RPC reference). Have such an identity
+  destroy a mob it created before the call if it must not be left running
+  unmanaged.
+  A changed instruction that waits for a compaction (an update answered
+  `applies_after_compaction`) takes effect with it.
+  `floor_tokens` is the member's compaction threshold for that turn
+  (gateway default 1024): a conversation shorter than it is left as it is,
+  so check the result's `compaction_applied`. `timeout` (seconds, gateway
+  default 60) is how long the gateway watches the turn; the call waits for
+  the reply for `timeout` plus 30 seconds, whatever the transport's request
+  timeout is, because the gateway holds the call past its deadline. Returns
+  the gateway's result as a dict. A failure raises `RpcError` with
+  `data["kind"]` (for example `compact_member_busy`,
+  `compact_member_timeout`); a `timeout` that is not a finite number of at
+  least one millisecond raises `ValueError` before any request.
 - `MetaRuntime.identities` (`IdentitiesHandle`) calls the long-term agent
   host methods (`meta/identity/*`): `create`, `update`, `archive`,
   `unarchive`, `remove`, `adopt`, `withdraw`, `changes_hold`, `list`, `get`,

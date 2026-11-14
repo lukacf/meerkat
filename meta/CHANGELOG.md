@@ -1026,6 +1026,30 @@ Security, Upgrade and Changed.
   locally hosted mob members signed TCP comms endpoints
   (`runtime_options.member_comms_address`), as TypeScript `memberCommsTcp`
   does: what a member of another gateway needs to reach them.
+- Python `MetaRuntime.compact_member(identity, *, floor_tokens=None,
+  timeout=None)` and TypeScript `MetaRuntime.compactMember(identity,
+  { floorTokens, timeoutMs })` call `meta/compact_member`, which neither SDK
+  could call. A host can compact a member's conversation now: the older
+  turns are summarized and the most recent ones are kept, at the cost of one
+  model turn and two in-place rebuilds of the member.
+  A `meta/compact_member` call that is admitted rebuilds the identity,
+  whether it then compacts, compacts nothing or fails; for an identity that
+  created mobs with its own
+  tools that costs it the listing and management of those mobs (see the
+  `meta/compact_member` section of the RPC reference). Have such an identity
+  destroy a mob it created before the call if it must not be left running
+  unmanaged.
+  A changed instruction that waits for a compaction (an update answered
+  `applies_after_compaction`, on a model that takes a system instruction
+  only ahead of the conversation) takes effect with it. The call waits for
+  the reply for the verb's timeout plus 30 seconds, whatever the
+  transport's request timeout is, because the gateway holds the call past
+  that timeout. The result is the gateway's: check its `compaction_applied`,
+  which is `false` when the conversation holds no fewer messages than
+  before the call (one shorter than `floor_tokens`, 1024 tokens by default,
+  is left as it is). A failure is the RPC error with `data.kind`, for
+  example `compact_member_busy` or `compact_member_timeout`. The Console's
+  RPC route does not forward the verb.
 
 - A spawn whose draft sets one provider param keeps the
   `reasoning_effort` level its profile declares in `provider_params`, as it

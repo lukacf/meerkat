@@ -1496,6 +1496,166 @@ async fn a_mob_created_again_for_the_same_owner_is_seated_without_a_refusal() ->
     Ok(())
 }
 
+/// What the record of who a created mob is private to answers a spawn into
+/// the mob `mob_id`: the person a member would be seated for (`None` for no
+/// one), or the refusal's text while the record holds nothing certain.
+fn recorded_mob_owner(runtime: &MobRuntime, mob_id: &str) -> Result<Option<String>, String> {
+    let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("record-probe"));
+    runtime
+        .private_owners()
+        .apply_child(mob_id, None, &mut spec)
+        .map(|()| {
+            spec.labels
+                .as_ref()
+                .and_then(|labels| labels.get(PRIVATE_TO).cloned())
+        })
+        .map_err(|error| error.to_string())
+}
+
+/// A destroy that is made again drops nothing of another mob. While a
+/// destroyed mob's storage cleanup is still owed, its id takes no other mob:
+/// another person's side chat is refused the create before it is admitted,
+/// so nothing is recorded for it. Once the destroy made again has settled
+/// the cleanup, the other side chat creates a mob under the id, private to
+/// its own person. A further destroy call by the first mob's creator is
+/// refused and releases nothing: the later mob keeps its owner, and its
+/// first member is seated without a refusal, private to that person and not
+/// shown to the first.
+#[tokio::test]
+async fn a_destroy_made_again_drops_nothing_of_a_later_mob_under_the_id() -> TestResult {
+    const CREW: &str = "crew-two-private-creators";
+    let state = tempfile::tempdir()?;
+    let (runtime, app, alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "destroy-made-again").await?;
+    let bob = bearer(bob_claims());
+    let bob_scope = caller_scope(&app, &bob).await;
+    assert_ne!(alice_scope, bob_scope, "two people");
+    let forked = fork_on_console(&app, Some(&bob), "alpha", "alpha-side-bob").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let tools = runtime.agent_mob_mcp_state().ok_or("agent mob tools")?;
+    let crew = meerkat_mob::MobId::from(CREW);
+    let definition = json!({ "definition": {
+        "id": CREW,
+        "profiles": { "worker": {
+            "model": "gpt-5.5",
+            "runtime_mode": "turn_driven",
+            "tools": { "comms": true },
+        } },
+    } });
+
+    // The first person's side chat creates the mob: it is hers.
+    let first = own_mob_create(&runtime, "alpha-side", CREW).await?;
+    assert_eq!(
+        recorded_mob_owner(&runtime, CREW),
+        Ok(Some(alice_scope.clone())),
+        "the first mob is private to its creator's person"
+    );
+    drop(first);
+
+    // A reader of the mob's store keeps its destroy's storage cleanup owed.
+    // The destroy and the one made again are the host's: the release runs
+    // the same for every caller of a destroy.
+    let store = child_mob_store(state.path(), CREW).ok_or("the created mob has a store")?;
+    let reader = meerkat_mob::MobStorage::persistent(&store).map_err(|error| error.to_string())?;
+    let incomplete = tools
+        .mob_destroy(&crew)
+        .await
+        .err()
+        .ok_or("the destroy's storage cleanup stays owed while the reader holds the store")?;
+    assert!(
+        matches!(
+            incomplete,
+            meerkat_mob_mcp::MobMcpDestroyError::Incomplete { .. }
+        ),
+        "{incomplete}"
+    );
+    assert!(
+        matches!(
+            tools.handle_for(&crew).await,
+            Err(meerkat_mob::MobError::MobNotFound(_))
+        ),
+        "the destroy itself completed: no mob is hosted under the id"
+    );
+    assert!(
+        recorded_mob_owner(&runtime, CREW).is_err(),
+        "the destroyed mob left no record"
+    );
+
+    // While that cleanup is owed, the id takes no other mob, and the create
+    // that is refused records nothing.
+    let second_creator = member_mob_tools(&runtime, "alpha-side-bob").await?;
+    let refused = agent_tool_call(&second_creator, "mob_create", definition)
+        .await
+        .err()
+        .ok_or("no mob is created under an id whose destroyed mob's cleanup is owed")?;
+    assert!(
+        refused.to_string().contains("still outstanding"),
+        "{refused}"
+    );
+    assert!(
+        recorded_mob_owner(&runtime, CREW).is_err(),
+        "the refused create recorded nothing"
+    );
+
+    // The destroy made again by its caller, once the reader is gone, runs
+    // the release again and settles the cleanup.
+    drop(reader);
+    tools
+        .mob_destroy(&crew)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    // The other person's side chat creates a mob under the id: it is his.
+    let second = own_mob_create(&runtime, "alpha-side-bob", CREW).await?;
+    assert_eq!(
+        recorded_mob_owner(&runtime, CREW),
+        Ok(Some(bob_scope.clone())),
+        "the later mob is private to its own creator's person"
+    );
+
+    // A further destroy call by the first creator reaches neither mob.
+    let first_creator = member_mob_tools(&runtime, "alpha-side").await?;
+    let further = agent_tool_call(&first_creator, "mob_destroy", json!({ "mob_id": CREW })).await;
+    eprintln!("the first creator's further destroy call answers: {further:?}");
+    assert!(
+        further.is_err(),
+        "the first creator has no say over the later mob: {further:?}"
+    );
+    assert_eq!(
+        tools.handle_for(&crew).await?.incarnation(),
+        second.incarnation(),
+        "the later mob is still the one hosted under the id"
+    );
+    assert_eq!(
+        recorded_mob_owner(&runtime, CREW),
+        Ok(Some(bob_scope.clone())),
+        "the later mob keeps its owner"
+    );
+    let (seat, refused_spawns) = seat_in_once_read(
+        &runtime,
+        &app,
+        &second,
+        "second-creators-helper",
+        member_session(&runtime, "alpha-side-bob").await?,
+    )
+    .await?;
+    assert_eq!(
+        refused_spawns, 0,
+        "its first member is seated without a refusal"
+    );
+    assert_eq!(
+        seat,
+        Seat {
+            private_to: Some(bob_scope),
+            exempt: true,
+            alice_sees: false,
+            bob_sees: true,
+        },
+        "private to the later creator's person, and not shown to the first"
+    );
+    Ok(())
+}
+
 /// Two creates under one id, by a shared member and by a private side chat,
 /// of which at most one leaves a mob hosted: the members seated in that mob
 /// are private to whom the creator its own creation record names is private

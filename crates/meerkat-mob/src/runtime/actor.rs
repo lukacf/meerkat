@@ -8134,13 +8134,18 @@ impl PendingSpawnCleanupAnchor {
     /// Run this anchor's cleanup against the provisioner that owns the
     /// provisioned session.
     ///
-    /// A lifecycle step that cancels the spawn (stop, complete, reset,
-    /// shutdown, destroy) ends a session the spawn created. A session the
-    /// spawn resumed or revived existed before it and never became a
-    /// member's: it is released exactly as a failed spawn's rollback
-    /// releases it, and stays as it was. A retire of the pending member is
-    /// that member's disposal, so it ends the session whatever its origin,
-    /// as the retire of a seated member does.
+    /// An anchor that carries the machine's retire incarnation ends the
+    /// session whatever its origin: MobMachine authorized that retire to
+    /// cancel the pending spawn of a member the mob already holds, and a
+    /// retire is that member's disposal. Every other anchor comes from a
+    /// lifecycle step that cancels the spawn (stop, complete, reset, retire
+    /// all, shutdown, destroy) or from a retirement's disposal pass, which
+    /// clears the incarnation before it takes the slots still pending: such
+    /// an anchor ends a session the spawn created, and releases a session
+    /// the spawn resumed or revived exactly as a failed spawn's rollback
+    /// releases it. That session existed before the spawn and never became a
+    /// member's; it stays as it was. A release that fails keeps the anchor,
+    /// and the step that ran it reports the failure.
     pub(super) async fn settle(
         &self,
         provisioner: &Arc<dyn MobProvisioner>,

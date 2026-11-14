@@ -629,8 +629,8 @@ async fn an_adopted_successor_keeps_its_management_of_the_mob_it_created() {
 }
 
 /// After a reset of the creator's mob no successor's chain is followed. A
-/// mob reset ends every member and restarts the mob's generations, so from
-/// then on a recorded generation is taken to name only the member that
+/// mob reset ends every member and can restart the mob's generations, so
+/// from then on a recorded generation is taken to name only the member that
 /// serves the session at exactly that generation. The creator seated again
 /// on its session after the reset manages nothing it created before it; a
 /// mob it creates after the reset it manages at the generation that created

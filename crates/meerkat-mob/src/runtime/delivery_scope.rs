@@ -605,9 +605,9 @@ impl MemberBinding {
     /// session's first creation, an adoption) moves nothing and leaves the
     /// chain as it is.
     ///
-    /// `None` once the mob's journal holds a mob reset: a mob reset restarts
-    /// its members' generations, so a generation no longer names one
-    /// incarnation and no chain is answered.
+    /// `None` once the mob's journal holds a mob reset: a mob reset can
+    /// restart its members' generations, so a generation may no longer name
+    /// one incarnation, and no chain is answered.
     ///
     /// Like the binding, this is a history fact and authorizes nothing by
     /// itself.
@@ -951,9 +951,9 @@ struct JournalFold {
     unborn_sessions: BTreeSet<SessionId>,
     /// The sessions a binding named since the latest mob reset.
     epoch_sessions: BTreeSet<SessionId>,
-    /// Whether the journal holds a mob reset. A mob reset restarts its
-    /// members' generations, so after one a generation names no single
-    /// incarnation and no binding answers a lineage.
+    /// Whether the journal holds a mob reset. A mob reset can restart its
+    /// members' generations, so after one a generation may name more than
+    /// one incarnation, and no binding answers a lineage.
     mob_reset_seen: bool,
 }
 
@@ -3060,10 +3060,10 @@ mod tests {
     }
 
     /// Once the journal holds a mob reset no binding answers a lineage,
-    /// whether it was bound before the reset or after it: a mob reset
-    /// restarts its members' generations, so a generation names no single
-    /// incarnation. A chain that began before the reset is never followed
-    /// across it.
+    /// whether it was bound before the reset or after it: a mob reset can
+    /// restart its members' generations, so a generation may name more than
+    /// one incarnation. A chain that began before the reset is never
+    /// followed across it.
     #[test]
     fn no_lineage_is_answered_once_the_journal_holds_a_mob_reset() {
         let member = AgentIdentity::from("member");

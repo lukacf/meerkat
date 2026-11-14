@@ -1459,6 +1459,42 @@ move answers the same refusal. `set.addressability` and
 the change class `capability` of the policy. An update sets a runtime
 mode and cannot return the agent to its profile's.
 
+A label change is applied at once and does not seat the agent again: the
+agent keeps its member and its conversation, and goes on listing and
+managing the mobs it created. The mob's roster reads the new labels from
+the update on, and what decides by a label decides on them at once: an
+access rule's `match_labels` at the next call (an open event stream
+within 20 seconds), the identity policy's rules on the agent's record. An
+idle agent is released by the update, so its next build is composed with
+the new labels, without a label that was removed. A busy agent is not
+interrupted, the answer does not say that it was busy, and going idle
+builds nothing: it keeps what it was built with until it is next
+released (a later update of it once it is idle, `meta/retire`, an idle
+retirement, a restart). An agent of a host whose sessions are not
+durable, a placed agent and an agent wired to a placed agent are not
+released by a label change and keep their build. What trails until the
+agent is next seated is the record of its seat in the mob's journal,
+which decides nothing an update can change and is what an earlier release
+that serves the same store reads; only seating the agent again
+(`meta/respawn`) brings it in line. A removed label also stays in the
+peer metadata of the agent's conversation, which its peers read, until
+the agent starts a new conversation. One agent is still seated again:
+a `broken` one (its build was refused for good, it serves nothing). Once
+its labels have changed since it was last seated, any update of it seats
+it again, the update that changes them included. See
+[Changing labels](/guides/agents-create-agents#changing-labels).
+
+A profile move and a runtime-mode change seat the agent again on the same
+conversation, once it is idle. An agent that is seated again no longer
+lists or manages the mobs it created with its own tools (its mob tools
+answer no such mob, and its calls that name one are refused; the mobs and
+their members stay as they are): have it destroy such a mob first, or
+leave the profile and the runtime mode of an agent that must go on
+managing its mobs as they are. A host does this through this method; an
+agent the policy lets change another agent can move that agent's profile
+through the `identity_update` tool, which takes no runtime mode and
+refuses a change of the caller itself (`self_change_refused`).
+
 An update can touch several change classes of the policy at once; each is
 judged by its own rules and the strictest outcome applies to the whole
 update.

@@ -463,7 +463,7 @@ impl MobActor {
             // whatever the update's member step then answers and whether
             // or not its caller is still there: what decides on a member's
             // labels reads the roster. No seat row is written here: the
-            // member's restamp writes it, and the row committed above
+            // member's next seat writes it, and the row committed above
             // records the restamp as owed until then
             // ([`crate::roster::Roster::set_store_owned_seat_labels`]).
             let relabelled = self

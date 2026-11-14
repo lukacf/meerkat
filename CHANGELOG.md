@@ -620,6 +620,52 @@ them.
   runtime (see Changed). Nothing is registered. `RegistrationRejection` is
   non-exhaustive, so code that matches it compiles unchanged.
 
+- `meerkat-mob-mcp`: `MobMcpState::mob_stored_definition(mob_id)`,
+  `MobMcpState::mob_update_stored_definition(mob_id, expected_revision,
+  definition)` and `MobStoredDefinitionError`. A host that manages its mobs
+  through the state, and so holds no `MobStorage` of theirs, reads and
+  replaces the stored definition of a cold mob before the first mob verb
+  restores it. The read answers the stored definition with its epoch, the
+  revision the update expects, and does not write the store file (it uses
+  `MobStorage::read_definition_snapshot`, below). The update opens the one
+  store the state keeps for that id under its persistent root and forwards
+  to `MobStorage::update_definition` unchanged, so the answers are the
+  storage's own (the committed `MobDefinitionRevision`, the same revision
+  for an exact retry, `SpecRevisionConflict` for a wrong expected revision);
+  before it, it runs a create's check of the tool bundles the definition's
+  profiles opt into (`ToolBundleNotOffered`). Neither call starts a restore
+  or resumes a mob; the first mob verb then resumes the mob from the new
+  definition, and waits for an update in flight. A shared state
+  (`MobMcpState::into_shared`) runs the update as its own task, as it runs a
+  create, so an update whose caller went away is not cancelled: it runs to
+  the storage's answer, and a refusal of it is logged at `warn`. Neither is
+  a live operation: a mob the state manages is refused with
+  `MobStoredDefinitionError::Managed` and nothing is written, a quarantined
+  store answers `MobQuarantined`, and an id the state has no store for
+  answers `MobNotFound`. An update stores the definition as given: what a
+  create adds to a definition (realm skill sources, a child mob's host tool
+  bundles and MCP servers) is not added, and a restore does not add it
+  either. It is checked against the roster in one case only: the storage
+  refuses an update that drops a profile a created agent's row names
+  (`DefinitionError`, `profile_held_by_identity`; see Changed). A member
+  seated without such a row is not checked: a definition that leaves
+  out its profile is stored, and that member's restore
+  then fails (`profile not found`). Rust API only; see "Durable definition
+  updates" in the mob architecture reference.
+
+- `meerkat-mob`: `MobStorage::read_definition_snapshot(path)` and
+  `MobDefinitionSnapshotReadError`. It reads the current definition of a mob
+  store file, with its epoch and event cursor (the `MobDefinitionSnapshot`
+  an opened storage mints), with no running mob and without opening the
+  store for writing: a missing file is not created (`StoreMissing`), a store
+  an older release wrote is read as it is and not migrated, a file that is
+  not a mob store this build reads is refused (`ForeignSchema`), and the
+  process takes no fence and registers no observer for the path. The store
+  file is not written; reading a store in WAL mode, which every persistent
+  mob store is, leaves SQLite's `-wal` and `-shm` files beside it when its
+  writer had closed cleanly, so the read needs a directory SQLite can
+  create them in.
+
 - `meerkat-core`, `meerkat-llm-core`: the vocabulary of a provider-neutral
   `reasoning_effort` option. The entries below are built from these types:
   the resolver, the route every client reports, the typed refusal and the

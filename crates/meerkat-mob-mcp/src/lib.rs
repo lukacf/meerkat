@@ -1222,6 +1222,27 @@ pub enum MobMcpDestroyError {
     Mob(#[from] MobError),
 }
 
+/// Error of [`MobMcpState::mob_stored_definition`] and
+/// [`MobMcpState::mob_update_stored_definition`]: one refusal table for the
+/// read and the write of a cold mob's stored definition.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum MobStoredDefinitionError {
+    /// The state manages the mob: a live handle of it exists in this state
+    /// (a mob it created or restored, or a handle its host inserted). A
+    /// stored definition is read and replaced through the state only while
+    /// the mob is cold; nothing was written.
+    #[error(
+        "mob {mob_id} is managed by this state: its stored definition is read and replaced through the state only while the mob is cold"
+    )]
+    Managed { mob_id: MobId },
+
+    /// Every other answer: this state's own refusals and the storage's
+    /// answer, unchanged.
+    #[error(transparent)]
+    Mob(#[from] MobError),
+}
+
 /// Error returned by the identity-addressed mob system-context surface.
 ///
 /// Authorization belongs to the mob control plane, while the actual append
@@ -3055,9 +3076,9 @@ impl MobMcpState {
     /// state shared that way has no way to own a background task, so unfinished
     /// councils then need an explicit
     /// [`TemporaryCouncilCoordinator::recover_unfinished`] call. It also runs a
-    /// restore re-attempt, a resume and a create inline in the caller's future,
-    /// so a dropped caller cancels them mid-way, and the next admission of a
-    /// re-attempt ends an abandoned one.
+    /// restore re-attempt, a resume, a create and a stored definition update
+    /// inline in the caller's future, so a dropped caller cancels them
+    /// mid-way, and the next admission of a re-attempt ends an abandoned one.
     #[must_use]
     pub fn into_shared(self) -> Arc<Self> {
         Arc::new_cyclic(|weak| {
@@ -5229,6 +5250,334 @@ impl MobMcpState {
         }
     }
 
+    /// The gates the two stored-definition calls share: the console owner
+    /// (`SendCommand`; no per-mob grant can speak for a mob with no running
+    /// machine), this state's admission, held by the answer until the call
+    /// is done, and a persistent root that was set up.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn admit_stored_definition_call(
+        &self,
+        name: &'static str,
+    ) -> Result<state_tasks::StateHold, MobError> {
+        self.require_console_owner(ControlScope::SendCommand)?;
+        let admission = self.admit(name)?;
+        self.persistent_storage_setup()?;
+        Ok(admission)
+    }
+
+    /// The store of the cold mob `mob_id`, or the refusal the two
+    /// stored-definition calls share. The caller holds the restore lock;
+    /// `restored` is the value it guards (the restore has run).
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn cold_mob_store(
+        &self,
+        mob_id: &MobId,
+        restored: bool,
+    ) -> Result<PathBuf, MobStoredDefinitionError> {
+        match self.hosted_mob(mob_id).await {
+            HostedMob::Absent => {}
+            HostedMob::Managed(_) => {
+                return Err(MobStoredDefinitionError::Managed {
+                    mob_id: mob_id.clone(),
+                });
+            }
+            HostedMob::Held(error) | HostedMob::Quarantined(error) => return Err(error.into()),
+        }
+        let Some(root) = &self.persistent_storage_root else {
+            return Err(MobError::MobNotFound(mob_id.clone()).into());
+        };
+        // The restore has run: the hosted sets name every mob of this state.
+        if restored {
+            return Err(MobError::MobNotFound(mob_id.clone()).into());
+        }
+        let path = Self::persistent_storage_path(root, mob_id);
+        // Only a store file that exists is a store: a write-capable open
+        // would create one.
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Err(MobError::MobNotFound(mob_id.clone()).into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(MobError::MobNotFound(mob_id.clone()).into());
+            }
+            Err(error) => return Err(MobError::StorageError(Box::new(error)).into()),
+        }
+        Ok(path)
+    }
+
+    /// Replace the stored definition of the cold mob `mob_id`: a mob whose
+    /// store is under this state's persistent root and that the state has
+    /// not restored yet. It is for a host that manages its mobs through this
+    /// state and so holds no [`MobStorage`] of theirs. Call it before the
+    /// first mob verb, which then restores the mob from the new definition;
+    /// [`Self::mob_stored_definition`] reads the definition to edit and the
+    /// revision to pass. It is not a live mutation.
+    ///
+    /// "Before the first mob verb" includes what restores on the state's own
+    /// account. The first step of the state's WorkGraph Flow reconciler is
+    /// the restore, and [`MobMcpDispatcher::new`] and the stock surfaces
+    /// start that reconciler for a state that has a WorkGraph service; a
+    /// schedule host that delivers to a mob restores too. Make the call
+    /// before any of them is started: once the restore has run the state
+    /// manages every mob it has, and the call answers
+    /// [`MobStoredDefinitionError::Managed`].
+    ///
+    /// The state opens the one store it keeps for `mob_id` and forwards to
+    /// [`MobStorage::update_definition`] unchanged, so the answer is the
+    /// storage's own: the committed revision, the same revision for an exact
+    /// retry, [`MobError::SpecRevisionConflict`] for a wrong
+    /// `expected_revision` (it names the stored epoch),
+    /// [`MobError::DefinitionError`] for a definition that does not validate.
+    /// The definition epoch stays MobMachine's. No restore starts: no other
+    /// store of the root is opened and no mob is resumed.
+    ///
+    /// Before the storage is asked, the update runs the check a create runs
+    /// on the tool bundles the definition's inline profiles opt into
+    /// (`tools.bundles`): a child mob, known from the stored mob's own
+    /// creation record, may opt into what the host offers to child mobs, any
+    /// other mob into none. The refusal is the create's,
+    /// [`MobError::ToolBundleNotOffered`].
+    ///
+    /// That check and the storage's validation are the update's whole check
+    /// of a definition. A create's builder checks more, and the update runs
+    /// none of it: the ingress ownership of an external supervisor bridge,
+    /// which the next resume checks again (a definition that fails it is
+    /// stored, fails that resume, and the state quarantines the store), and
+    /// a runtime adapter for `AutonomousHost` profiles, which only a create
+    /// checks. For a child mob a create also refuses an inline profile that
+    /// carries a different descriptor under the name of an MCP server the
+    /// host makes available to child mobs; the update stores it.
+    ///
+    /// `definition` is stored as given. What a create through this state
+    /// adds to a definition is not added, and a restore adds none of it
+    /// either: the mob resumes with the stored definition as it is.
+    /// - Realm skill sources ([`Self::with_realm_skill_sources`]). A create
+    ///   copies into the definition the source of every skill its profiles
+    ///   name. Here an inline profile that names a skill without its source
+    ///   in the definition is refused by the storage's validation
+    ///   ([`MobError::DefinitionError`], `missing_skill_ref`), which is what
+    ///   a caller that builds a definition afresh meets first. A profile
+    ///   that references a realm profile is stored without the source (the
+    ///   validation does not read realm profiles), and its members are
+    ///   seated without that skill.
+    /// - For a child mob, the tool bundles and MCP servers the host makes
+    ///   available to child mobs ([`Self::with_child_tool_bundles`] and the
+    ///   child MCP servers): a create names them in every inline profile.
+    ///   Profiles stored without them build members without them.
+    ///
+    /// The definition [`Self::mob_stored_definition`] answers carries what
+    /// the create added, so an edit of it keeps all of this.
+    ///
+    /// The definition is checked against the roster in one case only: the
+    /// storage refuses an update that drops a profile a created agent's row
+    /// names ([`MobError::DefinitionError`], diagnostic
+    /// `profile_held_by_identity`), and nothing is written. A member seated
+    /// without such a row is not checked. A definition that leaves out its
+    /// profile is stored, and that member's restore
+    /// then fails on it (`profile not found`). Under the default member
+    /// restore policy that is the member's first delivery
+    /// ([`MobError::MemberRestoreFailed`]): the member then reads Broken and
+    /// the rest of the mob works. Under a policy that restores every member
+    /// at start it is the resume itself, and the state quarantines the store
+    /// ([`MobError::MobQuarantined`]). Either way the next process can read
+    /// the stored definition and write one that has the profile again.
+    ///
+    /// A mob created from a mobpack ([`Self::mob_create_from_mobpack`])
+    /// stores the pack's identity in its definition (`source_identity`), and
+    /// a repeat create of that pack answers the mob only while the stored
+    /// definition equals the pack's. The update neither clears nor checks
+    /// that identity. After an update that changes the definition, with the
+    /// identity kept or dropped, the repeat create is refused with the
+    /// duplicate mobpack create's [`MobError::Internal`] (`duplicate mobpack
+    /// create for mob id '...' does not match existing verified pack
+    /// identity`) instead of answering the mob; an update that changes
+    /// nothing leaves it answering the mob.
+    ///
+    /// Refused, with no definition written:
+    /// - [`MobStoredDefinitionError::Managed`]: the state manages the mob
+    ///   (it created or restored it, or its host inserted its handle).
+    /// - A mob in one of the other hosted sets answers as it answers a
+    ///   lookup: a quarantined store [`MobError::MobQuarantined`], a child
+    ///   held before activation its hold. Both stores are kept as found, so
+    ///   a definition that makes a resume fail is replaced before the
+    ///   restore, not in the process that quarantined its store.
+    /// - [`MobError::MobNotFound`]: the state has no store to update for the
+    ///   id. It has no persistent root; or the root holds no store of the
+    ///   mob; or `definition` names another mob than `mob_id` (answered for
+    ///   the definition's id, as the storage answers a store that holds
+    ///   another mob); or the restore has already run and no hosted set
+    ///   holds the mob. After the restore the hosted sets name every mob the
+    ///   state has, so no store is opened then.
+    ///
+    /// None of these opens a store, with one exception: a store file under
+    /// the mob's name that holds no mob, or another mob, is opened for
+    /// writing before the storage answers [`MobError::MobNotFound`]. A
+    /// refusal of the definition itself (the tool bundle check, the
+    /// storage's validation, a wrong `expected_revision`) also comes after
+    /// the store was opened for writing. That open migrates a store an
+    /// older release wrote; no definition is written.
+    ///
+    /// Needs the console owner (`SendCommand`) and this state's admission,
+    /// like a create. A state whose persistent root could not be set up
+    /// refuses as it refuses every mob verb.
+    ///
+    /// The call holds the lock the restore runs under until the storage has
+    /// answered. A first mob verb that arrives meanwhile waits and then
+    /// resumes the mob from the new definition, so no restore pass resumes a
+    /// mob from the definition an update in flight is replacing; a create
+    /// runs only after the restore, so none is in flight either. The storage
+    /// waits up to 30 s for its exclusive fence, and the mob verbs of this
+    /// state wait with it.
+    ///
+    /// An update whose caller went away is not cancelled: it runs to the
+    /// storage's answer. A shared state
+    /// ([`Self::into_shared`]) runs the update as its own task, as it runs a
+    /// create and a resume, so a dropped caller cannot release that lock
+    /// while the storage's commit is under way. A first mob verb that takes
+    /// the lock before that task does restores the mob, and the abandoned
+    /// update is then refused ([`MobStoredDefinitionError::Managed`]) and
+    /// writes nothing; a refusal of the state's own task is logged at
+    /// `warn`, since a caller that went away does not read it. A state
+    /// shared by a plain
+    /// `Arc::new` runs the update in its caller's future, where a caller
+    /// dropped during the storage's commit releases the lock before the
+    /// commit has landed: await the call to its answer there.
+    ///
+    /// Three limits. A restore pass whose caller was dropped can leave the
+    /// resume of one store running as the state's own task, outside that
+    /// lock: an update of that mob in that window is not refused, which is
+    /// why the call is for use before the first mob verb. A handle the host
+    /// builds over the same store itself is not seen until it is inserted.
+    /// And the lock is this state's: a second [`MobMcpState`], or another
+    /// process, over the same persistent root is not excluded by it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn mob_update_stored_definition(
+        &self,
+        mob_id: &MobId,
+        expected_revision: u64,
+        definition: MobDefinition,
+    ) -> Result<meerkat_mob::MobDefinitionRevision, MobStoredDefinitionError> {
+        let admission = self.admit_stored_definition_call("mob stored definition update")?;
+        // The store this state keeps under an id holds the mob of that id.
+        if &definition.id != mob_id {
+            return Err(MobError::MobNotFound(definition.id).into());
+        }
+        // Like a create, the update runs to the storage's answer as the
+        // state's own task: a caller dropped mid-update cannot release the
+        // restore lock while the storage's commit still runs.
+        if let Some(state) = self.self_weak.get().and_then(std::sync::Weak::upgrade) {
+            let mob_id = mob_id.clone();
+            return self
+                .run_admitted_create("mob stored definition update", async move {
+                    let _admission = admission;
+                    let answer = state
+                        .update_stored_definition_admitted(&mob_id, expected_revision, definition)
+                        .await;
+                    // The caller may be gone by now, and then nobody reads a
+                    // refusal: a committed update is readable in the store,
+                    // a refused one leaves no other trace.
+                    if let Err(refusal) = &answer {
+                        tracing::warn!(
+                            %mob_id,
+                            %refusal,
+                            "a stored definition update was refused and wrote no definition"
+                        );
+                    }
+                    Ok(answer)
+                })
+                .await?;
+        }
+        let _admission = admission;
+        self.update_stored_definition_admitted(mob_id, expected_revision, definition)
+            .await
+    }
+
+    /// The body of [`Self::mob_update_stored_definition`] after its gates,
+    /// through the storage's answer.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn update_stored_definition_admitted(
+        &self,
+        mob_id: &MobId,
+        expected_revision: u64,
+        definition: MobDefinition,
+    ) -> Result<meerkat_mob::MobDefinitionRevision, MobStoredDefinitionError> {
+        // Held until the storage has answered: the restore scan, which
+        // resumes the stores of the root, runs under this lock.
+        let restored = self.restore_lock.lock().await;
+        let path = self.cold_mob_store(mob_id, *restored).await?;
+        let storage = MobStorage::persistent(&path)?;
+        // A create's check of the definition's tool bundle opt-ins, with the
+        // stored mob's own creation record saying whether it is a child mob.
+        let owner = storage.owner_bridge_binding().await?;
+        let destroyed_with_owner = owner.is_some_and(|owner| owner.destroy_on_owner_archive);
+        let child = child_tool_policy::is_child_mob(destroyed_with_owner);
+        self.refuse_unoffered_tool_bundles(&definition, child)?;
+        let revision = storage
+            .update_definition(expected_revision, definition)
+            .await?;
+        drop(restored);
+        Ok(revision)
+    }
+
+    /// Read the stored definition of the cold mob `mob_id` and its revision:
+    /// the definition a resume would take, its epoch (the
+    /// `expected_revision` [`Self::mob_update_stored_definition`] takes) and
+    /// the cursor of the event that set it. It is for a host that manages
+    /// its mobs through this state and so holds no [`MobStorage`] of theirs.
+    /// The stored definition carries what the create added to it, so a host
+    /// edits this definition and writes it back. Like the update, it is for
+    /// use before the first mob verb and before anything that restores on
+    /// the state's own account is started.
+    ///
+    /// The read does not write the store file. It goes through
+    /// [`MobStorage::read_definition_snapshot`], which opens the store file
+    /// read-only: no store is created, nothing is migrated or healed, no
+    /// fence is taken and no observer is registered. SQLite may leave the
+    /// store's `-wal` and `-shm` files beside it, as that reader describes.
+    /// A store an older
+    /// release wrote is read as it is; the update and the restore migrate
+    /// it when they open it. No restore starts: no other store of the root
+    /// is opened and no mob is resumed.
+    ///
+    /// The rules and refusals are the update's:
+    /// [`MobStoredDefinitionError::Managed`] for a mob the state manages,
+    /// the lookup answer of a quarantined store or a held child,
+    /// [`MobError::MobNotFound`] when the state has no store for the id (no
+    /// persistent root, no store of the mob under the root, a store that
+    /// holds no mob or another mob, or a restore that has already run
+    /// without any hosted set holding the mob), the console owner and this
+    /// state's admission, and the refusal of a persistent root that could
+    /// not be set up. A file under the mob's name that is not a mob store
+    /// this build reads answers [`MobError::StorageError`] carrying the
+    /// reader's [`meerkat_mob::MobDefinitionSnapshotReadError`].
+    ///
+    /// The read holds the lock the restore runs under while it reads, as the
+    /// update does, with the update's three limits. The revision it answers is
+    /// current until the next update; the update's compare-and-swap refuses
+    /// a stale one.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn mob_stored_definition(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<meerkat_mob::MobDefinitionSnapshot, MobStoredDefinitionError> {
+        let _admission = self.admit_stored_definition_call("mob stored definition read")?;
+        let restored = self.restore_lock.lock().await;
+        let path = self.cold_mob_store(mob_id, *restored).await?;
+        let snapshot = match MobStorage::read_definition_snapshot(&path).await {
+            Ok(snapshot) => snapshot,
+            // Gone since the probe: the state has no store for the id.
+            Err(meerkat_mob::MobDefinitionSnapshotReadError::StoreMissing { .. }) => None,
+            Err(meerkat_mob::MobDefinitionSnapshotReadError::Read(error)) => {
+                return Err(MobError::from(error).into());
+            }
+            Err(refused) => return Err(MobError::StorageError(Box::new(refused)).into()),
+        };
+        drop(restored);
+        // The store this state keeps under an id holds the mob of that id.
+        snapshot
+            .filter(|snapshot| &snapshot.definition().id == mob_id)
+            .ok_or_else(|| MobError::MobNotFound(mob_id.clone()).into())
+    }
+
     /// A member lookup of `session_id` over the persisted mob `mob_id` left
     /// unrestored with its store at `path`. That mob's incarnation is in
     /// doubt, so it is never a match: when its stored roster names the
@@ -5652,6 +6001,18 @@ impl MobMcpState {
         destroyed
     }
 
+    /// The refusal of a state whose persistent root could not be set up
+    /// ([`Self::with_persistent_storage_root`]): every operation over the
+    /// root fails closed with it.
+    fn persistent_storage_setup(&self) -> Result<(), MobError> {
+        match &self.persistent_storage_setup_error {
+            Some(error) => Err(MobError::Internal(format!(
+                "persistent mob state setup failed: {error}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
     async fn ensure_restored(&self) -> Result<(), MobError> {
         if self.persistent_storage_root.is_none() {
             // A host may still supply a durable council store without a
@@ -5661,11 +6022,7 @@ impl MobMcpState {
             self.schedule_local_forked_participant_sweeper();
             return Ok(());
         }
-        if let Some(error) = &self.persistent_storage_setup_error {
-            return Err(MobError::Internal(format!(
-                "persistent mob state setup failed: {error}"
-            )));
-        }
+        self.persistent_storage_setup()?;
         {
             let mut restored = self.restore_lock.lock().await;
             if !*restored {
@@ -21453,6 +21810,1853 @@ mod tests {
                 .is_empty(),
             "destroyed persistent mobs must not reappear after restart"
         );
+    }
+
+    /// [`explicit_definition`] with a second profile, `reviewer`: the
+    /// definition the stored-definition rows replace a stored one with.
+    fn definition_with_reviewer(mob_id: &str) -> MobDefinition {
+        let mut definition = explicit_definition(mob_id);
+        let reviewer = definition
+            .profiles
+            .get(&ProfileName::from("worker"))
+            .expect("the worker profile")
+            .clone();
+        definition
+            .profiles
+            .insert(ProfileName::from("reviewer"), reviewer);
+        definition
+    }
+
+    /// A restart over `root` with the mob `mob_id` stored: created through a
+    /// state over the root, its actor shut down, the state dropped.
+    async fn a_stored_mob_before_a_restart(
+        svc: &Arc<MockSessionSvc>,
+        root: &std::path::Path,
+        mob_id: &str,
+    ) -> MobId {
+        let state = restored_state(svc, root);
+        let mob_id = state
+            .mob_create_definition(explicit_definition(mob_id))
+            .await
+            .expect("create the stored mob");
+        state
+            .handle_for(&mob_id)
+            .await
+            .expect("predecessor mob handle")
+            .shutdown()
+            .await
+            .expect("retire the predecessor supervisor route");
+        mob_id
+    }
+
+    /// The store of `mob_id` under the persistent root `root`.
+    fn stored_mob_path(root: &std::path::Path, mob_id: &MobId) -> PathBuf {
+        MobMcpState::persistent_storage_path(&MobMcpState::persistent_mob_root(root), mob_id)
+    }
+
+    /// The definition the store of `mob_id` under `root` holds, and its
+    /// epoch, read from the store itself.
+    async fn stored_definition(root: &std::path::Path, mob_id: &MobId) -> (MobDefinition, u64) {
+        let snapshot = MobStorage::persistent(stored_mob_path(root, mob_id))
+            .expect("open the mob store")
+            .created_definition_snapshot()
+            .await
+            .expect("read the stored definition")
+            .expect("the store holds a definition");
+        (snapshot.definition().clone(), snapshot.epoch())
+    }
+
+    /// Whether `state` has run its restore scan.
+    async fn restore_has_run(state: &MobMcpState) -> bool {
+        *state.restore_lock.lock().await
+    }
+
+    /// What the storage itself answers to a definition update of a store
+    /// that has a live handle in the process: it commits the next epoch. The
+    /// running mob keeps the definition it started with, so the store is one
+    /// epoch ahead of its own live mob until the next resume. The storage
+    /// call is for a mob whose process is down; a state that manages the mob
+    /// has to refuse the update itself.
+    #[tokio::test]
+    async fn the_storage_commits_a_definition_update_under_a_live_handle_of_the_same_store() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = restored_state(&svc, root.path());
+        let mob_id = state
+            .mob_create_definition(explicit_definition("live-store"))
+            .await
+            .expect("create the managed mob");
+        let updated = definition_with_reviewer("live-store");
+
+        let answer = MobStorage::persistent(stored_mob_path(root.path(), &mob_id))
+            .expect("open the managed mob's store")
+            .update_definition(1, updated.clone())
+            .await;
+
+        let revision = answer.expect("the storage does not see the live handle");
+        assert_eq!((revision.epoch, revision.projection_revision), (2, 2));
+        let live = state.handle_for(&mob_id).await.expect("the managed mob");
+        assert_eq!(
+            live.definition(),
+            &explicit_definition("live-store"),
+            "the running mob keeps the definition it started with"
+        );
+        assert_eq!(
+            stored_definition(root.path(), &mob_id).await,
+            (updated, 2),
+            "its store is one epoch ahead of it"
+        );
+    }
+
+    /// A host replaces the stored definition of a cold mob through the
+    /// state: the state resumes nothing for it, and the first mob verb then
+    /// resumes the mob with the new definition at the advanced epoch.
+    #[tokio::test]
+    async fn a_cold_stored_definition_update_is_what_the_first_mob_verb_resumes() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_id = a_stored_mob_before_a_restart(&svc, root.path(), "cold-replace").await;
+        let updated = definition_with_reviewer("cold-replace");
+
+        let state = restored_state(&svc, root.path());
+        let revision = state
+            .mob_update_stored_definition(&mob_id, 1, updated.clone())
+            .await
+            .expect("the cold mob's stored definition is replaced");
+        assert_eq!((revision.epoch, revision.projection_revision), (2, 2));
+        assert!(
+            state.mobs.read().await.is_empty(),
+            "the update resumes nothing"
+        );
+
+        let resumed = state
+            .handle_for(&mob_id)
+            .await
+            .expect("the first mob verb resumes the mob");
+        assert_eq!(
+            resumed.definition(),
+            &updated,
+            "the mob resumes with the new definition"
+        );
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("reviewer"),
+                AgentIdentity::from("reviewer-1"),
+                Some(MobRuntimeMode::TurnDriven),
+                None,
+                None,
+            )
+            .await
+            .expect("the resumed mob seats a member of the added profile");
+        assert_eq!(
+            stored_definition(root.path(), &mob_id).await,
+            (updated, 2),
+            "the store holds the new definition at the advanced epoch"
+        );
+        let health = MobStorage::persistent(stored_mob_path(root.path(), &mob_id))
+            .expect("open the mob store")
+            .definition_projection_health()
+            .await
+            .expect("read the projection health");
+        assert!(
+            matches!(
+                health,
+                Some(meerkat_mob::MobDefinitionProjectionHealth::Healthy {
+                    authority_epoch: 2,
+                    projection_revision: 2,
+                })
+            ),
+            "{health:?}"
+        );
+    }
+
+    /// The update opens the one store it names and starts no restore scan:
+    /// a second store beside it, whose bytes are not a database, is neither
+    /// read nor quarantined, and the first mob verb still runs the restore.
+    #[tokio::test]
+    async fn a_cold_stored_definition_update_starts_no_restore_scan() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_id = a_stored_mob_before_a_restart(&svc, root.path(), "no-scan").await;
+        let broken_store = MobMcpState::persistent_mob_root(root.path())
+            .join(format!("{}broken.db", MobMcpState::MOB_STORE_FILE_PREFIX));
+        tokio::fs::write(&broken_store, b"not a sqlite database")
+            .await
+            .expect("write an undecodable mob store");
+
+        let state = restored_state(&svc, root.path());
+        state
+            .mob_update_stored_definition(&mob_id, 1, definition_with_reviewer("no-scan"))
+            .await
+            .expect("the cold mob's stored definition is replaced");
+
+        assert!(
+            !restore_has_run(&state).await,
+            "the update does not run the restore"
+        );
+        assert!(
+            !state
+                .mob_set_restored
+                .load(std::sync::atomic::Ordering::Acquire),
+            "the managed set is not declared restored"
+        );
+        assert!(
+            state.mobs.read().await.is_empty(),
+            "the update resumes nothing"
+        );
+        assert!(
+            state.quarantined_stores.read().await.is_empty(),
+            "the store beside it is not reported"
+        );
+        assert_eq!(
+            tokio::fs::read(&broken_store)
+                .await
+                .expect("read the store beside it"),
+            b"not a sqlite database",
+            "the store beside it is kept as found"
+        );
+
+        let listed = state.mob_list().await.expect("the first mob verb restores");
+        assert!(
+            listed.iter().any(|(listed, _)| listed == &mob_id),
+            "the updated mob is restored: {listed:?}"
+        );
+        assert_eq!(
+            state.quarantined_stores.read().await.len(),
+            1,
+            "the restore finds the undecodable store"
+        );
+    }
+
+    /// A mob this state manages is refused, typed, and nothing is written:
+    /// a mob it created, a mob it restored, and a mob of a state without a
+    /// persistent root.
+    #[tokio::test]
+    async fn a_managed_mob_refuses_a_stored_definition_update() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = restored_state(&svc, root.path());
+        let mob_id = state
+            .mob_create_definition(explicit_definition("managed"))
+            .await
+            .expect("create the managed mob");
+
+        let created = state
+            .mob_update_stored_definition(&mob_id, 1, definition_with_reviewer("managed"))
+            .await
+            .expect_err("a mob this state created is managed");
+        assert!(
+            matches!(
+                &created,
+                MobStoredDefinitionError::Managed { mob_id: refused } if refused == &mob_id
+            ),
+            "{created:?}"
+        );
+        assert_eq!(
+            stored_definition(root.path(), &mob_id).await,
+            (explicit_definition("managed"), 1),
+            "nothing is written"
+        );
+
+        state
+            .handle_for(&mob_id)
+            .await
+            .expect("predecessor mob handle")
+            .shutdown()
+            .await
+            .expect("retire the predecessor supervisor route");
+        drop(state);
+        let restarted = restored_state(&svc, root.path());
+        restarted.mob_list().await.expect("restore the mob");
+        let restored = restarted
+            .mob_update_stored_definition(&mob_id, 1, definition_with_reviewer("managed"))
+            .await
+            .expect_err("a mob this state restored is managed");
+        assert!(
+            matches!(
+                &restored,
+                MobStoredDefinitionError::Managed { mob_id: refused } if refused == &mob_id
+            ),
+            "{restored:?}"
+        );
+        assert_eq!(
+            stored_definition(root.path(), &mob_id).await,
+            (explicit_definition("managed"), 1),
+            "nothing is written"
+        );
+
+        let rootless = MobMcpState::new_in_memory();
+        let in_memory = rootless
+            .mob_create_definition(explicit_definition("managed-in-memory"))
+            .await
+            .expect("create a mob without a persistent root");
+        let refused = rootless
+            .mob_update_stored_definition(
+                &in_memory,
+                1,
+                definition_with_reviewer("managed-in-memory"),
+            )
+            .await
+            .expect_err("a managed mob of a state without a root is managed");
+        assert!(
+            matches!(
+                &refused,
+                MobStoredDefinitionError::Managed { mob_id: refused } if refused == &in_memory
+            ),
+            "{refused:?}"
+        );
+    }
+
+    /// A wrong expected revision answers the storage's own compare-and-swap
+    /// refusal, and nothing is written.
+    #[tokio::test]
+    async fn a_cold_stored_definition_update_at_a_wrong_revision_answers_the_storage_conflict() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_id = a_stored_mob_before_a_restart(&svc, root.path(), "wrong-revision").await;
+        let updated = definition_with_reviewer("wrong-revision");
+        let storage_answer = MobStorage::persistent(stored_mob_path(root.path(), &mob_id))
+            .expect("open the mob store")
+            .update_definition(7, updated.clone())
+            .await
+            .expect_err("the storage refuses a wrong expected revision");
+
+        let state = restored_state(&svc, root.path());
+        let refused = state
+            .mob_update_stored_definition(&mob_id, 7, updated)
+            .await
+            .expect_err("a wrong expected revision is refused");
+        assert!(
+            matches!(
+                &refused,
+                MobStoredDefinitionError::Mob(MobError::SpecRevisionConflict {
+                    mob_id: conflicted,
+                    expected: Some(7),
+                    actual: 1,
+                }) if conflicted == &mob_id
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(refused.to_string(), storage_answer.to_string());
+        assert_eq!(
+            stored_definition(root.path(), &mob_id).await,
+            (explicit_definition("wrong-revision"), 1),
+            "nothing is written"
+        );
+    }
+
+    /// An exact retry answers as the storage does: the revision the first
+    /// call committed, and no second epoch. Another definition at the same
+    /// expected revision then meets the compare-and-swap refusal.
+    #[tokio::test]
+    async fn a_cold_stored_definition_update_retried_exactly_answers_the_committed_revision() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_id = a_stored_mob_before_a_restart(&svc, root.path(), "exact-retry").await;
+        let updated = definition_with_reviewer("exact-retry");
+
+        let state = restored_state(&svc, root.path());
+        let first = state
+            .mob_update_stored_definition(&mob_id, 1, updated.clone())
+            .await
+            .expect("the first update commits");
+        let retried = state
+            .mob_update_stored_definition(&mob_id, 1, updated.clone())
+            .await
+            .expect("the exact retry answers the committed revision");
+        assert_eq!(retried, first);
+        assert_eq!(first.epoch, 2);
+        assert_eq!(
+            stored_definition(root.path(), &mob_id).await,
+            (updated, 2),
+            "the retry commits no second epoch"
+        );
+
+        let other = state
+            .mob_update_stored_definition(&mob_id, 1, explicit_definition("exact-retry"))
+            .await
+            .expect_err("another definition at the same expected revision is refused");
+        assert!(
+            matches!(
+                &other,
+                MobStoredDefinitionError::Mob(MobError::SpecRevisionConflict {
+                    expected: Some(1),
+                    actual: 2,
+                    ..
+                })
+            ),
+            "{other:?}"
+        );
+    }
+
+    /// A mob id this state has no store for answers `MobNotFound`, and no
+    /// store is made for it: a state without a persistent root, an unknown
+    /// id under a root, and a definition that names another mob than the id
+    /// the call addresses (whose store is left alone).
+    #[tokio::test]
+    async fn a_stored_definition_update_without_a_store_of_the_mob_answers_mob_not_found() {
+        let unknown = MobId::from("unknown");
+        let rootless = MobMcpState::new_in_memory();
+        let no_root = rootless
+            .mob_update_stored_definition(&unknown, 1, explicit_definition("unknown"))
+            .await
+            .expect_err("a state without a persistent root stores no mob");
+        assert!(
+            matches!(
+                &no_root,
+                MobStoredDefinitionError::Mob(MobError::MobNotFound(missing))
+                    if missing == &unknown
+            ),
+            "{no_root:?}"
+        );
+
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = restored_state(&svc, root.path());
+        let no_store = state
+            .mob_update_stored_definition(&unknown, 1, explicit_definition("unknown"))
+            .await
+            .expect_err("the root holds no store of the mob");
+        assert!(
+            matches!(
+                &no_store,
+                MobStoredDefinitionError::Mob(MobError::MobNotFound(missing))
+                    if missing == &unknown
+            ),
+            "{no_store:?}"
+        );
+        assert_eq!(mob_store_files(root.path()), 0, "no store is made for it");
+        assert!(!restore_has_run(&state).await);
+        drop(state);
+
+        // A store under the id `moved-b` that holds the mob `moved-a`.
+        let moved_a = a_stored_mob_before_a_restart(&svc, root.path(), "moved-a").await;
+        let moved_b = MobId::from("moved-b");
+        let from = MobMcpState::storage_file_paths(&stored_mob_path(root.path(), &moved_a));
+        let to = MobMcpState::storage_file_paths(&stored_mob_path(root.path(), &moved_b));
+        for (from, to) in from.iter().zip(&to) {
+            if tokio::fs::try_exists(from)
+                .await
+                .expect("look for the file")
+            {
+                tokio::fs::rename(from, to).await.expect("move the store");
+            }
+        }
+        let state = restored_state(&svc, root.path());
+        let other_mob = state
+            .mob_update_stored_definition(&moved_b, 1, definition_with_reviewer("moved-a"))
+            .await
+            .expect_err("the definition names another mob than the call addresses");
+        assert!(
+            matches!(
+                &other_mob,
+                MobStoredDefinitionError::Mob(MobError::MobNotFound(missing))
+                    if missing == &moved_a
+            ),
+            "{other_mob:?}"
+        );
+        let held = MobStorage::persistent(&to[0])
+            .expect("open the moved store")
+            .created_definition_snapshot()
+            .await
+            .expect("read the moved store")
+            .expect("the moved store holds a definition");
+        assert_eq!(
+            (held.definition(), held.epoch()),
+            (&explicit_definition("moved-a"), 1),
+            "the store under the addressed id is left alone"
+        );
+    }
+
+    /// A store the restore keeps quarantined answers the typed quarantine,
+    /// and is kept as found. Before the restore has run the state knows no
+    /// quarantine: the same store answers the storage's own failure.
+    #[tokio::test]
+    async fn a_quarantined_store_refuses_a_stored_definition_update_with_its_quarantine() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        a_stored_mob_before_a_restart(&svc, root.path(), "beside-quarantined").await;
+        let broken = MobId::from("broken");
+        let broken_store = stored_mob_path(root.path(), &broken);
+        tokio::fs::write(&broken_store, b"not a sqlite database")
+            .await
+            .expect("write an undecodable mob store");
+
+        let state = restored_state(&svc, root.path());
+        let cold = state
+            .mob_update_stored_definition(&broken, 1, explicit_definition("broken"))
+            .await
+            .expect_err("an undecodable store cannot be updated");
+        match &cold {
+            MobStoredDefinitionError::Mob(error) => assert_ne!(
+                quarantine_data(error)["kind"],
+                MOB_QUARANTINED_KIND,
+                "before the restore the answer is the storage's own: {error:?}"
+            ),
+            other => panic!("expected the storage's failure, got {other:?}"),
+        }
+        assert!(!restore_has_run(&state).await);
+
+        state.mob_list().await.expect("the restore runs");
+        let quarantined = state
+            .mob_update_stored_definition(&broken, 1, explicit_definition("broken"))
+            .await
+            .expect_err("a quarantined store is not updated");
+        match &quarantined {
+            MobStoredDefinitionError::Mob(error) => {
+                let data = quarantine_data(error);
+                assert_eq!(data["kind"], MOB_QUARANTINED_KIND, "{error:?}");
+                assert_eq!(data["mob_id"], "broken", "{error:?}");
+                assert_eq!(data["class"], "store_unreadable", "{error:?}");
+            }
+            other => panic!("expected the typed quarantine, got {other:?}"),
+        }
+        assert_eq!(
+            tokio::fs::read(&broken_store)
+                .await
+                .expect("read the quarantined store"),
+            b"not a sqlite database",
+            "the quarantined store is kept as found"
+        );
+    }
+
+    /// A restored child mob held before activation answers its hold, and its
+    /// store is kept as recovered.
+    #[tokio::test]
+    async fn a_held_child_mob_refuses_a_stored_definition_update_with_its_hold() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (svc, mob_id, owner, _worker_session) =
+            seat_child_worker_then_exit(&svc, root.path(), "held-child").await;
+        svc.script_observation(
+            &owner,
+            Ok(meerkat_mob::LiveDurableSourceObservation::Absent),
+        );
+        let state = restored_state(&svc, root.path());
+        assert_held_before_activation(state.handle_for(&mob_id).await, "owner_absent");
+        let (stored, epoch) = stored_definition(root.path(), &mob_id).await;
+        let mut updated = stored.clone();
+        let reviewer = updated
+            .profiles
+            .get(&ProfileName::from("worker"))
+            .expect("the worker profile")
+            .clone();
+        updated
+            .profiles
+            .insert(ProfileName::from("reviewer"), reviewer);
+
+        let refused = state
+            .mob_update_stored_definition(&mob_id, epoch, updated)
+            .await
+            .expect_err("a held child mob is not updated");
+        match &refused {
+            MobStoredDefinitionError::Mob(error) => {
+                assert!(error.is_held_before_activation(), "{error:?}");
+            }
+            other => panic!("expected the hold, got {other:?}"),
+        }
+        assert_eq!(
+            stored_definition(root.path(), &mob_id).await,
+            (stored, epoch),
+            "the held child's store is kept as recovered"
+        );
+    }
+
+    /// Once this state's restore has run, its hosted sets name every mob it
+    /// has: a store that appears under its root afterwards is not its mob.
+    /// The update answers `MobNotFound`, as every mob verb does, and opens
+    /// no store.
+    #[tokio::test]
+    async fn a_store_that_appears_after_the_restore_is_not_updated() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = restored_state(&svc, root.path());
+        assert!(
+            state
+                .mob_list()
+                .await
+                .expect("the restore runs over an empty root")
+                .is_empty()
+        );
+        let late = a_stored_mob_before_a_restart(&svc, root.path(), "after-restore").await;
+
+        let refused = state
+            .mob_update_stored_definition(&late, 1, definition_with_reviewer("after-restore"))
+            .await
+            .expect_err("the state does not have this mob");
+        assert!(
+            matches!(
+                &refused,
+                MobStoredDefinitionError::Mob(MobError::MobNotFound(missing))
+                    if missing == &late
+            ),
+            "{refused:?}"
+        );
+        assert!(
+            matches!(state.mob_status(&late).await, Err(MobError::MobNotFound(_))),
+            "a mob verb answers the same"
+        );
+        assert_eq!(
+            stored_definition(root.path(), &late).await,
+            (explicit_definition("after-restore"), 1),
+            "nothing is written"
+        );
+    }
+
+    /// While the update runs it holds the lock the restore runs under: the
+    /// first mob verb's restore waits for it, so no restore resumes the mob
+    /// from the definition the update is replacing.
+    #[tokio::test]
+    async fn the_restore_waits_for_a_stored_definition_update_in_flight() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_id = a_stored_mob_before_a_restart(&svc, root.path(), "update-in-flight").await;
+        let updated = definition_with_reviewer("update-in-flight");
+        let state = restored_state(&svc, root.path());
+
+        // An operation held on the store parks the storage's update at its
+        // exclusive fence.
+        let operation =
+            meerkat_sqlite::OperationGuard::for_database(&stored_mob_path(root.path(), &mob_id))
+                .expect("hold an operation on the store");
+        let updating = {
+            let state = Arc::clone(&state);
+            let mob_id = mob_id.clone();
+            let updated = updated.clone();
+            tokio::spawn(async move {
+                state
+                    .mob_update_stored_definition(&mob_id, 1, updated)
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.restore_lock.try_lock().is_ok() {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the update in flight holds the restore lock");
+
+        let listing = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.mob_list().await })
+        };
+        sleep(Duration::from_millis(300)).await;
+        assert!(
+            !listing.is_finished(),
+            "the first mob verb's restore waits for the update"
+        );
+        assert!(!updating.is_finished(), "the update is parked in the store");
+        assert!(state.mobs.read().await.is_empty(), "nothing is resumed");
+
+        drop(operation);
+        let revision = updating
+            .await
+            .expect("the update task")
+            .expect("the update commits once the store is free");
+        assert_eq!(revision.epoch, 2);
+        let listed = listing
+            .await
+            .expect("the listing task")
+            .expect("the restore runs after the update");
+        assert!(
+            listed.iter().any(|(listed, _)| listed == &mob_id),
+            "{listed:?}"
+        );
+        assert_eq!(
+            state
+                .handle_for(&mob_id)
+                .await
+                .expect("the restored mob")
+                .definition(),
+            &updated,
+            "the mob resumes with the new definition"
+        );
+    }
+
+    /// The update is the console owner's: a state bound to any other
+    /// principal is refused with the typed scope denial, before any store is
+    /// opened.
+    #[tokio::test]
+    async fn a_stored_definition_update_needs_the_console_owner() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_id = a_stored_mob_before_a_restart(&svc, root.path(), "owner-only").await;
+        let viewer = MobMcpState::new(
+            svc.clone(),
+            MobControlPrincipal::External(
+                meerkat_core::auth::PrincipalId::new("stored-definition-viewer")
+                    .expect("principal"),
+            ),
+        )
+        .expect("runtime custody")
+        .with_persistent_storage_root(Some(root.path().to_path_buf()));
+
+        let denied = viewer
+            .mob_update_stored_definition(&mob_id, 1, definition_with_reviewer("owner-only"))
+            .await
+            .expect_err("only the console owner replaces a stored definition");
+        assert!(
+            matches!(
+                &denied,
+                MobStoredDefinitionError::Mob(MobError::ScopeDenied(denial))
+                    if denial.required == ControlScope::SendCommand
+            ),
+            "{denied:?}"
+        );
+        assert_eq!(
+            stored_definition(root.path(), &mob_id).await,
+            (explicit_definition("owner-only"), 1),
+            "nothing is written"
+        );
+    }
+
+    /// A state that has closed its admission, and one that has stood down,
+    /// writes to no store any more.
+    #[tokio::test]
+    async fn a_stood_down_state_refuses_a_stored_definition_update() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_id = a_stored_mob_before_a_restart(&svc, root.path(), "stood-down").await;
+        let state = restored_state(&svc, root.path());
+        assert_eq!(
+            state.close_admission(far_deadline()).await,
+            MobStateStandDown::Clean
+        );
+        let closed = state
+            .mob_update_stored_definition(&mob_id, 1, definition_with_reviewer("stood-down"))
+            .await
+            .expect_err("a state whose admission is closed admits no stored definition update");
+        assert!(closed.to_string().contains("stood down"), "{closed}");
+        assert_eq!(
+            state.stand_down(far_deadline()).await,
+            MobStateStandDown::Clean
+        );
+
+        let refused = state
+            .mob_update_stored_definition(&mob_id, 1, definition_with_reviewer("stood-down"))
+            .await
+            .expect_err("a stood-down state admits no stored definition update");
+        assert!(refused.to_string().contains("stood down"), "{refused}");
+        assert_eq!(
+            stored_definition(root.path(), &mob_id).await,
+            (explicit_definition("stood-down"), 1),
+            "nothing is written"
+        );
+    }
+
+    /// A state whose persistent root could not be set up refuses the update
+    /// as it refuses every mob verb.
+    #[tokio::test]
+    async fn a_failed_persistent_root_setup_refuses_a_stored_definition_update() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let not_a_directory = root.path().join("not-a-directory");
+        tokio::fs::write(&not_a_directory, b"a file where the root should be")
+            .await
+            .expect("write a file where the root should be");
+        let state = MobMcpState::new(svc.clone(), MobControlPrincipal::Owner)
+            .expect("runtime custody")
+            .with_persistent_storage_root(Some(not_a_directory));
+        let verb = state
+            .mob_list()
+            .await
+            .expect_err("a mob verb refuses the failed setup");
+
+        let refused = state
+            .mob_update_stored_definition(
+                &MobId::from("setup-failed"),
+                1,
+                explicit_definition("setup-failed"),
+            )
+            .await
+            .expect_err("the update refuses the failed setup");
+        assert!(
+            matches!(
+                &refused,
+                MobStoredDefinitionError::Mob(MobError::Internal(_))
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(refused.to_string(), verb.to_string());
+        assert!(
+            refused
+                .to_string()
+                .contains("persistent mob state setup failed"),
+            "{refused}"
+        );
+    }
+
+    /// A state over `root` whose host offers the tool bundle `offered-bundle`
+    /// to child mobs and makes `supplied-bundle` available to every child
+    /// mob.
+    fn restored_state_with_child_bundles(
+        svc: &Arc<MockSessionSvc>,
+        root: &std::path::Path,
+    ) -> Arc<MobMcpState> {
+        let dispatcher = || -> Arc<dyn AgentToolDispatcher> {
+            Arc::new(MobMcpDispatcher::new(MobMcpState::new_in_memory()))
+        };
+        Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("runtime custody")
+                .with_persistent_storage_root(Some(root.to_path_buf()))
+                .with_child_tool_bundles(
+                    ChildToolBundles::new()
+                        .register(
+                            "offered-bundle",
+                            dispatcher(),
+                            ChildToolBundleAvailability::ChildOffered,
+                        )
+                        .register(
+                            "supplied-bundle",
+                            dispatcher(),
+                            ChildToolBundleAvailability::ChildAvailable,
+                        ),
+                ),
+        )
+    }
+
+    /// A restart over `root` with the child mob `mob_id` stored: created for
+    /// a persisted owner session through
+    /// [`restored_state_with_child_bundles`], its actor shut down, the state
+    /// dropped. Returns the restarted service, with the owner observed
+    /// committed, and the mob.
+    async fn a_stored_child_mob_before_a_restart(
+        svc: &Arc<MockSessionSvc>,
+        root: &std::path::Path,
+        mob_id: &str,
+    ) -> (Arc<MockSessionSvc>, MobId) {
+        let state = restored_state_with_child_bundles(svc, root);
+        let owner = SessionId::new();
+        svc.insert_persisted_session(Session::with_id(owner.clone()))
+            .await;
+        let mob_id = state
+            .mob_create_definition_with_owner_bridge_session(
+                explicit_definition(mob_id),
+                owner.clone(),
+                true,
+                false,
+            )
+            .await
+            .expect("create the child mob");
+        state
+            .handle_for(&mob_id)
+            .await
+            .expect("predecessor mob handle")
+            .shutdown()
+            .await
+            .expect("retire the predecessor supervisor route");
+        let restarted = Arc::new(svc.cold_restart().await);
+        restarted.script_observation(
+            &owner,
+            Ok(meerkat_mob::LiveDurableSourceObservation::Committed { revision: None }),
+        );
+        (restarted, mob_id)
+    }
+
+    /// The `worker` profile of `definition`, which is inline.
+    fn worker_profile(definition: &mut MobDefinition) -> &mut meerkat_mob::Profile {
+        definition
+            .profiles
+            .get_mut(&ProfileName::from("worker"))
+            .expect("the worker profile")
+            .as_inline_mut()
+            .expect("the worker profile is inline")
+    }
+
+    /// A host reads the stored definition and its revision of a cold mob
+    /// through the state, edits it, and writes it back at that revision. The
+    /// read resumes nothing and runs no restore.
+    #[tokio::test]
+    async fn a_cold_stored_definition_read_answers_what_the_update_then_takes() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_id = a_stored_mob_before_a_restart(&svc, root.path(), "cold-read").await;
+
+        let state = restored_state(&svc, root.path());
+        let stored = state
+            .mob_stored_definition(&mob_id)
+            .await
+            .expect("the cold mob's stored definition is read");
+        assert_eq!(
+            (stored.definition(), stored.epoch()),
+            (&explicit_definition("cold-read"), 1)
+        );
+        assert!(
+            !restore_has_run(&state).await,
+            "the read does not run the restore"
+        );
+        assert!(
+            state.mobs.read().await.is_empty(),
+            "the read resumes nothing"
+        );
+
+        let mut edited = stored.definition().clone();
+        let reviewer = edited
+            .profiles
+            .get(&ProfileName::from("worker"))
+            .expect("the worker profile")
+            .clone();
+        edited
+            .profiles
+            .insert(ProfileName::from("reviewer"), reviewer);
+        let revision = state
+            .mob_update_stored_definition(&mob_id, stored.epoch(), edited.clone())
+            .await
+            .expect("the edited definition is written back at the revision read");
+        assert_eq!(revision.epoch, 2);
+        let reread = state
+            .mob_stored_definition(&mob_id)
+            .await
+            .expect("the updated definition is read");
+        assert_eq!(
+            (reread.definition(), reread.epoch(), reread.event_cursor()),
+            (&edited, revision.epoch, revision.event_cursor)
+        );
+
+        let resumed = state
+            .handle_for(&mob_id)
+            .await
+            .expect("the first mob verb resumes the mob");
+        assert_eq!(resumed.definition(), &edited);
+    }
+
+    /// A mob id this state has no store for answers `MobNotFound` to the
+    /// read as to the update, and no store is made for it: a state without
+    /// a persistent root, an unknown id under a root, and an id whose store
+    /// holds another mob.
+    #[tokio::test]
+    async fn a_stored_definition_read_without_a_store_of_the_mob_answers_mob_not_found() {
+        let not_found =
+            |answer: &Result<meerkat_mob::MobDefinitionSnapshot, MobStoredDefinitionError>,
+             mob_id: &MobId| {
+                matches!(
+                    answer,
+                    Err(MobStoredDefinitionError::Mob(MobError::MobNotFound(missing)))
+                        if missing == mob_id
+                )
+            };
+        let unknown = MobId::from("unknown");
+        let rootless = MobMcpState::new_in_memory();
+        let no_root = rootless.mob_stored_definition(&unknown).await;
+        assert!(not_found(&no_root, &unknown), "{no_root:?}");
+
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = restored_state(&svc, root.path());
+        let no_store = state.mob_stored_definition(&unknown).await;
+        assert!(not_found(&no_store, &unknown), "{no_store:?}");
+        assert_eq!(mob_store_files(root.path()), 0, "no store is made for it");
+        assert!(!restore_has_run(&state).await);
+        drop(state);
+
+        // A store under the id `moved-b` that holds the mob `moved-a`.
+        let moved_a = a_stored_mob_before_a_restart(&svc, root.path(), "moved-a").await;
+        let moved_b = MobId::from("moved-b");
+        let from = MobMcpState::storage_file_paths(&stored_mob_path(root.path(), &moved_a));
+        let to = MobMcpState::storage_file_paths(&stored_mob_path(root.path(), &moved_b));
+        for (from, to) in from.iter().zip(&to) {
+            if tokio::fs::try_exists(from)
+                .await
+                .expect("look for the file")
+            {
+                tokio::fs::rename(from, to).await.expect("move the store");
+            }
+        }
+        let state = restored_state(&svc, root.path());
+        let other_mob = state.mob_stored_definition(&moved_b).await;
+        assert!(not_found(&other_mob, &moved_b), "{other_mob:?}");
+    }
+
+    /// A mob one of the hosted sets holds answers the read as it answers the
+    /// update: a managed mob the typed refusal, a quarantined store its
+    /// quarantine, a held child its hold, and after the restore an id none
+    /// of them holds `MobNotFound`. Before the restore a file that is not a
+    /// mob store answers the reader's own typed refusal and stays as found.
+    #[tokio::test]
+    async fn a_stored_definition_read_answers_what_holds_the_mob() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let managed = a_stored_mob_before_a_restart(&svc, root.path(), "read-managed").await;
+        let broken = MobId::from("broken");
+        let broken_store = stored_mob_path(root.path(), &broken);
+        tokio::fs::write(&broken_store, b"not a sqlite database")
+            .await
+            .expect("write an undecodable mob store");
+
+        let state = restored_state(&svc, root.path());
+        let cold = state
+            .mob_stored_definition(&broken)
+            .await
+            .expect_err("a file that is not a mob store has no definition to read");
+        match &cold {
+            MobStoredDefinitionError::Mob(MobError::StorageError(source)) => assert!(
+                matches!(
+                    source.downcast_ref::<meerkat_mob::MobDefinitionSnapshotReadError>(),
+                    Some(meerkat_mob::MobDefinitionSnapshotReadError::ForeignSchema { .. })
+                ),
+                "before the restore the answer is the reader's own: {source:?}"
+            ),
+            other => panic!("expected the reader's refusal, got {other:?}"),
+        }
+        assert!(!restore_has_run(&state).await);
+        assert_eq!(
+            tokio::fs::read(&broken_store)
+                .await
+                .expect("read the undecodable store"),
+            b"not a sqlite database",
+            "the store is kept as found"
+        );
+
+        state.mob_list().await.expect("the restore runs");
+        let quarantined = state
+            .mob_stored_definition(&broken)
+            .await
+            .expect_err("a quarantined store is not read");
+        match &quarantined {
+            MobStoredDefinitionError::Mob(error) => {
+                assert_eq!(
+                    quarantine_data(error)["kind"],
+                    MOB_QUARANTINED_KIND,
+                    "{error:?}"
+                );
+            }
+            other => panic!("expected the typed quarantine, got {other:?}"),
+        }
+        let refused = state
+            .mob_stored_definition(&managed)
+            .await
+            .expect_err("a managed mob is not read through the state's store");
+        assert!(
+            matches!(
+                &refused,
+                MobStoredDefinitionError::Managed { mob_id } if mob_id == &managed
+            ),
+            "{refused:?}"
+        );
+        let late = a_stored_mob_before_a_restart(&svc, root.path(), "read-after-restore").await;
+        let absent = state
+            .mob_stored_definition(&late)
+            .await
+            .expect_err("the state does not have this mob");
+        assert!(
+            matches!(
+                &absent,
+                MobStoredDefinitionError::Mob(MobError::MobNotFound(missing)) if missing == &late
+            ),
+            "{absent:?}"
+        );
+
+        let held_root = tempfile::tempdir().expect("tempdir");
+        let (svc, held, owner, _worker_session) =
+            seat_child_worker_then_exit(&svc, held_root.path(), "read-held-child").await;
+        svc.script_observation(
+            &owner,
+            Ok(meerkat_mob::LiveDurableSourceObservation::Absent),
+        );
+        let state = restored_state(&svc, held_root.path());
+        assert_held_before_activation(state.handle_for(&held).await, "owner_absent");
+        let hold = state
+            .mob_stored_definition(&held)
+            .await
+            .expect_err("a held child mob is not read");
+        match &hold {
+            MobStoredDefinitionError::Mob(error) => {
+                assert!(error.is_held_before_activation(), "{error:?}");
+            }
+            other => panic!("expected the hold, got {other:?}"),
+        }
+    }
+
+    /// The read passes the gates of the update: the console owner, the
+    /// state's admission, and a persistent root that was set up.
+    #[tokio::test]
+    async fn a_stored_definition_read_passes_the_gates_of_the_update() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_id = a_stored_mob_before_a_restart(&svc, root.path(), "gated-read").await;
+        let viewer = MobMcpState::new(
+            svc.clone(),
+            MobControlPrincipal::External(
+                meerkat_core::auth::PrincipalId::new("stored-definition-reader")
+                    .expect("principal"),
+            ),
+        )
+        .expect("runtime custody")
+        .with_persistent_storage_root(Some(root.path().to_path_buf()));
+        let denied = viewer
+            .mob_stored_definition(&mob_id)
+            .await
+            .expect_err("only the console owner reads a stored definition");
+        assert!(
+            matches!(
+                &denied,
+                MobStoredDefinitionError::Mob(MobError::ScopeDenied(denial))
+                    if denial.required == ControlScope::SendCommand
+            ),
+            "{denied:?}"
+        );
+
+        let state = restored_state(&svc, root.path());
+        assert_eq!(
+            state.stand_down(far_deadline()).await,
+            MobStateStandDown::Clean
+        );
+        let stood_down = state
+            .mob_stored_definition(&mob_id)
+            .await
+            .expect_err("a stood-down state admits no stored definition read");
+        assert!(
+            stood_down.to_string().contains("stood down"),
+            "{stood_down}"
+        );
+
+        let not_a_directory = root.path().join("not-a-directory");
+        tokio::fs::write(&not_a_directory, b"a file where the root should be")
+            .await
+            .expect("write a file where the root should be");
+        let state = MobMcpState::new(svc.clone(), MobControlPrincipal::Owner)
+            .expect("runtime custody")
+            .with_persistent_storage_root(Some(not_a_directory));
+        let setup = state
+            .mob_stored_definition(&mob_id)
+            .await
+            .expect_err("the read refuses the failed setup");
+        assert!(
+            setup
+                .to_string()
+                .contains("persistent mob state setup failed"),
+            "{setup}"
+        );
+    }
+
+    /// The update runs the check a create runs on a definition's tool bundle
+    /// opt-ins, from the stored mob's own creation record: a mob that is not
+    /// a child mob may opt into none, a child mob only into what the host
+    /// offers to child mobs. A refused update writes no definition.
+    #[tokio::test]
+    async fn a_cold_stored_definition_update_refuses_a_tool_bundle_a_create_would_refuse() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let plain = a_stored_mob_before_a_restart(&svc, root.path(), "bundle-plain").await;
+        let (svc, child) =
+            a_stored_child_mob_before_a_restart(&svc, root.path(), "bundle-child").await;
+        let opting_into = |mut definition: MobDefinition, bundle: &str| {
+            worker_profile(&mut definition)
+                .tools
+                .bundles
+                .push(bundle.to_string());
+            definition
+        };
+        let state = restored_state_with_child_bundles(&svc, root.path());
+
+        let refused = state
+            .mob_update_stored_definition(
+                &plain,
+                1,
+                opting_into(explicit_definition("bundle-plain"), "offered-bundle"),
+            )
+            .await
+            .expect_err("a mob that is not a child mob opts into no tool bundle");
+        assert!(
+            matches!(
+                &refused,
+                MobStoredDefinitionError::Mob(MobError::ToolBundleNotOffered {
+                    bundle,
+                    offered,
+                    ..
+                }) if bundle == "offered-bundle" && offered.is_empty()
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            stored_definition(root.path(), &plain).await,
+            (explicit_definition("bundle-plain"), 1),
+            "nothing is written"
+        );
+
+        let (child_definition, child_epoch) = stored_definition(root.path(), &child).await;
+        let unoffered = state
+            .mob_update_stored_definition(
+                &child,
+                child_epoch,
+                opting_into(child_definition.clone(), "host-secret"),
+            )
+            .await
+            .expect_err("a child mob opts only into what the host offers");
+        assert!(
+            matches!(
+                &unoffered,
+                MobStoredDefinitionError::Mob(MobError::ToolBundleNotOffered {
+                    bundle,
+                    offered,
+                    ..
+                }) if bundle == "host-secret" && offered == &["offered-bundle".to_string()]
+            ),
+            "{unoffered:?}"
+        );
+        assert_eq!(
+            stored_definition(root.path(), &child).await,
+            (child_definition.clone(), child_epoch),
+            "nothing is written"
+        );
+
+        let offered = opting_into(child_definition, "offered-bundle");
+        let revision = state
+            .mob_update_stored_definition(&child, child_epoch, offered.clone())
+            .await
+            .expect("a child mob may opt into a bundle the host offers");
+        assert_eq!(
+            stored_definition(root.path(), &child).await,
+            (offered, revision.epoch)
+        );
+
+        let created = state
+            .mob_create_definition(opting_into(
+                explicit_definition("bundle-plain"),
+                "offered-bundle",
+            ))
+            .await
+            .expect_err("a create refuses the same opt-in");
+        assert_eq!(
+            refused.to_string(),
+            created.to_string(),
+            "the update refuses as the create does"
+        );
+    }
+
+    /// A create through the state adds the realm skill sources its profiles
+    /// name; an update does not. A definition whose inline profile names a
+    /// skill without its source is refused by the storage's validation and
+    /// nothing is written; with the source in the definition it is stored.
+    #[tokio::test]
+    async fn a_cold_stored_definition_update_does_not_add_realm_skill_sources() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let cold = a_stored_mob_before_a_restart(&svc, root.path(), "skills-cold").await;
+        let naming_the_skill = |mob_id: &str| {
+            let mut definition = explicit_definition(mob_id);
+            worker_profile(&mut definition)
+                .skills
+                .push("house-rules".to_string());
+            definition
+        };
+        let source = SkillSource::Inline {
+            content: "house rules".to_string(),
+        };
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("runtime custody")
+                .with_persistent_storage_root(Some(root.path().to_path_buf()))
+                .with_realm_skill_sources(BTreeMap::from([(
+                    "house-rules".to_string(),
+                    source.clone(),
+                )])),
+        );
+
+        let refused = state
+            .mob_update_stored_definition(&cold, 1, naming_the_skill("skills-cold"))
+            .await
+            .expect_err("the update adds no skill source");
+        match &refused {
+            MobStoredDefinitionError::Mob(MobError::DefinitionError(diagnostics)) => {
+                assert!(
+                    diagnostics.iter().any(|diagnostic| diagnostic.code
+                        == meerkat_mob::DiagnosticCode::MissingSkillRef),
+                    "{diagnostics:?}"
+                );
+            }
+            other => panic!("expected the storage's validation, got {other:?}"),
+        }
+        assert_eq!(
+            stored_definition(root.path(), &cold).await,
+            (explicit_definition("skills-cold"), 1),
+            "nothing is written"
+        );
+
+        let mut with_source = naming_the_skill("skills-cold");
+        with_source
+            .skills
+            .insert("house-rules".to_string(), source.clone());
+        state
+            .mob_update_stored_definition(&cold, 1, with_source.clone())
+            .await
+            .expect("a definition that carries the source is stored");
+        assert_eq!(
+            stored_definition(root.path(), &cold).await,
+            (with_source, 2)
+        );
+
+        let created = state
+            .mob_create_definition(naming_the_skill("skills-created"))
+            .await
+            .expect("a create adds the realm skill source");
+        let (stored, _) = stored_definition(root.path(), &created).await;
+        assert_eq!(
+            stored.skills.get("house-rules"),
+            Some(&source),
+            "the created mob's stored definition carries the source"
+        );
+    }
+
+    /// A profile that references a realm profile gets the skill sources of
+    /// that profile from a create, never from a restore. An update that
+    /// leaves them out is stored (the storage's validation does not read
+    /// realm profiles), the restore adds nothing, and a member of the
+    /// profile is seated without the skill.
+    #[tokio::test]
+    async fn a_restore_does_not_add_realm_skill_sources_a_cold_update_left_out() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = SkillSource::Inline {
+            content: "house rules".to_string(),
+        };
+        let seeded_state = || {
+            Arc::new(
+                MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                    .expect("runtime custody")
+                    .with_persistent_storage_root(Some(root.path().to_path_buf()))
+                    .with_realm_skill_sources(BTreeMap::from([(
+                        "house-rules".to_string(),
+                        source.clone(),
+                    )])),
+            )
+        };
+        let state = seeded_state();
+        let mut profile = sample_realm_profile("gpt-5.5");
+        profile.tools.comms = true;
+        profile.skills = vec!["house-rules".to_string()];
+        state
+            .realm_profile_create("realm-worker", &profile)
+            .await
+            .expect("seed the realm profile");
+        let mut definition = MobDefinition::explicit(MobId::from("skills-realm"));
+        definition.profiles.insert(
+            ProfileName::from("realm-worker"),
+            ProfileBinding::RealmRef {
+                realm_profile: "realm-worker".to_string(),
+            },
+        );
+        let mob_id = state
+            .mob_create_definition(definition.clone())
+            .await
+            .expect("create the mob over the realm profile");
+        state
+            .handle_for(&mob_id)
+            .await
+            .expect("predecessor mob handle")
+            .shutdown()
+            .await
+            .expect("retire the predecessor supervisor route");
+        drop(state);
+        let (created, epoch) = stored_definition(root.path(), &mob_id).await;
+        assert_eq!(
+            created.skills.get("house-rules"),
+            Some(&source),
+            "the create added the realm profile's skill source"
+        );
+
+        let state = seeded_state();
+        state
+            .mob_update_stored_definition(&mob_id, epoch, definition.clone())
+            .await
+            .expect("a definition without the source is stored as given");
+        let resumed = state
+            .handle_for(&mob_id)
+            .await
+            .expect("the first mob verb resumes the mob");
+        assert_eq!(
+            resumed.definition(),
+            &definition,
+            "the restore adds no skill source"
+        );
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("realm-worker"),
+                AgentIdentity::from("realm-worker-1"),
+                Some(MobRuntimeMode::TurnDriven),
+                None,
+                None,
+            )
+            .await
+            .expect("a member of the profile is seated without the skill");
+    }
+
+    /// A create supplies a child mob's inline profiles with the tool bundles
+    /// the host makes available to child mobs. An update stores the
+    /// definition as given and a restore supplies nothing: the mob resumes
+    /// with exactly the stored profiles.
+    #[tokio::test]
+    async fn a_restore_does_not_supply_child_tool_bundles_a_cold_update_left_out() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (svc, child) =
+            a_stored_child_mob_before_a_restart(&svc, root.path(), "supply-child").await;
+        let (created, epoch) = stored_definition(root.path(), &child).await;
+        let mut without = created.clone();
+        assert_eq!(
+            worker_profile(&mut without).tools.rust_bundles,
+            vec!["supplied-bundle".to_string()],
+            "the create supplied the bundle available to child mobs"
+        );
+        worker_profile(&mut without).tools.rust_bundles.clear();
+
+        let state = restored_state_with_child_bundles(&svc, root.path());
+        state
+            .mob_update_stored_definition(&child, epoch, without.clone())
+            .await
+            .expect("a definition without the supplied bundle is stored as given");
+        let resumed = state
+            .handle_for(&child)
+            .await
+            .expect("the child mob resumes");
+        assert_eq!(
+            resumed.definition(),
+            &without,
+            "the restore supplies no tool bundle"
+        );
+    }
+
+    /// An update whose caller is dropped is not cancelled. A shared state
+    /// ([`MobMcpState::into_shared`]) runs it as its own task, which keeps
+    /// the lock the restore runs under until the storage has answered, so
+    /// the first mob verb waits for it and resumes the mob from the new
+    /// definition.
+    #[tokio::test]
+    async fn a_stored_definition_update_whose_caller_is_dropped_commits_before_the_restore() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_id = a_stored_mob_before_a_restart(&svc, root.path(), "caller-dropped").await;
+        let updated = definition_with_reviewer("caller-dropped");
+        let state = MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+            .expect("runtime custody")
+            .with_persistent_storage_root(Some(root.path().to_path_buf()))
+            .into_shared();
+
+        // An operation held on the store parks the storage's update at its
+        // exclusive fence.
+        let operation =
+            meerkat_sqlite::OperationGuard::for_database(&stored_mob_path(root.path(), &mob_id))
+                .expect("hold an operation on the store");
+        let updating = {
+            let state = Arc::clone(&state);
+            let mob_id = mob_id.clone();
+            let updated = updated.clone();
+            tokio::spawn(async move {
+                state
+                    .mob_update_stored_definition(&mob_id, 1, updated)
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.restore_lock.try_lock().is_ok() {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the update in flight holds the restore lock");
+
+        updating.abort();
+        let dropped = updating.await.expect_err("the caller is dropped");
+        assert!(dropped.is_cancelled(), "{dropped:?}");
+        assert!(
+            state.restore_lock.try_lock().is_err(),
+            "the update goes on without its caller and keeps the restore lock"
+        );
+        let listing = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.mob_list().await })
+        };
+
+        drop(operation);
+        let listed = listing
+            .await
+            .expect("the listing task")
+            .expect("the restore runs after the update");
+        assert!(
+            listed.iter().any(|(listed, _)| listed == &mob_id),
+            "{listed:?}"
+        );
+        assert_eq!(
+            state
+                .handle_for(&mob_id)
+                .await
+                .expect("the restored mob")
+                .definition(),
+            &updated,
+            "the mob resumes with the definition the dropped caller sent"
+        );
+        assert_eq!(
+            stored_definition(root.path(), &mob_id).await,
+            (updated, 2),
+            "the update committed"
+        );
+    }
+
+    /// The storage checks a definition against the roster only for the
+    /// profiles the created agents' rows name (an update that drops one is
+    /// refused there, pinned by the storage's own rows). This member is
+    /// seated by a spawn and has no such row, so
+    /// a cold update that leaves out the profile of a seated member is
+    /// stored. What follows depends on when that member is restored. Under
+    /// the default restore policy the mob resumes and the member stays
+    /// dormant; its first delivery fails with the member's restore failure
+    /// (`profile not found`), the member then reads Broken, and the rest of
+    /// the mob works. Under a policy that restores every member at start the
+    /// resume itself fails and the state quarantines the store, which then
+    /// refuses the stored-definition calls in that process. In both cases
+    /// the next process reads the stored definition, writes one that has the
+    /// profile again, and the member is delivered to.
+    #[tokio::test]
+    async fn a_cold_update_without_the_profile_of_a_seated_member_fails_that_members_restore() {
+        for (name, eager) in [
+            ("member-profile-removed-on-demand", false),
+            ("member-profile-removed-eager", true),
+        ] {
+            let svc = Arc::new(MockSessionSvc::new());
+            let root = tempfile::tempdir().expect("tempdir");
+            let state = restored_state(&svc, root.path());
+            let mob_id = state
+                .mob_create_definition(explicit_definition(name))
+                .await
+                .expect("create the mob");
+            let worker = AgentIdentity::from("worker-1");
+            state
+                .mob_spawn(
+                    &mob_id,
+                    ProfileName::from("worker"),
+                    worker.clone(),
+                    Some(MobRuntimeMode::TurnDriven),
+                    None,
+                    None,
+                )
+                .await
+                .expect("seat a member of the worker profile");
+            state
+                .handle_for(&mob_id)
+                .await
+                .expect("predecessor mob handle")
+                .shutdown()
+                .await
+                .expect("retire the predecessor supervisor route");
+            drop(state);
+            let svc = Arc::new(svc.cold_restart().await);
+
+            // The stored definition with the worker profile renamed.
+            let (with_profile, epoch) = stored_definition(root.path(), &mob_id).await;
+            let mut without_profile = with_profile.clone();
+            let profile = without_profile
+                .profiles
+                .remove(&ProfileName::from("worker"))
+                .expect("the worker profile");
+            without_profile
+                .profiles
+                .insert(ProfileName::from("analyst"), profile);
+
+            let state = if eager {
+                restored_state_eager(&svc, root.path())
+            } else {
+                restored_state(&svc, root.path())
+            };
+            let revision = state
+                .mob_update_stored_definition(&mob_id, epoch, without_profile.clone())
+                .await
+                .expect("the definition is stored: a spawned member's profile is not checked");
+            assert_eq!(revision.epoch, epoch + 1, "{name}");
+            let first = state.handle_for(&mob_id).await;
+            if eager {
+                let Err(quarantined) = first else {
+                    panic!("{name}: the resume restores the member and fails");
+                };
+                assert!(
+                    matches!(
+                        &quarantined,
+                        MobError::MobQuarantined { cause, .. }
+                            if matches!(
+                                &**cause,
+                                MobError::ProfileNotFound(profile)
+                                    if profile == &ProfileName::from("worker")
+                            )
+                    ),
+                    "{name}: {quarantined:?}"
+                );
+                assert_eq!(
+                    quarantine_data(&quarantined)["class"],
+                    "resume_refused",
+                    "{name}: {quarantined:?}"
+                );
+                let refused = state
+                    .mob_stored_definition(&mob_id)
+                    .await
+                    .expect_err("the process that quarantined the store does not read it");
+                assert!(
+                    matches!(
+                        &refused,
+                        MobStoredDefinitionError::Mob(MobError::MobQuarantined { .. })
+                    ),
+                    "{name}: {refused:?}"
+                );
+            } else {
+                let handle = first.expect("the mob resumes: the member is not restored yet");
+                assert_eq!(handle.definition(), &without_profile, "{name}");
+                assert_eq!(
+                    state
+                        .mob_member_status(&mob_id, &worker)
+                        .await
+                        .expect("the dormant member's status")
+                        .status,
+                    meerkat_mob::MobMemberStatus::Active,
+                    "{name}: the member reads active until it is restored"
+                );
+                let delivery = handle
+                    .member(&worker)
+                    .await
+                    .expect("the seated member")
+                    .internal_turn("a first delivery")
+                    .await
+                    .expect_err("the member cannot be restored without its profile");
+                assert!(
+                    matches!(
+                        &delivery,
+                        MobError::MemberRestoreFailed { member_id, reason, .. }
+                            if member_id == &worker && reason == "profile not found: worker"
+                    ),
+                    "{name}: {delivery:?}"
+                );
+                let broken = state
+                    .mob_member_status(&mob_id, &worker)
+                    .await
+                    .expect("the member's status after the failed restore");
+                assert_eq!(
+                    (broken.status, broken.error.as_deref()),
+                    (
+                        meerkat_mob::MobMemberStatus::Broken,
+                        Some("profile not found: worker")
+                    ),
+                    "{name}"
+                );
+                state
+                    .mob_spawn(
+                        &mob_id,
+                        ProfileName::from("analyst"),
+                        AgentIdentity::from("analyst-1"),
+                        Some(MobRuntimeMode::TurnDriven),
+                        None,
+                        None,
+                    )
+                    .await
+                    .expect("the rest of the mob works: a member of the new profile is seated");
+                handle
+                    .shutdown()
+                    .await
+                    .expect("retire the supervisor route");
+            }
+            drop(state);
+
+            // The next process puts the profile back before its first verb.
+            let svc = Arc::new(svc.cold_restart().await);
+            let state = restored_state(&svc, root.path());
+            let stored = state
+                .mob_stored_definition(&mob_id)
+                .await
+                .expect("the next process reads the stored definition");
+            assert_eq!(
+                (stored.definition(), stored.epoch()),
+                (&without_profile, epoch + 1),
+                "{name}"
+            );
+            let mut repaired = stored.definition().clone();
+            repaired.profiles.insert(
+                ProfileName::from("worker"),
+                with_profile.profiles[&ProfileName::from("worker")].clone(),
+            );
+            state
+                .mob_update_stored_definition(&mob_id, stored.epoch(), repaired.clone())
+                .await
+                .expect("a definition with the profile again is stored");
+            let resumed = state
+                .handle_for(&mob_id)
+                .await
+                .expect("the mob resumes from the repaired definition");
+            assert_eq!(resumed.definition(), &repaired, "{name}");
+            resumed
+                .member(&worker)
+                .await
+                .expect("the seated member")
+                .internal_turn("a delivery after the repair")
+                .await
+                .expect("the member is restored and delivered to");
+        }
+    }
+
+    /// A state restores on its own account too: the first step of its
+    /// WorkGraph Flow reconciler, which a dispatcher over a state with a
+    /// WorkGraph service starts, is the restore. From then on the state
+    /// manages every stored mob and both stored-definition calls refuse it,
+    /// so a host makes the calls before it builds the dispatcher.
+    #[tokio::test]
+    async fn a_dispatcher_built_first_makes_the_stored_mob_managed_for_the_stored_definition_calls()
+    {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_id = a_stored_mob_before_a_restart(&svc, root.path(), "dispatcher-first").await;
+        let workgraph =
+            meerkat::WorkGraphService::new(Arc::new(meerkat::MemoryWorkGraphStore::new()));
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("runtime custody")
+                .with_persistent_storage_root(Some(root.path().to_path_buf()))
+                .with_workgraph_service(Some(workgraph)),
+        );
+        assert!(!restore_has_run(&state).await, "nothing has restored yet");
+
+        let _dispatcher = MobMcpDispatcher::new(state.clone());
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !restore_has_run(&state).await {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the reconciler the dispatcher started runs the restore");
+
+        let refused = state
+            .mob_update_stored_definition(&mob_id, 1, definition_with_reviewer("dispatcher-first"))
+            .await
+            .expect_err("the state manages the mob it restored");
+        assert!(
+            matches!(
+                &refused,
+                MobStoredDefinitionError::Managed { mob_id: managed } if managed == &mob_id
+            ),
+            "{refused:?}"
+        );
+        let refused = state
+            .mob_stored_definition(&mob_id)
+            .await
+            .expect_err("the read refuses a managed mob as the update does");
+        assert!(
+            matches!(
+                &refused,
+                MobStoredDefinitionError::Managed { mob_id: managed } if managed == &mob_id
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            stored_definition(root.path(), &mob_id).await,
+            (explicit_definition("dispatcher-first"), 1),
+            "nothing is written"
+        );
+    }
+
+    /// A mob created from a pack stores the pack's identity with its
+    /// definition, and a repeat create of the same pack answers the mob only
+    /// while the stored definition equals the pack's. A cold update that
+    /// changes nothing leaves that so. One that changes the definition is
+    /// stored as given, with the identity (the read's answer, edited) or
+    /// without it, and the repeat create is then refused with the duplicate
+    /// mobpack create's `MobError::Internal` ("does not match existing
+    /// verified pack identity"): the mob is not answered as if unchanged.
+    #[tokio::test]
+    async fn a_cold_update_of_a_pack_created_mob_makes_a_repeat_create_of_the_pack_refuse() {
+        #[derive(Clone, Copy, Debug)]
+        enum Update {
+            /// The stored definition, written back as read.
+            NothingChanged,
+            /// A profile added, the pack identity kept (the read's answer,
+            /// edited).
+            ContentChangedIdentityKept,
+            /// A profile added, the pack identity dropped.
+            ContentChangedIdentityDropped,
+        }
+        for (name, update) in [
+            ("pack-unchanged", Update::NothingChanged),
+            ("pack-identity-kept", Update::ContentChangedIdentityKept),
+            (
+                "pack-identity-dropped",
+                Update::ContentChangedIdentityDropped,
+            ),
+        ] {
+            let svc = Arc::new(MockSessionSvc::new());
+            let root = tempfile::tempdir().expect("tempdir");
+            let identity =
+                meerkat_mob::MobDefinitionSourceIdentity::mobpack("d".repeat(64), Vec::new());
+            let pack = explicit_definition(name);
+            let state = restored_state(&svc, root.path());
+            let mob_id = state
+                .mob_create_from_mobpack(pack.clone(), BTreeMap::new(), identity.clone())
+                .await
+                .expect("create the mob from its pack");
+            state
+                .handle_for(&mob_id)
+                .await
+                .expect("predecessor mob handle")
+                .shutdown()
+                .await
+                .expect("retire the predecessor supervisor route");
+            drop(state);
+
+            let state = restored_state(&svc, root.path());
+            let stored = state
+                .mob_stored_definition(&mob_id)
+                .await
+                .expect("read the pack-created mob's stored definition");
+            assert_eq!(
+                stored.definition().source_identity.as_ref(),
+                Some(&identity),
+                "{name}: the stored definition carries the pack identity"
+            );
+            let mut updated = stored.definition().clone();
+            if !matches!(update, Update::NothingChanged) {
+                let analyst = worker_profile(&mut updated).clone();
+                updated.profiles.insert(
+                    ProfileName::from("analyst"),
+                    ProfileBinding::Inline(Box::new(analyst)),
+                );
+            }
+            if matches!(update, Update::ContentChangedIdentityDropped) {
+                updated.source_identity = None;
+            }
+            let revision = state
+                .mob_update_stored_definition(&mob_id, stored.epoch(), updated.clone())
+                .await
+                .expect("the definition is stored as given");
+            assert_eq!(revision.epoch, 2, "{name}: the update commits an epoch");
+
+            let repeated = state
+                .mob_create_from_mobpack(pack, BTreeMap::new(), identity)
+                .await;
+            match update {
+                Update::NothingChanged => assert_eq!(
+                    repeated.expect("the mob still equals its pack: the repeat create answers it"),
+                    mob_id,
+                    "{name}"
+                ),
+                Update::ContentChangedIdentityKept | Update::ContentChangedIdentityDropped => {
+                    let refused = repeated
+                        .expect_err("the stored mob is no longer the pack's: it is not answered");
+                    assert!(
+                        matches!(&refused, MobError::Internal(_)),
+                        "{name}: {refused:?}"
+                    );
+                    assert!(
+                        refused.to_string().contains("verified pack identity"),
+                        "{name}: {refused}"
+                    );
+                }
+            }
+            assert_eq!(
+                state
+                    .handle_for(&mob_id)
+                    .await
+                    .expect("the restored mob")
+                    .definition(),
+                &updated,
+                "{name}: the mob runs the stored definition"
+            );
+        }
     }
 
     /// Structured-data `kind` of a quarantined mob's answer. A local copy:

@@ -5161,6 +5161,25 @@ fn query_created_identities_page(
     Ok(super::CreatedIdentityScanPage { observations, next })
 }
 
+/// Read every journal event of the persistent mob store at `path`, in cursor
+/// order, with no running mob, for
+/// [`crate::MobStorage::read_definition_snapshot`]: open it read-only (a
+/// missing file is never created), check its schema without migrating it,
+/// and read the journal in one read transaction.
+pub(crate) async fn read_definition_journal_at(
+    path: PathBuf,
+) -> Result<Vec<MobEvent>, crate::MobDefinitionSnapshotReadError> {
+    tokio::task::spawn_blocking(move || read_definition_journal_at_sync(&path))
+        .await
+        .map_err(|error| MobStoreError::Internal(format!("sqlite task join failed: {error}")))?
+}
+
+fn read_definition_journal_at_sync(
+    path: &Path,
+) -> Result<Vec<MobEvent>, crate::MobDefinitionSnapshotReadError> {
+    Ok(read_mob_store_file(path, query_member_binding_events)?)
+}
+
 /// Why a read-only read of a persistent mob store by its path refused or
 /// failed: the cases each path reader's typed error names.
 enum MobStoreFileReadFault {
@@ -5175,6 +5194,18 @@ enum MobStoreFileReadFault {
 impl From<MobStoreError> for MobStoreFileReadFault {
     fn from(error: MobStoreError) -> Self {
         Self::Read(error)
+    }
+}
+
+impl From<MobStoreFileReadFault> for crate::MobDefinitionSnapshotReadError {
+    fn from(fault: MobStoreFileReadFault) -> Self {
+        match fault {
+            MobStoreFileReadFault::Missing { path } => Self::StoreMissing { path },
+            MobStoreFileReadFault::ForeignSchema { path, detail } => {
+                Self::ForeignSchema { path, detail }
+            }
+            MobStoreFileReadFault::Read(error) => Self::Read(error),
+        }
     }
 }
 
@@ -14592,6 +14623,164 @@ mod tests {
                 .is_empty(),
             "a store without such rows answers an empty map"
         );
+    }
+
+    /// Row: the definition snapshot reader refuses a missing store and
+    /// creates none, and refuses a file that is not a mob store this build
+    /// reads (not SQLite, no mob schema, a mob schema from a newer build, an
+    /// older mob schema this build does not accept) and leaves it as it was,
+    /// each typed; a mob store that holds no mob answers `None`.
+    #[tokio::test]
+    async fn the_definition_snapshot_reader_refuses_missing_and_foreign_stores_and_creates_nothing()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.db");
+        let refused = crate::MobStorage::read_definition_snapshot(&missing).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(crate::MobDefinitionSnapshotReadError::StoreMissing { path })
+                    if path == &missing
+            ),
+            "a missing store is refused typed: {refused:?}"
+        );
+        assert!(!missing.exists(), "the reader never creates a store");
+
+        let not_sqlite = dir.path().join("not-sqlite.db");
+        std::fs::write(&not_sqlite, b"this file is not a SQLite database").unwrap();
+        let no_mob_schema = dir.path().join("no-mob-schema.db");
+        Connection::open(&no_mob_schema)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated (value INTEGER);")
+            .unwrap();
+        let ledger_only = |path: &Path, version: i64| {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meerkat_schema (
+                     domain TEXT PRIMARY KEY,
+                     version INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO meerkat_schema VALUES ('mob', ?1)",
+                params![version],
+            )
+            .unwrap();
+        };
+        let future_schema = dir.path().join("future-schema.db");
+        ledger_only(&future_schema, 9999);
+        // Version 2 is an older mob schema no build accepts as it is.
+        assert!(!MOB_DOMAIN.allowed_existing_versions.contains(&2));
+        let older_schema = dir.path().join("older-schema.db");
+        ledger_only(&older_schema, 2);
+        for path in [&not_sqlite, &no_mob_schema, &future_schema, &older_schema] {
+            let before = file_facts(path);
+            let refused = crate::MobStorage::read_definition_snapshot(path).await;
+            assert!(
+                matches!(
+                    &refused,
+                    Err(crate::MobDefinitionSnapshotReadError::ForeignSchema {
+                        path: refused_path,
+                        ..
+                    }) if refused_path == path
+                ),
+                "{} is refused as a foreign schema: {refused:?}",
+                path.display()
+            );
+            assert_eq!(
+                file_facts(path),
+                before,
+                "{} is left as it was",
+                path.display()
+            );
+        }
+
+        let empty = dir.path().join("empty.db");
+        drop(open_connection(&empty).unwrap());
+        assert_eq!(
+            crate::MobStorage::read_definition_snapshot(&empty)
+                .await
+                .unwrap(),
+            None,
+            "a store that holds no mob answers no definition"
+        );
+    }
+
+    /// The definition snapshot reader reads a released 0.9.2 store, a
+    /// predecessor that opening the store would migrate, as it is: it
+    /// neither migrates nor otherwise writes the file.
+    #[tokio::test]
+    async fn the_definition_snapshot_reader_reads_a_released_v10_store_without_migrating_it() {
+        let (_dir, path) = temp_db_path();
+        seed_released_predecessor(&path, 10, build_released_0_9_2_mob_schema);
+        let before = std::fs::read(&path).unwrap();
+
+        let read = crate::MobStorage::read_definition_snapshot(&path)
+            .await
+            .expect("read a released v10 store");
+
+        assert_eq!(read, None, "the seeded store holds no mob");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(ledger_version(&path), 10);
+        assert!(!table_exists(&path, "mob_runtime_callback_claim_verifiers"));
+    }
+
+    /// The definition snapshot reader answers the definition a released
+    /// 0.9.2 store holds, read from that release's journal table, and
+    /// leaves the store unmigrated. The creation row is one this build
+    /// writes: no migration since that release rewrites a journal row.
+    #[tokio::test]
+    async fn the_definition_snapshot_reader_answers_the_definition_of_a_released_v10_store() {
+        let (_dir, path) = temp_db_path();
+        seed_released_predecessor(&path, 10, build_released_0_9_2_mob_schema);
+        let (_written_dir, written) = temp_db_path();
+        let definition = sample_definition();
+        let storage = crate::MobStorage::persistent(&written).unwrap();
+        storage
+            .events
+            .append(NewMobEvent {
+                mob_id: definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobCreated {
+                    definition: Box::new(definition.clone()),
+                },
+            })
+            .await
+            .unwrap();
+        drop(storage);
+        let (cursor, mob_id, event_json) = Connection::open(&written)
+            .unwrap()
+            .query_row(
+                "SELECT cursor, mob_id, event_json FROM mob_events",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, ?2, ?3)",
+                params![cursor, mob_id, event_json],
+            )
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let read = crate::MobStorage::read_definition_snapshot(&path)
+            .await
+            .expect("read a released v10 store")
+            .expect("the store holds a definition");
+
+        assert_eq!((read.definition(), read.epoch()), (&definition, 1));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(ledger_version(&path), 10);
+        assert!(!table_exists(&path, "mob_runtime_callback_claim_verifiers"));
     }
 
     /// A created identity entry's row (schema version 2) and every row of a

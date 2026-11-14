@@ -232,7 +232,8 @@ pub use operator_instruction::{
 };
 pub use provenance::MobProvenance;
 pub use storage::{
-    MobDefinitionProjectionHealth, MobDefinitionRevision, MobDefinitionSnapshot, MobStorage,
+    MobDefinitionProjectionHealth, MobDefinitionRevision, MobDefinitionSnapshot,
+    MobDefinitionSnapshotReadError, MobStorage,
 };
 pub use workgraph_attention::{
     lower_agent_identity_attention_target, lower_agent_identity_owner_key,

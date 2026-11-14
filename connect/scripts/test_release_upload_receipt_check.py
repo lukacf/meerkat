@@ -636,8 +636,8 @@ class ReceiptCheck(Fixture):
                 self.refused(self.check(change(self.receipt(), path, None), tool=tool), "pins", name)
                 missing = self.checkout({key: value for key, value in PINS.items() if key != name})
                 self.refused(self.check(tool=missing), "pins")
-        # The file as it is committed before a release commit sets the lists: nothing passes, whatever
-        # the receipt says about its own lists.
+        # A file whose lists are not set, as the file was committed before a pins commit set them:
+        # nothing passes, whatever the receipt says about its own lists.
         unset = {**PINS, "name_list_sha256": None, "rules_sha256": None, "non_published_list_sha256": None}
         receipt = self.receipt()
         for field in ("name_list_sha256", "rules_sha256", "non_published_list_sha256"):
@@ -794,8 +794,16 @@ class ReceiptCheck(Fixture):
             for name in PINS:
                 self.assertTrue(values[name] is None or re.fullmatch(r"[0-9a-f]{64}", values[name]), (target, name))
             self.assertEqual(values["names"], RELEASE_NAMES if target == RELEASE else HOLDS)
-        # Until a commit sets them, no file of the release's own passes.
-        self.assertEqual(set(pins["targets"][RELEASE][name] for name in PINS), {None})
+        # The Linux target and the release's own files have every pin set, each a digest: a commit
+        # before the release commit sets them from the lane's inputs. The macOS target's pins are not
+        # set, so nothing of that target passes. That a pin that is null or missing refuses, for a
+        # platform target, for another target of the same file and for the release's own files, is
+        # held by test_a_pin_that_is_null_or_missing_refuses, test_each_target_has_its_own_pins and
+        # test_the_release_target_has_its_own_pins.
+        for target in (TARGET, RELEASE):
+            for name in PINS:
+                self.assertRegex(pins["targets"][target][name] or "", r"\A[0-9a-f]{64}\Z", (target, name))
+        self.assertEqual(set(pins["targets"][OTHER_TARGET][name] for name in PINS), {None})
         self.assertEqual([path.name for path in release.glob("*pins*")], [PINS_NAME])
         # The file the check compares the scans' coverage exceptions with is committed beside it.
         self.assertTrue((release / EXCEPTIONS_NAME).is_file())

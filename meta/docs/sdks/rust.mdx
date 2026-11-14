@@ -372,8 +372,7 @@ calls them at these points:
   and builds nothing. From 0.9.15 a respawn seats the identity's successor
   in one step, and `customize_build` runs once for that seat, a Dormant seat
   on the session the member keeps, with no archive in between; before
-  0.9.15, and still for a member the same-session step does not serve (see
-  Known limitations in the changelog), a respawn retires the member and
+  0.9.15, and still for a member the same-session step does not serve (see Known limitations in Meta's changelog, the entry on the loss of an identity's mobs after a respawn), a respawn retires the member and
   revives its archived session with such a seat.
   `meta/identity/resolved_tools`, which reports the tools a build actually
   resolved, answers `no_build_recorded` until the member's first build. Each
@@ -390,8 +389,7 @@ From 0.9.15 a respawn of a built member seats its successor on the session
 it keeps, Dormant and building nothing, and the wake that
 follows builds it once, as for a lazily seated identity: `after_create` is
 told once, with the session the respawn keeps. Before 0.9.15, and still for
-a member the same-session step does not serve (see Known limitations in the
-changelog), the member is retired first and seated again on the session
+a member the same-session step does not serve (see Known limitations in Meta's changelog, the entry on the loss of an identity's mobs after a respawn), the member is retired first and seated again on the session
 Core kept archived. A materialization, a warm or
 a delivery of an identity Core seats again on its archived session builds
 the member once, at its wake, and the roster pass builds nothing. A lazily

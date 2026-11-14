@@ -691,6 +691,8 @@ host-side retirement (`mob/retire` over JSON-RPC, `meerkat_mob_retire` over
 MCP), and `MobHandle::retire` itself, which Meta's retire paths and idle
 sweep use. A descendant forked while its subtree is being retired is retired
 with it.
+The mobs the retired member created itself and its delegates end with its
+session, at the next start of the host.
 
 A child whose own turn fails is retired automatically. A child whose turn
 completes stays seated, for inspection or further work, until its forker

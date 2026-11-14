@@ -192,6 +192,10 @@ Security, Upgrade and Changed.
 - Hosts whose customizer has side effects: see Known limitations, respawn
   during a pending role move.
 
+- A host that used a respawn to discard queued prompts must withdraw them
+  another way: see Changed, the entry on the inputs a respawn hands to the
+  member's successor.
+
 - The published 0.9.14 Meta Python and TypeScript SDKs (the source of tag
   `meta-v0.9.14`) were run against a development build of this release's
   gateway with no provider key: every row of their own suites that starts a
@@ -1734,10 +1738,11 @@ Security, Upgrade and Changed.
     The two session bridge causes are exposed when that host keeps
     sessions and child mobs on disk. For the causes of this group, as in
     0.9.14: do not respawn the identity while its provider is
-    unavailable; after a respawn, do not stop or restart the gateway
-    until the identity has woken on the same session; and if a respawn's
-    wake failed, wake the identity successfully, on the same session,
-    before any restart. One of Core's reasons names a member placed on
+    unavailable; after a respawn, do not stop or restart the gateway until the
+    identity has woken on the same session (the call has answered without an
+    error and the identity has then answered one message); and if a respawn's
+    wake failed, wake the identity successfully, on the same session, before
+    any restart. One of Core's reasons names a member placed on
     another host whose spec names no placement: its line is this warning,
     and its exposure is not established, as for the next group.
   - Not established. `its member is placed on another host`: the line is

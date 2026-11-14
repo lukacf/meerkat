@@ -20057,9 +20057,10 @@ mod tests {
     /// agent mob tools re-derive after a restart: only a session's own create
     /// with its create capability. An OperatorSession record proves the
     /// creating session. An OperatorMember record proves the creating
-    /// member's session only while that session still serves the recorded
-    /// member at the recorded generation in the recorded parent incarnation:
-    /// once the member is respawned at its next generation, neither its old
+    /// member's session while that session serves the recorded member at
+    /// the recorded generation in the recorded parent incarnation (or its
+    /// same-session successor, which other rows cover): once the member is
+    /// respawned onto a new session at its next generation, neither its old
     /// session nor its new one proves anything. A create the host made for
     /// the same session or member (`Session`, `Member`) proves nothing: the
     /// session owns that mob but did not create it. A host create, and any

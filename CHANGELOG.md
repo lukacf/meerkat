@@ -760,18 +760,24 @@ them.
     many times; a declared role migration and a runtime-mode restamp of an
     identity entry's member, a store-owned identity's profile move and
     runtime-mode change among them; `MobHandle::respawn` of an identity
-    entry's member.
+    entry's member; and every other request that seats the member's
+    successor on its own session. A wake of the member, a restart of the
+    host and an adoption of the member change nothing.
   - Still ends it, as before: a reset onto a fresh session
     (`rotate_member`) and a worker's respawn, which takes a fresh session;
     a member that was retired and later seated again on its kept session,
     whatever seated it (a spawn or `ensure_member` that resumes the session,
-    an unlisted identity listed again, an archived identity unarchived);
+    an unlisted identity listed again, an archived identity unarchived); a
+    session binding recovery that moves the member to another session;
     every later generation of a member of a mob that was ever reset.
-  - Not brought back: upgrading does not give back a management a creator
-    had already lost. A creator that was retired and seated again on its
+  - Not covered: a member whose own mob is stored in custom stores without
+    the built-in identity and member store. Its member history cannot be
+    read, so its successor keeps nothing, as before.
+  - Not brought back: a creator that was retired and seated again on its
     session before the upgrade stays without its management of the mobs it
-    created. Those mobs end as before, with the session that owns them (see
-    the Upgrade notes).
+    created; upgrading does not give back a management lost that way. Those
+    mobs end as before, with the session that owns them (see the Upgrade
+    notes).
   The 0.9.4 Known limitation about a member "reset to its next generation,
   over the same session" described this case; it no longer applies to a
   same-session successor.

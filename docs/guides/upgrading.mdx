@@ -3978,9 +3978,10 @@ mode with leading zeros (`'0755'`; unquoted it reads as `755.0`).
   before 0.9.4 gets its incarnation at its first resume (provenance
   `Unrecorded`). After a restart, the session that created a mob with the
   agent mob tools manages it again (the grant is re-derived from the creation
-  record); a member that created a mob and was then reset to a later
-  generation over the same session does not (known limitation; an operator
-  grant restores manage).
+  record); a member that created a mob and was then seated at a later
+  generation does not, unless that generation is its same-session successor
+  (through 0.9.14 no later generation did: known limitation there; an
+  operator grant restores manage).
 - **Member delivery scopes name the incarnation** and are written at version
   2. A version-1 scope still decodes and is honoured only by a mob whose
   incarnation was assigned to a store from before 0.9.4; 0.9.3 refuses a

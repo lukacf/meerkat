@@ -1272,7 +1272,18 @@ Security, Upgrade and Changed.
   Mobs lost this way are not restored by the upgrade. `meta/respawn`
   (`MetaRuntime.respawn` in both SDKs, `IdentityRuntime::respawn`), the
   Console's respawn and the two rebuilds of `meta/compact_member` were
-  affected. On 0.9.9 and 0.9.10 a gateway could enter the state by
+  affected: all of them end the member's incarnation through one shared
+  step. For the respawn the loss and the fix are confirmed by a test. For
+  the compact call, that its rebuild takes the shared step is confirmed
+  by a test (`a_roster_identitys_incarnation_ends_through_cores_one_step_successor`,
+  and `compact_member_whose_rebuild_the_host_refuses_keeps_the_member_on_its_session`,
+  which runs the call and reads that the member stays on its session and
+  the session does not read archived); the loss of mobs across a restart
+  through the compact call is read from the source. Every identity of
+  0.9.9 through 0.9.14 is a configured one, so every identity of those
+  releases was affected. Agents created at run time are new in 0.9.15
+  and were never affected: their respawn and the compact call's rebuilds
+  have used the one step since they exist. On 0.9.9 and 0.9.10 a gateway could enter the state by
   itself: at each roster compile it respawned, once, every listed
   identity whose live member had been created before an upgrade from an
   older release and had not been respawned since. A respawn, the

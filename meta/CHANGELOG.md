@@ -942,9 +942,13 @@ Security, Upgrade and Changed.
   the next call (an open event stream within 20 seconds), the identity
   policy's rules on the agent's record. An idle agent is released by the
   update, so its next build is composed with the new labels (your
-  customizer is handed them, without a label that was removed); a busy
-  agent is not interrupted and takes them at its next build after it goes
-  idle, and a later update of it releases it once it is idle. What
+  customizer is handed them, without a label that was removed). A busy
+  agent is not interrupted, the answer does not say that it was busy, and
+  going idle builds nothing: it keeps what it was built with until it is
+  next released (a later update of it once it is idle, `meta/retire`, an
+  idle retirement, a restart). An agent of a host whose sessions are not
+  durable, a placed agent and an agent wired to a placed agent are not
+  released by a label change and keep their build. What
   trails until the agent is next seated is the record of its seat in the
   mob's journal: it decides nothing an update can change, it is what an
   earlier release that serves the same store reads, and only seating the
@@ -952,11 +956,12 @@ Security, Upgrade and Changed.
   mobs) brings it in line; see the rollback notes of Meerkat's upgrade
   guide before a rollback. A removed label stays in the peer metadata of
   the agent's conversation, which its peers read, until the agent starts a
-  new conversation. One agent is still seated again by a label update: an
-  agent that is broken because its build was refused for its labels. It
-  serves nothing while it is broken, the update that corrects its labels
-  seats it again, and if it had created mobs before, it no longer lists or
-  manages them. See "Changing labels" in the created agents guide.
+  new conversation. One agent is still seated again: a broken one (its
+  build was refused for good, it serves nothing). Once its labels have
+  changed since it was last seated, any update of it seats it again, the
+  update that changes them included; if it had created mobs before, it no
+  longer lists or manages them. See "Changing labels" in the created
+  agents guide.
 
 - The texts say what a profile move of an agent created at run time costs.
   A profile move (`set.profile`), and a host's change of the runtime mode

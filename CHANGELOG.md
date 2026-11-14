@@ -500,10 +500,17 @@ them.
   it), so what it was built with serves nothing more. A member that holds
   work is not interrupted: the update commits and answers
   `DeclaredEntryOutcome::Deferred`, and a retry of the update releases the
-  member once it is idle. A Broken member alone is still seated again by
+  member once it is idle (going idle builds nothing: until it is released
+  it runs on what it was built with). A member the release leaves live
+  answers `Kept` and stays on what it was built with: a placed member
+  and a member wired to a placed member, which a release does not serve,
+  and a member on a session service that keeps no durable sessions, where
+  a release releases nothing. A Broken member alone is still seated again by
   the update (`Restamped`): its build was refused for good, it serves
   nothing and holds no live build a release could let go, and only its
-  next incarnation is built again. A build carries every label of the row (a key
+  next incarnation is built again. That holds for every Broken member
+  whose row records the owed restamp, whatever broke it and whichever
+  field the update moves. A build carries every label of the row (a key
   the row dropped stays in a resumed session's own peer metadata, as at
   every resume). No seat row is written. The roster is not the journal:
   the member's last seat row keeps the labels it was seated with until
@@ -512,7 +519,16 @@ them.
   (`CreatedIdentityRecord::label_restamp_owed`, see Added): the commit of
   any update of a seated store-owned identity writes it when the member's
   last seat row carries other labels than the updated row, whichever
-  field the update moved. No update seats a member for its labels, and
+  field the update moved. The seat row is no measure of what a live
+  member was built with, so the row lets the record go once a seat row
+  carries the row's labels and no build of the member can predate them:
+  after a new seat row, or after an update or a retry whose member step
+  was done (it released the member), never after one that was deferred
+  and never while a member the release left live still runs.
+  An update that returns the row to the labels of the member's seat row
+  (a label added and removed again) therefore releases an idle member
+  and then lets the record go, and keeps it for a busy member until a
+  retry released it. No update seats a member for its labels, and
   neither does a retry of one: while the restamp is owed, each of them
   releases the idle member again, which costs a build at its next
   delivery and nothing else. The member's next seat row settles the owed

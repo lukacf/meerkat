@@ -236,10 +236,19 @@ conversation, and it goes on listing and managing the mobs it created.
 - **The agent's next build uses them.** An idle agent is released by the
   update, so its next delivery builds it again: your customizer is handed
   the new labels, and a label that was removed is not among them. An agent
-  that is busy is not interrupted; it takes the new labels at its next
-  build after it goes idle. Until the agent is next seated, any later
-  update of it releases it when it is idle: one more build at its next
-  delivery, nothing else.
+  that is busy is not interrupted, and going idle builds nothing: it keeps
+  what it was built with until it is next released. That is a later update
+  of it once it is idle, a retire (`meta/retire`), an idle retirement, or
+  a restart. The update's answer does not say that the agent was busy.
+  Until the agent is next seated, any later update of it releases it when
+  it is idle: one more build at its next delivery, nothing else.
+- **Agents that a label change does not release.** Three kinds of agent
+  stay live through a label update and keep what they were built with: an
+  agent of a host whose sessions are not durable (a release releases
+  nothing there; it takes new labels when it is rotated onto a fresh
+  conversation or the process restarts), a placed agent (its member host
+  owns its build), and an agent wired to a placed agent. The roster and
+  the access rules use their new labels at once all the same.
 - **What its peers read of it.** A build adds the agent's labels to the
   peer metadata of its conversation and takes none away, so a removed
   label stays in what its peers read of it until the agent starts a new
@@ -254,10 +263,15 @@ conversation, and it goes on listing and managing the mobs it created.
   which costs an agent that created mobs their listing and management:
   there is no way that keeps both.
 - **A broken agent is the exception.** An agent whose build was refused for
-  its labels (its row lacks a label your customizer sets) is `broken` and
-  serves nothing. The update that corrects its labels seats it again, and
-  its next send is served. If it had created mobs before it broke, it no
-  longer lists or manages them, as after a profile move.
+  good is `broken` and serves nothing. Once its labels have changed since
+  it was last seated, any update of it seats it again, the update that
+  changes them included, and its next send is served. So the update that
+  corrects the labels of an agent refused for them (its row lacked a label
+  your customizer sets) gets it built; and an agent whose labels were
+  changed earlier and that broke later for another reason is seated again
+  by its next update, whatever that update changes. If it had created mobs
+  before it broke, it no longer lists or manages them, as after a profile
+  move.
 
 ## Moving a profile
 

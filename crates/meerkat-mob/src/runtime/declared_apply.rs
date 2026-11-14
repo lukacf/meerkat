@@ -2070,17 +2070,22 @@ impl super::MobHandle {
     /// member keeps its session, generation and fence, and with them
     /// whatever is bound to its generation, and no seat row is written.
     /// `None` (the identity is kept as it is) when the declaration is not a
-    /// store-owned identity's composed spec, its row owes no restamp, no
-    /// member holds the identity, a seat row carries the row's labels
-    /// already (the settle then lets the owed restamp go), or the member
-    /// was released or had nothing to release.
+    /// store-owned identity's composed spec, its row owes no restamp, or
+    /// the member was released or had nothing to release.
     ///
     /// The one trigger is the row's own record, read here in one point
     /// read. An update's commit writes it when the member's last seat row
     /// carries other labels than the updated row, and the update's step
     /// sets the member's roster entry from the row. What a live member was
     /// built with is its session's until its next build, so the release is
-    /// what takes a label the row dropped out of a running build. The
+    /// what takes a label the row dropped out of a running build. The seat
+    /// row is no measure of that build: a row that returns to the labels of
+    /// the member's seat row (a label added and removed again) still owes
+    /// the release of the build composed in between. So every row that
+    /// records the restamp is owed the release, whatever its seat row
+    /// carries, and the record is let go only where no build of the member
+    /// can predate the row's labels
+    /// (`MobHandle::no_build_predates_the_row`). The
     /// journal's seat row follows at the member's next seat, whatever
     /// writes it (a respawn, a runtime-mode or role restamp, a rotation, a
     /// reset), and the row keeps the restamp owed until then: every
@@ -2094,14 +2099,19 @@ impl super::MobHandle {
     /// interrupted (the release is the idle check): a retry of the update
     /// releases it once it is idle. A member a release does not serve (a
     /// placed one, one wired to a placed member) is kept as it is, and on a
-    /// service that keeps no durable sessions the release releases nothing.
+    /// service that keeps no durable sessions the release releases nothing:
+    /// such a member stays live on what it was built with, and its row
+    /// keeps the record.
     ///
     /// The one member that is seated again is a Broken one
     /// ([`DeclaredEntryOutcome::Restamped`]): its build was refused for
     /// good (for a label its row lacked, say), it serves nothing and holds
     /// no live build a release could let go, and only its next incarnation
     /// is built again. Its successor takes the row's labels on its own
-    /// session, as a runtime-mode change's does.
+    /// session, as a runtime-mode change's does. That holds for every
+    /// Broken member whose row records the owed restamp, whatever broke it
+    /// and whichever field the declaration moved: its labels were updated
+    /// since its last seat, and its next declaration seats it again.
     async fn release_for_owed_store_owned_labels(
         &self,
         entry: &DeclaredEntry,
@@ -2125,14 +2135,12 @@ impl super::MobHandle {
             Ok(_) => return None,
             Err(error) => return Some(failure_outcome(error)),
         };
-        // What the restamp is owed against is the member's last seat row,
-        // never its roster entry, which the update's step set from the row.
-        match self.roster.read().await.seat_row_labels(identity) {
-            Some(seat) if *seat != labels => {}
-            _ => return None,
-        }
         // MobMachine's fact, read before the release: a Broken member
         // serves nothing, and only its next incarnation is built again.
+        // Between the read and the respawn only a host's own respawn of
+        // the member could move the fact (a Broken member's wake is
+        // refused, and no other declared apply of the mob runs beside this
+        // one), and that seats the next incarnation as well.
         let broken = super::identity_entry::machine_holds_broken(
             &self.machine_state_watch_rx.borrow(),
             identity,

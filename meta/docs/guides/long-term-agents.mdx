@@ -387,9 +387,9 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   `set.labels_remove`. A label change is applied at once and does not
   seat the agent again: the mob's roster and the access rules use the new
   labels at once, an idle agent is released and takes them at its next
-  build, on the same conversation, and a busy one takes them at its next
-  build after it goes idle; an agent that is broken because its build was
-  refused for its labels is seated again by the update that corrects them
+  build, on the same conversation, and a busy one keeps what it was built
+  with until it is next released; a broken agent whose labels have changed
+  since it was last seated is seated again by its next update
   (see
   [Changing labels](/guides/agents-create-agents#changing-labels)). A `profile`
   change moves the agent

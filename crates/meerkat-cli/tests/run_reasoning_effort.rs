@@ -808,6 +808,141 @@ fn cli_refusal_on_resume_leaves_the_stored_identity_unchanged() {
     }
 }
 
+/// A resume that names the level in two places that disagree is the
+/// caller's request, refused before anything is built: exit status 2 and,
+/// with JSON output, the failure document of an invalid request, as on a
+/// new session. The stored session is unchanged and no provider is reached.
+#[test]
+fn cli_two_spellings_that_disagree_on_resume_are_an_invalid_request() {
+    let provider = Loopback::start();
+    let roots = roots(provider.port);
+
+    let created = run_turn(
+        &roots,
+        DECLARED_MODEL,
+        &["--reasoning-effort", "low", "--output", "json"],
+    );
+    assert_ok(&created, "the session's first run");
+    let (_, result) = text_then_document(&created);
+    let session = result["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_string();
+    let shown_before = rkat(&roots, &["session", "show", &session]);
+    assert_ok(&shown_before, "session show");
+    let requests_before = provider.request_count();
+
+    // What each command answered, read before anything is asserted, so a
+    // failure prints all of them.
+    let level_json = resume_turn(
+        &roots,
+        &session,
+        &[
+            "--reasoning-effort",
+            "high",
+            "--param",
+            "reasoning_effort=low",
+            "--output",
+            "json",
+        ],
+    );
+    let level_text = resume_turn(
+        &roots,
+        &session,
+        &[
+            "--reasoning-effort",
+            "high",
+            "--param",
+            "reasoning_effort=low",
+        ],
+    );
+    let clear_json = resume_turn(
+        &roots,
+        &session,
+        &[
+            "--no-reasoning-effort",
+            "--param",
+            "reasoning_effort=low",
+            "--output",
+            "json",
+        ],
+    );
+    let clear_text = resume_turn(
+        &roots,
+        &session,
+        &["--no-reasoning-effort", "--param", "reasoning_effort=low"],
+    );
+    let code_of = |finished: &Finished| {
+        serde_json::from_str::<serde_json::Value>(finished.stdout.trim())
+            .ok()
+            .and_then(|document| document["error"]["code"].as_str().map(str::to_string))
+    };
+    let observed = (
+        (level_json.status, code_of(&level_json)),
+        level_text.status,
+        (clear_json.status, code_of(&clear_json)),
+        clear_text.status,
+    );
+    assert_eq!(
+        observed,
+        (
+            (Some(2), Some("INVALID_PARAMS".to_string())),
+            Some(2),
+            (Some(2), Some("INVALID_PARAMS".to_string())),
+            Some(2),
+        ),
+        "exit status and document code of (a level beside another nested level, json), (the same, \
+         text), (a clear beside a nested level, json), (the same, text)\nstdout of the first: {}\n\
+         stderr of the second: {}\nstdout of the third: {}\nstderr of the fourth: {}",
+        level_json.stdout,
+        level_text.stderr,
+        clear_json.stdout,
+        clear_text.stderr
+    );
+
+    // The documents are an invalid request's: validation, and no refusal
+    // details (the disagreement is not a route's refusal).
+    for finished in [&level_json, &clear_json] {
+        let document = only_document(finished);
+        assert_eq!(document["error"]["category"], "validation", "{document}");
+        assert!(document["error"].get("details").is_none(), "{document}");
+    }
+    // Text mode: both places are named on stderr, and stdout is empty.
+    assert!(
+        level_text.stderr.contains("reasoning_effort is 'high'")
+            && level_text
+                .stderr
+                .contains("provider_params.reasoning_effort is 'low'"),
+        "stderr:\n{}",
+        level_text.stderr
+    );
+    assert!(
+        clear_text
+            .stderr
+            .contains("provider_params.reasoning_effort is 'low'"),
+        "stderr:\n{}",
+        clear_text.stderr
+    );
+    for finished in [&level_text, &clear_text] {
+        assert!(
+            finished.stdout.trim().is_empty(),
+            "stdout: {:?}",
+            finished.stdout
+        );
+    }
+
+    assert_eq!(
+        provider.request_count(),
+        requests_before,
+        "no refused resume reached the provider"
+    );
+    let shown_after = rkat(&roots, &["session", "show", &session]);
+    assert_eq!(
+        shown_after.stdout, shown_before.stdout,
+        "the stored session is unchanged by the refused resumes"
+    );
+}
+
 /// A word that is not a level is an argument error: exit status 2, the
 /// argument parser's text on stderr, and no failure document.
 #[test]

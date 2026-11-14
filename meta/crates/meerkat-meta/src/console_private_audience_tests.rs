@@ -965,6 +965,1789 @@ async fn a_mob_a_shared_member_creates_itself_stays_shared_after_a_restart() -> 
     Ok(())
 }
 
+/// The agent mob tools of `member`'s session, as its turn holds them.
+async fn member_mob_tools(
+    runtime: &MobRuntime,
+    member: &str,
+) -> Result<Arc<dyn meerkat_core::AgentToolDispatcher>, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(Arc::new(meerkat_mob_mcp::AgentMobToolSurface::new(
+        runtime.agent_mob_mcp_state().ok_or("agent mob tools")?,
+        None,
+        meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()?,
+        "gpt-5.5".to_string(),
+        member_session(runtime, member).await?,
+        None,
+        None,
+        None,
+    )))
+}
+
+/// `member`'s own `mob_destroy` of the mob `mob_id` it created, made by the
+/// agent mob tools of its session as its turn makes one: afterwards no mob
+/// is hosted under the id.
+async fn own_mob_destroy(runtime: &MobRuntime, member: &str, mob_id: &str) -> TestResult {
+    let surface = member_mob_tools(runtime, member).await?;
+    agent_tool_call(&surface, "mob_destroy", json!({ "mob_id": mob_id })).await?;
+    let hosted = runtime
+        .agent_mob_mcp_state()
+        .ok_or("agent mob tools")?
+        .handle_for(&meerkat_mob::MobId::from(mob_id))
+        .await;
+    assert!(
+        matches!(hosted, Err(meerkat_mob::MobError::MobNotFound(_))),
+        "no mob is hosted under '{mob_id}' once {member} destroyed it"
+    );
+    Ok(())
+}
+
+/// `member`'s own `mob_create` of a mob `mob_id` whose only profile names a
+/// model nothing defines: the create is admitted, and fails when the mob is
+/// built, so no mob is hosted under the id.
+async fn own_mob_create_that_fails(runtime: &MobRuntime, member: &str, mob_id: &str) -> TestResult {
+    let surface = member_mob_tools(runtime, member).await?;
+    let failed = agent_tool_call(
+        &surface,
+        "mob_create",
+        json!({ "definition": {
+            "id": mob_id,
+            "profiles": { "worker": {
+                "model": "a-model-nothing-defines",
+                "runtime_mode": "turn_driven",
+                "tools": { "comms": true },
+            } },
+        } }),
+    )
+    .await;
+    assert!(
+        failed.is_err(),
+        "{member}'s create of '{mob_id}' fails: {failed:?}"
+    );
+    let hosted = runtime
+        .agent_mob_mcp_state()
+        .ok_or("agent mob tools")?
+        .handle_for(&meerkat_mob::MobId::from(mob_id))
+        .await;
+    assert!(
+        matches!(hosted, Err(meerkat_mob::MobError::MobNotFound(_))),
+        "no mob is hosted under '{mob_id}' after {member}'s create of it failed"
+    );
+    Ok(())
+}
+
+/// `member`'s own `mob_create` under the id of the hosted mob `hosted`: the
+/// create is refused before anything of a new mob exists, and the mob
+/// hosted under the id stays the one it was.
+async fn own_mob_create_under_a_hosted_id(
+    runtime: &MobRuntime,
+    member: &str,
+    hosted: &meerkat_mob::MobHandle,
+) -> TestResult {
+    let mob_id = hosted.mob_id().to_string();
+    let surface = member_mob_tools(runtime, member).await?;
+    let refused = agent_tool_call(
+        &surface,
+        "mob_create",
+        json!({ "definition": {
+            "id": mob_id,
+            "profiles": { "worker": {
+                "model": "gpt-5.5",
+                "runtime_mode": "turn_driven",
+                "tools": { "comms": true },
+            } },
+        } }),
+    )
+    .await;
+    assert!(
+        refused.is_err(),
+        "{member}'s create under the hosted id '{mob_id}' is refused: {refused:?}"
+    );
+    let now = runtime
+        .agent_mob_mcp_state()
+        .ok_or("agent mob tools")?
+        .handle_for(hosted.mob_id())
+        .await?;
+    assert!(
+        now.incarnation() == hosted.incarnation(),
+        "the mob hosted under '{mob_id}' is the one it was"
+    );
+    Ok(())
+}
+
+/// How a member is seated in a mob a member created, and who sees it.
+#[derive(Debug, PartialEq, Eq)]
+struct Seat {
+    /// The private owner on its roster row.
+    private_to: Option<String>,
+    /// Whether it is seated exempt from the definition's wiring rules.
+    exempt: bool,
+    /// Whether Alice's sidebar lists it.
+    alice_sees: bool,
+    /// Whether Bob's sidebar lists it.
+    bob_sees: bool,
+}
+
+/// `member`, seated in `mob` for `owner_session` as the agent mob tools seat
+/// a member, as its roster row and the two people's sidebars show it. The
+/// console answers a sidebar from its last walk of the rosters and walks
+/// again in the background, so the sidebars are read until a walk made
+/// after the seating answers: one that lists the member for Alice, who sees
+/// it whether it is private to her or to no one. Bob's is read after hers.
+async fn seat_in(
+    app: &Router,
+    mob: &meerkat_mob::MobHandle,
+    member: &str,
+    owner_session: meerkat_core::types::SessionId,
+) -> Result<Seat, Box<dyn std::error::Error + Send + Sync>> {
+    let private_to = seated_private_owner(mob, member, owner_session).await?;
+    let exempt = mob
+        .get_member(&AgentIdentity::from(member))
+        .await?
+        .ok_or_else(|| format!("{member} is seated"))?
+        .definition_wiring
+        == meerkat_mob::DefinitionWiring::Exempt;
+    let alice = bearer(alice_claims());
+    let mut alice_sees = false;
+    for _ in 0..100 {
+        alice_sees = row(&sidebar(app, Some(&alice)).await, member).is_some();
+        if alice_sees {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let bob_sees = row(&sidebar(app, Some(&bearer(bob_claims()))).await, member).is_some();
+    Ok(Seat {
+        private_to,
+        exempt,
+        alice_sees,
+        bob_sees,
+    })
+}
+
+/// [`seat_in`], for a mob whose owner the record may have to read from the
+/// mob's creation record first: a spawn refused as retryable is made again
+/// once the record answers for the mob. Answers the seat, and how many
+/// spawns were refused before it.
+async fn seat_in_once_read(
+    runtime: &MobRuntime,
+    app: &Router,
+    mob: &meerkat_mob::MobHandle,
+    member: &str,
+    owner_session: meerkat_core::types::SessionId,
+) -> Result<(Seat, usize), Box<dyn std::error::Error + Send + Sync>> {
+    let mut refused = 0;
+    loop {
+        match seat_in(app, mob, member, owner_session.clone()).await {
+            Ok(seat) => return Ok((seat, refused)),
+            Err(error) if refused < 3 && error.to_string().contains("retry") => refused += 1,
+            Err(error) => return Err(error),
+        }
+        let answers = async {
+            loop {
+                let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from(member));
+                if runtime
+                    .private_owners()
+                    .apply_child(mob.mob_id().as_str(), None, &mut spec)
+                    .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(20), answers)
+            .await
+            .map_err(|_| format!("the record never answered for the mob of {member}"))?;
+    }
+}
+
+/// The seat of a member private to the person whose caller scope is `owner`
+/// (Alice): her roster label, outside the definition's wiring, on her
+/// sidebar and not on Bob's.
+fn private_seat(owner: &str) -> Seat {
+    Seat {
+        private_to: Some(owner.to_string()),
+        exempt: true,
+        alice_sees: true,
+        bob_sees: false,
+    }
+}
+
+/// The seat of a member private to no one: no owner, the definition's
+/// wiring, on every person's sidebar.
+fn shared_seat() -> Seat {
+    Seat {
+        private_to: None,
+        exempt: false,
+        alice_sees: true,
+        bob_sees: true,
+    }
+}
+
+/// A gateway runtime over `state` with a shared member `alpha` and Alice's
+/// private side chat `alpha-side`, its console, and Alice's caller scope.
+async fn runtime_with_a_private_side_chat(
+    state: &std::path::Path,
+    mob: &str,
+) -> Result<(MobRuntime, Router, String), Box<dyn std::error::Error + Send + Sync>> {
+    let runtime = persistent_gateway_runtime_in(state, mob, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let alice = bearer(alice_claims());
+    let alice_scope = caller_scope(&app, &alice).await;
+    let forked = fork_on_console(&app, Some(&alice), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    Ok((runtime, app, alice_scope))
+}
+
+/// A mob a private side chat creates under an id a shared member's mob held
+/// before it was destroyed is private to the side chat's owner: the members
+/// seated in it carry the owner, sit outside the definition's wiring, and
+/// another person does not see them. The earlier mob under the id was private
+/// to no one, and that is not what the later mob is.
+#[tokio::test]
+async fn a_private_mob_under_an_id_a_shared_mob_used_is_private_to_its_own_creators_owner()
+-> TestResult {
+    const CREW: &str = "crew-shared-then-private";
+    let state = tempfile::tempdir()?;
+    let (runtime, app, alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "reused-id-shared-first").await?;
+
+    let shared = own_mob_create(&runtime, "alpha", CREW).await?;
+    assert_eq!(
+        seat_in(
+            &app,
+            &shared,
+            "shared-first-helper",
+            member_session(&runtime, "alpha").await?
+        )
+        .await?,
+        shared_seat(),
+        "the shared member's mob is private to no one"
+    );
+    drop(shared);
+    own_mob_destroy(&runtime, "alpha", CREW).await?;
+
+    let private = own_mob_create(&runtime, "alpha-side", CREW).await?;
+    assert_eq!(
+        seat_in(
+            &app,
+            &private,
+            "private-second-helper",
+            member_session(&runtime, "alpha-side").await?
+        )
+        .await?,
+        private_seat(&alice_scope),
+        "the side chat's mob under the same id is private to the side chat's owner"
+    );
+    let bob = bearer(bob_claims());
+    let read = console_rpc_as(
+        &app,
+        Some(&bob),
+        "meta/get_member",
+        json!({ "member_id": "private-second-helper" }),
+    )
+    .await;
+    let absent = console_rpc_as(
+        &app,
+        Some(&bob),
+        "meta/get_member",
+        json!({ "member_id": "nobody-here" }),
+    )
+    .await;
+    assert_eq!(
+        masked(&read, "private-second-helper"),
+        masked(&absent, "nobody-here"),
+        "another person reads the side chat's helper as a member that does not exist"
+    );
+    Ok(())
+}
+
+/// A mob a shared member creates under an id a private side chat's mob held
+/// before it was destroyed is private to no one: the members seated in it
+/// carry no owner, take the definition's wiring, and every person sees them.
+/// The earlier mob under the id was private to the side chat's owner, and
+/// that is not what the later mob is.
+#[tokio::test]
+async fn a_shared_mob_under_an_id_a_private_mob_used_is_private_to_no_one() -> TestResult {
+    const CREW: &str = "crew-private-then-shared";
+    let state = tempfile::tempdir()?;
+    let (runtime, app, alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "reused-id-private-first").await?;
+
+    let private = own_mob_create(&runtime, "alpha-side", CREW).await?;
+    assert_eq!(
+        seat_in(
+            &app,
+            &private,
+            "private-first-helper",
+            member_session(&runtime, "alpha-side").await?
+        )
+        .await?,
+        private_seat(&alice_scope),
+        "the side chat's mob is private to the side chat's owner"
+    );
+    drop(private);
+    own_mob_destroy(&runtime, "alpha-side", CREW).await?;
+
+    let shared = own_mob_create(&runtime, "alpha", CREW).await?;
+    assert_eq!(
+        seat_in(
+            &app,
+            &shared,
+            "shared-second-helper",
+            member_session(&runtime, "alpha").await?
+        )
+        .await?,
+        shared_seat(),
+        "the shared member's mob under the same id is private to no one"
+    );
+    Ok(())
+}
+
+/// A shared member's create that fails after it was admitted decides
+/// nothing for the mob a private side chat then creates under its id: that
+/// mob is private to the side chat's owner. The side chat's owner differs
+/// from what the failed create left, so the first spawn into the mob is
+/// refused as retryable while who created it is read from its creation
+/// record, and the spawn made again is seated by that record.
+#[tokio::test]
+async fn a_shared_members_failed_create_decides_nothing_for_a_private_mob_under_its_id()
+-> TestResult {
+    const CREW: &str = "crew-shared-create-failed";
+    let state = tempfile::tempdir()?;
+    let (runtime, app, alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "failed-create-shared-first").await?;
+    assert!(
+        runtime
+            .private_owners()
+            .seeded(&runtime.handle())
+            .await
+            .landed(),
+        "the runtime has read who its members are private to"
+    );
+
+    own_mob_create_that_fails(&runtime, "alpha", CREW).await?;
+    let private = own_mob_create(&runtime, "alpha-side", CREW).await?;
+    let (seat, refused_first) = seat_in_once_read(
+        &runtime,
+        &app,
+        &private,
+        "private-after-failed-helper",
+        member_session(&runtime, "alpha-side").await?,
+    )
+    .await?;
+    assert_eq!(
+        seat,
+        private_seat(&alice_scope),
+        "after a shared member's failed create, the side chat's mob under the id is private \
+         to the side chat's owner"
+    );
+    assert_eq!(
+        refused_first, 1,
+        "the first spawn into it waits for the mob's creation record"
+    );
+    Ok(())
+}
+
+/// The reverse: a private side chat's create that fails after it was
+/// admitted decides nothing for the mob a shared member then creates under
+/// its id. That mob is private to no one, once its creation record is read.
+#[tokio::test]
+async fn a_private_members_failed_create_decides_nothing_for_a_shared_mob_under_its_id()
+-> TestResult {
+    const CREW: &str = "crew-private-create-failed";
+    let state = tempfile::tempdir()?;
+    let (runtime, app, _alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "failed-create-private-first").await?;
+    assert!(
+        runtime
+            .private_owners()
+            .seeded(&runtime.handle())
+            .await
+            .landed(),
+        "the runtime has read who its members are private to"
+    );
+
+    own_mob_create_that_fails(&runtime, "alpha-side", CREW).await?;
+    let shared = own_mob_create(&runtime, "alpha", CREW).await?;
+    let (seat, refused_first) = seat_in_once_read(
+        &runtime,
+        &app,
+        &shared,
+        "shared-after-failed-helper",
+        member_session(&runtime, "alpha").await?,
+    )
+    .await?;
+    assert_eq!(
+        seat,
+        shared_seat(),
+        "after a side chat's failed create, the shared member's mob under the id is private \
+         to no one"
+    );
+    assert_eq!(
+        refused_first, 1,
+        "the first spawn into it waits for the mob's creation record"
+    );
+    Ok(())
+}
+
+/// A create refused before it is admitted, because a mob is hosted under
+/// its id, decides nothing for that mob: the members seated in the hosted
+/// mob afterwards are private to whom its own creator is private to. In
+/// both orders: a shared member's create under the id of a private side
+/// chat's mob, and a private side chat's create under the id of a shared
+/// member's mob.
+#[tokio::test]
+async fn a_create_refused_under_a_hosted_id_decides_nothing_for_the_hosted_mob() -> TestResult {
+    const PRIVATE: &str = "crew-hosted-private";
+    const SHARED: &str = "crew-hosted-shared";
+    let state = tempfile::tempdir()?;
+    let (runtime, app, alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "create-under-hosted-id").await?;
+
+    let private = own_mob_create(&runtime, "alpha-side", PRIVATE).await?;
+    own_mob_create_under_a_hosted_id(&runtime, "alpha", &private).await?;
+    assert_eq!(
+        seat_in(
+            &app,
+            &private,
+            "private-hosted-helper",
+            member_session(&runtime, "alpha-side").await?
+        )
+        .await?,
+        private_seat(&alice_scope),
+        "the side chat's mob stays private to the side chat's owner"
+    );
+
+    let shared = own_mob_create(&runtime, "alpha", SHARED).await?;
+    own_mob_create_under_a_hosted_id(&runtime, "alpha-side", &shared).await?;
+    assert_eq!(
+        seat_in(
+            &app,
+            &shared,
+            "shared-hosted-helper",
+            member_session(&runtime, "alpha").await?
+        )
+        .await?,
+        shared_seat(),
+        "the shared member's mob stays private to no one"
+    );
+    Ok(())
+}
+
+/// A mob created again under its id by a creator of the same owner is
+/// seated at once, with no refusal: after a destroy, for a private side
+/// chat and for a shared member, and after the same creator's failed
+/// create.
+#[tokio::test]
+async fn a_mob_created_again_for_the_same_owner_is_seated_without_a_refusal() -> TestResult {
+    const PRIVATE: &str = "crew-again-private";
+    const SHARED: &str = "crew-again-shared";
+    const FAILED: &str = "crew-again-after-failed";
+    let state = tempfile::tempdir()?;
+    let (runtime, app, alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "created-again-same-owner").await?;
+
+    for (creator, mob_id, seat) in [
+        ("alpha-side", PRIVATE, private_seat(&alice_scope)),
+        ("alpha", SHARED, shared_seat()),
+    ] {
+        let first = own_mob_create(&runtime, creator, mob_id).await?;
+        assert_eq!(
+            seat_in(
+                &app,
+                &first,
+                &format!("{mob_id}-first-helper"),
+                member_session(&runtime, creator).await?
+            )
+            .await?,
+            seat,
+            "{creator}'s first mob '{mob_id}'"
+        );
+        drop(first);
+        own_mob_destroy(&runtime, creator, mob_id).await?;
+        let again = own_mob_create(&runtime, creator, mob_id).await?;
+        assert_eq!(
+            seat_in(
+                &app,
+                &again,
+                &format!("{mob_id}-second-helper"),
+                member_session(&runtime, creator).await?
+            )
+            .await?,
+            seat,
+            "{creator}'s mob '{mob_id}' created again is seated at once"
+        );
+    }
+
+    own_mob_create_that_fails(&runtime, "alpha-side", FAILED).await?;
+    let after_failed = own_mob_create(&runtime, "alpha-side", FAILED).await?;
+    assert_eq!(
+        seat_in(
+            &app,
+            &after_failed,
+            "again-after-failed-helper",
+            member_session(&runtime, "alpha-side").await?
+        )
+        .await?,
+        private_seat(&alice_scope),
+        "the side chat's mob after its own failed create is seated at once"
+    );
+    Ok(())
+}
+
+/// What the record of who a created mob is private to answers a spawn into
+/// the mob `mob_id`: the person a member would be seated for (`None` for no
+/// one), or the refusal's text while the record holds nothing certain.
+fn recorded_mob_owner(runtime: &MobRuntime, mob_id: &str) -> Result<Option<String>, String> {
+    let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("record-probe"));
+    runtime
+        .private_owners()
+        .apply_child(mob_id, None, &mut spec)
+        .map(|()| {
+            spec.labels
+                .as_ref()
+                .and_then(|labels| labels.get(PRIVATE_TO).cloned())
+        })
+        .map_err(|error| error.to_string())
+}
+
+/// A destroy that is made again drops nothing of another mob. While a
+/// destroyed mob's storage cleanup is still owed, its id takes no other mob:
+/// another person's side chat is refused the create before it is admitted,
+/// so nothing is recorded for it. Once the destroy made again has settled
+/// the cleanup, the other side chat creates a mob under the id, private to
+/// its own person. A further destroy call by the first mob's creator is
+/// refused and releases nothing: the later mob keeps its owner, and its
+/// first member is seated without a refusal, private to that person and not
+/// shown to the first.
+#[tokio::test]
+async fn a_destroy_made_again_drops_nothing_of_a_later_mob_under_the_id() -> TestResult {
+    const CREW: &str = "crew-two-private-creators";
+    let state = tempfile::tempdir()?;
+    let (runtime, app, alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "destroy-made-again").await?;
+    let bob = bearer(bob_claims());
+    let bob_scope = caller_scope(&app, &bob).await;
+    assert_ne!(alice_scope, bob_scope, "two people");
+    let forked = fork_on_console(&app, Some(&bob), "alpha", "alpha-side-bob").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let tools = runtime.agent_mob_mcp_state().ok_or("agent mob tools")?;
+    let crew = meerkat_mob::MobId::from(CREW);
+    let definition = json!({ "definition": {
+        "id": CREW,
+        "profiles": { "worker": {
+            "model": "gpt-5.5",
+            "runtime_mode": "turn_driven",
+            "tools": { "comms": true },
+        } },
+    } });
+
+    // The first person's side chat creates the mob: it is hers.
+    let first = own_mob_create(&runtime, "alpha-side", CREW).await?;
+    assert_eq!(
+        recorded_mob_owner(&runtime, CREW),
+        Ok(Some(alice_scope.clone())),
+        "the first mob is private to its creator's person"
+    );
+    drop(first);
+
+    // A reader of the mob's store keeps its destroy's storage cleanup owed.
+    // The destroy and the one made again are the host's: the release runs
+    // the same for every caller of a destroy.
+    let store = child_mob_store(state.path(), CREW).ok_or("the created mob has a store")?;
+    let reader = meerkat_mob::MobStorage::persistent(&store).map_err(|error| error.to_string())?;
+    let incomplete = tools
+        .mob_destroy(&crew)
+        .await
+        .err()
+        .ok_or("the destroy's storage cleanup stays owed while the reader holds the store")?;
+    assert!(
+        matches!(
+            incomplete,
+            meerkat_mob_mcp::MobMcpDestroyError::Incomplete { .. }
+        ),
+        "{incomplete}"
+    );
+    assert!(
+        matches!(
+            tools.handle_for(&crew).await,
+            Err(meerkat_mob::MobError::MobNotFound(_))
+        ),
+        "the destroy itself completed: no mob is hosted under the id"
+    );
+    assert!(
+        recorded_mob_owner(&runtime, CREW).is_err(),
+        "the destroyed mob left no record"
+    );
+
+    // While that cleanup is owed, the id takes no other mob, and the create
+    // that is refused records nothing.
+    let second_creator = member_mob_tools(&runtime, "alpha-side-bob").await?;
+    let refused = agent_tool_call(&second_creator, "mob_create", definition)
+        .await
+        .err()
+        .ok_or("no mob is created under an id whose destroyed mob's cleanup is owed")?;
+    assert!(
+        refused.to_string().contains("still outstanding"),
+        "{refused}"
+    );
+    assert!(
+        recorded_mob_owner(&runtime, CREW).is_err(),
+        "the refused create recorded nothing"
+    );
+
+    // The destroy made again by its caller, once the reader is gone, runs
+    // the release again and settles the cleanup.
+    drop(reader);
+    tools
+        .mob_destroy(&crew)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    // The other person's side chat creates a mob under the id: it is his.
+    let second = own_mob_create(&runtime, "alpha-side-bob", CREW).await?;
+    assert_eq!(
+        recorded_mob_owner(&runtime, CREW),
+        Ok(Some(bob_scope.clone())),
+        "the later mob is private to its own creator's person"
+    );
+
+    // A further destroy call by the first creator reaches neither mob.
+    let first_creator = member_mob_tools(&runtime, "alpha-side").await?;
+    let further = agent_tool_call(&first_creator, "mob_destroy", json!({ "mob_id": CREW })).await;
+    eprintln!("the first creator's further destroy call answers: {further:?}");
+    assert!(
+        matches!(
+            &further,
+            Err(meerkat_core::ToolError::AccessDenied { name }) if name == "mob_destroy"
+        ),
+        "the first creator has no say over the later mob: {further:?}"
+    );
+    assert_eq!(
+        tools.handle_for(&crew).await?.incarnation(),
+        second.incarnation(),
+        "the later mob is still the one hosted under the id"
+    );
+    assert_eq!(
+        recorded_mob_owner(&runtime, CREW),
+        Ok(Some(bob_scope.clone())),
+        "the later mob keeps its owner"
+    );
+    let (seat, refused_spawns) = seat_in_once_read(
+        &runtime,
+        &app,
+        &second,
+        "second-creators-helper",
+        member_session(&runtime, "alpha-side-bob").await?,
+    )
+    .await?;
+    assert_eq!(
+        refused_spawns, 0,
+        "its first member is seated without a refusal"
+    );
+    assert_eq!(
+        seat,
+        Seat {
+            private_to: Some(bob_scope),
+            exempt: true,
+            alice_sees: false,
+            bob_sees: true,
+        },
+        "private to the later creator's person, and not shown to the first"
+    );
+    Ok(())
+}
+
+/// Two creates under one id, by a shared member and by a private side chat,
+/// of which at most one leaves a mob hosted: the members seated in that mob
+/// are private to whom the creator its own creation record names is private
+/// to, whichever create's answer the record got first.
+///
+/// Both orders are forced first, each for both winners. The losing create's
+/// answer is written before the winner's mob is hosted, and it is written
+/// once that mob is hosted (a create that passed the check for a hosted mob
+/// before the winner's mob was hosted is admitted after it). The answer is
+/// written as the create admission writes it. Each time the two answers
+/// disagree, so the first spawn into the mob is refused as retryable, and
+/// the spawn made again is seated by the mob's creation record.
+///
+/// Then the two creates run at once, several rounds, started in either
+/// order, as the scheduler lets them.
+#[tokio::test]
+async fn creates_racing_for_one_id_seat_the_hosted_mobs_members_by_its_own_creator() -> TestResult {
+    let state = tempfile::tempdir()?;
+    let (runtime, app, alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "racing-creates").await?;
+    assert!(
+        runtime
+            .private_owners()
+            .seeded(&runtime.handle())
+            .await
+            .landed(),
+        "the runtime has read who its members are private to"
+    );
+    let seat_of = |creator: &str| {
+        if creator == "alpha-side" {
+            private_seat(&alice_scope)
+        } else {
+            shared_seat()
+        }
+    };
+
+    for (winner, loser) in [("alpha-side", "alpha"), ("alpha", "alpha-side")] {
+        for losers_answer_first in [true, false] {
+            let order = if losers_answer_first {
+                "before"
+            } else {
+                "after"
+            };
+            let mob_id = format!("crew-forced-{winner}-{order}");
+            let losers_answer = seat_of(loser).private_to;
+            if losers_answer_first {
+                runtime
+                    .private_owners()
+                    .record_created_mob(&mob_id, losers_answer.clone());
+            }
+            let hosted = own_mob_create(&runtime, winner, &mob_id).await?;
+            if !losers_answer_first {
+                runtime
+                    .private_owners()
+                    .record_created_mob(&mob_id, losers_answer);
+            }
+            let (seat, refused_first) = seat_in_once_read(
+                &runtime,
+                &app,
+                &hosted,
+                &format!("{mob_id}-helper"),
+                member_session(&runtime, winner).await?,
+            )
+            .await?;
+            assert_eq!(
+                seat,
+                seat_of(winner),
+                "{loser}'s answer written {order} {winner}'s mob is hosted: the mob is seated by \
+                 {winner}'s owner"
+            );
+            assert_eq!(
+                refused_first, 1,
+                "{loser}'s answer written {order} {winner}'s mob is hosted: the first spawn \
+                 waits for the mob's creation record"
+            );
+            // The mob goes, with its helper's session.
+            drop(hosted);
+            own_mob_destroy(&runtime, winner, &mob_id).await?;
+        }
+    }
+
+    let tools = runtime.agent_mob_mcp_state().ok_or("agent mob tools")?;
+    let shared_tools = member_mob_tools(&runtime, "alpha").await?;
+    let private_tools = member_mob_tools(&runtime, "alpha-side").await?;
+    let create = |surface: &Arc<dyn meerkat_core::AgentToolDispatcher>, mob_id: &str| {
+        let surface = Arc::clone(surface);
+        let args = json!({ "definition": {
+            "id": mob_id,
+            "profiles": { "worker": {
+                "model": "gpt-5.5",
+                "runtime_mode": "turn_driven",
+                "tools": { "comms": true },
+            } },
+        } });
+        async move { agent_tool_call(&surface, "mob_create", args).await }
+    };
+
+    let mut hosted_rounds = 0;
+    for round in 0..6 {
+        let mob_id = format!("crew-raced-{round}");
+        let (by_shared, by_private) = if round % 2 == 0 {
+            tokio::join!(
+                create(&shared_tools, &mob_id),
+                create(&private_tools, &mob_id)
+            )
+        } else {
+            let (by_private, by_shared) = tokio::join!(
+                create(&private_tools, &mob_id),
+                create(&shared_tools, &mob_id)
+            );
+            (by_shared, by_private)
+        };
+        assert!(
+            !(by_shared.is_ok() && by_private.is_ok()),
+            "round {round}: both creates of '{mob_id}' answered a created mob"
+        );
+        let Ok(hosted) = tools
+            .handle_for(&meerkat_mob::MobId::from(mob_id.as_str()))
+            .await
+        else {
+            // Neither create left a mob hosted: nothing is seated.
+            continue;
+        };
+        hosted_rounds += 1;
+        let creator = match hosted.provenance().await? {
+            meerkat_mob::MobProvenance::OperatorMember {
+                creator_identity, ..
+            } => creator_identity.to_string(),
+            other => return Err(format!("round {round}: the creation record is {other:?}").into()),
+        };
+        assert_eq!(
+            by_private.is_ok(),
+            creator == "alpha-side",
+            "round {round}: the create that answered a created mob is the one the mob's \
+             creation record names ({creator})"
+        );
+        let expected = if creator == "alpha-side" {
+            private_seat(&alice_scope)
+        } else {
+            shared_seat()
+        };
+        let (seat, refused_first) = seat_in_once_read(
+            &runtime,
+            &app,
+            &hosted,
+            &format!("raced-helper-{round}"),
+            member_session(&runtime, &creator).await?,
+        )
+        .await?;
+        assert_eq!(
+            seat, expected,
+            "round {round}: the mob {creator} created is seated by {creator}'s owner"
+        );
+        eprintln!(
+            "round {round}: {creator} created '{mob_id}'; spawns refused before the seat: \
+             {refused_first}"
+        );
+        // The round's mob goes, with its helper's session.
+        drop(hosted);
+        own_mob_destroy(&runtime, &creator, &mob_id).await?;
+    }
+    assert!(hosted_rounds > 0, "no round left a mob hosted");
+    Ok(())
+}
+
+/// A gateway restart keeps nothing of the record but what the mobs' own
+/// creation records say. A mob a private side chat created under an id a
+/// shared member's destroyed mob used is read after a restart from its own
+/// creation record: a member seated in it then is private to the side
+/// chat's owner. Once that mob is destroyed and the gateway restarts again,
+/// nothing is left of it, and a mob a shared member creates under the id is
+/// private to no one.
+#[tokio::test]
+async fn a_restart_reads_a_mob_under_a_reused_id_from_its_own_creation_record() -> TestResult {
+    const MOB: &str = "reused-id-restart";
+    const CREW: &str = "crew-reused-across-restarts";
+    let state = tempfile::tempdir()?;
+    let (runtime, app, alice_scope) = runtime_with_a_private_side_chat(state.path(), MOB).await?;
+
+    let shared = own_mob_create(&runtime, "alpha", CREW).await?;
+    assert_eq!(
+        seat_in(
+            &app,
+            &shared,
+            "shared-before-restart-helper",
+            member_session(&runtime, "alpha").await?
+        )
+        .await?,
+        shared_seat(),
+        "the shared member's mob is private to no one"
+    );
+    drop(shared);
+    own_mob_destroy(&runtime, "alpha", CREW).await?;
+    drop(own_mob_create(&runtime, "alpha-side", CREW).await?);
+    drop(app);
+
+    // Between the create and a later spawn.
+    let runtime = restarted(runtime, state.path(), MOB).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let private = runtime
+        .agent_mob_mcp_state()
+        .ok_or("agent mob tools")?
+        .handle_for(&meerkat_mob::MobId::from(CREW))
+        .await?;
+    assert_eq!(
+        seat_in(
+            &app,
+            &private,
+            "private-after-restart-helper",
+            member_session(&runtime, "alpha-side").await?
+        )
+        .await?,
+        private_seat(&alice_scope),
+        "after a restart the side chat's mob is private to the side chat's owner"
+    );
+    drop(private);
+    own_mob_destroy(&runtime, "alpha-side", CREW).await?;
+    drop(app);
+
+    // Between the destroy and the next create.
+    let runtime = restarted(runtime, state.path(), MOB).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let shared = own_mob_create(&runtime, "alpha", CREW).await?;
+    assert_eq!(
+        seat_in(
+            &app,
+            &shared,
+            "shared-after-restart-helper",
+            member_session(&runtime, "alpha").await?
+        )
+        .await?,
+        shared_seat(),
+        "after the destroy and a restart, the shared member's mob under the id is private \
+         to no one"
+    );
+    Ok(())
+}
+
+/// A destroyed mob leaves no record of who it was private to: a spawn under
+/// its id is refused as retryable, as a spawn into a mob the record does not
+/// know is, until a mob is created under the id again. Its creation record,
+/// read while it lived, says nothing for the id afterwards: it is of that
+/// mob, and no mob hosted under the id is that mob.
+#[tokio::test]
+async fn a_destroyed_mob_leaves_no_record_of_who_it_was_private_to() -> TestResult {
+    const CREW: &str = "crew-destroyed";
+    let state = tempfile::tempdir()?;
+    let (runtime, _app, alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "destroyed-mob-record").await?;
+
+    let private = own_mob_create(&runtime, "alpha-side", CREW).await?;
+    let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("while-it-lives"));
+    runtime
+        .private_owners()
+        .apply_child(CREW, None, &mut spec)?;
+    assert_eq!(
+        spec.labels
+            .as_ref()
+            .and_then(|labels| labels.get(PRIVATE_TO)),
+        Some(&alice_scope),
+        "while the mob lives, the record names the side chat's owner"
+    );
+    let (lived_at, creation) = (private.incarnation(), private.provenance().await?);
+    drop(private);
+    own_mob_destroy(&runtime, "alpha-side", CREW).await?;
+
+    let refused_as_unknown = |when: &str| {
+        let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("after-the-destroy"));
+        let refusal = runtime
+            .private_owners()
+            .apply_child(CREW, None, &mut spec)
+            .expect_err("a spawn under a destroyed mob's id finds no record of the mob")
+            .to_string();
+        assert!(
+            refusal.contains(CREW) && refusal.contains("retry"),
+            "{when}, the refusal names the mob and asks for a retry: {refusal}"
+        );
+    };
+    refused_as_unknown("after the destroy");
+    let tools = runtime.agent_mob_mcp_state().ok_or("agent mob tools")?;
+    runtime
+        .private_owners()
+        .record_creation(&tools, &meerkat_mob::MobId::from(CREW), lived_at, &creation)
+        .await;
+    refused_as_unknown("offered the destroyed mob's creation record");
+
+    // Nor does it say anything once another mob is hosted under the id: a
+    // record of its own, handed the destroyed mob's creation record, holds
+    // nothing for the mob a shared member created there since.
+    let hosted_since = own_mob_create(&runtime, "alpha", CREW).await?;
+    assert!(
+        hosted_since.incarnation() != lived_at,
+        "the mob hosted under the id is another mob"
+    );
+    let owners = crate::private_owners::PrivateOwners::default();
+    owners.bind_child_mobs(&tools);
+    owners
+        .record_creation(&tools, &meerkat_mob::MobId::from(CREW), lived_at, &creation)
+        .await;
+    let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("after-the-next-create"));
+    let refusal = owners
+        .apply_child(CREW, None, &mut spec)
+        .expect_err("the destroyed mob's creation record says nothing for the mob hosted since")
+        .to_string();
+    assert!(refusal.contains("retry"), "{refusal}");
+    Ok(())
+}
+
+/// A spawn into a hosted mob the record holds nothing for is refused as
+/// retryable, never seated as private to no one. The record then reads the
+/// mob's own creation record, and the spawn made again is seated by it: as
+/// private to the side chat's owner in a side chat's mob, and as private to
+/// no one in a shared member's.
+#[tokio::test]
+async fn a_spawn_into_a_hosted_mob_the_record_does_not_know_is_refused_until_it_is_read()
+-> TestResult {
+    let state = tempfile::tempdir()?;
+    let (runtime, app, alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "unknown-hosted-mob").await?;
+    assert!(
+        runtime
+            .private_owners()
+            .seeded(&runtime.handle())
+            .await
+            .landed(),
+        "the runtime has read who its members are private to"
+    );
+    for (creator, mob_id, expected) in [
+        (
+            "alpha-side",
+            "crew-unknown-private",
+            private_seat(&alice_scope),
+        ),
+        ("alpha", "crew-unknown-shared", shared_seat()),
+    ] {
+        let mob = own_mob_create(&runtime, creator, mob_id).await?;
+        runtime.private_owners().forget_mob(mob_id);
+        let (seat, refused_first) = seat_in_once_read(
+            &runtime,
+            &app,
+            &mob,
+            &format!("{mob_id}-helper"),
+            member_session(&runtime, creator).await?,
+        )
+        .await?;
+        assert_eq!(
+            seat, expected,
+            "{creator}'s mob '{mob_id}' is seated by its own creation record"
+        );
+        assert_eq!(
+            refused_first, 1,
+            "the first spawn into '{mob_id}' is refused while the record does not know the mob"
+        );
+    }
+    Ok(())
+}
+
+/// A mob whose creation record names a creating member that nothing says
+/// the owner of (the member is not seated in a hosted mob, and no record of
+/// it was read) is not taken to be private to no one: a spawn into it is
+/// refused, and the refusal says what the mob waits for. The creating
+/// member is the one the record names: a member of the mob that ran at the
+/// incarnation the record holds. Another mob hosted under that mob's id,
+/// with a member of the creating member's name, is not that mob and says
+/// nothing: the mob stays refused. The mob that runs at the record's
+/// incarnation settles it, by its member's roster row, and so does the
+/// mob's own creation record, whose creating member has a roster row. The
+/// creation records are handed to records of their own here.
+#[tokio::test]
+async fn a_creating_member_nothing_says_the_owner_of_leaves_the_mob_unknown() -> TestResult {
+    const CREW: &str = "crew-unknown-creator";
+    const CREATORS_MOB: &str = "crew-of-a-creator-not-hosted-yet";
+    const CREATOR: &str = "creator-not-read-yet";
+    let state = tempfile::tempdir()?;
+    let (runtime, _app, alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "unknown-creating-member").await?;
+    let tools = runtime.agent_mob_mcp_state().ok_or("agent mob tools")?;
+    let mob = own_mob_create(&runtime, "alpha-side", CREW).await?;
+    let seated = |owners: &crate::private_owners::PrivateOwners| {
+        let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("late"));
+        owners
+            .apply_child(CREW, None, &mut spec)
+            .map(|()| spec.labels.and_then(|mut labels| labels.remove(PRIVATE_TO)))
+    };
+    let created_by = |incarnation: meerkat_core::service::MobIncarnationId| {
+        meerkat_mob::MobProvenance::OperatorMember {
+            parent_mob_id: meerkat_mob::MobId::from(CREATORS_MOB),
+            parent_incarnation: incarnation,
+            creator_identity: AgentIdentity::from(CREATOR),
+            creator_generation: meerkat_mob::Generation::INITIAL,
+            owner_session: meerkat_core::types::SessionId::new(),
+        }
+    };
+    let refused_until_the_creators_mob_is_hosted =
+        |owners: &crate::private_owners::PrivateOwners, when: &str| {
+            let refusal = seated(owners)
+                .expect_err("a mob whose creating member's owner nothing says is not seated into")
+                .to_string();
+            assert!(
+                refusal.contains(CREW) && refusal.contains("hosted") && !refusal.contains("retry"),
+                "{when}, the refusal names the mob and says what it waits for: {refusal}"
+            );
+        };
+
+    // A record of its own, which reads nothing by itself, and a creation
+    // record whose creating member's mob ran at an incarnation no mob runs at.
+    let owners = crate::private_owners::PrivateOwners::default();
+    owners.bind_child_mobs(&tools);
+    let by_a_member_not_known = created_by(meerkat_core::service::MobIncarnationId::mint());
+    owners
+        .record_creation(
+            &tools,
+            mob.mob_id(),
+            mob.incarnation(),
+            &by_a_member_not_known,
+        )
+        .await;
+    refused_until_the_creators_mob_is_hosted(&owners, "with no mob hosted under the creator's id");
+    assert!(
+        matches!(
+            tools
+                .handle_for(&meerkat_mob::MobId::from(CREATORS_MOB))
+                .await,
+            Err(meerkat_mob::MobError::MobNotFound(_))
+        ),
+        "the read hosted no mob for the creating member"
+    );
+
+    // Another mob is hosted under the creating member's mob id, with a
+    // member of the creating member's name, private to no one.
+    let another_mob: meerkat_mob::MobDefinition = serde_json::from_value(json!({
+        "id": CREATORS_MOB,
+        "profiles": { "worker": {
+            "model": "gpt-5.5",
+            "runtime_mode": "turn_driven",
+            "tools": { "comms": true }
+        } }
+    }))?;
+    Box::pin(tools.mob_create_definition(another_mob)).await?;
+    let another_mob = tools
+        .handle_for(&meerkat_mob::MobId::from(CREATORS_MOB))
+        .await?;
+    Box::pin(
+        another_mob.spawn_spec(
+            SpawnMemberSpec::new("worker", AgentIdentity::from(CREATOR))
+                .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven),
+        ),
+    )
+    .await?;
+    // The mobs hosted are no longer the ones the read was made over: a
+    // spawn that finds it out is refused as a mob being read is.
+    let refusal = seated(&owners)
+        .expect_err("the spawn before the mob is read again is refused")
+        .to_string();
+    assert!(
+        refusal.contains("retry") && !refusal.contains("hosted"),
+        "once the hosted mobs changed, the refusal asks for a retry: {refusal}"
+    );
+    owners
+        .record_creation(
+            &tools,
+            mob.mob_id(),
+            mob.incarnation(),
+            &by_a_member_not_known,
+        )
+        .await;
+    refused_until_the_creators_mob_is_hosted(
+        &owners,
+        "with another mob hosted under the creator's id, a namesake of the creator seated in it",
+    );
+
+    // The same record with the hosted mob's own incarnation names that
+    // mob's member: its roster row, which names nobody, settles the mob.
+    let owners = crate::private_owners::PrivateOwners::default();
+    owners.bind_child_mobs(&tools);
+    owners
+        .record_creation(
+            &tools,
+            mob.mob_id(),
+            mob.incarnation(),
+            &created_by(another_mob.incarnation()),
+        )
+        .await;
+    assert_eq!(
+        seated(&owners)?,
+        None,
+        "a creating member of the mob hosted at the record's incarnation settles the mob by \
+         its roster row"
+    );
+
+    let owners = crate::private_owners::PrivateOwners::default();
+    owners.bind_child_mobs(&tools);
+    owners
+        .record_creation(
+            &tools,
+            mob.mob_id(),
+            mob.incarnation(),
+            &mob.provenance().await?,
+        )
+        .await;
+    assert_eq!(
+        seated(&owners)?,
+        Some(alice_scope),
+        "the mob's own creation record names the side chat, whose roster row names its owner"
+    );
+    Ok(())
+}
+
+/// The store file the agent mob tools keep mob `mob_id` in, under `state`.
+fn child_mob_store(state: &std::path::Path, mob_id: &str) -> Option<std::path::PathBuf> {
+    let name = format!("mob--{mob_id}.db");
+    let mut dirs = vec![state.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.file_name().is_some_and(|file| file == name.as_str()) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// The quarantine of mob `mob_id`, as the agent mob tools list it: its
+/// class, the restore attempts that ended since it was quarantined, and
+/// whether one is in flight.
+async fn quarantine_of(
+    tools: &meerkat_mob_mcp::MobMcpState,
+    mob_id: &str,
+) -> Result<(meerkat_mob::MobQuarantineClass, u64, bool), Box<dyn std::error::Error + Send + Sync>>
+{
+    let row = tools
+        .quarantined_mobs()
+        .await?
+        .into_iter()
+        .find(|row| row.mob_id.as_str() == mob_id)
+        .ok_or_else(|| format!("'{mob_id}' is quarantined"))?;
+    Ok((row.class, row.attempts, row.retrying))
+}
+
+/// The mob of a creating member is never loaded, and no restore of it is
+/// tried, to decide who the mob that member created is private to. A
+/// private side chat's mob seats a member that creates a mob of its own.
+/// At the next start the store of the side chat's mob does not restore and
+/// is quarantined, and the mob its member created is hosted without it. A
+/// spawn into that mob is refused, with the refusal for a creating member
+/// that is not seated in a hosted mob, and is not seated as private to no
+/// one. The quarantined mob is as it was found: no restore of it was tried.
+///
+/// That answer is not final. Once the side chat's mob is hosted again, at
+/// the incarnation the creation record holds (its store is put back and
+/// its restore is tried again by the host), a spawn is refused, as a mob
+/// being read is, until the read it started has ended, and a spawn made
+/// after that is seated private to the side chat's owner, with no restart.
+#[tokio::test]
+async fn a_spawn_into_a_mob_whose_creators_mob_is_quarantined_is_refused_and_restores_nothing()
+-> TestResult {
+    const MOB: &str = "quarantined-creators-mob";
+    const PARENT: &str = "crew-parent-quarantined";
+    const GRANDCHILD: &str = "crew-grandchild-of-quarantined";
+    const LEAD: &str = "parent-lead";
+    let state = tempfile::tempdir()?;
+    let (runtime, app, alice_scope) = runtime_with_a_private_side_chat(state.path(), MOB).await?;
+    let tools = runtime.agent_mob_mcp_state().ok_or("agent mob tools")?;
+
+    let parent = own_mob_create(&runtime, "alpha-side", PARENT).await?;
+    let ran_at = parent.incarnation();
+    assert_eq!(
+        seated_private_owner(&parent, LEAD, member_session(&runtime, "alpha-side").await?).await?,
+        Some(alice_scope.clone()),
+        "the member of the side chat's mob is private to the side chat's owner"
+    );
+    let lead_session = parent
+        .get_member(&AgentIdentity::from(LEAD))
+        .await?
+        .and_then(|entry| entry.bridge_session_id().cloned())
+        .ok_or("the member of the side chat's mob has a session")?;
+    let lead_tools: Arc<dyn meerkat_core::AgentToolDispatcher> =
+        Arc::new(meerkat_mob_mcp::AgentMobToolSurface::new(
+            Arc::clone(&tools),
+            None,
+            meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()?,
+            "gpt-5.5".to_string(),
+            lead_session.clone(),
+            None,
+            None,
+            None,
+        ));
+    agent_tool_call(
+        &lead_tools,
+        "mob_create",
+        json!({ "definition": {
+            "id": GRANDCHILD,
+            "profiles": { "worker": {
+                "model": "gpt-5.5",
+                "runtime_mode": "turn_driven",
+                "tools": { "comms": true },
+            } },
+        } }),
+    )
+    .await?;
+    let grandchild = tools
+        .handle_for(&meerkat_mob::MobId::from(GRANDCHILD))
+        .await?;
+    let creation = grandchild.provenance().await?;
+    assert!(
+        matches!(
+            &creation,
+            meerkat_mob::MobProvenance::OperatorMember { parent_mob_id, creator_identity, .. }
+                if parent_mob_id.as_str() == PARENT && creator_identity.as_str() == LEAD
+        ),
+        "the mob's creation record names the member of the side chat's mob: {creation:?}"
+    );
+    drop((parent, grandchild, lead_tools, app));
+
+    // The gateway stops, and the store of the side chat's mob is one that
+    // does not restore when it starts again.
+    runtime.handle().shutdown().await?;
+    let _ = runtime
+        .stand_down_child_mobs(std::time::Instant::now() + std::time::Duration::from_secs(90))
+        .await;
+    drop(tools);
+    drop(runtime);
+    let store = child_mob_store(state.path(), PARENT).ok_or("the store of the side chat's mob")?;
+    // The store as the stopped gateway left it, with the files beside it.
+    let store_files = ["", "-wal", "-shm"].map(|suffix| {
+        let path = std::path::PathBuf::from(format!("{}{suffix}", store.display()));
+        let kept = std::fs::read(&path).ok();
+        (path, kept)
+    });
+    std::fs::write(&store, b"not a sqlite database")?;
+    for sidecar in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{sidecar}", store.display()));
+    }
+
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    assert!(
+        runtime
+            .private_owners()
+            .seeded(&runtime.handle())
+            .await
+            .landed(),
+        "the restarted runtime reads who its members are private to"
+    );
+    let tools = runtime.agent_mob_mcp_state().ok_or("agent mob tools")?;
+    let found = quarantine_of(&tools, PARENT).await?;
+    let grandchild = tools
+        .handle_for(&meerkat_mob::MobId::from(GRANDCHILD))
+        .await?;
+    let spawn_late = || {
+        Box::pin(
+            grandchild.spawn_spec_with_generated_owner_context(
+                SpawnMemberSpec::new("worker", AgentIdentity::from("grandchild-late"))
+                    .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven),
+                lead_session.clone(),
+            ),
+        )
+    };
+    let refusal = spawn_late()
+        .await
+        .err()
+        .ok_or("a spawn into the mob of a member whose mob is quarantined is refused")?
+        .to_string();
+    assert!(
+        refusal.contains(GRANDCHILD) && refusal.contains("hosted") && !refusal.contains("retry"),
+        "the refusal names the mob and says what it waits for: {refusal}"
+    );
+    assert!(
+        grandchild
+            .get_member(&AgentIdentity::from("grandchild-late"))
+            .await?
+            .is_none(),
+        "nothing was seated"
+    );
+    assert_eq!(
+        quarantine_of(&tools, PARENT).await?,
+        found,
+        "the quarantined mob is as it was found: no restore of it was tried"
+    );
+
+    // The store of the side chat's mob is put back, and the host has its
+    // restore tried again: the mob is hosted at the incarnation it ran at.
+    let owners = runtime.private_owners();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while owners.reads_under_way() > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| "the read the refused spawn started never ended")?;
+    for (path, kept) in &store_files {
+        match kept {
+            Some(bytes) => std::fs::write(path, bytes)?,
+            None => {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    let restored = tools
+        .mob_restore_retry(&meerkat_mob::MobId::from(PARENT))
+        .await?;
+    assert!(
+        matches!(restored, meerkat_mob_mcp::MobRestoreRetryOutcome::Restored),
+        "the side chat's mob is restored: {restored:?}"
+    );
+    let parent = tools.handle_for(&meerkat_mob::MobId::from(PARENT)).await?;
+    assert!(
+        parent.incarnation() == ran_at,
+        "the side chat's mob is hosted at the incarnation it ran at"
+    );
+
+    let refusal = spawn_late()
+        .await
+        .err()
+        .ok_or("the spawn that finds the hosted mobs changed is refused")?
+        .to_string();
+    assert!(
+        refusal.contains("retry") && !refusal.contains("hosted"),
+        "that refusal is the one of a mob being read: {refusal}"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("grandchild-late"));
+            if owners.apply_child(GRANDCHILD, None, &mut spec).is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| "the mob was never read again")?;
+    spawn_late().await?;
+    assert_eq!(
+        roster_labels(&grandchild, "grandchild-late")
+            .await?
+            .remove(PRIVATE_TO),
+        Some(alice_scope),
+        "once its creator's mob is hosted again, the mob is private to the side chat's owner"
+    );
+    Ok(())
+}
+
+/// The create admission decides who a mob is private to by the members its
+/// lookup finds the creating session to be, the lookup the mob's creation
+/// record is made from. A host's own create is private to no one and looks
+/// nothing up. A lookup that cannot be made refuses the create and records
+/// nothing. No member found: private to no one. One member, of the mob
+/// hosted at the incarnation the lookup found: its owner, by its roster
+/// row, by the record when the row names nobody, and by the record when it
+/// left its roster. A member whose owner nothing says refuses the create:
+/// one of a mob that is not hosted, whatever the record holds under its
+/// name, and a namesake in a mob hosted at another incarnation. Several
+/// members: nothing is decided, and a spawn is refused until the mob's
+/// creation record is read. A record of its own is used, so nothing but
+/// this row writes it.
+#[tokio::test]
+async fn the_create_admission_decides_by_the_members_its_lookup_finds() -> TestResult {
+    const KNOWN_BY_THE_RECORD: &str = "console-caller:v1:known-by-the-record";
+    let state = tempfile::tempdir()?;
+    let (runtime, _app, alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "create-admission").await?;
+    let tools = runtime.agent_mob_mcp_state().ok_or("agent mob tools")?;
+    let root = runtime.handle().mob_id().clone();
+    let runs_at = runtime.handle().incarnation();
+    let member = |name: &str| (root.clone(), runs_at, AgentIdentity::from(name));
+    let id = |name: &str| meerkat_mob::MobId::from(name);
+    let known_by_the_record =
+        BTreeMap::from([(PRIVATE_TO.to_string(), KNOWN_BY_THE_RECORD.to_string())]);
+    let owners = crate::private_owners::PrivateOwners::default();
+    owners.bind_child_mobs(&tools);
+    let seated = |mob_id: &str| {
+        let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("late"));
+        owners
+            .apply_child(mob_id, None, &mut spec)
+            .map(|()| spec.labels.and_then(|mut labels| labels.remove(PRIVATE_TO)))
+    };
+    let hosted = Arc::downgrade(&tools);
+    let gone = std::sync::Weak::new();
+    let side_session = member_session(&runtime, "alpha-side").await?;
+
+    owners
+        .admit_created_mob(&gone, &id("by-the-host"), None)
+        .await?;
+    assert_eq!(
+        seated("by-the-host")?,
+        None,
+        "a host's own create is private to no one"
+    );
+
+    let refusal = owners
+        .admit_created_mob(&gone, &id("lookup-not-made"), Some(&side_session))
+        .await
+        .expect_err("a session's create whose lookup cannot be made is refused");
+    assert!(refusal.contains("could not be read"), "{refusal}");
+    assert!(
+        seated("lookup-not-made").is_err(),
+        "a refused create records nothing: the mob is not private to no one"
+    );
+
+    owners
+        .admit_created_mob(&hosted, &id("by-the-side-chat"), Some(&side_session))
+        .await?;
+    assert_eq!(
+        seated("by-the-side-chat")?,
+        Some(alice_scope),
+        "the side chat's session is the side chat, private to its owner"
+    );
+    owners
+        .admit_created_mob(
+            &hosted,
+            &id("by-the-shared-member"),
+            Some(&member_session(&runtime, "alpha").await?),
+        )
+        .await?;
+    assert_eq!(
+        seated("by-the-shared-member")?,
+        None,
+        "the shared member's session is the shared member"
+    );
+    owners
+        .admit_created_mob(
+            &hosted,
+            &id("by-no-member"),
+            Some(&meerkat_core::types::SessionId::new()),
+        )
+        .await?;
+    assert_eq!(
+        seated("by-no-member")?,
+        None,
+        "a session no roster names is no member: private to no one"
+    );
+
+    owners
+        .admit_mob_created_by(&tools, &id("none-found"), &[])
+        .await?;
+    assert_eq!(seated("none-found")?, None, "no member found");
+
+    // A member of a mob that is not hosted: nothing says its owner, also
+    // not what the record holds under that mob id and name.
+    let elsewhere = (
+        id("a-mob-nothing-hosts"),
+        meerkat_core::service::MobIncarnationId::mint(),
+        AgentIdentity::from("nobody"),
+    );
+    for (mob_id, recorded) in [("creator-not-known", false), ("creator-not-hosted", true)] {
+        if recorded {
+            owners.record("a-mob-nothing-hosts", "nobody", Some(&known_by_the_record));
+        }
+        let refusal = owners
+            .admit_mob_created_by(&tools, &id(mob_id), std::slice::from_ref(&elsewhere))
+            .await
+            .expect_err("a create by a member whose owner nothing says is refused");
+        assert!(refusal.contains("nothing says"), "{mob_id}: {refusal}");
+        assert!(
+            seated(mob_id).is_err(),
+            "{mob_id}: a refused create records nothing: the mob is not private to no one"
+        );
+    }
+
+    // A namesake of the side chat in a mob hosted under the same id at
+    // another incarnation is not the side chat.
+    let refusal = owners
+        .admit_mob_created_by(
+            &tools,
+            &id("by-a-namesake"),
+            &[(
+                root.clone(),
+                meerkat_core::service::MobIncarnationId::mint(),
+                AgentIdentity::from("alpha-side"),
+            )],
+        )
+        .await
+        .expect_err("a member of a mob hosted at another incarnation is not the creating member");
+    assert!(refusal.contains("nothing says"), "{refusal}");
+    assert!(
+        seated("by-a-namesake").is_err(),
+        "a refused create records nothing: the mob is not private to no one"
+    );
+
+    owners
+        .admit_mob_created_by(
+            &tools,
+            &id("several-found"),
+            &[member("alpha"), member("alpha-side")],
+        )
+        .await?;
+    let refusal = seated("several-found")
+        .expect_err("several members found decide nothing")
+        .to_string();
+    assert!(refusal.contains("retry"), "{refusal}");
+
+    // The record adds to the hosted mob's rows: a member whose row names
+    // nobody, and one that left its roster.
+    owners.record(root.as_str(), "alpha", Some(&known_by_the_record));
+    owners
+        .admit_mob_created_by(&tools, &id("row-names-nobody"), &[member("alpha")])
+        .await?;
+    assert_eq!(
+        seated("row-names-nobody")?,
+        Some(KNOWN_BY_THE_RECORD.to_string()),
+        "a member the record knows as private stays private when its row names nobody"
+    );
+    owners.record(root.as_str(), "left-its-roster", Some(&known_by_the_record));
+    owners
+        .admit_mob_created_by(
+            &tools,
+            &id("creator-left-its-roster"),
+            &[member("left-its-roster")],
+        )
+        .await?;
+    assert_eq!(
+        seated("creator-left-its-roster")?,
+        Some(KNOWN_BY_THE_RECORD.to_string()),
+        "a member that left the roster of the hosted mob is known by the record"
+    );
+    Ok(())
+}
+
+/// Any number of spawns refused because the record does not know a mob
+/// start one read of the mob's creation record, not one each; a mob
+/// forgotten again is read again. A record whose seed has not landed
+/// starts no read: the seed reads every hosted mob. A read of a mob reads
+/// its event log first, so the members seated in it are known.
+#[tokio::test]
+async fn refused_spawns_into_one_mob_start_one_read_of_it() -> TestResult {
+    const CREW: &str = "crew-many-waiters";
+    let state = tempfile::tempdir()?;
+    let (runtime, _app, alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "many-waiters").await?;
+    let owners = runtime.private_owners();
+    assert!(
+        owners.seeded(&runtime.handle()).await.landed(),
+        "the runtime has read who its members are private to"
+    );
+    let tools = runtime.agent_mob_mcp_state().ok_or("agent mob tools")?;
+    let mob = own_mob_create(&runtime, "alpha-side", CREW).await?;
+    assert_eq!(
+        seated_private_owner(
+            &mob,
+            "crew-early",
+            member_session(&runtime, "alpha-side").await?
+        )
+        .await?,
+        Some(alice_scope.clone()),
+        "a member seated in the side chat's mob is private to the side chat's owner"
+    );
+    let refused = |owners: &crate::private_owners::PrivateOwners| {
+        let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("waiter"));
+        owners.apply_child(CREW, None, &mut spec).is_err()
+    };
+
+    owners.forget_mob(CREW);
+    let before = owners.reads_started();
+    for waiter in 0..8 {
+        assert!(
+            refused(owners),
+            "waiter {waiter} is refused while the mob is not known"
+        );
+    }
+    assert_eq!(
+        owners.reads_started() - before,
+        1,
+        "eight refused spawns start one read"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while refused(owners) || owners.reads_under_way() > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| "the read never landed")?;
+    assert_eq!(
+        owners.reads_started() - before,
+        1,
+        "the spawns made while that read ran started no other"
+    );
+    owners.forget_mob(CREW);
+    assert!(refused(owners), "a mob forgotten again is not known");
+    assert_eq!(
+        owners.reads_started() - before,
+        2,
+        "a mob forgotten again is read again"
+    );
+
+    let unseeded = crate::private_owners::PrivateOwners::default();
+    unseeded.bind_child_mobs(&tools);
+    assert!(
+        refused(&unseeded),
+        "a record that read nothing knows no mob"
+    );
+    assert_eq!(
+        unseeded.reads_started(),
+        0,
+        "a record whose seed has not landed starts no read"
+    );
+    assert_eq!(unseeded.owner_of(CREW, "crew-early"), None);
+    unseeded.read_hosted_mob(&tools, mob.mob_id()).await?;
+    assert_eq!(
+        unseeded.owner_of(CREW, "crew-early"),
+        Some(alice_scope),
+        "a read of a mob reads its event log: the members seated in it are known"
+    );
+    assert!(!refused(&unseeded), "and who created it");
+    Ok(())
+}
+
+/// Members seated with no private owner in a mob that is private to a
+/// person keep the audience they were seated with; when the mob's creation
+/// record is read, they are reported once per mob, by two counts (such
+/// members, and all the mob's members). A shared member's mob stands in
+/// for a mob whose members an earlier release seated, and its creation
+/// record is handed to a record of its own as one naming the private side
+/// chat. A mob whose members all carry their owner is not reported.
+#[tokio::test]
+async fn members_seated_without_an_owner_in_a_private_mob_are_reported_once() -> TestResult {
+    const CREW: &str = "crew-seated-before";
+    const LABELLED: &str = "crew-all-labelled";
+    let state = tempfile::tempdir()?;
+    let (runtime, _app, alice_scope) =
+        runtime_with_a_private_side_chat(state.path(), "seated-before").await?;
+    let tools = runtime.agent_mob_mcp_state().ok_or("agent mob tools")?;
+    let side_session = member_session(&runtime, "alpha-side").await?;
+    let mob = own_mob_create(&runtime, "alpha", CREW).await?;
+    assert_eq!(
+        seated_private_owner(
+            &mob,
+            "seated-before",
+            member_session(&runtime, "alpha").await?
+        )
+        .await?,
+        None,
+        "the member is seated with no private owner"
+    );
+
+    let by_the_side_chat = meerkat_mob::MobProvenance::OperatorMember {
+        parent_mob_id: runtime.handle().mob_id().clone(),
+        parent_incarnation: runtime.handle().incarnation(),
+        creator_identity: AgentIdentity::from("alpha-side"),
+        creator_generation: meerkat_mob::Generation::INITIAL,
+        owner_session: side_session.clone(),
+    };
+    let owners = crate::private_owners::PrivateOwners::default();
+    owners.bind_child_mobs(&tools);
+    owners
+        .record_creation(&tools, mob.mob_id(), mob.incarnation(), &by_the_side_chat)
+        .await;
+    let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("late"));
+    owners.apply_child(CREW, None, &mut spec)?;
+    assert_eq!(
+        spec.labels.and_then(|mut labels| labels.remove(PRIVATE_TO)),
+        Some(alice_scope.clone()),
+        "by that creation record the mob is private to the side chat's owner"
+    );
+    assert_eq!(
+        owners.report_members_seated_without_an_owner(&mob).await,
+        None,
+        "the read of the creation record reported the mob, and it is reported once"
+    );
+
+    let fresh = crate::private_owners::PrivateOwners::default();
+    assert_eq!(
+        fresh.report_members_seated_without_an_owner(&mob).await,
+        Some((1, 1)),
+        "the report counts the members without a private owner, and all members"
+    );
+    assert_eq!(
+        fresh.report_members_seated_without_an_owner(&mob).await,
+        None,
+        "a mob is reported once"
+    );
+
+    let labelled = own_mob_create(&runtime, "alpha-side", LABELLED).await?;
+    assert_eq!(
+        seated_private_owner(&labelled, "seated-labelled", side_session).await?,
+        Some(alice_scope),
+        "the member is seated with its owner"
+    );
+    assert_eq!(
+        fresh
+            .report_members_seated_without_an_owner(&labelled)
+            .await,
+        None,
+        "a mob whose members all carry their owner is not reported"
+    );
+    Ok(())
+}
+
 /// A mob whose creation record cannot say which member created it (several
 /// rosters named the session that created it, and the record picks none) is
 /// not taken to be private to no one when its record is read again, as it is
@@ -1754,6 +3537,150 @@ async fn reserved_labels_are_refused_by_host_and_sdk_member_creation() -> TestRe
             .await?
             .is_none(),
         "nothing is seated"
+    );
+    Ok(())
+}
+
+/// One identity adoption (`mob/adopt_member_identity_declaration`) of
+/// `member`, through the dispatcher both of Meta's doors use: its
+/// declaration states `labels` (or none when `None`) and everything else as
+/// the member's row has it. The answer as JSON.
+async fn adoption_stating(
+    runtime: &MobRuntime,
+    member: &str,
+    request_id: &str,
+    labels: Option<&BTreeMap<String, String>>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let handle = runtime.handle();
+    let entry = handle
+        .get_member(&AgentIdentity::from(member))
+        .await?
+        .ok_or_else(|| format!("{member} is seated"))?;
+    let session = entry
+        .bridge_session_id()
+        .ok_or_else(|| format!("{member} has a session"))?
+        .to_string();
+    let mut declared = json!({
+        "profile_name": serde_json::to_value(&entry.role)?,
+        "runtime_mode": serde_json::to_value(entry.runtime_mode)?,
+        "execution": { "execution": "controlling_session" },
+    });
+    if let Some(labels) = labels {
+        declared["labels"] = json!(labels);
+    }
+    let params = json!({
+        "mob_id": handle.mob_id().as_str(),
+        "agent_identity": member,
+        "request_id": request_id,
+        "precondition": "expected_absent",
+        "declaration_scope": "private-owner-adoption",
+        "declaration_revision": 1,
+        "session": {
+            "session_id": session,
+            "lineage_id": format!("session:{session}"),
+            "lineage_generation": 0,
+            "authority_policy": "require_existing"
+        },
+        "member": declared,
+        "owned_wiring": [],
+        "convergence": { "kind": "drain", "max_wait_ms": 5000 }
+    });
+    let answer = crate::rpc::mob_methods::handle_member_declaration_rpc(
+        &handle,
+        None,
+        true,
+        None,
+        crate::rpc::mob_methods::ADOPT_MEMBER_IDENTITY_DECLARATION,
+        json!(1),
+        &params,
+    )
+    .await
+    .ok_or("the adoption is a member declaration method")?;
+    Ok(serde_json::to_value(answer)?)
+}
+
+/// An identity adoption (`mob/adopt_member_identity_declaration`) leaves who
+/// a member is private to as it is. A declaration that names a person for a
+/// member private to no one, names another person for a member private to
+/// one, or leaves that member's person out, is refused by the adoption's own
+/// baseline rule; no identity intent is recorded and the member's row keeps
+/// its labels. A declaration that states the row's labels is not refused on
+/// that ground, and the member is still private to its person afterwards.
+#[tokio::test]
+async fn an_identity_adoption_leaves_who_a_member_is_private_to_as_it_is() -> TestResult {
+    const MOB: &str = "private-owner-adoption";
+    const BASELINE: &str = "identity adoption declaration changes active runtime mode or labels";
+    const OWNER: &str = "console-caller:v1:aa";
+    const OTHER: &str = "console-caller:v1:bb";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "shared", &[]).await?;
+    seeded_member(&runtime, "worker", "owned", &[(PRIVATE_TO, OWNER)]).await?;
+    let handle = runtime.handle();
+    let shared_row = roster_labels(&handle, "shared").await?;
+    let owned_row = roster_labels(&handle, "owned").await?;
+    assert_eq!(crate::access::private_owner(&shared_row), None);
+    assert_eq!(crate::access::private_owner(&owned_row), Some(OWNER));
+
+    let mut added = shared_row.clone();
+    added.insert(PRIVATE_TO.to_string(), OWNER.to_string());
+    let mut changed = owned_row.clone();
+    changed.insert(PRIVATE_TO.to_string(), OTHER.to_string());
+    let mut dropped = owned_row.clone();
+    dropped.remove(PRIVATE_TO);
+    for (case, member, labels, row) in [
+        ("added", "shared", Some(&added), &shared_row),
+        ("changed", "owned", Some(&changed), &owned_row),
+        ("dropped", "owned", Some(&dropped), &owned_row),
+        ("left-out", "owned", None, &owned_row),
+    ] {
+        let refused = adoption_stating(&runtime, member, &format!("adopt-{case}"), labels).await?;
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(BASELINE)),
+            "{case}: the adoption is refused by its baseline rule: {refused:#}"
+        );
+        assert!(refused["result"].is_null(), "{case}: {refused:#}");
+        assert!(
+            matches!(
+                handle.identity_intent(&AgentIdentity::from(member)).await,
+                Ok(meerkat_mob::identity::IdentityStoredObservation::Missing)
+            ),
+            "{case}: no identity intent is recorded"
+        );
+        assert_eq!(
+            &roster_labels(&handle, member).await?,
+            row,
+            "{case}: the row keeps its labels"
+        );
+    }
+
+    // The declaration that states the row's labels passes the baseline rule,
+    // so the label is what the four refusals above were about.
+    let stated = adoption_stating(&runtime, "owned", "adopt-stated", Some(&owned_row)).await?;
+    eprintln!("an adoption that states the row's labels answers: {stated}");
+    assert!(
+        !stated["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(BASELINE)),
+        "stating the row's labels is not refused by the baseline rule: {stated:#}"
+    );
+    // An adoption that was taken may rebuild the member on its session: read
+    // its row once it is seated again.
+    let mut after = None;
+    for _ in 0..100 {
+        if let Some(entry) = handle.get_member(&AgentIdentity::from("owned")).await? {
+            after = Some(entry.labels);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let after = after.ok_or("the adopted member is seated")?;
+    assert_eq!(
+        crate::access::private_owner(&after),
+        Some(OWNER),
+        "the member is still private to its person: {after:?}"
     );
     Ok(())
 }

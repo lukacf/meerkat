@@ -434,9 +434,11 @@ under `## [0.9.15]`.
 
 ### Rolling back to 0.9.14
 
-What this subsection says an earlier release does was established by
-reading the 0.9.14 source, not by running a 0.9.14 binary over state that
-0.9.15 wrote.
+What this subsection says an earlier release does was established by reading
+the 0.9.14 source, except where an item says it was confirmed by a run. Such a
+run was made with a 0.9.14 gateway built from the release tag, over state
+written by a development build of 0.9.15, with a scripted model in place of a
+provider.
 
 0.9.14 and earlier releases read most of what 0.9.15 writes without a
 refusal. The items below are where a rollback differs: configurations that
@@ -559,10 +561,11 @@ fork scope and the lineage roots, and they do not come back. **Do:** before a
 rollback of a mob kept in a host store, list the records written with
 `include_forks` (`mob/instruction_status`,
 `MobHandle::operator_instruction_status`); after the return to 0.9.15, write
-each of them again at a new revision with `include_forks`. They then select
-the forks seated from then on; forks seated before the rollback keep no
-lineage root and are not selected. A fork seated while rolled back has no
-lineage root on either store, and no such record selects it.
+each of them again at a new revision with `include_forks` (for an agent's own
+instruction record, use the step of the item on agents' instruction records).
+They then select the forks seated from then on; forks seated before the
+rollback keep no lineage root and are not selected. A fork seated while rolled
+back has no lineage root on either store, and no such record selects it.
 
 **Agents' instruction records.** An agent whose instructions changed on 0.9.15
 has one operator instruction record that holds them (namespace

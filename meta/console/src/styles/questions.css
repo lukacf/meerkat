@@ -162,5 +162,21 @@
   overflow-wrap: anywhere;
 }
 
+/* What the card does not show of a set larger than the reader's limits. */
+.cc-question__more {
+  margin: 4px 0 0;
+  font-size: var(--_cc-text-xs);
+  line-height: 1.4;
+  color: var(--_cc-foreground-muted);
+}
+/* The card's sentence takes the focus after Send and Dismiss, which disable
+   themselves. */
+.cc-question-set__sentence:focus { outline: none; }
+.cc-question-set__sentence:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}
+
 /* In the inbox the question sets head the Pending tab, above the approvals. */
 .gating-inbox__questions .cc-question-set { margin: 0; }

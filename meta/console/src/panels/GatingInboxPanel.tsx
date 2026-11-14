@@ -597,10 +597,12 @@ export function GatingInboxPanel({
   // The agents' question sets head Pending (the only tab that lists what
   // waits): each is answered on its card. The ones still open count with the
   // requests that wait. A set the gateway no longer lists leaves one line
-  // where its card was; the list shows it only when it showed the card.
+  // where its card was; the list shows it only when it showed the card. A
+  // first read that failed is said there too, with a way to try again.
   const openQuestions = questions?.snapshot.sets.length ?? 0;
   const questionsShown = questions !== undefined
-    && (questionSetEntries(questions.snapshot).length > 0 || questions.snapshot.notices.length > 0);
+    && (questionSetEntries(questions.snapshot).length > 0 || questions.snapshot.notices.length > 0
+      || (questions.snapshot.status === "unavailable" && questions.snapshot.error !== undefined));
   const questionList = questions !== undefined ? (
     <QuestionSetList view={questions} readOnly={readOnly} className="gating-inbox__cards gating-inbox__questions" testId="question-set-list" />
   ) : null;

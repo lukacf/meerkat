@@ -15,6 +15,8 @@ export interface Question {
   allowFreeText: boolean;
   /** The choice the asking agent recommends. Shown, never preselected. */
   recommended?: string;
+  /** How many choices past the reader's limit are not shown. */
+  omittedChoices?: number;
 }
 /** One open set of multiple-choice questions an agent asked a person
  * (`meta/gating/questions`). */
@@ -28,6 +30,11 @@ export interface QuestionSet {
   deadlineAtMs?: number;
   /** The digest of what was presented; a decision sends it back. */
   subjectDigest: string;
+  /** How many questions past the reader's limit are not shown. */
+  omittedQuestions?: number;
+  /** A title, prompt or label was longer than the reader's limit and is
+   * shown cut. */
+  shortened?: true;
 }
 export type QuestionAnswer = { kind: "choice"; choiceId: string } | { kind: "free_text"; text: string };
 /** A person's answers by question id. A question without an entry is left
@@ -154,47 +161,94 @@ const CLOSED_LIMIT = 20;
 /** How many lines of cards that left the snapshot keeps, and for how long. */
 const NOTICE_LIMIT = 5;
 const NOTICE_KEEP_MS = 60_000;
+/** The most this console reads of one set: the gateway's own limits (the
+ * text lengths in characters, which never cut what fits the gateway's
+ * bytes). What a server sends beyond them is left out, and the card says
+ * so. */
+export const QUESTION_SET_READ_LIMITS = { questions: 10, choices: 8, title: 200, prompt: 1024, label: 256 } as const;
 const text = (value: unknown) => typeof value === "string" && value.trim() ? value : undefined;
 const millis = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 8_640_000_000_000_000 ? value : undefined;
 const record = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+/** White space, controls and format characters (zero-width and direction
+ * marks, the byte order mark, the soft hyphen). */
+const INVISIBLE = /[\s\p{Cc}\p{Cf}\p{Z}]/u;
+/** Other characters that show nothing: the grapheme joiner, the Hangul
+ * fillers, two Khmer vowels and the blank Braille pattern; and the
+ * variation selectors. */
+const BLANK = new Set([0x34f, 0x115f, 0x1160, 0x17b4, 0x17b5, 0x2800, 0x3164, 0xffa0]);
+const selector = (point: number) => (point >= 0x180b && point <= 0x180f) || (point >= 0xfe00 && point <= 0xfe0f) || (point >= 0xe0100 && point <= 0xe01ef);
+/** Whether a person would see anything of the string. */
+function shows(value: string): boolean {
+  for (const character of value) {
+    const point = character.codePointAt(0) ?? 0;
+    if (!INVISIBLE.test(character) && !BLANK.has(point) && !selector(point)) return true;
+  }
+  return false;
+}
+/** A text a person reads (a title, prompt or label): undefined when it is
+ * no string or shows nothing, and cut to `limit` whole characters. */
+function words(value: unknown, limit: number): { text: string; cut: boolean } | undefined {
+  if (typeof value !== "string" || !shows(value)) return undefined;
+  if (value.length <= limit) return { text: value, cut: false };
+  const characters = Array.from(value.slice(0, 2 * limit + 1));
+  if (characters.length <= limit) return { text: value, cut: false };
+  const kept = characters.slice(0, limit).join("");
+  return shows(kept) ? { text: kept, cut: true } : undefined;
+}
 
-function normalizeQuestion(value: unknown): Question | null {
+function normalizeQuestion(value: unknown): { question: Question; cut: boolean } | null {
   const raw = record(value);
-  const id = text(raw?.id), prompt = text(raw?.prompt);
+  const id = text(raw?.id), prompt = words(raw?.prompt, QUESTION_SET_READ_LIMITS.prompt);
   if (!raw || !id || !prompt || !Array.isArray(raw.choices) || raw.choices.length === 0) return null;
   const choices: QuestionChoice[] = [];
-  for (const entry of raw.choices) {
+  let cut = prompt.cut;
+  // The choices past the limit are not read.
+  for (const entry of raw.choices.slice(0, QUESTION_SET_READ_LIMITS.choices)) {
     const choice = record(entry);
-    const choiceId = text(choice?.id), label = text(choice?.label);
+    const choiceId = text(choice?.id), label = words(choice?.label, QUESTION_SET_READ_LIMITS.label);
     if (!choiceId || !label || choices.some((known) => known.id === choiceId)) return null;
-    choices.push({ id: choiceId, label });
+    choices.push({ id: choiceId, label: label.text });
+    cut = cut || label.cut;
   }
   const recommended = text(raw.recommended);
+  const omittedChoices = raw.choices.length - choices.length;
   return {
-    id, prompt, choices, allowFreeText: raw.allow_free_text === true,
-    // A recommendation that names no choice of the question is not shown.
-    ...(recommended && choices.some((choice) => choice.id === recommended) ? { recommended } : {}),
+    question: {
+      id, prompt: prompt.text, choices, allowFreeText: raw.allow_free_text === true,
+      // A recommendation that names no choice shown is not shown.
+      ...(recommended && choices.some((choice) => choice.id === recommended) ? { recommended } : {}),
+      ...(omittedChoices > 0 ? { omittedChoices } : {}),
+    },
+    cut,
   };
 }
 
 /** A tolerant reader: unknown fields are ignored, and a set this console
  * cannot present whole (no id, asking agent, digest or readable questions)
- * is dropped. Never throws. */
+ * is dropped. A title, prompt or label of only invisible characters is
+ * empty. It reads at most `QUESTION_SET_READ_LIMITS` and says what it left
+ * out. Never throws. */
 export function normalizeQuestionSet(value: unknown): QuestionSet | null {
   const raw = record(value);
   const pendingId = text(raw?.pending_id), identity = text(record(raw?.origin)?.identity), subjectDigest = text(raw?.subject_digest);
   if (!raw || !pendingId || !identity || !subjectDigest || !Array.isArray(raw.questions) || raw.questions.length === 0) return null;
   const questions: Question[] = [];
-  for (const entry of raw.questions) {
-    const question = normalizeQuestion(entry);
-    if (!question || questions.some((known) => known.id === question.id)) return null;
-    questions.push(question);
+  const title = words(raw.title, QUESTION_SET_READ_LIMITS.title);
+  let cut = title?.cut === true;
+  // The questions past the limit are not read.
+  for (const entry of raw.questions.slice(0, QUESTION_SET_READ_LIMITS.questions)) {
+    const read = normalizeQuestion(entry);
+    if (!read || questions.some((known) => known.id === read.question.id)) return null;
+    questions.push(read.question);
+    cut = cut || read.cut;
   }
-  const title = text(raw.title), createdAtMs = millis(raw.created_at_ms), deadlineAtMs = millis(raw.deadline_at_ms);
+  const createdAtMs = millis(raw.created_at_ms), deadlineAtMs = millis(raw.deadline_at_ms);
+  const omittedQuestions = raw.questions.length - questions.length;
   return {
-    pendingId, origin: { identity }, ...(title ? { title } : {}), questions,
+    pendingId, origin: { identity }, ...(title ? { title: title.text } : {}), questions,
     ...(createdAtMs !== undefined ? { createdAtMs } : {}), ...(deadlineAtMs !== undefined ? { deadlineAtMs } : {}),
     subjectDigest,
+    ...(omittedQuestions > 0 ? { omittedQuestions } : {}), ...(cut ? { shortened: true as const } : {}),
   };
 }
 

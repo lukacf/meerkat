@@ -60,5 +60,6 @@ export function useQuestionSets(input: {
     snapshot,
     onAnswer: (pendingId, answers) => resourceRef.current?.answer(pendingId, answers),
     onDismiss: (pendingId) => resourceRef.current?.dismiss(pendingId),
+    onRefresh: () => resourceRef.current?.refresh(),
   } : undefined), [snapshot]);
 }

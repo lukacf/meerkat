@@ -58,6 +58,8 @@ export interface QuestionSetsView {
   snapshot: QuestionSetSnapshot;
   onAnswer(pendingId: string, answers: QuestionSetAnswers): void | Promise<void>;
   onDismiss(pendingId: string): void | Promise<void>;
+  /** Reads the question sets again: offered when the first read failed. */
+  onRefresh?(): void | Promise<void>;
 }
 
 const QuestionSetsContext = React.createContext<QuestionSetsView | undefined>(undefined);
@@ -80,14 +82,27 @@ const STATE_WORDS: Record<Exclude<QuestionSetCardState, "read_only">, { text: st
   refused: { text: "Not sent", tone: "crit" },
 };
 
-const SENTENCES = {
-  pending: "Pick one choice per question. A question you leave out reaches the agent as unanswered.",
-  submitting: "Sending your decision to the agent.",
-  stale: "The question sets could not be refreshed. Answers can be sent once they are read again.",
-  failed: "The Console could not confirm that your answer arrived. If this question is still listed after the next refresh, send your answer again.",
-  answered: "Answers sent.",
-  dismissed: "Dismissed. The agent was told no answer is coming.",
-} satisfies Record<Exclude<QuestionSetCardState, "refused" | "read_only">, string>;
+/** What the card says under who asked: what to do, where the answers go,
+ * what happens next and by when. The asking agent is named. `deadlineAtMs`
+ * is the gateway's deadline while it is still ahead on this clock: past it
+ * the card says nothing of a timeout, which is the gateway's to declare. */
+function stateSentence(state: Exclude<QuestionSetCardState, "refused" | "read_only">, agent: string, action: "answer" | "dismiss" | undefined, deadlineAtMs: number | undefined): string {
+  switch (state) {
+    case "pending":
+      return `Pick one choice per question, then send. Your answers go to ${agent}, which continues with them; a question you leave out reaches it as unanswered.`
+        + (deadlineAtMs !== undefined ? ` If nobody answers by ${formatAbsoluteTime(deadlineAtMs)}, ${agent} is told that the questions timed out.` : "");
+    case "submitting":
+      return action === "dismiss" ? `Telling ${agent} that no answer is coming.` : `Sending your answers to ${agent}.`;
+    case "stale":
+      return "The Console could not read the questions again just now, so this card may be out of date. It keeps trying; you can answer once it has read them.";
+    case "failed":
+      return "The Console could not confirm that your answer arrived. If this question is still listed after the next refresh, send your answer again.";
+    case "answered":
+      return `Your answers were sent to ${agent}, which continues with them.`;
+    case "dismissed":
+      return `Dismissed: no answer is coming, and ${agent} was told so.`;
+  }
+}
 
 /** Why nobody can answer on this card now, and what to do about it: the
  * chip and the sentence, by the snapshot's read-only reason. */
@@ -109,6 +124,10 @@ const NOTICE_WORDS: Record<QuestionSetNoticeKind, string> = {
 /** Show the byte counter from here on: near the limit, not before. */
 const FREE_TEXT_COUNTER_FROM = 200;
 const SOMETHING_ELSE = "Something else";
+/** How long after Send or Dismiss the card still takes the focus for its
+ * sentence: the state follows the press at once, so anything later is not
+ * that press. */
+const ACTED_FOCUS_MS = 5_000;
 
 /** One question: its prompt as the group's legend, one native radio per
  * choice (arrow keys and Tab work as in any radio group), the recommended
@@ -123,12 +142,14 @@ function QuestionGroup({ setId, question, answer, disabled, onChange }: {
 }) {
   const name = React.useId();
   const counterId = React.useId();
+  const group = React.useRef<HTMLFieldSetElement>(null);
   const freeText = answer?.kind === "free_text" ? answer.text : null;
   const bytes = freeText === null ? 0 : utf8ByteLength(freeText.trim());
   const tooLong = bytes > FREE_TEXT_MAX_BYTES;
   const counted = bytes >= FREE_TEXT_COUNTER_FROM;
+  const more = question.omittedChoices ?? 0;
   return (
-    <fieldset className="cc-question" disabled={disabled} data-testid={`question:${setId}:${question.id}`}>
+    <fieldset ref={group} className="cc-question" disabled={disabled} data-testid={`question:${setId}:${question.id}`}>
       <legend className="cc-question__prompt">{question.prompt}</legend>
       <div className="cc-question__choices">
         {question.choices.map((choice) => (
@@ -185,12 +206,20 @@ function QuestionGroup({ setId, question, answer, disabled, onChange }: {
           ) : null}
         </div>
       ) : null}
+      {more > 0 ? (
+        <p className="cc-question__more">{`${more} more ${more === 1 ? "choice is" : "choices are"} not shown.`}</p>
+      ) : null}
       {answer && !disabled ? (
         <button
           type="button"
           className="cc-question__clear"
           aria-label={`Clear the answer to: ${question.prompt}`}
-          onClick={() => onChange(undefined)}
+          onClick={() => {
+            onChange(undefined);
+            // Clear goes with the answer: focus moves to the question's
+            // first choice instead of being lost.
+            group.current?.querySelector<HTMLInputElement>("input[type='radio']")?.focus();
+          }}
         >
           Clear
         </button>
@@ -257,7 +286,8 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, slot, r
                 : "pending";
   const locked = READ_ONLY_WORDS[readOnlyReason ?? "read_only"];
   const words = state === "read_only" ? { text: locked.chip, tone: "locked" as Tone } : STATE_WORDS[state];
-  const sentence = state === "refused" && refusal ? refusal.words : state === "read_only" ? locked.sentence : SENTENCES[state as keyof typeof SENTENCES];
+  const sentence = state === "refused" ? refusal?.words ?? "" : state === "read_only" ? locked.sentence
+    : stateSentence(state, agentName, decision?.action, set.deadlineAtMs !== undefined && now < set.deadlineAtMs ? set.deadlineAtMs : undefined);
   const open = !closed && state !== "answered" && state !== "dismissed";
   // A person changes the draft while the set waits, after an uncertain send,
   // and after a refusal the set outlives (they may correct and send again),
@@ -274,6 +304,20 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, slot, r
     const { [questionId]: _previous, ...rest } = current;
     return answer ? { ...rest, [questionId]: answer } : rest;
   });
+  // Send and Dismiss disable themselves once pressed. Focus then goes to the
+  // sentence that says what is happening, on the card that was acted on.
+  const sentenceRef = React.useRef<HTMLElement | null>(null);
+  const actedAtMs = React.useRef<number | null>(null);
+  React.useEffect(() => {
+    const acted = actedAtMs.current;
+    actedAtMs.current = null;
+    if (state === "submitting" && acted !== null && Date.now() - acted < ACTED_FOCUS_MS) sentenceRef.current?.focus();
+  }, [state]);
+  const omitted = set.omittedQuestions ?? 0;
+  const more = [
+    omitted > 0 ? `${omitted} more ${omitted === 1 ? "question is" : "questions are"} not shown.` : "",
+    set.shortened ? "Some text is too long and is shown shortened." : "",
+  ].filter(Boolean).join(" ");
   return (
     <article className="cc-approval cc-question-set" data-state={state} data-testid={`question-set:${set.pendingId}`}>
       <header className="cc-approval__header">
@@ -302,13 +346,13 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, slot, r
         {waiting ? <span className="cc-approval__waiting">{`Waiting ${waiting}`}</span> : null}
       </p>
       {state === "pending" ? (
-        <p className="cc-question-set__hint" data-testid={`question-set-sentence:${set.pendingId}`}>{sentence}</p>
+        <p ref={sentenceRef as React.Ref<HTMLParagraphElement>} tabIndex={-1} className="cc-question-set__hint cc-question-set__sentence" data-testid={`question-set-sentence:${set.pendingId}`}>{sentence}</p>
       ) : (
         <Notice
           tone={state === "failed" || state === "refused" ? "crit" : state === "stale" ? "warn" : state === "answered" ? "ok" : state === "read_only" ? "locked" : "neutral"}
           role={state === "failed" || state === "refused" ? "alert" : undefined}
         >
-          <span data-testid={`question-set-sentence:${set.pendingId}`}>{sentence}</span>
+          <span ref={sentenceRef as React.Ref<HTMLSpanElement>} tabIndex={-1} className="cc-question-set__sentence" data-testid={`question-set-sentence:${set.pendingId}`}>{sentence}</span>
           {state === "refused" && refusal?.detail ? (
             <details className="cc-question-set__refusal" data-testid={`question-set-refusal:${set.pendingId}`}>
               <summary>Details</summary>
@@ -331,6 +375,7 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, slot, r
               onChange={(answer) => change(question.id, answer)}
             />
           ))}
+          {more ? <p className="cc-question__more" data-testid={`question-set-more:${set.pendingId}`}>{more}</p> : null}
         </div>
       )}
       <footer className="cc-approval__footer">
@@ -340,14 +385,14 @@ export function QuestionSetCard({ set, resourceStatus, decision, closed, slot, r
               variant="primary"
               disabled={!sendable}
               data-testid={`question-set-send:${set.pendingId}`}
-              onClick={() => { void onAnswer(set.pendingId, answers); }}
+              onClick={() => { actedAtMs.current = Date.now(); void onAnswer(set.pendingId, answers); }}
             >
               Send answers
             </Button>
             <Button
               disabled={!editable}
               data-testid={`question-set-dismiss:${set.pendingId}`}
-              onClick={() => { void onDismiss(set.pendingId); }}
+              onClick={() => { actedAtMs.current = Date.now(); void onDismiss(set.pendingId); }}
             >
               Dismiss
             </Button>
@@ -407,7 +452,10 @@ export function QuestionSetList({ view, identity, readOnly = false, className, t
   if (!view) return null;
   const { snapshot } = view;
   const notice = snapshot.notices.find((line) => shown.current.has(line.slot));
-  if (!entries.length && !notice) return null;
+  // The first read failed: nothing was ever listed. The inbox's list says so
+  // once, with a way to try again; a conversation does not repeat it.
+  const unread = identity === undefined && snapshot.status === "unavailable" && snapshot.error !== undefined;
+  if (!entries.length && !notice && !unread) return null;
   const cards = entries.map((entry) => (
     <QuestionSetCard
       key={entry.set.pendingId}
@@ -425,7 +473,15 @@ export function QuestionSetList({ view, identity, readOnly = false, className, t
   const line = notice ? (
     <Notice key="notice" tone="neutral" role="status" className="cc-question-set__notice" testId="question-set-notice">{NOTICE_WORDS[notice.kind]}</Notice>
   ) : null;
-  return className || testId ? <div className={className} data-testid={testId}>{line}{cards}</div> : <>{line}{cards}</>;
+  const failed = unread ? (
+    <Notice
+      key="unavailable" tone="warn" role="status" className="cc-question-set__notice" testId="question-set-unavailable"
+      action={view.onRefresh ? <Button size="sm" onClick={() => { void view.onRefresh?.(); }}>Try again</Button> : undefined}
+    >
+      The questions agents asked could not be loaded. The Console keeps trying; you can also try now.
+    </Notice>
+  ) : null;
+  return className || testId ? <div className={className} data-testid={testId}>{failed}{line}{cards}</div> : <>{failed}{line}{cards}</>;
 }
 
 /** The question sets the conversation's agent asked, from the provider:

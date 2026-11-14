@@ -287,13 +287,48 @@ impl Fixture {
             .iter()
             .rposition(|line| line.channel_ordinal == ordinal)
             .ok_or_else(|| format!("the source has no channel {ordinal}"))?;
+        Self::with_step_marked_at(source, last + 1, ordinal, step)
+    }
+
+    /// A CONSTRUCTED tape, built in memory and never written back: `source`
+    /// with one test step marker inserted in channel `ordinal` directly
+    /// before its test step named `before`, so the channel's provider
+    /// frames follow the new marker. It is the tape a capture writes when
+    /// the test takes that step while the channel is up. No provider frame
+    /// is invented or changed; the captured fixture file is not touched.
+    pub fn with_step_marked_before(
+        source: &Fixture,
+        ordinal: u32,
+        before: &str,
+        step: &str,
+    ) -> Result<Fixture, String> {
+        let at = source
+            .lines
+            .iter()
+            .position(|line| {
+                line.channel_ordinal == ordinal
+                    && matches!(&line.entry, Entry::Marker { step } if step == before)
+            })
+            .ok_or_else(|| {
+                format!("channel {ordinal} of the source has no test step named {before:?}")
+            })?;
+        Self::with_step_marked_at(source, at, ordinal, step)
+    }
+
+    fn with_step_marked_at(
+        source: &Fixture,
+        at: usize,
+        ordinal: u32,
+        step: &str,
+    ) -> Result<Fixture, String> {
+        let neighbour = &source.lines[at.saturating_sub(1)];
         let mut lines = source.lines.clone();
         lines.insert(
-            last + 1,
+            at,
             Line {
-                seq: source.lines[last].seq,
+                seq: neighbour.seq,
                 channel_ordinal: ordinal,
-                elapsed_ms: source.lines[last].elapsed_ms,
+                elapsed_ms: neighbour.elapsed_ms,
                 entry: Entry::Marker {
                     step: step.to_owned(),
                 },

@@ -1900,7 +1900,17 @@ async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
 async fn s104_replay_plays_a_tape_that_marks_the_typed_turn_after_the_host_close()
 -> Result<(), Box<dyn std::error::Error>> {
     let recorded = Fixture::parse(S104_FIXTURE)?;
-    let marked = Fixture::with_step_marked_after(&recorded, 1, support::TYPED_TURN_STEP)?;
+    // A recapture made with the marker already carries it: then the
+    // recording is the marked tape, and nothing is added to it.
+    let already_marked = recorded
+        .channels
+        .iter()
+        .any(|tape| tape.typed_turns_after > 0);
+    let marked = if already_marked {
+        recorded.clone()
+    } else {
+        Fixture::with_step_marked_after(&recorded, 1, support::TYPED_TURN_STEP)?
+    };
     let typed_turns: Vec<usize> = marked
         .channels
         .iter()
@@ -1924,6 +1934,54 @@ async fn s104_replay_plays_a_tape_that_marks_the_typed_turn_after_the_host_close
     // The first channel's close was confirmed by the tape's end, as on the
     // unmarked tape: nothing was left standing at a step.
     assert_eq!(replayed.cassette.parked(1), Parked::Ended);
+    Ok(())
+}
+
+/// A typed turn marked while its channel is up. The marker has provider
+/// frames after it on its channel, so it IS a tape step (only a typed turn
+/// with no frame after it holds nothing), and the replay driver, which
+/// cannot make a typed turn during a channel yet, stops there with a named
+/// error instead of stepping past it. The tape is the S106 recording with
+/// one marker line before its second spoken exchange, where a capture of a
+/// run that typed during the channel would write it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s106_replay_stops_at_a_typed_turn_marked_while_its_channel_is_up()
+-> Result<(), Box<dyn std::error::Error>> {
+    let recorded = Fixture::parse(S106_FIXTURE)?;
+    let marked =
+        Fixture::with_step_marked_before(&recorded, 1, S106_SECOND_STEP, support::TYPED_TURN_STEP)?;
+    let first = marked
+        .channels
+        .first()
+        .ok_or("the marked tape has no channel")?;
+    assert_eq!(
+        first.typed_turns_after, 0,
+        "a typed turn with provider frames after it was read as made after the channel"
+    );
+    assert!(
+        first
+            .markers()
+            .iter()
+            .any(|step| step == support::TYPED_TURN_STEP),
+        "a typed turn with provider frames after it must stay a tape step: {:?}",
+        first.markers()
+    );
+    let stopped = replay_s106_with(S106Steps {
+        tape: Some(marked),
+        ..S106Steps::default()
+    })
+    .await;
+    match stopped {
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("marks a typed turn while the channel is up"),
+            "the replay stopped for another reason: {error}"
+        ),
+        Ok(_) => {
+            return Err("the replay stepped past a typed turn it cannot make".into());
+        }
+    }
     Ok(())
 }
 
@@ -1999,6 +2057,9 @@ struct S106Steps {
     second_member: Option<(&'static str, Vec<Script>)>,
     /// Host knowledge prepended to the public session instructions.
     preface: Option<&'static str>,
+    /// The tape to replay instead of the committed recording (a tape
+    /// constructed from it).
+    tape: Option<Fixture>,
 }
 
 /// S106 replayed to its end with a row's extra host steps.
@@ -2008,7 +2069,10 @@ async fn replay_s106_with(steps: S106Steps) -> Result<Replayed, Box<dyn std::err
         .with_test_writer()
         .try_init();
     let one_at_a_time = REPLAY_LOCK.lock().await;
-    let fixture = Fixture::parse(S106_FIXTURE)?;
+    let fixture = match steps.tape {
+        Some(tape) => tape,
+        None => Fixture::parse(S106_FIXTURE)?,
+    };
     let jobs = recorded_jobs(&fixture);
     let cassette = Arc::new(Cassette::start(fixture.clone()).await?);
     let evidence = Journal::create_for("S106-replay", "Saffron".to_owned())?;

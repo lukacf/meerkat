@@ -42,8 +42,13 @@ it, and that is how a replay knows it: such a marker holds nothing, the
 channel's end included, and only tells the replay that a typed turn was made
 there. A `typed_turn` followed by provider frames was made while its channel
 was up; the replay driver cannot make one yet and stops with an error on such
-a tape. The two committed recordings were made before `play`, `typed_turn`,
-`playback_complete` and `truncate` existed and do not carry them.
+a tape. Three scenarios type while a channel is up (S98, S99 and S105), so
+their captures cannot be replayed until the driver can make such a turn. The
+two committed recordings were made before `play`, `typed_turn`,
+`playback_complete` and `truncate` existed and do not carry them; for that
+reason the driver checks a tape's count of typed turns against the replay
+script only when the tape marks one. Once no committed recording predates
+the marker, that check should be made exact.
 
 A raw recording that lost a line is renamed `provider-stream.jsonl.incomplete`
 at journal finish and is never a fixture.

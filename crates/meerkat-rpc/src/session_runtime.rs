@@ -2717,6 +2717,32 @@ fn runtime_driver_error_to_session_error(err: RuntimeDriverError) -> SessionErro
     ))
 }
 
+/// What a turn asks of the session's LLM identity, read before the turn is
+/// admitted.
+struct TurnLevelAdmission {
+    /// The identity the turn would run with: the session's, with the turn's
+    /// overrides.
+    target: SessionLlmIdentity,
+    /// The session is live.
+    live: bool,
+    /// The target's level is judged before admission: a turn that asks for
+    /// another LLM identity than the session holds, and every turn on a
+    /// stored session that is not live. Never a staged session, which its
+    /// first build judges.
+    judged: bool,
+    /// The turn is admitted only when the session has no unfinished input:
+    /// it changes the session's LLM identity and its start could be judged
+    /// on another identity than its admission. That is a turn whose target
+    /// carries a level (it sets or changes the level, or changes the model
+    /// of a session that holds one), and a turn that names anything of the
+    /// identity beside the level on a session that holds a level, even
+    /// when its own target carries none (a model change with a clear): a
+    /// repeat of the level queued behind it would set that level on the
+    /// new model. A clear alone and a repeat of the held level are not
+    /// such turns.
+    needs_idle_session: bool,
+}
+
 pub(crate) fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
     #[cfg(feature = "local-authorization")]
     if let Some(detail) = meerkat::surface::native_admission_error_detail(&err) {
@@ -7653,6 +7679,64 @@ impl SessionRuntime {
                 .await?)
     }
 
+    /// Read what a turn asks of the session's LLM identity, before the
+    /// turn is admitted ([`TurnLevelAdmission`]).
+    async fn turn_level_admission(
+        &self,
+        session_id: &SessionId,
+        overrides: Option<&crate::handlers::turn::TurnOverrides>,
+    ) -> Result<TurnLevelAdmission, RpcError> {
+        let target = self
+            .effective_llm_identity_for_turn(session_id, overrides)
+            .await?;
+        let live = matches!(self.service.has_live_session(session_id).await, Ok(true));
+        let staged = !live && self.staged_sessions.contains(session_id).await;
+        let Some(ov) = overrides.filter(|ov| Self::turn_overrides_name_llm_identity(ov)) else {
+            return Ok(TurnLevelAdmission {
+                target,
+                live,
+                judged: !staged && !live,
+                needs_idle_session: false,
+            });
+        };
+        // The level the session holds now (a staged session: the level it
+        // will be built with).
+        let held_level = self
+            .effective_llm_identity_for_turn(session_id, None)
+            .await?
+            .provider_params
+            .and_then(|params| params.reasoning_effort);
+        let names_beside_the_level = ov.model.is_some()
+            || ov.provider.is_some()
+            || ov.self_hosted_server_id.is_some()
+            || ov.provider_params.is_some()
+            || ov.auth_binding.is_some();
+        // A turn that names only the level field and asks for the level the
+        // session holds changes nothing.
+        let repeats_the_level = !names_beside_the_level
+            && match ov.reasoning_effort.as_ref() {
+                Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(level)) => {
+                    held_level == Some(*level)
+                }
+                Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => {
+                    held_level.is_none()
+                }
+                None => false,
+            };
+        let changes_llm_identity = !repeats_the_level;
+        let target_carries_a_level = target
+            .provider_params
+            .as_ref()
+            .is_some_and(|params| params.reasoning_effort.is_some());
+        Ok(TurnLevelAdmission {
+            live,
+            judged: !staged && (changes_llm_identity || !live),
+            needs_idle_session: changes_llm_identity
+                && (target_carries_a_level || (held_level.is_some() && names_beside_the_level)),
+            target,
+        })
+    }
+
     /// Judge a turn's target for the level it carries, before the turn's
     /// input is admitted. A level the target's route refuses is answered
     /// with the typed refusal. One reason is left to the build of a session
@@ -9810,29 +9894,18 @@ impl SessionRuntime {
         // not live is built by this turn's start with the target's level,
         // whether the turn names it or the session holds it, so every such
         // turn is judged. A staged session is judged by its first build.
-        let live = matches!(self.service.has_live_session(session_id).await, Ok(true));
-        let staged = !live && self.staged_sessions.contains(session_id).await;
-        let changes_llm_identity = match overrides.as_ref() {
-            Some(ov) if !staged => {
-                self.turn_overrides_reconfigure_llm_identity(session_id, ov)
-                    .await?
-            }
-            _ => false,
-        };
-        if !staged && (changes_llm_identity || !live) {
-            self.judge_turn_level_before_admission(session_id, &effective_identity, live)
+        let admission = self
+            .turn_level_admission(session_id, overrides.as_ref())
+            .await?;
+        if admission.judged {
+            self.judge_turn_level_before_admission(session_id, &admission.target, admission.live)
                 .await?;
         }
-        // A turn that changes the session's LLM identity and whose target
-        // carries a level is taken only on a session with no unfinished
-        // input (see the check under the registration lock below). Asked
-        // here too, so the caller is answered at once.
-        let level_change = changes_llm_identity
-            && effective_identity
-                .provider_params
-                .as_ref()
-                .is_some_and(|params| params.reasoning_effort.is_some());
-        if level_change && self.session_has_unfinished_input(session_id).await? {
+        // A turn that could be judged on another identity at its start is
+        // taken only on a session with no unfinished input (see the check
+        // under the registration lock below). Asked here too, so the caller
+        // is answered at once.
+        if admission.needs_idle_session && self.session_has_unfinished_input(session_id).await? {
             return Err(Self::level_change_on_a_busy_session());
         }
         self.validate_prompt_video_input(&prompt, &effective_identity)
@@ -9868,24 +9941,36 @@ impl SessionRuntime {
         // So a turn whose start could be judged on another identity than
         // its admission (anything queued ahead of it can change the
         // session's model) must not be queued: a turn that changes the
-        // session's LLM identity with a level in its target is admitted
-        // only when the session has no unfinished input, and is otherwise
-        // answered that the session is busy, with nothing admitted. The
-        // emptiness is the runtime's own answer, read under this lock, under
-        // which no other turn request is admitted, and the level is judged
-        // again here against the identity as it is now. This restriction
-        // goes when the machine can refuse such a turn at its start without
+        // session's LLM identity with a level in its target, or that names
+        // anything of that identity beside the level on a session that
+        // holds a level, is admitted only when the session has no
+        // unfinished input, and is otherwise answered that the session is
+        // busy, with nothing admitted (`TurnLevelAdmission`). The emptiness
+        // is the runtime's own answer, read under this lock, under which no
+        // other turn request is admitted, and the level is judged again
+        // here against the identity as it is now. This restriction goes
+        // when the machine can refuse such a turn at its start without
         // ending the session's other inputs.
-        if level_change {
-            if self.session_has_unfinished_input(session_id).await? {
-                return Err(Self::level_change_on_a_busy_session());
+        if overrides
+            .as_ref()
+            .is_some_and(Self::turn_overrides_name_llm_identity)
+        {
+            let admission = self
+                .turn_level_admission(session_id, overrides.as_ref())
+                .await?;
+            if admission.needs_idle_session {
+                if self.session_has_unfinished_input(session_id).await? {
+                    return Err(Self::level_change_on_a_busy_session());
+                }
+                if admission.judged {
+                    self.judge_turn_level_before_admission(
+                        session_id,
+                        &admission.target,
+                        admission.live,
+                    )
+                    .await?;
+                }
             }
-            let target_now = self
-                .effective_llm_identity_for_turn(session_id, overrides.as_ref())
-                .await?;
-            let live_now = matches!(self.service.has_live_session(session_id).await, Ok(true));
-            self.judge_turn_level_before_admission(session_id, &target_now, live_now)
-                .await?;
         }
         let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
         let staged_session_existed = self.staged_sessions.contains(session_id).await;

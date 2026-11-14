@@ -87,7 +87,10 @@ pub(crate) use console_ingress::{
     resolve_authorized_console_caller_from_token, session_fence_first_accepted_iat,
 };
 pub use event_transport::normalize_event_line;
-pub(crate) use gating::{MEMORY_CONFLICT_LOOKUP_FAILED_EVENT, is_legacy_sequential_pending_id};
+pub(crate) use gating::{
+    APPROVAL_NOTIFICATION_KIND, MEMORY_CONFLICT_LOOKUP_FAILED_EVENT,
+    is_legacy_sequential_pending_id,
+};
 pub(crate) use memory::staged_ledger_path;
 pub use metadata::{
     IdentityRotationIntent, IdentityToolRecord, InMemoryMetadataStore, LabelRpcResult,

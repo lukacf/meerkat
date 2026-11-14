@@ -85,12 +85,14 @@ Two files are meant to be left out: the key this pack is signed with
 (`--sign`) and the file this run writes (`-o`). In 0.4.1 through 0.9.14
 (confirmed by runs on 0.9.14; the earlier releases read from the source)
 each is left out only when its path, component by component, is the mob
-directory argument's path followed by the file's own; a trailing or doubled
-separator makes no difference
+directory argument's path followed by the file's own
 (`rkat mob pack mob -o mob/out.mobpack --sign mob/release.key --signer-id <id>`,
-or `.` with `./out.mobpack` and `./release.key`). With any other
-components, the key is packed, and so is the output of an earlier pack at
-that path:
+or `.` with `./out.mobpack` and `./release.key`). A single or doubled
+separator at the end of the directory argument, or a doubled one right after
+the directory in the file's path, makes no difference; a doubled separator or
+a `.` further inside the file's path does, and the key is packed. With any
+other components, the key is packed, and so is the output of an earlier pack
+at that path:
 `rkat mob pack . -o out.mobpack --sign release.key --signer-id <id>` inside
 the mob directory, `./mob` with `mob/release.key`, an absolute directory
 with a relative path, a path through a symbolic link. A pack that holds its

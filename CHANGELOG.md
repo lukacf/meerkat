@@ -1282,13 +1282,16 @@ them.
 
 - `rkat`, `meerkat-mob-pack`: `rkat mob pack` now leaves the signing key
   and its own output file out of the pack however their paths are written.
-  Before, each was left out only when its path, component by component,
-  was the mob directory argument's path followed by the file's own (a
-  trailing or doubled separator made no difference):
+  Before, each was left out only when its path, component by component, was
+  the mob directory argument's path followed by the file's own:
   `rkat mob pack mob -o mob/out.mobpack --sign mob/key.hex --signer-id <id>`
-  left both out, and so did `.` with `./out.mobpack` and `./key.hex`. With
-  any other components a signing key kept in the mob directory was packed,
-  and so was the output of an earlier pack. Inside the mob directory,
+  left both out, and so did `.` with `./out.mobpack` and `./key.hex`. A
+  single or doubled separator at the end of the directory argument, or a
+  doubled one right after the directory in the file's path, made no
+  difference; a doubled separator or a `.` further inside the file's path
+  did, and the key was packed. With any other components a signing key kept
+  in the mob directory was packed, and so was the output of an earlier pack.
+  Inside the mob directory,
   `rkat mob pack . -o out.mobpack --sign key.hex --signer-id <id>` packed
   the key, and from the second run on the output of the run before. So did
   `./mob` with `mob/key.hex`, `mob` with `./mob/key.hex`, an absolute

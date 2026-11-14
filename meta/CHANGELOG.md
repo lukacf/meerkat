@@ -143,7 +143,35 @@ Security, Upgrade and Changed.
   receives both as before.
 - On a console that can identify a person, a gating audit entry or pending
   request whose origin is an agent the console does not know is shown to an
-  administrator only, like every other record the console cannot attribute.
+  administrator only, like every other record the console cannot attribute,
+  and only an administrator decides such a request. A decide by the id of a
+  request the pending list withholds from its caller (`meta/gating/decide`
+  on the Console) is answered as a decide of an id that is not pending, and
+  the request stays pending. That also holds for a request whose origin an
+  access rule or a private owner keeps from the caller, which was answered
+  `access_denied`. Through 0.9.14 the pending list, the audit read and the
+  decide all asked only whether the caller may view the agent that holds
+  the origin's name, so a person who is not an administrator and may view
+  that agent was shown such a request and could decide it. Only a host
+  supplies a request's origin. On a Console that requires sign-in and has
+  no access configuration, a person's decide by id could in a narrow window
+  be applied to a request whose origin is an agent private to another
+  person; a request is now judged at the moment its decision is applied.
+  Affects 0.9.11 through 0.9.14 (read from the released sources; a run on
+  the development source showed the window). The Console's delivery history
+  (`meta/delivery/history`) follows the pending list as well: the record
+  of an approval notification carries the request's id and action text, and
+  is withheld from a caller the list would not show the request, and, on a
+  console that can identify a person, from everyone but an administrator
+  once the request is no longer held. A page of that history holds the
+  newest records its caller may read, up to its limit. Through 0.9.14 that
+  record was shown to every caller who may read the delivery history,
+  whatever the request's origin (from 0.9.11, unless the record itself
+  names an agent private to another person). On a Console that requires
+  sign-in and has no access configuration there is no administrator: a
+  request whose origin the Console does not know is shown to nobody there
+  and decided by nobody there. Its host decides or withdraws it, or it runs
+  into its timeout.
 - In 0.9.11 through 0.9.14, on a console that does not require sign-in and
   whose access rules are off, a caller who sent no token could read the
   conversation of a private side chat after that side chat had ended.
@@ -931,7 +959,80 @@ Security, Upgrade and Changed.
   (`runtime_options.member_comms_address`), as TypeScript `memberCommsTcp`
   does: what a member of another gateway needs to reach them.
 
+- Mob members get the stock tool `ask_user`: an agent asks a person a set of
+  multiple-choice questions (1 to 10 questions with 2 to 8 choices each, a
+  recommended choice and free text where the agent allows them), the call
+  returns at once, and the typed answers reach the agent later as an input
+  of its own. A set is a durable decision of kind `ask_user.questions`: it
+  survives a restart and ends `timed_out` at its deadline (one hour unless
+  the call says otherwise). The call answers `no_human_surface`, and holds
+  nothing, when there is no person to show the questions to or no way back
+  to the asker: the gateway serves no Console; its Console can identify no
+  person (it requires no sign-in and has no access control with a trusted
+  token issuer) or takes no changes (read-only); it keeps no durable
+  decisions (no persistent state directory); it runs a candidate launch; or
+  no answer can be routed to the asker, as for a member of a mob other than
+  the runtime's own (a sub-mob an agent created, for one). A member whose
+  build already has a tool
+  named `ask_user` keeps that tool and gets none from the gateway: its
+  questions are that tool's, are not held or listed here, and whoever
+  mounted it shows and answers them.
+  `meta/gating/questions` lists the open sets, soonest deadline first: all
+  of them on the stdio gateway, and on the Console (with `gating.view`) the
+  ones whose asking agent the caller may view. A set is answered through
+  `meta/gating/decide` with its `pending_id`: `approve` with
+  `presented_digest` and `answers` answers it, `reject` with
+  `presented_digest` dismisses it, and the result is
+  `{pending_id, kind: "question_set", outcome, decided_at_ms}`. On the
+  Console a signed-in person with `gating.decide` who can view the asking
+  agent answers. Nothing is decided by a refused request. A decide the set
+  itself refuses is answered `-32602` with `data.kind = "decision_refused"`
+  and the refusal as an object, `data.decision_refusal.kind`: `not_open`
+  (answered, dismissed, withdrawn or timed out already), `subject_changed`
+  (the `presented_digest` is not the set's), `expired` (the deadline passed
+  as the decision was applied) or `not_eligible`. A request at fault (an
+  invalid answer set, no digest, `escalate`) is plain invalid params. A
+  caller who is not a signed-in person is refused `approver_unauthenticated`
+  and a person without `gating.decide` `access_denied`. A set that is not
+  listed to the caller is answered exactly as an id that is not pending.
+  The Console shows each open set as a card, at the top of the inbox's
+  Pending tab and in the asking agent's chat, and counts it in "Needs you"
+  and on the Approvals view: who asked and by when, one group of choices
+  per question, the agent's recommendation marked and never preselected,
+  "Something else" for the person's own words where allowed, Send answers
+  and Dismiss. A set is listed once on the Pending tab, as that card, and
+  not among the durable decisions below it. A card says "Answered" or
+  "Dismissed" once the gateway confirmed it, "Not accepted" with what to do
+  when the gateway refused the reply and still lists the set, and why
+  nobody can answer when the caller
+  is not signed in or may not decide. A set the gateway no longer lists
+  leaves the screen whole; where its card was, one line says that the
+  question is no longer listed here. The deadline shown is the gateway's,
+  and the card never ends a set by the browser's clock. The Console reads
+  at most the gateway's own limits of a set (10 questions, 8 choices each,
+  the text lengths); a set larger than that is shown up to them, says
+  what is not shown, and takes no answer and no dismissal from the
+  Console, since a reply attests the whole set. Python
+  `MobHandle.gating_questions`, `gating_answer` and `gating_dismiss` and
+  TypeScript `gatingQuestions`, `gatingAnswer` and `gatingDismiss` wrap the
+  two methods. An SDK or Console older than this release does not list
+  question sets (they are not part of `meta/gating/pending`), so it never
+  shows one as an approval; a set nobody answers ends `timed_out` at its
+  deadline. On the Console a question set is read through
+  `meta/decisions/list`, `get` and `rendering`, and withdrawn through
+  `meta/decisions/withdraw`, only by a caller who may view its asking agent.
+  See [Question sets](docs/concepts/gating.mdx#question-sets).
+
 ### Changed
+
+- `meta/decisions/list` on the Console pages over what its caller may see: a
+  decision the caller may not see fills no place in a page and is never a
+  cursor, and the request's filters choose among the decisions it may see.
+  `meta/decisions/list`, `get`, `rendering` and `withdraw` on the Console
+  tell only an access administrator of rows the decision store cannot
+  decode. A caller who administers decisions by a rule no longer reads them:
+  `unreadable` is empty for it, and by its id such a row is answered as an
+  id that names no decision.
 
 - A host that labels its members in its customizer must put those labels
   in the row of an agent created at run time (an identity whose record is
@@ -957,6 +1058,19 @@ Security, Upgrade and Changed.
   sets no labels refuses nothing. An archive and a removal of a refused
   agent are served.
 
+- From 0.9.15 a gating decide on the Console (`meta/gating/decide`)
+  follows the pending list (see Security): a decide of a request the list
+  does not show its caller is answered as a decide of an id that is not
+  pending is. Two answers change with it. New in 0.9.15: on a console that
+  can identify a person, a decide of a request whose origin is an agent the
+  console does not know gets that answer unless the caller is an
+  administrator; through 0.9.14 such a decide was applied for a person who
+  may view that agent. And a decide of a request whose origin an access
+  rule or a private owner keeps from the caller is no longer answered
+  `access_denied`: it gets that answer too. A client that handled
+  `access_denied` on this call now gets the answer for an id that is not
+  pending; `access_denied` still answers a caller without the
+  `gating.decide` grant.
 - A declared definition update (`runtime_options.declare_spec_update` on
   the stdio gateway, `spec_update_ceremony` from Rust) that drops a profile
   agents were created on, or renames it, is refused: Meerkat answers the

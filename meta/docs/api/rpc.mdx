@@ -2541,6 +2541,76 @@ association `sid`, or of the token's digest when it carries none), never the
 token or the login itself. HTTP additionally accepts `"deny"` as an alias for
 `"reject"`; stdio does not.
 
+#### Answering a question set
+
+A `pending_id` that [`meta/gating/questions`](#metagatingquestions) lists
+names a [question set](/concepts/gating#question-sets), and the same method
+answers or dismisses it, with the same approver rules as above (stdio names
+`approver_id`; the HTTP console decides as the signed-in person and refuses a
+request that names one).
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `pending_id` | `string` | yes | The set's `pending_id` |
+| `decision` | `string` | yes | `"approve"` answers the set, `"reject"` dismisses it. `"escalate"` is refused |
+| `presented_digest` | `string` | yes | The `subject_digest` of the set as it was presented |
+| `answers` | `array` | with `approve` | One `{question_id, answer}` per answered question; at least one. `answer` is `{"kind": "choice", "choice_id": "..."}` or, where the question sets `allow_free_text`, `{"kind": "free_text", "text": "..."}` (1 to 280 bytes). A question left out reaches the agent as `unanswered` |
+| `approver_id` | `string` | stdio: yes; HTTP: refused | As for every decision |
+</Accordion>
+
+```json
+{
+  "pending_id": "decision:5f1c...",
+  "decision": "approve",
+  "presented_digest": "sha256:9a40...",
+  "answers": [
+    { "question_id": "region", "answer": { "kind": "choice", "choice_id": "eu" } },
+    { "question_id": "start", "answer": { "kind": "free_text", "text": "After the 16:00 freeze" } }
+  ]
+}
+```
+
+<Accordion title="Response">
+```json
+{
+  "pending_id": "decision:5f1c...",
+  "kind": "question_set",
+  "outcome": "answered",
+  "decided_at_ms": 1762700000000
+}
+```
+</Accordion>
+
+`outcome` is `answered` or `dismissed`. The asking agent then receives the
+typed result as an input of its own. A refused request decides nothing:
+
+- A decide the set itself refuses is answered `-32602` with the typed data
+  of the [decision methods](#durable-decision-methods): `data.kind` is
+  `"decision_refused"` and the refusal is an object,
+  `data.decision_refusal.kind`. For a question set it is `not_open` (the
+  set was answered, dismissed, withdrawn or timed out already),
+  `subject_changed` (`presented_digest` is not the set's `subject_digest`:
+  read the set again), `expired` (the deadline passed as the decision was
+  applied) or `not_eligible` (the decider may not decide this set).
+
+  ```json
+  {
+    "code": -32602,
+    "message": "decision decision:5f1c... refused the input: not_open",
+    "data": { "kind": "decision_refused", "decision_refusal": { "kind": "not_open" } }
+  }
+  ```
+- A request at fault is `-32602` invalid params with a sentence and no
+  data: an invalid answer set, a missing `presented_digest`, `escalate`.
+- A Console caller who is not a signed-in person is refused `-32057`
+  `approver_unauthenticated`, and a person without `gating.decide` `-32030`
+  `access_denied`, as for every decision. The Console checks both again
+  right before the decision is applied.
+- A `pending_id` that names no set listed to the caller (an unknown id, or
+  a set of an agent the caller may not view) is answered exactly as any id
+  that is not pending.
+
 ### `meta/gating/withdraw`
 
 Withdraw a pending gated action without a decision: the requester no longer
@@ -2595,6 +2665,59 @@ not a rejection.
 ### `meta/gating/pending`
 
 List all pending gated actions awaiting approval.
+
+### `meta/gating/questions`
+
+List the open [question sets](/concepts/gating#question-sets): the
+multiple-choice questions agents asked a person with the `ask_user` tool.
+No parameters. A question set is not part of `meta/gating/pending`.
+
+<Accordion title="Response">
+```json
+{
+  "question_sets": [
+    {
+      "pending_id": "decision:5f1c...",
+      "origin": { "identity": "release-planner" },
+      "title": "Release plan",
+      "questions": [
+        {
+          "id": "region",
+          "prompt": "Which region goes first?",
+          "choices": [
+            { "id": "eu", "label": "Europe" },
+            { "id": "us", "label": "United States" }
+          ],
+          "recommended": "eu"
+        },
+        {
+          "id": "start",
+          "prompt": "When should it start?",
+          "choices": [
+            { "id": "now", "label": "Now" },
+            { "id": "night", "label": "Tonight" }
+          ],
+          "allow_free_text": true
+        }
+      ],
+      "created_at_ms": 1762700000000,
+      "deadline_at_ms": 1762703600000,
+      "subject_digest": "sha256:9a40..."
+    }
+  ]
+}
+```
+</Accordion>
+
+Only open sets are listed, soonest deadline first. `origin.identity` is the
+asking agent, `title` is optional, `allow_free_text` is `false` when absent
+and `recommended`, when present, names one of the question's choices.
+`pending_id` is the id [`meta/gating/decide`](#answering-a-question-set)
+takes and `subject_digest` the `presented_digest` it sends back. The stdio
+gateway lists every open set. The HTTP console needs `gating.view` while
+access control is enforced and lists only the sets whose asking agent the
+caller may view: a set of a member private to someone else is not listed. A
+set nobody answers leaves the list at its deadline and ends `timed_out`.
 
 ### `meta/gating/audit`
 
@@ -2883,12 +3006,15 @@ console change: one made for another caller than its token
 one whose caller's login ended before it is made `-32056`
 (`data.kind = "caller_not_current"`), and the console audit log records it.
 A list pages over what the caller may
-see: an administrator reads the store's own pages, and any other caller reads
-the decisions of the approver ids it holds and its own requests, and learns
-of no other decision. `meta/decisions/rendering` for a caller that
-may see only the status is refused `-32030`
-(`data.kind = "content_not_visible"`). Unreadable rows are listed only to a
-caller allowed `decisions.admin`. While the runtime keeps decisions,
+see: a decision it may not see fills no place in a page and is never a
+cursor. An administrator reads every decision its filters name, and any
+other caller reads the decisions of the approver ids it holds and its own
+requests, and learns of no other decision. `meta/decisions/rendering` for a
+caller that may see only the status is refused `-32030`
+(`data.kind = "content_not_visible"`). Rows the store cannot decode are
+listed only to an access administrator; to any other caller such a row reads
+as an id that names no decision, on `get`, `rendering` and `withdraw` alike.
+While the runtime keeps decisions,
 `meta/capabilities` lists the decision methods the caller may call. The
 Approvals panel lists the open decisions on its Pending tab, read only: each
 one is decided where it was presented.

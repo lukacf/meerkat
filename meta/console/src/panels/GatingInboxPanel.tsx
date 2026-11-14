@@ -1,6 +1,8 @@
 import React from "react";
 import { ApprovalCard, DepartedApprovalCard, HostAttentionCard, PrivateReplyCard, deadlineWords, useApprovalClock, useApprovalViewer } from "../../../packages/console-components/src/conversation/approval-card";
+import { QuestionSetList, type QuestionSetsView } from "../../../packages/console-components/src/conversation/question-set-card";
 import { approvalAudience } from "../../../packages/console-core/src/pending-approvals";
+import { countedQuestionSets } from "../../../packages/console-core/src/pending-questions";
 import type { GatingAuditEntryView } from "../../../packages/console-core/src/control-plane";
 import type { ConsoleAttentionItem, ConsoleAttentionSnapshot } from "../../../packages/console-core/src/console-attention";
 import { hostDecideLinks, type HostAttentionSnapshot, type HostAttentionSourceConfig } from "../../../packages/console-core/src/host-attention";
@@ -62,7 +64,7 @@ import {
   type RawRecord,
 } from "./gating-model";
 import { DecisionCardList } from "./DecisionCard";
-import type { DecisionCardView, OwnDecisionWithdrawal } from "./decision-cards";
+import { decisionCardsBesideQuestions, type DecisionCardView, type OwnDecisionWithdrawal } from "./decision-cards";
 
 interface GatingInboxPanelProps {
   pending: unknown[];
@@ -70,6 +72,10 @@ interface GatingInboxPanelProps {
   onDecide: (pendingId: string, decision: "approve" | "reject" | "escalate") => void;
   readOnly?: boolean;
   resource?: PendingApprovalSnapshot;
+  /** The question sets agents asked and how this console answers them,
+   *  listed on Pending above the approvals. A gateway without question
+   *  sets, a denied read and a read still loading show nothing. */
+  questions?: QuestionSetsView;
   /** Refreshes the pending queue (the Pending tab). */
   onRefresh?: () => void;
   /** Refreshes the recorded approvals (the Audit and Auto tabs). */
@@ -470,6 +476,7 @@ export function GatingInboxPanel({
   onDecide,
   readOnly = false,
   resource,
+  questions,
   onRefresh,
   onRefreshAudit,
   auditUpdatedAtMs,
@@ -551,7 +558,9 @@ export function GatingInboxPanel({
   const hostFailedSources = tab === "pending" ? hostAttention?.failedSources ?? [] : [];
   // Durable decisions follow the approvals too, read only: each one is
   // decided where it was presented. "Load more" follows the list's cursor.
-  const decisionCards = tab === "pending" ? durableDecisions ?? [] : [];
+  // A question set is not among them while the question list shows the
+  // sets: it is answered on its own card above, and listed once.
+  const decisionCards = tab === "pending" ? decisionCardsBesideQuestions(durableDecisions ?? [], questions?.snapshot.status) : [];
   const decisionCursor = tab === "pending" && onLoadMoreDecisions ? decisionsNextAfter : undefined;
   const hostCardsShown = hostItems.length > 0 || hostFailedSources.length > 0;
   const hostShown = replyItems.length > 0 || hostCardsShown || decisionCards.length > 0
@@ -587,6 +596,21 @@ export function GatingInboxPanel({
       ) : null}
     </>
   ) : null;
+  // The agents' question sets head Pending (the only tab that lists what
+  // waits): each is answered on its card. The ones still open count with the
+  // requests that wait, once their list was read: a list that may be out of
+  // date keeps its cards and is not counted, as on the sidebar's badge. A
+  // set the gateway no longer lists leaves one line where its card was; the
+  // list shows it only when it showed the card. A first read that failed is
+  // said there too, with a way to try again. What sits beside the list (the
+  // empty inbox, small or large) follows what the list shows, which only
+  // the list knows.
+  const openQuestions = countedQuestionSets(questions?.snapshot.status, questions?.snapshot.sets.length ?? 0);
+  const [questionListShows, setQuestionListShows] = React.useState(false);
+  const questionsShown = questions !== undefined && questionListShows;
+  const questionList = questions !== undefined ? (
+    <QuestionSetList view={questions} readOnly={readOnly} className="gating-inbox__cards gating-inbox__questions" testId="question-set-list" onContent={setQuestionListShows} />
+  ) : null;
 
   let content: React.ReactNode;
   if (tab === "pending" && resource) {
@@ -599,19 +623,20 @@ export function GatingInboxPanel({
     const departed = (resource.departed ?? []).filter((item) => !viewer || approvalAudience(item.request, viewer).kind === "you");
     content = (
       <>
+        {questionList}
         {state && resource.requests.length === 0 ? (
           resource.status === "loading"
             ? <LoadingState variant="cards" rows={2} label={state.text} />
-            : <EmptyState kind={state.empty} role="status" title={state.text} inline={hostShown} />
+            : <EmptyState kind={state.empty} role="status" title={state.text} inline={hostShown || questionsShown} />
         ) : state ? (
           <Notice tone={state.tone} role="status">{state.text}</Notice>
         ) : null}
         {resource.status === "ready" && pendingRequests?.length === 0 ? (
           <EmptyState
-            illustration={hostShown ? undefined : "approvals-clear"}
+            illustration={hostShown || questionsShown ? undefined : "approvals-clear"}
             title="No pending approvals."
             body="Requests that need a decision appear here, soonest deadline first."
-            inline={hostShown}
+            inline={hostShown || questionsShown}
           />
         ) : null}
         {cards.length ? (
@@ -652,8 +677,9 @@ export function GatingInboxPanel({
     const showActions = !readOnly;
     content = (
       <>
+        {questionList}
         {rows.length === 0 ? (
-          <EmptyState title="No pending items." inline={hostShown} />
+          <EmptyState title="No pending items." inline={hostShown || questionsShown} />
         ) : (
           <RowList>
             {rows.map(({ raw, record, index }) => {
@@ -764,6 +790,7 @@ export function GatingInboxPanel({
     ? [{ key: "unsupported", text: "Not available on this connection", announce: false }]
     : [
       pendingKnown ? { key: "pending", text: `${pendingCount} pending`, tone: pendingCount > 0 ? "warn" : undefined, testId: "gating-summary-pending" } : null,
+      openQuestions > 0 ? { key: "questions", text: plural(openQuestions, "question set"), tone: "warn", testId: "gating-summary-questions" } : null,
       { key: "auto", text: automaticWords },
       nextWords ? { key: "deadline", text: nextWords.past ? "a deadline has passed" : `next deadline ${nextWords.text}`, announce: false, testId: "gating-summary-deadline" } : null,
     ];
@@ -850,7 +877,7 @@ export function GatingInboxPanel({
         active={tab}
         onSelect={setTab}
         tabs={[
-          { id: "pending", label: "Pending", count: pendingKnown ? pendingCount : null, testId: "gating-tab:pending" },
+          { id: "pending", label: "Pending", count: pendingKnown ? pendingCount + openQuestions : null, testId: "gating-tab:pending" },
           { id: "auto", label: "Auto", count: automaticCount, testId: "gating-tab:auto" },
           { id: "audit", label: "Audit", count: audit.length, testId: "gating-tab:audit" },
           { id: "policies", label: "Policies", testId: "gating-tab:policies" },

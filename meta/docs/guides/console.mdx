@@ -433,8 +433,9 @@ Approval cards are personal. A request pinned to an approver id the caller does
 not hold reads **Waiting for** that approver and offers no decision; for a
 signed-in person, a request pinned to an id they hold, or pinned to no one,
 reads **For you**. **Needs you** counts only the requests that are not waiting
-for someone else (with any host items), and the sidebar's **Approvals** count
-counts the same requests. A request for the caller that someone
+for someone else (with any host items and open
+[question sets](#question-sets)), and the sidebar's **Approvals** count
+counts the same requests and the open question sets. A request for the caller that someone
 else decides keeps its card, which says how and by whom (for example
 "Approved by" the deciding person, read from the gating audit), or "Decided
 elsewhere" when the audit cannot say.
@@ -452,6 +453,87 @@ none), or when its item is closed.
 Configure action tiers through the host's gating configuration. For SDK-launched
 stdio gateways, see [`gating_config_path`](/reference/configuration#sdk-and-gateway-runtime-options).
 That option does not configure unrelated HTTP or library entrypoints.
+
+### Question sets
+
+An agent can ask a person a set of multiple-choice questions with the
+`ask_user` tool (see [Question sets](/concepts/gating#question-sets)). The
+console shows each open set as one card, in two places: at the top of the
+**Pending** tab of **Approvals**, above the approval requests, and in the
+asking agent's chat, with that chat's approvals. Both read the same set, and
+the Pending tab's count includes the open sets. **Needs you** counts them
+with the approvals ("1 pending approval, 2 question sets"), and so does the
+badge of **Approvals** in the sidebar; with a question set waiting, **Needs
+you** opens the Pending list. **Needs you** never hides a count it knows:
+its number is the count of what was read (the approvals and the question
+sets of lists that are current, host items and your replies), and its words
+say what was not: "Checking questions" while the question sets are still
+being read, "Questions may be out of date" or "Questions unavailable" when
+their list is out of date or could not be read, and the same for approvals.
+With one approval waiting and the question read failing it shows "1" and
+reads "1 pending approval, Questions unavailable". A placeholder stands
+alone only when nothing was read: "..." while the lists are still being
+read, "!" when one is out of date or could not be read. A zero is shown
+once the approvals were read, never beside approvals that were not. The
+**Approvals** badge and the Pending tab's count hold the same question sets:
+those of a list that was read. A list that may be out of date keeps its
+cards on the tab and is not counted until it is read again.
+
+The card names the set (its title, or "Questions from" the agent), who asked,
+its status and its deadline, and says what to do: "Pick one choice per
+question, then send. Your answers go to" the agent, "which continues with
+them; a question you leave out reaches it as unanswered", and that with no
+answer by the deadline the agent is told the questions timed out. Each
+question is a group of radio buttons, one per choice. A choice the agent
+recommends carries a **Recommended** chip and is never preselected. Where the
+agent allowed it, a last choice **Something else** opens a text field for the
+person's own answer (at most 280 bytes; a counter appears near the limit).
+**Clear** removes a question's answer and puts the focus on the question's
+first choice. **Send answers** sends what is chosen; **Dismiss** tells the
+agent no answer is coming. Titles, prompts, labels and answers are shown as
+plain text. The agent's identity, the request id and the question and choice
+ids are under **Technical details**.
+
+The deadline is the gateway's. Before it the chip counts down; once the
+browser's clock is past it the chip reads "Answer by" and the time, and the
+set stays answerable for as long as the gateway lists it. The card never
+calls a set timed out by the browser's clock.
+
+| The card says | When |
+|---------------|------|
+| **Answer needed** | The set is open and you can answer it |
+| **Sending** | Your answers, or your dismissal, are on their way; both buttons are disabled |
+| **Answered** ("Your answers were sent to" the agent, "which continues with them.") | The gateway confirmed your answers; the card lists what was chosen for each question |
+| **Dismissed** ("Dismissed: no answer is coming, and" the agent "was told so.") | The gateway confirmed your dismissal |
+| **Not accepted**, with one sentence that says why and what to do | The reply did not reach the agent and the set is still listed. You can change the answers and send again as soon as the card offers Send: at once, except after "only a signed-in person can answer" and "you no longer have permission", when every card stays locked until the Console has read the questions again (its next successful read; it reads every 15 seconds while the page is visible). The sentences: the questions changed after you opened them (read them again, then answer); you are not one of the people who can answer this question; only a signed-in person can answer (sign in as yourself, then send again); you no longer have permission to answer questions here (ask an administrator for the permission to decide); this browser is now signed in as someone else, or your sign-in ended (nothing was changed); the reply was not accepted and nothing was changed (the request was stopped before the gateway took it up: sign in again if you are asked to, then send again); the gateway did not accept the reply (its own sentence is under **Details**) or did not take it (the kind of its refusal is under **Details**) |
+| **Not confirmed** | The gateway's answer was lost: the Console could not confirm that your answer, or your dismissal, arrived. If the question is still listed after the next refresh, send or dismiss it again. A retry that is stopped before the gateway takes it up leaves the card as it is: it says nothing about the first reply, which may have arrived. A caller who can no longer reply on the card is told why instead |
+| **May be out of date** | The list is not current. Either a read failed ("The Console could not read the questions again just now ... It keeps trying"), or no list was read for a while, as while a reply is on its way or when the tab just came back ("The Console has not read the questions for a while ... It is reading them again"). A caller who can answer is told they can once it has |
+| **Sign in to answer** | The caller is not a signed-in person: the questions are shown and nothing can be sent. Sign in as yourself |
+| **No permission** | The gateway said you may no longer decide: no card offers Send until the Console has read the questions again. Ask an administrator for the permission to decide |
+| **Read only** | Your access to this Console is read-only: you can read the questions but not answer them |
+
+A set the gateway no longer lists leaves the screen with everything of it,
+whatever the reason: the Console keeps none of its text. Where its card was,
+one line stays for about a minute:
+"This question is no longer listed here." When the gateway refused
+your reply because the set had just closed or timed out, that line says so
+and that nothing was sent; when the set left after a send the Console could
+not confirm, it says that too. If the focus was inside a card that left, it
+moves to the line; when several cards leave at once the list shows one line,
+and the focus moves there whichever card held it. Only a set you answered or
+dismissed here keeps its card, as **Answered** or **Dismissed**.
+
+The console reads the open sets every 15 seconds while the page is visible,
+like the approvals, and again after each of its own replies. If the first
+read fails, the Pending tab says that the questions could not be loaded and
+offers **Try again**. After **Send answers** or **Dismiss** the focus moves to
+the card's sentence. A set larger than the gateway's limits (10 questions, 8
+choices each, or text longer than its lengths) is shown up to them, the card
+says how many questions or choices are not shown, and it cannot be answered
+or dismissed from the Console: a reply attests the whole set, and the card
+shows only part of it. The card reads **Read only** and says to reply to the
+agent in its chat instead. A gateway older than question sets (no
+`meta/gating/questions`) shows no cards and no error.
 
 ### Dock — Chat panels
 

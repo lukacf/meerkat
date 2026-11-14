@@ -20,10 +20,28 @@ use crate::approval::ApprovalAssurance;
 use crate::approval::consent::{
     AuthenticatedApprover, ConsentEligibility, HostAuthenticationScope,
 };
+use crate::ask_user::AskUserQuestionAnswer;
 use crate::{PrincipalKind, PrincipalRef, SessionId};
 
-/// Largest decision reason or review feedback, in bytes.
+/// Largest decision reason, review feedback or typed answer, in bytes (of
+/// its JSON, for an answer).
 pub const DECISION_REASON_MAX_BYTES: usize = 4 * 1024;
+
+/// The typed answer a person gave with an approving decision, for a kind
+/// that asks one. It is part of the decision's human evidence, so the
+/// decision's machine binds it through the evidence digest: it is data the
+/// kind's owner reads, never text a surface parses. More kinds may be
+/// added.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DecisionAnswer {
+    /// The answers to a set of questions an agent asked a person (a
+    /// decision of kind `ask_user.questions`): one entry per question the
+    /// person answered. Whether they are valid for the held set is for the
+    /// kind's owner to check when it reads them.
+    AskUser { answers: Vec<AskUserQuestionAnswer> },
+}
 
 /// Who decides a decision. More tiers may be added with new kinds of
 /// evidence.
@@ -84,6 +102,7 @@ pub struct AttestedDecision {
     presentation: Option<PresentationRecord>,
     approve: bool,
     reason: Option<String>,
+    answer: Option<DecisionAnswer>,
 }
 
 impl AttestedDecision {
@@ -129,6 +148,7 @@ impl AttestedDecision {
             presentation: None,
             approve,
             reason: None,
+            answer: None,
         })
     }
 
@@ -146,6 +166,32 @@ impl AttestedDecision {
     /// [`DecisionContractError::TooLarge`] past 4 KiB.
     pub fn with_reason(mut self, reason: impl Into<String>) -> Result<Self, DecisionContractError> {
         self.reason = Some(bounded_text("reason", reason.into())?);
+        Ok(self)
+    }
+
+    /// The typed answer the person gave with this approving decision, for a
+    /// kind that asks one. Its JSON is at most 4 KiB.
+    ///
+    /// # Errors
+    /// [`DecisionContractError::Invalid`] on a rejecting decision (a
+    /// rejection answers nothing), [`DecisionContractError::TooLarge`] past
+    /// 4 KiB, and [`DecisionContractError::Encoding`] when the answer cannot
+    /// be encoded.
+    pub fn with_answer(mut self, answer: DecisionAnswer) -> Result<Self, DecisionContractError> {
+        if !self.approve {
+            return Err(DecisionContractError::Invalid {
+                what: "answer of a rejecting decision",
+            });
+        }
+        let encoded = serde_json::to_vec(&answer)
+            .map_err(|error| DecisionContractError::Encoding(error.to_string()))?;
+        if encoded.len() > DECISION_REASON_MAX_BYTES {
+            return Err(DecisionContractError::TooLarge {
+                what: "answer",
+                max_bytes: DECISION_REASON_MAX_BYTES,
+            });
+        }
+        self.answer = Some(answer);
         Ok(self)
     }
 
@@ -206,6 +252,12 @@ impl AttestedDecision {
         self.reason.as_deref()
     }
 
+    /// The typed answer the person gave with this decision, if any.
+    #[must_use]
+    pub fn answer(&self) -> Option<&DecisionAnswer> {
+        self.answer.as_ref()
+    }
+
     /// The durable evidence of this decision.
     #[must_use]
     pub fn evidence(&self) -> DecisionEvidence {
@@ -226,6 +278,7 @@ impl AttestedDecision {
             presentation: self.presentation.clone(),
             approve: self.approve,
             reason: self.reason.clone(),
+            answer: self.answer.clone(),
         }
     }
 }
@@ -430,6 +483,12 @@ pub enum DecisionEvidence {
         approve: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        /// The typed answer the person gave with an approving decision, for
+        /// a kind that asks one ([`DecisionAnswer`]). Absent otherwise, and
+        /// in evidence recorded before decisions carried it: such evidence
+        /// decodes, and keeps its bytes and its digest.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<DecisionAnswer>,
     },
     /// A reviewer's attributed verdict.
     Review {

@@ -190,6 +190,24 @@ async fn member_tools_and_attention_overlay_reach_live_turns() {
         has_tool(unbound_tools, "send_message"),
         "comms tools present on unbound turns: {unbound_tools:?}"
     );
+    // The stock tool `ask_user` is in the member's list once, and mounting
+    // it leaves the member's catalog as it was: the whole WorkGraph surface
+    // is offered inline, and the catalog's control tools are not composed.
+    assert_eq!(
+        unbound_tools
+            .iter()
+            .filter(|tool| tool.as_str() == "ask_user")
+            .count(),
+        1,
+        "the member is offered ask_user once: {unbound_tools:?}"
+    );
+    for control in ["tool_catalog_search", "tool_catalog_load"] {
+        assert!(
+            !has_tool(unbound_tools, control),
+            "mounting ask_user must not move the member's tools behind the tool catalog \
+             ({control} is offered): {unbound_tools:?}"
+        );
+    }
 
     // Bind a goal to the member IDENTITY over RPC (default mode: pursue).
     let response = rpc(

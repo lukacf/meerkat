@@ -219,6 +219,9 @@ import {
   parseGatingWithdrawResult,
   parseGatingAuditEntry,
   parseGatingPendingEntry,
+  parseGatingQuestionSet,
+  parseGatingQuestionSetResult,
+  gatingQuestionAnswerToWire,
   parseRediscoverReport,
   parseReconcileEdgesReport,
   parsePersistedEvent,
@@ -320,6 +323,9 @@ import {
   type GatingWithdrawResult,
   type GatingAuditEntry,
   type GatingPendingEntry,
+  type GatingQuestionAnswer,
+  type GatingQuestionSet,
+  type GatingQuestionSetResult,
   type RediscoverReport,
   type ReconcileEdgesReport,
   type PersistedEvent,
@@ -4671,6 +4677,71 @@ export class MobHandle {
         ? (((raw as Record<string, unknown>).entries as unknown[]) ?? [])
         : [];
     return (entries as unknown[]).map(parseGatingAuditEntry);
+  }
+
+  /**
+   * List the open question sets agents asked with `ask_user`
+   * (`meta/gating/questions`), soonest deadline first. A question set is not
+   * part of `gatingPending()`. Answer one with `gatingAnswer()` or dismiss
+   * it with `gatingDismiss()`; a set nobody answers ends `timed_out` at its
+   * deadline.
+   */
+  async gatingQuestions(): Promise<GatingQuestionSet[]> {
+    const raw = await this._runtime._rpc("meta/gating/questions");
+    const entries =
+      typeof raw === "object" && raw !== null
+        ? (((raw as Record<string, unknown>).question_sets as unknown[]) ?? [])
+        : [];
+    return (entries as unknown[]).map(parseGatingQuestionSet);
+  }
+
+  /**
+   * Answer an open question set (`meta/gating/decide` with `answers`); the
+   * asking agent then receives the typed answers. `presentedDigest` is the
+   * set's `subjectDigest`. `answers` holds one entry per answered question;
+   * at least one is needed, and a question left out reaches the agent as
+   * `unanswered`. The gateway refuses an invalid answer set and a set that
+   * is no longer open as invalid params.
+   */
+  async gatingAnswer(
+    pendingId: string,
+    options: {
+      approverId: string;
+      presentedDigest: string;
+      answers: readonly GatingQuestionAnswer[];
+    },
+  ): Promise<GatingQuestionSetResult> {
+    if (options.answers.length === 0) {
+      throw new Error("gatingAnswer needs at least one answer");
+    }
+    return parseGatingQuestionSetResult(
+      await this._runtime._rpc("meta/gating/decide", {
+        pending_id: pendingId,
+        decision: "approve",
+        approver_id: options.approverId,
+        presented_digest: options.presentedDigest,
+        answers: options.answers.map(gatingQuestionAnswerToWire),
+      }),
+    );
+  }
+
+  /**
+   * Dismiss an open question set (`meta/gating/decide` with `reject`): the
+   * asking agent is told no answer is coming. `presentedDigest` is the
+   * set's `subjectDigest`.
+   */
+  async gatingDismiss(
+    pendingId: string,
+    options: { approverId: string; presentedDigest: string },
+  ): Promise<GatingQuestionSetResult> {
+    return parseGatingQuestionSetResult(
+      await this._runtime._rpc("meta/gating/decide", {
+        pending_id: pendingId,
+        decision: "reject",
+        approver_id: options.approverId,
+        presented_digest: options.presentedDigest,
+      }),
+    );
   }
 
   // -- Durable decisions (the stdio host's `meta/decisions/*`) --------------

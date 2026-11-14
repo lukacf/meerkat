@@ -1277,22 +1277,16 @@ async fn a_people_subject_holds_the_approver_id_on_the_console() {
 
     // Gating decide: the gate names the approver id, and the Console decides
     // as the signed-in person, who holds that id only as the people subject.
-    let evaluated = runtime
-        .evaluate_gating_action_with_origin(
-            serde_json::from_value(json!({
-                "action": "release the reviewed artifact",
-                "actor_id": "requester",
-                "risk_tier": "r3",
-                "requested_approver": "team:owners",
-            }))
-            .expect("gating request"),
-            Some(GatingOrigin {
-                identity: "router".to_string(),
-                conversation_id: None,
-                interaction_id: None,
-            }),
-        )
-        .await;
+    let request = || {
+        serde_json::from_value(json!({
+            "action": "release the reviewed artifact",
+            "actor_id": "requester",
+            "risk_tier": "r3",
+            "requested_approver": "team:owners",
+        }))
+        .expect("gating request")
+    };
+    let evaluated = runtime.evaluate_gating_action(request()).await;
     let pending_id = evaluated.pending_id.clone().expect("a pending gate");
     let decided = rpc(
         &app,
@@ -1306,6 +1300,43 @@ async fn a_people_subject_holds_the_approver_id_on_the_console() {
     .await;
     assert!(decided["error"].is_null(), "{decided}");
     assert_eq!(decided["result"]["approver_id"], json!("team:owners"));
+
+    // The same gate with an origin this Console holds no agent for is shown
+    // to an administrator only: holding the approver id decides nothing for
+    // a request the pending list withholds. The decide is answered as a
+    // decide of an id that is not pending is, and the request stays pending.
+    let withheld = runtime
+        .evaluate_gating_action_with_origin(
+            request(),
+            Some(GatingOrigin {
+                identity: "router".to_string(),
+                conversation_id: None,
+                interaction_id: None,
+            }),
+        )
+        .await
+        .pending_id
+        .expect("a pending gate");
+    let decide = |pending_id: String| {
+        rpc(
+            &app,
+            Some(DAVE),
+            "meta/gating/decide",
+            json!({ "pending_id": pending_id, "decision": "approve" }),
+        )
+    };
+    let of_withheld = decide(withheld.clone()).await;
+    let of_no_request = decide("gate-pending-never-minted".to_string()).await;
+    assert!(!of_withheld["error"].is_null(), "{of_withheld}");
+    assert_eq!(of_withheld, of_no_request, "{of_withheld}");
+    let still_pending = runtime.list_gating_pending().await;
+    assert_eq!(
+        still_pending
+            .iter()
+            .map(|entry| entry.pending_id.as_str())
+            .collect::<Vec<_>>(),
+        [withheld.as_str()]
+    );
     drop(app);
     runtime.shutdown().await;
 }
@@ -1579,6 +1610,109 @@ async fn an_unreadable_row_reads_as_not_found_to_a_non_administrator() {
         drop(app);
         runtime.shutdown().await;
     }
+}
+
+/// Only an access administrator is told of the rows the store cannot
+/// decode. A person who administers decisions by a rule is kept apart from
+/// other people, and is told of none: the list names no such row, and by
+/// its id the row answers as an id that names no decision.
+#[tokio::test]
+async fn only_an_access_administrator_is_told_of_rows_the_store_cannot_decode() {
+    let absent = format!("decision:{}", "0".repeat(64));
+    // ERIN reads and administers decisions by a rule; ADMIN is an access
+    // administrator.
+    let access = r#"
+enabled = true
+admins = ["admin@example.test"]
+
+[[rules]]
+id = "decision-admin-by-rule"
+subjects = ["erin@example.test"]
+actions = ["decisions.view", "decisions.admin"]
+"#;
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console(&state, Some(access), true).await;
+    let owner = decisions_of(&state);
+    let readable = hold(
+        &owner,
+        "release",
+        "decode-readable",
+        "team:ops",
+        agent_requester(),
+    );
+    let broken = hold(
+        &owner,
+        "release",
+        "decode-broken",
+        "team:ops",
+        agent_requester(),
+    );
+    make_unreadable(&state, &broken);
+    let by_rule = walk(&app, Some(ERIN), 1).await;
+    let access_admin = walk(&app, Some(ADMIN), 1).await;
+    let by_rule_get = rpc(
+        &app,
+        Some(ERIN),
+        "meta/decisions/get",
+        json!({"decision_id": broken.decision_id.to_string()}),
+    )
+    .await;
+    let by_rule_absent = rpc(
+        &app,
+        Some(ERIN),
+        "meta/decisions/get",
+        json!({"decision_id": absent}),
+    )
+    .await;
+    // The withdraw of such a row, by its id.
+    let withdraw = |subject: &'static str, decision_id: String| {
+        let app = app.clone();
+        async move {
+            rpc(
+                &app,
+                Some(subject),
+                "meta/decisions/withdraw",
+                json!({"decision_id": decision_id}),
+            )
+            .await
+        }
+    };
+    let by_rule_withdraw = withdraw(ERIN, broken.decision_id.to_string()).await;
+    let by_rule_withdraw_absent = withdraw(ERIN, absent.clone()).await;
+    let access_admin_withdraw = withdraw(ADMIN, broken.decision_id.to_string()).await;
+    drop(app);
+    runtime.shutdown().await;
+
+    assert_eq!(
+        access_admin.unreadable,
+        [broken.decision_id.to_string()],
+        "an access administrator is told of the row"
+    );
+    assert_eq!(by_rule.whole, sorted(&[&readable]), "{by_rule:?}");
+    assert!(
+        by_rule.unreadable.is_empty(),
+        "a person who administers decisions by a rule is told of none: {by_rule:?}"
+    );
+    assert_eq!(
+        by_rule_get, by_rule_absent,
+        "by its id the row answers as an id that names no decision"
+    );
+    assert_eq!(
+        by_rule_withdraw, by_rule_withdraw_absent,
+        "a rule administrator's withdraw of such a row answers as an id that names no decision"
+    );
+    assert_eq!(
+        by_rule_withdraw_absent["error"]["data"]["kind"],
+        json!("decision_not_found"),
+        "{by_rule_withdraw_absent}"
+    );
+    assert_eq!(
+        access_admin_withdraw["error"]["data"]["kind"],
+        json!("decision_unreadable"),
+        "an access administrator's withdraw is told the row cannot be decoded: \
+         {access_admin_withdraw}"
+    );
 }
 
 /// The console audit log's rows of `meta/decisions/withdraw`, read by the

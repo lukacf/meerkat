@@ -7,6 +7,7 @@ import { SearchField } from "../../../packages/console-components/src/panel-kit/
 import { ViewOptions, type ViewOptionsControl } from "../../../packages/console-components/src/panel-kit/view-options";
 import { Sparkline } from "../../../packages/console-components/src/viz/charts/sparkline";
 import { approvalAudience, type ApprovalViewer, type PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
+import { countedQuestionSets } from "../../../packages/console-core/src/pending-questions";
 import React from "react";
 import {
   DEFAULT_CONSOLE_SIDEBAR_VIEW,
@@ -112,6 +113,14 @@ interface SidebarProps {
   hostAttentionCount?: number;
   /** Replies meant for the signed-in person alone, counted there too. */
   attentionReplyCount?: number;
+  /** The open sets of questions agents asked a person, counted in "Needs
+   * you" and on the Approvals view, where each is answered. */
+  questionSetCount?: number;
+  /** The state of the read of those sets. A list that is not ready is not
+   * counted on the Approvals view (as approvals that are not read are
+   * not), and "Needs you" says so in words beside the count of what was
+   * read. */
+  questionSetStatus?: "loading" | "ready" | "stale" | "unavailable" | "forbidden" | "unsupported";
   /** Comfortable (two-line 44 px rows) or compact (one-line 32 px rows). */
   density?: SidebarDensity;
   /** The view the focused pane shows: its nav entry wears the accent rule. */
@@ -2138,6 +2147,8 @@ export const Sidebar = React.memo(function Sidebar({
   onOpenApproval,
   hostAttentionCount = 0,
   attentionReplyCount = 0,
+  questionSetCount = 0,
+  questionSetStatus,
   density = "comfortable",
   activeControl = null,
   openControls,
@@ -2805,11 +2816,18 @@ export const Sidebar = React.memo(function Sidebar({
   const pendingApprovals = pendingApprovalCount(approvals, approvalViewer);
   const attentionByKind = React.useMemo<Partial<Record<NavKind, SidebarNavAttention>>>(() => {
     const out: Partial<Record<NavKind, SidebarNavAttention>> = { ...navAttention };
-    if (pendingApprovals > 0) {
+    // The sets of a list that was read: the same count as the inbox's Pending tab.
+    const questionSets = countedQuestionSets(questionSetStatus, questionSetCount);
+    if (pendingApprovals > 0 || questionSets > 0) {
+      // The Approvals view lists both: the requests that wait for a decision
+      // and the sets of questions agents asked a person.
       out.gating = {
-        count: pendingApprovals,
+        count: pendingApprovals + questionSets,
         tone: "warn",
-        description: `${pendingApprovals} pending ${pendingApprovals === 1 ? "approval" : "approvals"}`,
+        description: [
+          pendingApprovals > 0 ? `${pendingApprovals} pending ${pendingApprovals === 1 ? "approval" : "approvals"}` : "",
+          questionSets > 0 ? `${questionSets} question ${questionSets === 1 ? "set" : "sets"}` : "",
+        ].filter(Boolean).join(", "),
       };
     }
     if (healthAttention) out.health = healthAttention;
@@ -2821,7 +2839,7 @@ export const Sidebar = React.memo(function Sidebar({
       };
     }
     return out;
-  }, [healthAttention, logsErrors, navAttention, pendingApprovals]);
+  }, [healthAttention, logsErrors, navAttention, pendingApprovals, questionSetCount, questionSetStatus]);
   const workbenchAttention = React.useMemo(() => {
     let count = 0;
     let tone: SidebarNavAttention["tone"] = "warn";
@@ -2905,7 +2923,7 @@ export const Sidebar = React.memo(function Sidebar({
       >
         {orderAnnouncement}
       </div>
-      {approvals || hostAttentionCount || attentionReplyCount ? <ApprovalAttention snapshot={approvals} hostItems={hostAttentionCount} replies={attentionReplyCount} onOpen={onOpenApproval || (() => onOpenControl("gating"))} /> : null}
+      {approvals || hostAttentionCount || attentionReplyCount || questionSetCount || questionSetStatus === "stale" || questionSetStatus === "unavailable" ? <ApprovalAttention snapshot={approvals} hostItems={hostAttentionCount} replies={attentionReplyCount} questionSets={questionSetCount} questionStatus={questionSetStatus} onOpen={onOpenApproval || (() => onOpenControl("gating"))} /> : null}
       {/* The Workbench comes before the roster's mast, so the mast's search
           and view controls sit directly above the roster list. */}
       {(navKinds.length > 0 || customSidebarButtons.length > 0 || customPanels.length > 0) && (

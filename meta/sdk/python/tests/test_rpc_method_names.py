@@ -3046,3 +3046,239 @@ async def test_gating_withdraw_omits_an_absent_reason():
     await handle.gating_withdraw("gate-pending-000001")
 
     assert calls == [("meta/gating/withdraw", {"pending_id": "gate-pending-000001"})]
+
+
+QUESTION_SET_ID = "decision:" + "a" * 64
+QUESTION_SET_DIGEST = "sha256:" + "b" * 64
+QUESTION_SET_WIRE = {
+    "pending_id": QUESTION_SET_ID,
+    "origin": {"identity": "identity:release-planner"},
+    "title": "Release plan",
+    "questions": [
+        {
+            "id": "q1",
+            "prompt": "Which region goes first?",
+            "choices": [{"id": "eu", "label": "Europe"}, {"id": "us", "label": "United States"}],
+            "recommended": "eu",
+        },
+        {
+            "id": "q2",
+            "prompt": "When should it start?",
+            "choices": [{"id": "now", "label": "Now"}, {"id": "night", "label": "Tonight"}],
+            "allow_free_text": True,
+        },
+    ],
+    "created_at_ms": 1720000000000,
+    "deadline_at_ms": 1720003600000,
+    "subject_digest": QUESTION_SET_DIGEST,
+}
+
+
+@pytest.mark.asyncio
+async def test_gating_questions_lists_the_open_question_sets():
+    from meerkat_meta import (
+        GatingOrigin,
+        GatingQuestion,
+        GatingQuestionChoice,
+        GatingQuestionSet,
+    )
+
+    handle, calls = make_mock_mob_handle({
+        "meta/gating/questions": {
+            "question_sets": [
+                {**QUESTION_SET_WIRE, "later_field": {"ignored": True}},
+                {
+                    "pending_id": "decision:" + "c" * 64,
+                    "questions": [{
+                        "id": "q1",
+                        "prompt": "Proceed?",
+                        "choices": [{"id": "y", "label": "Yes"}, {"id": "n", "label": "No"}],
+                    }],
+                    "subject_digest": "sha256:" + "d" * 64,
+                },
+            ]
+        }
+    })
+
+    sets = await handle.gating_questions()
+
+    assert calls == [("meta/gating/questions", None)]
+    assert sets[0] == GatingQuestionSet(
+        pending_id=QUESTION_SET_ID,
+        questions=[
+            GatingQuestion(
+                id="q1",
+                prompt="Which region goes first?",
+                choices=[
+                    GatingQuestionChoice("eu", "Europe"),
+                    GatingQuestionChoice("us", "United States"),
+                ],
+                allow_free_text=False,
+                recommended="eu",
+            ),
+            GatingQuestion(
+                id="q2",
+                prompt="When should it start?",
+                choices=[
+                    GatingQuestionChoice("now", "Now"),
+                    GatingQuestionChoice("night", "Tonight"),
+                ],
+                allow_free_text=True,
+                recommended=None,
+            ),
+        ],
+        subject_digest=QUESTION_SET_DIGEST,
+        origin=GatingOrigin("identity:release-planner"),
+        title="Release plan",
+        created_at_ms=1720000000000,
+        deadline_at_ms=1720003600000,
+    )
+    # Optional fields absent: no title, no origin, no times, no free text.
+    bare = sets[1]
+    assert bare.title is None
+    assert bare.origin is None
+    assert bare.created_at_ms is None
+    assert bare.deadline_at_ms is None
+    assert bare.questions[0].allow_free_text is False
+    assert bare.questions[0].recommended is None
+
+
+@pytest.mark.asyncio
+async def test_gating_questions_reads_an_answer_without_sets_as_empty():
+    handle, calls = make_mock_mob_handle({"meta/gating/questions": {}})
+
+    assert await handle.gating_questions() == []
+    assert calls == [("meta/gating/questions", None)]
+
+
+@pytest.mark.asyncio
+async def test_gating_answer_sends_the_answers_through_gating_decide():
+    from meerkat_meta import GatingQuestionAnswer, GatingQuestionSetResult
+
+    handle, calls = make_mock_mob_handle({
+        "meta/gating/decide": {
+            "pending_id": QUESTION_SET_ID,
+            "kind": "question_set",
+            "outcome": "answered",
+            "decided_at_ms": 1720000000123,
+        }
+    })
+
+    result = await handle.gating_answer(
+        QUESTION_SET_ID,
+        approver_id="operator",
+        presented_digest=QUESTION_SET_DIGEST,
+        answers=[
+            GatingQuestionAnswer.choice("q1", "us"),
+            GatingQuestionAnswer.free_text("q2", "After the 16:00 freeze"),
+        ],
+    )
+
+    assert calls == [
+        (
+            "meta/gating/decide",
+            {
+                "pending_id": QUESTION_SET_ID,
+                "decision": "approve",
+                "approver_id": "operator",
+                "presented_digest": QUESTION_SET_DIGEST,
+                "answers": [
+                    {"question_id": "q1", "answer": {"kind": "choice", "choice_id": "us"}},
+                    {
+                        "question_id": "q2",
+                        "answer": {"kind": "free_text", "text": "After the 16:00 freeze"},
+                    },
+                ],
+            },
+        )
+    ]
+    assert result == GatingQuestionSetResult(
+        pending_id=QUESTION_SET_ID,
+        kind="question_set",
+        outcome="answered",
+        decided_at_ms=1720000000123,
+    )
+
+
+@pytest.mark.asyncio
+async def test_gating_answer_accepts_wire_form_answers_and_leaves_questions_out():
+    handle, calls = make_mock_mob_handle({
+        "meta/gating/decide": {
+            "pending_id": QUESTION_SET_ID,
+            "kind": "question_set",
+            "outcome": "answered",
+        }
+    })
+    wire_answer = {"question_id": "q2", "answer": {"kind": "choice", "choice_id": "night"}}
+
+    result = await handle.gating_answer(
+        QUESTION_SET_ID,
+        approver_id="operator",
+        presented_digest=QUESTION_SET_DIGEST,
+        answers=[wire_answer],
+    )
+
+    assert calls[0][1]["answers"] == [wire_answer]
+    assert calls[0][1]["answers"][0] is not wire_answer
+    assert result.outcome == "answered"
+    assert result.decided_at_ms is None
+
+
+@pytest.mark.asyncio
+async def test_gating_answer_needs_at_least_one_answer_and_sends_nothing_without():
+    handle, calls = make_mock_mob_handle()
+
+    with pytest.raises(ValueError, match="at least one answer"):
+        await handle.gating_answer(
+            QUESTION_SET_ID,
+            approver_id="operator",
+            presented_digest=QUESTION_SET_DIGEST,
+            answers=[],
+        )
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_gating_dismiss_rejects_the_set_with_the_presented_digest():
+    handle, calls = make_mock_mob_handle({
+        "meta/gating/decide": {
+            "pending_id": QUESTION_SET_ID,
+            "kind": "question_set",
+            "outcome": "dismissed",
+            "decided_at_ms": 1720000000456,
+        }
+    })
+
+    result = await handle.gating_dismiss(
+        QUESTION_SET_ID,
+        approver_id="operator",
+        presented_digest=QUESTION_SET_DIGEST,
+    )
+
+    assert calls == [
+        (
+            "meta/gating/decide",
+            {
+                "pending_id": QUESTION_SET_ID,
+                "decision": "reject",
+                "approver_id": "operator",
+                "presented_digest": QUESTION_SET_DIGEST,
+            },
+        )
+    ]
+    assert result.outcome == "dismissed"
+    assert result.kind == "question_set"
+    assert result.decided_at_ms == 1720000000456
+
+
+def test_gating_question_answers_have_the_two_wire_forms():
+    from meerkat_meta import GatingQuestionAnswer
+
+    assert GatingQuestionAnswer.choice("q1", "a").to_wire() == {
+        "question_id": "q1",
+        "answer": {"kind": "choice", "choice_id": "a"},
+    }
+    assert GatingQuestionAnswer.free_text("q2", "Later").to_wire() == {
+        "question_id": "q2",
+        "answer": {"kind": "free_text", "text": "Later"},
+    }

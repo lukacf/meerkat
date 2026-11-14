@@ -21,11 +21,15 @@
 //!   nothing of the decision: it reads as a decision that is not there.
 //!
 //! A list pages over what the caller may see, so that it learns of no
-//! other decision. An administrator reads the store's own pages. Any other
+//! other decision: a row it may not see fills no place in a page and is
+//! never a cursor, and the request's filters choose among the rows it may
+//! see. An administrator reads every decision the filters name. Any other
 //! caller reads, through the store's indexed filters, one stream for each
 //! approver id it holds and one of its own requests, merged by decision
-//! id; its cursor names only a row it was given, and a row the store cannot
-//! decode is not shown to it.
+//! id. A cursor names only a row its caller was given. A row the store
+//! cannot decode is shown only to an administrator who is not kept apart
+//! from other people (an access administrator): it cannot be shown to be
+//! one a caller may see.
 //!
 //! While access control is enforced, the reads need `decisions.view`. The
 //! withdraw is the administrator's, `decisions.admin` while access control
@@ -44,13 +48,14 @@ use meerkat_contracts::{
 };
 use meerkat_core::approval::decision::{
     ApproverId, DecisionId, DecisionListFilter, DecisionPrincipalKey, StoredDecision,
+    UnreadableDecision,
 };
 use meerkat_runtime::decision::wire::{wire_decision, wire_unreadable_decision};
 use meerkat_runtime::decision::{DecisionError, DecisionWithdrawer, DurableDecisionService};
 use serde_json::{Value, json};
 
 use super::owner::RuntimeDecisions;
-use super::stdio::{list_filter, page_limit, parse, part_size, read_page, rendering_of};
+use super::stdio::{list_filter, page_limit, parse, part_size, rendering_of};
 use super::wire::{
     self, GET_METHOD, LIST_METHOD, MetaDecisionListResult, MetaDecisionStatus, MetaDecisionView,
     RENDERING_METHOD, WITHDRAW_METHOD,
@@ -105,6 +110,21 @@ impl ConsoleDecisionCaller<'_> {
         self.access_view
             .is_some_and(|view| view.enforced() && view.allows(ACTION_DECISIONS_ADMIN))
     }
+
+    /// Whether the caller is kept apart from other people on this Console
+    /// (an access administrator is not, and nobody is where the Console
+    /// identifies no person).
+    fn kept_apart(&self) -> bool {
+        self.access_view
+            .is_some_and(AccessView::kept_apart_from_other_people)
+    }
+
+    /// Whether the caller is told of the rows the store cannot decode: an
+    /// administrator nobody is kept from. Such a row cannot be shown to be
+    /// one the caller may see.
+    fn reads_undecodable(&self) -> bool {
+        self.administers() && !self.kept_apart()
+    }
 }
 
 /// The caller's sight of decisions, fixed for one request: the approver ids
@@ -128,6 +148,12 @@ impl<'a> Viewer<'a> {
     }
 
     fn sight(&self, row: &StoredDecision) -> Sight {
+        // A question set is its asking member's: whatever the caller holds
+        // or administers, the set of a member hidden from them reads as a
+        // decision that is not there.
+        if !self.sees_asker(row) {
+            return Sight::Nothing;
+        }
         if self.administers || self.held.contains(row.descriptor.approver_id.as_str()) {
             return Sight::Whole;
         }
@@ -140,6 +166,23 @@ impl<'a> Viewer<'a> {
                 }
             }
             _ => Sight::Nothing,
+        }
+    }
+
+    /// Whether the caller may see the member that asked `row`, when `row`
+    /// is a question set (`crate::ask_user`): the rule the gating reads
+    /// apply to an entry's origin, so a member private to someone else, or
+    /// one the Console does not know while it keeps its people apart, is
+    /// hidden. A decision of any other kind has no asker to hide. A
+    /// question set whose asker cannot be read is shown only to a caller
+    /// who is not kept apart from other people.
+    fn sees_asker(&self, row: &StoredDecision) -> bool {
+        match crate::ask_user::question_set_asker(row) {
+            crate::ask_user::QuestionSetAsker::NotAQuestionSet => true,
+            crate::ask_user::QuestionSetAsker::Asker(asker) => {
+                crate::http_console::gating_origin_visible(self.caller.access_view, &asker)
+            }
+            crate::ask_user::QuestionSetAsker::Unreadable => !self.caller.kept_apart(),
         }
     }
 
@@ -217,8 +260,9 @@ pub(crate) fn advertised_methods(
 /// The answer to a Console decision request, or `None` when the Console
 /// serves no such method (it then answers it as any other method: not
 /// found). The withdraw is a console change, checked by `change`; its
-/// refusals are decided before any store read, and are the same for every
-/// decision id.
+/// refusals of the caller are decided before any store read, and are the
+/// same for every decision id. A decision the caller may not see at all is
+/// then answered as an id that names no decision.
 pub(crate) fn handle_console_decision_rpc(
     decisions: &RuntimeDecisions,
     caller: &ConsoleDecisionCaller<'_>,
@@ -269,7 +313,7 @@ fn withdraw_change(
     if let Err(refusal) = (change.caller_current)() {
         return caller_refused(id, refusal);
     }
-    withdraw(decisions, id, params)
+    withdraw(decisions, caller, id, params)
 }
 
 /// The refusal of a console change for its caller, as the Console's other
@@ -302,31 +346,6 @@ fn list(
         },
     };
     let viewer = Viewer::of(caller);
-    if viewer.administers {
-        // The administrator reads the store's own page and cursor, and is
-        // told of the rows the server cannot read.
-        let (_, listing) = match read_page(id, &params, decisions) {
-            Ok(page) => page,
-            Err(answer) => return answer,
-        };
-        return wire::success(
-            id,
-            MetaDecisionListResult {
-                decisions: listing
-                    .decisions
-                    .iter()
-                    .map(|row| wire_decision(row, false))
-                    .collect(),
-                statuses: Vec::new(),
-                unreadable: listing
-                    .unreadable
-                    .iter()
-                    .map(wire_unreadable_decision)
-                    .collect(),
-                next_after: listing.next_after.clone(),
-            },
-        );
-    }
     let filter = match list_filter(id, &params) {
         Ok(filter) => filter,
         Err(answer) => return answer,
@@ -338,24 +357,45 @@ fn list(
     if !decisions.is_available() {
         return wire::no_decision_store(id);
     }
-    let streams = viewer.streams(&filter);
-    let (rows, more) =
-        match visible_page(decisions.owner(), &streams, params.after.as_deref(), limit) {
-            Ok(page) => page,
-            Err(error) => return wire::decision_error(id, error),
-        };
+    // An administrator reads every decision the request's filter names:
+    // one stream. Any other caller reads the streams of what it holds and
+    // of what it asked for. Either way the page is of rows the caller may
+    // see: a row it may not see fills no place in it and is no cursor.
+    let streams = if viewer.administers {
+        vec![filter]
+    } else {
+        viewer.streams(&filter)
+    };
+    let read = match visible_page(
+        decisions.owner(),
+        &streams,
+        params.after.as_deref(),
+        limit,
+        |row| viewer.sight(row) != Sight::Nothing,
+    ) {
+        Ok(read) => read,
+        Err(error) => return wire::decision_error(id, error),
+    };
     let mut page = MetaDecisionListResult {
         decisions: Vec::new(),
         statuses: Vec::new(),
-        // A row the server cannot read cannot be shown to be the caller's.
-        unreadable: Vec::new(),
-        next_after: if more {
-            rows.last().map(|row| row.decision_id.to_string())
+        // A row the server cannot read cannot be shown to be the caller's:
+        // only an administrator nobody is kept from is told of it.
+        unreadable: if caller.reads_undecodable() {
+            read.undecodable
+                .iter()
+                .map(wire_unreadable_decision)
+                .collect()
+        } else {
+            Vec::new()
+        },
+        next_after: if read.more {
+            read.rows.last().map(|row| row.decision_id.to_string())
         } else {
             None
         },
     };
-    for row in &rows {
+    for row in &read.rows {
         match viewer.sight(row) {
             Sight::Whole => page.decisions.push(wire_decision(row, false)),
             Sight::Status => page.statuses.push(MetaDecisionStatus::of(row)),
@@ -365,47 +405,74 @@ fn list(
     wire::success(id, page)
 }
 
-/// The first `limit` rows after `after` of the union of `streams`, in
-/// decision id order, and whether more may follow.
+/// A page of the rows a caller may see.
+struct VisiblePage {
+    /// The rows, in decision id order.
+    rows: Vec<StoredDecision>,
+    /// The rows of the page's stretch the store cannot decode.
+    undecodable: Vec<UnreadableDecision>,
+    /// Whether a further row the caller may see follows the last one.
+    more: bool,
+}
+
+/// The first `limit` rows after `after` of the union of `streams` that
+/// `shown` says the caller may see, in decision id order, and whether a
+/// further such row follows.
 ///
 /// Each stream is read through the store's indexed filter, page by page,
-/// until it gave `limit` rows the server can read or it ended. The first
-/// `limit` rows of the union are then all read: a row of a stream that may
-/// hold more lies within that stream's rows read, or after `limit` rows
-/// already read.
+/// until it gave one row more than `limit` that the caller may see, or it
+/// ended. The first `limit + 1` such rows of the union are then all read: a
+/// row of a stream that may hold more lies within that stream's rows read,
+/// or after `limit + 1` rows already read. A row the caller may not see
+/// fills no place and is never the page's last row, so the cursor a caller
+/// is given names a row it was given, and a page tells it nothing of the
+/// rows between. A row the store cannot decode belongs to the page whose
+/// stretch it lies in: up to the last row given when more follow.
 fn visible_page(
     owner: &DurableDecisionService,
     streams: &[DecisionListFilter],
     after: Option<&str>,
     limit: usize,
-) -> Result<(Vec<StoredDecision>, bool), DecisionError> {
+    shown: impl Fn(&StoredDecision) -> bool,
+) -> Result<VisiblePage, DecisionError> {
     let mut rows: BTreeMap<String, StoredDecision> = BTreeMap::new();
-    let mut more = false;
+    let mut undecodable: BTreeMap<String, UnreadableDecision> = BTreeMap::new();
     for stream in streams {
         let mut cursor = after.map(str::to_owned);
-        let mut readable = 0_usize;
+        let mut given = 0_usize;
         loop {
-            let listing = owner.list(stream, cursor.as_deref(), limit)?;
-            readable += listing.decisions.len();
+            let listing = owner.list(stream, cursor.as_deref(), limit.saturating_add(1))?;
+            for row in listing.unreadable {
+                undecodable.entry(row.decision_id.clone()).or_insert(row);
+            }
             for row in listing.decisions {
-                rows.entry(row.decision_id.to_string()).or_insert(row);
+                if shown(&row) {
+                    given += 1;
+                    rows.entry(row.decision_id.to_string()).or_insert(row);
+                }
             }
             match listing.next_after {
-                Some(next) if readable < limit => cursor = Some(next),
-                Some(_) => {
-                    more = true;
-                    break;
-                }
-                None => break,
+                Some(next) if given <= limit => cursor = Some(next),
+                _ => break,
             }
         }
     }
     let mut page: Vec<StoredDecision> = rows.into_values().collect();
-    if page.len() > limit {
-        page.truncate(limit);
-        more = true;
-    }
-    Ok((page, more))
+    let more = page.len() > limit;
+    page.truncate(limit);
+    let last = page
+        .last()
+        .filter(|_| more)
+        .map(|row| row.decision_id.to_string());
+    let undecodable = undecodable
+        .into_values()
+        .filter(|row| last.as_ref().is_none_or(|last| row.decision_id <= *last))
+        .collect();
+    Ok(VisiblePage {
+        rows: page,
+        undecodable,
+        more,
+    })
 }
 
 /// The decision `decision_id` names, as the caller may see it; a decision
@@ -424,10 +491,11 @@ fn visible(
     }
     let row = match decisions.owner().get(&decision_id) {
         Ok(row) => row,
-        // Only an administrator, who reads every decision whole, learns
-        // that an unreadable row is there (and its decode error); to any
-        // other caller it answers as an id that names no decision.
-        Err(DecisionError::Unreadable { .. }) if !caller.administers() => {
+        // Only an administrator nobody is kept from, who is told of the
+        // rows the store cannot decode, learns that such a row is there
+        // (and its decode error); to any other caller it answers as an id
+        // that names no decision.
+        Err(DecisionError::Unreadable { .. }) if !caller.reads_undecodable() => {
             return Err(wire::not_found(id));
         }
         Err(error) => return Err(wire::decision_error(id, error)),
@@ -484,8 +552,17 @@ fn rendering(
     }
 }
 
-/// The administrator withdraws an open decision as the host.
-fn withdraw(decisions: &RuntimeDecisions, id: &Value, params: Value) -> Value {
+/// The administrator withdraws an open decision as the host. A decision
+/// the caller may not see at all (for an administrator: the question set of
+/// a member hidden from them, and, unless the caller is told of such rows,
+/// a row the store cannot decode) is not there to withdraw: its id is
+/// answered as an id that names no decision, as the reads answer it.
+fn withdraw(
+    decisions: &RuntimeDecisions,
+    caller: &ConsoleDecisionCaller<'_>,
+    id: &Value,
+    params: Value,
+) -> Value {
     let params: DecisionWithdrawParams = match parse(id, params) {
         Ok(params) => params,
         Err(answer) => return answer,
@@ -498,6 +575,16 @@ fn withdraw(decisions: &RuntimeDecisions, id: &Value, params: Value) -> Value {
     };
     if !decisions.is_available() {
         return wire::no_decision_store(id);
+    }
+    // The read records nothing: the withdraw's own touch still answers
+    // what it records (the expiry of a decision past its deadline).
+    let hidden = match decisions.owner().for_candidate_launch().get(&decision_id) {
+        Ok(row) => Viewer::of(caller).sight(&row) == Sight::Nothing,
+        Err(DecisionError::Unreadable { .. }) => !caller.reads_undecodable(),
+        Err(_) => false,
+    };
+    if hidden {
+        return wire::not_found(id);
     }
     match decisions
         .owner()

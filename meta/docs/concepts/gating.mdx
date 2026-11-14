@@ -170,11 +170,73 @@ The audit log and pending queue are bounded runtime collections. They are not th
 
 The console route applies the same audience as pending entries: an entry recorded with an origin is visible only to callers who may view that origin's agent, and `next_cursor` never names an entry the caller cannot see. Hidden entries therefore never advance the console cursor: a stretch of them is read again on the next call, and a gap can be reported if the last visible entry is evicted meanwhile. A gap means resynchronize, not that a visible entry was lost.
 
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+From 0.9.15, on a console that can identify a person, an audit entry or a pending request whose origin is an agent the console does not know is shown to an administrator only. A decide on the console follows the pending list: a request the list does not show the caller is answered as an id that is not pending, and stays pending. The console's delivery history follows the list too: the record of an approval notification, which carries the request's id and action text, is withheld from a caller the list would not show the request. On a console that requires sign-in and has no access configuration there is no administrator, so such a request is shown to nobody there and decided by nobody there: the host decides or withdraws it, or it runs into its timeout.
+
 `GET /console/gating/stream` is a live notification stream for the console. Each connection starts with `gating.resync_required` (`initial_sync`). After that, `gating.changed` means an entry the caller may see was recorded, and `gating.resync_required` (`gap`) means the caller should re-read from the start. Frames carry no gate IDs or outcomes; the caller reads them through `meta/gating/audit` with its cursor. Origin labels and roles are resolved from the live roster when the stream opens and whenever a new origin appears. `gating.view` and the origin audience are re-checked from the live access configuration on every change and every 15 seconds without one, which also applies approval expiry; losing `gating.view` ends the stream with `gating.access_revoked`. That periodic check covers access policy and approval expiry and is not a hard latency bound. The caller's token is checked separately: once it is no longer accepted, the stream ends without a frame, as every Console stream does. A burst of changes the caller cannot see produces no frame while the stream's cursor is retained; if the burst evicts it, the stream sends `gating.resync_required` (`gap`). A frame or an audit entry is information, never authorization: acting on a decision still goes through the current action and approval owners.
 
 ## Memory conflict integration
 
 For `r2` and `r3`, the runtime checks the supplied `entity` and `topic` against memory conflicts. If the `memory` module is loaded, that core MCP boundary must provide the `memory.conflict_read` tool. Without a loaded memory module, the runtime uses its in-process conflict ledger.
+
+## Question sets
+
+A mob member can ask a person a set of multiple-choice questions with the
+stock tool `ask_user` (see
+[Asking a person](https://docs.rkat.ai/concepts/tools#asking-a-person-ask_user)
+for its arguments, limits and results). Meta mounts the tool for members and
+shows each set to people as one card in the [Console](/guides/console#question-sets):
+in the inbox and in the asking agent's conversation. The call returns to the
+agent at once; the answers reach it later as an input of their own.
+
+A question set is not a gating request. It is a durable decision of kind
+`ask_user.questions`, so it survives a restart, it ends at its deadline (the
+tool's `timeout_seconds`, one hour by default), and its result is delivered
+to the asking agent once. It is not part of `meta/gating/pending`; the open
+sets are read with [`meta/gating/questions`](/api/rpc#metagatingquestions).
+
+- **Who may answer.** On the Console, a signed-in person with `gating.decide`
+  who can view the asking agent. The person comes from the connection, as
+  for every Console decision: no request field names an approver, and a
+  caller who is not a signed-in person is refused `approver_unauthenticated`.
+  A person without `gating.decide` is refused `access_denied`. A person who
+  cannot view the asking agent is not shown its sets, and a decide of such
+  a set is answered as an id that is not pending; a set of a member private
+  to someone else is not listed to anyone else. Over the SDK transport the
+  embedding host names `approver_id`, as for every `meta/gating/decide`.
+- **Answering.** `meta/gating/decide` with the set's `pending_id`, the
+  `presented_digest` the set was shown with and `decision` `approve` plus
+  `answers` answers it; `reject` dismisses it; `escalate` is refused. A
+  person picks one choice per question, or writes their own answer where
+  the agent allowed it, and may leave questions out: at least one answer is
+  needed, and a question left out reaches the agent as `unanswered`. See
+  [Answering a question set](/api/rpc#answering-a-question-set).
+- **When the set refuses.** A decide the set itself does not take is
+  answered `-32602` with `data.kind = "decision_refused"` and the refusal
+  in `data.decision_refusal.kind`: `not_open` (the set was answered,
+  dismissed, withdrawn or timed out already), `subject_changed` (the
+  `presented_digest` is not the set's: read the set again), `expired` (the
+  deadline passed as the decision was applied) or `not_eligible`. Nothing
+  is decided, and the Console says each in words: on the set's card, or,
+  for `not_open` and `expired`, in the one line that replaces the card.
+- **How a set ends.** The agent receives one of `answered`, `dismissed`,
+  `timed_out` (nobody answered before the deadline) or `withdrawn` (the host
+  or an administrator ended it). A free-text answer is the person's own
+  words: the agent receives it as data inside the typed result.
+- **When there is no person to ask.** The call answers `no_human_surface` at
+  once, and holds nothing, when the gateway serves no Console; when its
+  Console can identify no person (it requires no sign-in and has no access
+  control with a trusted token issuer) or takes no changes (a read-only
+  Console); when the gateway keeps no durable decisions (a launch without a
+  persistent state directory); on a candidate launch; and when no answer
+  can be routed back to the asker, as for a member of a mob other than the
+  runtime's own (a sub-mob an agent created, for one).
+- **A member with its own `ask_user`.** A member whose build already has a
+  tool named `ask_user` keeps it, and Meta mounts none for that member. The
+  questions that tool asks are its own: Meta holds no decision for them,
+  `meta/gating/questions` lists none of them, and whoever mounted the tool
+  shows and answers them.
 
 ## API methods
 
@@ -185,6 +247,7 @@ The JSON-RPC methods are:
 - `meta/gating/decide`
 - `meta/gating/withdraw`
 - `meta/gating/audit`
+- `meta/gating/questions`
 
 ## See also
 

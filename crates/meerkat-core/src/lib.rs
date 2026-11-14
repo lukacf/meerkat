@@ -77,6 +77,7 @@ pub use llm_client::{
 };
 pub mod approval;
 pub mod artifact;
+pub mod ask_user;
 pub mod auth;
 pub mod authorization;
 pub mod blob;

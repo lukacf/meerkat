@@ -11,6 +11,11 @@ use super::*;
 /// read's error text.
 pub(crate) const MEMORY_CONFLICT_LOOKUP_FAILED_EVENT: &str = "memory_conflict_lookup_failed";
 
+/// The `kind` of the delivery payload that notifies an approval route's
+/// recipient of a pending request. The payload carries the request's id
+/// and action text.
+pub(crate) const APPROVAL_NOTIFICATION_KIND: &str = "gating_approval_request";
+
 fn valid_gating_origin(origin: &GatingOrigin) -> bool {
     !origin.identity.trim().is_empty()
         && origin
@@ -808,7 +813,7 @@ impl MetaRuntimeHandle {
                     let sent = self.send_delivery(DeliverySendRequest {
                         resolution,
                         payload: serde_json::json!({
-                            "kind": "gating_approval_request",
+                            "kind": APPROVAL_NOTIFICATION_KIND,
                             "pending_id": pending_id,
                             "action_id": action_id,
                             "action": action,
@@ -892,7 +897,7 @@ impl MetaRuntimeHandle {
         &mut self,
         request: GatingDecideRequest,
     ) -> Result<GatingDecisionResult, GatingDecideError> {
-        let result = self.decide_gating_action_as(request, None, None);
+        let result = self.decide_gating_action_as(request, None, None, false);
         self.flush_gating_notices();
         result
     }
@@ -908,7 +913,7 @@ impl MetaRuntimeHandle {
         request: GatingDecideRequest,
         decider: &GatingDecider,
     ) -> Result<GatingDecisionResult, GatingDecideError> {
-        let result = self.decide_gating_action_as(request, Some(decider), None);
+        let result = self.decide_gating_action_as(request, Some(decider), None, false);
         self.flush_gating_notices();
         result
     }
@@ -931,28 +936,38 @@ impl MetaRuntimeHandle {
         Result<Result<GatingDecisionResult, GatingDecideError>, E>,
         GatingNoticeBatch,
     ) {
-        self.decide_gating_action_fenced(request, None, authorize)
+        self.decide_gating_action_fenced(request, None, |_| true, authorize)
     }
 
     /// [`Self::decide_gating_action_authorized`] for a decider whose
     /// authentication the caller attests: the decision's audit entry records
     /// `evidence` beside the deciding principal.
+    ///
+    /// The caller's surface may withhold a pending request from the caller
+    /// it decides for. `shown` says, of the pending entry the request names,
+    /// whether that caller may know of it. A request it may not know of is
+    /// decided exactly as an id that is not pending: `authorize` is asked as
+    /// for no entry, and the owner refuses as it refuses an unknown id, with
+    /// the same checks in the same order, so the caller cannot tell a
+    /// withheld request from an id that names none.
     pub(crate) fn decide_gating_action_attested<E>(
         &mut self,
         request: GatingDecideRequest,
         evidence: &GatingDecisionEvidence,
+        shown: impl FnOnce(&GatingPendingEntry) -> bool,
         authorize: impl FnOnce(Option<&GatingPendingEntry>) -> Result<GatingDecider, E>,
     ) -> (
         Result<Result<GatingDecisionResult, GatingDecideError>, E>,
         GatingNoticeBatch,
     ) {
-        self.decide_gating_action_fenced(request, Some(evidence), authorize)
+        self.decide_gating_action_fenced(request, Some(evidence), shown, authorize)
     }
 
     fn decide_gating_action_fenced<E>(
         &mut self,
         request: GatingDecideRequest,
         evidence: Option<&GatingDecisionEvidence>,
+        shown: impl FnOnce(&GatingPendingEntry) -> bool,
         authorize: impl FnOnce(Option<&GatingPendingEntry>) -> Result<GatingDecider, E>,
     ) -> (
         Result<Result<GatingDecisionResult, GatingDecideError>, E>,
@@ -960,8 +975,11 @@ impl MetaRuntimeHandle {
     ) {
         self.refresh_gating_timeouts();
         let pending = self.gating_pending.get(request.pending_id.trim()).cloned();
-        let result = authorize(pending.as_ref())
-            .map(|decider| self.decide_gating_action_as(request, Some(&decider), evidence));
+        let withheld = pending.as_ref().is_some_and(|entry| !shown(entry));
+        let pending = pending.filter(|_| !withheld);
+        let result = authorize(pending.as_ref()).map(|decider| {
+            self.decide_gating_action_as(request, Some(&decider), evidence, withheld)
+        });
         (result, self.take_gating_notices())
     }
 
@@ -982,6 +1000,7 @@ impl MetaRuntimeHandle {
         request: GatingDecideRequest,
         decider: Option<&GatingDecider>,
         evidence: Option<&GatingDecisionEvidence>,
+        withheld: bool,
     ) -> Result<GatingDecisionResult, GatingDecideError> {
         let now_ms = current_time_ms();
         self.refresh_gating_timeouts_at(now_ms);
@@ -996,9 +1015,13 @@ impl MetaRuntimeHandle {
         let decision = request.decision.clone();
         let reason = request.reason.clone();
         let pending_id = request.pending_id.trim().to_string();
+        // A request withheld from the caller is not pending for it: the
+        // lookup answers as for an id that names no request, after the same
+        // checks.
         let pending_entry = self
             .gating_pending
             .get(&pending_id)
+            .filter(|_| !withheld)
             .cloned()
             .ok_or_else(|| GatingDecideError::UnknownPendingId(pending_id.clone()))?;
 
@@ -2016,6 +2039,68 @@ mod withdraw_tests {
             Ok(Err(GatingDecideError::UnknownPendingId(pending_id)))
         );
         assert_eq!(owner.gating_state_snapshot(), before);
+    }
+
+    /// A request the deciding surface does not show its caller is decided
+    /// exactly as an id that is not pending: the authorizer is asked as for
+    /// no entry, the owner answers as it answers an unknown id (also when it
+    /// can mint no ids), and nothing changes. A request the surface shows
+    /// is decided as before.
+    #[test]
+    fn a_request_not_shown_to_its_caller_is_decided_as_an_id_that_is_not_pending() {
+        const NOT_PENDING: &str = "gate-pending-never-minted";
+        let evidence = GatingDecisionEvidence {
+            assurance: meerkat_core::ApprovalAssurance::PersonAuthenticated,
+            login_scope_digest: "digest".to_string(),
+        };
+        let mut owner = owner();
+        let pending_id = pend(&mut owner);
+        let before = owner.gating_state_snapshot();
+        let mut asked = Vec::new();
+        let mut decide_as = |owner: &mut MetaRuntimeHandle, id: &str, shown: bool| {
+            let (result, _notices) = owner.decide_gating_action_attested(
+                decide(id, GatingDecision::Approve),
+                &evidence,
+                |_| shown,
+                |entry| {
+                    asked.push(entry.is_some());
+                    Ok::<_, ()>(GatingDecider {
+                        principal: "owner@example.test".to_string(),
+                        held_approver_ids: ["person:owner".to_string()].into_iter().collect(),
+                    })
+                },
+            );
+            result
+        };
+        let withheld = decide_as(&mut owner, &pending_id, false);
+        let absent = decide_as(&mut owner, NOT_PENDING, true);
+        assert_eq!(
+            withheld,
+            Ok(Err(GatingDecideError::UnknownPendingId(pending_id.clone())))
+        );
+        assert_eq!(
+            absent,
+            Ok(Err(GatingDecideError::UnknownPendingId(
+                NOT_PENDING.to_string()
+            )))
+        );
+        assert_eq!(owner.gating_state_snapshot(), before, "nothing changed");
+
+        // An owner that can mint no ids answers both the same way.
+        let sequence = owner.gating_sequence;
+        owner.gating_sequence = u64::MAX;
+        let withheld = decide_as(&mut owner, &pending_id, false);
+        let absent = decide_as(&mut owner, NOT_PENDING, true);
+        assert!(
+            matches!(withheld, Ok(Err(GatingDecideError::IdsUnavailable(_)))),
+            "{withheld:?}"
+        );
+        assert_eq!(withheld, absent);
+        owner.gating_sequence = sequence;
+
+        let shown = decide_as(&mut owner, &pending_id, true);
+        assert!(matches!(shown, Ok(Ok(_))), "{shown:?}");
+        assert_eq!(asked, [false, false, false, false, true]);
     }
 
     #[test]

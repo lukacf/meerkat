@@ -112,6 +112,7 @@ export type { ConversationViewportKey, ConversationScrollControllerOptions } fro
 export { ConsoleTransportStatus, consoleTransportLabel } from "./conversation/transport-status";
 
 export * from "./conversation/approval-card";
+export * from "./conversation/question-set-card";
 
 export * from "./conversation/context-chips";
 

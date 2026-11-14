@@ -2706,6 +2706,164 @@ describe("MobHandle.gatingAudit()", () => {
   });
 });
 
+describe("MobHandle question sets", () => {
+  const pendingId = `decision:${"a".repeat(64)}`;
+  const digest = `sha256:${"b".repeat(64)}`;
+  const wire = {
+    pending_id: pendingId,
+    origin: { identity: "identity:release-planner" },
+    title: "Release plan",
+    questions: [
+      {
+        id: "q1",
+        prompt: "Which region goes first?",
+        choices: [{ id: "eu", label: "Europe" }, { id: "us", label: "United States" }],
+        recommended: "eu",
+      },
+      {
+        id: "q2",
+        prompt: "When should it start?",
+        choices: [{ id: "now", label: "Now" }, { id: "night", label: "Tonight" }],
+        allow_free_text: true,
+      },
+    ],
+    created_at_ms: 1720000000000,
+    deadline_at_ms: 1720003600000,
+    subject_digest: digest,
+  };
+
+  it("gatingQuestions() sends meta/gating/questions and parses the open sets", async () => {
+    const { handle, calls, setResponse } = createMockRuntime();
+    setResponse(() => ({
+      question_sets: [
+        { ...wire, later_field: { ignored: true } },
+        {
+          pending_id: `decision:${"c".repeat(64)}`,
+          questions: [{
+            id: "q1",
+            prompt: "Proceed?",
+            choices: [{ id: "y", label: "Yes" }, { id: "n", label: "No" }],
+          }],
+          subject_digest: `sha256:${"d".repeat(64)}`,
+        },
+      ],
+    }));
+
+    const sets = await handle.gatingQuestions();
+    assert.deepEqual(calls, [{ method: "meta/gating/questions", params: undefined }]);
+    assert.deepEqual(sets[0], {
+      pendingId,
+      origin: { identity: "identity:release-planner", conversationId: null, interactionId: null },
+      title: "Release plan",
+      questions: [
+        {
+          id: "q1",
+          prompt: "Which region goes first?",
+          choices: [{ id: "eu", label: "Europe" }, { id: "us", label: "United States" }],
+          allowFreeText: false,
+          recommended: "eu",
+        },
+        {
+          id: "q2",
+          prompt: "When should it start?",
+          choices: [{ id: "now", label: "Now" }, { id: "night", label: "Tonight" }],
+          allowFreeText: true,
+          recommended: null,
+        },
+      ],
+      createdAtMs: 1720000000000,
+      deadlineAtMs: 1720003600000,
+      subjectDigest: digest,
+    });
+    // Optional fields absent: no title, no origin, no times, no free text.
+    assert.equal(sets[1].title, null);
+    assert.equal(sets[1].origin, null);
+    assert.equal(sets[1].createdAtMs, null);
+    assert.equal(sets[1].deadlineAtMs, null);
+    assert.equal(sets[1].questions[0].allowFreeText, false);
+    assert.equal(sets[1].questions[0].recommended, null);
+  });
+
+  it("gatingQuestions() reads an answer without sets as empty", async () => {
+    const { handle, calls, setResponse } = createMockRuntime();
+    setResponse(() => ({}));
+    assert.deepEqual(await handle.gatingQuestions(), []);
+    assert.equal(calls[0].method, "meta/gating/questions");
+  });
+
+  it("gatingAnswer() sends the answers through meta/gating/decide", async () => {
+    const { handle, calls, setResponse } = createMockRuntime();
+    setResponse(() => ({
+      pending_id: pendingId,
+      kind: "question_set",
+      outcome: "answered",
+      decided_at_ms: 1720000000123,
+    }));
+
+    const result = await handle.gatingAnswer(pendingId, {
+      approverId: "operator",
+      presentedDigest: digest,
+      answers: [
+        { questionId: "q1", answer: { kind: "choice", choiceId: "us" } },
+        { questionId: "q2", answer: { kind: "free_text", text: "After the 16:00 freeze" } },
+      ],
+    });
+    assert.deepEqual(calls, [{
+      method: "meta/gating/decide",
+      params: {
+        pending_id: pendingId,
+        decision: "approve",
+        approver_id: "operator",
+        presented_digest: digest,
+        answers: [
+          { question_id: "q1", answer: { kind: "choice", choice_id: "us" } },
+          { question_id: "q2", answer: { kind: "free_text", text: "After the 16:00 freeze" } },
+        ],
+      },
+    }]);
+    assert.deepEqual(result, {
+      pendingId,
+      kind: "question_set",
+      outcome: "answered",
+      decidedAtMs: 1720000000123,
+    });
+  });
+
+  it("gatingAnswer() needs at least one answer and sends nothing without", async () => {
+    const { handle, calls } = createMockRuntime();
+    await assert.rejects(
+      () => handle.gatingAnswer(pendingId, { approverId: "operator", presentedDigest: digest, answers: [] }),
+      /at least one answer/,
+    );
+    assert.deepEqual(calls, []);
+  });
+
+  it("gatingDismiss() rejects the set with the presented digest", async () => {
+    const { handle, calls, setResponse } = createMockRuntime();
+    setResponse(() => ({ pending_id: pendingId, kind: "question_set", outcome: "dismissed" }));
+
+    const result = await handle.gatingDismiss(pendingId, {
+      approverId: "operator",
+      presentedDigest: digest,
+    });
+    assert.deepEqual(calls, [{
+      method: "meta/gating/decide",
+      params: {
+        pending_id: pendingId,
+        decision: "reject",
+        approver_id: "operator",
+        presented_digest: digest,
+      },
+    }]);
+    assert.deepEqual(result, {
+      pendingId,
+      kind: "question_set",
+      outcome: "dismissed",
+      decidedAtMs: null,
+    });
+  });
+});
+
 describe("MobHandle.rediscover()", () => {
   it("returns RediscoverReport on normal response", async () => {
     const { handle, calls, setResponse } = createMockRuntime();

@@ -502,6 +502,11 @@ pub(crate) trait ConsoleScheduleDoor: Send + Sync {
     /// occurrence's delivery idempotency key) in the sender's scope. `Err`
     /// carries why the Console refused it; nothing was sent then.
     async fn send(&self, send: &ConsoleScheduledSend, delivery_key: &str) -> Result<(), String>;
+
+    /// Whether a person can decide on this Console: it can identify a
+    /// person and it takes changes. On one that cannot, nobody answers what
+    /// an agent asks.
+    fn takes_a_persons_decision(&self) -> bool;
 }
 
 type DoorSender = watch::Sender<Option<Arc<dyn ConsoleScheduleDoor>>>;
@@ -535,6 +540,34 @@ impl ConsoleScheduleDoorSlot {
 
     fn downgrade(&self) -> Weak<DoorSender> {
         Arc::downgrade(&self.0)
+    }
+
+    /// Whether the runtime serves a Console, as this slot knows it: read
+    /// through the returned probe, which holds the slot weakly.
+    pub(crate) fn served(&self) -> ConsoleServed {
+        ConsoleServed(self.downgrade())
+    }
+}
+
+/// Whether a runtime serves a Console now, and whether a person can decide
+/// on it: a console router build installed its send path
+/// ([`ConsoleScheduleDoorSlot::install`]) and it still stands (it is
+/// cleared when the console projection is replaced and at shutdown).
+/// Held weakly, so a holder never keeps a stopped runtime's Console alive;
+/// a runtime that is gone serves none.
+#[derive(Clone)]
+pub(crate) struct ConsoleServed(Weak<DoorSender>);
+
+impl ConsoleServed {
+    /// Whether the runtime serves a Console now on which a person can
+    /// decide ([`ConsoleScheduleDoor::takes_a_persons_decision`]).
+    pub(crate) fn takes_a_persons_decision(&self) -> bool {
+        self.0.upgrade().is_some_and(|doors| {
+            doors
+                .borrow()
+                .as_ref()
+                .is_some_and(|door| door.takes_a_persons_decision())
+        })
     }
 }
 
@@ -1262,6 +1295,10 @@ mod tests {
 
     #[async_trait]
     impl ConsoleScheduleDoor for RecordingDoor {
+        fn takes_a_persons_decision(&self) -> bool {
+            true
+        }
+
         async fn send(
             &self,
             send: &ConsoleScheduledSend,

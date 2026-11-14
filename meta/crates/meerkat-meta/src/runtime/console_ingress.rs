@@ -437,6 +437,17 @@ pub(crate) fn console_identifies_people(
             && validate_trusted_oidc_runtime_config(&decisions.trusted_oidc).is_ok())
 }
 
+/// Whether a person can decide on this console: it can identify a person
+/// ([`console_identifies_people`]) and it takes changes. On a console that
+/// identifies nobody, or a read-only one, nobody answers what an agent asks
+/// a person.
+pub(crate) fn console_takes_a_persons_decision(
+    decisions: &RuntimeDecisionState,
+    access: Option<&AccessController>,
+) -> bool {
+    console_identifies_people(decisions, access) && !decisions.console.read_only
+}
+
 /// The view of a caller whose request carries no audience the Console
 /// resolved (an embedder's own REST route): the view of the subject the
 /// route's authentication resolved, or, where sign-in is optional, of the
@@ -2152,6 +2163,21 @@ impl AuthenticatedConsoleHuman {
             None => base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.token_digest),
         };
         format!("sha256:{:x}", Sha256::digest(scope.as_bytes()))
+    }
+
+    /// The host authentication scope of an event this human made: the
+    /// signed login association ([`Self::login_scope`]), or, for a token
+    /// that carries none, its unpadded base64url digest (one login per
+    /// token). Its digest is [`Self::login_scope_digest`]; a record keeps
+    /// that digest and never the scope.
+    pub(crate) fn authentication_scope(
+        &self,
+    ) -> meerkat_core::approval::consent::HostAuthenticationScope {
+        use base64::Engine as _;
+        meerkat_core::approval::consent::HostAuthenticationScope::new(match &self.login_scope {
+            Some(scope) => scope.clone(),
+            None => base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.token_digest),
+        })
     }
 
     /// The human's qualified principal: a `Human` whose id is the verified

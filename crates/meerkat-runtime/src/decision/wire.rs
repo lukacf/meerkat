@@ -6,19 +6,21 @@
 use std::num::NonZeroU32;
 
 use meerkat_contracts::{
-    DecisionAudienceRequest, DecisionListResult, DecisionPresentationRequest, WireCanonicalPart,
-    WireDecision, WireDecisionAssurance, WireDecisionEffect, WireDecisionEvidence,
-    WireDecisionNoticeState, WireDecisionOutcome, WireDecisionPhase, WireDecisionRefusal,
-    WireDecisionReviewVerdict, WireDecisionStage, WireDecisionTier, WirePresentationAudience,
-    WirePresentationLink, WirePresentationRecord, WireUnreadableDecision,
+    DecisionAudienceRequest, DecisionListResult, DecisionPresentationRequest, WireAskUserAnswer,
+    WireAskUserQuestionAnswer, WireCanonicalPart, WireDecision, WireDecisionAnswer,
+    WireDecisionAssurance, WireDecisionEffect, WireDecisionEvidence, WireDecisionNoticeState,
+    WireDecisionOutcome, WireDecisionPhase, WireDecisionRefusal, WireDecisionReviewVerdict,
+    WireDecisionStage, WireDecisionTier, WirePresentationAudience, WirePresentationLink,
+    WirePresentationRecord, WireUnreadableDecision,
 };
 use meerkat_core::ApprovalAssurance;
 use meerkat_core::approval::decision::{
-    ApproverId, CanonicalPart, DecisionContractError, DecisionEvidence, DecisionNotice,
-    DecisionOutcome, DecisionPhase, DecisionPrincipalKey, DecisionReference, DecisionReviewVerdict,
-    DecisionStage, DecisionTier, PresentationAudience, PresentationLink, PresentationRecord,
-    Sha256Digest, StoredDecision, UnreadableDecision,
+    ApproverId, CanonicalPart, DecisionAnswer, DecisionContractError, DecisionEvidence,
+    DecisionNotice, DecisionOutcome, DecisionPhase, DecisionPrincipalKey, DecisionReference,
+    DecisionReviewVerdict, DecisionStage, DecisionTier, PresentationAudience, PresentationLink,
+    PresentationRecord, Sha256Digest, StoredDecision, UnreadableDecision,
 };
+use meerkat_core::ask_user::AskUserAnswer;
 
 use super::effect::{DecisionEffect, decision_effect};
 use super::service::{DecisionListing, DecisionRefusal};
@@ -222,6 +224,7 @@ fn wire_decision_evidence(evidence: &DecisionEvidence) -> WireDecisionEvidence {
             presentation,
             approve,
             reason,
+            answer,
             ..
         } => WireDecisionEvidence::Human {
             decider: decider.to_string(),
@@ -240,6 +243,7 @@ fn wire_decision_evidence(evidence: &DecisionEvidence) -> WireDecisionEvidence {
             presentation: presentation.as_ref().map(wire_presentation),
             approve: *approve,
             reason: reason.clone(),
+            answer: answer.as_ref().map(wire_decision_answer),
         },
         DecisionEvidence::Review {
             reviewer,
@@ -262,6 +266,30 @@ fn wire_decision_evidence(evidence: &DecisionEvidence) -> WireDecisionEvidence {
             feedback: feedback.clone(),
         },
         _ => WireDecisionEvidence::Unknown,
+    }
+}
+
+/// The typed answer a human decision's evidence carries.
+fn wire_decision_answer(answer: &DecisionAnswer) -> WireDecisionAnswer {
+    match answer {
+        DecisionAnswer::AskUser { answers } => WireDecisionAnswer::AskUser {
+            answers: answers
+                .iter()
+                .map(|answered| WireAskUserQuestionAnswer {
+                    question_id: answered.question_id.clone(),
+                    answer: match &answered.answer {
+                        AskUserAnswer::Choice { choice_id } => WireAskUserAnswer::Choice {
+                            choice_id: choice_id.clone(),
+                        },
+                        AskUserAnswer::FreeText { text } => {
+                            WireAskUserAnswer::FreeText { text: text.clone() }
+                        }
+                        AskUserAnswer::Unanswered => WireAskUserAnswer::Unanswered,
+                    },
+                })
+                .collect(),
+        },
+        _ => WireDecisionAnswer::Unknown,
     }
 }
 

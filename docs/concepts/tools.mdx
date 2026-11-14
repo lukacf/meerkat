@@ -416,6 +416,59 @@ may run at all, and an application tool policy's member tool grants
 (`CompiledMemberToolGrant`) decide which tools a member may use and with what
 consequence. Both still apply to a call a scoped grant opened.
 
+### Asking a person (`ask_user`)
+
+`ask_user` lets an agent put a set of multiple-choice questions to a person
+and continue once they are answered. It is a stock tool that a host mounts:
+`meerkat-core` defines the tool, its typed questions, answers and outcomes
+and the seam a host implements (`AskUserHost`), and no build has the tool
+until its host mounts it. [Meerkat Meta](/meta/concepts/gating) mounts it for
+mob members and answers it in its Console (see "Question sets" on that
+page). `rkat`, `rkat-rpc`, the REST server
+and the Web SDK do not mount it.
+
+- **Arguments.** `questions` (required), an optional `title` and an optional
+  `timeout_seconds`. Each question has an `id`, a `prompt` and `choices`
+  (each an `id` and a `label`), and may set `allow_free_text` (the person may
+  write their own answer instead of a choice; off when absent) and
+  `recommended` (the id of the choice the agent recommends; it is shown to
+  the person and never preselected). Put the questions that belong together
+  in one call: a person answers one set at a time.
+- **Limits.** 1 to 10 questions, each with 2 to 8 choices. An id is 1 to 32
+  bytes of `a-z`, `0-9`, `_` and `-`, unique among the set's questions or
+  the question's choices. A prompt is at most 1024 bytes, a label 256, the
+  title 200. `recommended` names a choice of its own question.
+  `timeout_seconds` is 60 to 604800 (7 days) and defaults to 3600. A
+  free-text answer is 1 to 280 bytes. A call outside these limits is refused
+  as invalid arguments and asks nothing.
+- **The result comes in two steps.** The call returns at once; it never waits
+  for the person. Its result is
+  `{"outcome": "asked", "request_id", "answer_by", "answers": [], "note"}`:
+  the questions are now with a person, `request_id` names the request and
+  `answer_by` is its deadline. The answers arrive later as an input of their
+  own, labelled `ask_user_result`:
+  `{"outcome", "request_id", "answers": [{"question_id", "answer"}], "note"}`,
+  where each `answer` is `{"kind": "choice", "choice_id"}`,
+  `{"kind": "free_text", "text"}` or `{"kind": "unanswered"}`. The input
+  starts a turn of an idle agent, and the same `request_id` ties it to the
+  call.
+- **Outcomes.** At the call: `asked`, or `no_human_surface` when the host
+  has nowhere to show the questions to a person (nothing is held, and no
+  later input follows). In the later input: `answered` (the person sent
+  answers; a question they left out reads `unanswered`), `dismissed` (the
+  person declined to answer), `timed_out` (nobody answered before
+  `answer_by`; every question reads `unanswered`) and `withdrawn` (the host
+  ended the request before a person decided it).
+- **Free text is data.** A free-text answer is the person's own words about
+  the question asked. An agent reads it as an answer, not as instructions
+  that change what it may do: the person's authority over the agent is
+  whatever the host gave them, and an answer adds none.
+
+The questions and their end are held by the host. In Meta a set is a
+[durable decision](/api/rpc#durable-decisions) of kind `ask_user.questions`:
+it survives a restart, ends at its deadline, and the result reaches the
+asking agent once.
+
 ## Multimodal tool results
 
 Tools can return rich content beyond plain text. The injected runtime shape is `ToolResult.content: Vec<ContentBlock>`, with helper constructors for text-only or multimodal output.

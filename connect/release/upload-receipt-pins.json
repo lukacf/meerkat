@@ -8,8 +8,8 @@
       "non_published_list_sha256": null,
       "detector_pinned_sha256": "32ff711494f2e18ab58e3e8f5df32a5ddfe2ce01384879fa94bb0a41c95f7582",
       "detector_current_sha256": "88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509",
-      "detector_pinned_default_rules_sha256": null,
-      "detector_current_default_rules_sha256": null
+      "detector_pinned_default_rules_sha256": "b94aad1d0f105e4d7cb230872461705a4b04a7743c656836144ae6853cb33e1b",
+      "detector_current_default_rules_sha256": "e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf"
     },
     "macos-arm64": {
       "names": "holds-target",

@@ -527,8 +527,8 @@ match event {
     AgentEvent::RequestReasoningLowered {
         turn_number, fallback_attempt, provider, model, requested, baseline, outcome,
     } => {}
-    // One request was sent with the session's reasoning_effort level: the
-    // level it named, the level sent, the model and the route
+    // From 0.9.15: one request was sent with the session's reasoning_effort
+    // level: the level it named, the level sent, the model and the route
     AgentEvent::RequestReasoningEffortResolved { turn_number, fallback_attempt, resolution } => {}
 
     // Tool execution

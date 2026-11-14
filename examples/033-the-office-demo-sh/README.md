@@ -200,6 +200,8 @@ Provider requests are routed to the configured proxy base URL, which must own
 the real credentials and expose `/anthropic`, `/openai`, and `/gemini` routes.
 The browser uses placeholder keys and auto-starts on load.
 
+Known issue, noted 2026-11-14: the proxy that ships with `@rkat/web` 0.4.1 through 0.9.14 (`npx @rkat/web proxy`) is not an authenticated proxy. It does not check who calls it, and it listens on every network interface of the machine although it prints `localhost`. See the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14) for who needs to act and what to do.
+
 ## Event Scenarios
 
 1. **Client Escalation** — Acme Corp's Q4 deliverables are late

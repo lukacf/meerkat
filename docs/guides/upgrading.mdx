@@ -612,9 +612,16 @@ compares the text with the record's and writes nothing when they are equal. A
 record that only lost its fork scope, as on a host store after a rollback,
 therefore stays its member's alone through an update that keeps the text. To
 keep the text, update the agent twice: once with a changed text, then with the
-earlier text put back. 0.9.15 then writes the record at two new revisions, the
-second with the earlier text and for the agent and its forks (confirmed by a
-run, on a record written again on 0.9.14 with the same text and without the
+earlier text put back. Make the two updates one after the other and choose a
+change that does no harm: a run of the agent that starts between them works
+under the changed text, and a conversation first built between them keeps it
+in its first prompt, with the earlier text appended after it (read from the
+source). Where the identity policy holds a change of instructions (class
+`descriptive`) for approval, each of the two updates is a request of its own
+and needs its own approval; request the second once the first is carried out
+(read from the source). 0.9.15 then writes the record at two new revisions,
+the second with the earlier text and for the agent and its forks (confirmed by
+a run, on a record written again on 0.9.14 with the same text and without the
 fork scope; a host store was not run). Forks of the agent seated before the
 rollback keep no lineage root on a host store and are not selected by the
 rewritten record, as in the `include_forks` item (read from the source).
@@ -652,9 +659,10 @@ needs no change.
 **Identity policy.** A policy that sets `approval.timeouts_ms.archive` or
 `approval.timeouts_ms.adopt`, or in which a rule of `approval.rules` lists
 `archive` or `adopt` under `change`, is refused by a 0.9.14 gateway at init,
-enabled or not (confirmed by a run for `archive`, in a rule's `change` and
-under `approval.timeouts_ms` of a disabled policy; `adopt` was read from the
-source). **Do:** before a rollback, remove those keys and values from
+enabled or not (confirmed by a run for `archive`: in a rule's `change` of an
+enabled policy and under `approval.timeouts_ms` of a disabled one; the other
+combinations and `adopt` were read from the source). **Do:** before a
+rollback, remove those keys and values from
 `runtime_options.identity_creation`; add them again after the return.
 
 **Agents created at run time.** A 0.9.14 gateway starts on a state that holds
@@ -682,15 +690,15 @@ configured one: listed once, read by name, sent to (confirmed by a run).
 
 An archived agent, and one that awaits its preparation, stay as they are while
 rolled back (confirmed by a run). The Console lists each once and reads it by
-name. A send through the gateway is refused: for good when the agent is
-archived (`identity_archived`, or an internal error for an adopted agent that
-its configuration still lists), as retryable when it awaits its preparation. A
-0.9.14 gateway has no method that unarchives the one or settles the other. A
-send from the Console to such an agent is lost: the call is answered as
-accepted, nothing is delivered, the message then shows in the Console's
-conversation as a failed delivery (`delivery_failed`) without a reason, and it
-is not delivered later, the return to 0.9.15 and an unarchive included
-(confirmed by a run).
+name. A send through the gateway is refused: as final (not retryable) when the
+agent is archived (`identity_archived`; an internal error for an adopted agent
+that its configuration still lists), until the agent is unarchived on 0.9.15;
+as retryable when it awaits its preparation. A 0.9.14 gateway has no method
+that unarchives the one or settles the other. A send from the Console to such
+an agent is lost: the call is answered as accepted, nothing is delivered, the
+message then shows in the Console's conversation as a failed delivery
+(`delivery_failed`) without a reason, and it is not delivered later, the
+return to 0.9.15 and an unarchive included (confirmed by a run).
 
 A send to an agent that is owed its seat is refused as retryable until the mob
 next starts (a restart of the gateway, or the resume of a stopped mob), which
@@ -723,14 +731,21 @@ everywhere.
   that names a role, whether or not the agent has a seated member; a rule that
   names a label of the agent hides it (confirmed by a run). A seated one is
   listed twice: a rule by role hides the first entry, its member's, and not
-  the second, the duplicate, which carries no role (confirmed by a run).
+  the second, the agent's own entry, which carries no role (confirmed by a
+  run).
 - **A read by name** (`meta/console/inspect_identity`,
   `meta/identity/resolved_tools`) of such an agent that has no seated member
   (archived, or awaiting its preparation) is decided without its role and its
   labels: a deny that names either does not apply. A read by name of a seated
-  one is decided by both (confirmed by a run).
-- **A deny rule that names the agent** hides its entry and refuses the reads
+  one is decided by both. A person whom a rule by role or by label keeps out
+  is refused by the rule (`-32030`, `access_denied`), on
+  `meta/console/inspect_identity` as on `meta/identity/resolved_tools`. For a
+  person the rules admit, `meta/identity/resolved_tools` answers, and
+  `meta/console/inspect_identity` fails as the item above says: with an
+  internal error (`-32000`), not a refusal, so a caller can tell the two apart
   (confirmed by a run).
+- **A deny rule that names the agent** hides its entry, both entries of a
+  seated one, and refuses the reads (confirmed by a run).
 - **An agent private to a person** stays private: another signed-in person who
   is no administrator is shown no entry of it, gets no read of it by name and
   nothing of its conversation, and cannot send to it, whether it is seated or

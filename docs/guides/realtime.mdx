@@ -700,7 +700,10 @@ the request's work while that runs, or held for work that has not started.
 Only the same sentence does: words that begin more than 1.6 s after the
 user's previous word ended (on the positions the provider reports for the
 user's words) are a new turn, which the voice model answers or delegates as a
-request of its own, and nothing of it reaches the earlier request's work.
+request of its own, and nothing of it reaches the earlier request's work. A
+turn joins a request whole or not at all: when the voice model has said
+nothing since the rest of the sentence and the user then speaks again after
+such a pause, both parts are one turn, and neither joins the request.
 
 Assistant output may begin on a fresh channel from startup context or later
 canonical updates, without microphone input. Generated runtime authority keeps

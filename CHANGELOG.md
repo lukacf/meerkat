@@ -1650,7 +1650,10 @@ them.
   the provider's transcript drops more than 1.6 s of the user's words in
   the middle of a sentence, the rest of that sentence does not join a
   request delegated before the gap: it is a new turn, and the user may have
-  to say it again.
+  to say it again. And words of the same sentence that are still in an
+  unfinished turn when the user speaks again after such a pause (the voice
+  model said nothing in between) do not join the request either: a turn
+  joins a request whole or not at all.
 
 ## [0.9.14] - 2026-11-11
 

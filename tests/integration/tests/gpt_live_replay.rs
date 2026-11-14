@@ -3450,6 +3450,10 @@ fn s106_replay_reports_no_later_turn_as_continuing_an_earlier_delegation()
         delegations,
         "the capture must hold one joined delegation per recorded delegation"
     );
+    // The counted label is the adapter's own: its unit row
+    // `a_continuation_is_handed_on_under_the_label_the_replay_row_counts`
+    // fails when the label is renamed, so a zero here is never a renamed
+    // label.
     assert_eq!(
         lowered.count("user_turn_continues_delegation"),
         0,

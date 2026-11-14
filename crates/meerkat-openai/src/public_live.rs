@@ -10187,6 +10187,83 @@ mod tests {
         assert_eq!(markers[0].1, "dlg_note");
     }
 
+    /// The point a sentence pause is measured from is the furthest end of
+    /// the user's speech so far, not the end of the delta that arrived
+    /// last: an earlier word transcribed late never moves it back. Here the
+    /// sentence goes on at 2400 ms, an earlier word (1400 to 1600 ms)
+    /// arrives after it, and the next word begins at 3800 ms: 1200 ms after
+    /// the speech so far, but 2200 ms after the late word's end. The turn
+    /// still continues the delegation.
+    #[test]
+    fn a_late_earlier_word_does_not_move_the_pause_reference_back() {
+        let mut state = state_with_mid_utterance_delegation("dlg_note");
+        state
+            .apply_frame(frame(input_delta_span(" into", 2400.0, 2600.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(input_delta_span(" please", 1400.0, 1600.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(input_delta_span(" notes dot md", 3800.0, 4000.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span("On it.", 4400.0, 4600.0)))
+            .unwrap();
+        let observations = drain(&mut state);
+        let continued: Vec<(&str, &str)> = observations
+            .iter()
+            .filter_map(|observation| match observation {
+                GptLiveBrokerObservation::UserTurnContinuesDelegation {
+                    delegation,
+                    transcript,
+                    ..
+                } => Some((delegation.0.as_str(), transcript.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            continued,
+            [("dlg_note", " into please notes dot md")],
+            "a late earlier word moved the pause reference back and the sentence was cut: {observations:?}"
+        );
+    }
+
+    /// The label a continuation carries in the line the adapter writes for
+    /// every observation it hands on. The keyless replay row
+    /// `s106_replay_reports_no_later_turn_as_continuing_an_earlier_delegation`
+    /// counts that label in a replay's lines and expects none; renamed here
+    /// alone, its count would stay at zero for the wrong reason. A rename
+    /// changes this row and that one together.
+    #[test]
+    fn a_continuation_is_handed_on_under_the_label_the_replay_row_counts() {
+        let mut state = state_with_mid_utterance_delegation("dlg_note");
+        state
+            .apply_frame(frame(input_delta_span(
+                " into notes dot md",
+                1400.0,
+                1600.0,
+            )))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span("On it.", 1800.0, 2000.0)))
+            .unwrap();
+        let rendered: Vec<String> = drain(&mut state)
+            .iter()
+            .filter(|observation| {
+                matches!(
+                    observation,
+                    GptLiveBrokerObservation::UserTurnContinuesDelegation { .. }
+                )
+            })
+            .map(|observation| format!("{observation:?}"))
+            .collect();
+        assert_eq!(rendered.len(), 1, "{rendered:?}");
+        assert!(
+            rendered[0].contains("kind: \"user_turn_continues_delegation\""),
+            "{rendered:?}"
+        );
+    }
+
     /// The released form of the defect: a typed turn between the delegated
     /// request and the user's later words changed nothing, and the later
     /// words, answered by the voice itself, were reported as continuing the

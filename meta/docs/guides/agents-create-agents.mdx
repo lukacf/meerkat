@@ -222,7 +222,8 @@ instead. Only a create answers `pending_preparation`.
 ## Changing instructions
 
 An instructions change is in the agent's record at once. It reaches the agent
-at its next run; a run that starts within moments of the change may still use
+at its next run, or later when the result says so; a run that starts within
+moments of the change may still use
 the earlier instructions; earlier instructions are never rewritten. A dormant
 agent is not woken by it.
 
@@ -232,9 +233,18 @@ The update's result says what became of the change in
 | `kind` | Meaning |
 | --- | --- |
 | `applies_at_next_run` | The change reaches the agent at its next run. |
-| `applies_after_compaction` | The agent's model takes new instructions only at the head of what it reads: the change reaches it after its next compaction. |
+| `applies_after_compaction` | The agent's model takes new instructions only at the head of what it reads: the change reaches it after its next compaction, which a short conversation may never reach. |
 | `applies_at_next_session` | The change does not reach the agent as it runs now, for `reason`, and applies when the agent next starts a new conversation. Reasons: `prepared_authorization_required` (a governed runtime), `slot_limit_exceeded`, `active_set_budget_exceeded`, `lowering_unavailable`, `body_too_large`, `record_unavailable`. |
 | `unchanged` | The agent holds the same instructions already. |
+
+Whatever the kind, the host's instruction status read
+(`meta/instruction_status`) is the authority for whether the change is in
+effect: the agent's slot reads `pending` while the change is recorded and not
+yet in effect, and `effective` once it is. A change that waits for a
+compaction is brought into effect by the host: a reset of the agent starts
+it on a new conversation with the current instructions and gives the earlier
+conversation up (see
+[Changing an agent's instructions](/concepts/roster#changing-an-agents-instructions)).
 
 ## Archive, remove, and a fresh life
 

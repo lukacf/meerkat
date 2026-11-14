@@ -1465,13 +1465,22 @@ update.
 
 New instructions are in the agent's record at once, and the launch carries
 them to an agent that has a conversation: it reaches the agent at its next
-run; a run that starts within moments of the change may still use the
+run, or later when the answer says so; a run that starts within moments of
+the change may still use the
 earlier instructions; earlier instructions are never rewritten. The first
 answer of an update that names `set.instructions` says what became of the
 change in the agent's `instructions` member: `{"kind": "applies_at_next_run"}`,
 `{"kind": "applies_after_compaction"}`,
 `{"kind": "applies_at_next_session", "reason": ...}` or
-`{"kind": "unchanged"}` (a retry states none). The kinds, the reasons and
+`{"kind": "unchanged"}` (a retry states none). `applies_after_compaction`
+is a change that waits: the agent's model takes a system instruction only
+ahead of the conversation, the change takes effect at a compaction at the
+start of a run, and a short conversation may never reach one; `meta/reset`
+brings it into effect and gives the agent's conversation up. Whatever the
+kind, `meta/instruction_status` is the authority for whether the change is
+in effect: the agent's slot reads `pending` (with the reason
+`leading_prefix_only_lowering` for such a model) until it is, then
+`effective`. The kinds, the reasons and
 the limits are in
 [Changing an agent's instructions](/concepts/roster#changing-an-agents-instructions).
 

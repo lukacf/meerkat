@@ -395,9 +395,10 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   change moves the agent
   to that profile's model and tools on the same conversation. The move
   seats the agent again, and so does a change of `runtime_mode_override`:
-  an agent that created mobs with its own tools then no longer lists or
-  manages them (see
-  [Moving a profile](/guides/agents-create-agents#moving-a-profile)).
+  an agent that created mobs with its own tools goes on listing and
+  managing them (see
+  [Moving a profile](/guides/agents-create-agents#moving-a-profile) for
+  what still ends that).
   `addressability` and `runtime_mode_override` take the values they take on
   a create and are the change class `capability` of your policy; an update
   sets a runtime mode and cannot return the agent to its profile's.

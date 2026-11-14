@@ -1519,10 +1519,10 @@ them.
   every seated identity whose labels were updated owes the restamp until
   its next seat row, and a retry of the update or a later update of other
   fields does not settle it. The respawn seats the member again on the
-  same session and cancels a turn in flight, and an agent that created
-  mobs with its own tools then no longer lists or manages them: have it
-  destroy such a mob first, or leave that identity unsettled (it is out
-  of service while rolled back, and nothing of it is lost). A member no same-session
+  same session and cancels a turn in flight; an agent that created mobs
+  with its own tools goes on listing and managing them (see Fixed). An
+  identity left unsettled is out of service while rolled back, and
+  nothing of it is lost. A member no same-session
   successor can serve (placed, wired to a placed member, or on a session
   service that keeps no durable sessions) is settled by none of these:
   rotate it (`MobHandle::rotate_member`), or archive or remove its

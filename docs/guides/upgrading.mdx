@@ -507,10 +507,10 @@ file or `MobStorage::identity_record_rows` for a storage). While
 
 - respawn its member with the row's labels (`MobHandle::respawn_member`
   with `MemberRespawn::new().with_labels(..)`). The respawn seats the agent
-  again on the same conversation and cancels a turn in flight, and an agent
-  that created mobs with its own tools then no longer lists or manages
-  them: have it destroy such a mob first, or leave that agent unsettled. It
-  is then out of service while rolled back, and nothing of it is lost;
+  again on the same conversation and cancels a turn in flight; an agent
+  that created mobs with its own tools goes on listing and managing them.
+  An agent you leave unsettled is out of service while rolled back, and
+  nothing of it is lost;
 - a profile move or a runtime-mode change of the agent
   (`MobHandle::update_store_owned_identity`) seats it again and settles it
   too;

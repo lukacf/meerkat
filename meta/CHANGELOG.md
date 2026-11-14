@@ -970,18 +970,19 @@ Security, Upgrade and Changed.
   longer lists or manages them. See "Changing labels" in the created
   agents guide.
 
-- The texts say what a profile move of an agent created at run time costs.
+- The texts say what a profile move of an agent created at run time does.
   A profile move (`set.profile`), and a host's change of the runtime mode
   (`set.runtime_mode_override`), seats the agent again on the same
-  conversation, and an agent that is seated again no longer lists or
-  manages the mobs it created with its own tools: its mob tools answer no
-  such mob and its calls that name one are refused, while the mobs and
-  their members stay as they are. Another agent the host's rules let
-  change it can do that to an agent through `identity_update` (a profile
-  move), and a host through `meta/identity/update`; an agent cannot do it
-  to itself. Have the agent destroy such a mob first, or leave the profile
-  and the runtime mode of an agent that must go on managing its mobs as
-  they are. The `identity_update` tool's description says so now, and so
+  conversation, and an agent seated again this way goes on listing and
+  managing the mobs it created with its own tools (see Fixed: an identity
+  keeps managing the mobs it created); its new profile's tools decide what
+  it can call. Another agent the host's rules let change it can do that to
+  an agent through `identity_update` (a profile move), and a host through
+  `meta/identity/update`; an agent cannot do it to itself. What still ends
+  that management is a reset or a delete of the agent, an archive followed
+  by an unarchive, and a broken agent seated again by an update: have the
+  agent destroy such a mob first. The `identity_update` tool's description
+  says so now, and so
   do "Moving a profile" in the created agents guide, the long-term agents
   guide and `meta/identity/update` in the RPC reference. Text only: no
   call answers differently.

@@ -1485,12 +1485,12 @@ it again, the update that changes them included. See
 [Changing labels](/guides/agents-create-agents#changing-labels).
 
 A profile move and a runtime-mode change seat the agent again on the same
-conversation, once it is idle. An agent that is seated again no longer
-lists or manages the mobs it created with its own tools (its mob tools
-answer no such mob, and its calls that name one are refused; the mobs and
-their members stay as they are): have it destroy such a mob first, or
-leave the profile and the runtime mode of an agent that must go on
-managing its mobs as they are. A host does this through this method; an
+conversation, once it is idle. An agent seated again this way goes on
+listing and managing the mobs it created with its own tools; its new
+profile's tools decide what it can call. A broken agent that an update
+seats again no longer lists or manages them (its mob tools answer no such
+mob, and its calls that name one are refused; the mobs and their members
+stay as they are). A host does this through this method; an
 agent the policy lets change another agent can move that agent's profile
 through the `identity_update` tool, which takes no runtime mode and
 refuses a change of the caller itself (`self_change_refused`).

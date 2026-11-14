@@ -299,6 +299,27 @@ fn outcome_of_refusal(error: &OperatorInstructionError) -> InstructionOutcome {
     InstructionOutcome::AppliesAtNextSession { reason }
 }
 
+/// When a recorded change reaches an agent that has a conversation, by how
+/// its model takes an appended system instruction: `lowering`, as the
+/// agent's session service read it. Only a model read as taking one after
+/// conversation rows is answered the next run. A lowering that could not be
+/// read (`None`: no session service, a read that failed, a service that
+/// cannot tell) is never answered so: it is answered as a model that takes
+/// one only ahead of the conversation is, the cautious one of the answers
+/// there are. The instruction status read is the authority for whether the
+/// change is in effect.
+fn applies_with_lowering(lowering: Option<InstructionLowering>) -> InstructionOutcome {
+    match lowering {
+        Some(InstructionLowering::MidConversation) => InstructionOutcome::AppliesAtNextRun,
+        Some(InstructionLowering::Unavailable) => InstructionOutcome::AppliesAtNextSession {
+            reason: InstructionNextSessionReason::LoweringUnavailable,
+        },
+        Some(InstructionLowering::LeadingPrefixOnly) | None => {
+            InstructionOutcome::AppliesAfterCompaction
+        }
+    }
+}
+
 impl IdentityRuntime {
     /// The one comparison of an agent's instructions: `identity`'s current
     /// text against the record `mob` holds for it. When they differ, the
@@ -465,34 +486,29 @@ impl IdentityRuntime {
     }
 
     /// When a recorded change reaches the agent whose conversation is the
-    /// session `conversation`: its model's lowering decides.
+    /// session `conversation`: its model's lowering decides, as the member
+    /// session service reads it ([`applies_with_lowering`]). An agent with
+    /// no conversation takes the current text with its first build, which
+    /// is its next run.
     async fn applies_when(&self, conversation: Option<&SessionId>) -> InstructionOutcome {
-        let lowering = match (
-            self.bridge
-                .as_ref()
-                .and_then(|bridge| bridge.member_session_service()),
-            conversation,
-        ) {
-            (Some(sessions), Some(session_id)) => sessions
+        let Some(session_id) = conversation else {
+            return InstructionOutcome::AppliesAtNextRun;
+        };
+        let lowering = match self
+            .bridge
+            .as_ref()
+            .and_then(|bridge| bridge.member_session_service())
+        {
+            Some(sessions) => sessions
                 .read_member_instructions(std::slice::from_ref(session_id))
                 .await
                 .into_iter()
                 .next()
                 .and_then(Result::ok)
                 .and_then(|read| read.lowering),
-            _ => None,
+            None => None,
         };
-        match lowering {
-            Some(InstructionLowering::LeadingPrefixOnly) => {
-                InstructionOutcome::AppliesAfterCompaction
-            }
-            Some(InstructionLowering::Unavailable) => InstructionOutcome::AppliesAtNextSession {
-                reason: InstructionNextSessionReason::LoweringUnavailable,
-            },
-            Some(InstructionLowering::MidConversation) | None => {
-                InstructionOutcome::AppliesAtNextRun
-            }
-        }
+        applies_with_lowering(lowering)
     }
 
     /// Whether the session `session_id`, the conversation of an agent the
@@ -1126,6 +1142,33 @@ mod tests {
         assert_eq!(
             outcome_of_refusal(&OperatorInstructionError::MobTerminal),
             at_next_session(Reason::RecordUnavailable)
+        );
+    }
+
+    /// When a recorded change reaches an agent that has a conversation:
+    /// only a model read as taking a system instruction after conversation
+    /// rows is answered the next run. A lowering that could not be read is
+    /// answered as a model that takes one only ahead of the conversation
+    /// is, never as the next run.
+    #[test]
+    fn an_unreadable_lowering_never_answers_the_next_run() {
+        assert_eq!(
+            applies_with_lowering(Some(InstructionLowering::MidConversation)),
+            InstructionOutcome::AppliesAtNextRun
+        );
+        assert_eq!(
+            applies_with_lowering(Some(InstructionLowering::LeadingPrefixOnly)),
+            InstructionOutcome::AppliesAfterCompaction
+        );
+        assert_eq!(
+            applies_with_lowering(None),
+            InstructionOutcome::AppliesAfterCompaction
+        );
+        assert_eq!(
+            applies_with_lowering(Some(InstructionLowering::Unavailable)),
+            InstructionOutcome::AppliesAtNextSession {
+                reason: InstructionNextSessionReason::LoweringUnavailable
+            }
         );
     }
 

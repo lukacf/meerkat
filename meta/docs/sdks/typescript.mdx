@@ -366,7 +366,13 @@ poll: read `operation` when you want the state; it also resolves `refused`
 agent's `specDigest` afterwards, a create's `seat` (`seated` or `owed`) and
 an update's `instructions` (`applies_at_next_run`,
 `applies_after_compaction`, `applies_at_next_session` with a `reason`, or
-`unchanged`).
+`unchanged`). `applies_after_compaction` is a change that waits: the
+agent's model takes a system instruction only ahead of the conversation, and
+a short conversation may never reach the compaction that brings it into
+effect. `rt.reset(name)` does, and gives the agent's conversation up.
+`rt.instructionStatus` is the authority for whether a change is in
+effect; see
+[Changing an agent's instructions](/concepts/roster#changing-an-agents-instructions).
 
 The first answer of an `archive`, an `unarchive` and a `remove` also carries
 the agent's `schedules` (`SchedulesFollowed`: `effect`, `count`,

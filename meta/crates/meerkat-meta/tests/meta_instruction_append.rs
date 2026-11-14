@@ -3199,6 +3199,45 @@ async fn a_leading_prefix_only_model_answers_applies_after_compaction() {
     rig.shutdown().await;
 }
 
+/// An update that arrives while the agent's run is in flight answers by the
+/// agent's model, as one that arrives between runs does: the answer is read
+/// from the agent's committed session, which a run in flight does not hide.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_during_a_run_in_flight_answers_by_the_agents_model() {
+    for (profile, expected) in [
+        ("worker", InstructionOutcome::AppliesAtNextRun),
+        ("prefix", InstructionOutcome::AppliesAfterCompaction),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut rig = boot(temp.path(), &fresh_mob_id(), vec![configured_spec(&[])]).await;
+        rig.create_spec(created_spec_on(profile, &["Keep ALPHA records."]))
+            .await;
+        rig.turn(CREATED, "FIRST-TURN").await;
+
+        let held = format!("{HOLD} the held run");
+        let sent = rig
+            .rpc("meta/send", json!({"identity": CREATED, "content": held}))
+            .await;
+        assert!(sent["error"].is_null(), "{sent:#?}");
+        assert!(rig.asked(HOLD).await, "the held run is in flight");
+        rig.update_spec(
+            "update-one",
+            created_spec_on(profile, &["Keep ALPHA records."]),
+            created_spec_on(profile, &["Keep BETA records."]),
+        )
+        .await;
+        assert_eq!(
+            rig.after_update(&["Keep ALPHA records."], &["Keep BETA records."])
+                .await,
+            expected,
+            "the answer of an update during a run of an agent on the profile {profile}"
+        );
+        rig.release.send_replace(true);
+        rig.settled(CREATED, HOLD).await;
+        rig.shutdown().await;
+    }
+}
+
 mod governed {
     //! A host's native grant configuration that refuses everything: enough
     //! to make the runtime a governed one.

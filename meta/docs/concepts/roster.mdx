@@ -359,7 +359,9 @@ Available from Meerkat Meta 0.9.15.
 An agent's instructions (`additional_instructions` in its spec) are part of
 the first prompt of its conversation, and a restart resumes that
 conversation as it stands. When the text changes afterwards, the change
-reaches the agent at its next run; a run that starts within moments of the
+reaches the agent at its next run, or later on a model that takes a system
+instruction only ahead of the conversation (see "What to know" below); a
+run that starts within moments of the
 change may still use the earlier instructions; earlier instructions are never
 rewritten. The agent keeps its conversation: the whole current text arrives
 as one appended system entry that says it replaces the earlier version of
@@ -448,7 +450,26 @@ What to know:
   `applies_after_compaction`, and `meta/instruction_status` reports such a
   member's slot with `leading_prefix_only_lowering`. A model whose wire
   carries no system row besides its prompt applies it only with a fresh
-  conversation.
+  conversation. That compaction may never come by itself: a conversation is
+  compacted only when it reaches its compaction threshold (see `compaction`
+  in [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)),
+  never after a time or a number of turns, and until then the agent goes on
+  following its earlier instructions. `meta/reset` is always available: it
+  starts the agent on a fresh conversation, built from the current text,
+  and gives the earlier conversation up. A respawn (`meta/respawn`) and an
+  archive followed by an unarchive keep the conversation and do not bring
+  the change into effect. In the catalog of this release these models are
+  every Gemini model, the Anthropic models up to and including
+  `claude-opus-4-7`, `claude-sonnet-5` and `claude-haiku-4-5`, and the
+  OpenAI models `gpt-live-1` and `gpt-live-1-codex`; a model the catalog
+  does not know is treated the same way. Newer Anthropic models and the
+  other OpenAI models take the change at the agent's next run, except an
+  OpenAI model served through the ChatGPT backend (`chatgpt_backend`): its
+  wire is the one that carries no system row besides the prompt. A binding
+  the configuration does not resolve, or an OpenAI backend kind this
+  version does not know, is not taken to carry a system row after
+  conversation rows either. `meta/instruction_status` tells for a given
+  agent.
 - **A change made while the gateway was down** (the usual way to edit a
   configuration) is recorded after the gateway starts. For a configured
   agent: when the gateway registers it, at its start for the agents its
@@ -489,9 +510,14 @@ answer; a retry of the same request states none. The kinds:
 - `applies_at_next_run`: the change is recorded and reaches the agent at
   its next run (a run that starts within moments may still use the earlier
   instructions). For an agent no build has created a conversation for,
-  nothing is recorded: its first build takes the current text.
+  nothing is recorded: its first build takes the current text, unless that
+  build was already under way when the update arrived.
 - `applies_after_compaction`: the change is recorded; the agent's model
-  takes a system instruction only ahead of the conversation.
+  takes a system instruction only ahead of the conversation, so the change
+  waits for a compaction at the start of a run, which a short conversation
+  may never reach. It is also the answer when how the agent's model takes
+  one could not be read: an update never answers `applies_at_next_run` for
+  an agent with a conversation without having read it.
 - `applies_at_next_session`, with a `reason`: the change is not recorded,
   or cannot reach this conversation, and applies from the agent's next
   fresh conversation. The reasons are `prepared_authorization_required`,
@@ -501,6 +527,16 @@ answer; a retry of the same request states none. The kinds:
   update of its instructions, or at its first delivery or change after
   the gateway's next start).
 - `unchanged`: the update left the instructions as they were.
+
+Whatever the kind, `meta/instruction_status` is the authority for whether
+the change is in effect for the agent. Read it with the namespace
+`meerkat.identity.instructions` and the agent's name as `key` and as
+`identity`; the slot's state is then the member `members[0].slots[0].state`
+of the answer. `{"state": "pending", "reason": "leading_prefix_only_lowering"}`
+is a change that is recorded and not yet in effect on a model that takes a
+system instruction only ahead of the conversation;
+`{"state": "pending", "reason": "awaiting_run_start"}` is one that the
+agent's next run puts in effect; `{"state": "effective"}` is in effect.
 
 The update of the spec itself always stands.
 

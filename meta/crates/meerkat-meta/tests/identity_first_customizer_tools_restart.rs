@@ -5576,12 +5576,15 @@ const KEEPER_WORKER: &str = "kept-worker";
 /// it is the keeper's.
 const REACH_TURN: &str = "REACH-TURN";
 
+/// A call the reach row's model makes: its id, the tool and its arguments.
+type QueuedCall = (String, &'static str, serde_json::Value);
+
 /// The scripted model of the reach row: on the keeper's requests it makes,
 /// once each and in order, the queued calls whose id its transcript does
 /// not hold yet, and it records every tool result a transcript holds.
 #[derive(Clone, Default)]
 struct ReachModel {
-    script: Arc<std::sync::Mutex<Vec<(String, &'static str, serde_json::Value)>>>,
+    script: Arc<std::sync::Mutex<Vec<QueuedCall>>>,
     tool_results: Arc<std::sync::Mutex<BTreeMap<String, (bool, String)>>>,
 }
 
@@ -5986,16 +5989,19 @@ async fn a_created_agent_still_manages_the_mob_it_created_after_a_label_only_upd
 // What a created agent's next build is composed with after a label update
 // ---------------------------------------------------------------------------
 
+/// The labels one `customize_build` was handed: the row's, then the draft's.
+type HandedLabels = (BTreeMap<String, String>, BTreeMap<String, String>);
+
 /// A host customizer that records the labels each `customize_build` of the
 /// keeper is handed: the registered row's (`spec.labels`) and the build
 /// draft's (`draft.labels`).
 #[derive(Default)]
 struct LabelRecordingCustomizer {
-    builds: std::sync::Mutex<Vec<(BTreeMap<String, String>, BTreeMap<String, String>)>>,
+    builds: std::sync::Mutex<Vec<HandedLabels>>,
 }
 
 impl LabelRecordingCustomizer {
-    fn builds(&self) -> Vec<(BTreeMap<String, String>, BTreeMap<String, String>)> {
+    fn builds(&self) -> Vec<HandedLabels> {
         self.builds.lock().unwrap().clone()
     }
 }

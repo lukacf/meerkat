@@ -2135,3 +2135,660 @@ async fn a_level_change_or_clear_replaces_the_fallback_client() {
         harness = harness.cold_restart().await;
     }
 }
+
+/// The model-routing history is stored in the session's head row, and an
+/// earlier release decodes the head rows of a realm typed when it looks a
+/// session up; its provider params have no member for the provider-neutral
+/// reasoning effort level. So the realized record of a `brain_swap` holds
+/// the applied identity WITHOUT the level: it names the model that was
+/// installed, and the whole stored head row names no level. The session's
+/// own settings keep the level, live, stored and after a cold restart. A
+/// record in the earlier form, with the level inside, still decodes.
+#[tokio::test]
+async fn a_brain_swap_under_a_level_records_its_applied_identity_without_the_level() {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+    use meerkat_core::session_store::IncrementalSessionStore as _;
+
+    let level_of = |identity: &SessionLlmIdentity| {
+        identity
+            .provider_params
+            .as_ref()
+            .and_then(|params| params.reasoning_effort)
+    };
+    let harness = build_harness(PersistenceProfile::HeadCanonical).await;
+    let route = harness.environment.route;
+    let _committed = commit_brain_swap_request(&harness).await;
+
+    // Both models' entries of the account's list state `high`: the session
+    // takes the level, and the request after the switch runs at it.
+    harness.set_reasoning_route(Some(account_route_stating(&[EffortLevel::High])));
+    harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(None, Some(TurnMetadataOverride::Set(EffortLevel::High))),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("a level the route accepts is applied: {error}"));
+    assert_eq!(
+        level_of(&harness.live_identity().await),
+        Some(EffortLevel::High)
+    );
+
+    // The committed handoff is realized at the next input.
+    let completion = harness.run_prompt("the next input, after the swap").await;
+    assert_eq!(
+        harness.realized_terminal_count().await,
+        1,
+        "the handoff is realized: {completion:?}"
+    );
+    let swapped = harness.live_identity().await;
+    assert_eq!(swapped.model, route.model_b);
+    assert_eq!(
+        level_of(&swapped),
+        Some(EffortLevel::High),
+        "the session keeps its level across the switch"
+    );
+    assert_eq!(harness.durable_identity().await, swapped);
+
+    // The realized record: the installed model, and no level.
+    let records = harness.durable_routing_records().await;
+    let realized: Vec<&SessionLlmIdentity> = records
+        .iter()
+        .filter_map(|record| match record {
+            SessionModelRoutingControlRecord::ModelRoutingIntentRealized {
+                applied_identity,
+                ..
+            } => Some(&**applied_identity),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(realized.len(), 1, "one realized record: {records:?}");
+    assert_eq!(realized[0].model, route.model_b);
+    assert_eq!(
+        level_of(realized[0]),
+        None,
+        "the routing history records the applied identity without the level"
+    );
+    let stored_records = serde_json::to_string(&records).expect("the stored records");
+    assert!(
+        !stored_records.contains("reasoning_effort"),
+        "the stored routing history names no level: {stored_records}"
+    );
+
+    // The whole head row, as the session store holds it: what an earlier
+    // release decodes when it looks a session of the realm up.
+    let session_store = meerkat_store::SqliteSessionStore::open(
+        harness.environment.temp.path().join("sessions.sqlite3"),
+    )
+    .expect("open the sqlite session store");
+    let head = session_store
+        .load_head(&harness.session_id)
+        .await
+        .expect("load the stored head")
+        .expect("the session has a head row");
+    let stored_head = serde_json::to_string(&head).expect("the stored head row's form");
+    assert!(
+        stored_head.contains("model_routing_intent_realized"),
+        "the head row holds the realized record: {stored_head}"
+    );
+    assert!(
+        !stored_head.contains("reasoning_effort"),
+        "the stored head row names no level: {stored_head}"
+    );
+
+    // A record in the earlier form, with the level inside, still decodes.
+    let mut earlier = serde_json::to_value(&records).expect("the records as a value");
+    let earlier_record = earlier
+        .as_array_mut()
+        .expect("the records are a list")
+        .iter_mut()
+        .find(|record| record["record"] == "model_routing_intent_realized")
+        .expect("the realized record");
+    earlier_record["applied_identity"]["provider_params"] =
+        serde_json::json!({"reasoning_effort": "high"});
+    let decoded: Vec<SessionModelRoutingControlRecord> =
+        serde_json::from_value(earlier).expect("a record with the level inside decodes");
+    assert!(decoded.iter().any(|record| matches!(
+        record,
+        SessionModelRoutingControlRecord::ModelRoutingIntentRealized { applied_identity, .. }
+            if level_of(applied_identity) == Some(EffortLevel::High)
+    )));
+
+    // After a cold restart the session still holds its level.
+    let harness = harness.cold_restart().await;
+    assert_eq!(
+        level_of(&harness.durable_identity().await),
+        Some(EffortLevel::High),
+        "the session's own settings keep the level"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The rollback fixture for the session's head row
+// ---------------------------------------------------------------------------
+
+/// The JSON shape of a stored value as the previous release decodes it.
+enum Shape {
+    /// The previous release keeps this value untyped.
+    Any,
+    /// A string, a number, a boolean or null.
+    Leaf,
+    /// An object with exactly these members.
+    Object(&'static [(&'static str, Shape)]),
+    /// A list of values of one shape.
+    List(&'static Shape),
+    /// An object whose member `.0` names one of the variants `.1`, each with
+    /// its own members.
+    Tagged(
+        &'static str,
+        &'static [(&'static str, &'static [(&'static str, Shape)])],
+    ),
+}
+
+const ROW_PREFIX: Shape = Shape::Object(&[
+    ("version", Shape::Leaf),
+    ("row_count", Shape::Leaf),
+    ("digest", Shape::Leaf),
+]);
+const REWRITE_PREFIX: Shape =
+    Shape::Object(&[("occurrence_count", Shape::Leaf), ("digest", Shape::Leaf)]);
+const SYSTEM_TIME: Shape = Shape::Object(&[
+    ("secs_since_epoch", Shape::Leaf),
+    ("nanos_since_epoch", Shape::Leaf),
+]);
+const REASON_DISPOSITION: Shape = Shape::Tagged(
+    "disposition",
+    &[
+        ("not_provided", &[]),
+        (
+            "provided",
+            &[("reason", Shape::Object(&[("content", Shape::Leaf)]))],
+        ),
+    ],
+);
+const SWITCH_INTENT: Shape = Shape::Object(&[
+    ("target_model", Shape::Leaf),
+    (
+        "duration",
+        Shape::Tagged(
+            "duration_type",
+            &[
+                (
+                    "finite",
+                    &[(
+                        "duration",
+                        Shape::Tagged(
+                            "duration",
+                            &[("one_turn", &[]), ("turns", &[("turns", Shape::Leaf)])],
+                        ),
+                    )],
+                ),
+                ("until_changed", &[]),
+            ],
+        ),
+    ),
+    (
+        "origin",
+        Shape::Tagged(
+            "origin",
+            &[
+                ("user", &[("reason", REASON_DISPOSITION)]),
+                ("model", &[("reason", REASON_DISPOSITION)]),
+                ("system_policy", &[("reason", Shape::Leaf)]),
+            ],
+        ),
+    ),
+]);
+/// A provider's own tag: the member names of each provider's tag at the
+/// previous release; their values are that provider's own settings.
+const PROVIDER_TAG: Shape = Shape::Tagged(
+    "provider",
+    &[
+        (
+            "anthropic",
+            &[
+                ("thinking", Shape::Any),
+                ("thinking_budget_tokens", Shape::Leaf),
+                ("web_search", Shape::Leaf),
+                ("top_k", Shape::Leaf),
+                ("effort", Shape::Leaf),
+                ("structured_output", Shape::Any),
+                ("inference_geo", Shape::Any),
+                ("compaction", Shape::Any),
+                ("context", Shape::Leaf),
+                ("cache_control", Shape::Leaf),
+                ("cache_ttl", Shape::Leaf),
+                ("supports_temperature_override", Shape::Leaf),
+            ],
+        ),
+        (
+            "open_ai",
+            &[
+                ("reasoning_effort", Shape::Leaf),
+                ("reasoning_mode", Shape::Leaf),
+                ("reasoning_context", Shape::Leaf),
+                ("text_verbosity", Shape::Leaf),
+                ("seed", Shape::Leaf),
+                ("frequency_penalty", Shape::Leaf),
+                ("presence_penalty", Shape::Leaf),
+                ("web_search", Shape::Leaf),
+                ("structured_output", Shape::Any),
+                ("reasoning", Shape::Leaf),
+                ("chat_template_kwargs", Shape::Leaf),
+                ("thinking", Shape::Leaf),
+                ("store", Shape::Leaf),
+                ("prompt_cache_enabled", Shape::Leaf),
+                ("prompt_cache_key", Shape::Leaf),
+                ("prompt_cache_retention", Shape::Leaf),
+                (
+                    "prompt_cache_options",
+                    Shape::Object(&[("mode", Shape::Leaf), ("ttl", Shape::Leaf)]),
+                ),
+                ("supports_temperature_override", Shape::Leaf),
+                ("supports_reasoning_override", Shape::Leaf),
+            ],
+        ),
+        (
+            "gemini",
+            &[
+                (
+                    "thinking",
+                    Shape::Object(&[
+                        ("include_thoughts", Shape::Leaf),
+                        ("thinking_level", Shape::Leaf),
+                        ("thinking_budget", Shape::Leaf),
+                    ]),
+                ),
+                ("thinking_budget", Shape::Leaf),
+                ("thinking_level", Shape::Leaf),
+                ("top_k", Shape::Leaf),
+                ("top_p", Shape::Leaf),
+                ("structured_output", Shape::Any),
+                ("google_search", Shape::Leaf),
+                ("candidate_count", Shape::Leaf),
+                ("cached_content_name", Shape::Leaf),
+            ],
+        ),
+        ("unknown", &[("bag", Shape::Any)]),
+    ],
+);
+/// The identity a realized routing record holds. Its provider params are
+/// the previous release's: six members, and no provider-neutral
+/// `reasoning_effort`.
+const RECORDED_IDENTITY: Shape = Shape::Object(&[
+    ("model", Shape::Leaf),
+    ("provider", Shape::Leaf),
+    ("self_hosted_server_id", Shape::Leaf),
+    (
+        "provider_params",
+        Shape::Object(&[
+            ("temperature", Shape::Leaf),
+            ("top_p", Shape::Leaf),
+            ("max_output_tokens", Shape::Leaf),
+            ("reasoning", Shape::Leaf),
+            ("thinking_budget_tokens", Shape::Leaf),
+            ("provider_tag", PROVIDER_TAG),
+        ]),
+    ),
+    (
+        "auth_binding",
+        Shape::Object(&[
+            ("realm", Shape::Leaf),
+            ("binding", Shape::Leaf),
+            ("profile", Shape::Leaf),
+            ("origin", Shape::Leaf),
+        ]),
+    ),
+]);
+const ROUTING_RECORD: Shape = Shape::Tagged(
+    "record",
+    &[
+        (
+            "model_routing_intent_requested",
+            &[
+                ("request_id", Shape::Leaf),
+                ("originating_run_id", Shape::Leaf),
+                ("intent", SWITCH_INTENT),
+            ],
+        ),
+        (
+            "model_routing_intent_realized",
+            &[
+                ("request_id", Shape::Leaf),
+                ("originating_run_id", Shape::Leaf),
+                ("intent", SWITCH_INTENT),
+                ("applied_identity", RECORDED_IDENTITY),
+            ],
+        ),
+        (
+            "model_routing_intent_denied",
+            &[
+                ("request_id", Shape::Leaf),
+                ("originating_run_id", Shape::Leaf),
+                ("intent", SWITCH_INTENT),
+                (
+                    "reason",
+                    Shape::Tagged(
+                        "reason",
+                        &[
+                            ("unsupported_model", &[]),
+                            ("capability_policy", &[]),
+                            ("cost_policy", &[]),
+                            ("safety_policy", &[]),
+                            ("approval_required_but_unavailable", &[]),
+                            ("scoped_override_conflict", &[]),
+                            ("realtime_transport_conflict", &[]),
+                            ("projection_unsupported", &[]),
+                            ("denied_during_approval", &[("approvable", Shape::Leaf)]),
+                        ],
+                    ),
+                ),
+            ],
+        ),
+        (
+            "model_routing_intent_abandoned",
+            &[
+                ("request_id", Shape::Leaf),
+                ("originating_run_id", Shape::Leaf),
+                ("intent", SWITCH_INTENT),
+            ],
+        ),
+    ],
+);
+/// THE ROLLBACK FIXTURE of the session's head row: the head's shape as
+/// 0.9.14 decodes it, record by record and member by member, copied from
+/// that release's types (`SessionHead` and what it reaches in
+/// `meerkat-core`: the row and rewrite prefix accumulators, the lineage
+/// anchor, the graph prefix, the realtime event prefix, the metadata
+/// identity, `Usage` with its provider accounting, and the model-routing
+/// records with their intent and applied identity). 0.9.14 decodes the head
+/// rows of a realm typed when it looks a session up, and it recomputes each
+/// head's token from what it decoded: a member it does not know either
+/// fails the decode or changes the token, and both fail the lookup for the
+/// whole realm. A change that adds a member or a value to anything the head
+/// row holds fails here until the row stays readable by the previous
+/// release (the rule is written at `RunResult::reasoning_effort` and at
+/// `InputTerminalCompletion::outcome` for the input row; this is its
+/// counterpart for the head row).
+const TAG_HEAD_SHAPE: Shape = Shape::Object(&[
+    ("id", Shape::Leaf),
+    ("version", Shape::Leaf),
+    ("strand", Shape::Leaf),
+    ("head_revision", Shape::Leaf),
+    ("message_count", Shape::Leaf),
+    ("message_row_prefix", ROW_PREFIX),
+    (
+        "row_lineage_anchor",
+        Shape::Object(&[
+            ("rewrite_count", Shape::Leaf),
+            ("rewrite_prefix", REWRITE_PREFIX),
+            ("strand", Shape::Leaf),
+            ("message_count", Shape::Leaf),
+            ("materialized_prefix", ROW_PREFIX),
+            ("prefix", ROW_PREFIX),
+        ]),
+    ),
+    ("rewrite_count", Shape::Leaf),
+    ("rewrite_prefix", REWRITE_PREFIX),
+    (
+        "graph_prefix",
+        Shape::Object(&[("occurrence_count", Shape::Leaf), ("digest", Shape::Leaf)]),
+    ),
+    (
+        "realtime_event_prefix",
+        Shape::Object(&[
+            ("version", Shape::Leaf),
+            ("session_id", Shape::Leaf),
+            ("component", Shape::Leaf),
+            ("event_count", Shape::Leaf),
+            ("root_digest", Shape::Leaf),
+        ]),
+    ),
+    ("created_at", SYSTEM_TIME),
+    ("updated_at", SYSTEM_TIME),
+    (
+        "usage",
+        Shape::Object(&[
+            ("input_tokens", Shape::Leaf),
+            ("output_tokens", Shape::Leaf),
+            ("cache_creation_tokens", Shape::Leaf),
+            ("cache_read_tokens", Shape::Leaf),
+            ("reasoning_tokens", Shape::Leaf),
+            (
+                "provider_accounting",
+                Shape::Object(&[
+                    ("provider", Shape::Leaf),
+                    ("model", Shape::Leaf),
+                    ("presented_tokens", Shape::Leaf),
+                    ("convention", Shape::Leaf),
+                    ("aggregation", Shape::Leaf),
+                ]),
+            ),
+        ]),
+    ),
+    (
+        "metadata_identity",
+        Shape::Object(&[
+            ("format_version", Shape::Leaf),
+            ("entry_count", Shape::Leaf),
+            ("exact_root_digest", Shape::Leaf),
+        ]),
+    ),
+    // The previous release keeps the inline metadata map untyped.
+    ("metadata", Shape::Any),
+    ("model_routing_control", Shape::List(&ROUTING_RECORD)),
+]);
+
+/// Every place under `value` that `shape` does not know, as a path.
+fn unknown_to_shape(value: &serde_json::Value, shape: &Shape, path: &str, found: &mut Vec<String>) {
+    let members = |object: &serde_json::Map<String, serde_json::Value>,
+                   fields: &[(&'static str, Shape)],
+                   tag: Option<&str>,
+                   found: &mut Vec<String>| {
+        for (key, member) in object {
+            if tag == Some(key.as_str()) {
+                continue;
+            }
+            match fields.iter().find(|(name, _)| name == key) {
+                Some((_, member_shape)) => {
+                    unknown_to_shape(member, member_shape, &format!("{path}.{key}"), found);
+                }
+                None => found.push(format!("{path}.{key}")),
+            }
+        }
+    };
+    match (shape, value) {
+        (Shape::Any, _) | (_, serde_json::Value::Null) => {}
+        (Shape::Leaf, serde_json::Value::Object(_) | serde_json::Value::Array(_)) => {
+            found.push(format!("{path}: a structure where a plain value is read"));
+        }
+        (Shape::Leaf, _) => {}
+        (Shape::Object(fields), serde_json::Value::Object(object)) => {
+            members(object, fields, None, found);
+        }
+        (Shape::List(item), serde_json::Value::Array(items)) => {
+            for (index, member) in items.iter().enumerate() {
+                unknown_to_shape(member, item, &format!("{path}[{index}]"), found);
+            }
+        }
+        (Shape::Tagged(tag, variants), serde_json::Value::Object(object)) => {
+            let named = object.get(*tag).and_then(serde_json::Value::as_str);
+            match variants.iter().find(|(name, _)| Some(*name) == named) {
+                Some((_, fields)) => members(object, fields, Some(tag), found),
+                None => found.push(format!("{path}.{tag} = {named:?}")),
+            }
+        }
+        (_, other) => found.push(format!("{path}: {other} where another form is read")),
+    }
+}
+
+/// The stored head row of `session_id` in the SQLite sessions store at
+/// `store_path` holds nothing the previous release's head does not know.
+/// `step` names where the session is in its life.
+pub(super) async fn assert_the_stored_head_has_the_previous_releases_shape(
+    store_path: &std::path::Path,
+    session_id: &SessionId,
+    step: &str,
+) {
+    use meerkat_core::session_store::IncrementalSessionStore as _;
+
+    let store = meerkat_store::SqliteSessionStore::open(store_path.to_path_buf())
+        .expect("open the sqlite session store");
+    let head = store
+        .load_head(session_id)
+        .await
+        .expect("load the stored head")
+        .unwrap_or_else(|| panic!("{step}: the session has a head row"));
+    let stored = serde_json::to_value(&head).expect("the stored head row's form");
+    let mut found = Vec::new();
+    unknown_to_shape(&stored, &TAG_HEAD_SHAPE, "head", &mut found);
+    assert!(
+        found.is_empty(),
+        "{step}: the stored head row holds what the previous release's head does not know: \
+         {found:?} in {stored}"
+    );
+}
+
+/// The fixture refuses what it must: a head whose realized routing record
+/// carries the provider-neutral level, and a head with a member of its own
+/// that the previous release does not have.
+#[test]
+fn the_head_shape_fixture_refuses_a_level_in_a_routing_record_and_an_unknown_member() {
+    let identity = serde_json::json!({
+        "model": "model-b", "provider": "openai",
+        "provider_params": {"reasoning_effort": "high"},
+    });
+    let head = |params: serde_json::Value, extra: Option<&str>| {
+        let mut identity = identity.clone();
+        identity["provider_params"] = params;
+        let mut head = serde_json::json!({
+            "id": "018f7b9a-1c2d-7e3f-8a4b-5c6d7e8f9a0b", "version": 1, "strand": "root",
+            "head_revision": "r", "message_count": 1, "rewrite_count": 0,
+            "created_at": {"secs_since_epoch": 1, "nanos_since_epoch": 0},
+            "updated_at": {"secs_since_epoch": 1, "nanos_since_epoch": 0},
+            "usage": {"input_tokens": 1, "output_tokens": 1,
+                      "cache_creation_tokens": null, "cache_read_tokens": null},
+            "metadata": {"anything": {"reasoning_effort": "high"}},
+            "model_routing_control": [{
+                "record": "model_routing_intent_realized",
+                "request_id": "018f7b9a-1c2d-7e3f-8a4b-5c6d7e8f9a0c",
+                "originating_run_id": "018f7b9a-1c2d-7e3f-8a4b-5c6d7e8f9a0d",
+                "intent": {"target_model": "model-b",
+                           "duration": {"duration_type": "until_changed"},
+                           "origin": {"origin": "model",
+                                      "reason": {"disposition": "not_provided"}}},
+                "applied_identity": identity,
+            }],
+        });
+        if let Some(member) = extra {
+            head[member] = serde_json::json!(true);
+        }
+        head
+    };
+    let unknown = |head: &serde_json::Value| {
+        let mut found = Vec::new();
+        unknown_to_shape(head, &TAG_HEAD_SHAPE, "head", &mut found);
+        found
+    };
+    assert_eq!(
+        unknown(&head(
+            serde_json::json!({"provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}}),
+            None
+        )),
+        Vec::<String>::new(),
+        "a provider's own effort and an untyped metadata map are known"
+    );
+    assert_eq!(
+        unknown(&head(serde_json::json!({"reasoning_effort": "high"}), None)),
+        vec![
+            "head.model_routing_control[0].applied_identity.provider_params.reasoning_effort"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        unknown(&head(
+            serde_json::json!({}),
+            Some("a_member_of_a_later_release")
+        )),
+        vec!["head.a_member_of_a_later_release".to_string()]
+    );
+}
+
+/// The level's paths through the production SQLite store, with the stored
+/// head row checked against the previous release's shape after each: a
+/// session without a level; a level set on it (the reconfiguration a turn's
+/// override makes); a turn at the level; the run's own permanent model
+/// switch under the level; the level cleared; a cold restart. (A session
+/// created with a level, and an ordinary model fallback under it, are
+/// checked the same way by
+/// `a_skipped_fallback_target_under_a_level_stores_its_reason_in_no_input_row`.)
+#[tokio::test]
+async fn the_stored_head_row_keeps_the_previous_releases_shape_on_every_level_path() {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let harness = build_harness(PersistenceProfile::HeadCanonical).await;
+    let store_path = harness.environment.temp.path().join("sessions.sqlite3");
+    let session_id = harness.session_id.clone();
+    let check = |step: &'static str| {
+        let store_path = store_path.clone();
+        let session_id = session_id.clone();
+        async move {
+            assert_the_stored_head_has_the_previous_releases_shape(&store_path, &session_id, step)
+                .await;
+        }
+    };
+    check("a session without a level").await;
+
+    // The authoring turn commits the switch request (a requested record).
+    let _committed = commit_brain_swap_request(&harness).await;
+    check("after the turn that asks for the switch").await;
+
+    harness.set_reasoning_route(Some(account_route_stating(&[EffortLevel::High])));
+    harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(None, Some(TurnMetadataOverride::Set(EffortLevel::High))),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("a level the route accepts is applied: {error}"));
+    check("a level set on the session").await;
+
+    // A turn at the level, which also realizes the permanent switch.
+    let completion = harness.run_prompt("the next input, after the swap").await;
+    assert_eq!(
+        harness.realized_terminal_count().await,
+        1,
+        "the handoff is realized: {completion:?}"
+    );
+    assert_eq!(
+        harness
+            .live_identity()
+            .await
+            .provider_params
+            .and_then(|params| params.reasoning_effort),
+        Some(EffortLevel::High)
+    );
+    check("a turn at the level and the run's own permanent switch").await;
+
+    harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(None, Some(TurnMetadataOverride::Clear)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("clearing the level is applied: {error}"));
+    check("the level cleared").await;
+
+    let harness = harness.cold_restart().await;
+    assert_the_stored_head_has_the_previous_releases_shape(
+        &harness.environment.temp.path().join("sessions.sqlite3"),
+        &harness.session_id,
+        "a cold restart",
+    )
+    .await;
+}

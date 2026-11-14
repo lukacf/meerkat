@@ -20333,6 +20333,266 @@ mod tests {
         );
     }
 
+    /// A proof of absence for the stored forms. An ordinary model fallback
+    /// of a session that holds a reasoning effort level: the model's call
+    /// fails recoverably (not an authentication failure); the first fallback
+    /// target's route does not state the levels it accepts, so the target is
+    /// skipped for the level, with the reason `reasoning_effort_unsupported`
+    /// (`a_fallback_target_that_refuses_the_level_leaves_the_session_as_it_was`
+    /// reads that reason from a run's events); the second target accepts the
+    /// level and is switched to, which writes the fallback notice into the
+    /// transcript. Run through the runtime on the production SQLite wiring:
+    /// no stored input row of the session names the skip's reason, in the
+    /// form the store writes or after a decode, and the stored session, its
+    /// fallback record and its transcript's fallback notice do not name it
+    /// either. The reason is a value an earlier release does not know: this
+    /// row holds that it reaches no stored input row and no stored notice.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_skipped_fallback_target_under_a_level_stores_its_reason_in_no_input_row() {
+        use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_runtime::RuntimeStore as _;
+        use meerkat_runtime::completion::CompletionOutcome;
+
+        const PRIMARY_MODEL: &str = "claude-sonnet-4-6";
+        const SKIPPED_MODEL: &str = "custom-first-backup";
+        const BACKUP_MODEL: &str = "custom-text-only-backup";
+        const EXTERNAL_TOOL: &str = "known_external_tool";
+        const SKIP_REASON: &str = "reasoning_effort_unsupported";
+
+        let level_only = ProviderParamsOverride {
+            reasoning_effort: Some(EffortLevel::High),
+            ..Default::default()
+        };
+        let skipped_binding =
+            configured_auth_binding(FALLBACK_REALM_LEVEL_SKIPPED, "default_gemini");
+        let backup_binding =
+            configured_auth_binding(FALLBACK_REALM_LEVEL_SKIPPED, "default_openai");
+        let mut config = sticky_fallback_test_config(
+            FALLBACK_REALM_LEVEL_SKIPPED,
+            BACKUP_MODEL,
+            backup_binding.clone(),
+        );
+        config.realm.insert(
+            FALLBACK_REALM_LEVEL_SKIPPED.to_string(),
+            inline_realm_section(&[
+                ("anthropic", "test-primary-key"),
+                ("gemini", "test-first-backup-key"),
+                ("openai", "test-backup-key"),
+            ]),
+        );
+        config.models.custom.insert(
+            SKIPPED_MODEL.to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider: Provider::Gemini,
+                display_name: Some("First backup".to_string()),
+                context_window: Some(32_000),
+                max_input_tokens: None,
+                max_output_tokens: Some(4_096),
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
+        // The chain: the target that is skipped for the level, then the one
+        // that accepts it.
+        config.model_fallback.chain.insert(
+            0,
+            ModelFallbackTarget {
+                model: SKIPPED_MODEL.to_string(),
+                provider: Some(Provider::Gemini),
+                auth_binding: Some(skipped_binding),
+            },
+        );
+
+        let temp = tempfile::tempdir().expect("skipped fallback tempdir");
+        let sqlite_path = temp.path().join("sessions.sqlite3");
+        let sqlite_store = Arc::new(
+            meerkat_store::SqliteSessionStore::open(sqlite_path.clone())
+                .expect("open sqlite session store"),
+        );
+        // Production sqlite-realm wiring: the runtime's input rows live in
+        // the session store's file.
+        let runtime_store = Arc::new(
+            meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(sqlite_path)
+                .expect("open head-canonical runtime store"),
+        );
+        let blob_store = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let primary_requests = RecordedProviderTags::default();
+        let skipped_requests = RecordedProviderTags::default();
+        let backup_requests = RecordedProviderTags::default();
+        // The primary always fails recoverably. The first backup serves a
+        // model its provider's direct route states no levels for. The second
+        // backup's account states `low` and `high`.
+        let primary_client: Arc<dyn LlmClient> = Arc::new(LeveledStickyFallbackClient {
+            provider: Provider::Anthropic,
+            route: meerkat_core::direct_route_observation(Provider::Anthropic)
+                .expect("the Anthropic family has a direct route"),
+            fail_recoverably: true,
+            requests: Arc::clone(&primary_requests),
+        });
+        let skipped_client: Arc<dyn LlmClient> = Arc::new(LeveledStickyFallbackClient {
+            provider: Provider::Gemini,
+            route: meerkat_core::direct_route_observation(Provider::Gemini)
+                .expect("the Gemini family has a direct route"),
+            fail_recoverably: false,
+            requests: Arc::clone(&skipped_requests),
+        });
+        let backup_client: Arc<dyn LlmClient> = Arc::new(LeveledStickyFallbackClient {
+            provider: Provider::OpenAI,
+            route: meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::OpenAi(
+                    meerkat_core::provider_matrix::OpenAiBackendKind::Copilot,
+                ),
+                api: meerkat_core::ModelApi::Responses,
+                account: meerkat_core::AccountLevelStatement::Stated(vec![
+                    EffortLevel::Low,
+                    EffortLevel::High,
+                ]),
+                operator_levels: None,
+            },
+            fail_recoverably: false,
+            requests: Arc::clone(&backup_requests),
+        });
+        let mut factory = AgentFactory::new(temp.path().join("factory-sessions"))
+            .without_provider_auth_persistence()
+            .builtins(false);
+        factory.provider_registry = Arc::new(
+            meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty()
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::Anthropic,
+                    client: primary_client,
+                }))
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::Gemini,
+                    client: skipped_client,
+                }))
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::OpenAI,
+                    client: backup_client,
+                })),
+        );
+        let builder = crate::FactoryAgentBuilder::new(factory, config);
+        let persistence = crate::PersistenceBundle::new(
+            Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            Arc::clone(&blob_store) as Arc<dyn BlobStore>,
+        )
+        .expect("construct runtime authority");
+        let (service, adapter) =
+            crate::surface::build_runtime_backed_service(builder, 4, persistence)
+                .expect("compose the runtime-backed service");
+        let service = Arc::new(service);
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let mut request = sticky_fallback_runtime_request(
+            FALLBACK_REALM_LEVEL_SKIPPED,
+            PRIMARY_MODEL,
+            sticky_fallback_visibility_dispatcher(EXTERNAL_TOOL),
+        );
+        request
+            .build
+            .as_mut()
+            .expect("the request carries build options")
+            .provider_params = Some(level_only);
+        Box::pin(crate::surface::materialize_session(
+            &service,
+            &adapter,
+            session,
+            request,
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| {
+                    crate::surface::default_persistent_executor(service, adapter, session_id)
+                }
+            },
+        ))
+        .await
+        .expect("materialize the session at the level");
+
+        // The run: the model fails, the first target is skipped, the second
+        // is switched to and answers.
+        let completion = run_sticky_fallback_prompt(&adapter, &session_id, "first").await;
+        let CompletionOutcome::Completed(run) = completion else {
+            panic!("the run ends on the second fallback target: {completion:?}");
+        };
+        assert_eq!(run.text, "backup success");
+        let asked = |requests: &RecordedProviderTags| {
+            requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+        };
+        assert_eq!(asked(&primary_requests), 1, "the session's own model");
+        assert_eq!(
+            asked(&skipped_requests),
+            0,
+            "the skipped target is never asked"
+        );
+        assert_eq!(
+            asked(&backup_requests),
+            1,
+            "the target that was switched to"
+        );
+
+        // Every stored input row of the session, in the form the store
+        // writes it, and decoded again from that form.
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let rows = runtime_store
+            .load_input_states_strict(&runtime_id)
+            .await
+            .expect("every stored input row of the session decodes");
+        assert!(!rows.is_empty(), "the turn's input is stored");
+        for row in &rows {
+            let stored = serde_json::to_string(row).expect("the stored row's form");
+            assert!(
+                !stored.contains(SKIP_REASON),
+                "a stored input row names the skip's reason: {stored}"
+            );
+            let decoded: meerkat_runtime::input_state::StoredInputState =
+                serde_json::from_str(&stored).expect("the stored form decodes");
+            assert_eq!(decoded.state.input_id, row.state.input_id);
+        }
+
+        // The stored session: switched to the second target, with its
+        // fallback record and the transcript's fallback notice. None of it
+        // names the skip's reason.
+        let authoritative = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the durable session")
+            .expect("the durable session exists");
+        let metadata = authoritative
+            .session_metadata()
+            .expect("the session keeps its metadata");
+        assert_eq!(metadata.llm_identity().model, BACKUP_MODEL);
+        assert!(
+            metadata.model_fallback.is_some(),
+            "the fallback record is stored"
+        );
+        let stored_session = serde_json::to_string(&authoritative).expect("the stored session");
+        assert!(
+            stored_session.contains("model_fallback") && stored_session.contains("skipped_targets"),
+            "the transcript holds the fallback notice with its payload"
+        );
+        assert!(
+            !stored_session.contains(SKIP_REASON),
+            "the stored session names the skip's reason"
+        );
+
+        // The stored head row of a session that was created with a level and
+        // fell back under it holds nothing the previous release's head does
+        // not know.
+        super::brain_swap_runtime_loop_ab_tests::assert_the_stored_head_has_the_previous_releases_shape(
+            &temp.path().join("sessions.sqlite3"),
+            &session_id,
+            "created with a level, after an ordinary fallback under it",
+        )
+        .await;
+    }
+
     /// P0 regression: the default persistent realm backend (sqlite) serves
     /// sessions through a HeadCanonicalV1 runtime store. A recoverable
     /// primary failure with a configured fallback chain must durably commit

@@ -90,6 +90,44 @@ async def main():
 asyncio.run(main())
 ```
 
+<Warning>
+Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the
+Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events
+late or not at all, and a loop that waits for `run_completed` can wait
+without end. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases and what to do.
+</Warning>
+
+On an affected release, replace the send and the watch loop: read the
+member's `tokens_used` before the send, then wait until it is greater:
+
+```python
+        # Read the member's token count before the send
+        before = (await handle.member_status("agent-1")).tokens_used
+        await handle.send("agent-1", "Hello")
+
+        # Wait until the count is greater: it grows when a run ends
+        loop = asyncio.get_running_loop()
+        done_by = loop.time() + 120
+        while True:
+            status = await handle.member_status("agent-1")
+            if status.tokens_used > before:
+                break
+            if loop.time() > done_by:
+                raise TimeoutError("no run of agent-1 ended within 120 seconds")
+            await asyncio.sleep(0.5)
+        print(status.output_preview)
+```
+
+`tokens_used` grows once per run, when the run ends, and only for a run that
+called the model and whose provider reported usage: a run that fails before
+that, or a provider that reports no usage, ends this wait in the
+`TimeoutError`. It counts every run of the member, whoever started it, so the
+wait shows that a run ended, not that yours did; in this sample nothing else
+sends to `agent-1`. `status.status` and `status.is_final` describe the
+member, not the run.
+
 ## Durable detached tools
 
 Declare long-running host work explicitly instead of holding
@@ -238,9 +276,15 @@ status = await alice.status()          # state, session_id, generation, labels
 
 # Lifecycle
 await alice.reset()                    # Destructive: new generation, new session
-await rt.agent("domain:calendar").respawn()  # Non-destructive recovery
+await rt.agent("domain:calendar").respawn()  # Recovery: same identity, history and memory
 await rt.reconcile()                  # In-process roster reconciliation
 ```
+
+<Warning>
+Known issue, noted 2026-11-13: on Meta 0.9.9 through 0.9.14, respawning an identity on a gateway that keeps its state on disk, or on an embedding host that keeps its state on disk and uses identities, can destroy the mobs it created and its delegates. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases, how it happens and what to do.
+</Warning>
 
 `send_and_wait`, `dispatch_and_wait` and `dispatch_text_and_wait` are
 per-admission: the runtime mints a turn ticket for the delivery and keeps the
@@ -691,6 +735,15 @@ async for event in handle.subscribe_mob():
 
 Observation is independent of delivery. Subscribe before or after sending — the stream is continuous.
 
+<Warning>
+Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the
+Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events
+late or not at all, and a loop that waits for `run_completed` can wait
+without end. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases and what to do.
+</Warning>
+
 ### Structural mob events — durable observability
 
 `MobHandle.query_mob_events()` and `subscribe_mob_events()` project
@@ -895,6 +948,15 @@ result = await runtime.send(f"personal:{user_id}", slack_message)
 async for event in runtime.mob_handle().subscribe_agent(f"personal:{user_id}"):
     forward_to_slack(event)
 ```
+
+<Warning>
+Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the
+Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events
+late or not at all, and a loop that waits for `run_completed` can wait
+without end. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases and what to do.
+</Warning>
 
 Reserve `ensure_member` for **ephemeral workers** (helpers a parent spawns
 and an idle-retire label reaps) — the worker plane. See the
@@ -1688,7 +1750,7 @@ from meerkat_meta.errors import (
 ## Advanced API
 
 These methods are available for power users and module-system internals.
-Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`reconcile` instead.
+Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`reconcile` instead. Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events late or not at all, and a loop that waits for `run_completed` can wait without end. See the [known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14) for the affected releases and what to do.
 
 | Method | Return type | Description |
 |--------|-------------|-------------|

@@ -648,11 +648,15 @@ participant; `spawn_member` and `spawn_many_members` answer so for the
 source of a fork launch, and refuse a resume of a session bound to such a
 member as a resume of a session nobody holds; `list_members` and
 `mob_list_members` leave such a member out of the list and out of every
-listed member's `wired_to`; and the report of `mob_destroy` names no such
-member. A placed
-member's calls are asked about as that member's. The audience is handed the
-labels the calling member and the target carry on their own roster rows, so
-its rule can rest on a member's durable labels.
+listed member's `wired_to`; and the report of `mob_destroy`, and the refusal
+of a `mob_destroy` refused by the mob, name no such member. An agent is
+answered such a refusal whole only when its type shows that it names
+nothing the agent is not shown; any other is answered as `mob destroy
+refused. The destroy can be retried; the host's log has the cause.`, on a
+host with no audience too, and the host's log holds it whole at `warn`. A
+placed member's calls are asked about as that member's. The audience is
+handed the labels the calling member and the target carry on their own
+roster rows, so its rule can rest on a member's durable labels.
 
 A member placed on a member host holds manage scope over its mob, including
 the privileged spawn arguments, unless its controlling host narrowed it with

@@ -17,6 +17,7 @@ mod test_process_isolation;
 
 pub mod access;
 pub mod actor_loop_health;
+pub mod ask_user;
 pub mod auth;
 pub mod baseline;
 pub mod blob_store;

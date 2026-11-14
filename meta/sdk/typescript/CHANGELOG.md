@@ -80,6 +80,16 @@
   and cross-mob delivery between gateways) or in tests that need a provider
   key. The methods for agents created at run time (meta/identity) need a
   0.9.15 gateway: upgrade the gateway before the SDKs that call them.
+- `MobHandle.gatingQuestions()` lists the open question sets agents asked
+  with `ask_user` (`meta/gating/questions`) as `GatingQuestionSet`
+  (`GatingQuestion`, `GatingQuestionChoice`). `MobHandle.gatingAnswer(pendingId,
+  { approverId, presentedDigest, answers })` answers one and
+  `MobHandle.gatingDismiss(pendingId, { approverId, presentedDigest })`
+  dismisses one, both through `meta/gating/decide`; they resolve a
+  `GatingQuestionSetResult` (`outcome`: `answered` or `dismissed`). An answer
+  is a `GatingQuestionAnswer` (a choice, or free text where the question
+  allows it); `gatingAnswer` throws without at least one. `gatingPending()`
+  does not list question sets.
 
 ## 0.9.14
 

@@ -2723,7 +2723,9 @@ struct TurnLevelAdmission {
     /// The identity the turn would run with: the session's, with the turn's
     /// overrides.
     target: SessionLlmIdentity,
-    /// The session is live.
+    /// The session is live. Read only for a turn that is judged or gated:
+    /// `false` for a turn that names nothing of the identity on a session
+    /// that holds no level.
     live: bool,
     /// The target's level is judged before admission: a turn that asks for
     /// another LLM identity than the session holds, and every turn on a
@@ -2731,15 +2733,18 @@ struct TurnLevelAdmission {
     /// first build judges.
     judged: bool,
     /// The turn is admitted only when the session has no unfinished input:
-    /// it changes the session's LLM identity and its start could be judged
-    /// on another identity than its admission. That is a turn whose target
-    /// carries a level (it sets or changes the level, or changes the model
-    /// of a session that holds one), and a turn that names anything of the
-    /// identity beside the level on a session that holds a level, even
-    /// when its own target carries none (a model change with a clear): a
-    /// repeat of the level queued behind it would set that level on the
-    /// new model. A clear alone and a repeat of the held level are not
-    /// such turns.
+    /// it changes the session's LLM identity and its start, or the start of
+    /// a turn behind it, could be judged on another identity than at
+    /// admission. On a session that holds a level that is every turn that
+    /// changes anything of the identity: the model, the provider, the
+    /// self-hosted server, the provider params, the auth binding or the
+    /// level itself (set, changed or cleared; a level named inside the
+    /// provider params replaces them and is a change even when it equals
+    /// the held one). Only a plain turn and a repeat of the held level by
+    /// the level field queue there, so nothing queued can change the level
+    /// and a repeat is still a repeat when it starts. On a session that
+    /// holds no level it is a turn that sets one; everything else queues
+    /// (a clear there repeats "none").
     needs_idle_session: bool,
 }
 
@@ -7689,9 +7694,25 @@ impl SessionRuntime {
         let target = self
             .effective_llm_identity_for_turn(session_id, overrides)
             .await?;
+        let target_carries_a_level = target
+            .provider_params
+            .as_ref()
+            .is_some_and(|params| params.reasoning_effort.is_some());
+        let names_the_identity = overrides.filter(|ov| Self::turn_overrides_name_llm_identity(ov));
+        // A turn that names nothing of the identity on a session that holds
+        // no level has nothing to judge and nothing to gate: nothing more
+        // is read for it.
+        if names_the_identity.is_none() && !target_carries_a_level {
+            return Ok(TurnLevelAdmission {
+                target,
+                live: false,
+                judged: false,
+                needs_idle_session: false,
+            });
+        }
         let live = matches!(self.service.has_live_session(session_id).await, Ok(true));
         let staged = !live && self.staged_sessions.contains(session_id).await;
-        let Some(ov) = overrides.filter(|ov| Self::turn_overrides_name_llm_identity(ov)) else {
+        let Some(ov) = names_the_identity else {
             return Ok(TurnLevelAdmission {
                 target,
                 live,
@@ -7724,15 +7745,11 @@ impl SessionRuntime {
                 None => false,
             };
         let changes_llm_identity = !repeats_the_level;
-        let target_carries_a_level = target
-            .provider_params
-            .as_ref()
-            .is_some_and(|params| params.reasoning_effort.is_some());
         Ok(TurnLevelAdmission {
             live,
             judged: !staged && (changes_llm_identity || !live),
             needs_idle_session: changes_llm_identity
-                && (target_carries_a_level || (held_level.is_some() && names_beside_the_level)),
+                && (target_carries_a_level || held_level.is_some()),
             target,
         })
     }
@@ -7781,16 +7798,21 @@ impl SessionRuntime {
         }
     }
 
-    /// The answer to a turn that changes the session's LLM identity with a
-    /// level in its target while the session has an unfinished input. Its
-    /// data names the reason, so a caller can tell it from the other busy
-    /// answers: wait for the running turn's answer, then send it again.
+    /// The answer to a turn that needs an idle session
+    /// (`TurnLevelAdmission::needs_idle_session`) while the session has
+    /// an unfinished input. Its data names the reason, so a caller can tell
+    /// it from the other busy answers: wait for the running turn's answer,
+    /// then send it again.
     fn level_change_on_a_busy_session() -> RpcError {
         RpcError {
             code: error::SESSION_BUSY,
-            message: "session is busy: a turn that sets or changes the reasoning effort level, \
-                      or changes the model of a session that holds one, is not queued behind \
-                      unfinished work; send it again when the session is idle"
+            message: "session is busy: this turn is not queued behind unfinished work. On a \
+                      session that holds a reasoning effort level, a turn that changes the \
+                      model, the provider, the self-hosted server, the provider params, the \
+                      auth binding or the level (sets, changes or clears it; a level inside \
+                      provider_params counts as a change) needs an idle session; so does a \
+                      turn that sets a level on a session that holds none. Send it again \
+                      when the session is idle"
                 .to_string(),
             data: Some(serde_json::json!({
                 "kind": "reasoning_effort_change_needs_idle_session"
@@ -9940,12 +9962,12 @@ impl SessionRuntime {
         // the session's runtime registration with every input queued on it.
         // So a turn whose start could be judged on another identity than
         // its admission (anything queued ahead of it can change the
-        // session's model) must not be queued: a turn that changes the
-        // session's LLM identity with a level in its target, or that names
-        // anything of that identity beside the level on a session that
-        // holds a level, is admitted only when the session has no
-        // unfinished input, and is otherwise answered that the session is
-        // busy, with nothing admitted (`TurnLevelAdmission`). The emptiness
+        // session's model) must not be queued: on a session that holds a
+        // level every turn that changes anything of the LLM identity, and
+        // on a session that holds none a turn that sets a level, is
+        // admitted only when the session has no unfinished input, and is
+        // otherwise answered that the session is busy, with nothing
+        // admitted (`TurnLevelAdmission`). The emptiness
         // is the runtime's own answer, read under this lock, under which no
         // other turn request is admitted, and the level is judged again
         // here against the identity as it is now. This restriction goes

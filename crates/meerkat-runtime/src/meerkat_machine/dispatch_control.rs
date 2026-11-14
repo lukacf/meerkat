@@ -2841,7 +2841,7 @@ impl MeerkatMachine {
                     request_id: handoff.request_id,
                     originating_run_id: handoff.originating_run_id,
                     intent: handoff.intent,
-                    applied_identity: Box::new(applied_identity.clone()),
+                    applied_identity: Box::new(model_routing_record_identity(&applied_identity)),
                 };
                 self.record_and_persist_model_routing_handoff_resolution(
                     session_id,
@@ -3174,6 +3174,30 @@ fn routing_switch_approval_reason(
             super::dsl::RoutingSwitchApprovalReason::RealtimeDetachRequired
         }
     }
+}
+
+/// The identity as the model-routing history records it: without the
+/// provider-neutral reasoning effort level.
+///
+/// The history is stored in the session's head row, and an earlier release
+/// decodes the head rows of a realm typed when it looks a session up. That
+/// release's provider params have no member for the level and refuse a key
+/// they do not know, so one record that carried the level made every such
+/// lookup in the realm fail there, and no step repaired it. The record
+/// names what was installed. The level stays in the session's own settings,
+/// which are the only source of its live identity. Params that hold nothing
+/// else are recorded as absent.
+fn model_routing_record_identity(
+    identity: &meerkat_core::SessionLlmIdentity,
+) -> meerkat_core::SessionLlmIdentity {
+    let mut recorded = identity.clone();
+    if let Some(params) = recorded.provider_params.as_mut() {
+        params.reasoning_effort = None;
+        if params.is_empty() {
+            recorded.provider_params = None;
+        }
+    }
+    recorded
 }
 
 fn switch_approval_reason_from_routing(

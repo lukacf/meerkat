@@ -95,7 +95,7 @@ Committed create failure must not be silently rewritten to “cancelled” or cl
 - A turn the runtime queue does not dispatch (a direct turn, such as a
   create's first turn) also returns `SESSION_BUSY` while the session's
   runtime holds a run that waits to resume: one a store fence gap suspended
-  (see [Durable runs](/guides/durable-runs#one-writer%2C-fenced)), or one a
+  (see [Durable runs](/guides/durable-runs#one-writer-fenced)), or one a
   restart left open. It goes through once the runtime has resumed or
   settled that run.
 - Committed success must not be rewritten to cancellation.
@@ -1076,7 +1076,7 @@ dispatch, at a commit or while a suspended run waits), the live session is
 torn down, the store keeps the session's inputs as last committed for that
 owner, and every waiter in this process of an input the store keeps gets
 `RequeuedAcrossStop` too (see
-[Durable runs](/guides/durable-runs#one-writer%2C-fenced)).
+[Durable runs](/guides/durable-runs#one-writer-fenced)).
 
 A run the gap suspended before its first round commit starts again from its
 inputs under the same run id, and publishes `run_started` again with no

@@ -117,6 +117,22 @@ def slugify(heading: str) -> str:
     return encoded.strip("-")
 
 
+def published_slug(heading: str) -> str:
+    """The id a heading gets on the published site, as a link has to write it.
+
+    The published site and the pinned CLI differ for five characters. The CLI,
+    which `slugify` follows, keeps a comma, a colon, a semicolon, a question
+    mark and a double quote as percent escapes. The published site drops them:
+    the heading One Writer, Fenced has the id `one-writer-fenced` there, and a
+    link that writes `%2C` finds no heading in a browser. A slash and a plus sign
+    stay in the id on both, so a link still carries them as escapes
+    (`capabilities%2Fget`). Links are checked against this form, because the
+    published site is what a reader opens. Read from the ids of the live pages
+    on 2026-11-14; the cases in test_validate_mintlify_docs.py name them.
+    """
+    return slugify(re.sub(r'[,:;?"]', "", heading))
+
+
 def normalize_anchor(anchor: str) -> str:
     """Lower-case an anchor the way `slugify` does without corrupting escapes.
 
@@ -136,7 +152,7 @@ def heading_slugs(path: Path) -> set[str]:
         match = re.match(r"^(#{2,6})\s+(.+?)\s*$", line)
         if not match:
             continue
-        base = slugify(match.group(2))
+        base = published_slug(match.group(2))
         if not base:
             continue
         count = counts.get(base, 0)

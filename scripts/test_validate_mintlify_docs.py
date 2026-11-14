@@ -32,6 +32,50 @@ class MintlifyHeadingSlugTests(unittest.TestCase):
             "profiles-are-templates%3B-members-are-declared",
         )
 
+    def test_published_slug_drops_the_punctuation_the_published_site_drops(self) -> None:
+        # Each expected id is the id of that heading on docs.rkat.ai, read on
+        # 2026-11-14.
+        for heading, published_id in (
+            (
+                "One Writer, Fenced",
+                "one-writer-fenced",
+            ),
+            (
+                "Schedules, WorkGraph, and multi-host mobs",
+                "schedules-workgraph-and-multi-host-mobs",
+            ),
+            (
+                "Rust API: new fields and variants",
+                "rust-api-new-fields-and-variants",
+            ),
+            (
+                "The fast path: env vars",
+                "the-fast-path-env-vars",
+            ),
+            (
+                "Mutating methods (ABAC `workgraph.manage`; console also requires `can_mutate`)",
+                "mutating-methods-abac-workgraph-manage-console-also-requires-can_mutate",
+            ),
+            (
+                "How Is This Different From Claude Code Or Codex?",
+                "how-is-this-different-from-claude-code-or-codex",
+            ),
+            (
+                '`auth_config` with an external issuer (`provider: "oidc"`)',
+                "auth_config-with-an-external-issuer-provider-oidc",
+            ),
+        ):
+            with self.subTest(heading=heading):
+                self.assertEqual(VALIDATE.published_slug(heading), published_id)
+
+    def test_published_slug_keeps_the_slashes_of_method_names(self) -> None:
+        # The published id of this entry keeps its slashes and has no commas.
+        self.assertEqual(
+            VALIDATE.published_slug("`meta/identity/archive`, `meta/identity/unarchive`"),
+            "meta%2Fidentity%2Farchive-meta%2Fidentity%2Funarchive",
+        )
+        self.assertEqual(VALIDATE.published_slug("capabilities/get"), "capabilities%2Fget")
+
     def test_preserves_underscores_and_removes_apostrophes(self) -> None:
         self.assertEqual(VALIDATE.slugify("What's _new_?"), "whats-_new_%3F")
 
@@ -144,17 +188,17 @@ class MintlifyLinkValidationTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("docs/api/rest.mdx links to missing anchor '/api/rpc#capabilitiesget'", errors)
 
-    def test_semicolon_heading_rejects_legacy_fragment_and_accepts_encoded_fragment(self) -> None:
+    def test_semicolon_heading_accepts_the_published_fragment_and_rejects_the_encoded_one(self) -> None:
         (self.docs / "api" / "rpc.mdx").write_text(
             '---\ntitle: "RPC"\ndescription: "RPC"\nicon: "plug"\n---\n\n'
             "## Profiles are templates; members are declared\n",
             encoding="utf-8",
         )
-        self.write_rest_page("/api/rpc#profiles-are-templates-members-are-declared")
+        self.write_rest_page("/api/rpc#profiles-are-templates%3B-members-are-declared")
         code, errors = self.run_validator()
         self.assertEqual(code, 1)
         self.assertIn("missing anchor", errors)
-        self.write_rest_page("/api/rpc#profiles-are-templates%3B-members-are-declared")
+        self.write_rest_page("/api/rpc#profiles-are-templates-members-are-declared")
         code, errors = self.run_validator()
         self.assertEqual(code, 0, errors)
 

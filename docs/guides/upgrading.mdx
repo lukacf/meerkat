@@ -1025,13 +1025,6 @@ On 0.9.14 after the rollback:
   0.9.15 it stays unique and rising across the rollback, and a read from
   it returns exactly the later events (confirmed by a run); on 0.9.14
   `events/list_since` fails for such a session from any position.
-  An archive of a session that is not live in the process and still owes
-  a tracked interaction's terminal (a mob flow step, for example; not a
-  session that only took plain prompts) can fail on 0.9.14, with a
-  publication failure that can be retried (read from the source):
-  `session/archive`, `rkat session delete <ID>`, REST
-  `DELETE /sessions/{id}`, the MCP archive tool, and a member's archive
-  behind `mob/retire` and `mob/destroy`.
 - **A mob member whose session holds a level** that a turn set (the
   mob's definition and its profiles hold none). Cleared before the
   rollback, the member works on 0.9.14: it is listed, it takes turns, its
@@ -1053,24 +1046,39 @@ On 0.9.14 after the rollback:
   of a turn or a flow step delivered to that member, fail while the
   events 0.9.14 does not know lie in the stretch of the log it reads.
   Other members, the membership, and members that run in the mob's own
-  host are untouched. No step on 0.9.14 ends it. Going forward does not
-  end all of it: after such a member's host has run 0.9.14 and returned,
+  host are untouched. No step on 0.9.14 ends it. On a member host that
+  has gone back to 0.9.14, retiring a placed member (or archiving its
+  session) while a tracked flow step or tracked delivery for it is still
+  unsettled can fail (read from the source, not run). Going forward does
+  not end all of it: after such a member's host has run 0.9.14 and returned,
   the controlling host can skip events when that member's event stream
   is resumed from a cursor, and a wait for the completion of its run can
   time out; the stored events are complete (read from the source, not
   run). For a placed member the condition ends when the controller
   process restarts or the member's residency changes (its host re-binds,
-  it moves to another host, gets a new session or a new member
-  generation, or is retired) (read from the source, not run).
+  the member moves to another host, gets a new session or a new member
+  generation, or is retired) (read from the source). Which operation
+  changes the residency in a given setup, and whether a host that was
+  rolled back re-binds by itself, is not established.
 - **The status of a turn that ran with a level** (`session/input_status`)
-  answers on 0.9.14: the stored record of a finished turn verifies on a
-  release that does not know the level's report (confirmed by a test of
-  this change).
+  answers on 0.9.14, with one exception: an input that was admitted and
+  then refused for its level (a turn on a session whose model does not
+  support the level; below). The status call for such an input fails on
+  0.9.14, also after the level is cleared (confirmed by a run); the
+  session's other calls answer. For every other finished turn the stored
+  record verifies on a release that does not know the level's report
+  (confirmed by a test of this change).
 - **A turn that carries a level and has not finished** is neither run nor
   refused by 0.9.14: its status call fails there, and the input waits
   unchanged and runs again at the session's next turn on 0.9.15
   (confirmed by a run). Its session still holds the level, so it does not
-  return on 0.9.14 either way.
+  return on 0.9.14 either way. Read from the source and not seen in a
+  run: where the session itself holds no level (the unfinished turn is
+  the one that sets the level, or one that clears it), 0.9.14 stops the
+  recovery of that session's runtime on the row, so a turn, a resume and
+  an archive of that session answer an internal error ("Runtime recovery
+  is repair-blocked") until 0.9.15 has finished the turn, while reads and
+  the session list work.
 
 Stored places whose step costs something:
 
@@ -1104,8 +1112,8 @@ Stored places whose step costs something:
   id, on 0.9.15 too (`session/read` answers "Session not found"), while
   the statuses of its stored inputs still answer (confirmed by a run). An
   earlier run found the destroyed member's session row, with its level,
-  still in the sessions store, so the query above can list such a
-  session. No call that takes a session id reaches it, and no step for it
+  still in the sessions store, so the query for sessions that hold a
+  level can list such a session. No call that takes a session id reaches it, and no step for it
   is known; whether anything else on 0.9.14 reads that row was not
   established.
 - **A realm profile that holds a level,** or the `resume_overrides` value
@@ -1129,39 +1137,45 @@ Stored places whose step costs something:
 
 What no step removes (beside the event replay above):
 
-- **The record of a run that failed for a refused level.** An ordinary
-  refusal stores nothing 0.9.14 cannot read: a level refused when a
-  session is created, or at a turn's start, on a live session and on a
-  stored one (confirmed by a run). The record is written only when a run
-  that has started fails with `reasoning_effort_refused`: the session
-  holds a level that its route does not take when a request is made. The
-  ways into that, read from the source: a model switch that the run
-  itself made (`brain_swap`), to a model whose route does not take the
-  level; a route whose levels cannot be read when the request is made (an
-  account's model list that is not loaded); and a refusal that the
-  provider client returns. Not ways in: a refusal at a session's creation
-  or at a turn's start (above); a compaction that is refused for the
-  level, after which the run goes on; a mob flow, whose failed step is
-  recorded as text only; and a model fallback, where a target that does
-  not take the level is skipped and the skip's reason is stored in the
-  event log only (the last: confirmed by a test of this change and by a
-  run with the released 0.9.14 binary). The stored
-  input of that turn keeps the typed failure with its result, and 0.9.14
-  does not know the reason, so the row does not decode there. Turns on the
-  session, a resume, `session/read`, the history and the session list do
-  not read it. What fails while the row is stored:
-  `session/input_status` for that input, and the delivery status a consent
-  delivery or Meerkat Meta's delivery to a mob's runtime asks for when it
-  is this input's; Meerkat Connect's continuity check for the session and
-  the settlement it runs when it takes the session over cold; and, in a
-  governed realm, revoking a controller grant and releasing a credential
-  lease, which read the inputs of every session in the store. The row
-  stays stored and 0.9.15 reads it again. No step removes it (read from
-  the source, not run). A read-only query tells a host that uses one of
-  those calls, before it rolls back, whether its store holds such a row:
-  run it on `sessions.sqlite3` in the realm's directory (`runtime.sqlite3`
-  for a JSONL realm). Its form was run on stores without such a row; a
-  hit was not seen:
+- **The record of a turn that was admitted and then refused for its
+  level.** A turn that asks for a level its route refuses stores nothing
+  0.9.14 cannot read: it is refused when a session is created, or at the
+  turn's start, on a live session and on a stored one, where the stored
+  input ends as abandoned with the reason `stopped` (confirmed by a run).
+  The record is another case: a turn is admitted, and its request is then
+  refused, before anything is sent to the model, because the session
+  holds a level that its model does not support. The shape that was run:
+  a run switches the session to such a model (`brain_swap`), and the next
+  turn is refused (`-32602`, `reasoning_effort_refused`, reason
+  `unsupported_level`), and so is every turn after it until the level is
+  cleared (confirmed by a run, within these limits: one run, self-hosted
+  models behind a scripted endpoint, over JSON-RPC; not run: REST, the
+  CLI, a mob member). Two more ways in are read from the source: a route
+  whose levels cannot be read when the request is made (an account's
+  model list that is not loaded), and a refusal that the provider client
+  returns. Not ways in: a compaction that is refused for the level, after
+  which the run goes on; a mob flow, whose failed step is recorded as
+  text only; and a model fallback, where a target that does not take the
+  level is skipped and the skip's reason is stored in the event log only
+  (the last: confirmed by a test of this change and by a run with the
+  released 0.9.14 binary). The stored input of that turn is finished
+  (`consumed`) and keeps the typed failure, and 0.9.14 does not know the
+  reason, so the row does not decode there. On 0.9.14
+  `session/input_status` for that input fails ("input state read failed:
+  ... unknown variant `reasoning_effort_refused`"), also after the level
+  is cleared, while the session's other inputs answer and
+  `session/list`, `session/read`, `session/history` and a turn work
+  (confirmed by a run). Read from the source and not called in a run:
+  the delivery status a consent delivery or Meerkat Meta's delivery to a
+  mob's runtime asks for when it is this input's; Meerkat Connect's
+  continuity check for the session and the settlement it runs when it
+  takes the session over cold; and, in a governed realm, revoking a
+  controller grant and releasing a credential lease, which read the
+  inputs of every session in the store. The row stays stored, 0.9.15
+  reads it again, and no step removes it. A read-only query finds such
+  rows, on `sessions.sqlite3` in the realm's directory (`runtime.sqlite3`
+  for a JSONL realm, not run). It was run on a store with such rows and
+  returned them (confirmed by a run):
 
   ```sql
   SELECT runtime_id, input_id FROM runtime_input_states
@@ -1176,8 +1190,8 @@ a level on a member placed on another host if you may ever go back to
 0.9.14: what a rollback leaves there does not end with the return (read
 from the source, not run). What the option still costs: on 0.9.14
 the event replay of every session that ran a turn with a level fails, and
-the record of a run that failed for a refused level stays where it was
-written. There is no `rkat storage doctor` finding or count for stored
+the record of a turn that was admitted and then refused for its level
+stays where it was written. There is no `rkat storage doctor` finding or count for stored
 levels yet. To find affected mobs before rolling back, take the mob ids
 from JSON-RPC `mob/list` (`rkat` has no command that lists mobs), page
 each mob's stored events with `rkat mob logs <MOB_ID> --json` (100 events

@@ -2386,7 +2386,12 @@ them.
     from any position
     (``unknown variant `request_reasoning_effort_resolved` ``), and no
     step ends that on 0.9.14. The status of a finished turn that ran
-    with a level answers there (confirmed by a test of this change).
+    with a level answers there (confirmed by a test of this change),
+    with one exception: an input that was admitted and then refused for
+    its level (a turn on a session whose model does not support the
+    level). The status call for such an input fails on 0.9.14, also
+    after the level is cleared (confirmed by a run); the session's other
+    calls answer.
   - A turn that carries a level and has not finished is neither run nor
     refused by 0.9.14: its status call fails there, and the input waits
     unchanged and runs again at the session's next turn on 0.9.15.
@@ -2425,8 +2430,8 @@ them.
   ran a turn with a level still fails on 0.9.14. Sessions, inputs and
   mobs that never carried a level are written exactly as before and
   read on either release. One more stored form that no step removes (the
-  stored record of a run that failed for a refused level after it had
-  started), a member placed on another host (see Known limitations), the
+  stored record of a turn that was admitted and then refused for its
+  level), a member placed on another host (see Known limitations), the
   calls that fail and each item's grade are in "Rolling back to 0.9.14" in
   `docs/guides/upgrading.mdx`.
 
@@ -2623,9 +2628,11 @@ them.
   completion of its run can time out; the stored events are complete
   (read from the source, not run). For a placed member the condition
   ends when the controller process restarts or the member's residency
-  changes (its host re-binds, it moves to another host, gets a new
-  session or a new member generation, or is retired) (read from the
-  source, not run). Do not use a level on a member placed on another
+  changes (its host re-binds, the member moves to another host, gets a
+  new session or a new member generation, or is retired) (read from the
+  source). Which operation changes the residency in a given setup, and
+  whether a host that was rolled back re-binds by itself, is not
+  established. Do not use a level on a member placed on another
   host if you may ever go back to 0.9.14.
 
 - Read from the source: a preloaded skill that cannot be resolved (a mistyped

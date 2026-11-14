@@ -2362,10 +2362,8 @@ a level, and no step on 0.9.14 ends that. After such a member's host has
 run 0.9.14 and returned, the controlling host can skip events when that
 member's event stream is resumed from a cursor, and a wait for the
 completion of its run can time out; the stored events are complete (read
-from the source, not run). For a placed member the condition ends when the
-controller process restarts or the member's residency changes (its host
-re-binds, it moves to another host, gets a new session or a new member
-generation, or is retired) (read from the source, not run). See
+from the source, not run). What ends that condition, and what is not
+established about it, is in
 [Rolling back to 0.9.14](/guides/upgrading#rolling-back-to-0-9-14).
 
 A placed member can also be wired to an external peer (`mob/wire` with an

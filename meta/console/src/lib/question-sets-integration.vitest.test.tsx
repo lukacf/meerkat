@@ -120,7 +120,7 @@ describe("question sets in the Console", () => {
     fireEvent.click(within(card).getByRole("radio", { name: "Europe" }));
     fireEvent.click(within(card).getByRole("button", { name: "Send answers" }));
     await waitFor(() => expect(screen.queryAllByTestId(`question-set:${PENDING_ID}`).length).toBe(0));
-    expect((await screen.findByTestId("question-set-notice")).textContent).toBe("This question is no longer waiting for an answer.");
+    expect((await screen.findByTestId("question-set-notice")).textContent).toBe("This question is no longer listed here.");
     for (const word of SET_WORDS) expect(document.body.innerHTML.includes(word)).toBe(false);
     expect(document.body.textContent?.includes("gating decision failed")).toBe(false);
     expect(/not permitted|timed out/i.test(document.body.textContent ?? "")).toBe(false);

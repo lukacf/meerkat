@@ -230,6 +230,15 @@ describe("Workbench nav (B14)", () => {
     expect(alone.getByTestId("nav-badge:gating").textContent).toBe("2");
     expect(describedBy(alone.getByTestId("nav:gating"))).toBe("2 question sets");
     expect(within(alone.getByTestId("approval-attention")).getByRole("button").getAttribute("aria-label")).toBe("Needs you, 2 question sets");
+    cleanup();
+    // A list of question sets that may be out of date is not counted on the
+    // badge (as approvals that are not read are not), and Needs you says so.
+    const stale = render(<Sidebar {...withAttention} visibleControls={[...withAttention.visibleControls]} questionSetCount={1} questionSetStatus="stale" />);
+    expect(stale.getByTestId("nav-badge:gating").textContent).toBe("2");
+    expect(describedBy(stale.getByTestId("nav:gating"))).toBe("2 pending approvals");
+    expect(stale.getByTestId("approval-attention").querySelector(".cc-approval-attention__count")?.textContent).toBe("!");
+    expect(within(stale.getByTestId("approval-attention")).getByRole("button").getAttribute("aria-label"))
+      .toBe("Needs you, 2 pending approvals, Questions may be out of date");
   });
 
   it("lists views with exact names, describes their attention badges and marks the focused pane's view", () => {

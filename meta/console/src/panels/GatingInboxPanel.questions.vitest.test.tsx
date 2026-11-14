@@ -99,7 +99,7 @@ describe("GatingInboxPanel question sets", () => {
     expect(view.getByTestId(`question-set:${PENDING_ID}`)).toBeTruthy();
     view.rerender(panel(sets({ sets: [], slots: {}, notices: [{ slot: 1, kind: "gone", atMs: 5 }] })));
     expect(view.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
-    expect(view.getByTestId("question-set-notice").textContent).toBe("This question is no longer waiting for an answer.");
+    expect(view.getByTestId("question-set-notice").textContent).toBe("This question is no longer listed here.");
     expect(view.queryByText("Release plan")).toBeNull();
     expect(view.queryByText("Which region goes first?")).toBeNull();
     // The set no longer counts with what waits; the approval still does.
@@ -130,6 +130,28 @@ describe("GatingInboxPanel question sets", () => {
     const none = empty.getByText("No pending approvals.").closest(".cc-panel-empty");
     expect(none?.classList.contains("cc-panel-empty--inline")).toBe(true);
     expect(none?.classList.contains("cc-panel-empty--art")).toBe(false);
+  });
+
+  it("keeps the empty inbox small beside a line it shows, and large when the line is of a card it never showed", () => {
+    const value = (snapshot: QuestionSetSnapshot) => ({ snapshot, onAnswer: vi.fn(), onDismiss: vi.fn() });
+    const panel = (snapshot: QuestionSetSnapshot) => (
+      <GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={approvals([])} questions={value(snapshot)} />
+    );
+    const left = sets({ sets: [], slots: {}, notices: [{ slot: 1, kind: "gone", atMs: 5 }] });
+    const empty = (view: ReturnType<typeof render>) => view.getByText("No pending approvals.").closest(".cc-panel-empty");
+    // This inbox showed the card: the line is there and the empty state sits small beside it.
+    const view = render(panel(sets()));
+    view.rerender(panel(left));
+    expect(view.getByTestId("question-set-notice")).toBeTruthy();
+    expect(empty(view)?.classList.contains("cc-panel-empty--inline")).toBe(true);
+    cleanup();
+    // An inbox opened afterwards never showed the card: no line, and the clear
+    // inbox's own large picture.
+    const late = render(panel(left));
+    expect(late.queryByTestId("question-set-notice")).toBeNull();
+    expect(late.queryByTestId("question-set-list")).toBeNull();
+    expect(empty(late)?.classList.contains("cc-panel-empty--inline")).toBe(false);
+    expect(empty(late)?.classList.contains("cc-panel-empty--art")).toBe(true);
   });
 
   it("is unchanged without the question sets prop", () => {

@@ -6,6 +6,7 @@ import {
   QUESTION_SET_REFUSAL_WORDS,
   normalizeQuestionSet,
   questionSetAnswerParams,
+  questionSetRefusal,
   type QuestionSet,
   type QuestionSetDecisionState,
   type QuestionSetSnapshot,
@@ -275,6 +276,7 @@ describe("QuestionSetCard", () => {
     ["access_denied", false],
     ["caller_changed", false],
     ["caller_not_current", false],
+    ["not_sent", false],
   ] as const)("keeps the card after a refusal its set outlives (%s): not sent, why, what to do, and the person may send again", (kind, details) => {
     const sentence = QUESTION_SET_REFUSAL_WORDS[kind];
     expect(sentence.length).toBeGreaterThan(20);
@@ -383,25 +385,80 @@ describe("QuestionSetCard", () => {
     expect(onAnswer).toHaveBeenCalledWith(PENDING_ID, { "q-start": { kind: "choice", choiceId: "c-night" } });
   });
 
-  it("says when an answer may not have arrived and when the list may be out of date", () => {
+  it("says what could not be confirmed in the words of what was sent, and offers a resend only where one can be sent", () => {
+    const sentence = (view: ReturnType<typeof render>) => view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent;
     const failed = show({ decision: { phase: "failed", action: "answer", error: "network" } });
     expect(failed.card.dataset.state).toBe("failed");
-    expect(failed.view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent)
+    expect(sentence(failed.view))
       .toBe("The Console could not confirm that your answer arrived. If this question is still listed after the next refresh, send your answer again.");
     cleanup();
-    const stale = show({ resourceStatus: "stale" });
-    expect(stale.card.dataset.state).toBe("stale");
-    expect(stale.view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent)
-      .toBe("The Console could not read the questions again just now, so this card may be out of date. It keeps trying; you can answer once it has read them.");
-    expect(send(stale.view).disabled).toBe(true);
-    expect(dismiss(stale.view).disabled).toBe(true);
+    // A dismissal is not an answer.
+    const dismissed = show({ decision: { phase: "failed", action: "dismiss", error: "network" } });
+    expect(sentence(dismissed.view))
+      .toBe("The Console could not confirm that the dismissal arrived. If this question is still listed after the next refresh, dismiss it again.");
+    expect(sentence(dismissed.view)).not.toContain("your answer");
     cleanup();
     // An uncertain send stays uncertain when the caller's access then became
-    // read-only: the card keeps saying so and offers nothing to send.
-    const locked = show({ decision: { phase: "failed", action: "answer", error: "network" }, readOnly: true });
+    // read-only: the card keeps saying so, offers nothing to send and does
+    // not tell the person to send again.
+    const locked = show({ decision: { phase: "failed", action: "answer", error: "network" }, readOnly: true, readOnlyReason: "sign_in" });
     expect(locked.card.dataset.state).toBe("failed");
+    expect(sentence(locked.view))
+      .toBe("The Console could not confirm that your answer arrived. Sign in as yourself to answer. Only a signed-in person can answer an agent's questions.");
     expect(dismiss(locked.view).disabled).toBe(true);
     expect((locked.view.getAllByRole("radio") as HTMLInputElement[]).every((input) => input.disabled)).toBe(true);
+    cleanup();
+    // The same for a set that is now larger than the Console shows.
+    const cut = show({ set: questions({ title: "T".repeat(201) }), decision: { phase: "failed", action: "answer", error: "network" } });
+    expect(cut.card.dataset.state).toBe("failed");
+    expect(sentence(cut.view))
+      .toBe("The Console could not confirm that your answer arrived. This set of questions is larger than the Console shows, so it cannot be answered here. Reply to Release Planner in its chat instead.");
+    expect(sentence(cut.view)).not.toContain("send your answer again");
+    expect(send(cut.view).disabled).toBe(true);
+  });
+
+  it("says why the list may be out of date: a read that failed, or a list not read for a while, and what a person who can answer may do", () => {
+    const sentence = (view: ReturnType<typeof render>) => view.getByTestId(`question-set-sentence:${PENDING_ID}`).textContent;
+    // A read failed, and this person can answer.
+    const failed = show({ resourceStatus: "stale", readFailed: true });
+    expect(failed.card.dataset.state).toBe("stale");
+    expect(sentence(failed.view))
+      .toBe("The Console could not read the questions again just now, so this card may be out of date. It keeps trying; you can answer once it has read them.");
+    expect(send(failed.view).disabled).toBe(true);
+    expect(dismiss(failed.view).disabled).toBe(true);
+    cleanup();
+    // A read failed, and this caller cannot answer anyway: no promise of it.
+    const reader = show({ resourceStatus: "stale", readFailed: true, readOnly: true });
+    expect(sentence(reader.view)).toBe("The Console could not read the questions again just now, so this card may be out of date. It keeps trying.");
+    cleanup();
+    const cut = show({ resourceStatus: "stale", readFailed: true, set: questions({ title: "T".repeat(201) }) });
+    expect(sentence(cut.view)).toBe("The Console could not read the questions again just now, so this card may be out of date. It keeps trying.");
+    cleanup();
+    // No read failed (a reply is on its way, or the tab just came back): the
+    // card does not say that one did.
+    const waiting = show({ resourceStatus: "stale" });
+    expect(waiting.card.dataset.state).toBe("stale");
+    expect(sentence(waiting.view))
+      .toBe("The Console has not read the questions for a while, so this card may be out of date. It is reading them again; you can answer once it has.");
+    cleanup();
+    const waitingReader = show({ resourceStatus: "stale", readOnly: true, readOnlyReason: "sign_in" });
+    expect(sentence(waitingReader.view))
+      .toBe("The Console has not read the questions for a while, so this card may be out of date. It is reading them again.");
+  });
+
+  it("shows only the kind of a refusal it does not know by name under Details, never a message that carries an id", () => {
+    const refused = questionSetRefusal(Object.assign(new Error("refused"), { rpcError: {
+      code: -32602, message: `decision ${PENDING_ID} refused the input: presentation_incomplete`,
+      data: { kind: "decision_refused", decision_refusal: { kind: "presentation_incomplete" } },
+    } }))!;
+    const { view, card } = show({ decision: { phase: "refused", action: "answer", error: refused.words, refusal: refused } });
+    const disclosure = view.getByTestId(`question-set-refusal:${PENDING_ID}`);
+    expect(disclosure.textContent).toBe("DetailsThe gateway's refusal: presentation_incomplete");
+    // The set's id is under Technical details and nowhere else on the card.
+    const outside = card.cloneNode(true) as HTMLElement;
+    outside.querySelector(`[data-testid="question-set-details:${PENDING_ID}"]`)?.remove();
+    expect(outside.textContent).not.toContain(PENDING_ID);
+    expect(outside.textContent).not.toContain("decision:");
   });
 
   it("moves focus to the question's first choice after Clear, and to the card's sentence after Send", () => {
@@ -553,7 +610,7 @@ describe("QuestionSetList", () => {
     expect(view.getByTestId(`question-set:${BILLING_ID}`)).toBeTruthy();
     const lines = view.getAllByTestId("question-set-notice");
     expect(lines.length).toBe(1);
-    expect(lines[0].textContent).toBe("This question is no longer waiting for an answer.");
+    expect(lines[0].textContent).toBe("This question is no longer listed here.");
     expect(lines[0].getAttribute("role")).toBe("status");
     // Nothing of the set is left in the page: no name, text or id, shown or hidden.
     for (const word of SET_WORDS) expect(view.container.innerHTML).not.toContain(word);
@@ -565,7 +622,7 @@ describe("QuestionSetList", () => {
     view.rerender(list(listSnapshot({ sets: [], slots: {}, notices: [{ slot: 1, kind: "sent_unconfirmed", atMs: 5 }] })));
     expect(view.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
     expect(view.getByTestId("question-set-notice").textContent)
-      .toBe("This question is no longer waiting for an answer. The Console could not confirm whether your answer was the one that arrived.");
+      .toBe("This question is no longer listed here. The Console could not confirm whether your reply arrived.");
     for (const word of SET_WORDS) expect(view.container.innerHTML).not.toContain(word);
   });
 
@@ -598,6 +655,31 @@ describe("QuestionSetList", () => {
     for (const word of SET_WORDS) expect(view.container.innerHTML).not.toContain(word);
   });
 
+  it("moves the focus to the line when the card that held it is removed, and takes none otherwise", () => {
+    const focused = () => document.activeElement?.getAttribute("data-testid") ?? null;
+    const gone = listSnapshot({ sets: [billing()], slots: { [BILLING_ID]: 2 }, notices: [{ slot: 1, kind: "not_open", atMs: 5 }] });
+    const view = render(list(listSnapshot()));
+    // After Send the focus is on the card's sentence; the gateway then says
+    // the set is no longer open and the card is removed at once.
+    view.getByTestId(`question-set-sentence:${PENDING_ID}`).focus();
+    expect(focused()).toBe(`question-set-sentence:${PENDING_ID}`);
+    view.rerender(list(gone));
+    expect(focused()).toBe("question-set-line");
+    expect(document.activeElement?.textContent).toBe(QUESTION_SET_REFUSAL_WORDS.not_open);
+    expect(document.activeElement?.getAttribute("tabindex")).toBe("-1");
+    cleanup();
+    // The focus was elsewhere (another card, or nowhere): the line takes none.
+    const other = render(list(listSnapshot()));
+    other.getByTestId(`question-set-sentence:${BILLING_ID}`).focus();
+    other.rerender(list(gone));
+    expect(focused()).toBe(`question-set-sentence:${BILLING_ID}`);
+    cleanup();
+    const idle = render(list(listSnapshot()));
+    idle.rerender(list(gone));
+    expect(idle.getByTestId("question-set-notice")).toBeTruthy();
+    expect(focused()).toBeNull();
+  });
+
   it("shows the line only where the card was shown, and at most one", () => {
     const mine = render(list(listSnapshot(), IDENTITY, "mine"));
     const other = render(list(listSnapshot(), "identity:billing", "other"));
@@ -605,14 +687,14 @@ describe("QuestionSetList", () => {
     mine.rerender(list(left, IDENTITY, "mine"));
     other.rerender(list(left, "identity:billing", "other"));
     expect(within(mine.getByTestId("mine")).getAllByTestId("question-set-notice").map((line) => line.textContent))
-      .toEqual(["This question is no longer waiting for an answer. The Console could not confirm whether your answer was the one that arrived."]);
+      .toEqual(["This question is no longer listed here. The Console could not confirm whether your reply arrived."]);
     expect(within(other.getByTestId("other")).getAllByTestId("question-set-notice").map((line) => line.textContent))
-      .toEqual(["This question is no longer waiting for an answer."]);
+      .toEqual(["This question is no longer listed here."]);
     cleanup();
     // The inbox showed both cards: it shows one line, the newest.
     const inbox = render(list(listSnapshot()));
     inbox.rerender(list(left));
-    expect(inbox.getAllByTestId("question-set-notice").map((line) => line.textContent)).toEqual(["This question is no longer waiting for an answer."]);
+    expect(inbox.getAllByTestId("question-set-notice").map((line) => line.textContent)).toEqual(["This question is no longer listed here."]);
     cleanup();
     // A list that never showed the card says nothing of it.
     const late = render(list(left));
@@ -649,6 +731,40 @@ describe("Needs you with question sets", () => {
     expect(alone.getByRole("button", { name: "Needs you, 1 question set" })).toBeTruthy();
     alone.rerender(<ApprovalAttention questionSets={0} onOpen={vi.fn()} />);
     expect(alone.queryByTestId("approval-attention") === null).toBe(true);
+  });
+  it("shows a count only when everything it counts was read: one placeholder for approvals and for question sets", () => {
+    const row = (view: ReturnType<typeof render>) => view.getByTestId("approval-attention");
+    const name = (view: ReturnType<typeof render>) => within(row(view)).getByRole("button").getAttribute("aria-label");
+    // The question sets are still being read: no count that may be false.
+    const loading = render(<ApprovalAttention snapshot={approvals} questionSets={0} questionStatus="loading" onOpen={vi.fn()} />);
+    expect(count(loading)).toBe("...");
+    expect(name(loading)).toBe("Needs you, 1 pending approval, Checking questions");
+    expect(row(loading).getAttribute("data-pending")).toBe("false");
+    cleanup();
+    // The last list of question sets may be out of date.
+    const stale = render(<ApprovalAttention snapshot={approvals} questionSets={2} questionStatus="stale" onOpen={vi.fn()} />);
+    expect(count(stale)).toBe("!");
+    expect(name(stale)).toBe("Needs you, 1 pending approval, Questions may be out of date");
+    cleanup();
+    // The question sets could not be read at all: said, also where nothing else is shown.
+    const failed = render(<ApprovalAttention questionSets={0} questionStatus="unavailable" onOpen={vi.fn()} />);
+    expect(count(failed)).toBe("!");
+    expect(name(failed)).toBe("Needs you, Questions unavailable");
+    cleanup();
+    // The approvals are not read yet: the same placeholder, and the words still name the sets.
+    const approving = render(<ApprovalAttention snapshot={{ ...approvals, status: "loading", requests: [] }} questionSets={2} questionStatus="ready" onOpen={vi.fn()} />);
+    expect(count(approving)).toBe("...");
+    expect(name(approving)).toBe("Needs you, Checking approvals, 2 question sets");
+    cleanup();
+    // Both read: the count.
+    const ready = render(<ApprovalAttention snapshot={approvals} questionSets={2} questionStatus="ready" onOpen={vi.fn()} />);
+    expect(count(ready)).toBe("3");
+    expect(row(ready).getAttribute("data-pending")).toBe("true");
+    cleanup();
+    // A gateway without question sets, or a denied read: nothing of questions.
+    const none = render(<ApprovalAttention snapshot={approvals} questionSets={0} questionStatus="unsupported" onOpen={vi.fn()} />);
+    expect(count(none)).toBe("1");
+    expect(name(none)).toBe("Needs you, 1 pending approval");
   });
 });
 

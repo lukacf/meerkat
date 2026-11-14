@@ -299,15 +299,21 @@ describe("questionSetRefusal", () => {
     expect(questionSetRefusal(refusedError("not_eligible"))).toEqual({
       kind: "not_eligible", words: "You are not one of the people who can answer this question, so nothing was sent. Ask an administrator if you should be.",
     });
-    // Another refusal of the decision is not taken either; the gateway's own
-    // message stays for the details.
-    expect(questionSetRefusal(refusedError("presentation_incomplete"))).toEqual({
+    // Another refusal of the decision is not taken either. Its kind stays for
+    // the details; the gateway's message, which carries the decision's id,
+    // does not.
+    const unknown = questionSetRefusal(refusedError("presentation_incomplete"));
+    expect(unknown).toEqual({
       kind: "not_taken", words: "The gateway did not take this reply, so nothing was sent. Try again; if it happens again, tell an administrator.",
-      detail: `decision ${PENDING_ID} refused the input: presentation_incomplete`,
+      detail: "The gateway's refusal: presentation_incomplete",
     });
-    // The refusal is an object: a bare word is not read as one of the kinds.
-    expect(questionSetRefusal(rpcError(-32602, { kind: "decision_refused", decision_refusal: "not_open" }))?.kind).toBe("not_taken");
+    expect(JSON.stringify(unknown)).not.toContain(PENDING_ID);
+    // The refusal is an object: a bare word is not read as one of the kinds,
+    // and what is no kind at all is not shown.
+    expect(questionSetRefusal(rpcError(-32602, { kind: "decision_refused", decision_refusal: "not_open" }, `decision ${PENDING_ID} refused the input: not_open`)))
+      .toEqual({ kind: "not_taken", words: "The gateway did not take this reply, so nothing was sent. Try again; if it happens again, tell an administrator." });
     expect(questionSetRefusal(rpcError(-32602, { kind: "decision_refused" }))?.kind).toBe("not_taken");
+    expect(questionSetRefusal(rpcError(-32602, { kind: "decision_refused", decision_refusal: { kind: `decision ${PENDING_ID}` } }))?.detail).toBeUndefined();
   });
 
   it("reads the refusals of the person and of the caller as definite: nothing was sent", () => {
@@ -324,11 +330,32 @@ describe("questionSetRefusal", () => {
     expect(questionSetRefusal(rpcError(-32056, "caller_not_current"))).toEqual({
       kind: "caller_not_current", words: "Your sign-in ended before the reply was sent, so nothing was changed. Sign in again, then send again.",
     });
+    // -32057 is that refusal's own code, with or without its kind.
+    expect(questionSetRefusal(rpcError(-32057))?.kind).toBe("approver_unauthenticated");
+    expect(questionSetRefusal(rpcError(-32057, "person_authentication_required"))?.kind).toBe("approver_unauthenticated");
+  });
+
+  it("reads a request that never reached the gateway's decide as not sent, not as an unconfirmed reply", () => {
+    const notSent = {
+      kind: "not_sent",
+      words: "This reply was not sent: the Console could not confirm your sign-in, so nothing was changed. Sign in again if you are asked to, then send again.",
+    };
+    // The Console did not know whom it sends for, and sent nothing.
+    expect(questionSetRefusal(Object.assign(new Error("caller unknown"), { transportFailure: "caller_unknown" }))).toEqual(notSent);
+    // A sign-in page answered instead of the gateway.
+    expect(questionSetRefusal(Object.assign(new Error("sign-in page"), { transportFailure: "sign_in_redirect" }))).toEqual(notSent);
+    // The login ended: refused before the request was taken up.
+    expect(questionSetRefusal(Object.assign(new Error("401"), { httpStatus: 401 }))).toEqual(notSent);
+    expect(questionSetRefusal(rpcError(-32001, "unauthenticated"))).toEqual(notSent);
+    // A reply that may have arrived stays uncertain.
+    expect(questionSetRefusal(Object.assign(new Error("timeout"), { transportFailure: "timeout" }))).toBeNull();
+    expect(questionSetRefusal(Object.assign(new Error("lost"), { transportFailure: "connection_failed" }))).toBeNull();
+    expect(questionSetRefusal(rpcError(-32603, undefined, "the question set could not be decided"))).toBeNull();
   });
 
   it("reads invalid params without the typed refusal as a reply that was not accepted, and anything else as uncertain", () => {
     expect(questionSetRefusal(rpcError(-32602, undefined, "answers: unknown choice"))).toEqual({
-      kind: "not_accepted", words: "The gateway did not accept this reply, so nothing was sent. Check your choices and send again.",
+      kind: "not_accepted", words: "The gateway did not accept this reply, so nothing was sent. Check it, then send again.",
       detail: "answers: unknown choice",
     });
     expect(questionSetRefusal(new Error("network"))).toBeNull();
@@ -791,6 +818,26 @@ describe("createQuestionSetResource", () => {
     expect(snapshot.sets.map((entry) => entry.pendingId)).toEqual([PENDING_ID]);
     expect(snapshot.decisions[PENDING_ID]).toMatchObject({ phase: "refused", refusal: { kind: "not_accepted", detail: "answers: unknown choice" } });
     expect(questionSetEntries(snapshot).map((entry) => entry.set.pendingId)).toEqual([PENDING_ID]);
+    resource.dispose();
+  });
+
+  it("keeps a reply the Console never sent as not sent, and a set that leaves after it gets the plain line", async () => {
+    const c = clock(); let listed = true; let decides = 0;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: listed ? [wire()] : [] }),
+      decide: async () => { decides++; throw Object.assign(new Error("caller unknown"), { transportFailure: "caller_unknown" }); },
+    });
+    await tick(); await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    expect(resource.getSnapshot().decisions[PENDING_ID]).toMatchObject({ phase: "refused", refusal: { kind: "not_sent" } });
+    expect(resource.getSnapshot().readOnly).toBe(false);
+    // The person may send again.
+    await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "us" } });
+    expect(decides).toBe(2);
+    // Nothing was sent, so a set that then leaves is not one whose reply may have arrived.
+    listed = false; c.advance(15_000); await tick();
+    expect(resource.getSnapshot().sets).toEqual([]);
+    expect(resource.getSnapshot().notices.map((notice) => notice.kind)).toEqual(["gone"]);
     resource.dispose();
   });
 

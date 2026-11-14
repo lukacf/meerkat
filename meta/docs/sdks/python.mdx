@@ -90,6 +90,44 @@ async def main():
 asyncio.run(main())
 ```
 
+<Warning>
+Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the
+Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events
+late or not at all, and a loop that waits for `run_completed` can wait
+without end. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases and what to do.
+</Warning>
+
+On an affected release, replace the send and the watch loop: read the
+member's `tokens_used` before the send, then wait until it is greater:
+
+```python
+        # Read the member's token count before the send
+        before = (await handle.member_status("agent-1")).tokens_used
+        await handle.send("agent-1", "Hello")
+
+        # Wait until the count is greater: it grows when a run ends
+        loop = asyncio.get_running_loop()
+        done_by = loop.time() + 120
+        while True:
+            status = await handle.member_status("agent-1")
+            if status.tokens_used > before:
+                break
+            if loop.time() > done_by:
+                raise TimeoutError("no run of agent-1 ended within 120 seconds")
+            await asyncio.sleep(0.5)
+        print(status.output_preview)
+```
+
+`tokens_used` grows once per run, when the run ends, and only for a run that
+called the model and whose provider reported usage: a run that fails before
+that, or a provider that reports no usage, ends this wait in the
+`TimeoutError`. It counts every run of the member, whoever started it, so the
+wait shows that a run ended, not that yours did; in this sample nothing else
+sends to `agent-1`. `status.status` and `status.is_final` describe the
+member, not the run.
+
 ## Durable detached tools
 
 Declare long-running host work explicitly instead of holding
@@ -238,9 +276,15 @@ status = await alice.status()          # state, session_id, generation, labels
 
 # Lifecycle
 await alice.reset()                    # Destructive: new generation, new session
-await rt.agent("domain:calendar").respawn()  # Non-destructive recovery
+await rt.agent("domain:calendar").respawn()  # Recovery: same identity, history and memory
 await rt.reconcile()                  # In-process roster reconciliation
 ```
+
+<Warning>
+Known issue, noted 2026-11-13: on Meta 0.9.9 through 0.9.14, respawning an identity on a gateway that keeps its state on disk, or on an embedding host that keeps its state on disk and uses identities, can destroy the mobs it created and its delegates. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases, how it happens and what to do.
+</Warning>
 
 `send_and_wait`, `dispatch_and_wait` and `dispatch_text_and_wait` are
 per-admission: the runtime mints a turn ticket for the delivery and keeps the
@@ -474,6 +518,8 @@ retired identity); both are advisory. Every refusal raises
 
 ### Long-term agents
 
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
 `runtime.identities` reads and changes the mob's long-term agents, one call
 per `meta/identity/*` host method. Every agent is read and changed the same
 way, whoever asked for it and by whatever route it came to exist. The
@@ -647,10 +693,11 @@ await rt.revoke_instruction("app.example", "tone", 2)
 
 A write returns once the record is durable; a refusal raises `RpcError` with
 `data["instruction_set_code"]` (for example `stale_revision`). A member
-target is for that member alone: `set_instruction` refuses a target that
-carries `include_forks`, and a record for a member and its forks is written
-by a Rust host that embeds Meta, through the mob handle's
-`set_operator_instruction` (`instruction_status` shows it). The status
+target is for that member alone. From 0.9.15 Meerkat has `include_forks`, a
+record for a member and its forks: `set_instruction` refuses a target that
+carries it, and such a record is written by a Rust host that embeds Meta,
+through the mob handle's `set_operator_instruction` (`instruction_status`
+shows it). The status
 read never wakes a member and names each member by its `identity`; its
 advisory values (a pending or blocked `reason`, `residency`) may be new to
 this SDK, so keep them as they are. These replace
@@ -687,6 +734,15 @@ async for event in handle.subscribe_mob():
 ```
 
 Observation is independent of delivery. Subscribe before or after sending — the stream is continuous.
+
+<Warning>
+Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the
+Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events
+late or not at all, and a loop that waits for `run_completed` can wait
+without end. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases and what to do.
+</Warning>
 
 ### Structural mob events — durable observability
 
@@ -814,6 +870,10 @@ strings.
 
 ### Cross-mob peering (two gateways)
 
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+From 0.9.15. Through 0.9.14 `wire_cross_mob` wired nothing, and the Python builder had no `member_comms_tcp`.
+
 `wire_cross_mob(local_member_id, remote_member_id, remote_handle)` wires a
 member of this mob and a member of another mob to each other, so the two
 agents can send each other ordinary peer messages with their comms `send`
@@ -889,6 +949,15 @@ async for event in runtime.mob_handle().subscribe_agent(f"personal:{user_id}"):
     forward_to_slack(event)
 ```
 
+<Warning>
+Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the
+Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events
+late or not at all, and a loop that waits for `run_completed` can wait
+without end. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases and what to do.
+</Warning>
+
 Reserve `ensure_member` for **ephemeral workers** (helpers a parent spawns
 and an idle-retire label reaps) — the worker plane. See the
 [identity-first doctrine](https://github.com/lukacf/meerkat-meta/blob/main/docs/design/identity-first-doctrine.md).
@@ -915,7 +984,7 @@ rt = await (
 | `.mob(path)` | Path to mob TOML config |
 | `.mob_inline(toml_str)` | Inline mob TOML string (no temp file) |
 | `.meerkat_config(path)` | Meerkat host `config.toml` forwarded as `runtime_options.meerkat_config_path`, the only door for the `[self_hosted]` and `[realm]` tables Meerkat keeps out of `mob.toml` (a host-config `[models]` table reaches the factory too, but a profile's `model` must be catalogued, provider-annotated or defined under `mob.toml`'s own `[models.<id>]` to pass the init model check); a missing, malformed or non-validating file refuses init rather than building agents from the default config, and a top-level `[self_hosted]` or `[realm]` table inside `mob.toml` is refused at init with a message naming this option. TypeScript twin `meerkatConfig(path)`. See [Self-hosted models and the Meerkat host config](/reference/configuration#self-hosted-models-and-the-meerkat-host-config) |
-| `.member_comms_tcp(address="127.0.0.1:0")` | Signed TCP comms endpoints for the locally hosted mob members, forwarded as `runtime_options.member_comms_address`: each member binds a port on `address` (port `0`: one the system picks), and `MobHandle.peer_info` reports it as `dialable_address`. Needed on both gateways before `wire_cross_mob` can wire members of two gateways, which are two processes; pass a concrete externally reachable interface address for peers on another host. An empty address is a `ValueError`. TypeScript twin `memberCommsTcp(address)`. See [Cross-mob peering](#cross-mob-peering-two-gateways) |
+| `.member_comms_tcp(address="127.0.0.1:0")` | From 0.9.15. Signed TCP comms endpoints for the locally hosted mob members, forwarded as `runtime_options.member_comms_address`: each member binds a port on `address` (port `0`: one the system picks), and `MobHandle.peer_info` reports it as `dialable_address`. Needed on both gateways before `wire_cross_mob` can wire members of two gateways, which are two processes; pass a concrete externally reachable interface address for peers on another host. An empty address is a `ValueError`. TypeScript twin `memberCommsTcp(address)`. See [Cross-mob peering](#cross-mob-peering-two-gateways) |
 | `.provider_credentials_root(path)` | Provider credentials directory forwarded as `runtime_options.provider_credentials_root`: every agent the gateway builds resolves and persists provider logins and tokens there instead of the process default `<config dir>/meerkat/credentials`, which every process of the OS user shares. Absolute: the gateway opens it once at init, creating it when missing, and a relative path or a root it cannot open refuses init, never falling back to the default. Give each user their own root, and pass the same root on every reopen of that user's state; a host moving off a per-process `XDG_CONFIG_HOME=<C>` passes `<C>/meerkat/credentials` to keep existing logins. See [Provider credentials](/reference/configuration#provider-credentials) |
 | `.native_realm(realm_id, *, context_root, state_root, user_config_root)` | A native realm's effective configuration as every agent's configuration, forwarded as `runtime_options.native_realm`: the gateway reads it once at init with Meerkat's own native reader, copying and writing nothing, in place of `.meerkat_config(path)` (the two are refused together). Each root is an absolute path; a realm the state root does not hold, or a configuration that cannot be read or does not validate, refuses init, never falling back to the default configuration. The realm's whole configuration applies to every member. Requires `.member_auth_binding(...)`. TypeScript twin `nativeRealm({...})`. See [Native realm and member auth binding](/reference/configuration#native-realm-and-member-auth-binding) |
 | `.member_auth_binding(binding)` | The `AuthBindingRef(realm, binding, profile=None, origin=None)` every member is built with, forwarded as `runtime_options.member_auth_binding`; `origin` is `None` or `"configured"`. The gateway refuses at init a binding the members' configuration does not define, a definition profile the binding does not serve, and an automatic spawn policy, a model fallback target off the binding, image generation or the agent memory engines, in the definition, a realm profile it references or a stored child mob, and an identity declaration an earlier launch adopted that was sealed with no binding or another one; every member it builds then uses exactly this binding, or its build is refused (roster members, helpers and forks, later spawns, respawns and resets, members rebuilt after a restart, child mobs' members), never a default one; a member Meerkat rebuilds from its own records (a fork seated before the launch named the binding) that recorded another binding or none is refused at its rebuild and must be re-created; and a spawn that names another binding, an agent's child mob that would leave it, identity adoption, and an attach of a session whose live actor runs another binding are refused. A running gateway is never rebound. TypeScript twin `memberAuthBinding({...})`. See [Native realm and member auth binding](/reference/configuration#native-realm-and-member-auth-binding) |
@@ -1664,7 +1733,7 @@ from meerkat_meta.errors import (
     IdentityHostAdoptedError,          # A host adopted the identity, so Meta's verbs leave it alone (-32053)
     IdentityWakeHeldError,             # The wake is held until an operator acts (-32603): .kind names the hold
     ToolGrantRequestRefusedError,      # A refused meta/tool_grants/* request (-32602): .refusal_kind, .refusal
-    IdentityRefusedError,              # A refused meta/identity/* request (-32058): .kind, .field, .detail, .retryable, .details
+    IdentityRefusedError,              # From 0.9.15: a refused meta/identity/* request (-32058): .kind, .field, .detail, .retryable, .details
     RealmMcpRefusedError,              # A refused meta/realm_mcp/* request (-32602): .refusal_kind, .refusal
     RealmMcpUnavailableError,          # A realm MCP write could not be made now, or no credential store (-32004)
     RealmMcpOutcomeUnknownError,       # A realm MCP write began and its result is unknown (-32603)
@@ -1681,7 +1750,7 @@ from meerkat_meta.errors import (
 ## Advanced API
 
 These methods are available for power users and module-system internals.
-Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`reconcile` instead.
+Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`reconcile` instead. Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events late or not at all, and a loop that waits for `run_completed` can wait without end. See the [known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14) for the affected releases and what to do.
 
 | Method | Return type | Description |
 |--------|-------------|-------------|
@@ -1839,7 +1908,7 @@ from meerkat_meta import (
     AnnouncementFrontierError, AnnouncementRefusedError, AnnouncementNotFoundError,
     MOB_ANNOUNCEMENTS_UNAVAILABLE_CODE, ANNOUNCEMENT_CONFLICT_CODE,
     ANNOUNCEMENT_FRONTIER_CODE, ANNOUNCEMENT_REFUSED_CODE, ANNOUNCEMENT_NOT_FOUND_CODE,
-    # Long-term agents
+    # Long-term agents (from 0.9.15)
     IdentitiesHandle, AgentSpec, AgentSet, CreateAgents, UpdateAgent, AgentRef,
     SourceEvidence, AgentPage, AgentSummary, AgentRecord, AgentProvenance,
     AgentOutcome, InstructionOutcome, SchedulesFollowed, ScheduleRef,

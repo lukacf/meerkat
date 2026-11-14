@@ -8904,6 +8904,70 @@ mod tests {
         );
     }
 
+    /// In a mob that seats a member the caller is shown beside a member the
+    /// host's member tool audience hides from it, the report `mob_destroy`
+    /// answers leaves out the hidden member's failure, with its text, and
+    /// keeps the failure of the member the caller is shown.
+    #[tokio::test]
+    async fn mob_destroy_report_keeps_a_shown_members_failure_and_drops_a_hidden_members() {
+        let (state, archives) = MobMcpState::new_in_memory_with_archive_failure_control();
+        let home =
+            host_mob_with_kept_members(&state, "mixed-home", &[("mixed-caller", None)]).await;
+        // One mob per case, each with both members: the teardown of one of
+        // the two fails.
+        let mut answers = Vec::new();
+        for (mob_id, failing) in [
+            ("mixed-audience-a", "mixed-kept"),
+            ("mixed-audience-b", "mixed-shown"),
+        ] {
+            let handle = host_mob_with_kept_members(
+                &state,
+                mob_id,
+                &[("mixed-kept", Some("ann")), ("mixed-shown", None)],
+            )
+            .await;
+            let session = handle
+                .resolve_bridge_session_id(&AgentIdentity::from(failing))
+                .await
+                .expect("the member's session");
+            archives
+                .fail_archive(session, "the archive is refused")
+                .await;
+            let caller = member_mob_tools(
+                &state,
+                &home,
+                "mixed-caller",
+                scope_only_authority(mob_id, handle.live_incarnation()),
+            )
+            .await;
+            answers.push(
+                masked_mob_tool_answer(&caller, "mob_destroy", json!({ "mob_id": mob_id }), mob_id)
+                    .await,
+            );
+        }
+        let [hidden_failed, shown_failed] = answers.as_slice() else {
+            panic!("two destroys were asked");
+        };
+        for answer in [hidden_failed, shown_failed] {
+            assert!(
+                answer.starts_with("error:") && answer.contains("mob_destroy_incomplete"),
+                "the destroy is answered as incomplete: {answer}"
+            );
+            assert!(
+                !answer.contains("mixed-kept"),
+                "the report names no member hidden from the caller: {answer}"
+            );
+        }
+        assert!(
+            !hidden_failed.contains("the archive is refused"),
+            "no text of the hidden member's failure is answered: {hidden_failed}"
+        );
+        assert!(
+            shown_failed.contains("mixed-shown") && shown_failed.contains("the archive is refused"),
+            "the failure of the member the caller is shown is answered: {shown_failed}"
+        );
+    }
+
     /// `mob_wire` and `mob_unwire` ask the host's member tool audience about
     /// both members they name. A member it hides from the caller answers
     /// exactly as a name the mob does not hold, as the member and as the

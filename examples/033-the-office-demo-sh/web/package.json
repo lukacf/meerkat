@@ -9,7 +9,8 @@
     "build": "npm run sync:runtime && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "node tests/regression.cjs",
+    "test": "node --test tests/build-keys.test.mjs && node tests/regression.cjs",
+    "test:build-keys": "node --test tests/build-keys.test.mjs",
     "test:offline": "node tests/regression.cjs --offline"
   },
   "devDependencies": {

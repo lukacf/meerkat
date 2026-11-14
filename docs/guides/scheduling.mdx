@@ -266,6 +266,20 @@ The wrapper resolves this before persistence. A normal session becomes a
 strand future occurrences. `current_session` is not part of the REST or
 JSON-RPC target schema.
 
+From 0.9.15, the `create` spec of a `materialize_on_demand_session` target
+can set the session's
+[reasoning effort](/concepts/providers#reasoning-effort) level:
+`"provider_params": { "reasoning_effort": "high" }`. The level is checked
+when an occurrence is delivered, not when the schedule is created; a refused
+level sends no provider request and the occurrence ends as `delivery_failed`
+with the refusal's text and typed reason. A level stored in a schedule is a
+one-way step for a rollback: a release before 0.9.15 cannot list a realm's
+schedules while one stored schedule, a deleted one included, names a level.
+Before you set one, read
+[Rolling back to 0.9.14](/guides/upgrading#rolling-back-to-0-9-14), and
+replace a schedule's target with one that names no level before you delete
+the schedule.
+
 ### Identity targets
 
 `target_kind` must be `"identity"`; the current variant is

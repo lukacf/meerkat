@@ -485,7 +485,8 @@ On `turn(...)`, `stream(...)`, `startTurn(...)` and `mobTurnStart(...)` it is
 the turn's tri-state: a level sets it from that turn on,
 `{ action: "clear" }` removes it, and leaving it out keeps it. The client
 sends it only to a server whose contract is 0.9.15 or later and throws
-`CapabilityUnavailableError` otherwise, before anything is written. A level
+`CapabilityUnavailableError` otherwise, before anything is written: an older
+server ignores it on `session/create` and refuses it on a turn. A level
 the model or its route does not accept rejects the call with a
 `MeerkatError` whose `code` is `"-32602"` (invalid params);
 `reasoningEffortRefusal(error)` returns the typed refusal

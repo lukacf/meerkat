@@ -387,6 +387,7 @@ rkat run --model gpt-5.5 --reasoning-effort high "Plan the migration"
 | Python and TypeScript SDKs | `reasoning_effort` / `reasoningEffort` on session create, turns and mob member turns |
 | Web SDK | `SessionConfig.reasoningEffort` |
 | Mob profiles | the `reasoning_effort` key of the profile's `provider_params` |
+| Schedules | the `reasoning_effort` key of `provider_params` in a `materialize_on_demand_session` target's `create` spec; see [Scheduling](/guides/scheduling#session-targets) |
 | Rust | `AgentBuildConfig.provider_params.reasoning_effort` |
 
 The setting lives in the session's provider params, so

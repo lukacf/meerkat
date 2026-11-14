@@ -365,7 +365,8 @@ A level the model or its route does not accept fails the call with a
 `MeerkatError` whose `code` is `"-32602"` (invalid params) and whose
 `details` hold the refusal data. `meerkat.reasoning_effort_refusal(error)` returns the typed
 `ReasoningEffortRefusal` (`requested`, `provider`, `model`, `route`,
-`reason`, `supported`, `facts`, `conflicting_param`, `conflicting_level`), or
+`reason`, `supported`, `facts`, `conflicting_param`, `conflicting_level`,
+`retryable`, and the `transient` property), or
 `None` for any other error:
 
 ```python
@@ -625,6 +626,14 @@ use the raw-preserving `UnknownEvent` path, as do `reasoning_delta`,
 `tool_results_bounded_for_request`, `requested_compaction_skipped`, and
 `operator_instructions_applied`. See the
 [RPC event reference](/api/rpc#notifications) for their wire contracts.
+
+From 0.9.15, `request_reasoning_effort_resolved` has a handwritten parser
+class and arrives as a typed `RequestReasoningEffortResolved` event:
+`resolution`, `turn_number` and `fallback_attempt`. It is published once
+for each request handed to the provider client with the session's
+reasoning effort level; `parse_reasoning_effort_resolution(...)` reads its
+`resolution` (see [Reasoning effort](#reasoning-effort)). An SDK older than
+0.9.15 raises `UNKNOWN_EVENT_TYPE` on it.
 
 `live_channel_closed` has a handwritten parser class and arrives as a typed
 `LiveChannelClosed` event: `session_id`, `channel_id`, `reason` and

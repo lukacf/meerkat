@@ -860,7 +860,8 @@ During execution, `session/event` notifications are emitted (see
 </ParamField>
 
 <ParamField body="reasoning_effort" type="string | null" default="null">
-  From 0.9.15; an older server ignores the field.
+  From 0.9.15; an older server ignores the field. The 0.9.15 Python and TypeScript SDKs refuse to send it to an
+  older server, so nothing is sent.
   The session's provider-neutral reasoning effort level: `none`, `minimal`,
   `low`, `medium`, `high`, `xhigh` or `max` (see
   [Reasoning effort](/concepts/providers#reasoning-effort)). It is the same
@@ -1780,7 +1781,8 @@ Only a mechanical failure is `-32603`.
 </ParamField>
 
 <ParamField body="reasoning_effort" type="TurnMetadataOverride | null" default="preserve">
-  From 0.9.15; an older server refuses the field.
+  From 0.9.15; an older server refuses the field. The 0.9.15 Python and TypeScript SDKs refuse to send it to an
+  older server, so nothing is sent.
   The session's provider-neutral reasoning effort level from this turn on
   (see [Reasoning effort](/concepts/providers#reasoning-effort)). A level
   (`"high"`, or `{"action":"set","value":"high"}`) sets it,

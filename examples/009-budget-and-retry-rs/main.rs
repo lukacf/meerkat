@@ -93,8 +93,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // The threshold is checked against the tokens measured after each call,
     // and one call of this example uses a few thousand of them (the request
     // carries more than the prompt). Keep the budget above that: a budget the
-    // first call already crosses ends the run with `BudgetExhausted` and an
-    // empty `text`, which is what Example 3 shows on purpose.
+    // first call already crosses ends the run with `BudgetExhausted` and, on a
+    // new session like this one, an empty `text`. Example 3 shows that on
+    // purpose.
     let budget = BudgetLimits::unlimited()
         .with_max_tokens(8000) // Measured exhaustion threshold; a call can overshoot
         .with_max_tool_calls(10) // Max tool invocations

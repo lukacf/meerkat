@@ -1072,6 +1072,11 @@ them.
   printed none); `examples/009-budget-and-retry-rs` reads
   `terminal_cause_kind` before the text and uses a token budget above its
   own first call (its first part printed an empty answer).
+- Examples: the `web-runtime`, `shell` and `web` targets of
+  `make -C examples`, and so `make -C examples verify`, which runs them, no
+  longer fail in the browser-runtime build step when `CARGO_TARGET_DIR` is
+  not set and no runtime has been built yet. Seen on 0.9.14; earlier
+  releases were not checked.
 
 ### Security
 

@@ -154,6 +154,25 @@ describe("GatingInboxPanel question sets", () => {
     expect(empty(late)?.classList.contains("cc-panel-empty--art")).toBe(true);
   });
 
+  it("counts on the Pending tab only the sets of a list that was read, as the sidebar's badge does, and keeps the approvals' count", () => {
+    const panel = (snapshot: QuestionSetSnapshot) => (
+      <GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={approvals()}
+        questions={{ snapshot, onAnswer: vi.fn(), onDismiss: vi.fn() }} />
+    );
+    const tabCount = (view: ReturnType<typeof render>) => view.getByTestId("gating-tab:pending").textContent?.replace(/\D/g, "");
+    const view = render(panel(sets()));
+    expect(tabCount(view)).toBe("2");
+    expect(view.getByTestId("gating-summary-questions").textContent).toBe("1 question set");
+    // The list may be out of date: its card stays and says so, and its set
+    // is not counted until the list is read again. The approval still is.
+    view.rerender(panel(sets({ status: "stale" })));
+    expect(view.getByTestId(`question-set:${PENDING_ID}`).dataset.state).toBe("stale");
+    expect(tabCount(view)).toBe("1");
+    expect(view.queryByTestId("gating-summary-questions")).toBeNull();
+    view.rerender(panel(sets()));
+    expect(tabCount(view)).toBe("2");
+  });
+
   it("is unchanged without the question sets prop", () => {
     const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={approvals()} />);
     expect(view.queryByTestId("question-set-list")).toBeNull();

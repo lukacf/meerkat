@@ -232,11 +232,12 @@ describe("Workbench nav (B14)", () => {
     expect(within(alone.getByTestId("approval-attention")).getByRole("button").getAttribute("aria-label")).toBe("Needs you, 2 question sets");
     cleanup();
     // A list of question sets that may be out of date is not counted on the
-    // badge (as approvals that are not read are not), and Needs you says so.
+    // badge (as approvals that are not read are not). Needs you keeps the
+    // count of what was read, and its words say what was not.
     const stale = render(<Sidebar {...withAttention} visibleControls={[...withAttention.visibleControls]} questionSetCount={1} questionSetStatus="stale" />);
     expect(stale.getByTestId("nav-badge:gating").textContent).toBe("2");
     expect(describedBy(stale.getByTestId("nav:gating"))).toBe("2 pending approvals");
-    expect(stale.getByTestId("approval-attention").querySelector(".cc-approval-attention__count")?.textContent).toBe("!");
+    expect(stale.getByTestId("approval-attention").querySelector(".cc-approval-attention__count")?.textContent).toBe("2");
     expect(within(stale.getByTestId("approval-attention")).getByRole("button").getAttribute("aria-label"))
       .toBe("Needs you, 2 pending approvals, Questions may be out of date");
   });

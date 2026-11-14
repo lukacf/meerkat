@@ -149,9 +149,9 @@ describe("question sets in the Console", () => {
     const { fake, list } = gateway(person);
     list(new Error("gateway timeout"));
     render(<ConsoleApp baseUrl="" transport={fake} />);
-    // No count that may be false: a placeholder, and the words say why.
+    // The approvals were read (none waits): that count stays, and the words say what was not read.
     const needsYou = await screen.findByRole("button", { name: "Needs you, 0 pending approvals, Questions unavailable" });
-    expect(screen.getByTestId("approval-attention").querySelector(".cc-approval-attention__count")?.textContent).toBe("!");
+    expect(screen.getByTestId("approval-attention").querySelector(".cc-approval-attention__count")?.textContent).toBe("0");
     fireEvent.click(needsYou);
     const notice = await screen.findByTestId("question-set-unavailable");
     expect(notice.textContent).toContain("The questions agents asked could not be loaded.");

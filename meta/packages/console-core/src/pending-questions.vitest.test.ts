@@ -4,6 +4,7 @@ import type { ApprovalResourceEnvironment } from "./pending-approvals";
 import {
   FREE_TEXT_MAX_BYTES,
   QUESTION_SET_READ_LIMITS,
+  countedQuestionSets,
   createQuestionSetResource,
   normalizeQuestionSet,
   questionSetAnswerParams,
@@ -345,17 +346,21 @@ describe("questionSetRefusal", () => {
   });
 
   it("reads a request that never reached the gateway's decide as not sent, not as an unconfirmed reply", () => {
+    // One sentence for the four ways this happens, true of each: it claims
+    // only that the reply was not accepted and that nothing was changed.
     const notSent = {
       kind: "not_sent",
-      words: "This reply was not sent: the Console could not confirm your sign-in, so nothing was changed. Sign in again if you are asked to, then send again.",
+      words: "This reply was not accepted. Nothing was changed. Sign in again if you are asked to, then send again.",
     };
     // The Console did not know whom it sends for, and sent nothing.
     expect(questionSetRefusal(Object.assign(new Error("caller unknown"), { transportFailure: "caller_unknown" }))).toEqual(notSent);
     // A sign-in page answered instead of the gateway.
     expect(questionSetRefusal(Object.assign(new Error("sign-in page"), { transportFailure: "sign_in_redirect" }))).toEqual(notSent);
-    // The login ended: refused before the request was taken up.
+    // The login ended: the request left the browser and was refused before
+    // it was taken up, so the words do not say that nothing left.
     expect(questionSetRefusal(Object.assign(new Error("401"), { httpStatus: 401 }))).toEqual(notSent);
     expect(questionSetRefusal(rpcError(-32001, "unauthenticated"))).toEqual(notSent);
+    expect(notSent.words).not.toMatch(/not sent|did not send|could not confirm/i);
     // A reply that may have arrived stays uncertain.
     expect(questionSetRefusal(Object.assign(new Error("timeout"), { transportFailure: "timeout" }))).toBeNull();
     expect(questionSetRefusal(Object.assign(new Error("lost"), { transportFailure: "connection_failed" }))).toBeNull();
@@ -370,6 +375,19 @@ describe("questionSetRefusal", () => {
     expect(questionSetRefusal(new Error("network"))).toBeNull();
     expect(questionSetRefusal(rpcError(-32000))).toBeNull();
     expect(questionSetRefusal(rpcError(-32056))).toBeNull();
+  });
+});
+
+describe("countedQuestionSets", () => {
+  it("counts the open sets of a list that was read, and none of a list that was not", () => {
+    expect(countedQuestionSets("ready", 3)).toBe(3);
+    expect(countedQuestionSets("ready", 0)).toBe(0);
+    // Still loading, maybe out of date, unreadable, denied, or a gateway without question sets.
+    for (const status of ["loading", "stale", "unavailable", "forbidden", "unsupported"] as const) {
+      expect(countedQuestionSets(status, 3)).toBe(0);
+    }
+    // A host that does not know the state of the read counts what it was given.
+    expect(countedQuestionSets(undefined, 2)).toBe(2);
   });
 });
 
@@ -846,10 +864,62 @@ describe("createQuestionSetResource", () => {
     // The person may send again.
     await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "us" } });
     expect(decides).toBe(2);
+    // The card is of the reply refused last: no earlier one may have arrived.
+    expect(resource.getSnapshot().decisions[PENDING_ID]).toMatchObject({
+      phase: "refused", refusal: { kind: "not_sent" }, answers: { q1: { kind: "choice", choiceId: "us" } },
+    });
     // Nothing was sent, so a set that then leaves is not one whose reply may have arrived.
     listed = false; c.advance(15_000); await tick();
     expect(resource.getSnapshot().sets).toEqual([]);
     expect(resource.getSnapshot().notices.map((notice) => notice.kind)).toEqual(["gone"]);
+    resource.dispose();
+  });
+
+  it.each([
+    ["the Console did not know whom it sends for", () => Object.assign(new Error("caller unknown"), { transportFailure: "caller_unknown" })],
+    ["a sign-in page answered", () => Object.assign(new Error("sign-in page"), { transportFailure: "sign_in_redirect" })],
+    ["HTTP 401", () => Object.assign(new Error("401"), { httpStatus: 401 })],
+    ["the gateway's unauthenticated kind", () => rpcError(-32001, "unauthenticated")],
+  ] as const)("keeps an unconfirmed reply on the card through a retry read as not sent (%s), and in the line when the set leaves", async (_name, refused) => {
+    const c = clock(); let listed = true; let decides = 0;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: listed ? [wire()] : [] }),
+      // The first reply is lost on its way; the retry never reaches the gateway's decide.
+      decide: async () => { decides++; throw decides === 1 ? new Error("network") : refused(); },
+    });
+    await tick(); await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    const first = resource.getSnapshot().decisions[PENDING_ID];
+    expect(first).toEqual({ phase: "failed", action: "answer", answers: { q1: { kind: "choice", choiceId: "eu" } }, error: "network" });
+    await resource.dismiss(PENDING_ID);
+    expect(decides).toBe(2);
+    // The retry changed nothing and says nothing of the first reply, which
+    // may have arrived: the card still says that reply is not confirmed.
+    expect(resource.getSnapshot().decisions[PENDING_ID]).toEqual(first);
+    expect(resource.getSnapshot().readOnly).toBe(false);
+    // The person may still try again, and the line of a set that then leaves
+    // says that the first reply's arrival could not be confirmed.
+    await resource.dismiss(PENDING_ID);
+    expect(decides).toBe(3);
+    expect(resource.getSnapshot().decisions[PENDING_ID]).toEqual(first);
+    listed = false; c.advance(15_000); await tick();
+    expect(resource.getSnapshot().sets).toEqual([]);
+    expect(resource.getSnapshot().notices.map((notice) => notice.kind)).toEqual(["sent_unconfirmed"]);
+    resource.dispose();
+  });
+
+  it("shows a refusal the gateway's decide itself gave on a retry, also after an unconfirmed reply", async () => {
+    const c = clock(); let decides = 0;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: [wire()] }),
+      decide: async () => { decides++; throw decides === 1 ? new Error("network") : refusedError("not_eligible"); },
+    });
+    await tick(); await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    expect(resource.getSnapshot().decisions[PENDING_ID].phase).toBe("failed");
+    await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "us" } });
+    // The gateway's decide answered for the set as it is now: that is what the card says.
+    expect(resource.getSnapshot().decisions[PENDING_ID]).toMatchObject({ phase: "refused", refusal: { kind: "not_eligible" } });
     resource.dispose();
   });
 

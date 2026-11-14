@@ -740,6 +740,39 @@ describe("QuestionSetList", () => {
     expect(focused()).toBeNull();
   });
 
+  it("moves the focus to the line that is shown when two cards leave in one read, and to the list when no line is shown", () => {
+    // jsdom rows: what the DOM focuses, with no browser.
+    const focused = () => document.activeElement?.getAttribute("data-testid") ?? null;
+    const onBody = () => document.activeElement === null || document.activeElement.tagName === "BODY";
+    // Both cards leave in one read. The list shows one line, the newest,
+    // which is the first card's: whichever card held the focus, it goes there.
+    const both = listSnapshot({ sets: [], slots: {}, notices: [{ slot: 1, kind: "gone", atMs: 5 }, { slot: 2, kind: "sent_unconfirmed", atMs: 5 }] });
+    for (const id of [PENDING_ID, BILLING_ID]) {
+      const view = render(list(listSnapshot()));
+      view.getByTestId(`question-set-sentence:${id}`).focus();
+      expect(focused()).toBe(`question-set-sentence:${id}`);
+      view.rerender(list(both));
+      expect(view.getAllByTestId("question-set-notice").map((line) => line.textContent)).toEqual(["This question is no longer listed here."]);
+      expect(focused()).toBe("question-set-line");
+      expect(onBody()).toBe(false);
+      cleanup();
+    }
+    // The card that held the focus leaves and the list shows no line for
+    // it, beside a card that stays: the focus goes to the list itself.
+    const view = render(list(listSnapshot()));
+    view.getByTestId(`question-set-sentence:${PENDING_ID}`).focus();
+    view.rerender(list(listSnapshot({ sets: [billing()], slots: { [BILLING_ID]: 2 } })));
+    expect(view.queryByTestId("question-set-notice")).toBeNull();
+    expect(focused()).toBe("list");
+    expect(document.activeElement?.getAttribute("tabindex")).toBe("-1");
+    expect(onBody()).toBe(false);
+    cleanup();
+    // The list takes no focus that no card of its own held.
+    const idle = render(list(listSnapshot()));
+    idle.rerender(list(listSnapshot({ sets: [billing()], slots: { [BILLING_ID]: 2 } })));
+    expect(onBody()).toBe(true);
+  });
+
   it("shows the line only where the card was shown, and at most one", () => {
     const mine = render(list(listSnapshot(), IDENTITY, "mine"));
     const other = render(list(listSnapshot(), "identity:billing", "other"));
@@ -792,39 +825,102 @@ describe("Needs you with question sets", () => {
     alone.rerender(<ApprovalAttention questionSets={0} onOpen={vi.fn()} />);
     expect(alone.queryByTestId("approval-attention") === null).toBe(true);
   });
-  it("shows a count only when everything it counts was read: one placeholder for approvals and for question sets", () => {
+  it("never hides a count it knows: the number is the count of what was read, and the words say what was not", () => {
     const row = (view: ReturnType<typeof render>) => view.getByTestId("approval-attention");
     const name = (view: ReturnType<typeof render>) => within(row(view)).getByRole("button").getAttribute("aria-label");
-    // The question sets are still being read: no count that may be false.
+    // The question sets are still being read: the approvals' count stays.
     const loading = render(<ApprovalAttention snapshot={approvals} questionSets={0} questionStatus="loading" onOpen={vi.fn()} />);
-    expect(count(loading)).toBe("...");
+    expect(count(loading)).toBe("1");
     expect(name(loading)).toBe("Needs you, 1 pending approval, Checking questions");
-    expect(row(loading).getAttribute("data-pending")).toBe("false");
+    expect(row(loading).getAttribute("data-pending")).toBe("true");
     cleanup();
-    // The last list of question sets may be out of date.
+    // The last list of question sets may be out of date: its sets are not
+    // counted, and the words say so.
     const stale = render(<ApprovalAttention snapshot={approvals} questionSets={2} questionStatus="stale" onOpen={vi.fn()} />);
-    expect(count(stale)).toBe("!");
+    expect(count(stale)).toBe("1");
     expect(name(stale)).toBe("Needs you, 1 pending approval, Questions may be out of date");
     cleanup();
-    // The question sets could not be read at all: said, also where nothing else is shown.
-    const failed = render(<ApprovalAttention questionSets={0} questionStatus="unavailable" onOpen={vi.fn()} />);
-    expect(count(failed)).toBe("!");
-    expect(name(failed)).toBe("Needs you, Questions unavailable");
+    // The question sets could not be read: everything else that is known is counted.
+    const failing = render(<ApprovalAttention snapshot={approvals} hostItems={1} replies={1} questionSets={0} questionStatus="unavailable" onOpen={vi.fn()} />);
+    expect(count(failing)).toBe("3");
+    expect(name(failing)).toBe("Needs you, 1 pending approval, Questions unavailable, 1 item from the host, 1 reply for you");
     cleanup();
-    // The approvals are not read yet: the same placeholder, and the words still name the sets.
+    // A person with no approval waiting sees that count too while the question read fails.
+    const none = render(<ApprovalAttention snapshot={{ ...approvals, requests: [] }} questionSets={0} questionStatus="unavailable" onOpen={vi.fn()} />);
+    expect(count(none)).toBe("0");
+    expect(name(none)).toBe("Needs you, 0 pending approvals, Questions unavailable");
+    expect(row(none).getAttribute("data-pending")).toBe("false");
+    cleanup();
+    // The approvals are not read yet: the sets that were read are counted.
     const approving = render(<ApprovalAttention snapshot={{ ...approvals, status: "loading", requests: [] }} questionSets={2} questionStatus="ready" onOpen={vi.fn()} />);
-    expect(count(approving)).toBe("...");
+    expect(count(approving)).toBe("2");
     expect(name(approving)).toBe("Needs you, Checking approvals, 2 question sets");
+    expect(row(approving).getAttribute("data-pending")).toBe("true");
+    cleanup();
+    // Approvals that may be out of date are not counted; the sets that were read are.
+    const older = render(<ApprovalAttention snapshot={{ ...approvals, status: "stale" }} questionSets={2} questionStatus="ready" onOpen={vi.fn()} />);
+    expect(count(older)).toBe("2");
+    expect(name(older)).toBe("Needs you, Approvals may be out of date, 2 question sets");
+    cleanup();
+    // What the host gives is known while the approvals are still being read.
+    const hosted = render(<ApprovalAttention snapshot={{ ...approvals, status: "loading", requests: [] }} hostItems={1} onOpen={vi.fn()} />);
+    expect(count(hosted)).toBe("1");
+    expect(name(hosted)).toBe("Needs you, Checking approvals, 1 item from the host");
     cleanup();
     // Both read: the count.
     const ready = render(<ApprovalAttention snapshot={approvals} questionSets={2} questionStatus="ready" onOpen={vi.fn()} />);
     expect(count(ready)).toBe("3");
     expect(row(ready).getAttribute("data-pending")).toBe("true");
     cleanup();
-    // A gateway without question sets, or a denied read: nothing of questions.
-    const none = render(<ApprovalAttention snapshot={approvals} questionSets={0} questionStatus="unsupported" onOpen={vi.fn()} />);
-    expect(count(none)).toBe("1");
-    expect(name(none)).toBe("Needs you, 1 pending approval");
+    // A gateway without question sets: nothing of questions.
+    const without = render(<ApprovalAttention snapshot={approvals} questionSets={0} questionStatus="unsupported" onOpen={vi.fn()} />);
+    expect(count(without)).toBe("1");
+    expect(name(without)).toBe("Needs you, 1 pending approval");
+  });
+
+  it("shows a placeholder alone only when nothing was read, and no zero beside approvals that were not read", () => {
+    const row = (view: ReturnType<typeof render>) => view.getByTestId("approval-attention");
+    const name = (view: ReturnType<typeof render>) => within(row(view)).getByRole("button").getAttribute("aria-label");
+    const unread = (status: PendingApprovalSnapshot["status"]): PendingApprovalSnapshot => ({ ...approvals, status, requests: [] });
+    // Both lists are still being read.
+    const both = render(<ApprovalAttention snapshot={unread("loading")} questionSets={0} questionStatus="loading" onOpen={vi.fn()} />);
+    expect(count(both)).toBe("...");
+    expect(name(both)).toBe("Needs you, Checking approvals, Checking questions");
+    expect(row(both).getAttribute("data-pending")).toBe("false");
+    cleanup();
+    // One is still being read and the other could not be read, either way round.
+    const mixed = render(<ApprovalAttention snapshot={unread("loading")} questionSets={0} questionStatus="unavailable" onOpen={vi.fn()} />);
+    expect(count(mixed)).toBe("!");
+    cleanup();
+    const other = render(<ApprovalAttention snapshot={unread("unavailable")} questionSets={0} questionStatus="loading" onOpen={vi.fn()} />);
+    expect(count(other)).toBe("!");
+    cleanup();
+    // No approvals on this connection, and the question sets could not be
+    // read or may be out of date: said, also where nothing else is shown.
+    const failed = render(<ApprovalAttention questionSets={0} questionStatus="unavailable" onOpen={vi.fn()} />);
+    expect(count(failed)).toBe("!");
+    expect(name(failed)).toBe("Needs you, Questions unavailable");
+    cleanup();
+    const old = render(<ApprovalAttention questionSets={2} questionStatus="stale" onOpen={vi.fn()} />);
+    expect(count(old)).toBe("!");
+    expect(name(old)).toBe("Needs you, Questions may be out of date");
+    cleanup();
+    // The approvals are not read and the question sets were read as none: a
+    // zero would read as "nothing needs you" while the approvals are unknown.
+    const pendingRead = render(<ApprovalAttention snapshot={unread("loading")} questionSets={0} questionStatus="ready" onOpen={vi.fn()} />);
+    expect(count(pendingRead)).toBe("...");
+    expect(name(pendingRead)).toBe("Needs you, Checking approvals");
+    cleanup();
+    const noRead = render(<ApprovalAttention snapshot={unread("unavailable")} questionSets={0} questionStatus="ready" onOpen={vi.fn()} />);
+    expect(count(noRead)).toBe("!");
+    expect(name(noRead)).toBe("Needs you, Approvals unavailable");
+  });
+
+  it("opens the list, not the one approval, while the question sets are not read", () => {
+    const onOpen = vi.fn();
+    const view = render(<ApprovalAttention snapshot={approvals} questionSets={0} questionStatus="unavailable" onOpen={onOpen} />);
+    fireEvent.click(view.getByRole("button", { name: "Needs you, 1 pending approval, Questions unavailable" }));
+    expect(onOpen).toHaveBeenCalledWith(undefined);
   });
 });
 

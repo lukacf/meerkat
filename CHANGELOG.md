@@ -1024,6 +1024,16 @@ them.
 
 ### Security
 
+- Examples: a build of `examples/032-wasm-webcm-agent` no longer contains
+  provider keys. Its Vite config inlined `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY` and `GEMINI_API_KEY` from the environment for `vite build`
+  as well as for the dev server, so `npm run build` (or
+  `make -C examples web`) in a shell that held them wrote them in plain text
+  into `web/dist/assets/`. They are now inlined only by the local dev server.
+  Affects every release that ships the example, 0.4.2 through 0.9.14. For
+  what to do if you hosted or shared such a build, see the known issue on the
+  0.9.14 release page:
+  https://github.com/lukacf/meerkat/releases/tag/v0.9.14
 - `meerkat-core`, `rkat`: the configuration documents the engine writes are
   owner-only on Unix, whatever the process umask. They are a config document
   (`~/.rkat/config.toml`, a project's `.rkat/config.toml`, a realm's own
@@ -1187,6 +1197,30 @@ them.
   crates Meerkat builds with only `xattr` does, and `tar`, the one crate
   that uses `xattr`, calls it only to set attributes while unpacking, so
   Meerkat's own use is not known to be affected.
+
+- Examples: a build of `examples/031-wasm-mini-diplomacy-sh` or
+  `examples/033-the-office-demo-sh` no longer contains provider keys. Both
+  pages pre-fill their key fields from `VITE_`-prefixed variables
+  (`VITE_ANTHROPIC_API_KEY`, `VITE_OPENAI_API_KEY`, `VITE_GEMINI_API_KEY`;
+  033 also `VITE_RKAT_ANTHROPIC_API_KEY`, `VITE_RKAT_OPENAI_API_KEY` and
+  `VITE_RKAT_GEMINI_API_KEY`), and `npm run build` (or
+  `make -C examples web`) wrote their values, in plain text, into
+  `web/dist/assets/`: 031 wrote every variable with the `VITE_` prefix that
+  was set, 033 the six key variables it reads. The READMEs did not mention
+  these variables, so a build is affected only if they were set in its
+  environment or in an env file Vite reads in `web/` (`.env`, `.env.local`,
+  `.env.production`, `.env.production.local`). In 0.4.4 only, the build of
+  033 also wrote `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `GEMINI_API_KEY`,
+  or their `RKAT_`-prefixed forms where those were set (confirmed by a build
+  of the 0.4.4 source). The `VITE_` prefix is now exposed only to the local
+  dev server; a build exposes only variables whose names start with
+  `VITE_BUILD_PUBLIC_`, so any other `VITE_` variable a build of these two
+  examples relied on is now empty in the built page. Affects every release
+  that ships the examples: 031 from 0.4.1 and 033 from 0.4.4, through
+  0.9.14 (read from the released sources; confirmed by a build of 0.9.14).
+  For what to do if you hosted or shared such a build, see the known issue
+  on the 0.9.14 release page:
+  https://github.com/lukacf/meerkat/releases/tag/v0.9.14
 
 ### Upgrade notes
 

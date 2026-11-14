@@ -1061,7 +1061,7 @@ Security, Upgrade and Changed.
 
 - `IdentityStatus.intent_managed` (`meta/status_identity`, the status
   lists, both SDKs) reads `false` for an identity whose record is its row
-  in the mob's identity store. It read `true` through 0.9.13, when the
+  in the mob's identity store. It read `true` through 0.9.14, when the
   host's verbs refused it. It still reads `true` for an identity a host
   adopted through an identity intent row.
 
@@ -1077,7 +1077,7 @@ Security, Upgrade and Changed.
   provider answers to one of them is wired. Under a topology provider, a
   live edge between two identities that no owner declares (not the
   provider, not the mob definition's wiring, not a row's owned edges) is
-  pruned whichever record holds the identities' specs; through 0.9.13 no
+  pruned whichever record holds the identities' specs; through 0.9.14 no
   edge of an identity created at run time was pruned. An edge a row
   declares as its identity's owned edge is never pruned.
 
@@ -1094,7 +1094,7 @@ Security, Upgrade and Changed.
   the names from Core's identity entries and the rows of the names it has
   not registered yet in pages (one store read per page of names, through
   Core's `MobHandle::identity_records`), so a cold start makes no store
-  read per identity. Through 0.9.13 every pass read every row, one read
+  read per identity. Through 0.9.14 every pass read every row, one read
   each. A row Core changed is read again at the identity's next delivery,
   as before, and status and list reads answer the same before any door of
   the identity opened.
@@ -1259,7 +1259,7 @@ Security, Upgrade and Changed.
   are built from the same inputs. The customizer runs once per build.
   No build relies on an earlier answer, so a restart changes nothing, and an
   agent on a profile whose resume mask names the model keeps the host's
-  model after a restart, as a configured one does. Through 0.9.13 such an
+  model after a restart, as a configured one does. Through 0.9.14 such an
   agent got the customizer's tools only and ran on its profile's own model
   and prompt. A customizer that fails, or a draft that does not lower,
   refuses the build retryable, as a failed tool publication does.
@@ -1271,7 +1271,7 @@ Security, Upgrade and Changed.
   private member's `council`, read whom the member is private to from the
   member's own roster row (its `console.private_to` label). They asked
   only the running host's record of the members it had started, so
-  through 0.9.13 a private member the host had not started since its
+  through 0.9.14 a private member the host had not started since its
   launch (seated and never run, or any private member in the moments
   after a restart) was checked and retired by another agent, and convened
   a council. The host's record still adds what a roster row cannot say (a
@@ -1311,7 +1311,7 @@ Security, Upgrade and Changed.
   or a door named the identity. Core asks Meta's build preparer before
   both, Meta's spawn customizer attaches the identity's tool dispatcher to
   each build of a member Core holds as an identity entry, and the build
-  preparer publishes the host customizer's tools into it. Through 0.9.13
+  preparer publishes the host customizer's tools into it. Through 0.9.14
   such a build offered none of them until the member's next build.
 
 - A member of an identity whose record is its row is resolved to its

@@ -1957,6 +1957,26 @@ them.
   account also no longer holds the earlier sign-in's token in that window
   (it was refused there and served no request).
 
+- `meerkat-rpc`: a `session/create` that runs a first turn and is refused
+  for its reasoning effort level (`-32602`, `reasoning_effort_refused`)
+  leaves no session. The level on `session/create` is new in this release,
+  and no published version is affected: before this fix such a refused
+  create left a session with no messages that `session/list` and
+  `session/read` showed, although the refusal names no session, and every
+  `turn/start` on it that named no level was refused the same way. Each
+  such session held one of the server's session slots until the server
+  restarted (it was never stored). The refused create now takes back what
+  it prepared, as a create that fails before its first turn does: nothing
+  is listed, read or registered for it, and it holds no session slot. The
+  refusal's code and data are unchanged, whichever form names the level
+  (`reasoning_effort` or `provider_params.reasoning_effort`). A deferred
+  create (`initial_turn: "deferred"`) is unchanged: it answers its session
+  id before the level is judged, so its session stays; a `turn/start` that
+  names a level the route accepts, or clears the level, runs on it, and
+  one that names no level is refused and leaves the session as it was.
+  REST `POST /sessions` and the MCP server's `meerkat_run` judge the level
+  before a session exists and left none (confirmed by a test of each).
+
 ### Security
 
 - Examples: a build of `examples/032-wasm-webcm-agent` no longer contains

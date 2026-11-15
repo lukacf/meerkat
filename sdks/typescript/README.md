@@ -144,7 +144,7 @@ Creates a new session and immediately runs the first turn with the given prompt.
 | `prompt` | `string \| ContentBlock[]` | **(required)** | The user prompt for the first turn. |
 | `options.injectedContext` | `readonly ContentInput[]` | `undefined` | Ordered durable host-attached context immediately before the prompt. |
 | `options.transientTurnContext` | `string` | `undefined` | Request-only host facts for the first turn. |
-| `options.model` | `string` | Server/config default | LLM model name (e.g. `"gpt-5.5"`, `"gemini-3.5-flash"`, `"claude-opus-4-8"`). |
+| `options.model` | `string` | Server/config default | LLM model name (e.g. `"gpt-6-astra"`, `"gemini-3.8-flash"`, `"claude-opus-5-5"`). |
 | `options.provider` | `string` | Resolved from the model registry | Force a specific provider (`"anthropic"`, `"openai"`, `"gemini"`). |
 | `options.authBinding` | `WireAuthBindingRef` | `undefined` | Resolve credentials through an explicit realm binding. |
 | `options.systemPrompt` | `string \| { action: "disable" }` | `undefined` | Override or explicitly disable inherited system prompts. |
@@ -644,7 +644,7 @@ await client.connect();
 
 // Create session with first turn.
 const session = await client.createSession("My name is Alice.", {
-  model: "claude-sonnet-4-6",
+  model: "claude-sonnet-5-5",
 });
 
 // Follow-up turns reuse the runtime-backed session handle.

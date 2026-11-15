@@ -79,7 +79,7 @@ pub use types::{
     ScheduleConfig, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleSpawnTooling,
     ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TriggerSpec,
-    UpdateScheduleRequest,
+    UpdateScheduleRequest, direct_reasoning_effort_refusal,
 };
 
 pub const SCHEDULE_CAPABILITY_DISABLED_DESCRIPTION: &str = "config.tools.schedule_enabled is false";

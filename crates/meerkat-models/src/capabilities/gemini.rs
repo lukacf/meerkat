@@ -14,7 +14,9 @@ use meerkat_core::model_profile::catalog::{ModelReleaseStage, ModelTier};
 /// "Thinking level MINIMAL is not supported for this model" (live probe
 /// 2026-10-14 for gemini-4-argon, gemini-3.8-flash, gemini-3.7-flash and
 /// gemini-3.1-pro-preview; the thinking guide lists low/medium/high for them
-/// and for gemini-4-carbon).
+/// and for gemini-4-carbon). gemini-4-hydrogen has these three too (thinking
+/// guide, checked 2026-11-14, which lists no minimal for it) and a fourth,
+/// xhigh, that the Gemini thinking level cannot send: see its row.
 const GEMINI_LOW_TO_HIGH: &[EffortLevel] =
     &[EffortLevel::Low, EffortLevel::Medium, EffortLevel::High];
 
@@ -178,6 +180,118 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         call_timeout_secs: Some(900),
         // The stream can stay silent while the model thinks: Google's
         // 15-minute client-timeout guidance bounds the silence like the call.
+        stream_inactivity_timeout_secs: Some(900),
+        supports_forced_tool_choice: true,
+    },
+    // Gemini 4 Hydrogen
+    //
+    // Sources, checked 2026-11-14. They are the Gemini developer API pages,
+    // the route this crate's client uses by default; ai.google.dev answers
+    // each address below with a redirect to the same path under
+    // https://aistudio.google.com/docs/.
+    //   - Model page:
+    //     https://ai.google.dev/gemini-api/docs/models/gemini-4-hydrogen
+    //     (stable; text, image, video, audio and PDF input, text output;
+    //      1,048,576-token context window shared by input and output; max
+    //      output 65,536 synchronous, up to 1,048,576 only with long decode;
+    //      thinking levels low, medium, high and xhigh; implicit caching
+    //      only, explicit caching is not supported; function calling,
+    //      structured outputs and Search grounding supported; Live API and
+    //      image generation not supported)
+    //   - Release notes, 2026-11-12:
+    //     https://ai.google.dev/gemini-api/docs/changelog
+    //     (generally available, on the free tier and the paid tiers)
+    //   - Latest model guide:
+    //     https://ai.google.dev/gemini-api/docs/latest-model
+    //     (the fast Gemini 4 model; thinking levels low, medium, high
+    //      (default) and xhigh)
+    //   - Thinking:
+    //     https://ai.google.dev/gemini-api/docs/thinking
+    //     (levels low/medium/high/xhigh, on at high by default; xhigh on
+    //      this model only; no minimal listed for it)
+    //   - Pricing:
+    //     https://ai.google.dev/gemini-api/docs/pricing
+    //     (free tier and paid tiers)
+    //   - Long decode:
+    //     https://ai.google.dev/gemini-api/docs/long-decode
+    //     (for gemini-4-carbon, gemini-4-argon and gemini-4-hydrogen; set
+    //      HTTP read timeouts to 15 to 20 minutes per stream)
+    //
+    // The row is the Argon row under its own identity. Two things differ
+    // from Argon and Carbon and are not catalog fields: the model thinks at
+    // `high` when a request names no level (theirs is `medium`), and Google
+    // serves it on the free tier too. A request without a thinking level
+    // carries none, so Google's default applies.
+    //
+    // effort_levels lists low, medium and high: the levels the Gemini
+    // thinking level can send. Google also documents `xhigh` for this model.
+    // This release does not send it: a provider-neutral reasoning effort of
+    // `xhigh` is refused as an unsupported level, and the Gemini provider
+    // tag has no such value. `minimal`, which the guide does not list for
+    // the model, is refused locally by the rule that reads the row's levels.
+    //
+    // Thinking budgets are not documented for this model (thinking_level
+    // only), as for Argon.
+    //
+    // Google states no client timeout for this model by itself.
+    // call_timeout_secs and stream_inactivity_timeout_secs are the 900 s of
+    // the Argon and Carbon rows, TAKEN FROM the family's long decode
+    // guidance above, which names this model. max_output_tokens is the
+    // synchronous cap: long decode needs the Interactions API, which Meerkat
+    // does not use.
+    //
+    // TAKEN FROM the Google Cloud platform page only, another route than the
+    // developer API, and not stated on the pages above:
+    //   https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-hydrogen
+    //   (custom temperature, top_p and top_k values are ignored): the three
+    //   sampling flags are false, as on the Argon and Carbon rows.
+    //
+    // ASSUMED from the Argon row (image input and function calling are
+    // documented; these are not called out separately): image_tool_results,
+    // supports_forced_tool_choice.
+    //
+    // Not a default model: the Gemini default stays gemini-4-argon.
+    ModelCapabilities {
+        id: "gemini-4-hydrogen",
+        provider: Provider::Gemini,
+        display_name: "Gemini 4 Hydrogen",
+        tier: ModelTier::Recommended,
+        release_stage: ModelReleaseStage::Stable,
+        model_family: "gemini-4",
+        context_window: Some(1_048_576),
+        max_input_tokens: None,
+        max_output_tokens: Some(65_536),
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: true,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::GeminiThinkingLevel,
+        anthropic_disabled_thinking: AnthropicDisabledThinking::Refused,
+        supports_reasoning: false,
+        effort_levels: GEMINI_LOW_TO_HIGH,
+        openai_responses_params: None,
+        supports_web_search: true,
+        supports_mid_conversation_system_messages: false,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        call_timeout_secs: Some(900),
+        // The stream can stay silent while the model thinks, as on Gemini 4
+        // Argon: the same window bounds the silence like the call.
         stream_inactivity_timeout_secs: Some(900),
         supports_forced_tool_choice: true,
     },

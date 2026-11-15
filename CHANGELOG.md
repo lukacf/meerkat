@@ -50,6 +50,20 @@ them.
   `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
   read the binding file. See Security and the Upgrade notes.
 
+- Behaviour-only (not measured by the gate): `meerkat-schedule` and the
+  doors that take a schedule request, for session and identity targets: a
+  schedule create or update that writes `reasoning_effort` directly in a
+  session target's `create` spec or on the prompt action of a session or
+  identity target is refused (invalid params on JSON-RPC, HTTP 400 on REST,
+  an invalid-arguments error from the schedule tools) and nothing is stored.
+  0.9.14 read the member as an unknown one and dropped it, so such a request
+  was accepted and its schedule ran without a level. The refusal is given
+  when the request is read (`SessionTargetBinding`'s and
+  `ScheduledSessionAction`'s `Deserialize`); other unknown members are still
+  dropped, and the new `meerkat_schedule::direct_reasoning_effort_refusal`
+  tells a door whether a failed read was this refusal. A mob target does not
+  refuse the member yet. See Known limitations.
+
 - Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
   `meerkat-machine-kernels`: the schedule lifecycle machine gains a state
   field and two inputs, and its public types follow.
@@ -80,6 +94,91 @@ them.
   stored as 0.9.14 stores it. No Meerkat store holds the generated kernel
   `State`: only an embedder that serializes it itself is affected. For a
   rollback with schedules paused for their target, see the Upgrade notes.
+
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`:
+  the MeerkatMachine abandons one input only while it is still queued (see
+  Added). `MeerkatMachineInput` and `MeerkatMachineInputVariant`
+  (meerkat-runtime `meerkat_machine::dsl` and meerkat-machine-schema
+  `catalog::dsl::meerkat_machine`), `MeerkatMachineRuntimeInternalInput`
+  (meerkat-runtime) and the kernel
+  `generated::meerkat::Input` and `InputKind` gain
+  `AbandonQueuedInput { input_id, reason }`. `MeerkatMachineEffect` and
+  `MeerkatMachineEffectVariant` (the same two modules) and the kernel
+  `Effect` and `EffectKind` gain
+  `QueuedInputAbandonResolved { input_id, disposition, phase }`. The kernel
+  `generated::meerkat::TransitionId` gains the input's 26 arms:
+  `AbandonQueuedInputIdle`, `AbandonQueuedInputAttached`,
+  `AbandonQueuedInputRunning`, `AbandonQueuedInputRetired`,
+  `AbandonQueuedInputStopped`,
+  `AbandonQueuedInputNotQueuedInitializing`,
+  `AbandonQueuedInputNotQueuedIdle`, `AbandonQueuedInputNotQueuedAttached`,
+  `AbandonQueuedInputNotQueuedRunning`, `AbandonQueuedInputNotQueuedRetired`,
+  `AbandonQueuedInputNotQueuedStopped`,
+  `AbandonQueuedInputNotQueuedDestroyed`,
+  `AbandonQueuedInputAlreadyTerminalInitializing`,
+  `AbandonQueuedInputAlreadyTerminalIdle`,
+  `AbandonQueuedInputAlreadyTerminalAttached`,
+  `AbandonQueuedInputAlreadyTerminalRunning`,
+  `AbandonQueuedInputAlreadyTerminalRetired`,
+  `AbandonQueuedInputAlreadyTerminalStopped`,
+  `AbandonQueuedInputAlreadyTerminalDestroyed`,
+  `AbandonQueuedInputUntrackedInitializing`,
+  `AbandonQueuedInputUntrackedIdle`, `AbandonQueuedInputUntrackedAttached`,
+  `AbandonQueuedInputUntrackedRunning`, `AbandonQueuedInputUntrackedRetired`,
+  `AbandonQueuedInputUntrackedStopped` and
+  `AbandonQueuedInputUntrackedDestroyed`. Every new variant is appended last,
+  so no existing variant's implicit discriminant moves. Every enum named
+  here is exhaustive, so a downstream exhaustive match needs the new arms, or
+  a wildcard arm.
+
+- Rust API of `meerkat-machine-kernels` and `meerkat-machine-codegen`: the
+  kernel `generated::meerkat::TransitionId` gains four variants, appended
+  last: `ResolveRuntimeCompletionCleanupInputTerminatedWhileServingIdle`,
+  `ResolveRuntimeCompletionCleanupInputTerminatedWhileServingAttached`,
+  `ResolveRuntimeCompletionCleanupInputTerminatedWhileServingRunning` and
+  `ResolveRuntimeCompletionCleanupInputTerminatedWhileDrainingRetired`. The
+  completion cleanup rule now answers one terminated input by the runtime's
+  phase (see Fixed): its arm
+  `ResolveRuntimeCompletionCleanupRuntimeTerminated` exists in the phases
+  Initializing, Retired and Stopped only, and the new arm
+  `ResolveRuntimeCompletionCleanupInputTerminatedWhileServing` holds Idle,
+  Attached and Running. In Retired the rule reads the machine's own queue
+  state: `ResolveRuntimeCompletionCleanupRuntimeTerminated` answers there
+  only when nothing is left to drain (no run bound and no input queued), and
+  the new arm `ResolveRuntimeCompletionCleanupInputTerminatedWhileDraining`
+  answers for a retired runtime that still has work to drain (no shipped
+  relay reaches the Retired cells: see Fixed). The three
+  variants
+  `ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle`,
+  `ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached` and
+  `ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning` stay in the enum
+  at their places as retired variants: they stay matchable and are never
+  fired from this release on, and the generated documentation says so on
+  each. No existing variant's implicit discriminant moves. An exhaustive
+  match on the enum needs the four new arms, or a wildcard arm. The split
+  itself changes no input, effect, enum value or state field of the machine.
+  `meerkat_machine_codegen::MachineKernelRenderError` gains
+  `RetiredTransitionStillLive { transition }` and
+  `RetiredTransitionFollowsUnknown { transition, follows }`: rendering
+  refuses a retired name that a schema transition still has, and a retired
+  name whose predecessor the enum does not have. The enum is exhaustive, so
+  a downstream exhaustive match needs the two new arms, or a wildcard arm.
+
+- Rust API of `meerkat-runtime`, `meerkat-machine-schema` and
+  `meerkat-machine-kernels`: the machine now says which cleanup follows a
+  completion, so no surface chooses it. `RuntimeCompletionCleanupAction`
+  (meerkat-runtime `meerkat_machine::dsl`, meerkat-machine-schema
+  `catalog::dsl::meerkat_machine`, and the kernel's copy) gains
+  `CleanupArchivedSession`, appended last: the cleanup of an archived
+  session, the only one that ends the mobs the session owns. The archived
+  arm of the completion cleanup rule answers it; `CleanupRuntime` now always
+  means the cleanup of a session that stays. The enum is exhaustive, so a
+  downstream exhaustive match needs the new arm, or a wildcard arm.
+  `RuntimeCompletionCleanupAuthority::requires_runtime_cleanup()` is
+  removed: it answered a boolean that let a caller retire a runtime without
+  saying which cleanup it ran. Match `RuntimeCompletionCleanupAuthority::action`
+  instead, or hand it to `RuntimeCleanupScope::of_completion_action` (see
+  Added).
 
 - Rust API of `meerkat-mob`: `DiagnosticCode` gains the variant
   `ProfileHeldByIdentity` (wire `profile_held_by_identity`), appended last,
@@ -342,16 +441,98 @@ them.
   behind the lease of its previous incarnation included, stays a plain
   standby, and the report names no other holder.
 
+- `meerkat-runtime`, `meerkat-contracts`, `meerkat-rpc`,
+  `meerkat-web-runtime` and the Python, TypeScript and Web SDKs: recall of
+  one queued input. A caller withdraws exactly one queued input of a
+  session, and only while no run has taken it; a run that has taken the
+  input is never interrupted. Until now a caller could interrupt or stop a
+  run, or abandon everything queued (retire, reset, stop), but not withdraw
+  one selected input only if it had not started. The recall is
+  session-level: any caller that can act on the session can recall any
+  queued input of it, also one another client queued, and by an idempotency
+  key it did not mint. Recalling an input withdraws everything the queue
+  coalesced into it, and the answer names only the recalled input.
+  - The MeerkatMachine owns the decision: the new input
+    `AbandonQueuedInput { input_id, reason }` is guarded on the input's phase
+    being `Queued`, the fact a run reads when it takes the input
+    (`StageForRun`, a durable steer's join), so exactly one of the two
+    commits, and concurrent recalls withdraw the input once. Its three other
+    arms change nothing and answer through `QueuedInputAbandonResolved` with
+    the new `QueuedInputAbandonDisposition` (`Abandoned`, `NotQueued`,
+    `AlreadyTerminal`, `Untracked`). The runtime's internal queued-input
+    cancel points now ask the machine through this input as well, in place
+    of a phase read in the driver followed by the unconditional
+    `AbandonInput`, and each acts on the machine's answer: for an input the
+    machine says is not queued the cancel point records and publishes no
+    terminal and answers an internal error, and a persistent session is
+    then reloaded from its store before it serves again. The read and the
+    machine's answer come from the same state under one hold, so no caller
+    is known to reach this. `AbandonInput` and the bulk and teardown paths are
+    unchanged.
+  - Rust: `MeerkatMachine::recall_queued_input(session_id, input_id)`
+    answers `Option<QueuedInputRecall>`: `Abandoned { input_id,
+    attempt_count }` (the input is `Abandoned` with reason `Cancelled`,
+    durably on a persistent machine, and its completion waiter is answered
+    `RuntimeTerminated`; `attempt_count` is 0 when no run attempt was
+    counted for it),
+    `NotQueued { input_id, phase, run_id }` (a run holds it; nothing is
+    touched), `AlreadyTerminal { input_id, terminal }` (nothing is touched; a
+    second recall answers this, also after a restart), and `None` for an
+    input the session does not hold. The call never loads or wakes a
+    session. The projection onto the wire answer is public too: the module
+    `meerkat_runtime::queued_input_recall_wire` with
+    `wire_queued_input_recall` and `parse_wire_input_id`, re-exported as
+    `meerkat::surface::wire_queued_input_recall` and
+    `meerkat::surface::parse_wire_input_id`.
+  - JSON-RPC: `session/recall_input` with `RecallInputParams { session_id,
+    selector }`, where `selector` is `session/input_status`'s (by `input_id`
+    or by `idempotency_key`), answers `RecallInputResult { session_id, recall
+    }`. `recall` is the new `WireQueuedInputRecall`, tagged `outcome`:
+    `abandoned` (`attempt_count`), `not_queued` (`phase`, `run_id`),
+    `already_terminal` (`terminal`). An input the session does not hold and
+    a malformed input id are `-32602`; an unknown session is `-32001`; a
+    session with no live runtime whose input has not ended is `-32003`. No
+    error code is added and no existing vocabulary gains a token.
+  - Browser runtime: the export `recall_session_input(handle, input_id)`
+    resolves to the `WireQueuedInputRecall` JSON.
+  - SDKs: Python `Session.recall_input(input_id=...)` or
+    `(idempotency_key=...)`, TypeScript `session.recallInput({ inputId })` or
+    `({ idempotencyKey })`, Web `session.recallInput(inputId)`. Each
+    validates the answer on its `outcome` discriminator. The list of
+    outcomes can grow: an outcome an SDK does not know is returned as it
+    is, with no error, and a caller keeps it as it is. On `not_queued`,
+    `run_id` is there when the runtime has one.
+  - Against a server without the method (0.9.0 through 0.9.14; an older
+    server is refused when the SDK connects): the server
+    answers method not found (`-32601`), and the Python and TypeScript
+    methods raise `MeerkatError` with the code `"-32601"` and the server's
+    message. Neither method reads the server's contract version or
+    capabilities first; the refused call changes nothing on the server. The
+    Web SDK calls the runtime that ships in its own package, so there is no
+    older server to meet: an older runtime module fails when it is
+    initialised, with a plain error, and a runtime binding of the same
+    version that lacks the export rejects with `MeerkatError` code
+    `CAPABILITY_UNAVAILABLE`.
+  - Not in it: a REST route, and a mob-level method that reaches a member
+    hosted on another host. Call `session/recall_input` on the host that
+    serves the session.
+
 - `meerkat`: `session_runtime::runtime_state::RuntimeCleanupScope`
   (`ArchivedSession`, `KeptSession`) says what became of the session whose
   live runtime a cleanup retires, and
   `ArchiveRuntimeCleanup::run_scoped` and
   `run_after_runtime_termination_scoped` take it: the mob hook, which
   destroys the mobs a session owns, runs for an archived session only.
-  `RuntimeCleanupScope::of_completion_cleanup` reads the scope from the
-  completion cleanup authority's archive fact. `ArchiveRuntimeCleanup::run`
-  stays the archive's cleanup; `run_after_runtime_termination` is deprecated
-  in favour of the scoped form (see Deprecated and Fixed).
+  `ArchiveRuntimeCleanup::run` stays the archive's cleanup;
+  `run_after_runtime_termination` is deprecated in favour of the scoped form
+  (see Deprecated and Fixed).
+
+- `meerkat`: `RuntimeCleanupScope::of_completion_action` maps the machine's
+  completion cleanup action to the cleanup a surface runs: none for
+  `RetainRuntime`, `KeptSession` for `CleanupRuntime`, `ArchivedSession` for
+  `CleanupArchivedSession`. `ArchiveRuntimeCleanup::run_runtime_only` is the
+  cleanup of a session that stays, for a caller that is never an archive
+  (taking back the runtime registration a failed recovery or create made).
 
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
   requests themselves (see Security).
@@ -470,7 +651,7 @@ them.
   update's commit writes it, in the update's own transaction, when a
   member holds the identity and its last seat row carries other labels
   than the updated row; the row lets it go once a seat row carries the
-  row's labels (the update's restamp, a retry's, a runtime-mode or role
+  row's labels (a runtime-mode or role
   restamp, a respawn with the row's labels, a rotation, a seat), and an
   archive or a removal drops it. A row that owes none carries no such key
   and is byte for byte what 0.9.14 writes. See Changed for what reads it,
@@ -1334,6 +1515,17 @@ them.
   session's level (`turn/start`, `mob/turn_start`) goes through
   `resolve_session_provider_params`, the rule it wraps.
 
+- `meerkat-models`: Gemini 4 Hydrogen (`gemini-4-hydrogen`), Google's fast
+  Gemini 4 model, served on the free tier and the paid Gemini API tiers, is
+  a recommended catalog model with the limits and timeouts of Gemini 4 Argon
+  (a 1,048,576-token context window, 64K output, a 900 s call timeout and
+  stream-inactivity window) and the thinking levels `low`, `medium` and
+  `high` (a request that names none gets Google's default for the model,
+  `high`), while the `xhigh` level Google also documents for it is not sent
+  in this release (a `reasoning_effort` of `xhigh` is refused as
+  `unsupported_level`, and the Gemini `provider_tag` has no such value), and
+  the Gemini default model stays `gemini-4-argon`.
+
 ### Changed
 
 - Provider error text (see Security): in the errors of the OpenAI
@@ -1384,56 +1576,58 @@ them.
   document" in `docs/cli/configuration.mdx`.
 
 - Mob: a label update of a store-owned identity
-  (`update_store_owned_identity`) seats the row's labels at once: its
-  seated member is restamped on its own session at the next generation
-  (the same-session respawn a runtime-mode change makes, with
-  `MemberRespawn::with_labels`), and the update answers
-  `DeclaredEntryOutcome::Restamped`. What decides the restamp is the
-  comparison, in the commit of any update of a seated store-owned
-  identity, of its last seat row's labels with the updated row's (the
-  commit records a difference as an owed restamp, see below), not the
-  update's own label change: an update that moves no label restamps a seat that
-  carries other labels than the row, so a seat an earlier release left
-  stale is corrected by the identity's next update, and a label a
-  host-written spawn seated outside the row is dropped by it (for a member
-  a same-session successor can serve; see below). From 0.9.9 through
-  0.9.14 a label
-  update kept the member with the labels it was seated with until its host
-  respawned it (`IdentityRecordCensus::seats_stale` counted the seat).
-  With the label rule above a build must carry exactly its seat's labels,
-  and what decides on a member's labels reads its seat, so the seat
-  follows its row at the update, not at a later respawn. The restamp keeps
-  the member: the same identity entry, session and conversation, its edges
-  and its comms key; nothing is built or woken (a live idle member is
-  released, and its next delivery wakes it), no kickoff runs again, and
-  its next build resumes its session. A member that holds work is not
-  interrupted: the update commits and answers
-  `DeclaredEntryOutcome::Deferred`. A label update of a busy agent is
-  recorded in its row, and the mob's roster reads the row's labels
-  (`get_member`, the member lists) from the step that commits the row,
-  whatever the member step then answers and whether or not the update's
-  caller is still there. The running session takes them at its next build
-  (a key the row dropped stays in a resumed session's own peer metadata,
-  as at every resume). Nothing else of the member moves: the same
-  generation, fence and session, and no seat row is written. The same
-  holds when the member step fails (`Failed`), and for a member a
-  same-session successor cannot serve (a placed member, a member wired to
-  a placed member, a member on a session service that keeps no durable
-  sessions), whose update answers `Kept` as before. Such a member is not
-  left exactly as it was: its release is tried before the respawn that is
-  then refused
-  (in the three cases named it releases nothing; a member whose session
-  cannot be kept, lost or archived say, is released and then kept), and
-  its restamp stays owed. The roster is not the
-  journal: the member's last seat row keeps the labels it was seated with
-  until its restamp, and so do the readers of that row, the binding
-  journal's labels and `seats_stale`. The restamp stays owed, and the row
-  records it (`CreatedIdentityRecord::label_restamp_owed`, see Added). A
-  retry of the same update (it replays) or the identity's next update
-  carries the restamp out once the member is idle; a retry while the
-  member still holds work restamps nothing and leaves it owed. A respawn
-  with the row's labels, a rotation and a reset settle it too, as does a
-  runtime-mode or role restamp of the same update. While the restamp is
+  (`update_store_owned_identity`) keeps its seated member: no successor is
+  seated for a label, and the update of an idle member answers
+  `DeclaredEntryOutcome::Kept`. The member keeps its generation, fence,
+  session, conversation and edges, and with them whatever is bound to its
+  generation. From 0.9.9 through 0.9.14 a label update kept the member
+  too, with the labels it was seated with on its roster entry and at its
+  builds until its host respawned it (`IdentityRecordCensus::seats_stale`
+  counted the seat). Now the mob's roster reads the row's labels
+  (`get_member`, the member lists, the member filter by label) from the
+  step that commits the row, whether or not the update's caller is still
+  there, and the member's next build takes them: an idle live member is
+  released by the update (it stays seated, and its next delivery wakes
+  it), so what it was built with serves nothing more. A member that holds
+  work is not interrupted: the update commits and answers
+  `DeclaredEntryOutcome::Deferred`, and a retry of the update releases the
+  member once it is idle (going idle builds nothing: until it is released
+  it runs on what it was built with). A member the release leaves live
+  answers `Kept` and stays on what it was built with: a placed member
+  and a member wired to a placed member, which a release does not serve,
+  and a member on a session service that keeps no durable sessions, where
+  a release releases nothing. A Broken member alone is still seated again by
+  the update (`Restamped`): its build was refused for good, it serves
+  nothing and holds no live build a release could let go, and only its
+  next incarnation is built again. That holds for every Broken member
+  whose row records the owed restamp, whatever broke it and whichever
+  field the update moves. A build carries every label of the row (a key
+  the row dropped stays in a resumed session's own peer metadata, as at
+  every resume). No seat row is written. The roster is not the journal:
+  the member's last seat row keeps the labels it was seated with until
+  its next seat row, and so do the readers of that row, the binding
+  journal's labels and `seats_stale`. The row records that restamp as owed
+  (`CreatedIdentityRecord::label_restamp_owed`, see Added): the commit of
+  any update of a seated store-owned identity writes it when the member's
+  last seat row carries other labels than the updated row, whichever
+  field the update moved. The seat row is no measure of what a live
+  member was built with, so the row lets the record go once a seat row
+  carries the row's labels and no build of the member can predate them:
+  after a new seat row, or after an update or a retry whose member step
+  was done (it released the member), never after one that was deferred
+  and never while a member the release left live still runs.
+  An update that returns the row to the labels of the member's seat row
+  (a label added and removed again) therefore releases an idle member
+  and then lets the record go, and keeps it for a busy member until a
+  retry released it. No update seats a member for its labels, and
+  neither does a retry of one: while the restamp is owed, each of them
+  releases the idle member again, which costs a build at its next
+  delivery and nothing else. The member's next seat row settles the owed
+  restamp, whatever writes it: a respawn (with the row's labels,
+  `MemberRespawn::with_labels`, the host's chosen step for a seat its row
+  moved past), a runtime-mode or role restamp, a rotation or a reset. A
+  runtime-mode change and a profile move still seat the member's successor
+  on its own session, once it is idle, as before. While the restamp is
   owed, a start seats the row's labels on the member's roster entry (it
   reads the rows anyway, and builds, wakes and writes nothing), and a
   build of the member is compared with the row's labels: a label update
@@ -1449,8 +1643,9 @@ them.
   label it carries at a start and is compared with its own labels at a
   build, as before this release: a label a host seated outside the row is
   kept, or refused by the label rule, never dropped by a start or a
-  build. It goes at the identity's next update, which makes an idle
-  member's seat equal its row, as before. A host's own declaration of a
+  build. The identity's next update takes it off the roster entry and
+  records the owed restamp, and the member's next seat row drops it. A
+  host's own declaration of a
   store-owned identity (`apply_declared_roster` with created custody)
   restamps no label, declared or not: a label reaches a store-owned seat
   through the identity's row. The label rule is unchanged: a label the
@@ -1459,7 +1654,7 @@ them.
   identity's label change is unchanged: its member is kept, and its host
   labels its builds (the declared apply stores no labels). See Upgrade
   notes for seats an earlier release left with other labels than their
-  row.
+  row, and for a rollback.
 
 - Mob: the labels a store-owned member's build carries are compared with
   its seat's after the host's spawn customizer
@@ -1745,6 +1940,44 @@ them.
   claim lapses with its lease as before, and those attempts are still
   spent one per claim lease.
 
+- `meerkat-runtime`, `meerkat-rpc`, `meerkat-rest`, `meerkat-mcp-server`:
+  ending one queued input of a session no longer ends the session's other
+  work. A request cancelled while its turn was queued behind a running turn
+  (the JSON-RPC cancel notification, a client that closed its connection to
+  a shared runtime, REST `POST /requests/{id}/cancel`) ended that one
+  request, and with it the turn that was running on the session and the
+  session's other queued requests: each was answered an internal error
+  (`-32603`; REST `500`) and was not completed, the cancelled REST request
+  was answered only once the running turn had ended, and the session's MCP
+  adapter and pending event streams went with its runtime registration.
+  `mob/cancel_all_work` on a member whose session held a queued turn request
+  also retired that session's runtime registration, with what was attached
+  to it. Now only the one input ends: the
+  running turn completes and its request is answered its result, the other
+  queued requests run in the order they were queued (measured with two of
+  them), the cancelled request is answered at
+  once, and the session keeps its runtime registration and what is attached
+  to it. `mob/cancel_all_work` itself still ends the member's running run
+  and its queued inputs, as it is meant to: the member's queued turn
+  request is refused, and the member's session now keeps its runtime
+  registration (see Known limitations for the member's next turn). The recall of one queued input, new in this release, behaves the
+  same way. Measured by tests on JSON-RPC and REST, and at the MCP server's
+  completion cleanup. A request's cancel has ended its exact queued input
+  since 0.8.0 and `mob/cancel_all_work` has abandoned a member's queued
+  inputs since 0.8.51 (read at the release tags). The machine's completion
+  cleanup rule now answers one terminated input by the runtime's phase: a
+  runtime that serves is kept, and one that was stopped is cleaned up as
+  before (see Breaking for the kernel's transition names). For a retired
+  runtime the rule itself now keeps the runtime while an input is still
+  queued for its drain, and answers the cleanup when the input that ended
+  was the last one queued (rows at the rule and at the runtime). No shipped
+  surface reaches those two cells: the JSON-RPC, REST and MCP server relays
+  read a retired runtime as an archived session and clean it up as before,
+  and `session/recall_input` answers `-32001` for such a session. They are
+  the rule for a Rust host whose own relay asks the machine about a session
+  it does not read as archived. A stopped runtime with inputs still queued
+  is cleaned up as before.
+
 - `meerkat-rpc`, `meerkat-rest`, `meerkat`: a session that was cleaned up
   without being archived no longer loses the agents it created to the
   cleanup that the JSON-RPC and REST servers run after a turn. That cleanup
@@ -1801,8 +2034,8 @@ them.
   commands and the browser runtime (by reading the source). A failed start
   still retires the session's runtime registration and its live MCP
   connections, which the next turn builds again (see Known limitations for
-  an input queued behind the failed turn, and for a request cancelled while
-  its turn is queued). Affects 0.6.0 through 0.9.14 on JSON-RPC and REST:
+  an input queued behind the failed turn). Affects 0.6.0 through 0.9.14 on
+  JSON-RPC and REST:
   since 0.6.0 for a turn whose result could not be saved and for a stored
   session whose rebuild fails, since 0.6.2 for a realtime open of a stored
   session that cannot be rebuilt (JSON-RPC only), since 0.7.0 for any turn
@@ -2694,8 +2927,9 @@ them.
   `MemberBuildPreparer::prepare_store_owned_seat` or a spawn customizer
   that sets labels: respawn the member with its row's labels
   (`MobHandle::respawn_member` with `MemberRespawn::new().with_labels(..)`),
-  or update the identity while its member is idle (any update then makes
-  the seat equal the row). A host that answers such a member's seat from
+  or update the identity (any update then records the restamp its seat
+  row is owed, and the member's builds are compared with the row's labels
+  from then on). A host that answers such a member's seat from
   its row is otherwise refused the member's build, naming the label keys
   that differ.
 
@@ -2705,10 +2939,17 @@ them.
   Before a rollback, read `MobHandle::identity_record_census()` (or, with
   no running mob, `MobStorage::read_identity_record_rows` or
   `MobStorage::identity_record_rows`) and settle
-  every owed restamp while `label_restamps_owed` is above zero: retry the
-  update, or update the identity again, while its agent is idle, or
-  respawn its member with the row's labels (`MobHandle::respawn_member`
-  with `MemberRespawn::new().with_labels(..)`). A member no same-session
+  every owed restamp while `label_restamps_owed` is above zero: respawn
+  its member with the row's labels (`MobHandle::respawn_member`
+  with `MemberRespawn::new().with_labels(..)`), or move its profile or
+  its runtime mode. A label update never seats the member again, so
+  every seated identity whose labels were updated owes the restamp until
+  its next seat row, and a retry of the update or a later update of other
+  fields does not settle it. The respawn seats the member again on the
+  same session and cancels a turn in flight, and an agent that created
+  mobs with its own tools then no longer lists or manages them: have it
+  destroy such a mob first, or leave that identity unsettled (it is out
+  of service while rolled back, and nothing of it is lost). A member no same-session
   successor can serve (placed, wired to a placed member, or on a session
   service that keeps no durable sessions) is settled by none of these:
   rotate it (`MobHandle::rotate_member`), or archive or remove its
@@ -2936,6 +3177,14 @@ them.
   mob. The host's own creates answer `MobError::ProvenanceUnavailable`
   with the id as before.
 
+- A configuration or a mob definition that defines `gemini-4-hydrogen`
+  itself (`[models.gemini-4-hydrogen]`) must drop that entry when upgrading:
+  the catalog now has the id, and a second definition is refused with
+  "model id '<id>' must be unique across built-in, custom, and self-hosted
+  entries", a configuration by configuration validation and a mob definition
+  when one of its members is built (the mob definition case was read from
+  the source, not run). See Added.
+
 ### Known limitations
 
 - Mob: on a host that installs a member tool audience, a call that seats
@@ -2960,18 +3209,21 @@ them.
   again. Event streams that were pending on the session close with the
   registration and have to be opened again (read from the source). The
   session's next turn builds
-  the runtime again.
+  the runtime again. A turn fails at its start also when the server
+  refuses, while it applies the turn, something the turn's own request
+  asked for (for example a reasoning effort level the model does not
+  accept): that request is answered its typed refusal, and what is queued
+  behind it ends in the same way.
 
-- Cancelling a request whose turn is still queued also ends the turn that
-  is running on that session and the session's other queued requests. The
-  cancelled request is answered as cancelled (a row asserts this on REST; on
-  JSON-RPC it is read from the source); the running turn's request
-  and each other queued request are answered with an internal error
-  (`-32603`) and are not completed (measured by a test on JSON-RPC, on
-  0.9.14's cleanup and on this release's). The session and everything it
-  owns stay, and its next turn runs. Do not cancel a request while its
-  turn is queued: let it start, or interrupt the running turn
-  (`turn/interrupt`).
+- After `mob/cancel_all_work` ended a member's running run, the first turn
+  a client then starts on that member's session (`turn/start`) is answered
+  an internal error (`-32603`, "turn abandoned") and is not run; the turn
+  after it runs. Send the turn again. It is the same with and without a
+  turn request queued on the member (measured by a test on JSON-RPC, on
+  this release and on the tree before the fix above). Before that fix a
+  member with a turn request queued did not show it: the cleanup the fix
+  removes had retired the member's runtime, and the member's next turn
+  built it again.
 
 - A mob that belongs to a session which never became durable stays until
   that session id is archived. Before this release the cleanup of a failed
@@ -3087,11 +3339,15 @@ them.
   (`POST /sessions`).
 
 - A schedule's session spec is the one surface where the reasoning effort
-  level is not accepted in this release. A schedule whose `create` spec
-  carries `provider_params.reasoning_effort` is refused when it is created
+  level is not accepted in this release. A schedule request that writes
+  `reasoning_effort` in its `create` spec (directly or in `provider_params`)
+  or on the prompt action of a session or identity target is refused when
+  the schedule is created
   or updated (invalid params on JSON-RPC, HTTP 400 on REST, an
   invalid-arguments error from the MCP server's and an agent's schedule
-  tools), and nothing is stored. A provider's own effort under
+  tools), and nothing is stored. A `reasoning_effort` member written on a
+  mob target (a member send, a helper) is still accepted and ignored: the
+  delivery runs without a level. A provider's own effort under
   `provider_tag` is accepted there as before. The level is planned to
   return on schedules in a later release, together with a way back for
   stores on a rollback.

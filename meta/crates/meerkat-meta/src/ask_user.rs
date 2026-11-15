@@ -7,7 +7,7 @@
 //! of its own. Meta is the host:
 //!
 //! - **Mount.** Every member build passes the base session layer's hook
-//!   ([`AskUserSlot::after_hook`]), which puts the tool, with a
+//!   (`AskUserSlot::after_hook`), which puts the tool, with a
 //!   [`MemberAskUserHost`] for that member, into the build's host tools
 //!   (`SessionBuildOptions::host_tools`): Core's factory composes them as
 //!   one more part of the build's tool surface, beside whatever its base
@@ -16,29 +16,33 @@
 //!   `ask_user` (a host's own tool of that name) keeps its own, and Meta
 //!   mounts none: the questions that tool asks are that tool's, so no
 //!   decision is held for them, the read lists none of them and no notice
-//!   is sent for them. Nothing is opened, read or started for the mount.
+//!   is sent for them. A member build that runs through its registration's
+//!   tool-surface gate (a host with a member registration hook decides the
+//!   build's prepared surface whole) gets none either: it carries only the
+//!   tools it was asked for. Nothing is opened, read or started for the
+//!   mount.
 //! - **Surface.** The slot is late-bound: the runtime fills it
-//!   ([`AskUserSurface`]) once it keeps durable decisions and serves its
+//!   (`AskUserSurface`) once it keeps durable decisions and serves its
 //!   long-term agents. A call answers `no_human_surface` at once, holding
 //!   nothing, while the slot is empty, when the runtime keeps no durable
 //!   decisions, on a candidate launch (which acts nowhere), when no person
 //!   can decide on the runtime's Console
-//!   ([`crate::console_schedules::ConsoleServed`]: it serves none, or one
+//!   (`crate::console_schedules::ConsoleServed`: it serves none, or one
 //!   that can identify no person or takes no changes), and for
 //!   an asker no answer can be routed back to (a member of another mob than
 //!   the runtime's own, or a name that is no agent name). Otherwise the set
 //!   is held and the call answers `asked`.
-//! - **Read.** [`open_question_sets`] lists the open sets, soonest deadline
+//! - **Read.** `open_question_sets` lists the open sets, soonest deadline
 //!   first, for `meta/gating/questions`.
-//! - **Answer.** [`answer_question_set`] is the one hand-off of a person's
+//! - **Answer.** `answer_question_set` is the one hand-off of a person's
 //!   answer to the decision owner, for `meta/gating/decide` on the Console
 //!   and on stdio. Its match on the decision's kind is closed: a decision of
-//!   any other kind is [`QuestionSetRefusal::NotAQuestionSet`], which each
+//!   any other kind is `QuestionSetRefusal::NotAQuestionSet`, which each
 //!   route answers as it answers an unknown pending id.
 //! - **Notice.** The kind's executor is driven for the runtime from its first
 //!   set on (an executor claim creates files, so none is made before)
-//!   ([`spawn_ask_user_driver`]); the end of a set reaches its asker as a
-//!   keyed send ([`MemberKeyedNotices`], key [`ask_user_notice_key`]) whose
+//!   (`spawn_ask_user_driver`); the end of a set reaches its asker as a
+//!   keyed send (`MemberKeyedNotices`, key [`ask_user_notice_key`]) whose
 //!   body is the typed result ([`ask_user_result_input`]).
 
 use std::sync::{Arc, RwLock};
@@ -263,7 +267,12 @@ impl AskUserSlot {
     /// build whose external tools or host tools already name `ask_user`, as
     /// a tool they list or an entry of their catalog (the host's own tool of
     /// that name stays reachable: a name two parts of a build's surface list
-    /// is offered by neither).
+    /// is offered by neither). Nothing changes either for a member build
+    /// that runs through its registration's tool-surface gate
+    /// (`built_through_surface_gate` of `crate::native_realm`): the host that
+    /// installed the gate decides the build's prepared surface whole, it can
+    /// accept or refuse it but take no tool out of it, so the build carries
+    /// only the tools it was asked for and Meta adds none of its own.
     pub(crate) fn mount(&self, req: &mut CreateSessionRequest) {
         let Some(build) = req.build.as_mut() else {
             return;
@@ -271,6 +280,14 @@ impl AskUserSlot {
         let Some(binding) = build.mob_member_binding.as_ref() else {
             return;
         };
+        if crate::native_realm::built_through_surface_gate(build) {
+            tracing::debug!(
+                member = %binding.member,
+                "the member's build runs through its registration's tool-surface gate: \
+                 Meta mounts no ask_user"
+            );
+            return;
+        }
         if [build.external_tools.as_ref(), build.host_tools.as_ref()]
             .into_iter()
             .flatten()

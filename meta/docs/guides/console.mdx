@@ -772,8 +772,6 @@ Schedules are the `meta/schedule/*` methods on the console RPC (see
 
 ### Long-term agents
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 Available from Meerkat Meta 0.9.15.
 
 Where the team's host lets its agents be changed at run time (its
@@ -818,12 +816,12 @@ by how it came to exist.
   first use takes no agent that was not prepared for it: the field says
   so, and a new agent is created in that profile instead.
 - **Archive** stops the agent and keeps its name, its record, its
-  conversation and its memory; **Unarchive** brings it back. Archiving an
-  agent removes the mobs it created. They stay until the gateway next
-  starts; then each of those mobs is removed with its store, and
-  unarchiving the agent does not bring them back. Have the agent destroy
-  its mobs before you archive it. Do not archive an agent whose mobs must
-  stay. **Remove** is
+  conversation and its memory; **Unarchive** brings it back. An archive or a
+  removal of an agent that still owns mobs it created is refused: the
+  result says that the agent still has teams it created and that archiving
+  or removing it would remove them, and its Details hold the gateway's own
+  sentence. Have the agent destroy its mobs first, or keep the agent.
+  **Remove** is
   for good: its confirmation says that the name can never be used again and
   offers **Archive instead**. The confirmation of an archive and of a
   removal says that the agent's last conversation is harvested and

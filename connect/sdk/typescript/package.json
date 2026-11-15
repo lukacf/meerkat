@@ -1,6 +1,6 @@
 {
   "name": "@rkat/toolkit",
-  "version": "0.9.14",
+  "version": "0.9.15",
   "description": "Optional Meerkat Toolkit host-injected service operations",
   "type": "module",
   "main": "./dist/index.js",
@@ -103,8 +103,8 @@
     "typescript": "5.8.3"
   },
   "peerDependencies": {
-    "@rkat/meta-sdk": ">=0.9.14 <0.10.0",
-    "@rkat/sdk": ">=0.9.14 <0.10.0"
+    "@rkat/meta-sdk": ">=0.9.15 <0.10.0",
+    "@rkat/sdk": ">=0.9.15 <0.10.0"
   },
   "peerDependenciesMeta": {
     "@rkat/sdk": {

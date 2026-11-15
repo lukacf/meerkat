@@ -1648,7 +1648,7 @@ impl MemoryRecorder {
                 if result.deleted {
                     Ok(format!(
                         "Forgot memory {}. It stops being injected immediately; text already in \
-                         a live context is only revoked by reset/respawn.",
+                         a live context is only revoked by a reset.",
                         result.memory_id
                     ))
                 } else {

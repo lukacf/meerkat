@@ -4120,3 +4120,188 @@ async fn an_agents_update_keeps_a_reserved_label_and_is_refused_a_change_of_it()
     assert_eq!(record["labels"], json!({"tier": "gold"}), "{record}");
     rig.shutdown().await;
 }
+
+/// An agent's `identity_archive` of an agent whose session still owns a mob
+/// answers the family's refusal: `refused`, `owns_mobs`, about `name`, with
+/// how many mobs there are and no list of them (the mobs are the other
+/// agent's). Nothing is archived. Once the mob is destroyed the same call
+/// archives the agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agents_identity_archive_of_an_agent_that_owns_a_mob_is_refused_owns_mobs() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot(state.path(), &fresh_mob_id()).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(policy(), IdentityFamilyOptions::new()),
+        "the launch attaches its identity policy"
+    );
+    let created = rig
+        .tool(
+            LEAD,
+            "owner-create",
+            IDENTITY_CREATE,
+            json!({"request_id": "scout-1", "agents": [{"name": "scout", "profile": WORKER}]}),
+        )
+        .await;
+    assert_eq!(created.content["outcome"], "done", "{}", created.content);
+    let digest = created.content["agents"][0]["spec_digest"].clone();
+
+    // The agent's session owns a mob, recorded as its own `mob_create`
+    // records one: owned by the session, and ended with its archive.
+    let child = format!("{}-child", rig.runtime.mob_handle().mob_id());
+    let mobs = rig
+        .runtime
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the agent mob tools' state");
+    mobs.mob_create_definition_with_owner_bridge_session(
+        MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "{child}"
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
+"#
+        ))
+        .expect("parse the child definition"),
+        rig.session_of("scout").await,
+        true,
+        false,
+    )
+    .await
+    .expect("the mob is created for its owner");
+
+    let archive = json!({"request_id": "scout-2", "name": "scout", "expected_spec_digest": digest});
+    let refused = rig
+        .tool(LEAD, "owner-archive", IDENTITY_ARCHIVE, archive.clone())
+        .await;
+    assert!(refused.is_error, "{refused:?}");
+    let mut answer = refused.content.clone();
+    let detail = answer
+        .as_object_mut()
+        .and_then(|answer| answer.remove("detail"))
+        .unwrap_or_default();
+    assert_eq!(
+        answer,
+        json!({"outcome": "refused", "kind": "owns_mobs", "count": 1, "field": "name",
+               "retryable": false}),
+        "{}",
+        refused.content
+    );
+    assert!(
+        detail
+            .as_str()
+            .is_some_and(|detail| detail.contains("destroy") && !detail.contains(&child)),
+        "the sentence says what to do and names no mob: {detail}"
+    );
+    let listed = rig.tool(LEAD, "owner-list", IDENTITY_LIST, json!({})).await;
+    assert!(
+        listed.content["agents"]
+            .as_array()
+            .is_some_and(|agents| agents.iter().any(|agent| agent["name"] == "scout")),
+        "the agent is not archived: {}",
+        listed.content
+    );
+
+    // The twin: once the mob is destroyed, the same call archives the agent.
+    mobs.mob_destroy(&meerkat_mob::MobId::from(child.as_str()))
+        .await
+        .expect("the mob is destroyed");
+    let archived = rig
+        .tool(LEAD, "owner-archive-again", IDENTITY_ARCHIVE, archive)
+        .await;
+    assert_eq!(archived.content["outcome"], "done", "{}", archived.content);
+    rig.shutdown().await;
+}
+
+/// An agent's `identity_remove` of an agent whose session still owns a mob
+/// answers the same refusal as its archive: `refused`, `owns_mobs`, about
+/// `name`, with how many mobs there are and no list of them. Nothing is
+/// removed. Once the mob is destroyed the same call removes the agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agents_identity_remove_of_an_agent_that_owns_a_mob_is_refused_owns_mobs() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot(state.path(), &fresh_mob_id()).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(policy(), IdentityFamilyOptions::new()),
+        "the launch attaches its identity policy"
+    );
+    let created = rig
+        .tool(
+            LEAD,
+            "owner-create",
+            IDENTITY_CREATE,
+            json!({"request_id": "scout-1", "agents": [{"name": "scout", "profile": WORKER}]}),
+        )
+        .await;
+    assert_eq!(created.content["outcome"], "done", "{}", created.content);
+    let digest = created.content["agents"][0]["spec_digest"].clone();
+    let child = format!("{}-child", rig.runtime.mob_handle().mob_id());
+    let mobs = rig
+        .runtime
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the agent mob tools' state");
+    mobs.mob_create_definition_with_owner_bridge_session(
+        MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "{child}"
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
+"#
+        ))
+        .expect("parse the child definition"),
+        rig.session_of("scout").await,
+        true,
+        false,
+    )
+    .await
+    .expect("the mob is created for its owner");
+
+    let removal = json!({"request_id": "scout-2", "name": "scout", "expected_spec_digest": digest});
+    let refused = rig
+        .tool(LEAD, "owner-remove", IDENTITY_REMOVE, removal.clone())
+        .await;
+    assert!(refused.is_error, "{refused:?}");
+    let mut answer = refused.content.clone();
+    if let Some(answer) = answer.as_object_mut() {
+        answer.remove("detail");
+    }
+    assert_eq!(
+        answer,
+        json!({"outcome": "refused", "kind": "owns_mobs", "count": 1, "field": "name",
+               "retryable": false}),
+        "{}",
+        refused.content
+    );
+    let listed = rig.tool(LEAD, "owner-list", IDENTITY_LIST, json!({})).await;
+    assert!(
+        listed.content["agents"]
+            .as_array()
+            .is_some_and(|agents| agents.iter().any(|agent| agent["name"] == "scout")),
+        "the agent is not removed: {}",
+        listed.content
+    );
+
+    // The twin: once the mob is destroyed, the same call removes the agent.
+    mobs.mob_destroy(&meerkat_mob::MobId::from(child.as_str()))
+        .await
+        .expect("the mob is destroyed");
+    let removed = rig
+        .tool(LEAD, "owner-remove-again", IDENTITY_REMOVE, removal)
+        .await;
+    assert_eq!(removed.content["outcome"], "done", "{}", removed.content);
+    rig.shutdown().await;
+}

@@ -4268,9 +4268,10 @@ For an identity that created mobs each clearing step has a cost of its own:
   stores stay. A completed `meta/compact_member` has the same cost on those
   releases (see the top of this section). From 0.9.15 a respawn of a member
   the same-session step serves keeps that management (confirmed by tests and
-  by a run), and a completed `meta/compact_member` keeps it too (one run); a
-  call that times out, and one that completes without compacting, rebuild
-  the member by the same step (read from the source; not run);
+  by a run), and a completed `meta/compact_member` of a member the
+  same-session step serves keeps it too (one run); a call that times out,
+  and one that completes without compacting, rebuild the member by the
+  same step (read from the source; not run);
 - a reset: it ends the identity's session, and the mobs that session owns end
   with it, no later than the gateway's next start (read from the source, not
   run).

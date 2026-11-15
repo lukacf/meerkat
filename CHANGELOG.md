@@ -1851,8 +1851,8 @@ them.
   and this release's reader answered the successor's chain from the
   generation that created the mob out of the journal that build wrote. No
   host was upgraded in those runs, and 0.9.9 through 0.9.13 are read from
-  the source. A respawn made through a Meerkat Meta gateway on 0.9.14
-  (`meta/respawn`, the Console's respawn), and a completed
+  the source. A respawn made through a Meerkat Meta gateway on 0.9.9
+  through 0.9.14 (`meta/respawn`, the Console's respawn), and a completed
   `meta/compact_member` there, are not among these steps and are not
   covered: see "Not brought back" below. The session's create
   capability and its current role's tools decide each call as before.
@@ -1876,22 +1876,25 @@ them.
   - Not brought back: a creator that was retired and seated again on its
     session before the upgrade stays without its management of the mobs it
     created; upgrading does not give back a management lost that way. A
-    respawn through a Meerkat Meta gateway on 0.9.14 is that case: Meta
-    0.9.14 respawned an agent by retiring its member and seating it again
-    on its session (`meta/respawn`, the Console's respawn), not by the
-    same-session step. After the upgrade such an agent still lists none of
-    the mobs it created before that respawn, and its calls on them are
-    refused (run for `meta/respawn`: the published Meta 0.9.14, then this
-    release on the same state; the Console's respawn makes the same call,
-    read from the source). A further respawn of that agent on this release
-    does not give them back either (run); the mobs it created after its
-    0.9.14 respawn are managed and stay so (read from the source). A
-    completed `meta/compact_member` on 0.9.14 is the same case: each of its
-    two rebuilds retired the member and seated it again as that release's
-    respawn did (read from the source), and the agent then listed none of
-    its mobs there (a run on the published Meta 0.9.14); that the upgrade
-    does not give them back after such a call is read from the source too
-    (the upgrade after a 0.9.14 compact call was not run). Those
+    respawn through a Meerkat Meta gateway on 0.9.9 through 0.9.14 is that
+    case: Meta respawned an agent there by retiring its member and seating
+    it again on its session (`meta/respawn`, the Console's respawn), not
+    by the same-session step (read from the source at each tag). After the
+    upgrade such an agent still lists none of the mobs it created before
+    that respawn, and its calls on them are refused (run for
+    `meta/respawn`: the published Meta 0.9.14, then this release on the
+    same state; the Console's respawn makes the same call, read from the
+    source). A further respawn of that agent on this release does not give
+    them back either (run); the mobs it created after that respawn are
+    managed and stay so (read from the source). A `meta/compact_member` on
+    0.9.9 through 0.9.14 is the same case, a completed call or one that
+    failed or timed out after its first rebuild: each rebuild retired the
+    member and seated it again as those releases' respawn did (read from
+    the source at each tag). After a completed call the agent listed none
+    of its mobs there (a run on the published Meta 0.9.14), and the
+    upgrade does not give them back after it (one run); for a call that
+    failed or timed out after its first rebuild that is read from the
+    source, not run. Those
     mobs end as before, with the session that owns them (see the Upgrade
     notes, and Meerkat Meta's changelog, "Not brought back", for a Meta
     host).
@@ -2730,20 +2733,23 @@ them.
   `MobHandle::respawn` of an identity entry's member (run), the call behind
   `mob/respawn` (read from the source). The runs are of 0.9.14; Fixed says
   what they cover.
-  A respawn made through a Meerkat Meta gateway on 0.9.14 (`meta/respawn`,
-  the Console's respawn) is NOT one of them. It leaves the agent without the
-  mobs it created before that respawn, and the upgrade does not give them
-  back: the agent lists none of them and its calls on them are refused
-  (run for `meta/respawn`; see Fixed, "Not brought back", and Meerkat
-  Meta's changelog). A completed `meta/compact_member` on 0.9.14 leaves the
-  agent in the same state, and the upgrade does not give those mobs back
-  either (read from the source; the upgrade after such a call was not
-  run). A further respawn of that agent on 0.9.15 does not
+  A respawn made through a Meerkat Meta gateway on 0.9.9 through 0.9.14
+  (`meta/respawn`, the Console's respawn) is NOT one of them (read from the
+  source at each tag). It leaves the agent without the mobs it created
+  before that respawn, and the upgrade does not give them back: the agent
+  lists none of them and its calls on them are refused (run for
+  `meta/respawn` on 0.9.14; see Fixed, "Not brought back", and Meerkat
+  Meta's changelog). A further respawn of that agent on 0.9.15 does not
   give them back either (run): a mob's record names the member generation
-  that created it, and no later step reaches back past the 0.9.14 respawn.
-  Mobs the agent created after its 0.9.14 respawn are not affected: it
-  manages them, and keeps them through its respawns on 0.9.15 (read from
-  the source). What is left for the earlier mobs is to end them: a reset or
+  that created it, and no later step reaches back past that respawn. A
+  `meta/compact_member` on 0.9.9 through 0.9.14, a completed call or one
+  that failed or timed out after its first rebuild, leaves an agent in the
+  same state, and the upgrade does not give those mobs back either (one
+  run, of a completed call on 0.9.14; for a call that failed or timed out
+  after its first rebuild, read from the source; not run). Mobs the agent
+  created after that respawn or compact call are not affected: it manages
+  them, and keeps them through its respawns on 0.9.15 (read from the
+  source). What is left for the earlier mobs is to end them: a reset or
   a delete of the agent (`meta/reset`, `meta/delete_identity`), then the
   gateway's next start (read from the source). That ends the agent's
   conversation, and every mob its session owns, the ones it still manages

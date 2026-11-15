@@ -9,6 +9,13 @@
 //! Started work is never interrupted by a recall. An input the session does
 //! not hold, an unknown session and a session with no live runtime to decide
 //! in are errors from the existing vocabulary, never an outcome here.
+//!
+//! The list of outcomes can grow: a later release may add one.
+//! [`WireQueuedInputRecall`] is non-exhaustive, so a Rust client outside this
+//! crate matches it with a wildcard arm. The attribute keeps that match
+//! compiling when an outcome is added; it adds no catch-all variant, so a
+//! client built on this release that deserializes an outcome the enum does
+//! not have gets a decode error.
 
 use serde::{Deserialize, Serialize};
 
@@ -29,9 +36,14 @@ pub struct RecallInputParams {
 }
 
 /// Typed answer of a queued-input recall.
+// A later release may add an outcome, so a Rust client outside this crate
+// keeps a wildcard arm (see the module documentation). That note is not in
+// the item's own doc text, which the schema and the generated SDK types
+// carry as this type's description.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum WireQueuedInputRecall {
     /// The input was still queued and is now withdrawn: its terminal is
     /// `cancelled`, durably, and no run will take it. `attempt_count` is the
@@ -143,6 +155,38 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<WireQueuedInputRecall>(value).unwrap(),
             terminal
+        );
+    }
+
+    /// Pins what a Rust client that deserializes this type meets when the
+    /// server answers an outcome the enum does not have: the enum has no
+    /// catch-all variant and no untagged fallback, so decoding fails with
+    /// serde's unknown-variant error. Nothing is kept and nothing is guessed.
+    #[test]
+    fn an_outcome_the_enum_does_not_have_is_a_decode_error_with_no_catch_all() {
+        let unknown = serde_json::json!({"outcome": "deferred", "input_id": "i1"});
+        let error = serde_json::from_value::<WireQueuedInputRecall>(unknown.clone())
+            .expect_err("an outcome the enum does not have must not decode");
+        let text = error.to_string();
+        assert!(
+            text.contains("unknown variant `deferred`"),
+            "the decode error names the outcome it does not know: {text}"
+        );
+        for known in ["abandoned", "not_queued", "already_terminal"] {
+            assert!(
+                text.contains(known),
+                "the decode error lists the outcomes the enum has: {text}"
+            );
+        }
+
+        // The method's result carries the enum, so the whole answer fails to
+        // decode, from JSON text as a client reads it off the transport.
+        let answer = serde_json::json!({"session_id": "s", "recall": unknown}).to_string();
+        let error = serde_json::from_str::<RecallInputResult>(&answer)
+            .expect_err("a result with an outcome the enum does not have must not decode");
+        assert!(
+            error.to_string().contains("unknown variant `deferred`"),
+            "the result's decode error names the outcome: {error}"
         );
     }
 

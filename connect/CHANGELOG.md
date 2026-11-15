@@ -60,10 +60,13 @@ guides give the conditional wording for Connect 0.9.14.
 
 ### Known limitations
 
-- Agents hosted by Connect are not offered Meta's `ask_user` tool in 0.9.15,
-  as in 0.9.14. Meta 0.9.15 offers the tool to the members of its own
-  gateways; a host that decides its members' tool surface itself, as
-  Connect's native host does, is given no stock `ask_user`.
+- Agents hosted by Connect's native host are not offered Meta's `ask_user`
+  tool in 0.9.15, as in 0.9.14: a host that decides its members' tool
+  surface itself is given no stock `ask_user`. A member of a host's own Meta
+  runtime is offered it, as every member of a Meta runtime is from 0.9.15;
+  that includes the members built with the stock Console's setup customizer
+  (the preparation member and a recipe member). To keep the tool from such a
+  member, list it in the profile's `tools.deny` (`deny = ["ask_user"]`).
 
 ## [0.9.14] - 2026-11-11
 

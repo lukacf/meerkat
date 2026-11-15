@@ -5394,16 +5394,17 @@ async fn prepare_turn_state_for_primitive(
 /// Decide what becomes of a failed run's staged contributors, from the typed
 /// apply failure alone.
 ///
-/// Two failure classes refuse the release. One is a run whose consumer never
-/// began executing: there the loop dropped an `apply` whose in-flight fate it
-/// cannot observe, so returning a contributor to its work lane could have the
-/// instruction carried out twice. The other is a request the executor refused
-/// with nothing applied (the machine's cause `RequestRefused`, decided by the
-/// one mapping the failed run's machine input uses): the answer is the
-/// request's own, so a replay would be refused the same way up to the retry
-/// cap, and the contributors end once instead. Every other failure -
-/// including every other teardown reason - is an answer the executor gave,
-/// with nothing in flight, so replay repeats nothing.
+/// Exactly one failure class refuses the release here: a run whose consumer
+/// never began executing. There the loop dropped an `apply` whose in-flight
+/// fate it cannot observe, so returning a contributor to its work lane could
+/// have the instruction carried out twice. Every other failure - including
+/// every other teardown reason - is an answer the executor gave, with nothing
+/// in flight, so replay repeats nothing.
+///
+/// A request the executor refused with nothing applied is not decided here:
+/// the loop hands it over as replayable like every answered failure, and the
+/// failed-run realization ends its contributors when the cause the machine
+/// recorded with `RunFailed` is `RequestRefused`.
 ///
 /// `CoreExecutorTeardownReason` is `#[non_exhaustive]`, so this stays a
 /// `matches!` on the one reason rather than a `match` that would silently
@@ -5420,11 +5421,6 @@ fn failed_run_contributor_disposition(
         }
     ) {
         crate::meerkat_machine::FailedRunContributorDisposition::Terminalized
-    } else if let CoreExecutorError::ApplyFailed { cause } = error
-        && crate::meerkat_machine::dsl::RuntimeApplyFailureCause::from(cause)
-            == crate::meerkat_machine::dsl::RuntimeApplyFailureCause::RequestRefused
-    {
-        crate::meerkat_machine::FailedRunContributorDisposition::Refused
     } else {
         crate::meerkat_machine::FailedRunContributorDisposition::Replayed
     }
@@ -7399,17 +7395,6 @@ async fn resolve_failed_batch_backlog(
             // empty backlog, and the machine's own stage-attempt budget bounds
             // the retry: the payload either succeeds or `ResolveStagedRollback`
             // terminalizes it as MaxAttemptsExhausted.
-            return FailedBatchBacklogOutcome::ContinueProcessing;
-        }
-        if !d.has_queued_input_among(input_ids) {
-            // The machine holds none of the failed batch as queued work: its
-            // failure realization ended every member (a refused request ends
-            // its contributors with the run, and a persistent driver has
-            // archived them with their receipt, so the machine no longer
-            // tracks them). Nothing of the batch is there to put behind the
-            // backlog, and what is queued runs next. This is read from the
-            // machine's own state, like the two decisions above, never from
-            // the failure's kind.
             return FailedBatchBacklogOutcome::ContinueProcessing;
         }
         d.defer_queued_inputs_behind_backlog(input_ids, cancelled_run_id)
@@ -15042,11 +15027,13 @@ mod tests {
 
     /// A failed apply whose typed reason is the reasoning effort refusal is
     /// a refused request, whatever kind the executor gave it: the machine's
-    /// cause for it is `RequestRefused` and its contributors end with it.
-    /// The same failure without that reason, and a failure that carries
-    /// another typed reason, keep the executor's kind and are replayed.
+    /// cause for it is `RequestRefused`. The same failure without that
+    /// reason, and a failure that carries another typed reason, keep the
+    /// executor's kind. The loop does not decide the refused run's end from
+    /// the error: it hands every answered failure over as replayable, and
+    /// the failed-run realization reads the cause the machine recorded.
     #[test]
-    fn a_refused_reasoning_effort_level_is_a_refused_request_and_ends_its_contributors() {
+    fn a_refused_reasoning_effort_level_is_a_refused_request_for_the_machine_only() {
         use crate::meerkat_machine::FailedRunContributorDisposition;
         use crate::meerkat_machine::dsl::RuntimeApplyFailureCause;
         use meerkat_core::lifecycle::core_executor::{
@@ -15078,7 +15065,7 @@ mod tests {
             );
             assert_eq!(
                 failed_run_contributor_disposition(&CoreExecutorError::apply_failed(refused)),
-                FailedRunContributorDisposition::Refused,
+                FailedRunContributorDisposition::Replayed,
                 "{}",
                 kind.as_str()
             );

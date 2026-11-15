@@ -17057,6 +17057,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 )
             }
             update {
+                // The stored apply failure cause is the cause of the run
+                // whose result is held open (`RunFailed` writes both). A
+                // result adopted while none is held is another run's: its
+                // cause is not stored, so the cause of the run before it is
+                // dropped and never answers for the recovered run.
+                if self.runtime_completion_result_run_id == None {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.runtime_completion_result_run_id = Some(run_id);
                 // Recovery only ever surfaces PENDING durable batches, so the
                 // rehydrated correlation is by construction an open obligation.
@@ -26749,6 +26758,32 @@ macro_rules! meerkat_catalog_machine_dsl {
                 cancelled_run_id != None
                 && self.turn_terminal_run_id == cancelled_run_id
                 && self.terminal_outcome == Some(TurnTerminalOutcome::Cancelled)
+            }
+            guard "input_not_live" {
+                !self.input_phases.contains_key(input_id)
+                && !self.input_lane.contains_key(input_id)
+                && !self.input_recovery_lanes.contains_key(input_id)
+                && !self.input_run_associations.contains_key(input_id)
+            }
+            update {}
+            to Idle
+        }
+
+        // A run whose request was refused with nothing applied ends its
+        // inputs with the run: they are not returned to a work lane, and a
+        // persistent driver archives them with their receipt before the
+        // defer sweep of the failed run. Absence is a no-op for exactly
+        // that sweep: one that is not a cancellation's, while the run
+        // terminal the machine holds is a refused request. An untracked
+        // input of any other failed run stays a rejection.
+        transition DeferInputBehindBacklogEndedWithRefusedRun {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input DeferInputBehindBacklog { input_id, cancelled_run_id }
+            guard "refused_run_sweep" {
+                cancelled_run_id == None
+                && self.terminal_outcome == Some(TurnTerminalOutcome::Failed)
+                && self.terminal_cause_kind == Some(TurnTerminalCauseKind::RuntimeApplyFailure)
+                && self.last_runtime_apply_failure_cause == Some(RuntimeApplyFailureCause::RequestRefused)
             }
             guard "input_not_live" {
                 !self.input_phases.contains_key(input_id)

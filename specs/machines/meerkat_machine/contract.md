@@ -13157,6 +13157,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_not_live`
 - To: `Stopped`
 
+### `DeferInputBehindBacklogEndedWithRefusedRunIdle`
+- From: `Idle`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `refused_run_sweep`
+  - `input_not_live`
+- To: `Idle`
+
+### `DeferInputBehindBacklogEndedWithRefusedRunAttached`
+- From: `Attached`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `refused_run_sweep`
+  - `input_not_live`
+- To: `Attached`
+
+### `DeferInputBehindBacklogEndedWithRefusedRunRunning`
+- From: `Running`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `refused_run_sweep`
+  - `input_not_live`
+- To: `Running`
+
+### `DeferInputBehindBacklogEndedWithRefusedRunRetired`
+- From: `Retired`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `refused_run_sweep`
+  - `input_not_live`
+- To: `Retired`
+
+### `DeferInputBehindBacklogEndedWithRefusedRunStopped`
+- From: `Stopped`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `refused_run_sweep`
+  - `input_not_live`
+- To: `Stopped`
+
 ### `StageForRunIdle`
 - From: `Idle`
 - On: `StageForRun`(input_id, run_id)

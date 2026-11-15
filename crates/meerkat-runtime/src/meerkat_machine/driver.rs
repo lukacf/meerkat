@@ -5641,15 +5641,6 @@ impl DriverEntry {
         }
     }
 
-    /// Whether the machine holds any of `input_ids` as queued work (in a
-    /// lane, or in the queued phase).
-    pub(crate) fn has_queued_input_among(&self, input_ids: &[InputId]) -> bool {
-        match self {
-            DriverEntry::Ephemeral(d) => d.has_queued_input_among(input_ids),
-            DriverEntry::Persistent(d) => d.has_queued_input_among(input_ids),
-        }
-    }
-
     pub(crate) fn defer_queued_inputs_behind_backlog(
         &mut self,
         input_ids: &[InputId],
@@ -8107,6 +8098,17 @@ fn machine_apply_turn_run_failed(
             "failed to apply runtime turn failure for run {run_id}: {err}"
         ))
     })
+}
+
+/// Whether the apply failure cause the machine holds is a refused request.
+/// Read right after `RunFailed`, it is the failed run's own cause.
+fn machine_recorded_refused_request(driver: &DriverEntry) -> bool {
+    let authority = driver.shared_dsl_authority();
+    let auth = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    auth.state().last_runtime_apply_failure_cause
+        == Some(crate::meerkat_machine::dsl::RuntimeApplyFailureCause::RequestRefused)
 }
 
 fn machine_apply_turn_run_cancelled(
@@ -12308,6 +12310,20 @@ async fn fail_runtime_loop_run_inner(
             );
             return Err(RuntimeLoopRunFailError::Rejected(error));
         }
+    };
+    // A refused request's end is the machine's fact, not the caller's.
+    // `RunFailed` has just recorded this run's apply failure cause: when it
+    // is `RequestRefused` (the request was refused with nothing applied),
+    // the contributors the caller handed over as replayable end with the
+    // run instead, because a replay would only be refused again. No caller
+    // chooses this from the error.
+    let contributor_disposition = if contributor_disposition
+        == FailedRunContributorDisposition::Replayed
+        && machine_recorded_refused_request(&driver)
+    {
+        FailedRunContributorDisposition::Refused
+    } else {
+        contributor_disposition
     };
     let replay_plan = machine_build_replay_plan(&driver, &contributing_input_ids, "RunFailed");
     if let Err(err) = machine_apply_run_return_projection(

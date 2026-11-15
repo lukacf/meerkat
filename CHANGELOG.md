@@ -450,6 +450,15 @@ them.
     a malformed input id are `-32602`; an unknown session is `-32001`; a
     session with no live runtime whose input has not ended is `-32003`. No
     error code is added and no existing vocabulary gains a token.
+  - Rust clients of the wire type: `meerkat_contracts::WireQueuedInputRecall`
+    is non-exhaustive, as the runtime's `QueuedInputRecall` is, because the
+    list of outcomes can grow: a match on it outside `meerkat-contracts`
+    needs a wildcard arm. The attribute keeps that source compiling when a
+    later release adds an outcome; it does not make it decode. The enum has
+    no catch-all variant, so a Rust client built on this release that
+    deserializes the wire type gets a decode error (serde's unknown variant)
+    for an outcome a later release adds, and `RecallInputResult`, which
+    carries it, fails to decode with it.
   - Browser runtime: the export `recall_session_input(handle, input_id)`
     resolves to the `WireQueuedInputRecall` JSON.
   - SDKs: Python `Session.recall_input(input_id=...)` or

@@ -2684,6 +2684,21 @@ Security, Upgrade and Changed.
   either direction: it rests on the version requirements Connect 0.9.14
   published.
 
+- Agent memory: a session's taint is kept in the gateway's memory only.
+  While the gateway process runs, taint is sticky as documented. After a
+  gateway restart it is rebuilt only from the untrusted tool calls and
+  results that are still in the session's transcript, at that agent's next
+  model request: taint whose source a compaction has summarized away, and
+  taint that came from a tainted peer's message, is not restored, and until
+  that next request the session reads as untainted. The gateway also keeps
+  the taint of at most 4,096 sessions per process; once more sessions than
+  that have been tainted since its start, the session tainted earliest reads
+  as untainted again. In each of these cases the session's later
+  LLM-authored memory writes land `active`, not `quarantined`. Where that
+  matters, set `agent_memory.llm_writes` to `"quarantined"`, which
+  quarantines every LLM-authored write pending review. Read from the source,
+  not run; the memory module is unchanged from 0.9.14.
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

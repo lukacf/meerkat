@@ -36,8 +36,9 @@ start, under the target
 subscriptions (active or paused) deliver into agents private to a person.
 The line gives their number (`live`) and how many of them do not have the
 id form the agent's own tool gives (`not_by_member_tool`); it names no
-agent and no subscription. If the count cannot be made at a start, one WARN
-line under the same target says so instead.
+agent and no subscription. An agent whose record cannot be read at that
+start is not counted. If the count cannot be made at a start, one WARN line
+under the same target says so instead.
 
 ## Announcements
 

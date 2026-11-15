@@ -2055,10 +2055,11 @@ async fn a_stop_during_a_wake_abandons_the_wake_without_fail_stop() {
 }
 
 /// The same, with the abandoned wake's step held past the resume call's
-/// patience window (2 s in a test build): the first resume answers the typed
-/// stalled error, the row joins the lift that call left running, and the
-/// second resume answers Ok. The row above takes that path only on a starved
-/// host; this one always does, and fails if the first answer is anything else.
+/// patience window (`EXPLICIT_RESUME_PROGRESS_TIMEOUT` of the test build): the
+/// first resume answers the typed stalled error, the row joins the lift that
+/// call left running, and the second resume answers Ok. The row above takes
+/// that path only on a starved host; this one always does, and fails if the
+/// first answer is anything else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_resume_stalled_behind_an_abandoned_wakes_step_joins_the_lift_it_left_running() {
     stop_during_a_wake("wake-r113-held", true).await;
@@ -2125,18 +2126,22 @@ async fn stop_during_a_wake(label: &str, hold_the_step_across_the_resume: bool) 
     }
 
     // As in the wake-after-resume row: the resume call answers Ok once its
-    // lift ended. On a starved runner the call's patience window (2 s in a
-    // test build) can run out while the lift waits at its topology stage; the
-    // call then answers the typed stalled error, the mob keeps the lift and
-    // ends it on its own, and the same call again joins it. The row then
-    // waits for the lift's own end (a lift that never ends fails it there)
-    // and asks again; any other error fails the row.
+    // lift ended. On a starved runner the call's patience window
+    // (`EXPLICIT_RESUME_PROGRESS_TIMEOUT` of the test build) can run out
+    // while the lift waits at its topology stage; the call then answers the
+    // typed stalled error, the mob keeps the lift and ends it on its own, and
+    // the same call again joins it. The row then waits for the lift's own end
+    // (a lift that never ends fails it there) and asks again; any other error
+    // fails the row.
     if hold_the_step_across_the_resume {
         // Held for longer than the resume call's patience window, then let
-        // go, so the lift the call leaves running can end.
+        // go, so the lift the call leaves running can end. The hold follows
+        // the window's value in this build.
+        let hold = crate::runtime::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT
+            + Duration::from_millis(600);
         let preparer = fixture.preparer.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(2600)).await;
+            tokio::time::sleep(hold).await;
             preparer.open_gate();
         });
     }
@@ -2350,13 +2355,14 @@ async fn a_wake_after_a_stop_and_resume_waits_for_the_preempted_wakes_step() {
         .expect("the second wake task joins")
         .expect("the second wake makes the member live");
     // The resume call answers Ok once its lift ended. A lift that made no
-    // observable progress for the call's patience window (2 s in a test
-    // build) is answered with the typed stalled error instead: the mob keeps
-    // the lift and ends it on its own, and the same call again joins it. This
-    // lift waits at its topology stage behind the wake steps the row holds,
-    // so on a starved runner the window can run out first. The row then
-    // waits for the lift's own end (a lift that never ends fails it there),
-    // and the same call again answers the lift's own result.
+    // observable progress for the call's patience window
+    // (`EXPLICIT_RESUME_PROGRESS_TIMEOUT` of the test build) is answered with
+    // the typed stalled error instead: the mob keeps the lift and ends it on
+    // its own, and the same call again joins it. This lift waits at its
+    // topology stage behind the wake steps the row holds, so on a starved
+    // runner the window can run out first. The row then waits for the lift's
+    // own end (a lift that never ends fails it there), and the same call
+    // again answers the lift's own result.
     let resumed = tokio::time::timeout(WAIT, resume)
         .await
         .expect("the resume answers")

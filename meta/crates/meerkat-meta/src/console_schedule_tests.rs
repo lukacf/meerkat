@@ -3551,6 +3551,60 @@ async fn an_archive_pauses_an_agents_console_schedules_and_their_row_says_so() -
     Ok(())
 }
 
+/// A removal of an agent ends the schedules that name it: each is deleted,
+/// and the change's answer says so. Another agent's schedules stay as they
+/// are.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_removal_ends_an_agents_schedules_and_its_answer_says_so() -> TestResult {
+    let agents = created_agents("console-schedules-removed-agent").await?;
+    let open = Caller::open_console();
+    let scouts = answered_id(
+        &call(
+            &agents.fixture,
+            open,
+            "meta/schedule/create",
+            create_params("scout"),
+        )
+        .await,
+    );
+    let ledgers = answered_id(
+        &call(
+            &agents.fixture,
+            open,
+            "meta/schedule/create",
+            create_params("ledger"),
+        )
+        .await,
+    );
+
+    let agent = agents.named("scout").await;
+    let ended = agents
+        .change(
+            "remove-1",
+            crate::identity_creation::IdentityChangeSpec::Remove(agent),
+        )
+        .await["agents"][0]["schedules"]
+        .clone();
+    assert_eq!(
+        (ended["effect"].clone(), ended["count"].clone()),
+        (json!("ended"), json!(1)),
+        "the removal ends the agent's schedule: {ended:#?}"
+    );
+    assert_eq!(ended["schedules"][0]["schedule_id"], json!(scouts));
+    assert_eq!(
+        agents.state(&scouts).await.0,
+        meerkat::SchedulePhase::Deleted,
+        "the removed agent's schedule is deleted"
+    );
+    assert_eq!(
+        agents.state(&ledgers).await,
+        (meerkat::SchedulePhase::Active, false),
+        "another agent's schedule stays as it is"
+    );
+    agents.stop().await;
+    Ok(())
+}
+
 /// The Console creates and changes no schedule for an archived agent: both
 /// are refused as a send to it is (`identity_archived`), and nothing is
 /// written. A resume by name stays what it was, and takes the schedule

@@ -97,8 +97,9 @@ use super::digest::Sha256Digest;
 use super::executor::PreparationSettle;
 use super::executor::{
     AgentSpecs, ChangeCommit, ChangeCommitted, ChangeRequester, CoreChangeExecutor, ExecutorError,
-    IdentityChangeExecutor, InstructionStep, committed_outcome, consent_of_plan,
-    move_into_prepared_profile, refusal_of_error, row_spec,
+    IdentityChangeExecutor, InstructionStep, OwnedMobs, committed_outcome, consent_of_plan,
+    move_into_prepared_profile, owned_mobs_unread, refusal_of_error, refused_while_owning_mobs,
+    row_spec, whole_change_grant_refusal,
 };
 use super::family::SettlePreparationCall;
 use super::family::{
@@ -324,6 +325,11 @@ pub(crate) struct IdentityGate {
     /// The launch's schedules, which follow an agent's archive, unarchive
     /// and removal: `None` on a launch that gives the family none.
     schedules: Option<Arc<dyn AgentSchedules>>,
+    /// The mobs an agent's session owns, as the launch's agent mob tools
+    /// record them: an archive and a removal of an agent that still owns
+    /// one are refused when they are asked. `None` on a launch whose agents
+    /// create no mobs.
+    owned_mobs: Option<Arc<dyn OwnedMobs>>,
 }
 
 /// Ends a drive of the owed seats, however its task ends.
@@ -665,6 +671,66 @@ impl IdentityGate {
             decision_rows: None,
             seat_drive: Arc::new(AtomicBool::new(false)),
             schedules: None,
+            owned_mobs: None,
+        }
+    }
+
+    /// This family, asking `owned` which mobs an agent's session owns: an
+    /// archive and a removal of an agent that still owns one are refused
+    /// when they are asked ([`Self::refuse_while_owning_mobs`]).
+    #[must_use]
+    pub(crate) fn with_owned_mobs(mut self, owned: Arc<dyn OwnedMobs>) -> Self {
+        self.owned_mobs = Some(owned);
+        self
+    }
+
+    /// An archive and a removal of an agent whose session still owns mobs
+    /// are refused `owns_mobs` when they are asked: both retire the agent's
+    /// member, and those mobs end with the session's archive. The request
+    /// was normalized first, so what its rules deny, and a spec that moved,
+    /// are refused as such; this refusal then comes before anything is
+    /// held, so nobody is asked to decide a change that could only be
+    /// refused, and a plan of the change answers it too. The seam refuses
+    /// the same change again when it is carried out.
+    ///
+    /// The grant is judged first, as the seam judges it: an agent whose
+    /// grant does not admit the change is not answered here. It goes on as
+    /// it did before this check existed, is answered by its grant where
+    /// the change is carried out, and is told nothing of the mobs.
+    ///
+    /// Where the launch cannot say which mobs it hosts, the change is
+    /// refused retryable, in one sentence that is the same for every
+    /// caller ([`owned_mobs_unread`]).
+    async fn refuse_while_owning_mobs(
+        &self,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+        operation_id: &OperationId,
+        request: &IdentityRequest,
+    ) -> Result<(), IdentityRefusal> {
+        let Some(owned) = &self.owned_mobs else {
+            return Ok(());
+        };
+        let (RequestAction::Archive { identity, .. } | RequestAction::Remove { identity, .. }) =
+            &request.action
+        else {
+            return Ok(());
+        };
+        let Some(member) = core_member_name(identity) else {
+            return Ok(());
+        };
+        // A grant that refuses, and one that cannot be asked now, both leave
+        // the answer to the seam, which asks it again before anything else.
+        if !matches!(
+            whole_change_grant_refusal(mob, operation_id, requester, request, &member).await,
+            Ok(None)
+        ) {
+            return Ok(());
+        }
+        match refused_while_owning_mobs(owned.as_ref(), mob, requester, &member).await {
+            Ok(None) => Ok(()),
+            Ok(Some(refusal)) => Err(refusal),
+            Err(error) => Err(owned_mobs_unread(&error)),
         }
     }
 
@@ -1661,6 +1727,8 @@ impl IdentityGate {
             self.same_as_held(&state, request)?;
             return Ok(state);
         }
+        self.refuse_while_owning_mobs(mob, requester, &call.operation_id, request)
+            .await?;
         let Some(consent) = consent_of_plan(&judged.normalized.plan) else {
             // A person decides: the change is held, and nothing is written
             // but its decision.
@@ -1944,6 +2012,8 @@ impl IdentityGate {
         if let Some(hooks) = &self.hooks {
             hooks.validate(request)?;
         }
+        self.refuse_while_owning_mobs(mob, requester, &call.operation_id, request)
+            .await?;
         let lines = |request: &IdentityRequest| match &self.hooks {
             Some(hooks) => hooks.consequences(request),
             None => Ok(Vec::new()),
@@ -2384,6 +2454,56 @@ fn schedules_shown_to(requester: &Requester, followed: SchedulesFollowed) -> Sch
     }
 }
 
+/// The mobs an agent's session owns, read where their owners are recorded:
+/// the owner record of each mob the launch's agent mob tools host, and the
+/// owner of each mob they hold before activation. Nothing is kept here.
+struct HostedOwnedMobs(Arc<meerkat_mob_mcp::MobMcpState>);
+
+#[async_trait]
+impl OwnedMobs for HostedOwnedMobs {
+    async fn ending_with_archive_of(
+        &self,
+        session: &meerkat_core::SessionId,
+    ) -> Result<Vec<meerkat_mob::MobId>, MobError> {
+        // The held mobs first: this read fails, and never answers an empty
+        // list, when the restore of the persisted mobs failed. A mob held
+        // before activation ends with its owner's archive as a hosted one
+        // does.
+        let mut owned: Vec<meerkat_mob::MobId> = self
+            .0
+            .held_child_mobs()
+            .await?
+            .into_iter()
+            .filter(|(_, owner)| owner == session)
+            .map(|(mob_id, _)| mob_id)
+            .collect();
+        for mob_id in self
+            .0
+            .find_mobs_for_bridge_session(&session.to_string())
+            .await
+        {
+            // A mob destroyed since it was listed is the session's no more.
+            let Ok(handle) = self.0.handle_for(&mob_id).await else {
+                continue;
+            };
+            // The mob's own record says whose it is, whether it ends with
+            // its owner's archive, and whether it is the mob the owner's
+            // delegated helpers run in, which the owner cannot destroy.
+            let ends_with_archive = handle
+                .owner_bridge_session_lifecycle_authority()
+                .is_some_and(|owner| {
+                    owner.bridge_session_id == *session
+                        && owner.destroy_on_owner_archive
+                        && !owner.implicit_delegation_mob
+                });
+            if ends_with_archive {
+                owned.push(mob_id);
+            }
+        }
+        Ok(owned)
+    }
+}
+
 /// The executor a launch's family commits through, and every holder of a
 /// decision's permit commits through too: Core's change path, with what the
 /// seam asks of the launch wired once, here.
@@ -2392,11 +2512,16 @@ pub(crate) fn change_executor(
     identities: &Arc<IdentityRuntime>,
     instruction_step: Option<Arc<dyn InstructionStep>>,
     schedules: Option<Arc<dyn AgentSchedules>>,
+    owned_mobs: Option<Arc<dyn OwnedMobs>>,
 ) -> Arc<dyn IdentityChangeExecutor> {
     let core = CoreChangeExecutor::new().with_agent_specs(Arc::new(GateSpecs {
         policy: policy.cloned(),
         identities: Arc::downgrade(identities),
     }));
+    let core = match owned_mobs {
+        Some(owned) => core.with_owned_mobs(owned),
+        None => core,
+    };
     // What follows an update of an agent's instructions and a removal: the
     // step the launch's host gave, else the identity runtime's own, which
     // records the changed text for the agent and revokes a removed agent's
@@ -2531,15 +2656,26 @@ impl crate::UnifiedRuntime {
         options: IdentityFamilyOptions,
     ) {
         let changes_enabled = policy.is_some();
+        // The mobs an agent's session owns are recorded by the launch's
+        // agent mob tools: a launch without them has no agent that creates
+        // a mob, and refuses no archive or removal for one.
+        let owned_mobs: Option<Arc<dyn OwnedMobs>> = self
+            .mob_runtime()
+            .agent_mob_mcp_state()
+            .map(|state| Arc::new(HostedOwnedMobs(state)) as Arc<dyn OwnedMobs>);
         let executor = change_executor(
             policy.as_ref(),
             identities,
             options.instruction_step,
             options.schedules.clone(),
+            owned_mobs.clone(),
         );
         let mut gate = IdentityGate::new(policy, identities, Arc::clone(&executor))
             .with_private_members(Arc::new(self.mob_runtime().private_owners().clone()))
             .on_governed_runtime(self.mob_runtime().native_work_governed());
+        if let Some(owned) = owned_mobs {
+            gate = gate.with_owned_mobs(owned);
+        }
         if let Some(hooks) = options.hooks.clone() {
             gate = gate.with_host_hooks(hooks);
         }

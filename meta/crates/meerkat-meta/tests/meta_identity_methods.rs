@@ -8130,3 +8130,1706 @@ async fn a_caller_is_shown_no_agent_whose_record_its_view_refuses() {
         .expect("a get of an agent the view shows");
     let _ = runtime.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// An archive of an agent whose session still owns mobs. A mob an agent
+// creates with its own `mob_create` is owned by the agent's session and ends
+// with that session's archive: at the host's next start it is removed with
+// its store, and an unarchive does not bring it back. So the family refuses
+// the archive of an agent while its session owns such a mob, `owns_mobs`,
+// and writes nothing; the agent destroys its mobs first.
+// ---------------------------------------------------------------------------
+
+/// The host turn marker of the rows whose agent uses its own mob tools: a
+/// request whose transcript holds it is the asking agent's.
+const OWN_TOOLS_TURN: &str = "USE-YOUR-OWN-MOB-TOOLS";
+/// The member an agent of these rows seats in the mob it creates.
+const OWNED_WORKER: &str = "child-worker";
+/// The agent of these rows that has the mob tools.
+const MAKER: &str = "maker-a";
+
+/// One queued call of [`OwnToolsModel`]: its id, the tool and its arguments.
+type OwnToolsCall = (String, &'static str, Value);
+
+/// A scripted model: on a request whose transcript holds [`OWN_TOOLS_TURN`]
+/// it makes, once each and in order, the queued calls whose id the
+/// transcript does not hold yet, and it records every tool result a
+/// transcript holds.
+#[derive(Clone, Default)]
+struct OwnToolsModel {
+    script: Arc<Mutex<Vec<OwnToolsCall>>>,
+    tool_results: Arc<Mutex<BTreeMap<String, (bool, String)>>>,
+}
+
+impl OwnToolsModel {
+    fn queue(&self, id: &str, tool: &'static str, args: Value) {
+        self.script
+            .lock()
+            .unwrap()
+            .push((id.to_string(), tool, args));
+    }
+
+    /// The recorded result of the call `id`: whether it was an error, and
+    /// its text.
+    fn result(&self, id: &str) -> (bool, String) {
+        self.tool_results
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| panic!("the call {id} has a recorded result"))
+    }
+}
+
+impl meerkat_client::LlmClient for OwnToolsModel {
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+        let transcript = serde_json::to_string(&request.messages).unwrap_or_default();
+        {
+            let mut recorded = self.tool_results.lock().unwrap();
+            for message in &request.messages {
+                if let Message::ToolResults { results, .. } = message {
+                    for result in results {
+                        recorded.insert(
+                            result.tool_use_id.clone(),
+                            (result.is_error, result.text_content()),
+                        );
+                    }
+                }
+            }
+        }
+        let call = if transcript.contains(OWN_TOOLS_TURN) {
+            self.script
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _, _)| !transcript.contains(id.as_str()))
+                .cloned()
+        } else {
+            None
+        };
+        let [usage, done] = llm_usage::usage_then_done(
+            request,
+            meerkat::Provider::OpenAI,
+            if call.is_some() {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            },
+        );
+        Box::pin(async_stream::stream! {
+            match call {
+                Some((id, name, args)) => {
+                    yield Ok(LlmEvent::ToolCallComplete {
+                        id,
+                        name: name.to_string(),
+                        args,
+                        meta: None,
+                    });
+                }
+                None => {
+                    yield Ok(LlmEvent::TextDelta { delta: "ok".to_string(), meta: None });
+                }
+            }
+            yield Ok(usage);
+            yield Ok(done);
+        })
+    }
+
+    fn provider(&self) -> meerkat::Provider {
+        meerkat::Provider::OpenAI
+    }
+
+    fn health_check<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), LlmError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// The policy of these rows: the host, a person and an agent of the profile
+/// `planner` are allowed every change of an agent of the profiles `worker`
+/// and `planner`.
+fn owning_policy() -> Arc<IdentityCreationPolicy> {
+    let rule = |requester: Value| {
+        json!({"change": ["create", "descriptive", "archive", "remove"],
+               "requester": requester,
+               "target": {"profile": ["worker", "planner"]},
+               "outcome": {"kind": "allow"}})
+    };
+    Arc::new(
+        IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "peers": {"default": "allow"},
+            "approval": {"rules": [
+                rule(json!({"kind": "host"})),
+                rule(json!({"kind": "human"})),
+                rule(json!({"kind": "agent", "profile": ["planner"]})),
+            ]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled"),
+    )
+}
+
+/// The gateway's runtime composition on `state`, as the mob `mob_id`, whose
+/// members run on `model`, with [`owning_policy`] attached.
+async fn launch_owning(state: &Path, mob_id: &str, model: OwnToolsModel) -> UnifiedRuntime {
+    let runtime = Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(in_process_definition(mob_id))
+            .persistent_state(state)
+            .continuity_from_state_dir(state)
+            .await
+            .expect("open the state-dir identity substrate")
+            .roster_provider(Arc::new(InProcessRoster))
+            .identity_runtime_instance_id("meta-identity-methods")
+            .comms(true)
+            .default_llm_client(Arc::new(model))
+            .build(),
+    )
+    .await
+    .expect("build the gateway-shaped UnifiedRuntime");
+    assert!(
+        runtime.attach_identity_policy(owning_policy(), IdentityFamilyOptions::new()),
+        "the runtime serves identities and takes the policy"
+    );
+    runtime
+}
+
+/// One change of `runtime`'s family, as `requester`'s request `request_id`.
+async fn family_change(
+    runtime: &UnifiedRuntime,
+    requester: &ChangeRequester,
+    request_id: &str,
+    change: IdentityChangeSpec,
+) -> IdentityOutcome {
+    let operation_id =
+        OperationId::for_request(&requester.recorded(), request_id).expect("a request id");
+    runtime
+        .identity_family()
+        .expect("the family is attached")
+        .change(
+            &runtime.mob_handle(),
+            requester,
+            IdentityChangeCall::new(operation_id, change),
+        )
+        .await
+}
+
+/// The agent `name` in full, as the host reads it.
+async fn family_agent(runtime: &UnifiedRuntime, name: &str) -> AgentRecord {
+    match runtime
+        .identity_family()
+        .expect("the family is attached")
+        .read(
+            &runtime.mob_handle(),
+            &ChangeRequester::host("ops"),
+            IdentityRead::Get(GetAgent::new(name)),
+        )
+        .await
+    {
+        Ok(IdentityReadAnswer::Get(record)) => *record,
+        other => panic!("a get of {name} answers one agent: {other:?}"),
+    }
+}
+
+/// The host creates the agent `name` of the profile `profile`.
+async fn host_creates(runtime: &UnifiedRuntime, name: &str, profile: &str) {
+    let made = family_change(
+        runtime,
+        &ChangeRequester::host("ops"),
+        &format!("create-{name}"),
+        create_of(json!([{"name": name, "profile": profile}])),
+    )
+    .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+}
+
+/// The archive of the agent `name`, against the spec it holds now.
+async fn archive_of(runtime: &UnifiedRuntime, name: &str) -> IdentityChangeSpec {
+    IdentityChangeSpec::Archive(agent_ref(
+        name,
+        &family_agent(runtime, name).await.agent.spec_digest,
+    ))
+}
+
+/// The refusal of `outcome`, as every surface writes it.
+fn refused_data(outcome: &IdentityOutcome) -> Value {
+    outcome
+        .refusal()
+        .unwrap_or_else(|| panic!("the change is refused: {outcome:?}"))
+        .to_refused()
+}
+
+/// One turn of `who` that makes `calls` through its own tools, in order, and
+/// answers each call's recorded result: whether it was an error, and its
+/// text. `stage` makes the call ids unique.
+async fn own_tools_turn(
+    runtime: &UnifiedRuntime,
+    model: &OwnToolsModel,
+    who: &str,
+    stage: &str,
+    calls: Vec<(&'static str, Value)>,
+) -> Vec<(bool, String)> {
+    let ids: Vec<String> = calls
+        .iter()
+        .enumerate()
+        .map(|(n, (tool, _))| format!("own-{stage}-{n}-{tool}"))
+        .collect();
+    for (id, (tool, args)) in ids.iter().zip(calls) {
+        model.queue(id, tool, args);
+    }
+    runtime
+        .identity_runtime()
+        .expect("identity runtime")
+        .send_awaiting_commit(
+            &AgentIdentity::parse(who).unwrap(),
+            &meerkat_core::ContentInput::Text(format!("{OWN_TOOLS_TURN} {stage}")),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{who}'s turn at {stage} commits: {error}"));
+    ids.iter().map(|id| model.result(id)).collect()
+}
+
+/// `who` creates the mob `child` with its own `mob_create` and seats
+/// [`OWNED_WORKER`] in it with its own `mob_spawn_member`.
+async fn creates_a_mob_with_its_own_tool(
+    runtime: &UnifiedRuntime,
+    model: &OwnToolsModel,
+    who: &str,
+    child: &str,
+) {
+    let answers = own_tools_turn(
+        runtime,
+        model,
+        who,
+        &format!("create-{child}"),
+        vec![
+            (
+                "mob_create",
+                json!({ "definition": {
+                    "id": child,
+                    "profiles": { "worker": {
+                        "model": "gpt-5.5",
+                        "runtime_mode": "turn_driven",
+                        "tools": { "comms": true }
+                    } }
+                } }),
+            ),
+            (
+                "mob_spawn_member",
+                json!({ "mob_id": child, "profile": "worker", "member_id": OWNED_WORKER }),
+            ),
+        ],
+    )
+    .await;
+    for (is_error, text) in &answers {
+        assert!(
+            !is_error,
+            "{who} creates {child} and seats its worker: {text}"
+        );
+    }
+}
+
+/// `who` destroys `child` with its own `mob_destroy`, and the host no longer
+/// manages the mob.
+async fn destroys_its_mob_with_its_own_tool(
+    runtime: &UnifiedRuntime,
+    model: &OwnToolsModel,
+    who: &str,
+    child: &str,
+) {
+    let answers = own_tools_turn(
+        runtime,
+        model,
+        who,
+        &format!("destroy-{child}"),
+        vec![("mob_destroy", json!({ "mob_id": child }))],
+    )
+    .await;
+    assert!(
+        !answers[0].0,
+        "{who} destroys the mob it created: {:?}",
+        answers[0]
+    );
+    assert_eq!(
+        hosted_members(runtime, child).await,
+        None,
+        "the destroyed mob is no longer hosted"
+    );
+}
+
+/// The members of the mob `child` when the host manages it, `None` when it
+/// does not.
+async fn hosted_members(runtime: &UnifiedRuntime, child: &str) -> Option<Vec<String>> {
+    let mobs = runtime
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the agent mob tools' state");
+    match mobs.handle_for(&meerkat_mob::MobId::from(child)).await {
+        Ok(handle) => Some(
+            handle
+                .list_members()
+                .await
+                .iter()
+                .map(|member| member.agent_identity.to_string())
+                .collect(),
+        ),
+        Err(_) => None,
+    }
+}
+
+/// The session `who` runs on and the generation of its member.
+async fn seat_of(
+    runtime: &UnifiedRuntime,
+    who: &str,
+) -> (meerkat_core::types::SessionId, meerkat_mob::Generation) {
+    let status = runtime
+        .identity_runtime()
+        .expect("identity runtime")
+        .status(&AgentIdentity::parse(who).unwrap())
+        .await
+        .expect("the identity's status");
+    (
+        status.session_id.expect("the identity runs on a session"),
+        status
+            .generation
+            .expect("the identity's member has a generation"),
+    )
+}
+
+/// What the host's start reads of the session `session`: the observation
+/// that decides whether the mobs the session owns are resumed or removed.
+async fn session_observed(
+    runtime: &UnifiedRuntime,
+    session: &meerkat_core::types::SessionId,
+) -> String {
+    let observed = runtime
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the agent mob tools' state")
+        .session_service()
+        .observe_live_durable_source(session)
+        .await
+        .expect("the session is observed");
+    match observed {
+        meerkat_mob::LiveDurableSourceObservation::Committed { .. } => "committed".to_owned(),
+        meerkat_mob::LiveDurableSourceObservation::Archived => "archived".to_owned(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// The host creates the mob `child` for the session `owner`, recorded as an
+/// agent's own `mob_create` records it: owned by the session, and ended
+/// with the session's archive.
+async fn session_owns_a_mob(
+    runtime: &UnifiedRuntime,
+    owner: &meerkat_core::types::SessionId,
+    child: &str,
+) {
+    let mobs = runtime
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the agent mob tools' state");
+    mob_for_owner(&mobs, owner, child).await;
+}
+
+/// [`session_owns_a_mob`], on the agent mob tools' state `mobs`.
+async fn mob_for_owner(
+    mobs: &meerkat_mob_mcp::MobMcpState,
+    owner: &meerkat_core::types::SessionId,
+    child: &str,
+) {
+    let definition = MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "{child}"
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
+"#
+    ))
+    .expect("parse the child definition");
+    mobs.mob_create_definition_with_owner_bridge_session(definition, owner.clone(), true, false)
+        .await
+        .unwrap_or_else(|error| panic!("the mob {child} is created for its owner: {error}"));
+}
+
+/// The state of `requester`'s operation `request_id`, as the host reads it.
+async fn operation_state(
+    runtime: &UnifiedRuntime,
+    requester: &ChangeRequester,
+    request_id: &str,
+) -> OperationState {
+    match runtime
+        .identity_family()
+        .expect("the family is attached")
+        .read(
+            &runtime.mob_handle(),
+            &ChangeRequester::host("ops"),
+            IdentityRead::Operation(
+                OperationId::for_request(&requester.recorded(), request_id).expect("a request id"),
+            ),
+        )
+        .await
+    {
+        Ok(IdentityReadAnswer::Operation(state)) => state,
+        other => panic!("an operation read answers its state: {other:?}"),
+    }
+}
+
+/// An agent created at run time creates a mob with its own tool and seats a
+/// member in it. The host's archive of the agent is refused `owns_mobs`,
+/// about `name`, with the mob named, and nothing is written: the agent's
+/// record, its seat, its session and the mob with its member read as before,
+/// no operation is recorded, and the agent's next turn still lists the mob.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archive_of_an_agent_that_still_owns_a_mob_is_refused_and_writes_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let child = format!("{mob_id}-child");
+    let model = OwnToolsModel::default();
+    let runtime = launch_owning(temp.path(), &mob_id, model.clone()).await;
+    let host = ChangeRequester::host("ops");
+    host_creates(&runtime, MAKER, "planner").await;
+    creates_a_mob_with_its_own_tool(&runtime, &model, MAKER, &child).await;
+
+    let record = family_agent(&runtime, MAKER).await;
+    let seat = seat_of(&runtime, MAKER).await;
+    assert_eq!(session_observed(&runtime, &seat.0).await, "committed");
+    assert_eq!(
+        hosted_members(&runtime, &child).await,
+        Some(vec![OWNED_WORKER.to_owned()])
+    );
+
+    let archive = archive_of(&runtime, MAKER).await;
+    let refused = family_change(&runtime, &host, "archive-1", archive).await;
+    let data = refused_data(&refused);
+    assert_eq!(data["kind"], json!("owns_mobs"), "{data:#}");
+    assert_eq!(data["field"], json!("name"), "{data:#}");
+    assert_eq!(data["count"], json!(1), "{data:#}");
+    assert_eq!(data["mobs"], json!([child]), "{data:#}");
+    assert_eq!(data["retryable"], json!(false), "{data:#}");
+    let detail = data["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("destroy") && detail.contains("Nothing was changed"),
+        "the refusal says what to do: {data:#}"
+    );
+
+    // Nothing was written: each is read as it was before the archive.
+    assert_eq!(
+        family_agent(&runtime, MAKER).await,
+        record,
+        "the agent's record is as it was"
+    );
+    assert!(!record.agent.archived, "the agent is not archived");
+    assert_eq!(
+        seat_of(&runtime, MAKER).await,
+        seat,
+        "the agent's seat is as it was"
+    );
+    assert_eq!(
+        session_observed(&runtime, &seat.0).await,
+        "committed",
+        "the agent's session is not archived"
+    );
+    assert_eq!(
+        hosted_members(&runtime, &child).await,
+        Some(vec![OWNED_WORKER.to_owned()]),
+        "the mob is hosted with its member"
+    );
+    assert!(
+        matches!(
+            operation_state(&runtime, &host, "archive-1").await,
+            OperationState::Unknown
+        ),
+        "no operation is recorded for the refused archive"
+    );
+    let answers = own_tools_turn(
+        &runtime,
+        &model,
+        MAKER,
+        "after-refusal",
+        vec![("mob_list", json!({}))],
+    )
+    .await;
+    assert!(
+        !answers[0].0 && answers[0].1.contains(&child),
+        "the agent runs on, and lists the mob it created: {answers:?}"
+    );
+    assert_eq!(
+        seat_of(&runtime, MAKER).await.0,
+        seat.0,
+        "on its conversation"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// An agent that owns no mob is archived as before: one that has the mob
+/// tools and never created a mob, and one without them. Each archive
+/// answers `done`, and the agent reads archived.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_that_owns_no_mob_is_archived_as_before() {
+    let temp = tempfile::tempdir().unwrap();
+    let model = OwnToolsModel::default();
+    let runtime = launch_owning(temp.path(), &fresh_mob_id(), model.clone()).await;
+    let host = ChangeRequester::host("ops");
+    host_creates(&runtime, MAKER, "planner").await;
+    host_creates(&runtime, "scout", "worker").await;
+    // The agent with the mob tools has run, and lists no mob.
+    let answers = own_tools_turn(
+        &runtime,
+        &model,
+        MAKER,
+        "lists",
+        vec![("mob_list", json!({}))],
+    )
+    .await;
+    assert!(!answers[0].0, "{answers:?}");
+
+    for name in [MAKER, "scout"] {
+        let archive = archive_of(&runtime, name).await;
+        let archived = family_change(&runtime, &host, &format!("archive-{name}"), archive).await;
+        assert_eq!(archived.token(), "done", "{name}: {archived:?}");
+        assert!(
+            family_agent(&runtime, name).await.agent.archived,
+            "{name} reads archived"
+        );
+    }
+    let _ = runtime.shutdown().await;
+}
+
+/// The agent destroys the mob it created with its own tool, and the archive
+/// that was refused commits when the same request is asked again. After a
+/// restart of the gateway nothing was removed at its start and nothing is
+/// held; an unarchive seats the agent again on its conversation at a later
+/// generation, and its own tools list no mob.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_that_destroyed_its_mobs_is_archived_and_is_back_after_a_restart_and_an_unarchive()
+{
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let child = format!("{mob_id}-child");
+    let model = OwnToolsModel::default();
+    let host = ChangeRequester::host("ops");
+
+    let (before, digest) = {
+        let runtime = launch_owning(temp.path(), &mob_id, model.clone()).await;
+        host_creates(&runtime, MAKER, "planner").await;
+        creates_a_mob_with_its_own_tool(&runtime, &model, MAKER, &child).await;
+        let before = seat_of(&runtime, MAKER).await;
+
+        let archive = archive_of(&runtime, MAKER).await;
+        let refused = family_change(&runtime, &host, "archive-1", archive.clone()).await;
+        assert_eq!(
+            refused_data(&refused)["kind"],
+            json!("owns_mobs"),
+            "while the agent owns the mob its archive is refused: {refused:?}"
+        );
+
+        destroys_its_mob_with_its_own_tool(&runtime, &model, MAKER, &child).await;
+        let archived = family_change(&runtime, &host, "archive-1", archive).await;
+        assert_eq!(
+            archived.token(),
+            "done",
+            "the same request commits once the agent owns no mob: {archived:?}"
+        );
+        let record = family_agent(&runtime, MAKER).await;
+        assert!(record.agent.archived, "the agent reads archived");
+        let _ = runtime.shutdown().await;
+        (before, record.agent.spec_digest)
+    };
+
+    let runtime = launch_owning(temp.path(), &mob_id, model.clone()).await;
+    let mobs = runtime
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the agent mob tools' state");
+    assert_eq!(
+        mobs.held_child_mobs().await.expect("the held mobs read"),
+        Vec::new(),
+        "the start holds no mob"
+    );
+    assert!(
+        mobs.quarantined_mobs()
+            .await
+            .expect("the quarantined mobs read")
+            .is_empty(),
+        "the start quarantines no mob"
+    );
+    assert_eq!(
+        hosted_members(&runtime, &child).await,
+        None,
+        "the mob the agent destroyed stays destroyed"
+    );
+    let unarchived = family_change(
+        &runtime,
+        &host,
+        "unarchive-1",
+        IdentityChangeSpec::Unarchive(agent_ref(MAKER, &digest)),
+    )
+    .await;
+    assert_eq!(unarchived.token(), "done", "{unarchived:?}");
+    assert!(
+        !family_agent(&runtime, MAKER).await.agent.archived,
+        "the agent is back"
+    );
+    let answers = own_tools_turn(
+        &runtime,
+        &model,
+        MAKER,
+        "after-unarchive",
+        vec![("mob_list", json!({}))],
+    )
+    .await;
+    assert!(
+        !answers[0].0 && !answers[0].1.contains(&child),
+        "the unarchived agent runs, and lists no mob: {answers:?}"
+    );
+    let after = seat_of(&runtime, MAKER).await;
+    assert_eq!(after.0, before.0, "on its conversation");
+    assert!(after.1 > before.1, "at a later generation: {after:?}");
+    let _ = runtime.shutdown().await;
+}
+
+/// The other order an archive could harm a mob in is closed with the first:
+/// an archive, an unarchive and a turn of the agent before the gateway's
+/// next start would leave the mob hosted with nobody managing it. Through
+/// the family that order stops at its first step. The archive is refused,
+/// so there is nothing to unarchive (`not_archived`), the agent's turn
+/// still lists its mob, and after a restart of the gateway the mob is
+/// hosted with its member and the agent, on the same seat, still manages
+/// it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_archive_leaves_the_agent_managing_its_mob_after_a_turn_and_a_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let child = format!("{mob_id}-child");
+    let model = OwnToolsModel::default();
+    let host = ChangeRequester::host("ops");
+    let manages = |answers: &[(bool, String)], when: &str| {
+        let [list, members] = answers else {
+            panic!("two answers: {answers:?}");
+        };
+        assert!(
+            !list.0 && list.1.contains(&child),
+            "{when}: the agent lists the mob it created: {list:?}"
+        );
+        assert!(
+            !members.0 && members.1.contains(OWNED_WORKER),
+            "{when}: the agent reads the members of the mob it created: {members:?}"
+        );
+    };
+    let reads = || {
+        vec![
+            ("mob_list", json!({})),
+            ("mob_list_members", json!({ "mob_id": child })),
+        ]
+    };
+
+    let before = {
+        let runtime = launch_owning(temp.path(), &mob_id, model.clone()).await;
+        host_creates(&runtime, MAKER, "planner").await;
+        creates_a_mob_with_its_own_tool(&runtime, &model, MAKER, &child).await;
+        let before = seat_of(&runtime, MAKER).await;
+        let digest = family_agent(&runtime, MAKER).await.agent.spec_digest;
+
+        let archive = IdentityChangeSpec::Archive(agent_ref(MAKER, &digest));
+        let refused = family_change(&runtime, &host, "archive-1", archive).await;
+        assert_eq!(
+            refused_data(&refused)["kind"],
+            json!("owns_mobs"),
+            "{refused:?}"
+        );
+        let unarchive = IdentityChangeSpec::Unarchive(agent_ref(MAKER, &digest));
+        let nothing = family_change(&runtime, &host, "unarchive-1", unarchive).await;
+        assert_eq!(
+            refused_data(&nothing)["kind"],
+            json!("not_archived"),
+            "the agent was never archived: {nothing:?}"
+        );
+        let answers = own_tools_turn(&runtime, &model, MAKER, "before-restart", reads()).await;
+        manages(&answers, "before the restart");
+        let _ = runtime.shutdown().await;
+        before
+    };
+
+    let runtime = launch_owning(temp.path(), &mob_id, model.clone()).await;
+    assert_eq!(
+        hosted_members(&runtime, &child).await,
+        Some(vec![OWNED_WORKER.to_owned()]),
+        "after the restart the mob is hosted with its member"
+    );
+    let answers = own_tools_turn(&runtime, &model, MAKER, "after-restart", reads()).await;
+    manages(&answers, "after the restart");
+    assert_eq!(
+        seat_of(&runtime, MAKER).await,
+        before,
+        "the agent runs on the seat it had"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// The wire form of the refusal, on the Console's `meta/identity/archive`
+/// and `meta/identity/plan` (the handlers the stdio gateway serves too):
+/// JSON-RPC error `-32058` whose data is the refusal. An administrator is
+/// given the mobs; a signed-in person who may change the agent and does not
+/// administer the runtime is told how many they are, and no more.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_archive_call_answers_owns_mobs_and_names_the_mobs_only_to_an_administrator() {
+    const ROOT: &str = "root@example.org";
+    const ANN: &str = "ann@example.org";
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, app) = console_under(
+        temp.path(),
+        r#"
+enabled = true
+admins = ["root@example.org"]
+
+[[rules]]
+id = "works"
+actions = ["agent.identity.create", "agent.view", "agent.identity.manage", "agent.identity.remove"]
+"#,
+    )
+    .await;
+    assert!(runtime.attach_identity_policy(owning_policy(), IdentityFamilyOptions::new()));
+    let made = console_rpc(
+        &app,
+        Some(ROOT),
+        "meta/identity/create",
+        json!({"request_id": "root-1", "agents": [{"name": "scout", "profile": "worker"}]}),
+    )
+    .await;
+    assert_eq!(console_ok(&made)["outcome"], json!("done"), "{made:#}");
+    let child = format!("{}-child", runtime.mob_handle().mob_id());
+    let session = seat_of(&runtime, "scout").await.0;
+    session_owns_a_mob(&runtime, &session, &child).await;
+    let read = console_rpc(
+        &app,
+        Some(ROOT),
+        "meta/identity/get",
+        json!({"name": "scout"}),
+    )
+    .await;
+    let digest = console_ok(&read)["spec_digest"].clone();
+    let archive = |subject: &'static str, request: &'static str| {
+        let (app, digest) = (app.clone(), digest.clone());
+        async move {
+            console_rpc(
+                &app,
+                Some(subject),
+                "meta/identity/archive",
+                json!({"request_id": request, "name": "scout", "expected_spec_digest": digest}),
+            )
+            .await
+        }
+    };
+
+    // An administrator: the code, and the refusal with the mobs.
+    let answer = archive(ROOT, "root-2").await;
+    let error = &answer["error"];
+    assert_eq!(error["code"], json!(REFUSED), "{answer:#}");
+    assert_eq!(error["message"], error["data"]["detail"], "{answer:#}");
+    let mut data = error["data"].clone();
+    let detail = data
+        .as_object_mut()
+        .and_then(|data| data.remove("detail"))
+        .unwrap_or_default();
+    assert_eq!(
+        data,
+        json!({"kind": "owns_mobs", "count": 1, "mobs": [child], "field": "name",
+               "retryable": false}),
+        "{answer:#}"
+    );
+    assert!(
+        detail
+            .as_str()
+            .is_some_and(|detail| !detail.contains(&child)),
+        "the sentence names no mob: {detail}"
+    );
+
+    // A person who may change the agent: how many, and no list.
+    let answer = archive(ANN, "ann-1").await;
+    let mut data = answer["error"]["data"].clone();
+    if let Some(data) = data.as_object_mut() {
+        data.remove("detail");
+    }
+    assert_eq!(answer["error"]["code"], json!(REFUSED), "{answer:#}");
+    assert_eq!(
+        data,
+        json!({"kind": "owns_mobs", "count": 1, "field": "name", "retryable": false}),
+        "{answer:#}"
+    );
+
+    // A plan of the archive answers the same refusal.
+    let planned = console_rpc(
+        &app,
+        Some(ROOT),
+        "meta/identity/plan",
+        json!({"change": "archive", "request_id": "root-plan", "name": "scout",
+               "expected_spec_digest": digest.clone()}),
+    )
+    .await;
+    assert_eq!(planned["error"]["code"], json!(REFUSED), "{planned:#}");
+    assert_eq!(
+        planned["error"]["data"]["kind"],
+        json!("owns_mobs"),
+        "{planned:#}"
+    );
+    assert_eq!(
+        planned["error"]["data"]["mobs"],
+        json!([child]),
+        "{planned:#}"
+    );
+    assert!(
+        !family_agent(&runtime, "scout").await.agent.archived,
+        "nothing was archived"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// An archive a person would decide is refused when it is asked, while the
+/// agent owns a mob: no decision is held, so nobody is asked to approve an
+/// archive that could only be refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archive_that_needs_approval_is_not_held_while_the_agent_owns_mobs() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    assert!(runtime.attach_identity_policy(held_policy(), IdentityFamilyOptions::new()));
+    let host = ChangeRequester::host("ops");
+    let made = family_change(
+        &runtime,
+        &host,
+        "create-1",
+        create_of(json!([{"name": "worker-a", "profile": "worker"}])),
+    )
+    .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    let child = format!("{}-child", runtime.mob_handle().mob_id());
+    let session = seat_of(&runtime, "worker-a").await.0;
+    session_owns_a_mob(&runtime, &session, &child).await;
+
+    let archive = archive_of(&runtime, "worker-a").await;
+    let refused = family_change(&runtime, &host, "archive-1", archive.clone()).await;
+    assert_eq!(
+        refused_data(&refused)["kind"],
+        json!("owns_mobs"),
+        "{refused:?}"
+    );
+    assert!(
+        matches!(
+            operation_state(&runtime, &host, "archive-1").await,
+            OperationState::Unknown
+        ),
+        "no decision is held for the refused archive"
+    );
+
+    // The twin: once the mob is destroyed, the same archive is held for
+    // its decision.
+    runtime
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the agent mob tools' state")
+        .mob_destroy(&meerkat_mob::MobId::from(child.as_str()))
+        .await
+        .expect("the host destroys the mob");
+    let held = family_change(&runtime, &host, "archive-1", archive).await;
+    assert_eq!(held.token(), "pending_decision", "{held:?}");
+    let _ = runtime.shutdown().await;
+}
+
+/// The guard counts the mobs an agent can destroy. The mob the agent's
+/// `delegate` helpers run in is the session's own too, and the agent has no
+/// tool that destroys it: it holds no work the agent keeps, and it is made
+/// again at the agent's next delegation. An agent whose session owns only
+/// that mob is archived as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_whose_session_owns_only_its_delegation_mob_is_archived() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), false, None).await;
+    let host = ChangeRequester::host("ops");
+    let made = rig
+        .change(
+            &host,
+            "r-1",
+            create_of(json!([{"name": "scout", "profile": "worker"}])),
+        )
+        .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    let session = seat_of(&rig.runtime, "scout").await.0;
+    let mobs = rig
+        .runtime
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the agent mob tools' state");
+    let delegation = mobs
+        .get_or_create_implicit_mob_for_bridge_session(&session.to_string(), "gpt-5.5")
+        .await
+        .expect("the session's delegation mob");
+    assert!(
+        mobs.is_implicit_mob(&delegation).await,
+        "the mob is the session's delegation mob"
+    );
+
+    let digest = rig.digest("scout").await;
+    let archived = rig
+        .change(
+            &host,
+            "r-2",
+            IdentityChangeSpec::Archive(agent_ref("scout", &digest)),
+        )
+        .await;
+    assert_eq!(archived.token(), "done", "{archived:?}");
+    rig.shutdown().await;
+}
+
+/// The stated limit: the guard is the family's. A host that archives an
+/// agent through Core's own call is not refused, and the mob the agent
+/// created ends as an archived session's mobs end: it stays hosted in the
+/// same process, and at the gateway's next start it is removed with its
+/// store. An unarchive seats the agent again and does not bring the mob
+/// back.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archive_through_core_is_not_refused_and_the_agents_mob_ends_at_the_next_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let child = format!("{mob_id}-child");
+    let model = OwnToolsModel::default();
+    let allow = || {
+        meerkat_mob::IdentityChangeConsentInput::Policy(meerkat_mob::IdentityPolicyOutcome::Allow)
+    };
+    let operation = |name: &str| {
+        meerkat_mob::IdentityOperation::new(
+            name,
+            meerkat_core::approval::decision::Sha256Digest::of(name.as_bytes()).as_str(),
+        )
+    };
+    {
+        let runtime = launch_owning(temp.path(), &mob_id, model.clone()).await;
+        host_creates(&runtime, MAKER, "planner").await;
+        creates_a_mob_with_its_own_tool(&runtime, &model, MAKER, &child).await;
+        let archived = runtime
+            .mob_handle()
+            .archive_identity(
+                meerkat_mob::IdentityArchiveChange::new(
+                    operation("core-archive"),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    MAKER,
+                ),
+                allow(),
+            )
+            .await;
+        assert!(
+            matches!(
+                archived,
+                Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+            ),
+            "Core's archive commits: {archived:?}"
+        );
+        assert_eq!(
+            hosted_members(&runtime, &child).await,
+            Some(vec![OWNED_WORKER.to_owned()]),
+            "in the same process the mob is still hosted with its member"
+        );
+        let _ = runtime.shutdown().await;
+    }
+
+    let runtime = launch_owning(temp.path(), &mob_id, model.clone()).await;
+    assert_eq!(
+        hosted_members(&runtime, &child).await,
+        None,
+        "after the archive and a restart the mob is gone"
+    );
+    let unarchived = runtime
+        .mob_handle()
+        .unarchive_identity(
+            meerkat_mob::IdentityArchiveChange::new(
+                operation("core-unarchive"),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                MAKER,
+            ),
+            allow(),
+        )
+        .await;
+    assert!(
+        matches!(
+            unarchived,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "Core's unarchive commits: {unarchived:?}"
+    );
+    assert_eq!(
+        hosted_members(&runtime, &child).await,
+        None,
+        "the unarchive does not bring the mob back"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// What the row below hands the seam in place of the launch's own answer:
+/// it says the session owns no mob and, as it answers, creates one for the
+/// session, as a run of the agent that is still going would after the
+/// guard's read.
+struct CreatesAMobAfterTheRead {
+    mobs: Arc<meerkat_mob_mcp::MobMcpState>,
+    child: String,
+}
+
+#[async_trait]
+impl meerkat_meta::identity_creation::OwnedMobs for CreatesAMobAfterTheRead {
+    async fn ending_with_archive_of(
+        &self,
+        session: &meerkat_core::types::SessionId,
+    ) -> Result<Vec<meerkat_mob::MobId>, meerkat_mob::MobError> {
+        mob_for_owner(&self.mobs, session, &self.child).await;
+        Ok(Vec::new())
+    }
+}
+
+/// The other stated limit: the guard's read and Core's commit are two
+/// steps. A mob the agent creates after the read, in a run still going when
+/// the archive commits, is not seen: the archive commits, the mob stays
+/// hosted in the same process, and at the gateway's next start it is
+/// removed, as the mobs of any archived session are.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mob_the_agent_creates_after_the_archives_check_is_not_seen() {
+    use meerkat_meta::identity_creation::{
+        ChangeCommit, CoreChangeExecutor, IdentityChangeExecutor, IdentityEntryFacts,
+        RequestEnvelope, RequesterFacts, consent_of_plan, normalize_archive,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let child = format!("{mob_id}-child");
+    let host = ChangeRequester::host("ops");
+    {
+        let (runtime, _asked, _fail_next_session) =
+            launch_with(temp.path(), &mob_id, false, false).await;
+        assert!(runtime.attach_identity_policy(in_process_policy(), IdentityFamilyOptions::new()));
+        host_creates(&runtime, "scout", "worker").await;
+        let digest = family_agent(&runtime, "scout").await.agent.spec_digest;
+        let archive = normalize_archive(
+            &in_process_policy(),
+            &RequesterFacts::host("ops"),
+            RequestEnvelope::default(),
+            &IdentityEntryFacts::new("scout", digest.clone(), Some(1), "worker", BTreeMap::new()),
+            &agent_ref("scout", &digest).to_archive(),
+        )
+        .expect("the archive is allowed");
+        let seam = CoreChangeExecutor::new().with_owned_mobs(Arc::new(CreatesAMobAfterTheRead {
+            mobs: runtime
+                .mob_runtime()
+                .agent_mob_mcp_state()
+                .expect("the agent mob tools' state"),
+            child: child.clone(),
+        }));
+        let operation = OperationId::for_request(&host.recorded(), "archive-1").expect("an id");
+        let archived = seam
+            .commit(ChangeCommit::new(
+                &runtime.mob_handle(),
+                &operation,
+                &host,
+                consent_of_plan(&archive.plan).expect("the rules allow it"),
+                &archive.request,
+            ))
+            .await
+            .expect("a typed outcome");
+        assert_eq!(
+            archived.outcome.token(),
+            "done",
+            "the archive commits: the mob was created after the read: {archived:?}"
+        );
+        assert_eq!(
+            hosted_members(&runtime, &child).await,
+            Some(Vec::new()),
+            "in the same process the mob is hosted"
+        );
+        let _ = runtime.shutdown().await;
+    }
+
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &mob_id, false, false).await;
+    assert_eq!(
+        hosted_members(&runtime, &child).await,
+        None,
+        "after a restart the mob is gone"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// A removal retires the agent's member as an archive does, so the mobs the
+// agent's session owns end with it the same way. The family refuses a
+// removal of an agent that still owns mobs as it refuses its archive.
+// ---------------------------------------------------------------------------
+
+/// The removal of the agent `name`, against the spec it holds now.
+async fn removal_of(runtime: &UnifiedRuntime, name: &str) -> IdentityChangeSpec {
+    IdentityChangeSpec::Remove(agent_ref(
+        name,
+        &family_agent(runtime, name).await.agent.spec_digest,
+    ))
+}
+
+/// Whether an agent holds the name `name`, as the host reads it.
+async fn agent_exists(runtime: &UnifiedRuntime, name: &str) -> bool {
+    runtime
+        .identity_family()
+        .expect("the family is attached")
+        .read(
+            &runtime.mob_handle(),
+            &ChangeRequester::host("ops"),
+            IdentityRead::Get(GetAgent::new(name)),
+        )
+        .await
+        .is_ok()
+}
+
+/// An agent created at run time creates a mob with its own tool. The host's
+/// removal of the agent is refused `owns_mobs`, about `name`, with the mob
+/// named, and nothing is written: the agent's record, its seat and the mob
+/// with its member read as before, and no operation is recorded. Once the
+/// agent has destroyed its mob with its own tool, the same request removes
+/// it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removal_of_an_agent_that_still_owns_a_mob_is_refused_and_writes_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let child = format!("{mob_id}-child");
+    let model = OwnToolsModel::default();
+    let runtime = launch_owning(temp.path(), &mob_id, model.clone()).await;
+    let host = ChangeRequester::host("ops");
+    host_creates(&runtime, MAKER, "planner").await;
+    creates_a_mob_with_its_own_tool(&runtime, &model, MAKER, &child).await;
+    let record = family_agent(&runtime, MAKER).await;
+    let seat = seat_of(&runtime, MAKER).await;
+
+    let removal = removal_of(&runtime, MAKER).await;
+    let refused = family_change(&runtime, &host, "remove-1", removal.clone()).await;
+    let mut data = refused_data(&refused);
+    let detail = data
+        .as_object_mut()
+        .and_then(|data| data.remove("detail"))
+        .unwrap_or_default();
+    assert_eq!(
+        data,
+        json!({"kind": "owns_mobs", "count": 1, "mobs": [child], "field": "name",
+               "retryable": false}),
+        "{refused:?}"
+    );
+    assert!(
+        detail.as_str().is_some_and(
+            |detail| detail.contains("destroy") && detail.contains("Nothing was changed")
+        ),
+        "the refusal says what to do: {detail}"
+    );
+    assert_eq!(
+        family_agent(&runtime, MAKER).await,
+        record,
+        "the agent's record is as it was"
+    );
+    assert_eq!(
+        seat_of(&runtime, MAKER).await,
+        seat,
+        "the agent's seat is as it was"
+    );
+    assert_eq!(
+        hosted_members(&runtime, &child).await,
+        Some(vec![OWNED_WORKER.to_owned()]),
+        "the mob is hosted with its member"
+    );
+    assert!(
+        matches!(
+            operation_state(&runtime, &host, "remove-1").await,
+            OperationState::Unknown
+        ),
+        "no operation is recorded for the refused removal"
+    );
+
+    destroys_its_mob_with_its_own_tool(&runtime, &model, MAKER, &child).await;
+    let removed = family_change(&runtime, &host, "remove-1", removal).await;
+    assert_eq!(
+        removed.token(),
+        "done",
+        "the same request commits once the agent owns no mob: {removed:?}"
+    );
+    assert!(!agent_exists(&runtime, MAKER).await, "the agent is removed");
+    let _ = runtime.shutdown().await;
+}
+
+/// The wire form of a refused removal, on the Console's
+/// `meta/identity/remove` and `meta/identity/plan`: JSON-RPC error `-32058`
+/// whose data is the refusal. An administrator is given the mobs; a
+/// signed-in person who may remove the agent and does not administer the
+/// runtime is told how many they are, and no more, on the call and on its
+/// plan.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_remove_call_answers_owns_mobs_and_names_the_mobs_only_to_an_administrator() {
+    const ROOT: &str = "root@example.org";
+    const ANN: &str = "ann@example.org";
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, app) = console_under(
+        temp.path(),
+        r#"
+enabled = true
+admins = ["root@example.org"]
+
+[[rules]]
+id = "works"
+actions = ["agent.identity.create", "agent.view", "agent.identity.manage", "agent.identity.remove"]
+"#,
+    )
+    .await;
+    assert!(runtime.attach_identity_policy(owning_policy(), IdentityFamilyOptions::new()));
+    let made = console_rpc(
+        &app,
+        Some(ROOT),
+        "meta/identity/create",
+        json!({"request_id": "root-1", "agents": [{"name": "scout", "profile": "worker"}]}),
+    )
+    .await;
+    assert_eq!(console_ok(&made)["outcome"], json!("done"), "{made:#}");
+    let child = format!("{}-child", runtime.mob_handle().mob_id());
+    let session = seat_of(&runtime, "scout").await.0;
+    session_owns_a_mob(&runtime, &session, &child).await;
+    let read = console_rpc(
+        &app,
+        Some(ROOT),
+        "meta/identity/get",
+        json!({"name": "scout"}),
+    )
+    .await;
+    let digest = console_ok(&read)["spec_digest"].clone();
+    let ask = |subject: &'static str, method: &'static str, request: &'static str| {
+        let (app, digest) = (app.clone(), digest.clone());
+        async move {
+            let mut params =
+                json!({"request_id": request, "name": "scout", "expected_spec_digest": digest});
+            if method == "meta/identity/plan" {
+                params["change"] = json!("remove");
+            }
+            let answer = console_rpc(&app, Some(subject), method, params).await;
+            assert_eq!(answer["error"]["code"], json!(REFUSED), "{answer:#}");
+            let mut data = answer["error"]["data"].clone();
+            if let Some(data) = data.as_object_mut() {
+                data.remove("detail");
+            }
+            data
+        }
+    };
+    let listed = json!({"kind": "owns_mobs", "count": 1, "mobs": [child], "field": "name",
+                        "retryable": false});
+    let counted = json!({"kind": "owns_mobs", "count": 1, "field": "name", "retryable": false});
+    assert_eq!(
+        ask(ROOT, "meta/identity/remove", "root-2").await,
+        listed,
+        "an administrator's removal"
+    );
+    assert_eq!(
+        ask(ROOT, "meta/identity/plan", "root-plan").await,
+        listed,
+        "an administrator's plan"
+    );
+    assert_eq!(
+        ask(ANN, "meta/identity/remove", "ann-1").await,
+        counted,
+        "a person's removal"
+    );
+    assert_eq!(
+        ask(ANN, "meta/identity/plan", "ann-plan").await,
+        counted,
+        "a person's plan"
+    );
+    assert!(agent_exists(&runtime, "scout").await, "nothing was removed");
+    let _ = runtime.shutdown().await;
+}
+
+/// A removal a person would decide is refused when it is asked, while the
+/// agent owns a mob: no decision is held. Once the mob is destroyed the
+/// same removal is held for its decision.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removal_that_needs_approval_is_not_held_while_the_agent_owns_mobs() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    assert!(runtime.attach_identity_policy(held_policy(), IdentityFamilyOptions::new()));
+    let host = ChangeRequester::host("ops");
+    host_creates(&runtime, "worker-a", "worker").await;
+    let child = format!("{}-child", runtime.mob_handle().mob_id());
+    let session = seat_of(&runtime, "worker-a").await.0;
+    session_owns_a_mob(&runtime, &session, &child).await;
+
+    let removal = removal_of(&runtime, "worker-a").await;
+    let refused = family_change(&runtime, &host, "remove-1", removal.clone()).await;
+    assert_eq!(
+        refused_data(&refused)["kind"],
+        json!("owns_mobs"),
+        "{refused:?}"
+    );
+    assert!(
+        matches!(
+            operation_state(&runtime, &host, "remove-1").await,
+            OperationState::Unknown
+        ),
+        "no decision is held for the refused removal"
+    );
+    runtime
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the agent mob tools' state")
+        .mob_destroy(&meerkat_mob::MobId::from(child.as_str()))
+        .await
+        .expect("the host destroys the mob");
+    let held = family_change(&runtime, &host, "remove-1", removal).await;
+    assert_eq!(held.token(), "pending_decision", "{held:?}");
+    let _ = runtime.shutdown().await;
+}
+
+/// The person the approver map names approves the decision `decision_id`,
+/// after a host channel showed it to its approvers.
+async fn approve(runtime: &UnifiedRuntime, decision_id: &str) {
+    use meerkat_core::approval::decision::{
+        ApproverId, DecisionId, DecisionReference, PresentationAudience, PresentationRecord,
+    };
+
+    let owner = runtime.durable_decisions().owner().clone();
+    let row = owner
+        .get(&DecisionId::new(decision_id).expect("a decision id"))
+        .expect("the decision is read");
+    owner
+        .present(
+            &row.decision_id,
+            &PresentationRecord::complete(
+                PresentationAudience::Approver {
+                    approver_id: ApproverId::new(APPROVERS).expect("approver"),
+                },
+                &row.descriptor.rendering,
+                None,
+                DecisionReference::new("chat:owners").expect("channel"),
+                DecisionReference::new(format!("message-{}", now_ms())).expect("message"),
+                now_ms(),
+            ),
+        )
+        .expect("present");
+    struct NoNotices;
+    #[async_trait]
+    impl meerkat_meta::DecisionNoticeSink for NoNotices {
+        async fn deliver(&self, _line: String) -> bool {
+            true
+        }
+    }
+    let connection = meerkat_meta::StdioDecisionConnection::new(
+        runtime.durable_decisions().realm(),
+        Arc::new(NoNotices) as Arc<dyn meerkat_meta::DecisionNoticeSink>,
+    );
+    let line =
+        json!({"jsonrpc": "2.0", "id": "decide", "method": "meta/decisions/decide", "params": {
+            "decision_id": decision_id,
+            "approve": true,
+            "presented_digest": row.descriptor.subject_digest.to_string(),
+            "attestation": {
+                "ingress": "chat",
+                "subject": OWNER,
+                "scope": "chat-session-1",
+                "event_ref": format!("chat:event:{decision_id}"),
+                "observed_at_ms": now_ms(),
+            },
+        }})
+        .to_string();
+    let answer: Value = serde_json::from_str(
+        &connection
+            .handle_line(runtime, &line)
+            .await
+            .expect("a decision method answers"),
+    )
+    .expect("answer JSON");
+    assert!(answer["error"].is_null(), "{answer:#}");
+}
+
+/// An archive and a removal that were held while their agents owned no mob,
+/// and are approved after each agent's session came to own one, are refused
+/// when they are carried out: neither agent is archived or removed, and
+/// each operation reads back as a decision that ended, whose sentence names
+/// `owns_mobs`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_archive_or_removal_is_refused_when_carried_out_while_the_agent_owns_mobs() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    assert!(runtime.attach_identity_policy(held_policy(), IdentityFamilyOptions::new()));
+    let host = ChangeRequester::host("ops");
+    host_creates(&runtime, "worker-a", "worker").await;
+    host_creates(&runtime, "worker-b", "worker").await;
+
+    let archive = archive_of(&runtime, "worker-a").await;
+    let removal = removal_of(&runtime, "worker-b").await;
+    let held_archive = family_change(&runtime, &host, "archive-1", archive).await;
+    let held_removal = family_change(&runtime, &host, "remove-1", removal).await;
+    for held in [&held_archive, &held_removal] {
+        assert_eq!(held.token(), "pending_decision", "{held:?}");
+    }
+
+    // Each agent's session comes to own a mob while its change waits.
+    for name in ["worker-a", "worker-b"] {
+        let child = format!("{}-{name}-child", runtime.mob_handle().mob_id());
+        let session = seat_of(&runtime, name).await.0;
+        session_owns_a_mob(&runtime, &session, &child).await;
+    }
+    approve(&runtime, &decision_of(&held_archive)).await;
+    approve(&runtime, &decision_of(&held_removal)).await;
+
+    for request in ["archive-1", "remove-1"] {
+        let deadline = std::time::Instant::now() + TURN_BOUND;
+        let ended = loop {
+            match operation_state(&runtime, &host, request).await {
+                OperationState::Outcome(outcome) if outcome.token() != "pending_decision" => {
+                    break outcome;
+                }
+                _ => {}
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{request}: the approved change was not carried out"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        let data = refused_data(&ended);
+        assert_eq!(
+            data["kind"],
+            json!("decision_closed"),
+            "{request}: {data:#}"
+        );
+        assert!(
+            data["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("owns_mobs")),
+            "{request}: the sentence names why it was refused: {data:#}"
+        );
+        assert!(
+            data.get("mobs").is_none() && data.get("count").is_none(),
+            "{request}: the closed decision names no mob and no number: {data:#}"
+        );
+    }
+    assert!(
+        !family_agent(&runtime, "worker-a").await.agent.archived,
+        "the agent is not archived"
+    );
+    assert!(
+        agent_exists(&runtime, "worker-b").await,
+        "the agent is not removed"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// The stated limit holds for a removal too: a host that removes an agent
+/// through Core's own call is not refused, and the mob the agent created
+/// stays hosted in the same process and is removed at the gateway's next
+/// start.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removal_through_core_is_not_refused_and_the_agents_mob_ends_at_the_next_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let child = format!("{mob_id}-child");
+    let model = OwnToolsModel::default();
+    {
+        let runtime = launch_owning(temp.path(), &mob_id, model.clone()).await;
+        host_creates(&runtime, MAKER, "planner").await;
+        creates_a_mob_with_its_own_tool(&runtime, &model, MAKER, &child).await;
+        let removed = runtime
+            .mob_handle()
+            .remove_identity(
+                meerkat_mob::IdentityRemoval::new(
+                    meerkat_mob::IdentityOperation::new(
+                        "core-remove",
+                        meerkat_core::approval::decision::Sha256Digest::of(b"core-remove").as_str(),
+                    ),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    MAKER,
+                ),
+                meerkat_mob::IdentityChangeConsentInput::Policy(
+                    meerkat_mob::IdentityPolicyOutcome::Allow,
+                ),
+            )
+            .await;
+        assert!(
+            matches!(
+                removed,
+                Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+            ),
+            "Core's removal commits: {removed:?}"
+        );
+        assert_eq!(
+            hosted_members(&runtime, &child).await,
+            Some(vec![OWNED_WORKER.to_owned()]),
+            "in the same process the mob is still hosted with its member"
+        );
+        let _ = runtime.shutdown().await;
+    }
+
+    let runtime = launch_owning(temp.path(), &mob_id, model.clone()).await;
+    assert_eq!(
+        hosted_members(&runtime, &child).await,
+        None,
+        "after the removal and a restart the mob is gone"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// The grant is judged first. An agent whose grant does not admit a change
+/// of the agent it names is answered what it is answered for an agent that
+/// owns no mob, for an archive and for a removal: never `owns_mobs`, and no
+/// number of mobs.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_whose_grant_does_not_admit_the_change_is_not_told_of_the_mobs() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), false, None).await;
+    let host = ChangeRequester::host("ops");
+    // An agent of a profile without the mob tools holds no spawn grant; the
+    // rows' rules still let it ask.
+    let ungranted = ChangeRequester::agent_recorded(HOST_A);
+    for name in ["plain", "owner"] {
+        let made = rig
+            .change(
+                &host,
+                &format!("create-{name}"),
+                create_of(json!([{"name": name, "profile": "worker"}])),
+            )
+            .await;
+        assert_eq!(made.token(), "done", "{made:?}");
+    }
+    let child = format!("{}-child", rig.runtime.mob_handle().mob_id());
+    let session = seat_of(&rig.runtime, "owner").await.0;
+    session_owns_a_mob(&rig.runtime, &session, &child).await;
+
+    for change in ["archive", "remove"] {
+        let ask = |name: &'static str| {
+            let rig = &rig;
+            let ungranted = ungranted.clone();
+            async move {
+                let agent = agent_ref(name, &rig.digest(name).await);
+                let spec = if change == "archive" {
+                    IdentityChangeSpec::Archive(agent)
+                } else {
+                    IdentityChangeSpec::Remove(agent)
+                };
+                let outcome = rig
+                    .change(&ungranted, &format!("{change}-{name}"), spec)
+                    .await;
+                let mut data = refused_data(&outcome);
+                if let Some(data) = data.as_object_mut() {
+                    data.remove("detail");
+                }
+                data
+            }
+        };
+        let plain = ask("plain").await;
+        let owner = ask("owner").await;
+        assert_ne!(
+            plain["kind"],
+            json!("owns_mobs"),
+            "{change}: the grant refuses the agent: {plain:#}"
+        );
+        assert_eq!(
+            owner, plain,
+            "{change}: the same answer whether or not the agent owns a mob"
+        );
+    }
+    rig.shutdown().await;
+}
+
+/// What the row below hands the seam in place of the launch's own answer:
+/// the hosted mobs cannot be read.
+struct UnreadableMobs;
+
+#[async_trait]
+impl meerkat_meta::identity_creation::OwnedMobs for UnreadableMobs {
+    async fn ending_with_archive_of(
+        &self,
+        _session: &meerkat_core::types::SessionId,
+    ) -> Result<Vec<meerkat_mob::MobId>, meerkat_mob::MobError> {
+        Err(meerkat_mob::MobError::Internal(
+            "failed to read persistent mob root '/host/private/mobs'".to_owned(),
+        ))
+    }
+}
+
+/// The check fails closed. When the launch cannot say which mobs it hosts,
+/// an archive and a removal are not made: the seam ends with no outcome and
+/// the agent stands as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archive_or_removal_is_not_made_when_the_hosted_mobs_cannot_be_read() {
+    use meerkat_meta::identity_creation::{
+        ChangeCommit, CoreChangeExecutor, IdentityChangeExecutor, IdentityEntryFacts,
+        RequestEnvelope, RequesterFacts, consent_of_plan, normalize_archive, normalize_remove,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), false, None).await;
+    let host = ChangeRequester::host("ops");
+    let made = rig
+        .change(
+            &host,
+            "create-1",
+            create_of(json!([{"name": "scout", "profile": "worker"}])),
+        )
+        .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    let digest = rig.digest("scout").await;
+    let policy = in_process_policy();
+    let facts = RequesterFacts::host("ops");
+    let entry =
+        IdentityEntryFacts::new("scout", digest.clone(), Some(1), "worker", BTreeMap::new());
+    let archive = normalize_archive(
+        &policy,
+        &facts,
+        RequestEnvelope::default(),
+        &entry,
+        &agent_ref("scout", &digest).to_archive(),
+    )
+    .expect("the archive is allowed");
+    let removal = normalize_remove(
+        &policy,
+        &facts,
+        RequestEnvelope::default(),
+        &entry,
+        &agent_ref("scout", &digest).to_remove(),
+    )
+    .expect("the removal is allowed");
+    let seam = CoreChangeExecutor::new().with_owned_mobs(Arc::new(UnreadableMobs));
+    let mob = rig.runtime.mob_handle();
+    for (request_id, normalized) in [("archive-1", &archive), ("remove-1", &removal)] {
+        let operation = OperationId::for_request(&host.recorded(), request_id).expect("an id");
+        let answered = seam
+            .commit(ChangeCommit::new(
+                &mob,
+                &operation,
+                &host,
+                consent_of_plan(&normalized.plan).expect("the rules allow it"),
+                &normalized.request,
+            ))
+            .await;
+        assert!(
+            answered.is_err(),
+            "{request_id}: the change is not made: {answered:?}"
+        );
+    }
+    let record = rig.agent("scout").await.expect("the agent stands");
+    assert!(!record.agent.archived, "the agent is not archived");
+    rig.shutdown().await;
+}

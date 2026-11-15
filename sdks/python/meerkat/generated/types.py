@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Generated wire types for Meerkat SDK.
 
-Contract version: 0.9.14
+Contract version: 0.9.15
 """
 
 import sys
@@ -17,7 +17,7 @@ else:
 from .errors import MeerkatError
 
 
-CONTRACT_VERSION = "0.9.14"
+CONTRACT_VERSION = "0.9.15"
 
 
 Value = Any
@@ -1463,10 +1463,17 @@ class WireAskUserAnswerUnknown(TypedDict, total=False):
 
 WireAskUserAnswer = WireAskUserAnswerChoice | WireAskUserAnswerFreeText | WireAskUserAnswerUnanswered | WireAskUserAnswerUnknown
 
+@dataclass
+class WireAskUserQuestionAnswer:
+    """One question's answer in a [`WireDecisionAnswer::AskUser`]."""
+    answer: WireAskUserAnswer
+    question_id: str
+
+
 # The typed answer a person gave with an approving decision, for a kind
 # that asks one. It is data of the decision's evidence, never text.
 class WireDecisionAnswerAskUser(TypedDict, total=False):
-    answers: Required[list[dict[str, Any]]]
+    answers: Required[list[WireAskUserQuestionAnswer]]
     kind: Required[Literal['ask_user']]
 
 class WireDecisionAnswerUnknown(TypedDict, total=False):
@@ -2756,13 +2763,6 @@ class WirePresentationRecord:
     subject_digest: str
     link: Optional[WirePresentationLink] = None
     max_part_bytes: Optional[int] = None
-
-
-@dataclass
-class WireAskUserQuestionAnswer:
-    """One question's answer in a [`WireDecisionAnswer::AskUser`]."""
-    answer: WireAskUserAnswer
-    question_id: str
 
 
 @dataclass

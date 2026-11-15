@@ -4,6 +4,8 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.15
+
 - `MetaRuntime.compact_member(identity, *, floor_tokens=None, timeout=None)`
   calls `meta/compact_member`: the member's conversation is compacted now
   (the older turns summarized, the most recent ones kept) in one
@@ -45,8 +47,12 @@ All notable changes to the Python SDK are documented here.
 - `IdentityRefusedError` (`IDENTITY_REFUSED_CODE`, `-32058`) is the one
   refusal error of those calls: `kind`, `field`, `detail`, `retryable`,
   `details`, `known_kind`, and the `IdentityRefusal` as `refusal`.
-  `IDENTITY_REFUSAL_KINDS` is the closed vocabulary (57 kinds); the suite
-  fails when it differs from the gateway's. `IDENTITY_OUTCOMES`,
+  `IDENTITY_REFUSAL_KINDS` is the closed vocabulary (58 kinds); the suite
+  fails when it differs from the gateway's. One of them is `owns_mobs`: an
+  `archive` or a `remove` of an agent that still owns mobs it created is
+  refused, with
+  `details["count"]` (how many) and, for the host, `details["mobs"]` (their
+  ids). `IDENTITY_OUTCOMES`,
   `INSTRUCTION_OUTCOME_KINDS`, `INSTRUCTION_NEXT_SESSION_REASONS` and
   `AGENT_SEATS` are closed too. A value newer than the SDK reaches the
   caller as its token; an outcome token the SDK cannot read raises

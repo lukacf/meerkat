@@ -8626,8 +8626,17 @@ impl SpawnActivateState {
         let identity_fenced_member = identity_member_permit.is_some();
         // Identity convergence owns wiring as a separate generated obligation
         // with its own target-local permit. Once MemberSpawned committed under
-        // an identity member permit, legacy role/parent/respawn wiring must not
-        // smuggle a second structural write into the member obligation.
+        // an identity member permit, the spawn takes no role wiring, no
+        // parent wiring and no respawn snapshot: each would write edges of
+        // its own into the member obligation. Two things remain, both
+        // MobMachine's and both planned in `plan_spawn_wiring`: an owned pair
+        // of the member's identity entry that MobMachine's verdict says to
+        // realize goes through the fail-fast fan-out, as for any spawn (it
+        // can add that edge), and the edges MobMachine already holds for the
+        // member have their trust repaired, which writes no structure. An
+        // owned pair MobMachine already holds is one of those held edges: it
+        // takes the repair, where a failure is owed and retried, and not the
+        // fan-out, where a failure fails the spawn.
         let auto_wire_parent = auto_wire_parent && !identity_fenced_member;
         let restore_wiring = if identity_fenced_member {
             None
@@ -30003,6 +30012,22 @@ impl MobActor {
                 }
                 IdentityReconcileDecision::RetireMemberMaterialization => {
                     if !self.retirements.contains_key(identity) {
+                        // A wiring effect of the member that is still in
+                        // flight settles first, as it does before a Retire or
+                        // a Respawn command (`wiring_io_control_is_pending`):
+                        // its ledger names this incarnation, and the rebuild
+                        // repairs the trust of the edges MobMachine holds, so
+                        // a rebuild under it would repair an edge the effect
+                        // may still take back. Nothing of the retirement has
+                        // started; the reconcile waits and asks again.
+                        if self.wiring_effect_pending_for_member(identity) {
+                            self.schedule_identity_reconcile_wait(
+                                identity,
+                                IdentityReconcileAuthorityKey::from_intent(&intent_record),
+                                Duration::from_millis(100),
+                            );
+                            return Ok(false);
+                        }
                         // The host's adoption takes the identity's declared
                         // entry over first: the end of this retirement ends
                         // the entry, so the member the reconcile materializes
@@ -30205,6 +30230,26 @@ impl MobActor {
                     }
                 }
                 IdentityReconcileDecision::EnsureMemberMaterialization => {
+                    // The same fact and the same wait as before the
+                    // retirement, asked once more before the rebuild. No
+                    // wiring call can be in flight here: a wire, an unwire or
+                    // a batch naming the member waits from the pass's check
+                    // until the retirement has ended (a retirement's stages
+                    // are effects of the member), and the identity is not
+                    // seated now. The mob's own detached trust repairs are
+                    // held by no command gate: an owed edge repair, a peer's
+                    // wake step, a reload revival. None takes an edge back;
+                    // waiting for one spares a trust row that its settle
+                    // could remove after the rebuild's restore, which the
+                    // owed repair would heal.
+                    if self.wiring_effect_pending_for_member(identity) {
+                        self.schedule_identity_reconcile_wait(
+                            identity,
+                            IdentityReconcileAuthorityKey::from_intent(&intent_record),
+                            Duration::from_millis(100),
+                        );
+                        return Ok(false);
+                    }
                     // As for the runtime registration: a deferred custody
                     // restore is re-attempted first, and backs off the
                     // reconcile while it stays deferred.
@@ -67432,10 +67477,8 @@ impl MobActor {
         })
     }
 
-    fn machine_restore_wiring_plan(
-        &self,
-        agent_identity: &AgentIdentity,
-    ) -> Result<RestoreWiringPlan, MobError> {
+    /// The members MobMachine holds a wiring edge to for `agent_identity`.
+    fn machine_wired_local_peers(&self, agent_identity: &AgentIdentity) -> Vec<AgentIdentity> {
         let local =
             mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(agent_identity.as_str()));
         let mut local_peers = Vec::new();
@@ -67453,6 +67496,16 @@ impl MobActor {
         }
         local_peers.sort();
         local_peers.dedup();
+        local_peers
+    }
+
+    fn machine_restore_wiring_plan(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Result<RestoreWiringPlan, MobError> {
+        let local =
+            mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(agent_identity.as_str()));
+        let local_peers = self.machine_wired_local_peers(agent_identity);
 
         let mut external_peers = Vec::new();
         for edge in self

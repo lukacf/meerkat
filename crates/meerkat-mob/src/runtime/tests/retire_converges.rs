@@ -309,10 +309,15 @@ async fn a_retire_whose_budget_ends_during_the_mobs_own_redrive_answers_in_progr
         "the held retirement is past its archive observation"
     );
 
-    let error = tokio::time::timeout(STEP, handle.retire(identity.clone()))
-        .await
-        .expect("the caller's wait ends at its budget")
-        .expect_err("the mob's retirement is held past the caller's budget");
+    // This answer arrives when the caller's retire budget ends, so the row
+    // waits past that window of the build, not for a prompt step.
+    let error = tokio::time::timeout(
+        past_window(crate::runtime::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT),
+        handle.retire(identity.clone()),
+    )
+    .await
+    .expect("the caller's wait ends at its budget")
+    .expect_err("the mob's retirement is held past the caller's budget");
     assert!(
         matches!(
             &error,

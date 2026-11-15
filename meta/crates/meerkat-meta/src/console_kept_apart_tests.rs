@@ -2444,3 +2444,159 @@ async fn a_run_in_flight_at_a_retire_ends_with_a_record_the_members_viewers_read
     let _ = runtime.shutdown().await;
     Ok(())
 }
+
+/// A member seated on a stored session is the member that session was built
+/// for, also after a restart and on a runtime taken from a bare handle,
+/// which has Core's member history alone to read: a private member's ended
+/// session seats a member private to the same person, exempt from the
+/// definition's wiring rules, and an ordinary member's ended session seats
+/// the request unchanged. A session no member history binds is decided by
+/// the session's own stores: one that does not exist seats the request
+/// unchanged where a session service says so, and is not seated where
+/// nothing can be read.
+#[tokio::test]
+async fn a_member_seated_on_a_stored_session_is_the_member_it_was_built_for() -> TestResult {
+    const MOB: &str = "kept-apart-seat-on-stored-session";
+    let left = state_after_a_console_with_sign_in(MOB).await?;
+    let restarted = persistent_gateway_runtime_in(left.state.path(), MOB, "", "").await?;
+    let bare = MobRuntime::from_handle(restarted.handle());
+    assert!(restarted.session_service().is_some() && bare.session_service().is_none());
+    let owner = restarted
+        .handle()
+        .member_binding_for_session(&left.side_chat_session)
+        .await?
+        .and_then(|binding| crate::access::private_owner(binding.labels()).map(str::to_string))
+        .ok_or("the side chat was private to a person")?;
+    let never_ran = meerkat_core::types::SessionId::new();
+    let request = || {
+        SpawnMemberSpec::new(
+            ProfileName::from("worker"),
+            AgentIdentity::from("seated-again"),
+        )
+    };
+    for (runtime, which, of_a_session_nobody_ran_on) in [
+        (&restarted, "a runtime with a session service", Ok(None)),
+        (
+            &bare,
+            "a runtime taken from a bare handle",
+            Err("access denied: the session has no established owner".to_string()),
+        ),
+    ] {
+        let private = seat_on_stored_session(runtime, &left.side_chat_session, request())
+            .await
+            .map_err(|refusal| refusal.message)?;
+        assert_eq!(
+            private
+                .labels
+                .as_ref()
+                .and_then(crate::access::private_owner),
+            Some(owner.as_str()),
+            "{which}: a private member's ended session"
+        );
+        assert!(
+            private.definition_wiring.is_exempt(),
+            "{which}: a private member is seated exempt from the wiring rules"
+        );
+        let shared = seat_on_stored_session(runtime, &left.beta_session, request())
+            .await
+            .map_err(|refusal| refusal.message)?;
+        assert_eq!(
+            shared.labels, None,
+            "{which}: an ordinary ended member's session"
+        );
+        assert_eq!(
+            seat_on_stored_session(runtime, &never_ran, request())
+                .await
+                .map(|spec| spec.labels)
+                .map_err(|refusal| refusal.message),
+            of_a_session_nobody_ran_on,
+            "{which}: a session nobody ran on"
+        );
+    }
+    restarted.handle().shutdown().await?;
+    Ok(())
+}
+
+/// A stored session that is not archived is decided by its stored document
+/// where its served label map names nobody: after a restart, a private
+/// member's session that no member ended is handed out by the resume read
+/// with its member labels, and they name its owner, whether Core's member
+/// history cannot be read, holds no binding of the session, or names nobody
+/// in its newest row.
+#[tokio::test]
+async fn a_stored_session_that_is_not_archived_is_decided_by_its_stored_document() -> TestResult {
+    const MOB: &str = "kept-apart-seat-on-served-session";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(
+        &runtime,
+        Some(everyone_drives_every_agent()),
+    ));
+    let forked = fork_on_console(
+        &app,
+        Some(&person_bearer(alice_claims())),
+        "alpha",
+        "alpha-side",
+    )
+    .await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    drop(app);
+    let session = session_of(&runtime, "alpha-side").await?;
+    let owner = runtime
+        .handle()
+        .get_member(&AgentIdentity::from("alpha-side"))
+        .await?
+        .and_then(|entry| crate::access::private_owner(&entry.labels).map(str::to_string))
+        .ok_or("the side chat is private to a person")?;
+    runtime.handle().shutdown().await?;
+    let _ = runtime
+        .stand_down_child_mobs(std::time::Instant::now() + Duration::from_secs(90))
+        .await;
+    drop(runtime);
+
+    let restarted = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    let service = restarted
+        .session_service()
+        .ok_or("the restarted runtime's session service")?;
+    let document =
+        match meerkat_mob::MobSessionService::load_session_for_resume(service.as_ref(), &session)
+            .await?
+        {
+            meerkat_mob::ResumeSessionLoad::Active(document) => document,
+            other => return Err(format!("the session is not archived: {other:?}").into()),
+        };
+    assert_eq!(
+        stored_document_member_labels(&document)
+            .as_ref()
+            .and_then(crate::access::private_owner),
+        Some(owner.as_str()),
+        "the stored document's member labels name the owner"
+    );
+    let stored = session_stored_member_labels(&restarted, &session).await;
+    assert_eq!(
+        stored.as_ref().and_then(crate::access::private_owner),
+        Some(owner.as_str()),
+        "the session's own stores name the owner"
+    );
+    for (history, what) in [
+        (
+            None,
+            "a member history that cannot be read or holds no binding of the session",
+        ),
+        (
+            Some(BTreeMap::new()),
+            "a newest member row that names nobody",
+        ),
+    ] {
+        assert_eq!(
+            stored_member_labels([history, stored.clone()])
+                .as_ref()
+                .and_then(crate::access::private_owner),
+            Some(owner.as_str()),
+            "{what}: the member is seated private to the document's owner"
+        );
+    }
+    restarted.handle().shutdown().await?;
+    Ok(())
+}

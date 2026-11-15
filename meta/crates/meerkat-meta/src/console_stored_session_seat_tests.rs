@@ -1077,3 +1077,128 @@ async fn a_caller_with_no_token_seats_no_shared_member_on_a_private_stored_sessi
     }
     Ok(())
 }
+
+/// Each line of the rule for what a member seated on a stored session
+/// carries of the member the session was built for.
+#[test]
+fn the_rule_for_what_a_member_seated_on_a_stored_session_carries() {
+    use std::collections::BTreeMap;
+
+    let labels = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    };
+    let side_chat_of = crate::side_chat::SIDE_CHAT_OF_LABEL;
+    let of_one = labels(&[
+        (PRIVATE_TO, "one-person"),
+        (side_chat_of, SOURCE),
+        ("display_name", "Notes"),
+        ("role", "worker"),
+    ]);
+    let of_another = labels(&[(PRIVATE_TO, "another-person")]);
+    let nobody = labels(&[("display_name", "Notes"), ("role", "worker")]);
+    let private = Some(labels(&[
+        (PRIVATE_TO, "one-person"),
+        (side_chat_of, SOURCE),
+    ]));
+    let shared = Some(BTreeMap::new());
+
+    // A served session's label map answers only when it names an owner.
+    assert_eq!(served_session_member_labels(BTreeMap::new()), None);
+    assert_eq!(served_session_member_labels(nobody.clone()), None);
+    assert_eq!(
+        served_session_member_labels(of_one.clone()),
+        Some(of_one.clone())
+    );
+
+    for (what, history, stored, carried) in [
+        ("no source answered", None, None, None),
+        (
+            "no binding found and a served label map that names nobody",
+            None,
+            served_session_member_labels(BTreeMap::new()),
+            None,
+        ),
+        (
+            "the sources name two people",
+            Some(of_one.clone()),
+            Some(of_another.clone()),
+            None,
+        ),
+        (
+            "the sources name two people, the other way round",
+            Some(of_another),
+            Some(of_one.clone()),
+            None,
+        ),
+        (
+            "the member history names nobody, the stored labels name a person",
+            Some(nobody.clone()),
+            Some(of_one.clone()),
+            private.clone(),
+        ),
+        (
+            "the member history names a person, the stored labels nobody",
+            Some(of_one.clone()),
+            Some(nobody.clone()),
+            private.clone(),
+        ),
+        (
+            "both name the same person",
+            Some(of_one.clone()),
+            Some(of_one.clone()),
+            private.clone(),
+        ),
+        (
+            "only the member history answers, naming a person",
+            Some(of_one.clone()),
+            None,
+            private.clone(),
+        ),
+        (
+            "only the stored labels answer, naming a person",
+            None,
+            Some(of_one),
+            private,
+        ),
+        (
+            "both answer and name nobody",
+            Some(nobody.clone()),
+            Some(nobody.clone()),
+            shared.clone(),
+        ),
+        (
+            "only the member history answers, naming nobody",
+            Some(nobody.clone()),
+            None,
+            shared.clone(),
+        ),
+        (
+            "only the stored labels answer, naming nobody",
+            None,
+            Some(nobody),
+            shared,
+        ),
+    ] {
+        assert_eq!(stored_member_labels([history, stored]), carried, "{what}");
+    }
+}
+
+/// A session no source answers for, or whose sources name different owners,
+/// is not seated.
+#[test]
+fn a_session_whose_owner_cannot_be_read_is_not_seated() {
+    let named = |who: &str| {
+        Some(std::collections::BTreeMap::from([(
+            PRIVATE_TO.to_string(),
+            who.to_string(),
+        )]))
+    };
+    assert_eq!(stored_member_labels([None, None]), None);
+    assert_eq!(
+        stored_member_labels([named("one-person"), named("another-person")]),
+        None
+    );
+}

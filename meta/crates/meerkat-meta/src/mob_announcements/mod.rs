@@ -61,7 +61,7 @@ mod host_store_tests;
 #[cfg(test)]
 mod remote_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::sync::Arc;
 
@@ -520,6 +520,13 @@ impl AnnouncementComposition {
                  delivered, no declaration is reconciled, and every change is refused; queued \
                  work stays for the authoritative launch, and reads still answer"
             );
+            // A candidate reads all the same: the count of the live
+            // subscriptions on members private to a person is logged at its
+            // start too.
+            let counting = service.clone();
+            drop(tokio::spawn(async move {
+                counting.warn_of_private_member_subscriptions().await;
+            }));
             return Ok(service);
         }
         // The dispatcher starts once the declarations are reconciled (the
@@ -527,7 +534,9 @@ impl AnnouncementComposition {
         // first round runs on what they made and dropped. A reconcile that
         // fails or outlasts its bound is logged and the dispatcher starts
         // anyway; later triggers reconcile again, and a runtime refusal
-        // waits as pending.
+        // waits as pending. The start then logs the count of the live
+        // subscriptions that deliver into members private to a person,
+        // while there are any.
         let starting = service.clone();
         drop(tokio::spawn(async move {
             drop(
@@ -535,6 +544,7 @@ impl AnnouncementComposition {
                     .start_after_reconcile(DECLARATIONS_RECONCILE_BEFORE_START)
                     .await,
             );
+            starting.warn_of_private_member_subscriptions().await;
         }));
         drop(service.watch_mobs());
         Ok(service)

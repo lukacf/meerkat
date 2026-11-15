@@ -522,6 +522,36 @@ one `sent` row per distinct resolution), and
 `parseReasoningEffortResolution(...)` the resolution `run_started`,
 `run_resumed` and `request_reasoning_effort_resolved` carry.
 
+A turn that would change the model identity of a session that has unfinished
+work is not queued behind that work (the rule of the JSON-RPC turn requests:
+[Model settings on a busy session](/api/rpc#model-settings-on-a-busy-session)).
+It rejects at once with a `MeerkatError`
+whose `code` is `"-32002"` (session busy) and whose `details` are
+`{ kind: "reasoning_effort_change_needs_idle_session" }`; nothing is stored
+for the turn. The one `kind` covers every cause. On a session that holds a
+provider-neutral level: a turn that sets, changes or clears the level, or
+that changes the model, the provider, the self-hosted server, the provider
+parameters or the auth binding (a level named inside `providerParams`
+replaces those parameters, so it is one of these even when the level is the
+same). On a session that holds no level: a turn that sets one. Plain turns,
+and turns that repeat the session's level with `reasoningEffort`, queue as
+before. This is not a level refusal, so `reasoningEffortRefusal(error)`
+returns `undefined` for it; a level the model does not accept is still
+answered with its refusal first. Wait for the running turn's answer, then
+send the turn again; do not poll. A later release is planned to queue such a
+turn.
+
+```typescript
+try {
+  await session.turn("Think harder", { reasoningEffort: "high" });
+} catch (error) {
+  const kind = (error as { details?: { kind?: unknown } }).details?.kind;
+  if (kind !== "reasoning_effort_change_needs_idle_session") throw error;
+  await runningTurn; // the turn that was in flight
+  await session.turn("Think harder", { reasoningEffort: "high" });
+}
+```
+
 `grantGatedTools` gates built-in tool families and tool names: the session
 mounts them hidden and refuses their calls until `grantTool(sessionId, { family
 }, { durationMs })` or `grantTool(sessionId, { tool }, { expiresAtMs })` opens

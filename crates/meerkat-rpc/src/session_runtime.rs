@@ -43313,7 +43313,7 @@ mod tests {
                     client.release.notify_one();
                     (
                         false,
-                        tokio::time::timeout(std::time::Duration::from_secs(60), refused)
+                        tokio::time::timeout(std::time::Duration::from_mins(1), refused)
                             .await
                             .expect("the request behind the turn is answered once the turn ended")
                             .unwrap(),
@@ -43587,7 +43587,7 @@ mod tests {
             // Its own turn starts: its request is made. An answer before
             // that request is an answer without a run.
             requests += 1;
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_mins(1);
             while client.calls.load(AtomicOrdering::SeqCst) < requests {
                 if queued.is_finished() {
                     let answered = (&mut queued).await.unwrap().map(|_| ());

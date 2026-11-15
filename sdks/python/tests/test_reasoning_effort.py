@@ -40,6 +40,7 @@ from meerkat import (
 )
 from meerkat.client import _REASONING_EFFORT_MIN_CONTRACT
 from meerkat.errors import CapabilityUnavailableError, MeerkatError
+from meerkat.streaming import _StdoutDispatcher
 
 SESSION_ID = "019a2b3c-0000-7000-8000-000000000001"
 
@@ -492,6 +493,47 @@ def test_a_refusal_this_sdk_cannot_read_keeps_the_raw_data() -> None:
     assert reasoning_effort_refusal(refused(None)) is None
     assert reasoning_effort_refusal(ValueError("no details")) is None
     assert parse_reasoning_effort_refusal("not an object") is None
+
+
+# The data of the busy answer (JSON-RPC ``-32002``) to a turn that sets or
+# changes the provider-neutral level, or changes the model of a session that
+# holds one, while the session has unfinished work.
+LEVEL_CHANGE_NEEDS_IDLE_SESSION = {"kind": "reasoning_effort_change_needs_idle_session"}
+
+
+@pytest.mark.asyncio
+async def test_a_level_change_on_a_busy_session_is_a_busy_error_not_a_level_refusal() -> None:
+    """The server's answer, read off the wire: the general error with the
+    busy code and the data as sent, which the refusal helper does not read
+    as a level refusal. Wait for the running turn's answer and send the
+    turn again."""
+    reader = asyncio.StreamReader()
+    answer = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": -32002,
+            "message": "session is busy",
+            "data": LEVEL_CHANGE_NEEDS_IDLE_SESSION,
+        },
+    }
+    reader.feed_data((json.dumps(answer) + "\n").encode())
+    reader.feed_eof()
+    dispatcher = _StdoutDispatcher(reader)
+    dispatcher.start()
+    response = dispatcher.expect_response(1)
+    with pytest.raises(MeerkatError) as raised:
+        await asyncio.wait_for(response, timeout=1.0)
+    error = raised.value
+    await dispatcher.stop()
+
+    assert type(error) is MeerkatError
+    assert error.code == "-32002"
+    assert error.details == LEVEL_CHANGE_NEEDS_IDLE_SESSION
+    assert reasoning_effort_refusal(error) is None
+    # The same data on the refusal's own code is still no level refusal: the
+    # helper reads the kind, never the code or the text.
+    assert reasoning_effort_refusal(refused(LEVEL_CHANGE_NEEDS_IDLE_SESSION)) is None
 
 
 # The `reasoning_effort` block of a run result after a model fallback switch.

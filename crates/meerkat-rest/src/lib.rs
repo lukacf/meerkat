@@ -17465,6 +17465,107 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         assert_eq!(payload["text"], "ok");
     }
 
+    /// A `POST /sessions` whose reasoning effort level the route does not
+    /// accept is refused by the session's build, before a session exists:
+    /// HTTP 400 with the typed details, which name no created session, and
+    /// no session is listed or stored afterwards. The mock client reports
+    /// no route, so every level is refused as unknown.
+    #[tokio::test]
+    async fn test_create_session_refused_for_its_level_leaves_no_session() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let app = router(state.clone());
+
+        // The level in both forms a create names it in: the direct member
+        // and the nested `provider_params` key.
+        for (form, body) in [
+            (
+                "direct",
+                serde_json::json!({"prompt": "Reply briefly.", "reasoning_effort": "high"}),
+            ),
+            (
+                "nested",
+                serde_json::json!({
+                    "prompt": "Reply briefly.",
+                    "provider_params": {"reasoning_effort": "high"}
+                }),
+            ),
+        ] {
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                app.clone().oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/sessions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                ),
+            )
+            .await
+            .expect("the refused create route timed out")
+            .unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{form}: {payload}");
+            assert_eq!(payload["code"], "INVALID_PARAMS", "{form}: {payload}");
+            assert_eq!(
+                payload["details"]["kind"], "reasoning_effort_refused",
+                "{form}: {payload}"
+            );
+            assert_eq!(
+                payload["details"]["reasoning_effort_refusal"]["reason"],
+                "supported_levels_unknown",
+                "{form}: {payload}"
+            );
+            assert_eq!(
+                (
+                    payload["details"].get("session_id"),
+                    payload["details"].get("session_created"),
+                ),
+                (None, None),
+                "{form}: the build refused the level before a session was created: {payload}"
+            );
+        }
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            listed["sessions"],
+            serde_json::json!([]),
+            "a create refused for its level leaves no session listed"
+        );
+        let stored = state
+            .session_service
+            .list(meerkat_core::service::SessionQuery::default())
+            .await
+            .expect("list the sessions the service holds");
+        assert!(
+            stored.is_empty(),
+            "a create refused for its level leaves no session: {} left",
+            stored.len()
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Structured output over REST: validate-first and extraction fallback
     // -----------------------------------------------------------------------
@@ -18873,6 +18974,194 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             ),
             (true, true),
             "the refused continue changes nothing: the session is live and registered"
+        );
+    }
+
+    /// A message that names the reasoning effort level, or a model, for a
+    /// session this server holds live is not served, and it is refused the
+    /// same way whether or not a turn is running: at once, with REST's own
+    /// answer (HTTP 500, `INTERNAL_ERROR`, a text that says the session is
+    /// busy), and nothing is stored or queued for it. A turn that is running
+    /// and a plain message queued behind it both complete, and the session
+    /// takes its next turn. The answer is never a JSON-RPC error text.
+    ///
+    /// `provider_params` is not a member of this request: a message that
+    /// carries it is read without it, as a plain message, and sets no level.
+    #[tokio::test]
+    async fn test_continue_session_level_on_a_live_session_is_refused_at_once_busy_or_idle() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
+        for (form, change) in [
+            ("level", serde_json::json!({"reasoning_effort": "high"})),
+            (
+                "clear",
+                serde_json::json!({"reasoning_effort": {"action": "clear"}}),
+            ),
+            ("model", serde_json::json!({"model": "claude-opus-4-8"})),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let mut state = load_rest_state_with_capacity(&temp, 4).await;
+            let calls = Arc::new(tokio::sync::watch::channel(0).0);
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+                calls: Arc::clone(&calls),
+                release: Arc::clone(&release),
+            }));
+            let session_id = create_deferred_rest_runtime_session(&state).await;
+            let app = router(state.clone());
+            let post = |body: serde_json::Value| {
+                let app = app.clone();
+                let uri = format!("/sessions/{session_id}/messages");
+                tokio::spawn(async move {
+                    let response = app
+                        .oneshot(
+                            axum::http::Request::builder()
+                                .method("POST")
+                                .uri(uri)
+                                .header("content-type", "application/json")
+                                .body(Body::from(body.to_string()))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let status = response.status();
+                    let body = response.into_body().collect().await.unwrap().to_bytes();
+                    let payload: serde_json::Value = serde_json::from_slice(&body)
+                        .unwrap_or_else(|_| serde_json::json!(String::from_utf8_lossy(&body)));
+                    (status, payload)
+                })
+            };
+            let message = |prompt: &str| serde_json::json!({"session_id": session_id.to_string(), "prompt": prompt});
+            let active_inputs = || async {
+                state
+                    .runtime_adapter
+                    .list_active_inputs(&session_id)
+                    .await
+                    .expect("the session's active inputs")
+                    .len()
+            };
+            let assert_not_served = |answer: &(StatusCode, serde_json::Value), when: &str| {
+                let (status, payload) = answer;
+                assert_eq!(
+                    *status,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "{form}, {when}: {payload}"
+                );
+                assert_eq!(
+                    payload["code"], "INTERNAL_ERROR",
+                    "{form}, {when}: {payload}"
+                );
+                let text = payload["error"].as_str().unwrap_or_default();
+                assert!(
+                    text.contains("session is busy"),
+                    "{form}, {when}: {payload}"
+                );
+                assert!(
+                    !text.contains("-32600") && !text.contains("destroyed"),
+                    "{form}, {when}: the answer is REST's own: {payload}"
+                );
+            };
+            let mut change_message = message("change the session");
+            for (member, value) in change.as_object().expect("a change is an object") {
+                change_message[member.as_str()] = value.clone();
+            }
+
+            // While a turn runs: refused at once, and nothing is stored.
+            let running = post(message("hold the turn open"));
+            wait_for_rest_llm_calls(&calls, 1, "the turn reaches the LLM").await;
+            assert_eq!(active_inputs().await, 1, "{form}: the running turn's input");
+            let refused = tokio::time::timeout(FAILURE_BOUND, post(change_message.clone()))
+                .await
+                .unwrap_or_else(|_| panic!("{form}: the change is answered while the turn runs"))
+                .expect("change task");
+            assert!(!running.is_finished(), "{form}: the turn is still running");
+            assert_not_served(&refused, "while a turn runs");
+            assert_eq!(
+                active_inputs().await,
+                1,
+                "{form}: the refused message stored and queued nothing"
+            );
+
+            // A plain message behind the running turn queues, and both run.
+            let mut plain = post(message("plain behind"));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(300), &mut plain)
+                    .await
+                    .is_err(),
+                "{form}: a plain message waits behind the running turn"
+            );
+            release.add_permits(16);
+            let (status, payload) = tokio::time::timeout(FAILURE_BOUND, running)
+                .await
+                .expect("the running turn finishes once released")
+                .expect("running turn task");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{form}: the running turn: {payload}"
+            );
+            let (status, payload) = tokio::time::timeout(FAILURE_BOUND, plain)
+                .await
+                .expect("the queued message finishes")
+                .expect("queued message task");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{form}: the queued message: {payload}"
+            );
+
+            // On the idle live session: the same answer, and nothing stored.
+            assert_eq!(active_inputs().await, 0, "{form}: the session is idle");
+            let refused = tokio::time::timeout(FAILURE_BOUND, post(change_message))
+                .await
+                .unwrap_or_else(|_| panic!("{form}: the change is answered on the idle session"))
+                .expect("change task");
+            assert_not_served(&refused, "when idle");
+            assert_eq!(active_inputs().await, 0, "{form}: nothing stored when idle");
+
+            // The session takes its next turn.
+            let (status, payload) = tokio::time::timeout(FAILURE_BOUND, post(message("next turn")))
+                .await
+                .expect("the next turn finishes")
+                .expect("next turn task");
+            assert_eq!(status, StatusCode::OK, "{form}: the next turn: {payload}");
+        }
+
+        // `provider_params` is not read on this request: the message runs
+        // as a plain one.
+        let temp = TempDir::new().unwrap();
+        let mut state = load_rest_state_with_capacity(&temp, 4).await;
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_deferred_rest_runtime_session(&state).await;
+        let response = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{session_id}/messages"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "session_id": session_id.to_string(),
+                            "prompt": "a message with provider params",
+                            "provider_params": {"reasoning_effort": "high"}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a message that carries `provider_params` runs as a plain message: {}",
+            String::from_utf8_lossy(&body)
         );
     }
 

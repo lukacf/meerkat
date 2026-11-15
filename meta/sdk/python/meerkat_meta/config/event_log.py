@@ -25,7 +25,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class MemoryEventLogConfig:
-    """Bounded queryable in-process event store (declared ephemeral)."""
+    """Queryable in-process event store (declared ephemeral)."""
 
     batch_size: int | None = None
     flush_interval_ms: int | None = None

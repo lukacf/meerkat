@@ -12,7 +12,10 @@ use super::parts::part_ranges;
 use super::*;
 use crate::approval::consent::{AuthenticatedApprover, HostAuthenticationScope};
 use crate::approval::{ApprovalAssurance, ApprovalStoreError};
-use crate::ask_user::{AskUserAnswer, AskUserQuestionAnswer};
+use crate::ask_user::{
+    ASK_USER_FREE_TEXT_MAX_BYTES, ASK_USER_ID_MAX_BYTES, ASK_USER_QUESTIONS_MAX, AskUserAnswer,
+    AskUserAnswers, AskUserChoice, AskUserQuestion, AskUserQuestionAnswer, AskUserQuestionSet,
+};
 use crate::{PrincipalKind, PrincipalRef, SessionId, TrustDomainId};
 
 fn domain(value: &str) -> TrustDomainId {
@@ -1082,7 +1085,7 @@ fn the_evidence_carries_a_typed_answer_and_evidence_without_one_keeps_its_digest
 }
 
 /// An attested decision carries a typed answer only when it approves, and
-/// only within the evidence bound; the answer is part of its evidence.
+/// only within the answer's own bound; the answer is part of its evidence.
 #[test]
 fn an_attested_decision_carries_its_answer_into_the_evidence() {
     let login = HostAuthenticationScope::new("login-1");
@@ -1126,9 +1129,14 @@ fn an_attested_decision_carries_its_answer_into_the_evidence() {
         }
     );
 
-    // The bound is on the answer's JSON: one byte past it is refused.
+    // The bound is on the answer's JSON, and it is the answer's own: an
+    // answer past the reason's bound is taken, and one byte past its own is
+    // refused.
     let overhead = serde_json::to_vec(&answer("")).expect("encode").len();
-    let at_the_bound = "a".repeat(DECISION_REASON_MAX_BYTES - overhead);
+    attested_in(&login, true)
+        .with_answer(answer(&"a".repeat(DECISION_REASON_MAX_BYTES)))
+        .expect("an answer larger than a reason may be");
+    let at_the_bound = "a".repeat(DECISION_ANSWER_MAX_BYTES - overhead);
     attested_in(&login, true)
         .with_answer(answer(&at_the_bound))
         .expect("an answer of exactly the bound");
@@ -1139,9 +1147,62 @@ fn an_attested_decision_carries_its_answer_into_the_evidence() {
             .expect_err("an answer past the bound"),
         DecisionContractError::TooLarge {
             what: "answer",
-            max_bytes: DECISION_REASON_MAX_BYTES,
+            max_bytes: DECISION_ANSWER_MAX_BYTES,
         }
     );
+}
+
+/// The answer's bound holds the largest set of answers `ask_user` takes:
+/// every question of a full set answered in writing, under the longest id,
+/// with the longest text of the characters JSON writes longest.
+#[test]
+fn the_answer_bound_holds_the_largest_valid_set_of_answers() {
+    let ids: Vec<String> = (0..ASK_USER_QUESTIONS_MAX)
+        .map(|index| format!("question-{index:023}"))
+        .collect();
+    let set = AskUserQuestionSet::new(
+        None,
+        ids.iter()
+            .map(|id| {
+                assert_eq!(id.len(), ASK_USER_ID_MAX_BYTES);
+                AskUserQuestion {
+                    id: id.clone(),
+                    prompt: "What should the note say?".to_owned(),
+                    choices: ["short", "long"]
+                        .into_iter()
+                        .map(|choice| AskUserChoice {
+                            id: choice.to_owned(),
+                            label: choice.to_owned(),
+                        })
+                        .collect(),
+                    allow_free_text: true,
+                    recommended: None,
+                }
+            })
+            .collect(),
+    )
+    .expect("a valid full set");
+    let given: Vec<AskUserQuestionAnswer> = ids
+        .iter()
+        .map(|id| AskUserQuestionAnswer {
+            question_id: id.clone(),
+            answer: AskUserAnswer::FreeText {
+                text: "\u{1}".repeat(ASK_USER_FREE_TEXT_MAX_BYTES),
+            },
+        })
+        .collect();
+    // The answers keep every rule of the set, as they were given.
+    let answers = AskUserAnswers::for_set(&set, given.clone()).expect("valid answers for the set");
+    assert_eq!(answers.answers(), given.as_slice());
+
+    // Their JSON is the size the bound's arithmetic states, and within it.
+    let largest = DecisionAnswer::AskUser { answers: given };
+    let encoded = serde_json::to_vec(&largest).expect("encode").len();
+    assert_eq!(encoded, 17_741);
+    assert_eq!(encoded, super::evidence::ASK_USER_ANSWER_JSON_MAX_BYTES);
+    attested_in(&HostAuthenticationScope::new("login-1"), true)
+        .with_answer(largest)
+        .expect("the largest valid set of answers is taken");
 }
 
 #[test]

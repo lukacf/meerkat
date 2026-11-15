@@ -253,7 +253,10 @@ them.
 - `meerkat-core`, `meerkat-contracts`: a person's decision can carry a typed
   answer (see Added: `ask_user`). `DecisionEvidence::Human` in `meerkat-core`
   and `WireDecisionEvidence::Human` in `meerkat-contracts` gain an optional
-  field `answer`. Source only: code that builds either variant names the
+  field `answer`. An answer's JSON is at most 32 KiB
+  (`DECISION_ANSWER_MAX_BYTES`), which holds every set of answers valid for
+  an `ask_user` question set; a decision's reason keeps its 4 KiB limit.
+  Source only: code that builds either variant names the
   field, and a pattern that lists the variant's fields needs it or `..`.
   The stored rows and the wire output of a decision without an answer are
   unchanged. Rollback: a build older than this one cannot read a decision

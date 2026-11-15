@@ -13,16 +13,18 @@ use meerkat_core::approval::consent::{
     AuthenticatedApprover, ConsentEligibility, ConsentEligibilityAnswer, ConsentIneligible,
 };
 use meerkat_core::approval::decision::{
-    ApproverId, AttestedDecision, AttributedReview, DecisionHoldRequest, DecisionId,
-    DecisionIngress, DecisionKind, DecisionListFilter, DecisionNotice, DecisionOperationId,
-    DecisionPhase, DecisionPrincipalKey, DecisionReference, DecisionRenderer, DecisionRendering,
-    DecisionRequestBody, DecisionReviewVerdict, DecisionStore, DecisionSubjectKey,
-    InMemoryDecisionStore, PresentationAudience, PresentationRecord, Sha256Digest, StoredDecision,
+    ApproverId, AttestedDecision, AttributedReview, DECISION_REASON_MAX_BYTES, DecisionHoldRequest,
+    DecisionId, DecisionIngress, DecisionKind, DecisionListFilter, DecisionNotice,
+    DecisionOperationId, DecisionPhase, DecisionPrincipalKey, DecisionReference, DecisionRenderer,
+    DecisionRendering, DecisionRequestBody, DecisionReviewVerdict, DecisionStore,
+    DecisionSubjectKey, InMemoryDecisionStore, PresentationAudience, PresentationRecord,
+    Sha256Digest, StoredDecision,
 };
 use meerkat_core::approval::{ApprovalAssurance, ApprovalConsentDeliveryState};
 use meerkat_core::ask_user::{
-    AskUserAnswer, AskUserAnswers, AskUserChoice, AskUserOutcome, AskUserQuestion,
-    AskUserQuestionAnswer, AskUserQuestionSet, AskUserResult,
+    ASK_USER_FREE_TEXT_MAX_BYTES, ASK_USER_ID_MAX_BYTES, ASK_USER_QUESTIONS_MAX, AskUserAnswer,
+    AskUserAnswers, AskUserChoice, AskUserOutcome, AskUserQuestion, AskUserQuestionAnswer,
+    AskUserQuestionSet, AskUserResult,
 };
 use meerkat_core::{PrincipalKind, PrincipalRef, RunId, SessionId, TrustDomainId};
 use meerkat_store::SqliteDecisionStore;
@@ -1136,6 +1138,108 @@ fn a_dismissal_carries_no_answers() {
     assert_eq!(
         ask_user_result_of(&rejected).expect("the result").answers,
         all_unanswered()
+    );
+}
+
+/// The row's full set: as many questions as a set takes, each under an id
+/// of the longest size and accepting a written answer.
+fn full_written_set() -> AskUserQuestionSet {
+    let questions = (0..ASK_USER_QUESTIONS_MAX)
+        .map(|index| {
+            let mut question = question(
+                &format!("question-{index:023}"),
+                "What should the note say?",
+                &[("short", "Keep it short"), ("long", "Write it out")],
+            );
+            assert_eq!(question.id.len(), ASK_USER_ID_MAX_BYTES);
+            question.allow_free_text = true;
+            question
+        })
+        .collect();
+    AskUserQuestionSet::new(None, questions).expect("a valid full set")
+}
+
+#[test]
+fn a_full_set_of_the_longest_written_answers_full_of_escaped_characters_is_attested_and_read_back()
+{
+    let dir = tempfile::tempdir().expect("tempdir");
+    let clock = ManualClock::at(ASKED_AT);
+    let service = service_over(
+        Arc::new(SqliteDecisionStore::in_store_path(dir.path())),
+        &clock,
+    );
+    let decision = hold_ask_user(
+        &service,
+        ASKED_AT,
+        hold_of(full_written_set(), &RunId::new(), "call-1"),
+    )
+    .expect("the hold");
+    let body = AskUserBody::of(&decision).expect("the held body");
+
+    // Every question is answered in writing with the longest text an answer
+    // takes, all of it characters JSON escapes: quotes, which cost two
+    // bytes each, and in the first answer a control character, which costs
+    // six.
+    let quotes = "\"".repeat(ASK_USER_FREE_TEXT_MAX_BYTES);
+    let with_a_control_character = format!(
+        "{}\u{1}{}",
+        "\"".repeat(140),
+        "\"".repeat(ASK_USER_FREE_TEXT_MAX_BYTES - 141)
+    );
+    let given: Vec<AskUserQuestionAnswer> = body
+        .questions
+        .questions()
+        .iter()
+        .enumerate()
+        .map(|(index, question)| {
+            let text = if index == 0 {
+                &with_a_control_character
+            } else {
+                &quotes
+            };
+            assert_eq!(text.len(), ASK_USER_FREE_TEXT_MAX_BYTES);
+            free_text(&question.id, text)
+        })
+        .collect();
+    assert_eq!(given.len(), ASK_USER_QUESTIONS_MAX);
+
+    // The answers keep every rule of the set.
+    let answers =
+        AskUserAnswers::for_set(&body.questions, given.clone()).expect("valid answers for the set");
+    assert_eq!(answers.answers(), given.as_slice());
+    // Their JSON is larger than a decision's reason may be.
+    let encoded = serde_json::to_vec(&DecisionAnswer::AskUser {
+        answers: given.clone(),
+    })
+    .expect("encode")
+    .len();
+    assert!(
+        encoded > DECISION_REASON_MAX_BYTES,
+        "the row's answers are {encoded} bytes of JSON"
+    );
+
+    // Answers that are valid for the set are attested.
+    present(&service, &decision);
+    let attested = attest_ask_user_answers(person_decides(&decision, true), &answers);
+    assert_eq!(
+        attested.as_ref().map(|_| ()),
+        Ok(()),
+        "a full set of valid answers is attested"
+    );
+    let attested = attested.expect("attested");
+
+    // The decision records them, and a later read gives them back whole.
+    let approved = service
+        .decide(&decision.decision_id, &attested, &MayAnswer)
+        .expect("the answer is recorded");
+    assert_eq!(approved.state.phase, DecisionPhase::Approved);
+    let stored = service.get(&decision.decision_id).expect("read");
+    assert_eq!(
+        ask_user_answers_of(&stored, &body)
+            .expect("a valid document")
+            .expect("the answers")
+            .answers(),
+        given.as_slice()
     );
 }
 

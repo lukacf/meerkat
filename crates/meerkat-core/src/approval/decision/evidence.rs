@@ -20,12 +20,53 @@ use crate::approval::ApprovalAssurance;
 use crate::approval::consent::{
     AuthenticatedApprover, ConsentEligibility, HostAuthenticationScope,
 };
-use crate::ask_user::AskUserQuestionAnswer;
+use crate::ask_user::{
+    ASK_USER_FREE_TEXT_MAX_BYTES, ASK_USER_ID_MAX_BYTES, ASK_USER_QUESTIONS_MAX,
+    AskUserQuestionAnswer,
+};
 use crate::{PrincipalKind, PrincipalRef, SessionId};
 
-/// Largest decision reason, review feedback or typed answer, in bytes (of
-/// its JSON, for an answer).
+/// Largest decision reason or review feedback, in bytes.
 pub const DECISION_REASON_MAX_BYTES: usize = 4 * 1024;
+
+/// Largest typed answer of a decision ([`DecisionAnswer`]), in bytes of its
+/// JSON: 32 KiB.
+///
+/// It is sized for the largest set of answers the `ask_user` tool takes, so
+/// answers that are valid for their question set are never refused for
+/// their size. The JSON of that set is 17,741 bytes:
+///
+/// - The wrapper `{"kind":"ask_user","answers":[` and `]}` is 32 bytes.
+/// - A set has at most 10 questions and a person answers each at most once,
+///   so there are at most 10 entries, with 9 commas between them.
+/// - The largest entry is a written answer,
+///   `{"question_id":"ID","answer":{"kind":"free_text","text":"TEXT"}}`: 58
+///   bytes around the id and the text. A choice,
+///   `{"question_id":"ID","answer":{"kind":"choice","choice_id":"ID"}}`,
+///   holds a second id of at most 32 bytes instead of the text and is
+///   smaller.
+/// - A question id is at most 32 bytes of `a-z`, `0-9`, `_` and `-`, none of
+///   which JSON escapes.
+/// - A written answer is at most 280 bytes. JSON writes a quote, a
+///   backslash, a backspace, a tab, a line feed, a form feed and a carriage
+///   return as 2 bytes, and every other control character below U+0020 as
+///   6 (`\u0001`), so 280 one-byte control characters are 1,680 bytes;
+///   every other character is written as it is.
+///
+/// 32 + 10 x (58 + 32 + 6 x 280) + 9 = 17,741. The build fails when the
+/// tool's limits outgrow the bound.
+pub const DECISION_ANSWER_MAX_BYTES: usize = 32 * 1024;
+
+/// The JSON of the largest [`DecisionAnswer::AskUser`] that is valid for a
+/// question set, in bytes: the arithmetic of [`DECISION_ANSWER_MAX_BYTES`]
+/// over the tool's own limits.
+pub(super) const ASK_USER_ANSWER_JSON_MAX_BYTES: usize = 32
+    + ASK_USER_QUESTIONS_MAX * (58 + ASK_USER_ID_MAX_BYTES + 6 * ASK_USER_FREE_TEXT_MAX_BYTES)
+    + (ASK_USER_QUESTIONS_MAX - 1);
+
+// A change of the tool's limits that outgrows the answer's bound fails the
+// build here.
+const _: () = assert!(ASK_USER_ANSWER_JSON_MAX_BYTES <= DECISION_ANSWER_MAX_BYTES);
 
 /// The typed answer a person gave with an approving decision, for a kind
 /// that asks one. It is part of the decision's human evidence, so the
@@ -170,13 +211,15 @@ impl AttestedDecision {
     }
 
     /// The typed answer the person gave with this approving decision, for a
-    /// kind that asks one. Its JSON is at most 4 KiB.
+    /// kind that asks one. Its JSON is at most 32 KiB
+    /// ([`DECISION_ANSWER_MAX_BYTES`]), which holds every set of answers
+    /// that is valid for an `ask_user` question set.
     ///
     /// # Errors
     /// [`DecisionContractError::Invalid`] on a rejecting decision (a
     /// rejection answers nothing), [`DecisionContractError::TooLarge`] past
-    /// 4 KiB, and [`DecisionContractError::Encoding`] when the answer cannot
-    /// be encoded.
+    /// 32 KiB, and [`DecisionContractError::Encoding`] when the answer
+    /// cannot be encoded.
     pub fn with_answer(mut self, answer: DecisionAnswer) -> Result<Self, DecisionContractError> {
         if !self.approve {
             return Err(DecisionContractError::Invalid {
@@ -185,10 +228,10 @@ impl AttestedDecision {
         }
         let encoded = serde_json::to_vec(&answer)
             .map_err(|error| DecisionContractError::Encoding(error.to_string()))?;
-        if encoded.len() > DECISION_REASON_MAX_BYTES {
+        if encoded.len() > DECISION_ANSWER_MAX_BYTES {
             return Err(DecisionContractError::TooLarge {
                 what: "answer",
-                max_bytes: DECISION_REASON_MAX_BYTES,
+                max_bytes: DECISION_ANSWER_MAX_BYTES,
             });
         }
         self.answer = Some(answer);

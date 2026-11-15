@@ -90,17 +90,19 @@ Security, Upgrade and Changed.
   holder of `runtime.admin` where access rules are enforced and any person
   signed in where they are not, and only while adopting an agent they could
   see that had no declaration yet, and only toward an agent whose name
-  sorts after it. The effect on the other agent: under `identity_owned`
-  wiring custody it stops converging, its owner's later changes do not
-  become active, and it stops taking messages from its owner's next change
-  on; under the default custody nothing shows. Every such edge has this
-  effect, also one adopted with permission (see Upgrade and Fixed); what
-  the access check now closes is that a caller could cause it for an agent
-  it could not view. Affected: 0.9.11 through 0.9.14: the edge ends were not
-  checked at any of the tags v0.9.9, v0.9.10, v0.9.11, v0.9.12, v0.9.13 and
-  v0.9.14 (read from the code at each), and agents private to a person
-  exist from 0.9.11. What such an adoption left behind stays in the store:
-  see Upgrade.
+  sorts after it. The effect: such a caller could make an agent it cannot
+  view stop taking messages at that agent's owner's next change. Under
+  `identity_owned` wiring custody the other agent stops converging (at once
+  if it had not converged yet, otherwise from its owner's next change on),
+  its owner's later changes do not become active, and, if it had converged
+  before, it stops taking messages; under the default custody nothing
+  shows. Every such edge has this effect, also one adopted with permission
+  (see Upgrade and Fixed); what the access check now closes is that a
+  caller could cause it for an agent it could not view. Affected: 0.9.11
+  through 0.9.14: the edge ends were not checked at any of the tags v0.9.9,
+  v0.9.10, v0.9.11, v0.9.12, v0.9.13 and v0.9.14 (read from the code at
+  each), and agents private to a person exist from 0.9.11. What such an
+  adoption left behind stays in the store: see Upgrade.
 
 - The Console decides an agent for which no member is seated on the
   agent's own record (its profile as its role, and its labels) wherever a
@@ -257,22 +259,28 @@ Security, Upgrade and Changed.
   adopting agent's declaration and in the other agent's stored plan. No
   method removes it yet: a second adopt of either agent is refused, and a
   new declaration of the other agent does not drop it (read from the
-  source). Measured on a store that holds such an edge: the edge wires
-  nothing and adds no trust. When the other agent is under the default
-  wiring custody (`external_managed`) it converges as before, and its
-  owner's next change is committed and becomes active. When the other
-  agent is under `identity_owned` wiring custody, it reads `repair_blocked`
-  instead of converged from its next reconcile pass on, and a change its
-  owner makes after that is committed but does not become active
-  (measured). If it had converged before, it also refuses messages from its
-  owner's next change on (admission closed for identity convergence), and a
-  restart does not clear it (run on Meta 0.9.14). This is so for every edge
+  source). Retiring the adopting agent does not free the other one (run on
+  the published Meta 0.9.14). Measured on a store that holds such an edge:
+  the edge wires nothing and adds no trust. When the other agent is under
+  the default wiring custody (`external_managed`) it converges as before,
+  and its owner's next change is committed and becomes active. When the
+  other agent is under `identity_owned` wiring custody, it reads
+  `repair_blocked` instead of converged: at once if it had not converged
+  yet, otherwise from its owner's next change on. A change its owner makes
+  is then committed but does not become active, and if the agent had
+  converged before, it also refuses messages (admission closed for identity
+  convergence); a restart does not clear it. This is so for every edge
   another agent's declaration owns toward such an agent, also one adopted
-  with permission, in 0.8.26 through 0.9.14 (see Fixed; read from the
-  source). To find such edges, list the adopted declarations that own
-  wiring. The query is read-only; run it against a copy of the mob store
-  (in a gateway's state directory, the database `event_log.sqlite3`). It
-  was run on a store that holds such an edge:
+  with permission (run on the published Meta 0.9.14; 0.8.26 through 0.9.13
+  read from the source; see Fixed). The adopting agent itself reads
+  `repair_blocked` and refuses messages from its first reconcile pass,
+  whatever is at the other end of its edge (run on the published Meta
+  0.9.14). Not run: a gateway with an identity roster, Core's own
+  `rkat-rpc`, and versions before 0.9.14. To find such edges, list the
+  adopted declarations that own wiring. The query is read-only; run it
+  against a copy of the mob store (in a gateway's state directory, the
+  database `event_log.sqlite3`). It was run on a store that holds such an
+  edge:
 
   ```sql
   SELECT mob_id, agent_identity,

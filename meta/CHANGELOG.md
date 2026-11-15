@@ -1596,7 +1596,9 @@ Security, Upgrade and Changed.
     created at run time to another profile and a change of its runtime
     mode (`meta/identity/update`, the `identity_update` tool). The
     respawn, the profile move and the mode change are confirmed by tests;
-    the compact call's rebuilds are read from the source.
+    a completed `meta/compact_member` by one run; a call that times out,
+    and one that completes without compacting, rebuild the member by the
+    same step (read from the source; not run).
   - Still ends it: `meta/reset`, `meta/reset_all` and
     `meta/delete_identity`, which take a fresh session; a respawn of a
     member that is not served (it is retired and then woken, as in
@@ -1611,7 +1613,11 @@ Security, Upgrade and Changed.
     creator's reach, and neither does a respawn of the identity on this
     release (both by a run: a mob created and its creator respawned
     through the published 0.9.14 gateway, then this release on the same
-    state, then `meta/respawn` there). A mob the identity created after
+    state, then `meta/respawn` there). The same holds for a creator that
+    lost it by a completed `meta/compact_member` on 0.9.14, whose two
+    rebuilds retired and seated the member as that release's respawn did
+    (read from the source; the upgrade after such a call was not run). A
+    mob the identity created after
     its 0.9.14 respawn is in its reach, and stays there through its
     respawns on this release (read from the source). On a stock gateway
     the way found to end a mob that is out of its creator's reach is a
@@ -2037,9 +2043,11 @@ Security, Upgrade and Changed.
   `meta/compact_member` has the same cost on those releases (the RPC
   reference's `meta/compact_member` section). From this release a respawn
   of a served member keeps the identity's management of the mobs it created
-  (confirmed by tests and by a run; see Fixed), and each rebuild of
-  `meta/compact_member` takes the same step (read from the source; not
-  run). A reset: it ends the identity's session, and the mobs that session
+  (confirmed by tests and by a run; see Fixed), and a completed
+  `meta/compact_member` keeps it too (one run); a call that times out, and
+  one that completes without compacting, rebuild the member by the same
+  step (read from the source; not run). A reset: it ends the identity's
+  session, and the mobs that session
   owns end with it, no later than the gateway's next start (read from the
   source, not run). A `meta/compact_member` that failed has rebuilt the
   identity once before its maintenance turn, so on 0.9.9 through 0.9.14 the

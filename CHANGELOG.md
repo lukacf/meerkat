@@ -1779,8 +1779,9 @@ them.
   generation that created the mob out of the journal that build wrote. No
   host was upgraded in those runs, and 0.9.9 through 0.9.13 are read from
   the source. A respawn made through a Meerkat Meta gateway on 0.9.14
-  (`meta/respawn`, the Console's respawn) is not one of these steps and is
-  not covered: see "Not brought back" below. The session's create
+  (`meta/respawn`, the Console's respawn), and a completed
+  `meta/compact_member` there, are not among these steps and are not
+  covered: see "Not brought back" below. The session's create
   capability and its current role's tools decide each call as before.
   - Keeps the creator's management: `MobHandle::respawn_member`, once or
     many times; a declared role migration and a runtime-mode restamp of an
@@ -1811,7 +1812,13 @@ them.
     release on the same state; the Console's respawn makes the same call,
     read from the source). A further respawn of that agent on this release
     does not give them back either (run); the mobs it created after its
-    0.9.14 respawn are managed and stay so (read from the source). Those
+    0.9.14 respawn are managed and stay so (read from the source). A
+    completed `meta/compact_member` on 0.9.14 is the same case: each of its
+    two rebuilds retired the member and seated it again as that release's
+    respawn did (read from the source), and the agent then listed none of
+    its mobs there (a run on the published Meta 0.9.14); that the upgrade
+    does not give them back after such a call is read from the source too
+    (the upgrade after a 0.9.14 compact call was not run). Those
     mobs end as before, with the session that owns them (see the Upgrade
     notes, and Meerkat Meta's changelog, "Not brought back", for a Meta
     host).
@@ -2599,7 +2606,10 @@ them.
   mobs it created before that respawn, and the upgrade does not give them
   back: the agent lists none of them and its calls on them are refused
   (run for `meta/respawn`; see Fixed, "Not brought back", and Meerkat
-  Meta's changelog). A further respawn of that agent on 0.9.15 does not
+  Meta's changelog). A completed `meta/compact_member` on 0.9.14 leaves the
+  agent in the same state, and the upgrade does not give those mobs back
+  either (read from the source; the upgrade after such a call was not
+  run). A further respawn of that agent on 0.9.15 does not
   give them back either (run): a mob's record names the member generation
   that created it, and no later step reaches back past the 0.9.14 respawn.
   Mobs the agent created after its 0.9.14 respawn are not affected: it

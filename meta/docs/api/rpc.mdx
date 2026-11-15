@@ -4132,11 +4132,13 @@ For an identity that created mobs, a completed call has a cost of its own on
 0.9.9 through 0.9.14.
 After the call has completed there, the identity no longer lists a mob it created and its calls that name the mob are refused; the mobs' stores are kept (seen in a run on 0.9.14, and in a run on 0.9.15's code before a same-session successor kept that management).
 A call that fails after its first rebuild has the same cost on those releases (read from the source, not run).
-From 0.9.15 each rebuild takes the same-session step a respawn takes (read
-from the source; not run for this call), and an identity whose member is
-replaced by that step keeps its management of the mobs it created (confirmed
-for `meta/respawn` by tests and by a run). A member the same-session step
-does not serve still pays the cost.
+From 0.9.15 each rebuild takes the same-session step a respawn takes, and a
+completed call keeps the identity's management of the mobs it created (one
+run: after the call the identity listed its mob and its mob's members and
+checked a member, in the same process and after a gateway restart). A call
+that times out, and one that completes without compacting, rebuild the
+member by the same step (read from the source; not run). A member the
+same-session step does not serve still pays the cost.
 Before the call, have the identity retire the members of, or destroy, a mob
 it created whose members act on their own (not run).
 
@@ -4266,8 +4268,9 @@ For an identity that created mobs each clearing step has a cost of its own:
   stores stay. A completed `meta/compact_member` has the same cost on those
   releases (see the top of this section). From 0.9.15 a respawn of a member
   the same-session step serves keeps that management (confirmed by tests and
-  by a run), and each rebuild of `meta/compact_member` takes the same step
-  (read from the source; not run);
+  by a run), and a completed `meta/compact_member` keeps it too (one run); a
+  call that times out, and one that completes without compacting, rebuild
+  the member by the same step (read from the source; not run);
 - a reset: it ends the identity's session, and the mobs that session owns end
   with it, no later than the gateway's next start (read from the source, not
   run).

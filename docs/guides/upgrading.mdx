@@ -728,13 +728,15 @@ agent seated again since lists and manages none of the mobs it created; the
 mobs and their members go on running. The return to 0.9.15 restores its
 management with no call (one run). An agent that an earlier release retires
 and seats again while rolled back (a respawn through a 0.9.14 Meta gateway
-does so) is not restored by the return (by a run of such a respawn on
-0.9.14 followed by 0.9.15; the same after a rollback was not run), and a
-respawn on 0.9.15 does not restore it either (run).
+does so, and so does each rebuild of its `meta/compact_member`) is not
+restored by the return (for the respawn, by a run of it on 0.9.14 followed
+by 0.9.15; the same after a rollback was not run; for the compact call,
+read from the source), and a respawn on 0.9.15 does not restore it either
+(run).
 
-**Do:** no step before the rollback. While rolled back, do not respawn such
-an agent through Meta; have it manage its mobs before the rollback or after
-the return.
+**Do:** no step before the rollback. While rolled back, do not respawn or
+compact such an agent through Meta; have it manage its mobs before the
+rollback or after the return.
 
 **Operator instruction records past an earlier release's totals.** An
 earlier release bounds the mob as a whole at 64
@@ -2451,9 +2453,11 @@ compiling. A Meta probe that must keep the earlier rule checks
   those releases (see the `meta/compact_member` section of Meta's RPC
   reference). From 0.9.15 a respawn of a member the same-session step
   serves keeps the identity's management of the mobs it created (confirmed
-  by tests and by a run), and each rebuild of `compact_member` takes that
-  same step (read from the source; not run); a management lost on 0.9.9
-  through 0.9.14 is not brought back. A reset: it ends the identity's
+  by tests and by a run), and a completed `compact_member` keeps it too
+  (one run); a call that times out, and one that completes without
+  compacting, rebuild the member by the same step (read from the source;
+  not run). A management lost on 0.9.9 through 0.9.14 is not brought back.
+  A reset: it ends the identity's
   session, and the mobs that session owns end with it, no later than the
   gateway's next start (read from the source, not run). A
   `meta/compact_member` that failed has rebuilt the identity once before

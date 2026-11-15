@@ -388,16 +388,6 @@ them.
   LayerDecision schema that adaptive mob packs bundle does not carry the
   value, so the schema stays the released one.
 
-- TypeScript SDK (not measured by the gate): each form of the selector of
-  `MeerkatClient.inputState(sessionId, selector)` now forbids the other key:
-  `{ inputId: string }` gains `idempotencyKey?: never` and
-  `{ idempotencyKey: string }` gains `inputId?: never`. A call that passes
-  both keys no longer compiles, and at run time it throws `MeerkatError`
-  code `INVALID_ARGS` and sends nothing, where 0.9.14 sent the input id and
-  ignored the key: name the one you mean. A selector that names neither
-  (an untyped caller's) throws the same error, where 0.9.14 sent a selector
-  without a value. See Fixed.
-
 ### Added
 
 - `meerkat-runtime`, `meerkat-contracts`, `meerkat-rpc`,
@@ -456,7 +446,10 @@ them.
     resolves to the `WireQueuedInputRecall` JSON.
   - SDKs: Python `Session.recall_input(input_id=...)` or
     `(idempotency_key=...)`, TypeScript `session.recallInput({ inputId })` or
-    `({ idempotencyKey })`, Web `session.recallInput(inputId)`. Each
+    `({ idempotencyKey })`, Web `session.recallInput(inputId)`. The Python
+    and TypeScript selectors name exactly one of the two: both, or neither,
+    is refused before anything is sent (Python `ValueError`, TypeScript
+    `MeerkatError` code `INVALID_ARGS`). Each
     validates the answer on its `outcome` discriminator. The list of
     outcomes can grow: an outcome an SDK does not know is returned as it
     is, with no error, and a caller keeps it as it is. On `not_queued`,
@@ -2185,17 +2178,6 @@ them.
   with `-32602`, which the SDKs raise as `MeerkatError`.
   `mob/cancel_all_work` cancels all of a member's work. Only the texts
   changed; the method, its types and its error codes are as before.
-- TypeScript SDK: `client.inputState` and the new `session.recallInput` no
-  longer take a selector that names both `inputId` and `idempotencyKey`.
-  Such a selector was sent as the input id selector and the key was ignored
-  without an error (`inputState` through 0.9.14; `recallInput` is new in
-  this release). The selector's type now admits exactly one of the two, and
-  a selector that names both, or neither, is refused with `MeerkatError`
-  code `INVALID_ARGS` before anything is sent, where the Python SDK's
-  `input_state` and `recall_input` raise `ValueError`. A key that is
-  `undefined` or `null` is not named, so a selector that carries one such
-  key beside the other is sent as the other. The wire selector is as
-  before. See Breaking for `inputState`.
 - Release binaries: the Linux x86_64 release archives of `rkat`, `rkat-rpc`,
   `rkat-rest` and `rkat-mcp` registered no capability and no built-in skill.
   The capability list was empty on every surface (`rkat capabilities`,

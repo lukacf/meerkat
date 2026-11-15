@@ -157,36 +157,23 @@ describe("queued-input recall wrapper", () => {
   });
 });
 
-// The selector of `session/recall_input` and `session/input_status` is
-// one-of: it names the input by its input id or by its idempotency key. A
-// selector object that names both, or neither, is refused before anything is
-// sent. A key that is `undefined` or `null` is not named, as `None` is not
-// in the Python wrappers.
-describe("the input selector names exactly one of input id and idempotency key", () => {
+// The selector of `session/recall_input` is one-of: it names the input by
+// its input id or by its idempotency key. A selector object that names both,
+// or neither, is refused before anything is sent. A key that is `undefined`
+// or `null` is not named, as `None` is not in the Python wrapper.
+describe("the recall selector names exactly one of input id and idempotency key", () => {
   const recall = { outcome: "abandoned", input_id: INPUT_ID, attempt_count: 0 };
-  const state = { input_id: INPUT_ID, phase: "queued" };
   const canned = {
     "session/recall_input": { session_id: "s-1", recall },
-    "session/input_status": { state },
   };
   const wrappers = [
     {
       name: "Session.recallInput",
-      needs: "recallInput",
-      method: "session/recall_input",
       call: (client, selector) => sessionOver(client).recallInput(selector),
     },
     {
       name: "DeferredSession.recallInput",
-      needs: "recallInput",
-      method: "session/recall_input",
       call: (client, selector) => new DeferredSession(client, "s-1").recallInput(selector),
-    },
-    {
-      name: "MeerkatClient.inputState",
-      needs: "inputState",
-      method: "session/input_status",
-      call: (client, selector) => client.inputState("s-1", selector),
     },
   ];
   const refused = [
@@ -220,7 +207,7 @@ describe("the input selector names exactly one of input id and idempotency key",
     ],
   ];
 
-  for (const { name, needs, method, call } of wrappers) {
+  for (const { name, call } of wrappers) {
     for (const [label, selector] of refused) {
       it(`${name} refuses a selector that names ${label} and sends nothing`, async () => {
         const { client, calls } = fakeClient(canned);
@@ -229,7 +216,7 @@ describe("the input selector names exactly one of input id and idempotency key",
           assert.equal(error.code, "INVALID_ARGS");
           assert.equal(
             error.message,
-            `${needs} needs exactly one of selector.inputId and selector.idempotencyKey`,
+            "recallInput needs exactly one of selector.inputId and selector.idempotencyKey",
           );
           return true;
         });
@@ -241,15 +228,10 @@ describe("the input selector names exactly one of input id and idempotency key",
       it(`${name} sends the one selector for ${label}`, async () => {
         const { client, calls } = fakeClient(canned);
         await call(client, selector);
-        assert.deepEqual(calls, [{ method, params: { session_id: "s-1", selector: wire } }]);
+        assert.deepEqual(calls, [
+          { method: "session/recall_input", params: { session_id: "s-1", selector: wire } },
+        ]);
       });
     }
   }
-
-  it("MeerkatClient.inputState answers the stored state, or null for no match", async () => {
-    const found = fakeClient(canned);
-    assert.deepEqual(await found.client.inputState("s-1", { inputId: INPUT_ID }), state);
-    const missing = fakeClient({ "session/input_status": {} });
-    assert.equal(await missing.client.inputState("s-1", { idempotencyKey: "inbox:msg-1" }), null);
-  });
 });

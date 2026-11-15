@@ -811,22 +811,21 @@ function toolGrantSubject(
 }
 
 /**
- * The wire selector of `session/input_status` and `session/recall_input`.
- * It names the input by exactly one of its input id and its idempotency
- * key; a key that is `undefined` or `null` is not named. Throws
- * `INVALID_ARGS`, before anything is sent, for a selector that names both
- * or neither. `method` is the SDK method the message names.
+ * The wire selector of `session/recall_input`. It names the input by
+ * exactly one of its input id and its idempotency key; a key that is
+ * `undefined` or `null` is not named. Throws `INVALID_ARGS`, before
+ * anything is sent, for a selector that names both or neither.
  */
-function inputSelectorToWire(
-  method: string,
-  selector: { inputId?: string | null; idempotencyKey?: string | null },
-): { by: "input_id" | "idempotency_key"; value: string } {
+function recallSelectorToWire(selector: {
+  inputId?: string | null;
+  idempotencyKey?: string | null;
+}): { by: "input_id" | "idempotency_key"; value: string } {
   const inputId = selector?.inputId ?? undefined;
   const idempotencyKey = selector?.idempotencyKey ?? undefined;
   if ((inputId === undefined) === (idempotencyKey === undefined)) {
     throw new MeerkatError(
       "INVALID_ARGS",
-      `${method} needs exactly one of selector.inputId and selector.idempotencyKey`,
+      "recallInput needs exactly one of selector.inputId and selector.idempotencyKey",
     );
   }
   return inputId !== undefined
@@ -1896,19 +1895,18 @@ export class MeerkatClient {
    * Read an input's stored runtime state (terminal outcome, run
    * association) by canonical input id or by the caller-supplied
    * idempotency key. Returns `null` when no input matches — the durable
-   * reconciliation query for interrupted work after a host restart. Throws
-   * `INVALID_ARGS`, before anything is sent, unless the selector names
-   * exactly one of `inputId` and `idempotencyKey`.
+   * reconciliation query for interrupted work after a host restart.
    */
   async inputState(
     sessionId: string,
-    selector:
-      | { inputId: string; idempotencyKey?: never }
-      | { idempotencyKey: string; inputId?: never },
+    selector: { inputId: string } | { idempotencyKey: string },
   ): Promise<Record<string, unknown> | null> {
     const params: RpcSessionInputStateParams = {
       session_id: sessionId,
-      selector: inputSelectorToWire("inputState", selector),
+      selector:
+        "inputId" in selector
+          ? { by: "input_id", value: selector.inputId }
+          : { by: "idempotency_key", value: selector.idempotencyKey },
     };
     const result = await this.request("session/input_status", params);
     return (result.state as Record<string, unknown> | undefined) ?? null;
@@ -5338,9 +5336,9 @@ export class MeerkatClient {
 
   /**
    * @internal Withdraw one input of the session, only while it is still
-   * queued. The selector is `session/input_status`'s: it names exactly one
-   * of `inputId` and `idempotencyKey`, and one that names both or neither
-   * throws `INVALID_ARGS` before anything is sent.
+   * queued. The selector has `session/input_status`'s wire form. It names
+   * exactly one of `inputId` and `idempotencyKey`, and one that names both
+   * or neither throws `INVALID_ARGS` before anything is sent.
    */
   async _recallInput(
     sessionId: string,
@@ -5350,7 +5348,7 @@ export class MeerkatClient {
   ): Promise<RecallInputResult> {
     const result = await this.request("session/recall_input", {
       session_id: sessionId,
-      selector: inputSelectorToWire("recallInput", selector),
+      selector: recallSelectorToWire(selector),
     });
     const context = "Invalid session/recall_input response";
     if (typeof result.session_id !== "string") {

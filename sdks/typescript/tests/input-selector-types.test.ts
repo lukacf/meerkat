@@ -1,5 +1,5 @@
-// The selector of `recallInput` and `inputState` names the input by its
-// input id or by its idempotency key, never by both and never by neither.
+// The selector of `recallInput` names the input by its input id or by its
+// idempotency key, never by both and never by neither.
 import type { DeferredSession, MeerkatClient, Session } from "../src/index.js";
 
 declare const client: MeerkatClient;
@@ -13,8 +13,6 @@ void session.recallInput({ inputId: INPUT_ID });
 void session.recallInput({ idempotencyKey: KEY });
 void deferred.recallInput({ inputId: INPUT_ID });
 void deferred.recallInput({ idempotencyKey: KEY });
-void client.inputState("s-1", { inputId: INPUT_ID });
-void client.inputState("s-1", { idempotencyKey: KEY });
 void client._recallInput("s-1", { inputId: INPUT_ID });
 void client._recallInput("s-1", { idempotencyKey: KEY });
 
@@ -23,16 +21,12 @@ void session.recallInput({ inputId: INPUT_ID, idempotencyKey: KEY });
 // @ts-expect-error A selector names one of the two, not both.
 void deferred.recallInput({ inputId: INPUT_ID, idempotencyKey: KEY });
 // @ts-expect-error A selector names one of the two, not both.
-void client.inputState("s-1", { inputId: INPUT_ID, idempotencyKey: KEY });
-// @ts-expect-error A selector names one of the two, not both.
 void client._recallInput("s-1", { inputId: INPUT_ID, idempotencyKey: KEY });
 
 // @ts-expect-error A selector names one of the two.
 void session.recallInput({});
 // @ts-expect-error A selector names one of the two.
 void deferred.recallInput({});
-// @ts-expect-error A selector names one of the two.
-void client.inputState("s-1", {});
 // @ts-expect-error A selector names one of the two.
 void client._recallInput("s-1", {});
 
@@ -42,4 +36,4 @@ const both = { inputId: INPUT_ID, idempotencyKey: KEY };
 // @ts-expect-error A selector names one of the two, not both.
 void session.recallInput(both);
 // @ts-expect-error A selector names one of the two, not both.
-void client.inputState("s-1", both);
+void deferred.recallInput(both);

@@ -28,16 +28,20 @@ Security, Upgrade and Changed.
   `meta/mob_announcements/declarations/apply` refuses a declared
   subscription of one member that the applied declarations do not already
   hold unchanged when it names a member that is not seated, or is private
-  to another person: `-32047` `unknown_member`, and nothing is applied. A
-  member this gateway does not serve, and a member of a peer that cannot
-  be used, are not seated. While the member's check cannot be read, the
-  apply is refused for now: `-32047` `native_unavailable`, nothing is
-  applied, and the same apply can be made again later.
-  Seat the member first, or apply the declarations over the stdio gateway
-  (or declare them in the gateway's options or its sidecar), where a
-  subscription for a member that is not seated yet is kept pending. A
-  subscription the applied declarations already hold unchanged is carried
-  as it is, and role-selected subscriptions are declared as before.
+  to another person: `-32047` `unknown_member`, and nothing is applied.
+  0.9.14 kept such a subscription pending until its member was seated. A
+  member this gateway does not serve, and a member of a peer that cannot be
+  used, are not seated. While the member's check cannot be read, the apply
+  is refused for now: `-32047` `native_unavailable`, nothing is applied, and
+  the same apply can be made again once the member's check can be read (for
+  a member of a mob that does not run: once that mob runs). Seat the member
+  first, or apply the declarations over the stdio gateway (or declare them
+  in the gateway's options or its sidecar), where a subscription for a
+  member that is not seated yet is kept pending. A subscription the applied
+  declarations already hold unchanged is carried as it is, and role-selected
+  subscriptions are declared as before. A subscription put over the stdio
+  gateway for a member of a mob that does not run is refused there too
+  (`native_unavailable`).
 
 - Behaviour-only (not measured by the gate): on the Console,
   `meta/mob_announcements/sources/put` refuses a source that names, in an
@@ -47,13 +51,15 @@ Security, Upgrade and Changed.
   member this gateway does not serve, and a member of a peer that cannot
   be used, are not seated. While a named member's check cannot be read,
   the put is refused for now: `-32047` `native_unavailable`, nothing is
-  written, and the same put can be made again later. The
+  written, and the same put can be made again once the member's check can be
+  read (for a member of a mob that does not run: once that mob runs). The
   same holds for a source declared through
   `meta/mob_announcements/declarations/apply` on the Console, unless the
-  applied declarations already hold it unchanged. Seat the member first, or
-  put or declare the source over the stdio gateway (or in the gateway's
-  options or its sidecar), which stores it as before. A member of a mob on
-  another gateway is named as before.
+  applied declarations already hold it unchanged. 0.9.14 stored a source
+  that named a member not seated yet. Seat the member first, or put or
+  declare the source over the stdio gateway (or in the gateway's options or
+  its sidecar), which stores it as before. A member of a mob on another
+  gateway is named as before.
 
 - Behaviour-only (not measured by the gate): on a Console that can identify
   a person, `meta/schedule/list`, `update`, `pause`, `resume` and `delete`
@@ -156,6 +162,28 @@ Security, Upgrade and Changed.
   declare the edge through the stdio gateway.
 
 ### Security
+
+- The Console's mob announcement methods (`meta/mob_announcements/*`) check
+  the caller's access to every agent a request or a stored record names;
+  closes cases in which a request could act on, or be shown, an agent the
+  caller may not see. Who could make such a request: on a Console where
+  access rules are enforced, a holder of `runtime.admin` who is not an
+  access administrator; on a Console where they are not, any caller the
+  Console serves (with sign-in, any person signed in). Affected: 0.9.11
+  through 0.9.14. The methods are served without their caller's view in
+  every release from 0.9.9 through 0.9.14 (the handler is one and the same
+  file in each of them; the effects were run on unreleased code whose
+  handler is byte for byte the released one; not run on a released version);
+  agents private to a person (`console.private_to`) exist from 0.9.11, and
+  in 0.9.9 and 0.9.10 a holder of `runtime.admin` is meant to reach every
+  agent through these methods. Upgrading alone does not undo it. The upgrade
+  removes nothing, and a subscription that was recorded before the upgrade
+  for an agent private to another person keeps delivering into that agent
+  until the host cancels it. REQUIRED host step after the upgrade: review
+  every live mob announcement subscription the host cannot account for from
+  its own records, and have the owner of each agent private to a person say
+  which of that agent's subscriptions to keep. See Upgrade for the host's
+  step.
 
 - The Console's request entry points now refuse malformed parameters. This
   closes a case in which a request could be served without the access check
@@ -380,6 +408,67 @@ Security, Upgrade and Changed.
 
 ### Upgrade
 
+- Required host step after upgrading a gateway that serves mob announcements:
+  review every live mob announcement subscription the host cannot account for
+  from its own records, and have the owner of each agent private to a person
+  (`console.private_to`) say which of that agent's to keep. The upgrade
+  cancels none, and a subscription keeps delivering until the host cancels it.
+  While live subscriptions deliver into agents private to a person, every
+  start logs one WARN line under the target
+  `meerkat_meta::mob_announcements::private_member_subscriptions` with two
+  counts and no name.
+
+  1. All live subscriptions, page by page, over the stdio gateway, where the
+     host is shown every agent:
+
+         {"jsonrpc":"2.0","id":1,"method":"meta/mob_announcements/subscriptions/list","params":{"limit":256}}
+
+     and for the next page add `"after": "<the last row's id>"` until a page
+     holds fewer than 256 rows. Keep the rows whose `state` is `active` or
+     `paused`. Take out only the rows the host can account for from its own
+     records (the ones its own declarations hold:
+     `meta/mob_announcements/declarations/get` lists them by id; and the puts
+     its own applications made, where it has a record of them). Every row it
+     cannot account for is on the list.
+  2. A narrowing aid for the order of the review, never a filter of the list:
+     the private agents of the gateway's own mob. Read the roster
+     (`meta/list_members`; each row carries `labels`; `meta/identity/get`
+     answers one agent's `labels`) and mark the rows of step 1 whose
+     `member.mob_id` is the gateway's mob and whose `member.identity` is an
+     agent whose labels carry `console.private_to`: take those to the agents'
+     owners first. A row whose `member.mob_id` is another mob hosted here (a
+     mob an agent created) cannot be marked this way: these calls do not read
+     that mob's roster. The start line does read it, so its first count can be
+     larger than the number of rows marked here. Do not try to match the
+     count: review every row of the list.
+  3. One more column, a help for the order and nothing more: whether the row's
+     `id` has the form the agent's own subscription tool gives,
+     `m-<16 hex digits>-<name>` (the first 16 hex digits of the SHA-256 of the
+     member's key, then the name the agent chose). The form is computable from
+     the mob id and the agent's name, so it does not prove who made a
+     subscription, and a row without it may be one the host itself made for
+     the agent. The second count of the start line is the count of rows
+     without the form among the ones it counts.
+  4. Cancel a subscription the owner does not keep:
+
+         {"jsonrpc":"2.0","id":2,"method":"meta/mob_announcements/subscriptions/cancel","params":{"operation_id":"cancel-found","subscription_id":"sub-found","expected_revision":1}}
+
+     with the row's `id` as `subscription_id`, its `revision` as
+     `expected_revision`, and an `operation_id` of the host's own. It answers
+     the subscription as cancelled and the batches that still hold its
+     announcements.
+  5. Check: an announcement made afterwards is not captured for it, and
+     `meta/mob_announcements/deliveries/list` with the agent as `member` shows
+     no delivery after the ones made before the cancel.
+  6. Who made a subscription through the Console: the Console audit log
+     (`meta/console/audit`, in Meta from 0.9.11) has one row per Console
+     change with its caller and, among the row's identifiers, the
+     subscription's id, for as long as it keeps the row (by default 20000 rows
+     per record set and none older than 365 days; across restarts only where
+     the gateway's metadata store keeps its realm documents: a read answers
+     `retention`: `durable` or `process`). A subscription made over the stdio
+     gateway or by an agent's own tool has no row there.
+
 - If you run a client of your own against the Console's request entry
   points (`POST /console/rpc`, `/console/rpc/multipart`), check that it
   sends each request's parameters as the RPC reference documents them. A
@@ -417,8 +506,8 @@ Security, Upgrade and Changed.
   `rkat-rpc`, and versions before 0.9.14. To find such edges, list the
   adopted declarations that own wiring. The query is read-only; run it
   against a copy of the mob store (in a gateway's state directory, the
-  database `event_log.sqlite3`). It was run on a store that holds such an
-  edge:
+  database `event_log.sqlite3`). It was run on a store a 0.9.14 gateway
+  wrote, which holds such an edge:
 
   ```sql
   SELECT mob_id, agent_identity,
@@ -482,7 +571,23 @@ Security, Upgrade and Changed.
   announcement source through the Console: a declared subscription for a
   member that is not seated yet, and a source that names such a member, are
   refused there (see Breaking). Seat the member first, or use the stdio
-  gateway.
+  gateway. On the Console, `declarations/apply` and `sources/put` refuse
+  with `native_unavailable` while a named member's check cannot be read, and
+  the same request is judged as any other once it can. For a member of a mob
+  hosted here that does not run, that is once the mob runs again. A mob held
+  until its owner resolves runs again when the session of the agent that
+  created it is restored (the gateway looks at its held mobs again at its
+  next pass); if that agent is archived the mob is torn down instead, and
+  its members are then answered as not seated. A quarantined mob is listed
+  with its `class` under `quarantined_mobs` in `meta/status`: a
+  `store_unavailable` mob is restored again by the next call that addresses
+  it through the runtime and by the next start; for `store_unreadable` and
+  `resume_refused`, repair the mob's store and restart the gateway (see
+  Meerkat's mobs guide, "Quarantined mobs and degraded members"). The
+  refusal itself retries nothing. Meanwhile the host can declare the same
+  subscription or source over the stdio gateway (or in the gateway's options
+  or its sidecar): a declared subscription is kept pending there as before,
+  and a source is stored as before.
 
 - Hosts whose customizer has side effects: see Known limitations, respawn
   during a pending role move.
@@ -1829,12 +1934,14 @@ Security, Upgrade and Changed.
   whose pages are filled from the other rows. An id that such a record
   holds is answered as taken. An answer about a source, and a refusal, name
   no such agent. A declarations apply leaves the declared subscriptions of
-  such agents as they are. A member is judged as the agent the view speaks
-  of when this gateway's runtime holds its mob; every member is judged
-  while that cannot be said, and only a member of a mob that is positively
-  another gateway's (one the contact directory files a peer under) is
-  judged as itself. The stdio gateway, whose caller is the host, answers as
-  before.
+  such agents as they are. A role-selected subscription takes no agent
+  private to a person; a source's role or label audience grant admits such
+  an agent only to subscribe itself (read from the code, not run). A member
+  is judged as the agent the view speaks of when this gateway's runtime
+  holds its mob; every member is judged while that cannot be said, and only
+  a member of a mob that is positively another gateway's (one the contact
+  directory files a peer under) is judged as itself. The stdio gateway,
+  whose caller is the host, answers as before.
 
 - At every start, a gateway with mob announcements logs one WARN line
   under the target
@@ -1842,7 +1949,8 @@ Security, Upgrade and Changed.
   live subscriptions deliver into agents private to a person
   (`console.private_to`): how many there are (active or paused), and how
   many of those do not have the id form the agent's own tool gives. The
-  line names no agent and no subscription.
+  line names no agent and no subscription. See Upgrade for the required host
+  step.
 
 - Meerkat reserves the mob id form `council--...` for temporary councils, so
   a mob create under such an id through Meta's mob tools is refused as an

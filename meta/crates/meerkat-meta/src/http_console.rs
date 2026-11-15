@@ -4102,6 +4102,10 @@ mod console_side_chat_tests;
 mod console_private_side_chat_tests;
 
 #[cfg(test)]
+#[path = "console_private_member_schedule_end_tests.rs"]
+mod console_private_member_schedule_end_tests;
+
+#[cfg(test)]
 #[path = "console_private_audience_tests.rs"]
 mod console_private_audience_tests;
 

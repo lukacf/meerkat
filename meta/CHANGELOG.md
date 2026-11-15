@@ -450,7 +450,7 @@ Security, Upgrade and Changed.
   descriptions, where a note that names the agent can be given in full. A
   later member of that name that has the memory tool can also change or
   remove what was stored, and the person who stored it can lose sight of it
-  in the Console. Affects 0.9.11 through 0.9.15.
+  in the Console. Affects 0.9.11 through this release.
 
   Until a fix, on such a gateway leave agent memory out (do not set
   `runtime_options.agent_memory`) and restart. Leaving agent memory out
@@ -467,6 +467,7 @@ Security, Upgrade and Changed.
   off the roster and declaring it again does not. With agent memory on,
   under any of the narrower settings below, a reset does not help: the agent
   is built with the list again and is given the notes again on its turns.
+
   Three narrower settings each close a part.
   `agent_memory.per_turn_injection: "off"` stops the notes that are added to
   agents' turns, for every agent of the gateway, and nothing else: an agent
@@ -492,8 +493,9 @@ Security, Upgrade and Changed.
   them whole in the Console. Before an agent is registered or created, an
   administrator looks for its name in the memory panel. What a member's tool
   changed or removed is kept in the store, marked as superseded or removed,
-  and is not deleted. A fix is planned as the first change of the next
-  release.
+  and is not deleted.
+
+  A fix is planned as the first change of the next release.
 
 ### Upgrade
 

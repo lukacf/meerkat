@@ -29623,22 +29623,27 @@ impl MobActor {
             session,
             member,
             wiring_custody,
+            owned_wiring,
             ..
         } = &intent_record.intent
         else {
             unreachable!("absent intent was refused at the recovery-slice boundary")
         };
-        let desired_incident_wiring = match &intent_record.retirement_plan {
-            crate::identity::IdentityRetirementPlan::Targets {
-                incident_wiring, ..
-            } => incident_wiring,
-            crate::identity::IdentityRetirementPlan::NoKnownRealization => {
-                return Err(MobError::Internal(
-                    "present identity intent is missing its store-sealed incident wiring plan"
-                        .to_string(),
-                ));
-            }
-        };
+        // The store-sealed plan's incident wiring is the union of every
+        // desired edge that touches this identity, the edges another
+        // identity's declaration owns included: cleanup targets, not this
+        // identity's obligation. The pass still requires the plan, and holds
+        // the identity to the edges its own intent owns; an edge's owner is
+        // held to it, both endpoints' trust included, by the owner's pass.
+        if matches!(
+            &intent_record.retirement_plan,
+            crate::identity::IdentityRetirementPlan::NoKnownRealization
+        ) {
+            return Err(MobError::Internal(
+                "present identity intent is missing its store-sealed incident wiring plan"
+                    .to_string(),
+            ));
+        }
 
         // Converged steady state must not reload the session document: the
         // cached witness substitutes the expensive read while the sealed
@@ -29681,7 +29686,7 @@ impl MobActor {
         #[cfg(not(feature = "runtime-adapter"))]
         let member_has_active_work = false;
         let wiring_observation = self
-            .observe_identity_wiring_exact(identity, *wiring_custody, desired_incident_wiring)
+            .observe_identity_wiring_exact(identity, *wiring_custody, owned_wiring)
             .await;
         let normalized_tombstone = intent_record.tombstone_generation.unwrap_or(0);
         let session_creation_slot = IdentityOperationSlot::SessionCreationConsumed {

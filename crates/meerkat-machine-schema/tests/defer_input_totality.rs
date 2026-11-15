@@ -30,7 +30,10 @@
 //! run failed, its cause kind is a failed apply, its apply failure cause is
 //! `RequestRefused`), for a sweep that is not a cancellation's, and only
 //! when the input is absent from every live input index. An untracked input
-//! of any other failed batch stays a loud rejection.
+//! of any other failed batch stays a loud rejection. The arm names no run:
+//! a sweep that is not a cancellation's carries none. It is bound to the run
+//! terminal the machine holds, which is sound because each sweep directly
+//! follows its own run's persisted terminal, before any other run starts.
 //!
 //! This test pins all four arms: removing a no-op, absorbing corruption, or
 //! widening archived admission must remain a deliberate, reviewed change.

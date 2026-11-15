@@ -1617,10 +1617,13 @@ Security, Upgrade and Changed.
   and whoever mounted it shows and answers them. A tool of that name from
   an MCP server the member's profile configures is not kept: it and the
   stock tool are offered by neither, and the member has no tool of that
-  name (see Breaking and Known limitations). Every other member of a
-  runtime is offered the tool, unless it is denied it: a profile that lists
-  `ask_user` in `tools.deny` keeps it from its members, whose model is not
-  offered it.
+  name (see Breaking and Known limitations). A member of a host that
+  installs a member registration hook
+  (`member_runtime_registration_hook`) gets none either: that host decides
+  each member's prepared tool surface whole, so the member carries only the
+  tools its build was asked for. Every other member of a runtime is offered
+  the tool, unless it is denied it: a profile that lists `ask_user` in
+  `tools.deny` keeps it from its members, whose model is not offered it.
   `meta/gating/questions` lists the open sets, soonest deadline first: all
   of them on the stdio gateway, and on the Console (with `gating.view`) the
   ones whose asking agent the caller may view. A set is answered through

@@ -56,6 +56,13 @@ guides give the conditional wording for Connect 0.9.14.
   through 0.9.14 hold tools built with `rustix` 1.1.5; the kits are rebuilt
   at the next Connect release.
 
+### Known limitations
+
+- Agents hosted by Connect are not offered Meta's `ask_user` tool in 0.9.15,
+  as in 0.9.14. Meta 0.9.15 offers the tool to the members of its own
+  gateways; a host that decides its members' tool surface itself, as
+  Connect's native host does, is given no stock `ask_user`.
+
 ## [0.9.14] - 2026-11-11
 
 Meerkat Connect 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14

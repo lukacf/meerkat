@@ -1423,9 +1423,17 @@ Security, Upgrade and Changed.
     confirmed by tests; the others are read from the source.
   - Not brought back: a mob whose creator lost its management on 0.9.14
     stays as it is. Upgrading does not bring the mob back into its
-    creator's reach. On a stock gateway the way found to end it is a
+    creator's reach, and neither does a respawn of the identity on this
+    release (both by a run: a mob created and its creator respawned
+    through the published 0.9.14 gateway, then this release on the same
+    state, then `meta/respawn` there). A mob the identity created after
+    its 0.9.14 respawn is in its reach, and stays there through its
+    respawns on this release (read from the source). On a stock gateway
+    the way found to end a mob that is out of its creator's reach is a
     reset or a delete of the identity, followed by the gateway's next
-    start (read from the source).
+    start (read from the source): the identity's conversation ends, and
+    every mob its session owns, the ones it still manages among them, is
+    removed with its members and its store.
 
 - A name an agent holds through its record in the mob's identity store
   that the host's roster lists too (the host adopted the agent into the

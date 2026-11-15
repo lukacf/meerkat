@@ -775,9 +775,20 @@ them.
   went on running. A same-session successor now keeps that management,
   through any number of such steps, in the same process and after a restart;
   the steps below say which changes of a member keep it and which end it.
-  Mobs created before this release are covered without any call. The
-  session's create capability and its current role's tools decide each call
-  as before.
+  A mob created on an earlier release is covered with no call when its
+  creator was replaced there by these same steps. On 0.9.9 through 0.9.14
+  four steps write the two journal rows this release follows:
+  `MobHandle::respawn_member` (run), a declared role migration (run), a
+  runtime-mode restamp (run), and `MobHandle::respawn` of an identity
+  entry's member (run; that `mob/respawn` makes this call is read from the
+  source). Each run is of 0.9.14: a build of the 0.9.14 tag made the step,
+  and this release's reader answered the successor's chain from the
+  generation that created the mob out of the journal that build wrote. No
+  host was upgraded in those runs, and 0.9.9 through 0.9.13 are read from
+  the source. A respawn made through a Meerkat Meta gateway on 0.9.14
+  (`meta/respawn`, the Console's respawn) is not one of these steps and is
+  not covered: see "Not brought back" below. The session's create
+  capability and its current role's tools decide each call as before.
   - Keeps the creator's management: `MobHandle::respawn_member`, once or
     many times; a declared role migration and a runtime-mode restamp of an
     identity entry's member, a store-owned identity's profile move and
@@ -797,9 +808,20 @@ them.
     read, so its successor keeps nothing, as before.
   - Not brought back: a creator that was retired and seated again on its
     session before the upgrade stays without its management of the mobs it
-    created; upgrading does not give back a management lost that way. Those
+    created; upgrading does not give back a management lost that way. A
+    respawn through a Meerkat Meta gateway on 0.9.14 is that case: Meta
+    0.9.14 respawned an agent by retiring its member and seating it again
+    on its session (`meta/respawn`, the Console's respawn), not by the
+    same-session step. After the upgrade such an agent still lists none of
+    the mobs it created before that respawn, and its calls on them are
+    refused (run for `meta/respawn`: the published Meta 0.9.14, then this
+    release on the same state; the Console's respawn makes the same call,
+    read from the source). A further respawn of that agent on this release
+    does not give them back either (run); the mobs it created after its
+    0.9.14 respawn are managed and stay so (read from the source). Those
     mobs end as before, with the session that owns them (see the Upgrade
-    notes).
+    notes, and Meerkat Meta's changelog, "Not brought back", for a Meta
+    host).
   The 0.9.4 Known limitation about a member "reset to its next generation,
   over the same session" described this case; it no longer applies to a
   same-session successor.
@@ -1385,10 +1407,31 @@ them.
 
 ### Upgrade notes
 
-- A member that created mobs with the agent mob tools and was then replaced
-  by a same-session successor (see Fixed) manages those mobs again after the
-  upgrade, with no call: it lists them and its calls on them are admitted.
-  The upgrade does not bring back the management of a creator that was
+- A member that created mobs with the agent mob tools on an earlier release
+  and was replaced there by a same-session successor manages those mobs
+  again after the upgrade, with no call: it lists them and its calls on them
+  are admitted. The steps of 0.9.9 through 0.9.14 that leave such a
+  successor are Meerkat's own: `MobHandle::respawn_member` (run), a
+  declared role migration (run), a runtime-mode restamp (run), and
+  `MobHandle::respawn` of an identity entry's member (run), the call behind
+  `mob/respawn` (read from the source). The runs are of 0.9.14; Fixed says
+  what they cover.
+  A respawn made through a Meerkat Meta gateway on 0.9.14 (`meta/respawn`,
+  the Console's respawn) is NOT one of them. It leaves the agent without the
+  mobs it created before that respawn, and the upgrade does not give them
+  back: the agent lists none of them and its calls on them are refused
+  (run for `meta/respawn`; see Fixed, "Not brought back", and Meerkat
+  Meta's changelog). A further respawn of that agent on 0.9.15 does not
+  give them back either (run): a mob's record names the member generation
+  that created it, and no later step reaches back past the 0.9.14 respawn.
+  Mobs the agent created after its 0.9.14 respawn are not affected: it
+  manages them, and keeps them through its respawns on 0.9.15 (read from
+  the source). What is left for the earlier mobs is to end them: a reset or
+  a delete of the agent (`meta/reset`, `meta/delete_identity`), then the
+  gateway's next start (read from the source). That ends the agent's
+  conversation, and every mob its session owns, the ones it still manages
+  among them, is removed with its members and its store.
+  The upgrade does not bring back the management of any creator that was
   retired and seated again on its session before it: such a mob stays
   unlisted for its creator and goes on running until the session that owns
   it is archived (a reset or a removal of the member) and the host starts

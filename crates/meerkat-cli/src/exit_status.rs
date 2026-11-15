@@ -1202,6 +1202,127 @@ mod tests {
         assert_eq!(failure_exit_status(&error), crate::EXIT_ERROR);
     }
 
+    /// A provider sign-in that needs to be renewed (`user_reauth_required`,
+    /// what a Copilot mint returns when its model listing refused the token
+    /// twice) exits 1 either way. A build that meets it is the typed
+    /// provider-auth session error: its document is `INTERNAL_ERROR` with
+    /// the typed data as details. A running session's turn that meets it is
+    /// a failed turn: its document is `PROVIDER_ERROR` with the typed turn
+    /// error, not retryable (an abandoned input without its error is an
+    /// untyped failure: `INTERNAL_ERROR`, no details). None is the exit 2
+    /// `INVALID_PARAMS` of a refused `reasoning_effort` level, and none says
+    /// `retryable: true`.
+    #[test]
+    fn a_sign_in_that_must_be_renewed_exits_1_with_its_typed_document() {
+        let build = crate::session_err_to_anyhow(SessionError::provider_auth_failure(
+            meerkat_core::service::SessionProviderAuthFailure {
+                kind: meerkat_core::AuthErrorKind::UserReauthRequired,
+                provider: meerkat_core::Provider::OpenAI,
+                realm_id: Some(meerkat_core::RealmId::parse("global").unwrap()),
+                binding_id: Some(meerkat_core::BindingId::parse("copilot_openai").unwrap()),
+            },
+        ));
+        println!(
+            "CLI, a build that needs a new sign-in: exit status {}, stderr `Error: {build}`, \
+             --output json document:\n{}",
+            failure_exit_status(&build),
+            serde_json::to_string_pretty(&failure_document(&build)).unwrap()
+        );
+        assert_eq!(failure_exit_status(&build), crate::EXIT_ERROR);
+        assert_eq!(failure_exit_status(&build), 1);
+        assert_eq!(
+            failure_error_code(&build),
+            Some(ErrorCode::InternalError),
+            "the typed owner's transport code"
+        );
+        assert_eq!(
+            failure_document_json(&build),
+            serde_json::json!({
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "category": "internal",
+                    "message": "Session service error: provider authentication failed: \
+                                provider=openai kind=user_reauth_required \
+                                binding=global/copilot_openai",
+                    "details": {
+                        "kind": "user_reauth_required",
+                        "provider": "openai",
+                        "realm_id": "global",
+                        "binding_id": "copilot_openai",
+                        "agent_build_failure_cause": "LlmIdentityUnresolvable",
+                        "cause": "provider_auth",
+                    },
+                }
+            })
+        );
+
+        // The turn of a running session: the authentication failure its
+        // provider request's authorization fails with.
+        let agent_error = AgentError::llm(
+            "openai",
+            meerkat_core::error::LlmFailureReason::AuthError,
+            "Authentication failed: user reauth required",
+        );
+        let turn_error = meerkat_core::TurnErrorMetadata::from_agent_error(&agent_error)
+            .expect("an LLM failure has turn error metadata");
+        let reason = agent_error.to_string();
+        let failed_turn = abandoned_turn(&reason, turn_error.clone());
+        println!(
+            "CLI, a turn that needs a new sign-in (failed turn): exit status {}, \
+             stderr `Error: {failed_turn}`, --output json document:\n{}",
+            failure_exit_status(&failed_turn),
+            serde_json::to_string_pretty(&failure_document(&failed_turn)).unwrap()
+        );
+        assert_eq!(failure_exit_status(&failed_turn), crate::EXIT_ERROR);
+        let document = failure_document_json(&failed_turn);
+        assert_eq!(document["error"]["code"], "PROVIDER_ERROR");
+        assert_eq!(document["error"]["category"], "provider");
+        assert_eq!(
+            document["error"]["details"],
+            serde_json::json!({
+                "error": {
+                    "kind": "llm_failure",
+                    "terminal": true,
+                    "outcome": "failed",
+                    "detail": "Authentication failed: user reauth required",
+                    "provider": "openai",
+                    "retryable": false,
+                    "reason": {"reason_type": "llm_auth_error"},
+                }
+            })
+        );
+
+        let abandoned = match crate::completion_outcome_to_cli_runtime_turn_result(
+            meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                reason: reason.clone(),
+                error: turn_error,
+            },
+            &SessionId::new(),
+            &meerkat_core::connection::RealmId::parse("cli-exit").unwrap(),
+            false,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("an abandoned completion is a failure"),
+        };
+        println!(
+            "CLI, a turn that needs a new sign-in (abandoned): exit status {}, \
+             stderr `Error: {abandoned}`, --output json document:\n{}",
+            failure_exit_status(&abandoned),
+            serde_json::to_string_pretty(&failure_document(&abandoned)).unwrap()
+        );
+        assert_eq!(failure_exit_status(&abandoned), crate::EXIT_ERROR);
+        assert_eq!(
+            failure_document_json(&abandoned),
+            serde_json::json!({
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "category": "internal",
+                    "message": format!("turn abandoned: {reason}"),
+                }
+            })
+        );
+    }
+
     fn refused_level(reason: &str, supported: serde_json::Value) -> serde_json::Value {
         let facts = if supported.is_null() {
             serde_json::Value::Null

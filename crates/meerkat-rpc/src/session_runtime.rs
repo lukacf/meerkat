@@ -47865,6 +47865,97 @@ mod tests {
         }
     }
 
+    /// A provider sign-in that needs to be renewed (`user_reauth_required`,
+    /// what a Copilot mint returns when its model listing refused the token
+    /// twice) has two answers. A build that meets it answers the typed
+    /// provider-auth session error: the internal-error code with the typed
+    /// data. A running session's turn that meets it answers a failed turn:
+    /// the provider-error code with the typed turn error, not retryable.
+    /// Neither is the invalid-params answer of a refused `reasoning_effort`
+    /// level, and neither says `retryable: true`.
+    #[test]
+    fn a_sign_in_that_must_be_renewed_answers_its_typed_data() {
+        let session_id = SessionId::new();
+        let build_answer = session_error_to_rpc(SessionError::provider_auth_failure(
+            meerkat_core::service::SessionProviderAuthFailure {
+                kind: meerkat_core::AuthErrorKind::UserReauthRequired,
+                provider: meerkat_core::Provider::OpenAI,
+                realm_id: Some(meerkat_core::RealmId::parse("global").expect("a realm id")),
+                binding_id: Some(
+                    meerkat_core::BindingId::parse("copilot_openai").expect("a binding id"),
+                ),
+            },
+        ));
+        println!(
+            "JSON-RPC, a build that needs a new sign-in: {}",
+            serde_json::to_string(&build_answer).expect("serialize")
+        );
+        assert_eq!(build_answer.code, error::INTERNAL_ERROR, "{build_answer:?}");
+        assert_eq!(build_answer.code, -32603);
+        assert_ne!(build_answer.code, error::INVALID_PARAMS);
+        assert_eq!(
+            build_answer.message,
+            "provider authentication failed: provider=openai kind=user_reauth_required \
+             binding=global/copilot_openai"
+        );
+        assert_eq!(
+            build_answer.data,
+            Some(serde_json::json!({
+                "kind": "user_reauth_required",
+                "provider": "openai",
+                "realm_id": "global",
+                "binding_id": "copilot_openai",
+                "agent_build_failure_cause": "LlmIdentityUnresolvable",
+                "cause": "provider_auth",
+            }))
+        );
+
+        // The turn of a running session: the authentication failure its
+        // provider request's authorization fails with.
+        let agent_error = meerkat_core::AgentError::llm(
+            "openai",
+            meerkat_core::error::LlmFailureReason::AuthError,
+            "Authentication failed: user reauth required",
+        );
+        let turn_error = meerkat_core::TurnErrorMetadata::from_agent_error(&agent_error)
+            .expect("an LLM failure has turn error metadata");
+        let reason = agent_error.to_string();
+        for outcome in [
+            meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                reason: reason.clone(),
+                error: turn_error.clone(),
+            },
+            meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                reason: reason.clone(),
+                error: turn_error,
+            },
+        ] {
+            let answer = completion_outcome_to_rpc_result(outcome, &session_id)
+                .expect_err("a turn that needs a new sign-in is an RPC error");
+            println!(
+                "JSON-RPC, a turn that needs a new sign-in: {}",
+                serde_json::to_string(&answer).expect("serialize")
+            );
+            assert_eq!(answer.code, error::PROVIDER_ERROR, "{answer:?}");
+            assert_eq!(answer.code, -32010);
+            assert_eq!(answer.message, format!("turn abandoned: {reason}"));
+            assert_eq!(
+                answer.data,
+                Some(serde_json::json!({
+                    "error": {
+                        "kind": "llm_failure",
+                        "terminal": true,
+                        "outcome": "failed",
+                        "detail": "Authentication failed: user reauth required",
+                        "provider": "openai",
+                        "retryable": false,
+                        "reason": {"reason_type": "llm_auth_error"},
+                    },
+                }))
+            );
+        }
+    }
+
     #[test]
     fn completion_outcome_to_rpc_result_finalization_failure_hides_nondurable_result() {
         // Row #85 gate: a finalization (durable-commit) failure is NOT durably

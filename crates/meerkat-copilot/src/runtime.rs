@@ -7827,6 +7827,198 @@ mod tests {
         );
     }
 
+    /// A model listing that answers 401 again, to the token minted after its
+    /// first 401, refuses the sign-in: the mint makes exactly one re-mint
+    /// and two listings (the second with the new token), marks the account
+    /// as needing a new sign-in and fails as `user_reauth_required`. That
+    /// kind does not clear on its own and the agent loop does not retry it.
+    /// No token and no model list are kept, so the account resolves no route
+    /// without a list (the state a retryable `supported_levels_unavailable`
+    /// effort refusal reports), and the next mint fails the same way without
+    /// a request.
+    #[tokio::test]
+    async fn a_second_model_discovery_401_at_the_mint_needs_a_new_sign_in() {
+        let (auth_binding, binding) = validated_binding();
+        let (env, auth_lease) = resolver_environment(&auth_binding).await;
+        let transport = Arc::new(ScriptedTransport::new([
+            token_response("derived-one"),
+            json_response(401, serde_json::json!({"message": "expired"})),
+            token_response("derived-two"),
+            json_response(401, serde_json::json!({"message": "expired"})),
+        ]));
+        let state = Arc::new(CopilotAccountState::new(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::DeviceSignIn,
+        ));
+        let token_url = state
+            .config
+            .endpoints()
+            .expect("the default endpoints")
+            .copilot_token_url
+            .to_string();
+        let authorizer = CopilotAuthorizer {
+            state: Arc::clone(&state),
+            binding,
+            env,
+            transport: transport.clone(),
+        };
+        let source_phase = || {
+            auth_lease
+                .snapshot(&meerkat_core::handles::LeaseKey::from_credential_identity(
+                    &account_identity(),
+                ))
+                .phase
+        };
+        assert_eq!(
+            source_phase(),
+            Some(meerkat_core::handles::AuthLeasePhase::Valid),
+            "the sign-in is valid before the mint"
+        );
+
+        let error = authorizer
+            .prime()
+            .await
+            .expect_err("a second listing 401 fails the mint");
+        println!("second 401 at the mint: error Display = {error}");
+        println!("second 401 at the mint: error Debug = {error:?}");
+
+        // The error: a sign-in error, by value and by its wire kind.
+        let ProviderAuthError::Auth(auth_error) = &error else {
+            panic!("a second listing 401 is an auth error: {error:?}");
+        };
+        assert_eq!(*auth_error, AuthError::UserReauthRequired);
+        let kind = auth_error.kind();
+        println!("second 401 at the mint: auth kind = {}", kind.as_str());
+        assert_eq!(kind.as_str(), "user_reauth_required");
+        assert!(
+            !kind.clears_on_its_own(),
+            "a new sign-in is not a failure that clears on its own"
+        );
+
+        // As a turn's failure it is an authentication failure the agent loop
+        // does not retry.
+        let turn_failure = meerkat_llm_core::LlmError::from_authorizer(auth_error.clone());
+        println!("second 401 at the mint: as a turn failure = {turn_failure}");
+        assert!(
+            matches!(
+                turn_failure,
+                meerkat_llm_core::LlmError::AuthenticationFailed { .. }
+            ),
+            "{turn_failure:?}"
+        );
+        assert!(
+            matches!(
+                turn_failure.failure_reason(),
+                meerkat_core::error::LlmFailureReason::AuthError
+            ),
+            "{turn_failure:?}"
+        );
+        assert!(
+            meerkat_core::retry::LlmRetryFailure::from_agent_error(
+                &turn_failure.clone().into_agent_error("openai"),
+            )
+            .is_none(),
+            "the agent loop does not retry a turn that needs a new sign-in: {turn_failure:?}"
+        );
+        // The typed turn error a surface reports for it.
+        let turn_error = meerkat_core::TurnErrorMetadata::from_agent_error(
+            &turn_failure.clone().into_agent_error("openai"),
+        )
+        .expect("an LLM failure has turn error metadata");
+        let turn_error = serde_json::to_value(&turn_error).expect("serialize the turn error");
+        println!("second 401 at the mint: turn error = {turn_error}");
+        assert_eq!(
+            turn_error,
+            serde_json::json!({
+                "kind": "llm_failure",
+                "terminal": true,
+                "outcome": "failed",
+                "detail": "Authentication failed: user reauth required",
+                "provider": "openai",
+                "retryable": false,
+                "reason": {"reason_type": "llm_auth_error"},
+            })
+        );
+
+        // The requests: mint, listing, one re-mint, one more listing with the
+        // new token.
+        let requests = transport
+            .requests
+            .lock()
+            .iter()
+            .map(|(url, headers)| {
+                (
+                    url.clone(),
+                    headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mints = requests.iter().filter(|(url, _)| *url == token_url).count();
+        let listing_bearers = requests
+            .iter()
+            .filter(|(url, _)| url.ends_with("/models"))
+            .map(|(_, bearer)| bearer.clone())
+            .collect::<Vec<_>>();
+        println!(
+            "second 401 at the mint: requests = {}, mints = {mints}, listings = {}",
+            requests.len(),
+            listing_bearers.len()
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|(url, _)| url.ends_with("/models"))
+                .collect::<Vec<_>>(),
+            [false, true, false, true],
+            "mint, listing, re-mint, listing"
+        );
+        assert_eq!(mints, 2, "the first mint and exactly one re-mint");
+        assert_eq!(
+            listing_bearers,
+            [
+                Some("Bearer derived-one".to_string()),
+                Some("Bearer derived-two".to_string()),
+            ],
+            "exactly two listings, the second with the token minted after the first 401"
+        );
+
+        // The account: marked as needing a new sign-in, with no token and no
+        // model list kept.
+        println!(
+            "second 401 at the mint: sign-in phase = {:?}",
+            source_phase()
+        );
+        assert_eq!(
+            source_phase(),
+            Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
+        );
+        assert!(
+            state.cache.read().is_none(),
+            "a refused mint keeps no token and no list"
+        );
+        assert!(authorizer.model_snapshot().is_none());
+        assert!(authorizer.api_base().is_none());
+
+        // The next mint fails the same way and sends nothing.
+        let again = authorizer
+            .prime()
+            .await
+            .expect_err("the account still needs a new sign-in");
+        println!("second 401 at the mint: the next mint = {again}");
+        assert_eq!(
+            again,
+            ProviderAuthError::Auth(AuthError::UserReauthRequired)
+        );
+        assert_eq!(
+            transport.request_count(),
+            4,
+            "an account that needs a new sign-in sends no request"
+        );
+    }
+
     /// The device sign-in's credentials travel in `Authorization` values
     /// marked sensitive: the GitHub token on the exchange and the derived
     /// token on the model listing.
@@ -14964,6 +15156,130 @@ mod tests {
             );
             assert_eq!(transport.request_count(), 5);
             assert_eq!(session.bearers(), ["Bearer derived-one"]);
+        }
+
+        /// A running session whose token refresh meets a listing that
+        /// answers 401 twice (to the refreshed token and to the one minted
+        /// after its 401): the turn fails once with an authentication
+        /// failure the agent loop does not retry, without a request signed,
+        /// and the account needs a new sign-in. Until then the session's
+        /// turns fail the same way and no session builds on the account,
+        /// both without a request. After a new sign-in the same session's
+        /// next turn mints from it and is served.
+        #[tokio::test]
+        async fn a_second_listing_401_at_a_running_sessions_mint_needs_a_new_sign_in() {
+            let clock = TestClock::new();
+            let unauthorized = || json_response(401, serde_json::json!({"message": "expired"}));
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                models_response(),
+                // The refresh, due after 200 s.
+                token_at("derived-two", clock.at(3600), 200),
+                unauthorized(),
+                token_at("derived-three", clock.at(3600), 200),
+                unauthorized(),
+                // The new sign-in's mint.
+                token_at("derived-four", clock.at(7200), 200),
+                models_response(),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+            assert!(session.turn().await.is_empty(), "the first turn is served");
+            assert_eq!(session.bearers(), ["Bearer derived-one"]);
+            assert_eq!(transport.request_count(), 2);
+
+            // The refresh is due: the turn mints, and the listing refuses the
+            // new token and the one minted after that.
+            clock.set(201);
+            let events = session.turn().await;
+            println!("running session, second 401 at the mint: turn = {events:?}");
+            let [Err(error)] = events.as_slice() else {
+                panic!("the turn fails once: {events:?}");
+            };
+            println!("running session, second 401 at the mint: turn error Display = {error}");
+            assert!(
+                matches!(
+                    error,
+                    meerkat_llm_core::LlmError::AuthenticationFailed { message }
+                        if message == "user reauth required"
+                ),
+                "{error:?}"
+            );
+            assert!(
+                matches!(
+                    error.failure_reason(),
+                    meerkat_core::error::LlmFailureReason::AuthError
+                ) && !retried(error),
+                "a turn that needs a new sign-in is an auth failure the loop does not retry: {error:?}"
+            );
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
+            );
+            assert_eq!(
+                transport.request_count(),
+                6,
+                "one refresh mint, one re-mint and two listings"
+            );
+            assert_eq!(
+                session.bearers(),
+                ["Bearer derived-one"],
+                "the failed turn signed no request"
+            );
+
+            // Until a new sign-in: the session's next turn fails the same
+            // way, and no session builds on the account; neither sends a
+            // request.
+            let events = session.turn().await;
+            println!("running session, the next turn before a new sign-in: {events:?}");
+            let [Err(again)] = events.as_slice() else {
+                panic!("the next turn fails once: {events:?}");
+            };
+            assert!(
+                matches!(
+                    again,
+                    meerkat_llm_core::LlmError::AuthenticationFailed { message }
+                        if message == "user reauth required"
+                ) && !retried(again),
+                "{again:?}"
+            );
+            let build = account
+                .try_session([])
+                .await
+                .err()
+                .expect("no session builds on an account that needs a new sign-in");
+            println!("running session, a new build before a new sign-in: {build}");
+            assert_eq!(
+                build,
+                ProviderAuthError::Auth(AuthError::UserReauthRequired)
+            );
+            assert_eq!(transport.request_count(), 6);
+            assert_eq!(session.bearers(), ["Bearer derived-one"]);
+
+            // A new sign-in: the same session's next turn mints from it and
+            // is served.
+            let new_expiry =
+                DateTime::from_timestamp(clock.at(86_400).timestamp(), 0).expect("a whole second");
+            account.sign_in_again("github-new-token", new_expiry).await;
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::Valid)
+            );
+            let events = session.turn_across_a_route_change().await;
+            println!("running session, the turn after a new sign-in: {events:?}");
+            assert!(
+                events.is_empty(),
+                "the session is served again after a new sign-in: {events:?}"
+            );
+            assert_eq!(
+                transport.request_count(),
+                8,
+                "the new sign-in's mint and listing"
+            );
+            assert_eq!(
+                session.bearers(),
+                ["Bearer derived-one", "Bearer derived-four"]
+            );
         }
 
         /// A mint whose model listing answers a 403 that asks for no account

@@ -2543,6 +2543,72 @@ mod tests {
         assert_eq!(data["binding_id"], "openai");
     }
 
+    /// A build whose provider resolution needs a new sign-in (a Copilot mint
+    /// whose model listing refused the token twice returns exactly this
+    /// error) is the typed provider-auth session error of kind
+    /// `user_reauth_required`. It is not a refused `reasoning_effort` level:
+    /// its data names no refusal and no `retryable`, and its kind does not
+    /// clear on its own.
+    #[test]
+    fn a_build_that_needs_a_new_sign_in_is_a_typed_sign_in_failure() {
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("global").unwrap(),
+            binding: meerkat_core::BindingId::parse("copilot_openai").unwrap(),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        let error = build_agent_error_to_session_error(
+            BuildAgentError::LlmClient(meerkat_client::FactoryError::ProviderAuth(
+                meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                    meerkat_core::AuthError::UserReauthRequired,
+                ),
+            )),
+            Some(Provider::OpenAI),
+            Some(&binding),
+        );
+        println!("build that needs a new sign-in: session error Display = {error}");
+        println!(
+            "build that needs a new sign-in: session error code = {}",
+            error.code()
+        );
+
+        assert!(
+            !matches!(
+                &error,
+                SessionError::Agent(meerkat_core::error::AgentError::ReasoningEffortRefused(_))
+            ),
+            "a sign-in failure is not a refused reasoning effort level: {error:?}"
+        );
+        assert!(error.is_build_llm_identity_unresolvable());
+        let failure = error
+            .provider_auth_failure_data()
+            .expect("a typed provider-auth failure");
+        assert_eq!(
+            failure,
+            meerkat_core::service::SessionProviderAuthFailure {
+                kind: meerkat_core::AuthErrorKind::UserReauthRequired,
+                provider: Provider::OpenAI,
+                realm_id: Some(meerkat_core::RealmId::parse("global").unwrap()),
+                binding_id: Some(meerkat_core::BindingId::parse("copilot_openai").unwrap()),
+            }
+        );
+        assert!(!failure.kind.clears_on_its_own());
+        assert_eq!(
+            error.to_string(),
+            "provider authentication failed: provider=openai kind=user_reauth_required \
+             binding=global/copilot_openai"
+        );
+        let data = error.structured_data().expect("structured auth failure");
+        println!("build that needs a new sign-in: session error data = {data}");
+        assert_eq!(data["cause"], "provider_auth");
+        assert_eq!(data["kind"], "user_reauth_required");
+        assert_eq!(data["provider"], "openai");
+        assert_eq!(data["realm_id"], "global");
+        assert_eq!(data["binding_id"], "copilot_openai");
+        assert!(data.get("retryable").is_none(), "{data}");
+        assert!(data.get("reasoning_effort_refusal").is_none(), "{data}");
+    }
+
     #[test]
     fn provider_auth_public_message_redacts_provider_diagnostics() {
         let error = build_agent_error_to_session_error(

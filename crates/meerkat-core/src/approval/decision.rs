@@ -34,7 +34,7 @@ mod tests;
 
 pub use evidence::{
     AttestedDecision, AttributedReview, AuthenticatedDecisionEvent, DECISION_REASON_MAX_BYTES,
-    DecisionEvidence, DecisionReviewVerdict, DecisionTier,
+    DecisionAnswer, DecisionEvidence, DecisionReviewVerdict, DecisionTier,
 };
 pub use keys::{
     ApproverId, DECISION_APPROVER_ID_MAX_BYTES, DECISION_REFERENCE_MAX_BYTES,
@@ -68,7 +68,8 @@ pub const APPROVAL_BRANCH_LABEL: &str = "decision.approval_branch";
 /// model reviewer's allow can therefore never approve a grant, a tool
 /// grant, a release, a gate or a change of an agent (its creation, update,
 /// archive, unarchive, removal or adoption): an agent never approves a
-/// change of an agent.
+/// change of an agent. Nor can it answer the questions an agent asks a
+/// person (`ask_user.questions`): a model never answers for one.
 ///
 /// The list must grow with each kind decided by people only, whichever crate
 /// owns the kind: a kind missing from it keeps a review stage.
@@ -83,6 +84,7 @@ pub const DECIDED_BY_PEOPLE_ONLY: &[&str] = &[
     "identity.unarchive",
     "identity.remove",
     "identity.adopt",
+    "ask_user.questions",
 ];
 
 /// Whether decisions of `kind` are decided by people only

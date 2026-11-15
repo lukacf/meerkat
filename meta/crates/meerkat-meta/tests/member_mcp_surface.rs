@@ -889,6 +889,375 @@ args = [{server:?}]
     let _ = runtime.handle().shutdown().await;
 }
 
+/// A member with builtins and shell off whose tools come from one server its
+/// profile configures is offered `ask_user` beside the tool list the same
+/// member has without it, and nothing else changes: the server's tool, the
+/// comms tools and the tool catalog's two control tools are all there. The
+/// catalog of such a member is exact (its base is the build's own MCP
+/// adapter), so its control tools are composed; a mount that made the
+/// catalog read not exact would take them away and leave every server tool
+/// inline for good.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_with_a_profile_mcp_server_keeps_its_tool_list_beside_ask_user() {
+    // The first-turn list of this member without `ask_user`.
+    const WITHOUT_ASK_USER: [&str; 8] = [
+        "lookup",
+        "peers",
+        "reply_to_peer",
+        "send_message",
+        "send_request",
+        "send_response",
+        "tool_catalog_load",
+        "tool_catalog_search",
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let server = listing_server(dir.path());
+    let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "member-mcp-surface-catalog"
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "autonomous_host"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true
+
+[[profiles.worker.tools.mcp_servers]]
+name = "{LISTING}"
+command = "/bin/sh"
+args = [{server:?}]
+"#,
+        server = server.display().to_string(),
+    ))
+    .expect("mob definition");
+    let client = CaptureClient::default();
+    let spec = meerkat_meta::MobBootstrapSpec::ephemeral(
+        definition,
+        meerkat_mob::MobStorage::in_memory(),
+        dir.path().join("store"),
+        4,
+        None,
+    )
+    .expect("plain ephemeral spec")
+    .with_options(meerkat_meta::MobBootstrapOptions {
+        allow_ephemeral_sessions: true,
+        notify_orchestrator_on_resume: false,
+        default_llm_client: Some(Arc::new(client.clone())),
+    });
+    let runtime = meerkat_meta::MobRuntime::bootstrap(spec)
+        .await
+        .expect("bootstrap");
+    Box::pin(
+        runtime
+            .handle()
+            .spawn_spec(meerkat_mob::SpawnMemberSpec::host_root(
+                "worker",
+                meerkat_mob::AgentIdentity::from("worker-1"),
+            )),
+    )
+    .await
+    .expect("spawn");
+    meerkat_meta::send_message_on_mob(&runtime.handle(), "worker-1", "hello".to_string())
+        .await
+        .expect("send");
+    let first = client.first_request().await;
+    let mut offered: Vec<&str> = first
+        .tools
+        .iter()
+        .map(|tool| tool.split('=').next().unwrap_or(tool))
+        .collect();
+    offered.sort_unstable();
+    let mut expected: Vec<&str> = WITHOUT_ASK_USER.to_vec();
+    expected.push("ask_user");
+    expected.sort_unstable();
+    assert_eq!(
+        offered, expected,
+        "the member is offered its own tool list and ask_user, the catalog's control tools \
+         included: {first:?}"
+    );
+    let lookup = format!("{LOOKUP}=Mcp:{LISTING}");
+    assert!(
+        first.tools.contains(&lookup),
+        "the server's tool keeps its MCP provenance: {first:?}"
+    );
+    let _ = runtime.handle().shutdown().await;
+}
+
+/// A stdio MCP server whose one tool is named `ask_user`.
+const ASKING: &str = "asking";
+const ASKING_SERVER: &str = r#"while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"asking","version":"0"}}}\n' "$id" ;;
+    *'"method":"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"ask_user","inputSchema":{"type":"object"}}]}}\n' "$id" ;;
+  esac
+done
+"#;
+
+/// The first request of the one member of a mob whose profile configures the
+/// asking server. `tools` is added to the profile's `tools` table and
+/// `server` to the server's own entry, each as TOML lines.
+async fn first_request_of_a_member_with_the_asking_server(
+    mob: &str,
+    tools: &str,
+    server: &str,
+) -> CapturedRequest {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("asking.sh");
+    std::fs::write(&script, ASKING_SERVER).expect("write the asking server");
+    let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "{mob}"
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "autonomous_host"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true
+{tools}
+
+[[profiles.worker.tools.mcp_servers]]
+name = "{ASKING}"
+command = "/bin/sh"
+args = [{script:?}]
+{server}
+"#,
+        script = script.display().to_string(),
+    ))
+    .expect("mob definition");
+    let client = CaptureClient::default();
+    let spec = meerkat_meta::MobBootstrapSpec::ephemeral(
+        definition,
+        meerkat_mob::MobStorage::in_memory(),
+        dir.path().join("store"),
+        4,
+        None,
+    )
+    .expect("plain ephemeral spec")
+    .with_options(meerkat_meta::MobBootstrapOptions {
+        allow_ephemeral_sessions: true,
+        notify_orchestrator_on_resume: false,
+        default_llm_client: Some(Arc::new(client.clone())),
+    });
+    let runtime = meerkat_meta::MobRuntime::bootstrap(spec)
+        .await
+        .expect("bootstrap");
+    Box::pin(
+        runtime
+            .handle()
+            .spawn_spec(meerkat_mob::SpawnMemberSpec::host_root(
+                "worker",
+                meerkat_mob::AgentIdentity::from("worker-1"),
+            )),
+    )
+    .await
+    .expect("spawn");
+    meerkat_meta::send_message_on_mob(&runtime.handle(), "worker-1", "hello".to_string())
+        .await
+        .expect("send");
+    let first = client.first_request().await;
+    let _ = runtime.handle().shutdown().await;
+    first
+}
+
+/// The tools of `request` with one of `names`, as `<name>=<kind>:<source>`,
+/// sorted.
+fn tools_named<'a>(request: &'a CapturedRequest, names: &[&str]) -> Vec<&'a str> {
+    let mut tools: Vec<&str> = request
+        .tools
+        .iter()
+        .map(String::as_str)
+        .filter(|tool| names.contains(&tool.split('=').next().unwrap_or(tool)))
+        .collect();
+    tools.sort_unstable();
+    tools
+}
+
+/// One warning Core logged for a tool name two parts of a build list
+/// (`meerkat_core::SHARED_TOOL_NAME_LOG_TARGET`): its fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SharedNameWarning {
+    tool: String,
+    listed_by: String,
+    tools_of: String,
+}
+
+impl tracing::field::Visit for SharedNameWarning {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "tools_of" {
+            self.tools_of = value.to_string();
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        match field.name() {
+            "tool" => self.tool = format!("{value:?}"),
+            "listed_by" => self.listed_by = format!("{value:?}"),
+            _ => {}
+        }
+    }
+}
+
+/// The process's subscriber while a row captures those warnings: it keeps
+/// each one, from whatever thread logs it.
+#[derive(Clone, Default)]
+struct SharedNameWarnings(Arc<Mutex<Vec<SharedNameWarning>>>);
+
+impl tracing::Subscriber for SharedNameWarnings {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.target() == meerkat_core::SHARED_TOOL_NAME_LOG_TARGET
+            && *metadata.level() == tracing::Level::WARN
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut warning = SharedNameWarning::default();
+        event.record(&mut warning);
+        self.0.lock().unwrap().push(warning);
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+/// The process's one subscriber for those warnings, installed by the first
+/// row that asks for it. A row reads the warnings of its own mob.
+fn shared_name_warnings() -> &'static SharedNameWarnings {
+    static WARNINGS: std::sync::OnceLock<SharedNameWarnings> = std::sync::OnceLock::new();
+    WARNINGS.get_or_init(|| {
+        let warnings = SharedNameWarnings::default();
+        tracing::dispatcher::set_global_default(tracing::Dispatch::new(warnings.clone()))
+            .expect("these rows set the process's one subscriber");
+        warnings
+    })
+}
+
+/// What the two pins below assert of the one member of `mob`, whose profile
+/// configures the asking server and adds `tools` to its `tools` table.
+async fn assert_neither_ask_user_is_offered_and_the_build_says_so(mob: &str, tools: &str) {
+    let warnings = shared_name_warnings();
+    let first = first_request_of_a_member_with_the_asking_server(mob, tools, "").await;
+    assert_eq!(
+        tools_named(&first, &["ask_user"]),
+        Vec::<&str>::new(),
+        "neither the server's ask_user nor the stock one is offered: {first:?}"
+    );
+    let logged: Vec<SharedNameWarning> = warnings
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|warning| warning.tools_of.contains(mob))
+        .cloned()
+        .collect();
+    assert_eq!(logged.len(), 1, "one warning for the member: {logged:?}");
+    assert_eq!(logged[0].tool, "ask_user");
+    assert_eq!(
+        logged[0].listed_by,
+        format!("Mcp:{ASKING}, Builtin:ask_user"),
+        "the warning names the server and the stock tool"
+    );
+    assert!(
+        logged[0].tools_of.starts_with("session ") && logged[0].tools_of.contains("worker-1"),
+        "the warning names the member's session and the member: {logged:?}"
+    );
+    assert!(
+        first
+            .tools
+            .iter()
+            .any(|tool| tool.starts_with("send_message=")),
+        "the member's other tools are offered: {first:?}"
+    );
+}
+
+/// PINS A KNOWN LIMITATION; it does not approve it. A member whose profile
+/// configures an MCP server that offers a tool named `ask_user` has no tool
+/// of that name: the server's tool and the stock tool share the name, a name
+/// two parts of a build offer is offered by neither, and the member's model
+/// is offered neither of them. The member builds and takes its turn, and its
+/// other tools are offered. It is not silent: once the real server has
+/// connected and listed its tool, the build logs one warning that names the
+/// tool, the two sources that list it (the server and the stock tool) and
+/// the member (its session and its comms name). When the member's own tool
+/// is made to win the name, this row changes with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_whose_mcp_server_offers_ask_user_is_offered_no_tool_of_that_name() {
+    assert_neither_ask_user_is_offered_and_the_build_says_so("member-mcp-surface-own-ask-user", "")
+        .await;
+}
+
+/// The same pin for a member with shell tools. Such a member's build binds
+/// its tools to the session's operations after it has composed them, and
+/// that step rebuilds the composed surface: the warning still names the
+/// member's session and the member.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_with_shell_tools_whose_mcp_server_offers_ask_user_is_told_so_by_name() {
+    assert_neither_ask_user_is_offered_and_the_build_says_so(
+        "member-mcp-surface-shell-own-ask-user",
+        "shell = true",
+    )
+    .await;
+}
+
+/// The way out of the limitation the row above pins: the profile maps the
+/// server's `ask_user` to another name (the server entry's `tool_names`).
+/// The member is then offered the server's tool under that name and the
+/// stock `ask_user`, each once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_whose_profile_renames_its_servers_ask_user_is_offered_both_tools() {
+    let first = first_request_of_a_member_with_the_asking_server(
+        "member-mcp-surface-renamed-ask-user",
+        "",
+        r#"tool_names = { ask_user = "ask_operator" }"#,
+    )
+    .await;
+    let renamed = format!("ask_operator=Mcp:{ASKING}");
+    assert_eq!(
+        tools_named(&first, &["ask_user", "ask_operator"]),
+        vec![renamed.as_str(), "ask_user=Builtin:ask_user"],
+        "the server's tool under its mapped name, and the stock ask_user: {first:?}"
+    );
+}
+
+/// What is not a way out: a profile's `tools.deny = ["ask_user"]` hides the
+/// name whatever offers it. It does not bring the server's tool back: the
+/// member is still offered no tool named `ask_user`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_profile_that_denies_ask_user_does_not_bring_back_its_servers_tool_of_that_name() {
+    let first = first_request_of_a_member_with_the_asking_server(
+        "member-mcp-surface-denied-own-ask-user",
+        r#"deny = ["ask_user"]"#,
+        "",
+    )
+    .await;
+    assert_eq!(
+        tools_named(&first, &["ask_user"]),
+        Vec::<&str>::new(),
+        "a deny of the name offers neither tool of that name: {first:?}"
+    );
+    assert!(
+        first
+            .tools
+            .iter()
+            .any(|tool| tool.starts_with("send_message=")),
+        "the member's other tools are offered: {first:?}"
+    );
+}
+
 /// A server that never answers its handshake.
 const SILENT: &str = "silent";
 /// Its own connect timeout.

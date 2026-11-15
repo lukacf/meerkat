@@ -1,5 +1,6 @@
 import * as React from "react";
 import { approvalAudience } from "../../../console-core/src/pending-approvals";
+import { countedQuestionSets } from "../../../console-core/src/pending-questions";
 import type { ApprovalAction, ApprovalAudience, ApprovalDecisionState, ApprovalViewer, DepartedApproval, PendingApproval, PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
 import type { HostAttentionItem, HostAttentionSourceConfig, HostDecideLink } from "../../../console-core/src/host-attention";
 import type { ConsoleAttentionItem } from "../../../console-core/src/console-attention";
@@ -509,39 +510,73 @@ export function PrivateReplyCard({ item, onDismiss }: {
   );
 }
 
-export function ApprovalAttention({ snapshot, onOpen, hostItems = 0, replies = 0 }: {
+export function ApprovalAttention({ snapshot, onOpen, hostItems = 0, replies = 0, questionSets = 0, questionStatus }: {
   snapshot?: PendingApprovalSnapshot;
   onOpen(pendingId?: string): void;
   /** Host-provided attention items, counted with the approvals. */
   hostItems?: number;
   /** Replies meant for the signed-in person alone, counted with them too. */
   replies?: number;
+  /** The open sets of questions agents asked a person, counted with them
+   *  too: a question waits for someone as an approval does. */
+  questionSets?: number;
+  /** The state of the read of the question sets, when the host knows it.
+   *  While it is not ready its sets are not counted, and the words say so
+   *  ("Checking questions", "Questions may be out of date", "Questions
+   *  unavailable"); what was read keeps its count. A gateway without
+   *  question sets and a denied read show nothing of them. */
+  questionStatus?: "loading" | "ready" | "stale" | "unavailable" | "forbidden" | "unsupported";
 }) {
-  // Approvals count only where the connection can show them; host items and
-  // replies count on any connection, so an aggregate console still names them.
+  // Approvals count only where the connection can show them; host items,
+  // replies and question sets count on any connection, so an aggregate
+  // console still names them.
   const approvalsShown = Boolean(snapshot) && snapshot?.status !== "forbidden" && snapshot?.status !== "unsupported";
   // A request routed to an approver the viewer does not hold waits for
   // someone else: it does not need this viewer.
   const viewer = useApprovalViewer();
-  if (!approvalsShown && hostItems === 0 && replies === 0) return null;
+  const questionsShown = questionStatus !== "forbidden" && questionStatus !== "unsupported";
+  // The sets the number holds: those of a list that was read.
+  const sets = countedQuestionSets(questionStatus, questionSets);
+  const questionsReady = !questionsShown || questionStatus === undefined || questionStatus === "ready";
+  // A read of the question sets that failed, or a list that may be out of
+  // date, is said even where nothing else is shown.
+  const questionsUnread = questionsShown && (questionStatus === "stale" || questionStatus === "unavailable");
+  if (!approvalsShown && hostItems === 0 && replies === 0 && sets === 0 && !questionsUnread) return null;
   const requests = approvalsShown && snapshot ? snapshot.requests.filter((request) => request.status === "pending"
     && snapshot.decisions[request.pendingId]?.phase !== "settled"
     && (!viewer || approvalAudience(request, viewer).kind === "you")) : [];
   const ready = !approvalsShown || snapshot?.status === "ready";
   const approvalStatus = !approvalsShown ? "" : ready ? `${requests.length} pending approval${requests.length === 1 ? "" : "s"}` : snapshot?.status === "loading" ? "Checking approvals" : snapshot?.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable";
+  const questionWords = questionsReady ? (sets ? `${sets} question set${sets === 1 ? "" : "s"}` : "")
+    : questionStatus === "loading" ? "Checking questions" : questionStatus === "stale" ? "Questions may be out of date" : "Questions unavailable";
   const hostStatus = hostItems ? `${hostItems} item${hostItems === 1 ? "" : "s"} from the host` : "";
   const replyStatus = replies ? `${replies} ${replies === 1 ? "reply" : "replies"} for you` : "";
-  const status = [approvalStatus, hostStatus, replyStatus].filter(Boolean).join(", ");
-  const count = requests.length + hostItems + replies;
+  const status = [approvalStatus, questionWords, hostStatus, replyStatus].filter(Boolean).join(", ");
+  // A known count is never hidden. The number is the count of what was
+  // read: the approvals of a list that is ready, the sets of a list that is
+  // ready, and what the host gives. The words say what is still being read
+  // or could not be read.
+  const count = (ready ? requests.length : 0) + sets + hostItems + replies;
+  const allReady = ready && questionsReady;
+  // A placeholder stands alone only when nothing was read: "..." while
+  // what is not ready is only still being read, "!" when a list is out of
+  // date or could not be read. A zero is shown once the approvals were
+  // read; beside approvals that were not, it would read as "nothing needs
+  // you" while they are unknown.
+  const numbered = allReady || count > 0 || (approvalsShown && ready);
+  const reading = (ready || snapshot?.status === "loading") && (questionsReady || questionStatus === "loading");
   return (
-    <section className="cc-approval-attention" aria-label="Needs you" data-testid="approval-attention" data-state={approvalsShown ? snapshot?.status : "ready"} data-pending={ready && count > 0}>
+    <section className="cc-approval-attention" aria-label="Needs you" data-testid="approval-attention" data-state={approvalsShown ? snapshot?.status : "ready"} data-pending={count > 0}>
       <button className="cc-approval-attention__open" type="button" aria-label={`Needs you, ${status}`} title={status}
-        onClick={() => onOpen(ready && requests.length === 1 ? requests[0].pendingId : undefined)}>
+        // One approval and nothing else opens on that approval; question
+        // sets head the inbox's Pending list, so with them, and while they
+        // are not read, the list opens.
+        onClick={() => onOpen(allReady && requests.length === 1 && sets === 0 ? requests[0].pendingId : undefined)}>
         <svg className="cc-approval-attention__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <path d="m4 5-2 9v5h20v-5l-2-9H4Z" /><path d="M2 14h6l2 3h4l2-3h6" />
         </svg>
         <span className="cc-approval-attention__label">Needs you</span>
-        <span className="cc-approval-attention__count" aria-hidden="true">{ready ? count : snapshot?.status === "loading" ? "..." : "!"}</span>
+        <span className="cc-approval-attention__count" aria-hidden="true">{numbered ? count : reading ? "..." : "!"}</span>
         <svg className="cc-approval-attention__chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
       </button>
       <span className="cc-approval-attention__status" role="status">{status}</span>

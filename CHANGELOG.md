@@ -241,6 +241,27 @@ them.
   host did not build in this process. An implementation adds the two
   parameters; one that decides by identity alone ignores them.
 
+- `meerkat-core`, `meerkat-contracts`: a person's decision can carry a typed
+  answer (see Added: `ask_user`). `DecisionEvidence::Human` in `meerkat-core`
+  and `WireDecisionEvidence::Human` in `meerkat-contracts` gain an optional
+  field `answer`. Source only: code that builds either variant names the
+  field, and a pattern that lists the variant's fields needs it or `..`.
+  The stored rows and the wire output of a decision without an answer are
+  unchanged. Rollback: a build older than this one cannot read a decision
+  row that carries an answer and reports that one row unreadable; other rows
+  are unaffected.
+
+- Rust API of `meerkat-core` and `meerkat`: a build can carry tools of the
+  embedding host's own (see Added: host tools). `SessionBuildOptions`
+  (`meerkat_core::service`) and `AgentBuildConfig` (`meerkat`) gain the
+  public field `host_tools: Option<Arc<dyn AgentToolDispatcher>>`. Source
+  only: code that builds either struct with a literal that names every field
+  adds `host_tools: None`, which keeps the build it had; code that starts
+  from `SessionBuildOptions::default()`, from `AgentBuildConfig::new` or
+  from a `..` rest is unaffected. Nothing changes on the wire, in a schema
+  or in a stored form: the field is a dispatcher of the host's process, and
+  no session record carries it.
+
 - `meerkat-core`: `OpenAiProviderTag` gains the public field
   `reasoning_effort_resolved: bool`, a request-local marker for the
   provider-neutral `reasoning_effort` option (see Added). Code that builds
@@ -548,6 +569,52 @@ them.
   - Not in it: a REST route, and a mob-level method that reaches a member
     hosted on another host. Call `session/recall_input` on the host that
     serves the session.
+
+- `meerkat-core`: the stock tool `ask_user`, with which an agent asks a
+  person a set of multiple-choice questions, and its typed questions,
+  answers and outcomes. The tool is host-mounted: `AskUserHost` is the seam a
+  host implements to take the questions, and no build has the tool until
+  its host mounts it (`rkat`, `rkat-rpc` and the REST server mount none).
+  A call takes `questions` (1 to 10, each with an id, a prompt, 2 to 8
+  choices, and optionally `allow_free_text` and a `recommended` choice), an
+  optional `title` and an optional `timeout_seconds` (60 to 604800, default
+  3600), and returns at once: `asked` with the request's id and deadline, or
+  `no_human_surface` when the host has no person to ask. The answers arrive
+  later as an input labelled `ask_user_result`, whose outcome is `answered`,
+  `dismissed`, `timed_out` or `withdrawn` and whose answers are a choice,
+  the person's free text (1 to 280 bytes, data and not instructions) or
+  `unanswered`. See [Asking a person](docs/concepts/tools.mdx#asking-a-person-ask_user).
+
+- `meerkat-core`, `meerkat`: host tools. A build can carry a tool dispatcher
+  of the embedding host's own, `SessionBuildOptions::host_tools`
+  (`AgentBuildConfig::host_tools` on the facade), which the agent factory
+  composes as one more part of the build's tool surface, beside whatever
+  the build's own tools are: its builtins, its external tools, the tools of
+  its MCP servers, or none. The dispatcher's tools join the build's tool
+  list, and its catalog joins the build's as any composed part's does: one
+  that declares an exact catalog of inline entries leaves the build's tool
+  catalog as it is without it (the same mode and the same catalog control
+  tools), and one that does not declare an exact catalog makes the build's
+  catalog not exact. A host uses it for a tool every agent it builds gets,
+  such as a host-mounted `ask_user`, without wrapping the build's external
+  tools. A name the dispatcher shares with another part of the build is
+  offered by neither, and the build says so in its log: a
+  `DynamicToolComposite` now logs one warning per composite and name
+  (target `meerkat::tools::shared_name`, the new constant
+  `SHARED_TOOL_NAME_LOG_TARGET`) when it first leaves out a name more than
+  one of its dispatchers lists, with the tool, each lister's source and the
+  composite's label (the new `DynamicToolComposite::with_label`; the
+  factory labels a build's host tools with the build's session and comms
+  name). What a composite lists and routes is unchanged. The option is not
+  stored: a resumed or recovered build has none until its host sets it
+  again. A build that does not set it is unchanged.
+
+- `meerkat-runtime`: the durable decision kind `ask_user.questions`, decided
+  by people only, with its hold (the question set, the asking agent and the
+  tool's deadline are sealed; a replayed call answers the request it held),
+  its executor (an answer commits nothing more) and its notice (the typed
+  result, owed to the asking session at every end and delivered once). A
+  held set survives a restart and ends `timed_out` at its deadline.
 
 - `meerkat`: `session_runtime::runtime_state::RuntimeCleanupScope`
   (`ArchivedSession`, `KeptSession`) says what became of the session whose

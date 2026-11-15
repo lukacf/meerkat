@@ -816,7 +816,7 @@ impl ToolGrantRequestRefusal {
 
 /// RFC 3339 UTC rendering of UNIX milliseconds, or the raw value when it is
 /// out of range.
-fn format_unix_ms(unix_ms: u64) -> String {
+pub(crate) fn format_unix_ms(unix_ms: u64) -> String {
     i64::try_from(unix_ms)
         .ok()
         .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)

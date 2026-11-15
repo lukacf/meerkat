@@ -106,6 +106,16 @@ All notable changes to the Python SDK are documented here.
   from the released sources; confirmed by a run on 0.9.14). For what to do
   on an affected release, see the known issue on the Meta 0.9.14 release
   page: https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14
+- `MobHandle.gating_questions()` lists the open question sets agents asked
+  with `ask_user` (`meta/gating/questions`) as `GatingQuestionSet`
+  (`GatingQuestion`, `GatingQuestionChoice`). `MobHandle.gating_answer(
+  pending_id, *, approver_id, presented_digest, answers)` answers one and
+  `MobHandle.gating_dismiss(pending_id, *, approver_id, presented_digest)`
+  dismisses one, both through `meta/gating/decide`; they return a
+  `GatingQuestionSetResult` (`outcome`: `answered` or `dismissed`). An answer
+  is a `GatingQuestionAnswer` (`.choice(...)`, or `.free_text(...)` where the
+  question allows it) or its wire form; `gating_answer` raises `ValueError`
+  without at least one. `gating_pending()` does not list question sets.
 
 ## 0.9.14
 

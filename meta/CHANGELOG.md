@@ -57,6 +57,42 @@ Security, Upgrade and Changed.
   activates a construction yet: write `allow` or `require_approval`, and the
   preparation mode `required`.
 
+- Behaviour: a member whose profile configures an MCP server that offers a
+  tool named `ask_user` loses that tool at the upgrade. Members now get
+  the stock tool `ask_user` (see Added), a tool name two parts of a
+  member's build list is offered by neither, and so such a member's model
+  is offered no tool named `ask_user`: neither its server's nor the stock
+  one. Such a member also has no stock `ask_user`: it cannot put a question
+  to a person until its server's tool has another name. The member builds
+  and runs, and its other tools are offered. It is
+  not silent: once the server has connected, each build of such a member
+  logs one warning on the gateway's stderr (target
+  `meerkat::tools::shared_name`: "more than one part of a tool surface
+  lists this tool name: it is offered by none of them", with `tool`, the
+  two sources in `listed_by`, and the member's session and comms name in
+  `tools_of`). **Check before upgrading:** on 0.9.14,
+  `meta/identity/resolved_tools` (Python `identity_resolved_tools`,
+  TypeScript `identityResolvedTools`) lists the tools an agent's
+  member offers its model, without waking it. An empty list is no answer
+  when no build of the member is recorded yet: the method then answers
+  `tools_source: "no_build_recorded"`, which those two SDK methods do not
+  show; read the source with Python `identity_resolved_tools_detail` or
+  TypeScript `identityResolvedToolsDetail`, build the member first with
+  `meta/identity/warm`, or read the server entries of its profile. A
+  member whose list has `ask_user` is affected when the tool comes from an
+  MCP server of its profile (`[[profiles.<name>.tools.mcp_servers]]`); it
+  keeps the tool when its host supplies it as one of the build's external
+  tools. An MCP server attached to a member's live session that offers the
+  name is in the same case as a profile's. **Do:** give
+  the server's tool another name: map it in the profile
+  (`tool_names = { ask_user = "ask_operator" }` on the server's entry), or
+  rename it on the server. The member then has the server's tool under the
+  new name and the stock `ask_user`, and its prompts and instructions that
+  name the tool must name the new one. In this release no setting keeps a
+  profile server's tool under the name `ask_user` on a Meta member:
+  `tools.deny = ["ask_user"]` hides the name whatever offers it, and does
+  not bring the server's tool back. See Known limitations.
+
 - Rust, source only: `CustomizerToolsSpawnCustomizer` no longer implements
   the auto traits `UnwindSafe` and `RefUnwindSafe`. It now holds a
   late-bound reference to the session bridge, through which it asks whether
@@ -1080,6 +1116,80 @@ Security, Upgrade and Changed.
   (`runtime_options.member_comms_address`), as TypeScript `memberCommsTcp`
   does: what a member of another gateway needs to reach them.
 
+- Mob members get the stock tool `ask_user`: an agent asks a person a set of
+  multiple-choice questions (1 to 10 questions with 2 to 8 choices each, a
+  recommended choice and free text where the agent allows them), the call
+  returns at once, and the typed answers reach the agent later as an input
+  of its own. A set is a durable decision of kind `ask_user.questions`: it
+  survives a restart and ends `timed_out` at its deadline (one hour unless
+  the call says otherwise). The call answers `no_human_surface`, and holds
+  nothing, when there is no person to show the questions to or no way back
+  to the asker: the gateway serves no Console; its Console can identify no
+  person (it requires no sign-in and has no access control with a trusted
+  token issuer) or takes no changes (read-only); it keeps no durable
+  decisions (no persistent state directory); it runs a candidate launch; or
+  no answer can be routed to the asker, as for a member of a mob other than
+  the runtime's own (a sub-mob an agent created, for one). A member whose
+  build already has a tool named `ask_user` among its external tools (the
+  tools its host supplies to the build) keeps that tool and gets none from
+  the gateway: its questions are that tool's, are not held or listed here,
+  and whoever mounted it shows and answers them. A tool of that name from
+  an MCP server the member's profile configures is not kept: it and the
+  stock tool are offered by neither, and the member has no tool of that
+  name (see Breaking and Known limitations). Every other member of a
+  runtime is offered the tool, unless it is denied it: a profile that lists
+  `ask_user` in `tools.deny` keeps it from its members, whose model is not
+  offered it.
+  `meta/gating/questions` lists the open sets, soonest deadline first: all
+  of them on the stdio gateway, and on the Console (with `gating.view`) the
+  ones whose asking agent the caller may view. A set is answered through
+  `meta/gating/decide` with its `pending_id`: `approve` with
+  `presented_digest` and `answers` answers it, `reject` with
+  `presented_digest` dismisses it, and the result is
+  `{pending_id, kind: "question_set", outcome, decided_at_ms}`. On the
+  Console a signed-in person with `gating.decide` who can view the asking
+  agent answers. Nothing is decided by a refused request. A decide the set
+  itself refuses is answered `-32602` with `data.kind = "decision_refused"`
+  and the refusal as an object, `data.decision_refusal.kind`: `not_open`
+  (answered, dismissed, withdrawn or timed out already), `subject_changed`
+  (the `presented_digest` is not the set's), `expired` (the deadline passed
+  as the decision was applied) or `not_eligible`. A request at fault (an
+  invalid answer set, no digest, `escalate`) is plain invalid params. A
+  caller who is not a signed-in person is refused `approver_unauthenticated`
+  and a person without `gating.decide` `access_denied`. A set that is not
+  listed to the caller is answered exactly as an id that is not pending.
+  The Console shows each open set as a card, at the top of the inbox's
+  Pending tab and in the asking agent's chat, and counts it in "Needs you"
+  and on the Approvals view: who asked and by when, one group of choices
+  per question, the agent's recommendation marked and never preselected,
+  "Something else" for the person's own words where allowed, Send answers
+  and Dismiss. A set is listed once on the Pending tab, as that card, and
+  not among the durable decisions below it; a set the question list does
+  not hold is shown there, as a read-only decision card. A card says
+  "Answered" or
+  "Dismissed" once the gateway confirmed it, "Not accepted" with what to do
+  when the gateway refused the reply and still lists the set, and why
+  nobody can answer when the caller
+  is not signed in or may not decide. A set the gateway no longer lists
+  leaves the screen whole; where its card was, one line says that the
+  question is no longer listed here. The deadline shown is the gateway's,
+  and the card never ends a set by the browser's clock. The Console reads
+  at most the gateway's own limits of a set (10 questions, 8 choices each,
+  the text lengths); a set larger than that is shown up to them, says
+  what is not shown, and takes no answer and no dismissal from the
+  Console, since a reply attests the whole set. Python
+  `MobHandle.gating_questions`, `gating_answer` and `gating_dismiss` and
+  TypeScript `gatingQuestions`, `gatingAnswer` and `gatingDismiss` wrap the
+  two methods. An SDK or Console older than this release does not list a
+  question set as a question or as an approval (sets are not part of
+  `meta/gating/pending`): it meets one only as a durable decision of a kind
+  it does not know, which an older Console shows as a read-only card to a
+  caller who may see the decision. A set nobody answers ends `timed_out` at
+  its deadline. On the Console a question set is read through
+  `meta/decisions/list`, `get` and `rendering`, and withdrawn through
+  `meta/decisions/withdraw`, only by a caller who may view its asking agent.
+  See [Question sets](docs/concepts/gating.mdx#question-sets).
+
 - A spawn whose draft sets one provider param keeps the
   `reasoning_effort` level its profile declares in `provider_params`, as it
   keeps the profile's other declared params, and a draft's own level wins.
@@ -1173,6 +1283,15 @@ Security, Upgrade and Changed.
   council stays private to no one, and so does a council a host runs
   directly. A council's mob left over from before a restart is read as
   private to no one, as before.
+
+- `meta/decisions/list` on the Console pages over what its caller may see: a
+  decision the caller may not see fills no place in a page and is never a
+  cursor, and the request's filters choose among the decisions it may see.
+  `meta/decisions/list`, `get`, `rendering` and `withdraw` on the Console
+  tell only an access administrator of rows the decision store cannot
+  decode. A caller who administers decisions by a rule no longer reads them:
+  `unreadable` is empty for it, and by its id such a row is answered as an
+  id that names no decision.
 
 - A host that labels its members in its customizer must put those labels
   in the row of an agent created at run time (an identity whose record is
@@ -2082,6 +2201,16 @@ Security, Upgrade and Changed.
   change how such an agent runs, set the other explicit value
   (`autonomous_host` or `turn_driven`); clearing an override is not offered
   in this release.
+- A tool named `ask_user` from an MCP server of a member's profile and the
+  stock tool `ask_user` are offered by neither: the member has no tool of
+  that name, and each such build logs a warning that names the tool, its
+  two sources and the member (see Breaking). No setting keeps the server's
+  tool under that name; the profile can give it another one (`tool_names`
+  on the server's entry). The same holds for a server attached to a
+  member's live session. Not in this release: the member's own tool
+  winning the name. That needs the host's tools composed after the build
+  has waited for its MCP servers, and is planned as a follow-up.
+
 - The loss of an identity's mobs after a respawn (see Fixed) remains for
   a member the fix does not serve whose session a store keeps. A member
   the fix does not serve is retired and then woken, as in 0.9.14, and

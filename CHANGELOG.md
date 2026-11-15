@@ -2366,14 +2366,15 @@ them.
   the retained sealed-intent reconciliation slice" on every reconcile pass,
   a change committed for it stayed at its desired revision with the earlier
   revision active, and no call cleared it: the pass held the agent to every
-  edge recorded as incident to it, the other agent's edge included. The pass
-  now holds each agent to the edges its own declaration owns, so such an
-  agent converges again and its owner's changes become active. The edge
-  stays in the store, and the agent whose declaration owns it is still held
-  to it (see Known limitations). An agent under the default custody was not
-  affected by this. Nothing stored and no request or answer changes.
-  Affected: 0.8.26 through 0.9.14 (run on Core and Meta 0.9.14; earlier
-  versions read from the source).
+  edge recorded as incident to it, the other agent's edge included. On
+  0.9.14 such an agent also refused delivered messages (`mob/member_send`)
+  (from runs on the published 0.9.14). The pass now holds each agent to the
+  edges its own declaration owns, so such an agent converges again and its
+  owner's changes become active. The edge stays in the store, and the agent
+  whose declaration owns it is still held to it (see Known limitations). An
+  agent under the default custody was not affected by this. Nothing stored
+  and no request or answer changes. Affected: 0.8.26 through 0.9.14 (run on
+  Core and Meta 0.9.14; earlier versions read from the source).
 
 - `meerkat-rpc`, `meerkat-rest`, `meerkat`: a session that was cleaned up
   without being archived no longer loses the agents it created to the
@@ -3262,7 +3263,15 @@ them.
   printed, not the directory's. No output file is written. The archive
   format and the signature are unchanged. In Rust, `pack_directory` and
   `pack_directory_with_excludes` return that `PackValidationError::Io`
-  before they read the directory. Affects 0.4.1 through 0.9.14.
+  before they read the directory. Affects 0.4.1 through 0.9.14, by a reading
+  of the source, not by a run: there the key is left out by its path as
+  written and read a second time, by that path, to sign. A pack made from a
+  directory that nothing changed while the command ran is not affected
+  beyond the entry above. Only where the key file was inside the mob
+  directory and was renamed or replaced while the command ran could such a
+  pack hold a key file, or be signed with another key than the one left out.
+  Keep the key outside the mob directory, and check a pack with `rkat mob
+  inspect <pack>`.
 
 - Mob: a `mob_destroy` refused by the mob tells an agent nothing of a
   member the host's member tool audience
@@ -3628,6 +3637,32 @@ them.
   from then on). A host that answers such a member's seat from
   its row is otherwise refused the member's build, naming the label keys
   that differ.
+
+- An agent under identity-owned wiring custody that another agent's
+  declaration wires to read `repair_blocked` through 0.9.14, with its
+  owner's changes committed and not active (see Fixed). From 0.9.15 such an
+  agent converges again and its owner's changes become active, including
+  changes committed while it was blocked: they become active at the first
+  reconcile pass after the upgrade, which the host's start runs, and the
+  operator does nothing for it (confirmed by a test on a store carried over
+  a restart). To see beforehand which changes will take effect, read each
+  such agent with `mob/member_tool_declaration` (listed in the Meerkat RPC
+  reference's method overview; a Meta gateway serves the same call) and
+  compare the answer's top-level `desired_intent_revision` with
+  `convergence.active_intent_revision`: a desired revision above the active
+  one, or an absent active revision on an agent whose `convergence.decision`
+  reads repair-blocked, is a change that takes effect at the upgrade (an
+  agent blocked with nothing newer to apply reads the same: treat it as
+  changed and check it after the upgrade). If
+  `convergence.active_intent_revision` is absent, this host process has not
+  recorded an applied revision for the member since it last started (that
+  record is kept in memory only). Read again after the next reconcile pass:
+  it gets a value once a pass converges the member. If it stays absent, read
+  `convergence.decision` and `convergence.detail`: a member in backoff,
+  repair-blocked or quarantined keeps it absent, even when an earlier
+  revision was applied before a restart and may still be in effect. Do not
+  compare the two revisions inside `convergence` with each other. The edge
+  itself stays in the store.
 
 - Mob, rollback: releases 0.9.9 through 0.9.14 read a row that carries
   `label_restamp_owed` as unreadable, for that one identity (its name is

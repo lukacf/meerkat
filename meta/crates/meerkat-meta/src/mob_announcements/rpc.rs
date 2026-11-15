@@ -759,7 +759,8 @@ impl<'a> Audience<'a> {
     }
 
     /// Whether an escalation about `subject` is one of a member the caller
-    /// may not see: the member itself, or a declared subscription of it.
+    /// may not see: the member itself, a declared subscription of it, or a
+    /// role template's child made for it.
     async fn hides_subject(
         &self,
         service: &AnnouncementService,
@@ -774,7 +775,7 @@ impl<'a> Audience<'a> {
                 DeclarationRecordKind::Source => Ok(false),
                 DeclarationRecordKind::Subscription | DeclarationRecordKind::RoleChild => {
                     Ok(service
-                        .declared_subscription_member(id)
+                        .declared_subscription_member(*record_kind, id)
                         .await
                         .map_err(rpc_error)?
                         .is_some_and(|member| self.hides(&member)))

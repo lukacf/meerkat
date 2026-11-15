@@ -660,14 +660,51 @@ impl AnnouncementService {
             .collect())
     }
 
-    /// The member the record `id` delivers into: as `declared` names it
-    /// ([`Self::declared_members`]), or as the subscription under the id
-    /// holds it. None for an id that is neither.
+    /// The member each role child was made for, by the child's id: as the
+    /// child's own record holds it, whatever the child's status and whatever
+    /// subscription has its id, if any.
+    async fn role_child_members(&self) -> Result<BTreeMap<String, Member>, AnnouncementError> {
+        let children = self
+            .stored("role_children", |store| async move {
+                store.role_children().await
+            })
+            .await?;
+        Ok(children
+            .into_iter()
+            .map(|child| (child.subscription_id.to_string(), child.member))
+            .collect())
+    }
+
+    /// The member the record `id` of `kind` is of.
+    ///
+    /// A role child is the record of the member it was made for, as
+    /// `children` holds it ([`Self::role_child_members`]). Its own record is
+    /// asked first: a child can have no subscription under its id (a pending
+    /// one, or one whose cancelled or ended subscription retention removed),
+    /// and the id can be held by a subscription made at runtime, of any
+    /// member.
+    ///
+    /// A declared subscription, and a role child that has no record of its
+    /// own any more, is of the member it delivers into: as `declared` names
+    /// it ([`Self::declared_members`]), or as the subscription under the id
+    /// holds it. None for an id that is none of these, and for a source,
+    /// which has no member of its own.
     async fn record_member(
         &self,
         declared: &BTreeMap<String, Member>,
+        children: &BTreeMap<String, Member>,
+        kind: DeclarationRecordKind,
         id: &str,
     ) -> Result<Option<Member>, AnnouncementError> {
+        match kind {
+            DeclarationRecordKind::Source => return Ok(None),
+            DeclarationRecordKind::RoleChild => {
+                if let Some(member) = children.get(id) {
+                    return Ok(Some(member.clone()));
+                }
+            }
+            DeclarationRecordKind::Subscription => {}
+        }
         if let Some(member) = declared.get(id) {
             return Ok(Some(member.clone()));
         }
@@ -677,15 +714,20 @@ impl AnnouncementService {
         Ok(self.subscription(&id).await?.map(|found| found.member))
     }
 
-    /// The member a declared subscription or a role child delivers into, by
-    /// the record's id: as the applied declarations name it, or as the
-    /// subscription under the id holds it. None for an id that is neither.
+    /// The member a declared subscription or a role child is of, by the
+    /// record's kind and id ([`Self::record_member`]): a role child's is the
+    /// member it was made for.
     pub(crate) async fn declared_subscription_member(
         &self,
+        kind: DeclarationRecordKind,
         id: &str,
     ) -> Result<Option<Member>, AnnouncementError> {
+        let children = match kind {
+            DeclarationRecordKind::RoleChild => self.role_child_members().await?,
+            DeclarationRecordKind::Source | DeclarationRecordKind::Subscription => BTreeMap::new(),
+        };
         let declared = self.declared_members().await?;
-        self.record_member(&declared, id).await
+        self.record_member(&declared, &children, kind, id).await
     }
 
     /// Reconcile at a trigger: the options' declarations when they are newer
@@ -1714,8 +1756,10 @@ impl AnnouncementService {
     /// call's failure. No caller holds the gate when it calls this.
     ///
     /// With `hidden`, the judge of the members the reader may not see, the
-    /// view lists no declared subscription and no role child of such a
-    /// member.
+    /// view lists no declared subscription of such a member and no role
+    /// child made for one: a role child is judged by the member in its own
+    /// record, whatever its status and whether or not a subscription has
+    /// its id ([`Self::record_member`]).
     pub(super) async fn declared_view(
         &self,
         hidden: Option<HiddenMember<'_>>,
@@ -1724,6 +1768,7 @@ impl AnnouncementService {
             let mut view = self.declared_view_held().await?;
             if let Some(hidden) = hidden {
                 let declared = self.declared_members().await?;
+                let children = self.role_child_members().await?;
                 let mut shown = Vec::with_capacity(view.records.len());
                 for mut record in view.records {
                     let of_hidden_member = match record.kind {
@@ -1745,7 +1790,7 @@ impl AnnouncementService {
                             false
                         }
                         DeclarationRecordKind::Subscription | DeclarationRecordKind::RoleChild => {
-                            self.record_member(&declared, &record.id)
+                            self.record_member(&declared, &children, record.kind, &record.id)
                                 .await?
                                 .is_some_and(|member| hidden(&member))
                         }

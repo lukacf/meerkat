@@ -24,6 +24,7 @@ API changes, error codes, SDKs, prebuilt binaries and Rust embedding:
 | Continue | `rkat run --resume <target> "<prompt>"` | `turn/start` | `POST /sessions/{id}/messages` | `Session.turn(...)` | `Session.turn(...)` |
 | Interrupt current turn | `rkat session interrupt <id>` | `turn/interrupt` | `POST /sessions/{id}/interrupt` | `Session.interrupt()` | `Session.interrupt()` |
 | Stop one exact run | none | `turn/stop_run` | `POST /sessions/{id}/runs/{run_id}/stop` | `Session.stop_run(run_id, reason=...)` | `Session.stopRun(runId, reason)` |
+| Withdraw one queued input | none | `session/recall_input` | none | `Session.recall_input(input_id=...)` or `(idempotency_key=...)` | `Session.recallInput({ inputId })` or `({ idempotencyKey })` |
 | Read state | `rkat session show <id>` | `session/read` | `GET /sessions/{id}`, `GET /sessions/{id}/status` | `read_session(id)` | `readSession(id)` |
 | History | none | `session/history` | `GET /sessions/{id}/history?offset=&limit=` | `read_session_history(id, offset=, limit=)` | `readSessionHistory(id, {offset, limit})` |
 | List | `rkat session list [--limit N] [--offset N] [--label K=V]` | `session/list` | `GET /sessions?limit=&offset=&label=k%3Dv` | `list_sessions(labels=, limit=, offset=)` | `listSessions({labels, limit, offset})` |

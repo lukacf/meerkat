@@ -32,6 +32,9 @@ mod request_execution;
 mod runtime_backed;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 mod runtime_delivery;
+pub use meerkat_runtime::queued_input_recall_wire::{
+    parse_wire_input_id, wire_queued_input_recall,
+};
 pub use meerkat_runtime::run_stop_wire::{parse_wire_run_id, wire_run_stop_receipt};
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use runtime_delivery::{SessionServiceDeliveryHost, SessionServiceDeliverySink};

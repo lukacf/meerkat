@@ -1711,6 +1711,43 @@ pub async fn handle_compact(
     }
 }
 
+/// Handle `session/recall_input`: withdraw one input only while it is still
+/// queued. The typed answer says what the machine did (`abandoned`,
+/// `not_queued`, `already_terminal`); a run that has taken the input is
+/// never interrupted. An input the session does not hold and a malformed
+/// input id are invalid params.
+pub async fn handle_recall_input(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: &SessionRuntime,
+) -> RpcResponse {
+    let params: meerkat_contracts::RecallInputParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {
+        Ok(sid) => sid,
+        Err(resp) => return resp,
+    };
+    let recall = match runtime
+        .recall_queued_input(&session_id, &params.selector)
+        .await
+    {
+        Ok(recall) => recall,
+        Err(rpc_err) => return RpcResponse::from_error(id, rpc_err),
+    };
+    match meerkat::surface::wire_queued_input_recall(&recall) {
+        Ok(recall) => RpcResponse::success(
+            id,
+            meerkat_contracts::RecallInputResult {
+                session_id: session_id.to_string(),
+                recall,
+            },
+        ),
+        Err(message) => RpcResponse::error(id, error::INTERNAL_ERROR, message),
+    }
+}
+
 /// Handle `session/inject_context`.
 pub async fn handle_inject_context(
     id: Option<RpcId>,

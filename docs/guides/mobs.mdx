@@ -977,6 +977,29 @@ and earlier failed that resume with an internal error). A store written
 before 0.9.4 whose last epoch already reused a generation still resumes, and
 that identity's next spawn goes above the recovered high-water.
 
+When a session's mobs end depends on what archives the session. A member
+its mob retires has its session archived by the mob, and the mobs that
+session owns (the mobs its agent created with `mob_create`, and the session's
+implicit mob with its delegates and forks) end with it at the next start of
+the host: the mob's retire archives the session and leaves its mobs to that
+start. A session archived through a surface's own archive call (JSON-RPC
+`session/archive`, the REST and MCP archive) has its mobs destroyed at that
+call. A
+worker's respawn (`respawn`, `mob/respawn`, the `mob_respawn` tool of
+`MobMcpDispatcher`) retires the member and gives its successor a new session,
+so the mobs the old incarnation created and its delegates are not carried
+over to the successor.
+An identity entry's member is respawned on its own session
+(`MobHandle::respawn_member`, and `respawn` of such a member), so the mobs
+that session owns do not end with the respawn. What the respawned member's
+own tools list and manage of the mobs it created is not kept (see the
+`meta/compact_member` section of Meta's RPC reference). Which side a member
+is on follows from how it was created: a member a
+host seats through an identity entry (a declared or store-owned identity, the
+way a host keeps a durable roster) is an entry's member; a member spawned
+directly (a host's spawn call, an agent's `mob_spawn_member`, a helper) is a
+worker.
+
 ### Dormant seats and comms keys (Rust hosts)
 
 A dormant seat (`MobHandle::seat_dormant_members`, a `rotate_member` that
@@ -1226,16 +1249,32 @@ untouched. Cancelling an idle member is not an error. On success the result
 is `{"mob_id": "...", "ok": true}`.
 
 <Warning>
-Known issue in 0.9.5 through 0.9.14 (the range read from the source; 0.8.51
-through 0.9.4 not determined), noted 2026-11-13, confirmed by a test for `turn/start` on the member's
-session id (`mob/turn_start` reaches the same path, read from the source):
-if a client has a turn of its own queued on that member's session,
-`mob/cancel_all_work` also abandons it, and the mobs that member's session
-owns are then destroyed. Work the mob itself admitted (member sends,
-submitted work) does not trigger this. See the
+Known issue in 0.9.5 through 0.9.14, noted 2026-11-13 and corrected
+2026-11-14 after runs on the published 0.9.14 `rkat-rpc` (measured on
+0.9.14; 0.9.5 through 0.9.13 read from the source; 0.8.51 through 0.9.4 not
+determined): `mob/cancel_all_work` can destroy the mobs that the member's
+session owns.
+
+- With a turn waiting: the mobs are destroyed when a turn a client sent to
+  the member's session (`turn/start` on its session id) or a
+  `mob/turn_start` is waiting behind the member's run when the cancel is
+  taken (measured on a default realm and on a realm created with
+  `--realm-backend jsonl`). The waiting turn itself may still run. With
+  nothing waiting, a default realm keeps the mobs.
+- On a realm created with `--realm-backend jsonl`, nothing needs to be
+  waiting: the first turn started on the member's session after the cancel
+  (measured for `turn/start`) is answered with an internal error (`-32603`)
+  and is not completed, and the mobs are destroyed at that turn. Before
+  0.9.14 this case is not determined.
+
+Work the mob itself admitted (member sends, submitted work) and still queued
+at the cancel does not count as a waiting turn. See the
 [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14).
-Until a release with the fix, do not call `mob/cancel_all_work` while such a
-turn is queued.
+Until a release with the fix, do not call `mob/cancel_all_work` on a member
+while such a turn is queued. On a `jsonl` realm, do not call it at all on a
+member whose session owns mobs; if you already have, restart the process
+before the next turn is sent to that member (after a restart the next turn
+ran and the mobs were kept, in one run).
 </Warning>
 
 ## Flows
@@ -1549,6 +1588,8 @@ embedded Rust all cascade (`MobHandle::retire_with_descendants` is an alias).
 Each retirement runs through the ordinary retire path and every one is
 attempted; the first failure is reported, and a retry converges. Members
 spawned by other means are not affected.
+The mobs the retired member created itself and its delegates end with its
+session, at the next start of the host.
 
 Retiring a declared identity that its host's roster still lists does not
 remove it: the identity entry outlives the retirement, and the host's next

@@ -3068,6 +3068,10 @@ impl MethodRouter {
             "session/input_status" => {
                 routed_arm(|| self.handle_session_input_state(id, params)).await
             }
+            "session/recall_input" => {
+                routed_arm(|| handlers::session::handle_recall_input(id, params, &self.runtime))
+                    .await
+            }
             "session/stream_open" => {
                 routed_arm(|| self.handle_session_stream_open(id, params)).await
             }
@@ -28782,6 +28786,129 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             .expect("the keyed send is admitted")
         }
 
+        /// A member retired by its mob while a client's `mob/turn_start` on
+        /// it is in flight: the retire and the turn request are both
+        /// answered, and the member's session is left with no runtime
+        /// registration.
+        #[cfg(feature = "mob")]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_member_retired_with_a_turn_start_in_flight_keeps_no_runtime_registration() {
+            const BOUND: Duration = Duration::from_secs(30);
+            let (router, runtime, _temp) = keyed_router(true).await;
+            let calls = Arc::new(tokio::sync::watch::channel(0usize).0);
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            runtime.set_default_llm_client(Some(Arc::new(GatedLlmClient {
+                calls: Arc::clone(&calls),
+                release: Arc::clone(&release),
+                requests: Arc::new(StdMutex::new(Vec::new())),
+            })));
+            let mob_id = tokio::time::timeout(
+                BOUND,
+                create_mob_with_worker(&router, "retire-with-a-turn-in-flight"),
+            )
+            .await
+            .expect("the mob and its member are created without a model call");
+            let member_session = runtime
+                .mob_state()
+                .expect("the mob surface")
+                .mob_resolve_bridge_session_id(
+                    &meerkat_mob::MobId::from(mob_id.as_str()),
+                    &meerkat_mob::AgentIdentity::from("worker-1"),
+                )
+                .await
+                .expect("the member's session resolves")
+                .expect("the member holds a session");
+
+            let mut seen = calls.subscribe();
+            let turn = {
+                let router = router.clone();
+                let mob_id = mob_id.clone();
+                tokio::spawn(async move {
+                    router
+                        .dispatch(make_request(
+                            "mob/turn_start",
+                            serde_json::json!({
+                                "mob_id": mob_id,
+                                "agent_identity": "worker-1",
+                                "prompt": "a turn in flight at the retire",
+                            }),
+                        ))
+                        .await
+                        .expect("mob/turn_start response")
+                })
+            };
+            tokio::time::timeout(BOUND, seen.wait_for(|calls| *calls >= 1))
+                .await
+                .expect("the member's turn reaches the provider")
+                .expect("call counter stays open");
+            assert!(
+                runtime
+                    .runtime_adapter()
+                    .contains_session(&member_session)
+                    .await,
+                "the member's session is registered while its turn is in flight"
+            );
+
+            let retire = {
+                let router = router.clone();
+                let mob_id = mob_id.clone();
+                tokio::spawn(async move {
+                    router
+                        .dispatch(make_request(
+                            "mob/retire",
+                            serde_json::json!({
+                                "mob_id": mob_id,
+                                "agent_identity": "worker-1",
+                            }),
+                        ))
+                        .await
+                        .expect("mob/retire response")
+                })
+            };
+            // The retire may wait for the turn in flight: the provider
+            // answers shortly.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            release.add_permits(4);
+            let retired = tokio::time::timeout(BOUND, retire)
+                .await
+                .expect("the retire is answered")
+                .expect("retire task");
+            assert!(
+                retired.error.is_none(),
+                "the retire succeeds: {:?}",
+                retired.error
+            );
+            let turn = tokio::time::timeout(BOUND, turn)
+                .await
+                .expect("the turn request is answered")
+                .expect("turn task");
+
+            let mut registered = true;
+            for _ in 0..600 {
+                registered = runtime
+                    .runtime_adapter()
+                    .contains_session(&member_session)
+                    .await;
+                if !registered {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            println!(
+                "the turn request was answered result {:?}, error {:?}; registered afterwards: \
+                 {registered}",
+                turn.result.is_some(),
+                turn.error
+            );
+            assert!(
+                !registered,
+                "the retired member's session keeps no runtime registration (the turn request \
+                 was answered result {:?}, error {:?})",
+                turn.result.is_some(),
+                turn.error
+            );
+        }
+
         /// the first answer is a receipt with a pending or admitted
         /// status; on replay delivery_id and committed_at_ms are identical,
         /// the status may advance, and nothing new is admitted.
@@ -28841,6 +28968,51 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
                 followed["state"]["input_id"], input_id,
                 "the admitted pair names a row session/input_status reads: {followed}"
             );
+            // The same pair names the input to session/recall_input on the
+            // member's session. The member may already have taken the input,
+            // so any of the three answers is right; each must agree with the
+            // row afterwards.
+            let recalled = result_value(
+                &router
+                    .dispatch(make_request(
+                        "session/recall_input",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "selector": { "by": "input_id", "value": input_id },
+                        }),
+                    ))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(recalled["recall"]["input_id"], input_id, "{recalled}");
+            let after = result_value(
+                &router
+                    .dispatch(make_request(
+                        "session/input_status",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "selector": { "by": "input_id", "value": input_id },
+                        }),
+                    ))
+                    .await
+                    .unwrap(),
+            );
+            let terminal = &after["state"]["terminal_outcome"];
+            match recalled["recall"]["outcome"].as_str() {
+                Some("abandoned") => assert_eq!(
+                    terminal, "cancelled",
+                    "a recalled member input is cancelled: {after}"
+                ),
+                Some("not_queued") => assert_ne!(
+                    terminal, "cancelled",
+                    "an input the member's run holds is not cancelled: {after}"
+                ),
+                Some("already_terminal") => assert_eq!(
+                    &recalled["recall"]["terminal"], terminal,
+                    "an ended member input answers its own terminal: {after}"
+                ),
+                other => panic!("unexpected recall outcome {other:?}: {recalled}"),
+            }
         }
 
         /// the first answer reports pending or admitted, and an admitted
@@ -29596,6 +29768,411 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
                     .expect("read the entry's input ledger")
                     .is_some(),
                 "the entry's session holds the input"
+            );
+        }
+    }
+
+    /// `session/recall_input`: withdraw one input only while it is still
+    /// queued. Every row drives the wire (JSON params and results).
+    mod queued_input_recall {
+        use super::caller_idempotency_key::keyed_router;
+        use super::*;
+
+        async fn create_session(router: &MethodRouter) -> String {
+            let resp = router
+                .dispatch(make_request(
+                    "session/create",
+                    serde_json::json!({ "prompt": "Hello" }),
+                ))
+                .await
+                .unwrap();
+            result_value(&resp)["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string()
+        }
+
+        /// Queue one external event on an idle session and return its input
+        /// id. Nothing runs it until the session's next turn.
+        async fn queue_event(router: &MethodRouter, session_id: &str, body: &str) -> String {
+            let admitted = result_value(
+                &router
+                    .dispatch(make_request(
+                        "session/external_event",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "kind": "generic_json",
+                            "event_type": "inbox.item",
+                            "payload": { "body": body },
+                        }),
+                    ))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(admitted["outcome_type"], "accepted", "{admitted}");
+            let input_id = admitted["input_id"]
+                .as_str()
+                .expect("the admission names its input")
+                .to_string();
+            let state = input_state(router, session_id, &input_id).await;
+            assert_eq!(
+                state["current_state"], "queued",
+                "the event waits queued for the next turn: {state}"
+            );
+            input_id
+        }
+
+        async fn input_state(
+            router: &MethodRouter,
+            session_id: &str,
+            input_id: &str,
+        ) -> serde_json::Value {
+            result_value(
+                &router
+                    .dispatch(make_request(
+                        "session/input_status",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "selector": { "by": "input_id", "value": input_id },
+                        }),
+                    ))
+                    .await
+                    .unwrap(),
+            )["state"]
+                .clone()
+        }
+
+        /// Recall the input named by its runtime input id.
+        async fn recall(router: &MethodRouter, session_id: &str, input_id: &str) -> RpcResponse {
+            recall_selected(router, session_id, "input_id", input_id).await
+        }
+
+        /// Recall the input named as `session/input_status` names it.
+        async fn recall_selected(
+            router: &MethodRouter,
+            session_id: &str,
+            by: &str,
+            value: &str,
+        ) -> RpcResponse {
+            router
+                .dispatch(make_request(
+                    "session/recall_input",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "selector": { "by": by, "value": value },
+                    }),
+                ))
+                .await
+                .unwrap()
+        }
+
+        async fn run_turn(router: &MethodRouter, session_id: &str) {
+            let turn = router
+                .dispatch(make_request(
+                    "turn/start",
+                    serde_json::json!({ "session_id": session_id, "prompt": "continue" }),
+                ))
+                .await
+                .unwrap();
+            assert!(turn.error.is_none(), "the next turn runs: {turn:?}");
+        }
+
+        /// A queued input is abandoned: its terminal is `cancelled`, the next
+        /// turn does not run it, and a second recall answers
+        /// `already_terminal`.
+        #[tokio::test]
+        async fn recall_abandons_a_queued_input_and_a_second_recall_is_already_terminal() {
+            let (router, _runtime, _temp) = keyed_router(false).await;
+            let session_id = create_session(&router).await;
+            let input_id = queue_event(&router, &session_id, "withdraw me").await;
+
+            let first = result_value(&recall(&router, &session_id, &input_id).await);
+            assert_eq!(first["session_id"], session_id.as_str(), "{first}");
+            assert_eq!(
+                first["recall"],
+                serde_json::json!({
+                    "outcome": "abandoned",
+                    "input_id": input_id,
+                    "attempt_count": 0,
+                }),
+                "{first}"
+            );
+
+            let state = input_state(&router, &session_id, &input_id).await;
+            assert_eq!(state["current_state"], "abandoned", "{state}");
+            assert_eq!(state["terminal_outcome"], "cancelled", "{state}");
+            assert!(
+                state.get("last_run_id").is_none(),
+                "a recalled input was never bound to a run: {state}"
+            );
+
+            run_turn(&router, &session_id).await;
+            let after_turn = input_state(&router, &session_id, &input_id).await;
+            assert_eq!(
+                after_turn["terminal_outcome"], "cancelled",
+                "the next turn does not run a recalled input: {after_turn}"
+            );
+
+            let second = result_value(&recall(&router, &session_id, &input_id).await);
+            assert_eq!(second["recall"]["outcome"], "already_terminal", "{second}");
+            assert_eq!(second["recall"]["terminal"], "cancelled", "{second}");
+        }
+
+        /// The selector is `session/input_status`'s: a caller that only kept
+        /// the idempotency key it submitted under recalls by that key, and an
+        /// unknown key is refused like an unknown input id.
+        #[tokio::test]
+        async fn recall_by_idempotency_key_withdraws_the_keyed_input() {
+            let (router, _runtime, _temp) = keyed_router(false).await;
+            let session_id = create_session(&router).await;
+            let admitted = result_value(
+                &router
+                    .dispatch(make_request(
+                        "session/external_event",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "kind": "generic_json",
+                            "event_type": "inbox.item",
+                            "idempotency_key": "inbox:recall-1",
+                            "payload": { "body": "withdraw me by key" },
+                        }),
+                    ))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(admitted["outcome_type"], "accepted", "{admitted}");
+            let input_id = admitted["input_id"].as_str().expect("input id").to_string();
+
+            let unknown =
+                recall_selected(&router, &session_id, "idempotency_key", "inbox:never-sent").await;
+            assert_eq!(
+                unknown.error.as_ref().map(|error| error.code),
+                Some(crate::error::INVALID_PARAMS),
+                "a key this session never admitted is refused: {unknown:?}"
+            );
+
+            let first = result_value(
+                &recall_selected(&router, &session_id, "idempotency_key", "inbox:recall-1").await,
+            );
+            assert_eq!(first["recall"]["outcome"], "abandoned", "{first}");
+            assert_eq!(first["recall"]["input_id"], input_id.as_str(), "{first}");
+            let state = input_state(&router, &session_id, &input_id).await;
+            assert_eq!(state["terminal_outcome"], "cancelled", "{state}");
+
+            let second = result_value(
+                &recall_selected(&router, &session_id, "idempotency_key", "inbox:recall-1").await,
+            );
+            assert_eq!(second["recall"]["outcome"], "already_terminal", "{second}");
+            assert_eq!(second["recall"]["input_id"], input_id.as_str(), "{second}");
+            assert_eq!(second["recall"]["terminal"], "cancelled", "{second}");
+        }
+
+        /// An input a turn already consumed answers `already_terminal` with
+        /// its `completed` terminal, and nothing changes.
+        #[tokio::test]
+        async fn recall_of_a_completed_input_is_already_terminal() {
+            let (router, _runtime, _temp) = keyed_router(false).await;
+            let session_id = create_session(&router).await;
+            let input_id = queue_event(&router, &session_id, "run me").await;
+            run_turn(&router, &session_id).await;
+            let consumed = input_state(&router, &session_id, &input_id).await;
+            assert_eq!(consumed["terminal_outcome"], "completed", "{consumed}");
+
+            let answer = result_value(&recall(&router, &session_id, &input_id).await);
+            assert_eq!(answer["recall"]["outcome"], "already_terminal", "{answer}");
+            assert_eq!(answer["recall"]["terminal"], "completed", "{answer}");
+            let after = input_state(&router, &session_id, &input_id).await;
+            assert_eq!(after["terminal_outcome"], "completed", "{after}");
+        }
+
+        /// Another session's input is unknown to this session: the recall is
+        /// refused as invalid params and the other session's input stays
+        /// queued.
+        #[tokio::test]
+        async fn recall_of_another_sessions_input_is_refused_and_touches_nothing() {
+            let (router, _runtime, _temp) = keyed_router(false).await;
+            let owner = create_session(&router).await;
+            let other = create_session(&router).await;
+            let input_id = queue_event(&router, &owner, "the owner's event").await;
+
+            let refused = recall(&router, &other, &input_id).await;
+            let error = refused
+                .error
+                .as_ref()
+                .unwrap_or_else(|| panic!("another session's input is refused: {refused:?}"));
+            assert_eq!(error.code, crate::error::INVALID_PARAMS, "{error:?}");
+            let state = input_state(&router, &owner, &input_id).await;
+            assert_eq!(
+                state["current_state"], "queued",
+                "the owner's input is untouched: {state}"
+            );
+
+            let never_admitted = meerkat_core::lifecycle::InputId::new().to_string();
+            let unknown = recall(&router, &owner, &never_admitted).await;
+            assert_eq!(
+                unknown.error.as_ref().map(|error| error.code),
+                Some(crate::error::INVALID_PARAMS),
+                "an input this session never admitted is refused: {unknown:?}"
+            );
+        }
+
+        /// A malformed input id is invalid params; an unknown session is the
+        /// ordinary session-not-found.
+        #[tokio::test]
+        async fn recall_refuses_a_malformed_input_id_and_an_unknown_session() {
+            let (router, _runtime, _temp) = keyed_router(false).await;
+            let session_id = create_session(&router).await;
+            let malformed = recall(&router, &session_id, "not-an-input-id").await;
+            assert_eq!(
+                malformed.error.as_ref().map(|error| error.code),
+                Some(crate::error::INVALID_PARAMS),
+                "{malformed:?}"
+            );
+            let unknown_session = recall(
+                &router,
+                &meerkat_core::SessionId::new().to_string(),
+                &meerkat_core::lifecycle::InputId::new().to_string(),
+            )
+            .await;
+            assert_eq!(
+                unknown_session.error.as_ref().map(|error| error.code),
+                Some(crate::error::SESSION_NOT_FOUND),
+                "{unknown_session:?}"
+            );
+        }
+
+        /// Concurrent recalls of one queued input: exactly one abandons it,
+        /// the others answer `already_terminal`, and none hangs.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_recalls_of_one_queued_input_abandon_it_exactly_once() {
+            const RECALLS: usize = 8;
+            let (router, _runtime, _temp) = keyed_router(false).await;
+            let router = Arc::new(router);
+            let session_id = create_session(&router).await;
+            let input_id = queue_event(&router, &session_id, "withdraw me once").await;
+
+            let mut calls = Vec::with_capacity(RECALLS);
+            for _ in 0..RECALLS {
+                let router = Arc::clone(&router);
+                let session_id = session_id.clone();
+                let input_id = input_id.clone();
+                calls.push(tokio::spawn(async move {
+                    result_value(&recall(&router, &session_id, &input_id).await)
+                }));
+            }
+            let mut abandoned = 0;
+            let mut already_terminal = 0;
+            for call in calls {
+                let answer = tokio::time::timeout(Duration::from_mins(1), call)
+                    .await
+                    .expect("no recall hangs")
+                    .expect("the recall task ends");
+                match answer["recall"]["outcome"].as_str() {
+                    Some("abandoned") => abandoned += 1,
+                    Some("already_terminal") => {
+                        assert_eq!(answer["recall"]["terminal"], "cancelled", "{answer}");
+                        already_terminal += 1;
+                    }
+                    other => panic!("unexpected recall outcome {other:?}: {answer}"),
+                }
+            }
+            assert_eq!(abandoned, 1, "exactly one recall abandons the input");
+            assert_eq!(already_terminal, RECALLS - 1);
+        }
+
+        /// A session with no live runtime in the server: the recall never
+        /// loads it. An input that has ended answers `already_terminal` from
+        /// its stored row; an input a stop kept queued is refused as session
+        /// not running, and its row is untouched.
+        #[tokio::test]
+        async fn recall_on_a_session_with_no_live_runtime_answers_the_store_or_is_not_running() {
+            let (router, _runtime, _temp) = keyed_router(false).await;
+            let session_id = create_session(&router).await;
+            let sid = meerkat_core::SessionId::parse(&session_id).expect("session id");
+            let ended = queue_event(&router, &session_id, "ends with the stop").await;
+
+            // Stop the session's runtime: the queued event ends with it. Then
+            // start it again with nothing to run its inputs, queue a durable
+            // prompt, and stop it keeping queued prompts for the next start.
+            let registration = router
+                .runtime_adapter
+                .current_session_registration_witness(&sid)
+                .await
+                .expect("the live session's registration");
+            assert!(
+                router
+                    .runtime_adapter
+                    .unregister_session_registration_until_terminal_if_current(&registration)
+                    .await
+                    .expect("stop the session's runtime"),
+                "the registration is torn down"
+            );
+            router
+                .runtime_adapter
+                .register_session(sid.clone())
+                .await
+                .expect("start the session's runtime with no executor");
+            let prompt = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+                "kept for the next start",
+                None,
+            ));
+            let kept = prompt.id().to_string();
+            let (admitted, _waiter) = router
+                .runtime_adapter
+                .accept_input_with_completion(&sid, prompt)
+                .await
+                .expect("admit the prompt");
+            assert!(admitted.is_accepted(), "{admitted:?}");
+            let registration = router
+                .runtime_adapter
+                .current_session_registration_witness(&sid)
+                .await
+                .expect("the restarted session's registration");
+            router
+                .runtime_adapter
+                .unregister_session_registration_until_terminal_reporting_queued_inputs_if_current(
+                    &registration,
+                    meerkat_runtime::UnregisterQueuedInputs::Requeue {
+                        max_age: Duration::from_mins(10),
+                    },
+                )
+                .await
+                .expect("stop the runtime keeping queued prompts");
+            assert!(!router.runtime_adapter.contains_session(&sid).await);
+            let kept_state = input_state(&router, &session_id, &kept).await;
+            assert_eq!(
+                kept_state["current_state"], "queued",
+                "the stop kept the prompt queued in the store: {kept_state}"
+            );
+
+            // The kept input's phase lives in a runtime that is not loaded.
+            let refused = recall(&router, &session_id, &kept).await;
+            assert_eq!(
+                refused.error.as_ref().map(|error| error.code),
+                Some(crate::error::SESSION_NOT_RUNNING),
+                "a queued input of a session with no live runtime is refused: {refused:?}"
+            );
+            let kept_after = input_state(&router, &session_id, &kept).await;
+            assert_eq!(
+                kept_after["current_state"], "queued",
+                "the refused recall leaves the kept input queued: {kept_after}"
+            );
+
+            // The ended input answers from its stored row.
+            let ended_state = input_state(&router, &session_id, &ended).await;
+            assert!(
+                ended_state["terminal_outcome"].is_string(),
+                "the first stop ended the queued event: {ended_state}"
+            );
+            let answer = result_value(&recall(&router, &session_id, &ended).await);
+            assert_eq!(answer["recall"]["outcome"], "already_terminal", "{answer}");
+            assert_eq!(
+                answer["recall"]["terminal"], ended_state["terminal_outcome"],
+                "{answer}"
+            );
+            assert!(
+                !router.runtime_adapter.contains_session(&sid).await,
+                "no recall loads the session"
             );
         }
     }

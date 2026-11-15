@@ -156,3 +156,100 @@ describe("queued-input recall wrapper", () => {
     assert.deepEqual(calls, ["session/recall_input"]);
   });
 });
+
+// The selector of `session/recall_input` and `session/input_status` is
+// one-of: it names the input by its input id or by its idempotency key. A
+// selector object that names both, or neither, is refused before anything is
+// sent. A key that is `undefined` or `null` is not named, as `None` is not
+// in the Python wrappers.
+describe("the input selector names exactly one of input id and idempotency key", () => {
+  const recall = { outcome: "abandoned", input_id: INPUT_ID, attempt_count: 0 };
+  const state = { input_id: INPUT_ID, phase: "queued" };
+  const canned = {
+    "session/recall_input": { session_id: "s-1", recall },
+    "session/input_status": { state },
+  };
+  const wrappers = [
+    {
+      name: "Session.recallInput",
+      needs: "recallInput",
+      method: "session/recall_input",
+      call: (client, selector) => sessionOver(client).recallInput(selector),
+    },
+    {
+      name: "DeferredSession.recallInput",
+      needs: "recallInput",
+      method: "session/recall_input",
+      call: (client, selector) => new DeferredSession(client, "s-1").recallInput(selector),
+    },
+    {
+      name: "MeerkatClient.inputState",
+      needs: "inputState",
+      method: "session/input_status",
+      call: (client, selector) => client.inputState("s-1", selector),
+    },
+  ];
+  const refused = [
+    ["both", { inputId: INPUT_ID, idempotencyKey: "inbox:msg-1" }],
+    ["both, the key empty", { inputId: INPUT_ID, idempotencyKey: "" }],
+    ["neither", {}],
+    ["neither, both undefined", { inputId: undefined, idempotencyKey: undefined }],
+    ["neither, both null", { inputId: null, idempotencyKey: null }],
+  ];
+  const sent = [
+    ["the input id", { inputId: INPUT_ID }, { by: "input_id", value: INPUT_ID }],
+    [
+      "the idempotency key",
+      { idempotencyKey: "inbox:msg-1" },
+      { by: "idempotency_key", value: "inbox:msg-1" },
+    ],
+    [
+      "the input id beside an undefined key",
+      { inputId: INPUT_ID, idempotencyKey: undefined },
+      { by: "input_id", value: INPUT_ID },
+    ],
+    [
+      "the idempotency key beside an undefined input id",
+      { inputId: undefined, idempotencyKey: "inbox:msg-1" },
+      { by: "idempotency_key", value: "inbox:msg-1" },
+    ],
+    [
+      "the idempotency key beside a null input id",
+      { inputId: null, idempotencyKey: "inbox:msg-1" },
+      { by: "idempotency_key", value: "inbox:msg-1" },
+    ],
+  ];
+
+  for (const { name, needs, method, call } of wrappers) {
+    for (const [label, selector] of refused) {
+      it(`${name} refuses a selector that names ${label} and sends nothing`, async () => {
+        const { client, calls } = fakeClient(canned);
+        await assert.rejects(call(client, selector), (error) => {
+          assert.ok(error instanceof MeerkatError);
+          assert.equal(error.code, "INVALID_ARGS");
+          assert.equal(
+            error.message,
+            `${needs} needs exactly one of selector.inputId and selector.idempotencyKey`,
+          );
+          return true;
+        });
+        assert.deepEqual(calls, []);
+      });
+    }
+
+    for (const [label, selector, wire] of sent) {
+      it(`${name} sends the one selector for ${label}`, async () => {
+        const { client, calls } = fakeClient(canned);
+        await call(client, selector);
+        assert.deepEqual(calls, [{ method, params: { session_id: "s-1", selector: wire } }]);
+      });
+    }
+  }
+
+  it("MeerkatClient.inputState answers the stored state, or null for no match", async () => {
+    const found = fakeClient(canned);
+    assert.deepEqual(await found.client.inputState("s-1", { inputId: INPUT_ID }), state);
+    const missing = fakeClient({ "session/input_status": {} });
+    assert.equal(await missing.client.inputState("s-1", { idempotencyKey: "inbox:msg-1" }), null);
+  });
+});

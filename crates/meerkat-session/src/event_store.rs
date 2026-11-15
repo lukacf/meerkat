@@ -2358,16 +2358,22 @@ impl FileEventStore {
             file.sync_all().await?;
             drop(file);
             tokio::fs::rename(&temporary, &destination).await?;
-            let sync_directory = directory.clone();
-            tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
-                std::fs::File::open(sync_directory)?.sync_all()
-            })
-            .await
-            .map_err(|error| {
-                EventStoreError::Store(format!(
-                    "event-log head directory sync task failed: {error}"
-                ))
-            })??;
+            // Fsync the head's directory so the rename survives a crash
+            // (unix; directory handles are not fsyncable elsewhere, and
+            // Windows refuses to open a directory as a file at all).
+            #[cfg(unix)]
+            {
+                let sync_directory = directory.clone();
+                tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+                    std::fs::File::open(sync_directory)?.sync_all()
+                })
+                .await
+                .map_err(|error| {
+                    EventStoreError::Store(format!(
+                        "event-log head directory sync task failed: {error}"
+                    ))
+                })??;
+            }
             Ok::<(), EventStoreError>(())
         }
         .await;

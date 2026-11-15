@@ -391,7 +391,20 @@ pub(crate) async fn write_stock_grant_file(
     };
     written.await.map_err(SelectionWriteFailure::NotWritten)?;
     if let Some(parent) = path.parent() {
-        let synced = async { tokio::fs::File::open(parent).await?.sync_all().await };
+        // Fsync the parent directory so the rename survives a crash (unix;
+        // directory handles are not fsyncable elsewhere, and Windows refuses
+        // to open a directory as a file at all).
+        let synced = async {
+            #[cfg(unix)]
+            {
+                tokio::fs::File::open(parent).await?.sync_all().await?;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = parent;
+            }
+            Ok::<(), std::io::Error>(())
+        };
         synced.await.map_err(SelectionWriteFailure::NotDurable)?;
     }
     Ok(())

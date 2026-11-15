@@ -752,6 +752,9 @@ impl FileGrantOwnerStore {
         Ok(LeaseFile(file))
     }
 
+    /// Fsync the log's parent directory so the installed link survives a
+    /// crash (unix; directory handles are not fsyncable elsewhere, and
+    /// Windows refuses to open a directory as a file at all).
     fn sync_parent(&self) -> std::io::Result<()> {
         if !self.synced() {
             return Ok(());
@@ -760,7 +763,15 @@ impl FileGrantOwnerStore {
             Some(parent) if !parent.as_os_str().is_empty() => parent,
             _ => Path::new("."),
         };
-        std::fs::File::open(parent)?.sync_all()
+        #[cfg(unix)]
+        {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = parent;
+        }
+        Ok(())
     }
 }
 

@@ -1295,15 +1295,26 @@ async fn write_manifest_payload_atomically(
     Ok(())
 }
 
+/// Fsync the directory `path` so a completed rename into it survives a crash
+/// (unix; directory handles are not fsyncable elsewhere, and Windows refuses
+/// to open a directory as a file at all).
 async fn sync_dir(path: &Path) -> Result<(), StoreError> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
-        let file = std::fs::File::open(path)?;
-        file.sync_all()
-    })
-    .await
-    .map_err(StoreError::Join)?
-    .map_err(StoreError::Io)
+    #[cfg(unix)]
+    {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+            let file = std::fs::File::open(path)?;
+            file.sync_all()
+        })
+        .await
+        .map_err(StoreError::Join)?
+        .map_err(StoreError::Io)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 async fn read_existing_manifest(path: &Path) -> Result<RealmManifest, StoreError> {

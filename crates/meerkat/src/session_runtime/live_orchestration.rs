@@ -5848,6 +5848,49 @@ mod orchestrator {
             channel_id: &LiveChannelId,
             expected_session: Option<&SessionId>,
         ) -> Result<LiveRefreshResult, LiveChannelVerbError> {
+            self.refresh_live_channel_inner(host, channel_id, expected_session, false)
+                .await
+                .map(|(queued, _withheld)| queued)
+        }
+
+        /// The refresh a live host asks for after the channel's own model
+        /// loaded deferred tools: the same pipeline as
+        /// [`Self::refresh_live_channel`], with one difference. A tool whose
+        /// parameter schema the channel's adapter refuses (its local check,
+        /// [`LiveAdapterHost::tools_refused_by_channel`], which reads the
+        /// schema and nothing else) is left out of the queued tool list and
+        /// returned with the reason; the host names the tool in the load's
+        /// result. A definition the provider refuses for another reason is
+        /// still sent, and that update can end the conversation. A refresh a
+        /// client asks for sends the session's whole tool list, as before.
+        pub async fn refresh_live_channel_after_tool_load(
+            &self,
+            host: &LiveAdapterHost,
+            channel_id: &LiveChannelId,
+        ) -> Result<
+            (
+                LiveRefreshResult,
+                Vec<meerkat_core::live_adapter::LiveToolRefusal>,
+            ),
+            LiveChannelVerbError,
+        > {
+            self.refresh_live_channel_inner(host, channel_id, None, true)
+                .await
+        }
+
+        async fn refresh_live_channel_inner(
+            &self,
+            host: &LiveAdapterHost,
+            channel_id: &LiveChannelId,
+            expected_session: Option<&SessionId>,
+            withhold_tools_the_provider_refuses: bool,
+        ) -> Result<
+            (
+                LiveRefreshResult,
+                Vec<meerkat_core::live_adapter::LiveToolRefusal>,
+            ),
+            LiveChannelVerbError,
+        > {
             let request = LiveChannelRequestPublicKind::Refresh;
             let Some(session_id) = self
                 .runtime_adapter
@@ -5893,6 +5936,26 @@ mod orchestrator {
             // no factory in scope; the format negotiated at open time stays
             // in force.
             let mut snapshot = build_live_projection_snapshot(&session_id, &open_config, None);
+            let withheld = if withhold_tools_the_provider_refuses {
+                match host
+                    .tools_refused_by_channel(channel_id, &snapshot.visible_tools)
+                    .await
+                {
+                    Ok(refused) => refused,
+                    Err(error) => {
+                        return Err(self
+                            .record_request_rejection(&session_id, channel_id, request, &error)
+                            .await);
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            if !withheld.is_empty() {
+                snapshot
+                    .visible_tools
+                    .retain(|tool| !withheld.iter().any(|refusal| refusal.name == tool.name));
+            }
             match host.next_snapshot_version(channel_id).await {
                 Ok(version) => snapshot.snapshot_version = version,
                 Err(error) => {
@@ -5912,7 +5975,10 @@ mod orchestrator {
                                 "live refresh queued authority rejected result: {error}"
                             ),
                         })?;
-                    Ok(live_refresh_result_from_machine_authority(&authority))
+                    Ok((
+                        live_refresh_result_from_machine_authority(&authority),
+                        withheld,
+                    ))
                 }
                 Err(error) => Err(self
                     .record_request_rejection(&session_id, channel_id, request, &error)

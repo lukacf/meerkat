@@ -197,7 +197,10 @@ async fn configured_rpc_run(limit: u32, tool_responses: usize) -> (Value, usize)
         "tools/register",
         json!({"tools": [
             {"name": "synthetic_one", "description": "Synthetic no-effect fixture", "input_schema": {"type": "object"}},
-            {"name": "synthetic_two", "description": "Synthetic no-effect fixture", "input_schema": {"type": "object"}}
+            // Over the deferred catalog's byte budget, so the session defers
+            // its registered tools and offers the catalog search the
+            // synthetic model calls.
+            {"name": "synthetic_two", "description": format!("Synthetic no-effect fixture {}", "x".repeat(meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD)), "input_schema": {"type": "object"}}
         ]}),
     )
     .await;

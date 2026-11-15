@@ -1290,6 +1290,17 @@ impl AgentToolDispatcher for MemberUpcallToolDispatcher {
         Arc::clone(&self.tools)
     }
 
+    /// The remote operator tools are one fixed list for the dispatcher's
+    /// whole life, so the default catalog (each listed tool as an inline
+    /// session entry) is this source's exact registry. Reporting it lets a
+    /// placed member keep an exact composed catalog.
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        meerkat_core::ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: false,
+        }
+    }
+
     fn live_bridge_effect_kind(&self, tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
         match tool_name {
             TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS => {

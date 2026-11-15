@@ -49,11 +49,32 @@ pub struct CatalogControlVisibilityProvider {
     scope: RwLock<Option<ToolScope>>,
     #[cfg(test)]
     visibility_state_override: RwLock<Option<SessionToolVisibilityState>>,
+    /// Test-only: the bound scope's read of the names the model holds fails.
+    #[cfg(test)]
+    visible_names_unreadable: std::sync::atomic::AtomicBool,
+    /// Test-only: the bound scope's filter predicate fails.
+    #[cfg(test)]
+    filters_unreadable: std::sync::atomic::AtomicBool,
 }
 
 impl CatalogControlVisibilityProvider {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Stand in for a bound scope that cannot say which names the model
+    /// holds (its own state is unreadable while its owner still answers).
+    #[cfg(test)]
+    fn set_visible_names_unreadable_for_test(&self, unreadable: bool) {
+        self.visible_names_unreadable
+            .store(unreadable, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Stand in for a bound scope whose filter predicate cannot answer.
+    #[cfg(test)]
+    fn set_filters_unreadable_for_test(&self, unreadable: bool) {
+        self.filters_unreadable
+            .store(unreadable, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn set_scope(&self, scope: ToolScope) {
@@ -71,14 +92,6 @@ impl CatalogControlVisibilityProvider {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard = Some(visibility_state);
-    }
-
-    fn visible_tool_names(&self) -> Option<BTreeSet<meerkat_core::ToolName>> {
-        self.scope
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .and_then(|scope| scope.visible_tool_names().ok())
     }
 
     /// Resolve the visibility facts the deferred-load path needs from a *bound*
@@ -110,7 +123,20 @@ impl CatalogControlVisibilityProvider {
         // A bound scope whose visibility cannot be projected is treated as no
         // authoritative visibility (fail closed), never as default visibility.
         let visibility_state = scope.visibility_state().map_err(|_| NoToolScope)?;
-        let visible_tool_names = scope.visible_tool_names().unwrap_or_default();
+        // A scope that cannot say which names the model holds is unreadable,
+        // not a scope whose model holds none: fail closed here, before any
+        // entry is read, so the answer does not depend on the request.
+        let visible_tool_names = scope.visible_tool_names().map_err(|_| NoToolScope);
+        #[cfg(test)]
+        let visible_tool_names = if self
+            .visible_names_unreadable
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            Err(NoToolScope)
+        } else {
+            visible_tool_names
+        };
+        let visible_tool_names = visible_tool_names?;
         Ok(ResolvedLoadVisibility {
             visibility_state,
             visible_tool_names,
@@ -125,6 +151,13 @@ impl CatalogControlVisibilityProvider {
     /// In tests, an injected `visibility_state_override` stands in for a bound
     /// scope, so the filter is composed from that injected state.
     fn staged_session_filters_allow_name(&self, name: &str) -> Result<bool, NoToolScope> {
+        #[cfg(test)]
+        if self
+            .filters_unreadable
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(NoToolScope);
+        }
         #[cfg(test)]
         if let Some(visibility_state) = self
             .visibility_state_override
@@ -182,6 +215,22 @@ impl CatalogControlDispatcher {
             }
         }
         should_compose_tool_catalog_control_plane(session_dispatcher)
+    }
+
+    /// Whether a session built on `session_dispatcher` starts with the
+    /// control tools in its model requests, so its system prompt should say
+    /// how to use them: the control plane is composed for it, and a source
+    /// needs the control tools in every request
+    /// ([`meerkat_core::ToolCatalogControlPlane::Always`]) or the catalog
+    /// starts deferred (a source is connecting, or its deferrable tools are
+    /// over the byte budget). A session that starts inline gets no such
+    /// line; when it later defers, the notice that names its deferred tools
+    /// says how to load them.
+    pub fn should_announce_for(session_dispatcher: &dyn AgentToolDispatcher) -> bool {
+        Self::should_compose_for(session_dispatcher)
+            && (session_dispatcher.tool_catalog_control_plane()
+                == meerkat_core::ToolCatalogControlPlane::Always
+                || Self::should_enable_for(session_dispatcher))
     }
 
     pub fn new(
@@ -291,7 +340,24 @@ impl CatalogControlDispatcher {
         let limit = args.limit.unwrap_or(10).clamp(1, 50);
         let query = args.query.unwrap_or_default().to_lowercase();
         let pending_sources = self.session_dispatcher.pending_catalog_sources();
-        let visible_tool_names = self.visibility_provider.visible_tool_names();
+
+        // Fail closed: without a readable scope there is no telling which
+        // entries the session may find, so the answer names none of them. It
+        // says so at the result level, the same for every query.
+        let scope_unreadable = || SearchResponse {
+            catalog_exact: true,
+            total_matches: 0,
+            results: Vec::new(),
+            pending_sources: pending_sources.iter().cloned().collect(),
+            empty_result_status: Some(SearchVisibilityStatus::TemporarilyUnavailable),
+        };
+        let Ok(ResolvedLoadVisibility {
+            visible_tool_names, ..
+        }) = self.visibility_provider.resolve_load_visibility()
+        else {
+            return scope_unreadable();
+        };
+        let filters_unreadable = std::cell::Cell::new(false);
 
         let results = catalog
             .iter()
@@ -303,10 +369,8 @@ impl CatalogControlDispatcher {
                 )
             })
             .filter(|entry| matches_query(entry, &query))
-            .map(|entry| {
-                let currently_loaded = visible_tool_names
-                    .as_ref()
-                    .is_some_and(|names| names.contains(entry.tool.name.as_str()));
+            .filter_map(|entry| {
+                let currently_loaded = visible_tool_names.contains(entry.tool.name.as_str());
                 let visibility_status = if currently_loaded {
                     SearchVisibilityStatus::Loaded
                 } else {
@@ -314,11 +378,17 @@ impl CatalogControlDispatcher {
                         .visibility_provider
                         .staged_session_filters_allow_name(&entry.tool.name)
                     {
-                        // No bound scope authority: fail closed. Without
-                        // visibility truth the entry cannot honestly be
-                        // advertised as loadable or as filter-blocked.
-                        Err(NoToolScope) => SearchVisibilityStatus::TemporarilyUnavailable,
-                        Ok(false) => SearchVisibilityStatus::BlockedByFilter,
+                        // The scope stopped answering for its filters: no
+                        // row, and the whole answer fails closed below.
+                        Err(NoToolScope) => {
+                            filters_unreadable.set(true);
+                            return None;
+                        }
+                        // The session's filters do not allow the tool, so it
+                        // is not in this session's catalog, as it is not in
+                        // the session's tool list: no row, and so no total
+                        // and no limit slot that counts it.
+                        Ok(false) => return None,
                         Ok(true) if !entry.currently_callable() => {
                             SearchVisibilityStatus::TemporarilyUnavailable
                         }
@@ -326,14 +396,17 @@ impl CatalogControlDispatcher {
                     }
                 };
 
-                SearchResultItem {
+                Some(SearchResultItem {
                     name: entry.tool.name.clone().into(),
                     description: entry.tool.description.clone(),
                     currently_callable: currently_loaded,
                     visibility_status,
-                }
+                })
             })
             .collect::<Vec<_>>();
+        if filters_unreadable.get() {
+            return scope_unreadable();
+        }
 
         let empty_result_status = if results.is_empty() && !pending_sources.is_empty() {
             Some(SearchVisibilityStatus::PendingSource)
@@ -352,16 +425,7 @@ impl CatalogControlDispatcher {
 
     fn load_response(&self, args: LoadArgs) -> (LoadResponse, Option<SessionEffect>) {
         let Some(catalog) = self.exact_session_catalog() else {
-            let resolutions = args
-                .names
-                .into_iter()
-                .map(|name| ToolCatalogLoadResolution {
-                    name,
-                    accepted: false,
-                    accepted_noop: false,
-                    rejected_reason: Some(ToolCatalogLoadRejectedReason::UnknownKey),
-                })
-                .collect();
+            let resolutions = args.names.into_iter().map(unknown_key_resolution).collect();
             return (
                 LoadResponse {
                     catalog_exact: false,
@@ -407,18 +471,41 @@ impl CatalogControlDispatcher {
         let mut resolutions = Vec::new();
 
         for name in args.names {
-            let Some(entry) = catalog
-                .iter()
-                .find(|entry| entry.plane == ToolPlaneClass::Session && entry.tool.name == name)
-            else {
+            let already_visible = visible_tool_names.contains(name.as_str());
+            let filters_allow = self
+                .visibility_provider
+                .staged_session_filters_allow_name(&name);
+            // The scope stopped answering for its filters: fail closed with
+            // one answer for every name the model does not hold, whether the
+            // catalog holds it or not.
+            if !already_visible && filters_allow.is_err() {
                 resolutions.push(ToolCatalogLoadResolution {
                     name,
                     accepted: false,
                     accepted_noop: false,
-                    rejected_reason: Some(ToolCatalogLoadRejectedReason::UnknownKey),
+                    rejected_reason: Some(ToolCatalogLoadRejectedReason::TemporarilyUnavailable),
                 });
                 continue;
+            }
+
+            let Some(entry) = catalog
+                .iter()
+                .find(|entry| entry.plane == ToolPlaneClass::Session && entry.tool.name == name)
+            else {
+                resolutions.push(unknown_key_resolution(name));
+                continue;
             };
+
+            // A tool the session's filters do not allow is not in this
+            // session's catalog, whatever kind of entry it is: its load
+            // answers what a load of a name the catalog does not hold
+            // answers, from the same constructor. A tool the model already
+            // holds is not hidden from it and keeps its answer until the
+            // boundary that removes it from the model's tool list.
+            if !already_visible && matches!(filters_allow, Ok(false)) {
+                resolutions.push(unknown_key_resolution(name));
+                continue;
+            }
 
             match &entry.deferred_eligibility {
                 ToolCatalogDeferredEligibility::InlineOnly => {
@@ -457,7 +544,6 @@ impl CatalogControlDispatcher {
                             provenance,
                             &entry.tool,
                         ));
-                    let already_visible = visible_tool_names.contains(name.as_str());
                     if already_requested || already_visible {
                         noop_names.insert(name.clone());
                         resolutions.push(ToolCatalogLoadResolution {
@@ -468,18 +554,13 @@ impl CatalogControlDispatcher {
                         });
                         continue;
                     }
-                    match self
-                        .visibility_provider
-                        .staged_session_filters_allow_name(&name)
-                    {
+                    match filters_allow {
                         Ok(true) => {}
+                        // Answered above for every tool the model does not
+                        // hold, and a tool it holds is a no-op: kept so the
+                        // match stays total and fails closed.
                         Ok(false) => {
-                            resolutions.push(ToolCatalogLoadResolution {
-                                name,
-                                accepted: false,
-                                accepted_noop: false,
-                                rejected_reason: Some(ToolCatalogLoadRejectedReason::NotFilterable),
-                            });
+                            resolutions.push(unknown_key_resolution(name));
                             continue;
                         }
                         // The scope authority could not project filter truth:
@@ -687,6 +768,15 @@ impl AgentToolDispatcher for CatalogControlDispatcher {
                             reason: err.to_string(),
                         })?;
                 let (response, effect) = self.load_response(args);
+                // Every name the catalog accepted, newly requested or
+                // requested or loaded before: typed data for the owner of
+                // the boundary that follows this call.
+                let accepted_names = response
+                    .accepted_names
+                    .iter()
+                    .chain(response.noop_names.iter())
+                    .map(|name| meerkat_core::ToolName::from(name.as_str()))
+                    .collect::<Vec<_>>();
                 // Serialization failure propagates as a typed ToolError; a
                 // structured success must never collapse into an empty
                 // successful result.
@@ -701,6 +791,11 @@ impl AgentToolDispatcher for CatalogControlDispatcher {
                 ));
                 if let Some(effect) = effect {
                     outcome.session_effects.push(effect);
+                }
+                if !accepted_names.is_empty() {
+                    outcome = outcome.with_deferred_tool_load(
+                        meerkat_core::DeferredToolLoad::requested(accepted_names),
+                    );
                 }
                 Ok(outcome)
             }
@@ -750,7 +845,6 @@ struct SearchResultItem {
 enum SearchVisibilityStatus {
     Loaded,
     Deferred,
-    BlockedByFilter,
     PendingSource,
     TemporarilyUnavailable,
 }
@@ -761,6 +855,18 @@ struct LoadResponse {
     accepted_names: Vec<String>,
     noop_names: Vec<String>,
     resolutions: Vec<ToolCatalogLoadResolution>,
+}
+
+/// The load answer for a name the session's catalog does not hold: a name no
+/// source provides, and a tool the session's filters do not allow. Both come
+/// from this one constructor, so the answer cannot tell them apart.
+fn unknown_key_resolution(name: String) -> ToolCatalogLoadResolution {
+    ToolCatalogLoadResolution {
+        name,
+        accepted: false,
+        accepted_noop: false,
+        rejected_reason: Some(ToolCatalogLoadRejectedReason::UnknownKey),
+    }
 }
 
 fn matches_query(entry: &ToolCatalogEntry, query: &str) -> bool {
@@ -801,7 +907,7 @@ fn load_tool_def() -> ToolDef {
         audience: Default::default(),
         name: LOAD_TOOL_NAME.into(),
         description:
-            "Load one or more deferred session tools by canonical tool name so they become part of the staged session tool surface on the next boundary."
+            "Load one or more deferred session tools by canonical tool name. An accepted tool can be called from your next step, unless the result's `availability` field, or the tool's entry in `tool_availability`, says it cannot be called in this conversation yet."
                 .to_string(),
         input_schema: schema_for::<LoadArgs>(),
         provenance: control_provenance(),
@@ -1191,6 +1297,16 @@ mod tests {
         })
     }
 
+    /// A description that alone puts a deferred-eligible tool over the
+    /// deferred catalog's byte budget, so a fixture with it selects the
+    /// deferred mode.
+    fn over_catalog_budget(text: &str) -> String {
+        format!(
+            "{text} {}",
+            "x".repeat(meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD)
+        )
+    }
+
     fn session_tool_without_provenance(name: &str, description: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
             audience: Default::default(),
@@ -1215,6 +1331,17 @@ mod tests {
         tools: Arc<[Arc<ToolDef>]>,
         deferred_tool_names: HashSet<meerkat_core::ToolName>,
     ) -> ToolScope {
+        generated_visibility_scope_for_model(tools, deferred_tool_names, None, &ToolFilter::All)
+    }
+
+    /// A generated visibility scope whose owner is hydrated with a model
+    /// profile and the capability base filter that profile implies.
+    fn generated_visibility_scope_for_model(
+        tools: Arc<[Arc<ToolDef>]>,
+        deferred_tool_names: HashSet<meerkat_core::ToolName>,
+        model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
+        capability_base_filter: &ToolFilter,
+    ) -> ToolScope {
         let identity = meerkat_core::SessionLlmIdentity {
             model: "test-model".to_string(),
             provider: meerkat_core::Provider::Anthropic,
@@ -1225,8 +1352,8 @@ mod tests {
         let owner = meerkat_runtime::standalone_tool_visibility_owner(
             &meerkat_core::SessionId::new(),
             &identity,
-            None,
-            &ToolFilter::All,
+            model_profile,
+            capability_base_filter,
         )
         .expect("generated standalone visibility owner should initialize");
         ToolScope::new_with_visibility_owner(tools, HashSet::new(), deferred_tool_names, owner)
@@ -1522,7 +1649,9 @@ mod tests {
         );
         let deferred_two = session_tool(
             "deferred_mcp_tool_two",
-            "Another deferred MCP tool so the exact catalog crosses the adaptive threshold.",
+            &over_catalog_budget(
+                "Another deferred MCP tool so the exact catalog crosses the byte budget.",
+            ),
         );
         let exact_with_deferred = ExactCatalogDispatcher {
             tools: vec![Arc::clone(&deferred), Arc::clone(&deferred_two)].into(),
@@ -1590,7 +1719,10 @@ mod tests {
     #[test]
     fn should_compose_for_is_idempotent_when_control_plane_is_already_present() {
         let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
-        let deferred_two = session_tool("deferred_mcp_tool_two", "Second deferred MCP tool");
+        let deferred_two = session_tool(
+            "deferred_mcp_tool_two",
+            &over_catalog_budget("Second deferred MCP tool"),
+        );
         let search = Arc::new(search_tool_def());
         let load = Arc::new(load_tool_def());
         let already_composed = ExactCatalogDispatcher {
@@ -1707,6 +1839,127 @@ mod tests {
             ]
         );
         assert!(outcome.session_effects.is_empty());
+    }
+
+    /// The load reports, as typed data beside its result, every name the
+    /// catalog accepted: a newly requested one, and one requested or loaded
+    /// before, which carries no effect. A call that accepts nothing reports
+    /// no load. The owner of the boundary after the call acts on this, so a
+    /// repeated load is acted on too.
+    #[tokio::test]
+    async fn load_reports_the_accepted_names_as_a_typed_deferred_load() {
+        let first = session_tool("deferred_first", "First deferred tool");
+        let second = session_tool("deferred_second", "Second deferred tool");
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&first), Arc::clone(&second)].into(),
+            catalog: vec![
+                ToolCatalogEntry::session_deferred(
+                    Arc::clone(&first),
+                    true,
+                    callback_provenance("test"),
+                ),
+                ToolCatalogEntry::session_deferred(
+                    Arc::clone(&second),
+                    true,
+                    callback_provenance("test"),
+                ),
+            ]
+            .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: false,
+        });
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        let scope = generated_visibility_scope(
+            vec![Arc::clone(&first), Arc::clone(&second)].into(),
+            ["deferred_first".into(), "deferred_second".into()]
+                .into_iter()
+                .collect(),
+        );
+        visibility_provider.set_scope(scope.clone());
+        let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
+        let load = |names: serde_json::Value| {
+            control.dispatch(search_call(LOAD_TOOL_NAME, json!({ "names": names })))
+        };
+
+        let requested = load(json!(["deferred_first"])).await.unwrap();
+        let reported = requested.deferred_tool_load().expect("a typed load");
+        assert_eq!(
+            reported.stage(),
+            meerkat_core::DeferredToolLoadStage::Requested
+        );
+        assert_eq!(reported.names(), ["deferred_first"]);
+        let [SessionEffect::RequestDeferredTools { authorities }] =
+            requested.session_effects.as_slice()
+        else {
+            panic!("expected one request effect: {requested:?}");
+        };
+
+        // The boundary after an external call: request, then commit.
+        scope
+            .add_requested_deferred_authorities(authorities)
+            .unwrap();
+        scope.commit_requested_deferred_tools().unwrap();
+        assert!(
+            scope
+                .visible_tool_names()
+                .unwrap()
+                .contains("deferred_first")
+        );
+
+        let repeated = load(json!(["deferred_first", "missing_tool"]))
+            .await
+            .unwrap();
+        assert!(
+            repeated.session_effects.is_empty(),
+            "a loaded name requests nothing again"
+        );
+        let reported = repeated
+            .deferred_tool_load()
+            .expect("a repeated load is still reported");
+        assert_eq!(reported.names(), ["deferred_first"]);
+
+        let rejected = load(json!(["missing_tool"])).await.unwrap();
+        assert_eq!(
+            rejected.deferred_tool_load(),
+            None,
+            "a call that accepts no name reports no load"
+        );
+    }
+
+    /// The load tool's description holds on every surface. In an ordinary
+    /// turn and in a live bridge operation an accepted tool is in the next
+    /// model call. In a live conversation it is callable once the call
+    /// returns, unless the host could not update the conversation's tool
+    /// list, which the result's `availability` field then says. It no longer
+    /// promises a "next boundary", which a live conversation never reaches.
+    #[test]
+    fn load_description_is_true_for_ordinary_turns_and_live_conversations() {
+        let description = load_tool_def().description;
+        assert!(
+            description.contains("can be called from your next step"),
+            "{description}"
+        );
+        assert!(description.contains("`availability`"), "{description}");
+        assert!(description.contains("`tool_availability`"), "{description}");
+        assert!(!description.contains("boundary"), "{description}");
+    }
+
+    /// The built-in skill an agent reads about the catalog tools says what
+    /// the description says, not the old "next admitted tool boundary" rule.
+    #[test]
+    fn the_builtin_skill_describes_a_load_as_the_description_does() {
+        let skill = include_str!("../skills/builtin-utilities-workflow/SKILL.md");
+        let about_load = skill
+            .split("- Use `tool_catalog_search` and `tool_catalog_load`")
+            .nth(1)
+            .and_then(|rest| rest.split("\n\n").next())
+            .expect("the skill's bullet about the catalog tools");
+        assert!(
+            about_load.contains("callable from your next step"),
+            "{about_load}"
+        );
+        assert!(about_load.contains("`availability`"), "{about_load}");
+        assert!(!about_load.contains("boundary"), "{about_load}");
     }
 
     #[tokio::test]
@@ -1870,11 +2123,14 @@ mod tests {
     }
 
     /// Without a bound `ToolScope` the search surface must fail closed too:
-    /// a deferred-eligible entry reports `TemporarilyUnavailable`, never
-    /// `Deferred`/`BlockedByFilter` derived from a locally composed default
-    /// filter — the control plane is not a fallback visibility authority.
+    /// with no visibility truth it cannot tell which entries the session may
+    /// find, so it names none. The answer holds no row, no name and no
+    /// description, and says at the result level that the catalog is
+    /// temporarily unavailable. It never reports `Deferred` on the word of a
+    /// locally composed default filter: the control plane is not a fallback
+    /// visibility authority.
     #[tokio::test]
-    async fn search_without_scope_reports_temporarily_unavailable() {
+    async fn search_without_scope_names_nothing_and_reports_temporarily_unavailable() {
         let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
         let dispatcher = Arc::new(ExactCatalogDispatcher {
             tools: vec![Arc::clone(&deferred)].into(),
@@ -1890,22 +2146,23 @@ mod tests {
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
 
-        let outcome = control
-            .dispatch(search_call(
-                SEARCH_TOOL_NAME,
-                json!({ "query": "deferred" }),
-            ))
-            .await
-            .unwrap();
-        let response: SearchResponse =
-            serde_json::from_str(&outcome.result.text_content()).unwrap();
-
-        assert_eq!(response.results.len(), 1);
-        assert_eq!(
-            response.results[0].visibility_status,
-            SearchVisibilityStatus::TemporarilyUnavailable,
-            "no bound scope means no visibility truth: fail closed"
-        );
+        for args in [json!({ "query": "deferred" }), json!({})] {
+            let outcome = control
+                .dispatch(search_call(SEARCH_TOOL_NAME, args))
+                .await
+                .unwrap();
+            let text = outcome.result.text_content();
+            assert_eq!(
+                text,
+                r#"{"catalog_exact":true,"total_matches":0,"results":[],"empty_result_status":"temporarily_unavailable"}"#,
+                "no bound scope means no visibility truth: fail closed, and name nothing"
+            );
+            let response: SearchResponse = serde_json::from_str(&text).unwrap();
+            assert_eq!(
+                response.empty_result_status,
+                Some(SearchVisibilityStatus::TemporarilyUnavailable)
+            );
+        }
     }
 
     /// Gate (#201): with a `ToolScope` bound, behavior is unchanged — a valid
@@ -2201,8 +2458,9 @@ mod tests {
                 name: "deferred_mcp_tool".into(),
                 accepted: false,
                 accepted_noop: false,
-                rejected_reason: Some(ToolCatalogLoadRejectedReason::NotFilterable),
-            }]
+                rejected_reason: Some(ToolCatalogLoadRejectedReason::UnknownKey),
+            }],
+            "a tool the session's filters do not allow answers as a name the catalog does not hold"
         );
         assert!(
             outcome.session_effects.is_empty(),
@@ -2218,10 +2476,11 @@ mod tests {
             pending_sources: Arc::from(["pending-mcp".to_string()]),
             may_require_control_plane: false,
         });
-        let control = CatalogControlDispatcher::new(
-            dispatcher,
-            Arc::new(CatalogControlVisibilityProvider::new()),
-        );
+        // A session's control plane always has its scope bound; the pending
+        // status below is the answer of a readable scope with nothing to find.
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        visibility_provider.set_scope(generated_visibility_scope(Arc::from([]), HashSet::new()));
+        let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
 
         let outcome = control
             .dispatch(search_call(SEARCH_TOOL_NAME, json!({ "query": "secret" })))
@@ -2240,7 +2499,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_reports_loaded_deferred_blocked_and_temporarily_unavailable_states() {
+    async fn search_reports_loaded_deferred_and_temporarily_unavailable_states_and_omits_a_filtered_tool()
+     {
         let loaded = session_tool(
             "loaded_secret_lookup",
             "Deferred secret lookup that is already loaded and visible.",
@@ -2350,6 +2610,10 @@ mod tests {
         let response: SearchResponse =
             serde_json::from_str(&outcome.result.text_content()).unwrap();
 
+        assert_eq!(
+            response.total_matches, 3,
+            "the total counts only what the session may find"
+        );
         let statuses = response
             .results
             .into_iter()
@@ -2366,11 +2630,682 @@ mod tests {
         );
         assert_eq!(
             statuses.get("blocked_secret_lookup"),
-            Some(&SearchVisibilityStatus::BlockedByFilter)
+            None,
+            "a tool the session's filters do not allow is not a search result"
         );
         assert_eq!(
             statuses.get("offline_secret_lookup"),
             Some(&SearchVisibilityStatus::TemporarilyUnavailable)
         );
+    }
+
+    // A tool the session's filters do not allow is absent from the deferred
+    // catalog: no search returns or counts it and its load answers as a name
+    // the catalog does not hold. The rows below hold that for every filter
+    // layer the scope composes, and that the tool is back once the filter
+    // allows it, on the same control plane.
+
+    const HIDDEN_TOOL: &str = "ledger_export";
+    const HIDDEN_DESCRIPTION: &str = "Ledger export the session filters do not allow.";
+    const OPEN_TOOLS: [&str; 2] = ["report_lookup", "report_archive"];
+
+    fn open_tools() -> Vec<Arc<ToolDef>> {
+        vec![
+            session_tool(OPEN_TOOLS[0], "Report lookup behind the deferred catalog."),
+            session_tool(OPEN_TOOLS[1], "Report archive behind the deferred catalog."),
+        ]
+    }
+
+    fn open_and_hidden_tools() -> Vec<Arc<ToolDef>> {
+        let mut tools = open_tools();
+        tools.push(session_tool(HIDDEN_TOOL, HIDDEN_DESCRIPTION));
+        tools
+    }
+
+    fn names(names: &[&str]) -> meerkat_core::types::ToolNameSet {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    fn test_witness() -> ToolVisibilityWitness {
+        ToolVisibilityWitness {
+            last_seen_provenance: Some(callback_provenance("test")),
+        }
+    }
+
+    /// A control plane over callable deferred session tools, bound to a
+    /// generated visibility scope it shares with the caller.
+    fn deferred_control(tools: Vec<Arc<ToolDef>>) -> (CatalogControlDispatcher, ToolScope) {
+        deferred_control_for_model(tools, None, &ToolFilter::All)
+    }
+
+    fn deferred_control_for_model(
+        tools: Vec<Arc<ToolDef>>,
+        model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
+        capability_base_filter: &ToolFilter,
+    ) -> (CatalogControlDispatcher, ToolScope) {
+        let tools: Arc<[Arc<ToolDef>]> = tools.into();
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: Arc::clone(&tools),
+            catalog: tools
+                .iter()
+                .map(|tool| {
+                    ToolCatalogEntry::session_deferred(
+                        Arc::clone(tool),
+                        true,
+                        callback_provenance("test"),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: false,
+        });
+        let scope = generated_visibility_scope_for_model(
+            Arc::clone(&tools),
+            tools.iter().map(|tool| tool.name.clone()).collect(),
+            model_profile,
+            capability_base_filter,
+        );
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        visibility_provider.set_scope(scope.clone());
+        (
+            CatalogControlDispatcher::new(dispatcher, visibility_provider),
+            scope,
+        )
+    }
+
+    /// The search answer exactly as the model reads it.
+    async fn search_text(control: &CatalogControlDispatcher, args: serde_json::Value) -> String {
+        let outcome = control
+            .dispatch(search_call(SEARCH_TOOL_NAME, args))
+            .await
+            .unwrap();
+        assert!(!outcome.result.is_error);
+        assert!(outcome.session_effects.is_empty());
+        outcome.result.text_content()
+    }
+
+    /// The load answer exactly as the model reads it, and its effects.
+    async fn load_text(
+        control: &CatalogControlDispatcher,
+        names: &[&str],
+    ) -> (String, Vec<SessionEffect>) {
+        let outcome = control
+            .dispatch(search_call(LOAD_TOOL_NAME, json!({ "names": names })))
+            .await
+            .unwrap();
+        assert!(!outcome.result.is_error);
+        (outcome.result.text_content(), outcome.session_effects)
+    }
+
+    /// The whole contract for the hidden name: no search finds or counts it,
+    /// and its load answers byte for byte what the same load answers in a
+    /// session whose catalog never held that name.
+    async fn assert_hidden_tool_is_absent(control: &CatalogControlDispatcher, case: &str) {
+        assert_tool_is_absent(
+            control,
+            HIDDEN_TOOL,
+            HIDDEN_DESCRIPTION,
+            &["ledger", HIDDEN_TOOL, "session filters do not allow"],
+            case,
+        )
+        .await;
+    }
+
+    /// The same contract for any hidden tool beside the two open ones:
+    /// `only_hidden_queries` match that tool alone.
+    async fn assert_tool_is_absent(
+        control: &CatalogControlDispatcher,
+        hidden_name: &str,
+        hidden_description: &str,
+        only_hidden_queries: &[&str],
+        case: &str,
+    ) {
+        let all_text = search_text(control, json!({})).await;
+        let all: SearchResponse = serde_json::from_str(&all_text).unwrap();
+        assert_eq!(
+            all.results
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            OPEN_TOOLS.to_vec(),
+            "{case}: search returns only what the session's filters allow"
+        );
+        assert_eq!(
+            all.total_matches, 2,
+            "{case}: the total does not count the hidden entry"
+        );
+        assert!(
+            !all_text.contains(hidden_name) && !all_text.contains(hidden_description),
+            "{case}: neither the name nor the description reaches the answer: {all_text}"
+        );
+
+        // A limit below the count still reports the count of what the session
+        // may find, so the "more results" figure does not include the entry.
+        let limited: SearchResponse =
+            serde_json::from_str(&search_text(control, json!({ "limit": 1 })).await).unwrap();
+        assert_eq!(limited.results.len(), 1, "{case}");
+        assert_eq!(
+            limited.total_matches, 2,
+            "{case}: the total behind a limit does not count the hidden entry"
+        );
+
+        // A query only the hidden entry matches, by name or by description,
+        // answers exactly what a query nothing matches answers.
+        let nothing = search_text(control, json!({ "query": "no such tool anywhere" })).await;
+        assert_eq!(
+            nothing, r#"{"catalog_exact":true,"total_matches":0,"results":[]}"#,
+            "{case}"
+        );
+        for query in only_hidden_queries {
+            assert_eq!(
+                search_text(control, json!({ "query": query })).await,
+                nothing,
+                "{case}: a query for the hidden entry ({query}) answers as a query nothing matches"
+            );
+        }
+
+        // The same load in a session whose catalog never held the name.
+        let (never_held, _) = deferred_control(open_tools());
+        let (unknown_text, unknown_effects) = load_text(&never_held, &[hidden_name]).await;
+        assert_eq!(
+            unknown_text,
+            format!(
+                r#"{{"catalog_exact":true,"accepted_names":[],"noop_names":[],"resolutions":[{{"name":"{hidden_name}","accepted":false,"rejected_reason":"unknown_key"}}]}}"#
+            ),
+            "{case}: precondition: the answer for a name the catalog does not hold"
+        );
+        assert!(unknown_effects.is_empty());
+        let (hidden_text, hidden_effects) = load_text(control, &[hidden_name]).await;
+        assert_eq!(
+            hidden_text, unknown_text,
+            "{case}: a load of the hidden tool answers byte for byte as an unknown name"
+        );
+        assert!(
+            hidden_effects.is_empty(),
+            "{case}: a load of the hidden tool stages nothing"
+        );
+
+        // Beside other names its resolution differs from an unknown name's
+        // only by the name asked for.
+        let (mixed_text, _) =
+            load_text(control, &[OPEN_TOOLS[0], hidden_name, "no_such_tool"]).await;
+        let mixed: LoadResponse = serde_json::from_str(&mixed_text).unwrap();
+        assert_eq!(
+            mixed.accepted_names,
+            vec![OPEN_TOOLS[0].to_string()],
+            "{case}"
+        );
+        assert!(mixed.noop_names.is_empty(), "{case}");
+        assert_eq!(
+            mixed.resolutions[1..],
+            [
+                ToolCatalogLoadResolution {
+                    name: hidden_name.into(),
+                    accepted: false,
+                    accepted_noop: false,
+                    rejected_reason: Some(ToolCatalogLoadRejectedReason::UnknownKey),
+                },
+                ToolCatalogLoadResolution {
+                    name: "no_such_tool".into(),
+                    accepted: false,
+                    accepted_noop: false,
+                    rejected_reason: Some(ToolCatalogLoadRejectedReason::UnknownKey),
+                },
+            ],
+            "{case}"
+        );
+    }
+
+    /// The hidden tool is a deferred entry again: search finds and counts
+    /// it, and its load is accepted with the load effect.
+    async fn assert_hidden_tool_is_findable_and_loadable(
+        control: &CatalogControlDispatcher,
+        case: &str,
+    ) {
+        let all: SearchResponse =
+            serde_json::from_str(&search_text(control, json!({})).await).unwrap();
+        assert_eq!(all.total_matches, 3, "{case}");
+        let found: SearchResponse =
+            serde_json::from_str(&search_text(control, json!({ "query": "ledger" })).await)
+                .unwrap();
+        assert_eq!(found.total_matches, 1, "{case}");
+        assert_eq!(
+            found.results,
+            vec![SearchResultItem {
+                name: HIDDEN_TOOL.into(),
+                description: HIDDEN_DESCRIPTION.into(),
+                currently_callable: false,
+                visibility_status: SearchVisibilityStatus::Deferred,
+            }],
+            "{case}: the tool is findable once the filter allows it"
+        );
+        let (text, effects) = load_text(control, &[HIDDEN_TOOL]).await;
+        let loaded: LoadResponse = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            loaded.accepted_names,
+            vec![HIDDEN_TOOL.to_string()],
+            "{case}: the tool is loadable once the filter allows it"
+        );
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [SessionEffect::RequestDeferredTools { .. }]
+            ),
+            "{case}"
+        );
+    }
+
+    /// A deny list over a deferrable tool: the staged filter hides it from
+    /// the moment it is staged, before any boundary applies it, and lifting
+    /// the filter brings the tool back on the same control plane.
+    #[tokio::test]
+    async fn a_deny_list_hides_the_tool_from_search_and_load_until_it_is_lifted() {
+        let (control, scope) = deferred_control(open_and_hidden_tools());
+        assert_hidden_tool_is_findable_and_loadable(&control, "before the deny list").await;
+
+        scope
+            .handle()
+            .stage_external_filter(ToolFilter::Deny(names(&[HIDDEN_TOOL])))
+            .unwrap();
+        let staged = scope.visibility_state().unwrap();
+        assert_eq!(staged.active_filter, ToolFilter::All);
+        assert_eq!(
+            staged.staged_filter,
+            ToolFilter::Deny(names(&[HIDDEN_TOOL]))
+        );
+        assert_hidden_tool_is_absent(&control, "a staged deny list, before its boundary").await;
+
+        scope.apply_staged(open_and_hidden_tools().into()).unwrap();
+        assert_hidden_tool_is_absent(&control, "an applied deny list").await;
+
+        scope
+            .handle()
+            .stage_external_filter(ToolFilter::All)
+            .unwrap();
+        assert_hidden_tool_is_findable_and_loadable(&control, "the deny list lifted").await;
+    }
+
+    /// A tool the model already holds keeps its `loaded` row while a deny is
+    /// only staged; the boundary that applies the deny removes the tool from
+    /// the model's list and from the catalog together.
+    #[tokio::test]
+    async fn a_staged_deny_of_a_loaded_tool_reaches_search_at_its_boundary() {
+        let tools = open_and_hidden_tools();
+        let (control, scope) = deferred_control(tools.clone());
+        scope
+            .add_requested_deferred_authorities(&[DeferredToolLoadAuthority::new(
+                HIDDEN_TOOL,
+                test_witness(),
+            )])
+            .unwrap();
+        scope.apply_staged(tools.clone().into()).unwrap();
+        assert!(scope.visible_tool_names().unwrap().contains(HIDDEN_TOOL));
+
+        scope
+            .handle()
+            .stage_external_filter(ToolFilter::Deny(names(&[HIDDEN_TOOL])))
+            .unwrap();
+        let found: SearchResponse =
+            serde_json::from_str(&search_text(&control, json!({ "query": "ledger" })).await)
+                .unwrap();
+        assert_eq!(found.total_matches, 1);
+        assert_eq!(
+            found.results[0].visibility_status,
+            SearchVisibilityStatus::Loaded,
+            "the model still holds the tool until the boundary applies the deny"
+        );
+        let (text, effects) = load_text(&control, &[HIDDEN_TOOL]).await;
+        let loaded: LoadResponse = serde_json::from_str(&text).unwrap();
+        assert_eq!(loaded.noop_names, vec![HIDDEN_TOOL.to_string()]);
+        assert!(effects.is_empty());
+
+        scope.apply_staged(tools.into()).unwrap();
+        assert!(!scope.visible_tool_names().unwrap().contains(HIDDEN_TOOL));
+        assert_hidden_tool_is_absent(&control, "the deny applied at its boundary").await;
+    }
+
+    /// A launch policy that makes the tool unreachable hides it the same way.
+    #[tokio::test]
+    async fn a_launch_policy_deny_hides_the_tool_from_search_and_load() {
+        let (control, scope) = deferred_control(open_and_hidden_tools());
+        let mut state = scope.visibility_state().unwrap();
+        state.policy_base_filter = ToolFilter::Deny(names(&[HIDDEN_TOOL]));
+        scope.set_visibility_state(state).unwrap();
+        assert_hidden_tool_is_absent(&control, "a launch policy deny").await;
+    }
+
+    /// A tool the session's model cannot use is absent the same way. The
+    /// capability filter is the model's: it hides the image viewer from a
+    /// model that cannot read an image in a tool result.
+    #[tokio::test]
+    async fn a_capability_filtered_tool_is_absent_from_search_and_load() {
+        const VIEWER_DESCRIPTION: &str = "Image viewer the model cannot use.";
+        let model_profile: meerkat_core::model_profile::ModelProfile =
+            serde_json::from_value(json!({
+                "provider": "anthropic",
+                "model_family": "test-family",
+                "supports_temperature": true,
+                "supports_thinking": false,
+                "supports_reasoning": false,
+                "inline_video": false,
+                "vision": false,
+                "image_input": false,
+                "image_tool_results": false,
+                "realtime": false,
+                "supports_web_search": false,
+                "supports_mid_conversation_system_messages": false,
+                "image_generation": false,
+                "params_schema": {},
+            }))
+            .expect("a model profile without image tool results");
+        let capability_base_filter =
+            meerkat_core::capability_base_filter_for_image_tool_results(false);
+        let mut tools = open_tools();
+        tools.push(session_tool(
+            meerkat_core::VIEW_IMAGE_TOOL_NAME,
+            VIEWER_DESCRIPTION,
+        ));
+        let (control, scope) =
+            deferred_control_for_model(tools, Some(&model_profile), &capability_base_filter);
+        assert_eq!(
+            scope.visibility_state().unwrap().capability_base_filter,
+            ToolFilter::Deny(names(&[meerkat_core::VIEW_IMAGE_TOOL_NAME])),
+            "precondition: the scope holds the model's capability filter"
+        );
+        assert_tool_is_absent(
+            &control,
+            meerkat_core::VIEW_IMAGE_TOOL_NAME,
+            VIEWER_DESCRIPTION,
+            &[meerkat_core::VIEW_IMAGE_TOOL_NAME, "image viewer"],
+            "a capability filter",
+        )
+        .await;
+    }
+
+    /// A closed grant gate hides the tool; once a live grant opens the name
+    /// it is findable and loadable on the same control plane.
+    #[tokio::test]
+    async fn a_closed_grant_gate_hides_the_tool_until_a_grant_opens_it() {
+        let (control, scope) = deferred_control(open_and_hidden_tools());
+        scope
+            .replace_tool_grant_gate(meerkat_core::tool_grant::InstalledToolGrantGate::names(
+                BTreeSet::from([HIDDEN_TOOL.into()]),
+            ))
+            .unwrap();
+        assert_hidden_tool_is_absent(&control, "a closed grant gate").await;
+
+        scope
+            .apply_tool_grant_open_set(BTreeSet::from([HIDDEN_TOOL.into()]))
+            .unwrap();
+        assert_hidden_tool_is_findable_and_loadable(&control, "the grant gate opened").await;
+    }
+
+    /// An inherited ceiling counts a name only once it is witnessed against
+    /// the session's own current tool. Until then the name is absent; once
+    /// its source is witnessed it is findable and loadable, with no rebuild.
+    #[tokio::test]
+    async fn an_unwitnessed_ceiling_name_is_absent_until_its_source_is_witnessed() {
+        let (control, scope) = deferred_control(open_and_hidden_tools());
+        let mut state = scope.visibility_state().unwrap();
+        state.inherited_base_filter =
+            ToolFilter::Allow(names(&[OPEN_TOOLS[0], OPEN_TOOLS[1], HIDDEN_TOOL]));
+        state.filter_witnesses = [
+            (OPEN_TOOLS[0].into(), test_witness()),
+            (OPEN_TOOLS[1].into(), test_witness()),
+            (
+                HIDDEN_TOOL.into(),
+                ToolVisibilityWitness {
+                    last_seen_provenance: Some(callback_provenance("not-yet-this-source")),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        scope.set_visibility_state(state.clone()).unwrap();
+        assert_hidden_tool_is_absent(&control, "a ceiling name not yet witnessed").await;
+
+        state
+            .filter_witnesses
+            .insert(HIDDEN_TOOL.into(), test_witness());
+        scope.set_visibility_state(state).unwrap();
+        assert_hidden_tool_is_findable_and_loadable(&control, "the ceiling name witnessed").await;
+    }
+
+    /// A tool that is never deferred and that the session's filters do not
+    /// allow answers as an unknown name too: its load does not confirm that
+    /// the name exists.
+    #[tokio::test]
+    async fn a_filtered_inline_tool_load_answers_as_an_unknown_name() {
+        const INLINE: &str = "inline_admin";
+        let inline = session_tool(INLINE, "Inline administration tool.");
+        let control_over = |with_inline: bool, denied: bool| {
+            let mut tools = open_tools();
+            let mut catalog = tools
+                .iter()
+                .map(|tool| {
+                    ToolCatalogEntry::session_deferred(
+                        Arc::clone(tool),
+                        true,
+                        callback_provenance("test"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if with_inline {
+                tools.push(Arc::clone(&inline));
+                catalog.push(ToolCatalogEntry::session_inline(Arc::clone(&inline), true));
+            }
+            let tools: Arc<[Arc<ToolDef>]> = tools.into();
+            let scope = generated_visibility_scope(
+                Arc::clone(&tools),
+                OPEN_TOOLS.iter().map(|name| (*name).into()).collect(),
+            );
+            if denied {
+                scope
+                    .handle()
+                    .stage_external_filter(ToolFilter::Deny(names(&[INLINE])))
+                    .unwrap();
+                scope.apply_staged(Arc::clone(&tools)).unwrap();
+            }
+            let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+            visibility_provider.set_scope(scope.clone());
+            (
+                CatalogControlDispatcher::new(
+                    Arc::new(ExactCatalogDispatcher {
+                        tools,
+                        catalog: catalog.into(),
+                        pending_sources: Arc::from([]),
+                        may_require_control_plane: false,
+                    }),
+                    visibility_provider,
+                ),
+                scope,
+            )
+        };
+
+        // Control: an inline tool the model holds is named as not deferrable.
+        let (allowed_control, allowed_scope) = control_over(true, false);
+        let (allowed_text, _) = load_text(&allowed_control, &[INLINE]).await;
+        let allowed: LoadResponse = serde_json::from_str(&allowed_text).unwrap();
+        assert_eq!(
+            allowed.resolutions[0].rejected_reason,
+            Some(ToolCatalogLoadRejectedReason::NotDeferredEligible)
+        );
+
+        let (unknown_text, _) = load_text(&control_over(false, false).0, &[INLINE]).await;
+        let (denied_text, effects) = load_text(&control_over(true, true).0, &[INLINE]).await;
+        assert_eq!(
+            denied_text, unknown_text,
+            "a load of a filtered inline tool answers byte for byte as an unknown name"
+        );
+        assert!(effects.is_empty());
+
+        // The same tool in a turn that blocks it: unknown for that turn, and
+        // named as not deferrable again in the next turn.
+        allowed_scope
+            .handle()
+            .set_turn_overlay(None, [INLINE.into()].into_iter().collect())
+            .unwrap();
+        let (turn_text, effects) = load_text(&allowed_control, &[INLINE]).await;
+        assert_eq!(
+            turn_text, unknown_text,
+            "a load of an inline tool this turn blocks answers byte for byte as an unknown name"
+        );
+        assert!(effects.is_empty());
+        allowed_scope.handle().clear_turn_overlay().unwrap();
+        let (next_turn_text, _) = load_text(&allowed_control, &[INLINE]).await;
+        assert_eq!(next_turn_text, allowed_text);
+    }
+
+    /// A turn's own overlay is a filter the model's tool list honours for
+    /// that turn, so the catalog honours it too: a tool the turn blocks, by
+    /// name or by an allow list that leaves it out, is absent for that turn,
+    /// and the next turn, without the overlay, finds and loads it again.
+    #[tokio::test]
+    async fn a_turn_overlay_hides_the_tool_for_that_turn_only() {
+        let (control, scope) = deferred_control(open_and_hidden_tools());
+
+        scope
+            .handle()
+            .set_turn_overlay(None, [HIDDEN_TOOL.into()].into_iter().collect())
+            .unwrap();
+        assert_hidden_tool_is_absent(&control, "a turn that blocks the tool").await;
+        scope.handle().clear_turn_overlay().unwrap();
+        assert_hidden_tool_is_findable_and_loadable(&control, "the next turn, without the overlay")
+            .await;
+
+        scope
+            .handle()
+            .set_turn_overlay(
+                Some(OPEN_TOOLS.iter().map(|name| (*name).into()).collect()),
+                HashSet::new(),
+            )
+            .unwrap();
+        assert_hidden_tool_is_absent(&control, "a turn that allows only the other tools").await;
+        scope.handle().clear_turn_overlay().unwrap();
+        assert_hidden_tool_is_findable_and_loadable(&control, "the turn after the allow list")
+            .await;
+    }
+
+    /// The answer of a search that cannot tell which entries the session may
+    /// find: no row, no count, one status.
+    const UNREADABLE_SEARCH: &str = r#"{"catalog_exact":true,"total_matches":0,"results":[],"empty_result_status":"temporarily_unavailable"}"#;
+
+    fn refused_as_temporarily_unavailable(name: &str) -> ToolCatalogLoadResolution {
+        ToolCatalogLoadResolution {
+            name: name.to_string(),
+            accepted: false,
+            accepted_noop: false,
+            rejected_reason: Some(ToolCatalogLoadRejectedReason::TemporarilyUnavailable),
+        }
+    }
+
+    /// A bound scope that cannot say which names the model holds is not a
+    /// scope whose model holds none. Every search answers the same, whatever
+    /// its query matches, and every load is refused: with the filter
+    /// predicate failing too (the scope's own state is unreadable), and with
+    /// the predicate still answering.
+    #[tokio::test]
+    async fn an_unreadable_set_of_held_names_answers_every_search_the_same_and_refuses_every_load()
+    {
+        for filters_unreadable in [true, false] {
+            let (control, _scope) = deferred_control(open_and_hidden_tools());
+            let provider = Arc::clone(&control.visibility_provider);
+            provider.set_visible_names_unreadable_for_test(true);
+            provider.set_filters_unreadable_for_test(filters_unreadable);
+
+            for args in [
+                json!({}),
+                json!({ "limit": 1 }),
+                json!({ "query": "ledger" }),
+                json!({ "query": "report" }),
+                json!({ "query": "a query no entry matches" }),
+            ] {
+                assert_eq!(
+                    search_text(&control, args.clone()).await,
+                    UNREADABLE_SEARCH,
+                    "filters unreadable: {filters_unreadable}; search {args}"
+                );
+            }
+
+            let asked = [OPEN_TOOLS[0], HIDDEN_TOOL, "no_such_tool"];
+            let (text, effects) = load_text(&control, &asked).await;
+            let response: LoadResponse = serde_json::from_str(&text).unwrap();
+            assert!(response.accepted_names.is_empty(), "{text}");
+            assert!(response.noop_names.is_empty(), "{text}");
+            assert_eq!(
+                response.resolutions,
+                asked.map(refused_as_temporarily_unavailable).to_vec(),
+                "filters unreadable: {filters_unreadable}"
+            );
+            assert!(effects.is_empty());
+
+            provider.set_visible_names_unreadable_for_test(false);
+            provider.set_filters_unreadable_for_test(false);
+            assert_hidden_tool_is_findable_and_loadable(&control, "the scope readable again").await;
+        }
+    }
+
+    /// The filter predicate stops answering while the names the model holds
+    /// are still readable. A load keeps the no-op for a tool the model holds
+    /// and gives one answer for every other name, whether the catalog holds
+    /// it, a filter hides it, or nothing provides it. A search whose query
+    /// reaches an entry the model does not hold names nothing.
+    #[tokio::test]
+    async fn unreadable_filters_refuse_the_load_of_every_name_the_model_does_not_hold() {
+        let tools = open_and_hidden_tools();
+        let (control, scope) = deferred_control(tools.clone());
+        scope
+            .add_requested_deferred_authorities(&[DeferredToolLoadAuthority::new(
+                OPEN_TOOLS[0],
+                test_witness(),
+            )])
+            .unwrap();
+        scope.apply_staged(tools.into()).unwrap();
+        assert!(scope.visible_tool_names().unwrap().contains(OPEN_TOOLS[0]));
+        scope
+            .handle()
+            .stage_external_filter(ToolFilter::Deny(names(&[HIDDEN_TOOL])))
+            .unwrap();
+        control
+            .visibility_provider
+            .set_filters_unreadable_for_test(true);
+
+        let (text, effects) = load_text(
+            &control,
+            &[OPEN_TOOLS[0], OPEN_TOOLS[1], HIDDEN_TOOL, "no_such_tool"],
+        )
+        .await;
+        let response: LoadResponse = serde_json::from_str(&text).unwrap();
+        assert!(response.accepted_names.is_empty(), "{text}");
+        assert_eq!(response.noop_names, vec![OPEN_TOOLS[0].to_string()]);
+        assert_eq!(
+            response.resolutions,
+            vec![
+                ToolCatalogLoadResolution {
+                    name: OPEN_TOOLS[0].to_string(),
+                    accepted: true,
+                    accepted_noop: true,
+                    rejected_reason: None,
+                },
+                refused_as_temporarily_unavailable(OPEN_TOOLS[1]),
+                refused_as_temporarily_unavailable(HIDDEN_TOOL),
+                refused_as_temporarily_unavailable("no_such_tool"),
+            ],
+            "one answer for every name the model does not hold: {text}"
+        );
+        assert!(effects.is_empty());
+
+        for args in [
+            json!({}),
+            json!({ "query": "ledger" }),
+            json!({ "query": "archive" }),
+        ] {
+            assert_eq!(
+                search_text(&control, args.clone()).await,
+                UNREADABLE_SEARCH,
+                "search {args}"
+            );
+        }
     }
 }

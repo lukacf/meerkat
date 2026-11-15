@@ -1307,6 +1307,11 @@ impl meerkat_core::AgentToolDispatcher for FiringHostGatedScheduleTools {
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
         self.inner.tool_catalog_capabilities()
     }
+    /// The wrapped dispatcher's answer, as for its capabilities. Without this
+    /// forward the trait default would turn an inner `OnDemand` into `Always`.
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
+    }
 
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
         self.inner.tool_catalog()
@@ -1589,6 +1594,11 @@ impl meerkat_core::AgentToolDispatcher for MobIdentityScheduleToolDispatcher {
     /// inner catalog declarations verbatim.
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
         self.inner.tool_catalog_capabilities()
+    }
+    /// The wrapped dispatcher's answer, as for its capabilities. Without this
+    /// forward the trait default would turn an inner `OnDemand` into `Always`.
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
     }
 
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
@@ -3092,6 +3102,38 @@ mod tests {
                     .map(|entry| entry.tool.name.to_string())
                     .collect::<Vec<_>>(),
                 vec!["meerkat_schedule_list".to_string()]
+            );
+        }
+    }
+
+    /// Both schedule wrappers answer for the catalog control tools as the
+    /// dispatcher they wrap does: an inner `OnDemand` stays `OnDemand`
+    /// (the trait default would answer `Always`).
+    #[tokio::test]
+    async fn schedule_wrappers_forward_the_inner_catalog_control_plane() {
+        let inner = crate::tool_application_test_support::on_demand_catalog_probe();
+        let rewriting = Arc::new(MobIdentityScheduleToolDispatcher::new_for_test(
+            Arc::clone(&inner),
+            |_session| async { None },
+        ));
+        let gated = FiringHostGatedScheduleTools {
+            inner: Arc::clone(&rewriting) as Arc<dyn meerkat_core::AgentToolDispatcher>,
+            binding: ScheduleFiringHostBinding::pending_in_process_host(),
+        };
+        for (wrapper, dispatcher) in [
+            (
+                "identity rewriting",
+                Arc::clone(&rewriting) as Arc<dyn meerkat_core::AgentToolDispatcher>,
+            ),
+            (
+                "firing host gate",
+                Arc::new(gated) as Arc<dyn meerkat_core::AgentToolDispatcher>,
+            ),
+        ] {
+            assert_eq!(
+                dispatcher.tool_catalog_control_plane(),
+                meerkat_core::ToolCatalogControlPlane::OnDemand,
+                "{wrapper}"
             );
         }
     }

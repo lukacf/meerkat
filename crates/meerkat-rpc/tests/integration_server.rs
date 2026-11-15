@@ -22,6 +22,17 @@ use meerkat_rpc::session_runtime::SessionRuntime;
 use meerkat_store::MemoryBlobStore;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+/// A tool description that alone takes a registered callback tool over the
+/// deferred catalog's byte budget, so a session with it defers it and
+/// offers the catalog control tools. A few small registered tools stay in
+/// the request.
+fn over_catalog_budget(description: &str) -> String {
+    format!(
+        "{description} {}",
+        "x".repeat(meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD)
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Mock LLM client
 // ---------------------------------------------------------------------------
@@ -209,8 +220,53 @@ fn spawn_test_server_with_client(
     BufReader<tokio::io::DuplexStream>,
     tokio::task::JoinHandle<Result<(), meerkat_rpc::server::ServerError>>,
 ) {
+    spawn_test_server_with_factory(|root| AgentFactory::new(root.join("sessions")), client)
+}
+
+/// The tool flags `rkat-rpc` gives its factory (`src/main.rs`), as the text
+/// of that chain. [`spawn_default_composition_test_server`] builds its
+/// factory with the same flags; the row that uses it checks that the
+/// binary's chain still reads like this.
+const BINARY_DEFAULT_TOOL_FLAGS: &str = "        .builtins(true)
+        .shell(true)
+        .schedule(config.tools.schedule_enabled)
+        .memory(true);";
+
+/// A test server whose sessions get the tool families `rkat-rpc` mounts by
+/// default: builtin and shell tools, the schedule tools and memory search.
+fn spawn_default_composition_test_server(
+    client: Arc<dyn LlmClient>,
+) -> (
+    tokio::io::DuplexStream,
+    BufReader<tokio::io::DuplexStream>,
+    tokio::task::JoinHandle<Result<(), meerkat_rpc::server::ServerError>>,
+) {
+    spawn_test_server_with_factory(
+        |root| {
+            let project_root = root.join("project");
+            std::fs::create_dir_all(&project_root).expect("create the project root");
+            AgentFactory::new(root.join("sessions"))
+                .runtime_root(root.join("realm"))
+                .project_root(project_root)
+                .builtins(true)
+                .shell(true)
+                .schedule(Config::default().tools.schedule_enabled)
+                .memory(true)
+        },
+        client,
+    )
+}
+
+fn spawn_test_server_with_factory(
+    factory: impl FnOnce(&std::path::Path) -> AgentFactory,
+    client: Arc<dyn LlmClient>,
+) -> (
+    tokio::io::DuplexStream,
+    BufReader<tokio::io::DuplexStream>,
+    tokio::task::JoinHandle<Result<(), meerkat_rpc::server::ServerError>>,
+) {
     let temp = tempfile::tempdir().unwrap();
-    let factory = AgentFactory::new(temp.path().join("sessions"));
+    let factory = factory(temp.path());
     let config = Config::default();
     let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
     let blob_store: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
@@ -380,7 +436,7 @@ async fn deferred_callback_direct_sessions_expose_control_plane_tools_on_first_t
                     }
                 }, {
                     "name": "secret_audit",
-                    "description": "Audit a secret value through the same deferred catalog.",
+                    "description": over_catalog_budget("Audit a secret value through the same deferred catalog."),
                     "input_schema": {
                         "type": "object",
                         "properties": {
@@ -460,6 +516,153 @@ async fn deferred_callback_direct_sessions_expose_control_plane_tools_on_first_t
         !first_call.iter().any(|name| name == "secret_lookup"),
         "deferred tools should remain hidden before load, got {first_call:?}"
     );
+
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+/// A session of the RPC server as `rkat-rpc` composes it by default (its
+/// `session/create` names no tool family, so every family comes from the
+/// server: builtin and shell tools, the schedule tools and memory search),
+/// with registered tools over the deferred catalog's byte budget. Every
+/// family the server mounts by default must report an exact catalog for the
+/// session to defer: the first model request carries one tool of each
+/// family and the two catalog control tools, and leaves the registered tools
+/// behind the catalog.
+#[tokio::test]
+async fn a_default_session_defers_registered_tools_over_the_budget() {
+    assert!(
+        include_str!("../src/main.rs").contains(BINARY_DEFAULT_TOOL_FLAGS),
+        "rkat-rpc's factory no longer has the tool flags this row's server copies: \
+         update `spawn_default_composition_test_server` and `BINARY_DEFAULT_TOOL_FLAGS` \
+         to the binary's chain"
+    );
+    let client = Arc::new(RecordingToolClient::default());
+    let (mut writer, mut reader, server_handle) =
+        spawn_default_composition_test_server(client.clone());
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }),
+    )
+    .await;
+    let init_resp = read_response(&mut reader).await;
+    assert!(
+        init_resp["error"].is_null(),
+        "initialize failed: {init_resp}"
+    );
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/register",
+            "params": {
+                "tools": [{
+                    "name": "secret_lookup",
+                    "description": "Look up a secret value through a deferred catalog.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string"}
+                        },
+                        "required": ["key"]
+                    }
+                }, {
+                    "name": "secret_audit",
+                    "description": over_catalog_budget("Audit a secret value through the same deferred catalog."),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string"}
+                        },
+                        "required": ["key"]
+                    }
+                }]
+            }
+        }),
+    )
+    .await;
+    let register_resp = read_response(&mut reader).await;
+    assert!(
+        register_resp["error"].is_null(),
+        "tools/register failed: {register_resp}"
+    );
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "session/create",
+            "params": {
+                "prompt": "Bootstrap a session with the server's default tools",
+                "initial_turn": "deferred"
+            }
+        }),
+    )
+    .await;
+    let create_resp = read_response(&mut reader).await;
+    assert!(
+        create_resp["error"].is_null(),
+        "session/create failed: {create_resp}"
+    );
+    let session_id = create_resp["result"]["session_id"]
+        .as_str()
+        .expect("session_id missing")
+        .to_string();
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "turn/start",
+            "params": {
+                "session_id": session_id,
+                "prompt": "Inspect the tools of this session."
+            }
+        }),
+    )
+    .await;
+    let turn_resp = read_response(&mut reader).await;
+    assert!(
+        turn_resp["error"].is_null(),
+        "turn/start failed: {turn_resp}"
+    );
+
+    let seen = client.seen_tools();
+    assert_eq!(seen.len(), 1, "expected exactly one LLM call, got {seen:?}");
+    let first_call = &seen[0];
+    for (family, tool) in [
+        ("shell", "shell"),
+        ("schedule", "meerkat_schedule_create"),
+        ("memory search", "memory_search"),
+    ] {
+        assert!(
+            first_call.iter().any(|name| name == tool),
+            "the server mounts the {family} tools by default ({tool}), got {first_call:?}"
+        );
+    }
+    for control in ["tool_catalog_search", "tool_catalog_load"] {
+        assert!(
+            first_call.iter().any(|name| name == control),
+            "a default session with registered tools over the budget offers {control}, \
+             got {first_call:?}"
+        );
+    }
+    for registered in ["secret_lookup", "secret_audit"] {
+        assert!(
+            !first_call.iter().any(|name| name == registered),
+            "{registered} waits behind the deferred catalog, got {first_call:?}"
+        );
+    }
 
     drop(writer);
     server_handle.await.unwrap().unwrap();
@@ -647,7 +850,7 @@ async fn pipelined_tools_register_commits_before_session_create() {
 }
 
 #[tokio::test]
-async fn late_registered_deferred_callbacks_keep_control_plane_after_inline_build() {
+async fn late_registered_callbacks_defer_with_the_control_tools_after_an_inline_start() {
     let client = Arc::new(RecordingToolClient::default());
     let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client.clone());
 
@@ -750,17 +953,13 @@ async fn late_registered_deferred_callbacks_keep_control_plane_after_inline_buil
     let initial_call = &seen[0];
     assert!(
         initial_call.iter().any(|name| name == "secret_lookup"),
-        "the session should start inline before the adaptive deferred threshold is crossed, got {initial_call:?}"
+        "the session should start inline before the byte budget is crossed, got {initial_call:?}"
     );
     assert!(
-        initial_call
+        !initial_call
             .iter()
-            .any(|name| name == "tool_catalog_search"),
-        "dynamically defer-capable sessions should still precompose tool_catalog_search, got {initial_call:?}"
-    );
-    assert!(
-        initial_call.iter().any(|name| name == "tool_catalog_load"),
-        "dynamically defer-capable sessions should still precompose tool_catalog_load, got {initial_call:?}"
+            .any(|name| name == "tool_catalog_search" || name == "tool_catalog_load"),
+        "an inline session with a small registered tool sends no catalog control tool, got {initial_call:?}"
     );
 
     send_request(
@@ -772,7 +971,7 @@ async fn late_registered_deferred_callbacks_keep_control_plane_after_inline_buil
             "params": {
                 "tools": [{
                     "name": "secret_audit",
-                    "description": "Audit a secret value through the same deferred catalog.",
+                    "description": over_catalog_budget("Audit a secret value through the same deferred catalog."),
                     "input_schema": {
                         "type": "object",
                         "properties": {
@@ -828,6 +1027,142 @@ async fn late_registered_deferred_callbacks_keep_control_plane_after_inline_buil
     assert!(
         !first_call.iter().any(|name| name == "secret_audit"),
         "late-added deferred tools should remain hidden until loaded, got {first_call:?}"
+    );
+    assert!(
+        first_call.iter().any(|name| name == "secret_lookup"),
+        "the tool the model already had stays in the request, got {first_call:?}"
+    );
+
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+/// A plain session, created before any tool is registered, sends no catalog
+/// control tool: the server mounts them for every session, so that tools can
+/// arrive later, and leaves them out while nothing waits. A small tool
+/// registered later is offered directly. When a later registration takes the
+/// session over the byte budget, the next request carries both control tools
+/// and the new tool waits behind the catalog.
+#[tokio::test]
+async fn a_session_created_before_any_registration_defers_only_once_it_is_over_the_budget() {
+    let client = Arc::new(RecordingToolClient::default());
+    let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client.clone());
+
+    async fn call(
+        writer: &mut tokio::io::DuplexStream,
+        reader: &mut BufReader<tokio::io::DuplexStream>,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        send_request(
+            writer,
+            &serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
+        )
+        .await;
+        let response = read_response(reader).await;
+        assert!(response["error"].is_null(), "{method} failed: {response}");
+        response
+    }
+    let is_control = |name: &String| name == "tool_catalog_search" || name == "tool_catalog_load";
+
+    call(
+        &mut writer,
+        &mut reader,
+        1,
+        "initialize",
+        serde_json::json!({}),
+    )
+    .await;
+    let created = call(
+        &mut writer,
+        &mut reader,
+        2,
+        "session/create",
+        serde_json::json!({
+            "prompt": "Bootstrap a session with no registered tool",
+            "initial_turn": "deferred",
+            "enable_builtins": false,
+            "enable_shell": false,
+            "enable_memory": false,
+            "enable_mob": false
+        }),
+    )
+    .await;
+    let session_id = created["result"]["session_id"]
+        .as_str()
+        .expect("session_id missing")
+        .to_string();
+    let turn = |id: u64, prompt: &str| {
+        (
+            id,
+            serde_json::json!({"session_id": session_id, "prompt": prompt}),
+        )
+    };
+
+    let (id, params) = turn(3, "A plain turn with no tool.");
+    call(&mut writer, &mut reader, id, "turn/start", params).await;
+    let seen = client.seen_tools();
+    assert_eq!(seen.len(), 1, "expected one LLM call, got {seen:?}");
+    assert!(
+        seen[0].is_empty(),
+        "a plain session sends no tool and no catalog control tool, got {:?}",
+        seen[0]
+    );
+
+    call(
+        &mut writer,
+        &mut reader,
+        4,
+        "tools/register",
+        serde_json::json!({"tools": [{
+            "name": "secret_lookup",
+            "description": "Look up a secret value.",
+            "input_schema": {"type": "object"}
+        }]}),
+    )
+    .await;
+    let (id, params) = turn(5, "A turn with one small registered tool.");
+    call(&mut writer, &mut reader, id, "turn/start", params).await;
+    let seen = client.seen_tools();
+    assert_eq!(seen.len(), 2, "expected two LLM calls, got {seen:?}");
+    assert_eq!(
+        seen[1],
+        vec!["secret_lookup".to_string()],
+        "a small tool registered later is offered directly, with no catalog control tool"
+    );
+
+    call(
+        &mut writer,
+        &mut reader,
+        6,
+        "tools/register",
+        serde_json::json!({"tools": [{
+            "name": "secret_audit",
+            "description": over_catalog_budget("Audit a secret value."),
+            "input_schema": {"type": "object"}
+        }]}),
+    )
+    .await;
+    let (id, params) = turn(7, "A turn after a registration over the budget.");
+    call(&mut writer, &mut reader, id, "turn/start", params).await;
+    let seen = client.seen_tools();
+    assert_eq!(seen.len(), 3, "expected three LLM calls, got {seen:?}");
+    assert_eq!(
+        seen[2].iter().filter(|name| is_control(name)).count(),
+        2,
+        "over the budget both catalog control tools are in the request, got {:?}",
+        seen[2]
+    );
+    assert!(
+        !seen[2].iter().any(|name| name == "secret_audit"),
+        "the tool that took the session over the budget waits behind the catalog, got {:?}",
+        seen[2]
+    );
+    assert!(
+        seen[2].iter().any(|name| name == "secret_lookup"),
+        "the tool the model already had stays in the request, got {:?}",
+        seen[2]
     );
 
     drop(writer);
@@ -1608,8 +1943,23 @@ mod tcp_callback_ownership {
                 .await;
             self.response(id).await
         }
+        /// Register a small tool: a session offers it in its requests.
         async fn register(&mut self, tool: &str) {
-            let result = self.request(2, "tools/register", json!({"tools":[{"name":tool,"description":"connection-owned synthetic callback","input_schema":{"type":"object","properties":{}}}]})).await;
+            self.register_described(tool, "connection-owned synthetic callback".to_owned())
+                .await;
+        }
+        /// Register a tool over the catalog's byte budget: a session defers
+        /// it, offers the catalog control tools, and the model loads the tool
+        /// before it calls it.
+        async fn register_deferred(&mut self, tool: &str) {
+            self.register_described(
+                tool,
+                super::over_catalog_budget("connection-owned synthetic callback"),
+            )
+            .await;
+        }
+        async fn register_described(&mut self, tool: &str, description: String) {
+            let result = self.request(2, "tools/register", json!({"tools":[{"name":tool,"description":description,"input_schema":{"type":"object","properties":{}}}]})).await;
             assert!(result["registered"].as_u64().unwrap() > 0);
         }
         async fn create(&mut self) -> String {
@@ -1992,8 +2342,8 @@ mod tcp_callback_ownership {
         let (_, mut b) = h.connect().await;
         // Register after both constructors so the baseline reaches actual misrouting,
         // independently of the previous test's registry-reset failure.
-        a.register("a_lookup").await;
-        b.register("b_lookup").await;
+        a.register_deferred("a_lookup").await;
+        b.register_deferred("b_lookup").await;
         let a_session = a.create().await;
         a.start(&a_session, "route-a").await;
         let a_initial = h.seen("route-a").await;
@@ -2361,11 +2711,12 @@ mod tcp_callback_ownership {
 
     /// The `durable` detached callback tool as a connection registers it:
     /// one runner and contract, and the description that tells two
-    /// declarations apart.
+    /// declarations apart. It is over the catalog's byte budget, so a session
+    /// defers it and the model loads it first.
     fn durable_tool(description: &str) -> Value {
         json!([{
             "name": "durable",
-            "description": description,
+            "description": super::over_catalog_budget(description),
             "input_schema": {"type": "object", "properties": {}},
             "execution": {
                 "mode": "detached",
@@ -2619,7 +2970,7 @@ mod tcp_callback_ownership {
         );
         let (_, mut a) = h.connect().await;
         if register_first {
-            a.register(tool).await;
+            a.register_deferred(tool).await;
         }
         let mob_id = a
             .request(
@@ -2638,7 +2989,7 @@ mod tcp_callback_ownership {
         )
         .await;
         if !register_first {
-            a.register(tool).await;
+            a.register_deferred(tool).await;
         }
         a.send(json!({"jsonrpc":"2.0","id":7,"method":"mob/turn_start","params":{"mob_id":mob_id,"agent_identity":"w1","prompt":prompt}}))
             .await;
@@ -2700,7 +3051,7 @@ mod tcp_callback_ownership {
         );
         let (_, mut a) = h.connect().await;
         let (_, mut b) = h.connect().await;
-        a.register(tool).await;
+        a.register_deferred(tool).await;
         let mob_id = a
             .request(
                 5,
@@ -2776,13 +3127,11 @@ mod tcp_callback_ownership {
         // The id `MobDefinition::implicit(session, ..)` gives.
         let mob = format!("implicit-{session}");
         if over_rpc {
+            // Both tools are small, so the member's requests carry the ones
+            // it has: the model calls B's tool without loading it.
             h.provider.plan(
                 prompt,
                 [
-                    Step::Load {
-                        tool: "b_lookup",
-                        call_id: "load-b-member",
-                    },
                     Step::Call {
                         tool: "b_lookup",
                         call_id: "call-b-member",
@@ -2833,11 +3182,22 @@ mod tcp_callback_ownership {
             b.response(9).await;
             return;
         }
-        let loaded = h.seen(prompt).await;
-        assert_catalog_load(&loaded, "load-b-member", "b_lookup");
+        // A tool of A's that reached the re-created mob would be in this
+        // request beside B's.
         assert!(
-            !loaded.tools.iter().any(|name| name == "a_lookup"),
-            "A's tool reached the re-created mob: {loaded:?}"
+            initial.tools.iter().any(|name| name == "b_lookup"),
+            "the re-created mob's member has B's tool: {initial:?}"
+        );
+        assert!(
+            !initial.tools.iter().any(|name| name == "a_lookup"),
+            "A's tool reached the re-created mob: {initial:?}"
+        );
+        assert!(
+            !initial
+                .tools
+                .iter()
+                .any(|name| name.starts_with("tool_catalog_")),
+            "a member whose registered tools are all in the request has no control tool: {initial:?}"
         );
         let (owner, callback) = tokio::select! {
             frame = a.next_significant() => ("A", frame),
@@ -2994,7 +3354,7 @@ mod tcp_callback_ownership {
             ],
         );
         let (a_index, mut a) = h.connect().await;
-        a.register("a_lookup").await;
+        a.register_deferred("a_lookup").await;
         let token = claim_token(
             &a.request(5, "mob/create", claim_mob_definition("handoff_mob"))
                 .await,
@@ -3019,7 +3379,7 @@ mod tcp_callback_ownership {
 
         // No connection holds the route: the member's call fails typed.
         let (_, mut b) = h.connect().await;
-        b.register("b_lookup").await;
+        b.register_deferred("b_lookup").await;
         b.send(member_turn(8, "handoff_mob", "handoff-unclaimed"))
             .await;
         h.seen("handoff-unclaimed").await;
@@ -3313,7 +3673,7 @@ mod tcp_callback_ownership {
             h.restart().await;
 
             let (_, mut b) = h.connect().await;
-            b.register("b_lookup").await;
+            b.register_deferred("b_lookup").await;
             b.send(json!({"jsonrpc":"2.0","id":17,"method":"mob/claim_callback_route","params":claim_params("restored_mob", &json!(format!("mct_{}", "A".repeat(43))))}))
                 .await;
             assert_claim_refused(
@@ -3361,11 +3721,12 @@ mod tcp_callback_ownership {
 
     /// The detached callback tool `name` a connection registers. Each case
     /// registers its own name and runner, so a job one case queues never
-    /// routes to another case's connection.
+    /// routes to another case's connection. It is over the catalog's byte
+    /// budget, so a session defers it and the model loads it first.
     fn detached_tool(name: &str) -> Value {
         json!([{
             "name": name,
-            "description": "connection-owned detached callback",
+            "description": super::over_catalog_budget("connection-owned detached callback"),
             "input_schema": {"type": "object", "properties": {}},
             "execution": {
                 "mode": "detached",

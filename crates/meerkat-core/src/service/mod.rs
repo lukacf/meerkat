@@ -2161,6 +2161,26 @@ impl ParentToolCompositionAuthority {
             .map_err(Self::map_visible_tools_error)
     }
 
+    /// The parent's effective tools: the ones its model sees and the ones
+    /// waiting behind its deferred catalog, which it can load at any time.
+    /// This is the ceiling a child inherits. Whether the child defers is
+    /// decided for the child, as for any session, so a tool the parent keeps
+    /// behind its catalog must not drop out of the child's ceiling. Names a
+    /// scoped tool grant opened stay out, as in the visible snapshot.
+    fn effective_tool_snapshot_result(
+        &self,
+    ) -> Result<Vec<Arc<ToolDef>>, crate::tool_scope::ToolScopeStageError> {
+        let tool_scope = self.current_tool_scope().ok_or_else(|| {
+            crate::tool_scope::ToolScopeStageError::Owner {
+                message: "parent tool scope is unavailable".to_string(),
+            }
+        })?;
+        tool_scope
+            .effective_tools_with_grant_gate_closed_result()
+            .map(|tools| tools.iter().cloned().collect())
+            .map_err(Self::map_visible_tools_error)
+    }
+
     /// Returns the tool definitions currently visible to the parent agent.
     pub fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>> {
         self.visible_tool_snapshot_result().unwrap_or_default()
@@ -2181,7 +2201,7 @@ impl ParentToolCompositionAuthority {
         filter: crate::tool_scope::ToolFilter,
     ) -> Result<crate::InheritedToolVisibilityAuthority, crate::tool_scope::ToolScopeStageError>
     {
-        let tools = self.visible_tool_snapshot_result()?;
+        let tools = self.effective_tool_snapshot_result()?;
         let tool_defs = tools
             .iter()
             .map(|tool| tool.as_ref().clone())
@@ -2195,15 +2215,16 @@ impl ParentToolCompositionAuthority {
         )
     }
 
-    /// Authorize a child allow-filter derived from the current visible parent
-    /// tool set plus optional allow/deny overlays.
+    /// Authorize a child allow-filter derived from the parent's current
+    /// effective tool set (visible and deferred) plus optional allow/deny
+    /// overlays.
     pub fn authorize_inherited_tool_visibility_with_overlays(
         &self,
         allow_overlay: Option<&std::collections::HashSet<String>>,
         deny_overlay: Option<&std::collections::HashSet<String>>,
     ) -> Result<crate::InheritedToolVisibilityAuthority, crate::tool_scope::ToolScopeStageError>
     {
-        let tools = self.visible_tool_snapshot_result()?;
+        let tools = self.effective_tool_snapshot_result()?;
         let mut names = tools
             .iter()
             .map(|tool| tool.name.as_str().to_string())

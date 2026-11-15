@@ -411,6 +411,22 @@ fn identity(server: &McpServerConfig) -> meerkat::McpServerIdentity {
         .in_realm(meerkat_core::RealmId::parse("meta").expect("realm"))
 }
 
+/// The gate answers for the catalog control tools as the dispatcher it
+/// wraps does: an inner `OnDemand` stays `OnDemand` (the trait default would
+/// answer `Always`).
+#[test]
+fn the_gate_forwards_the_inner_catalog_control_plane() {
+    let gate = PersonalAccountGate::new(
+        crate::tool_application_test_support::on_demand_catalog_probe(),
+        accounts(),
+        None,
+    );
+    assert_eq!(
+        gate.tool_catalog_control_plane(),
+        meerkat_core::ToolCatalogControlPlane::OnDemand
+    );
+}
+
 #[test]
 fn mcp_accounts_config_refuses_unknown_modes_and_keys() {
     let config = McpAccountsConfig::from_toml_str(

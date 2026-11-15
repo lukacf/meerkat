@@ -1283,6 +1283,26 @@ fn openai_realtime_tools(visible_tools: &[ToolDef]) -> Result<Vec<Tool>, LlmErro
         .collect()
 }
 
+/// The tools of `tools` the realtime tool normalizer refuses, each with its
+/// reason. A `Refresh` whose tool list holds such a tool is refused whole and
+/// ends the channel, so a host asks here first for a tool the model loaded
+/// during the conversation.
+fn openai_realtime_refused_tools(
+    tools: &[ToolDef],
+) -> Vec<meerkat_core::live_adapter::LiveToolRefusal> {
+    tools
+        .iter()
+        .filter_map(|tool| {
+            openai_realtime_tools(std::slice::from_ref(tool))
+                .err()
+                .map(|error| meerkat_core::live_adapter::LiveToolRefusal {
+                    name: tool.name.clone(),
+                    reason: error.to_string(),
+                })
+        })
+        .collect()
+}
+
 /// Parse the JSON arguments of a realtime provider tool call, failing the
 /// tool-call boundary on malformed payloads instead of laundering invalid
 /// JSON into a `Value::String` blob. Mirrors the Anthropic streaming sibling
@@ -4610,7 +4630,7 @@ fn map_openai_live_server_error(error: OpenAiServerError) -> LlmError {
 use meerkat_core::live_adapter::{
     LiveAdapter, LiveAdapterCommand, LiveAdapterError, LiveAdapterErrorCode,
     LiveAdapterObservation, LiveAdapterStatus, LiveChannelCapabilities, LiveConfigRejectionReason,
-    LiveInputChunk, LiveResponseModality,
+    LiveInputChunk, LiveResponseModality, LiveToolRefusal,
 };
 use meerkat_core::types::ToolResult as CoreToolResult;
 use std::sync::Mutex as StdMutex;
@@ -5078,6 +5098,13 @@ fn set_status(cell: &StdMutex<LiveAdapterStatus>, new_status: LiveAdapterStatus)
 
 #[async_trait]
 impl LiveAdapter for OpenAiLiveAdapter {
+    /// The tools the realtime tool normalizer refuses, each with its
+    /// reason: the same check a `Refresh` runs on its tool list, where a
+    /// refusal ends the channel.
+    fn refused_tools(&self, tools: &[ToolDef]) -> Vec<LiveToolRefusal> {
+        openai_realtime_refused_tools(tools)
+    }
+
     async fn send_command(&self, command: LiveAdapterCommand) -> Result<(), LiveAdapterError> {
         let _gate = self.command_gate.lock().await;
         if self.closed.load(Ordering::Acquire) {
@@ -6659,6 +6686,40 @@ mod tests {
     use tokio::sync::Mutex;
 
     type FakeEventQueue = Arc<Mutex<VecDeque<Result<Option<ServerEvent>, LlmError>>>>;
+
+    /// The local check a host runs before it adds a tool the model loaded
+    /// during a conversation to the channel: a tool whose schema the
+    /// normalizer refuses is named with the reason, a tool it takes is not.
+    #[test]
+    fn refused_tools_names_only_the_tool_whose_schema_the_normalizer_refuses() {
+        let tool = |name: &str, input_schema: serde_json::Value| ToolDef {
+            audience: Default::default(),
+            name: name.into(),
+            description: "A test tool.".to_string(),
+            input_schema,
+            provenance: None,
+        };
+        let refused = openai_realtime_refused_tools(&[
+            tool("takes_an_object", serde_json::json!({ "type": "object" })),
+            tool("takes_a_string", serde_json::json!({ "type": "string" })),
+        ]);
+        assert_eq!(refused.len(), 1, "one tool is refused: {refused:?}");
+        assert_eq!(refused[0].name.as_str(), "takes_a_string");
+        assert!(
+            refused[0].reason.contains("takes_a_string"),
+            "the reason is the normalizer's own, which names the tool: {}",
+            refused[0].reason
+        );
+        // The check and the refresh path agree: the same list is refused
+        // whole by the normalizer a `Refresh` runs.
+        assert!(
+            openai_realtime_tools(&[tool(
+                "takes_a_string",
+                serde_json::json!({ "type": "string" })
+            )])
+            .is_err()
+        );
+    }
 
     /// Regression (A2): live session tools are rendered through the shared
     /// normalizer; the pre-fix `workgraph_claim` shape reaches the session

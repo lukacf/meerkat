@@ -105031,6 +105031,10 @@ mod operator_instruction_host_store;
 /// dormant and unborn members, retire, reset, restart and refusals.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod operator_instruction_rows;
+/// The mob operator tools report an exact catalog, so a member that mounts
+/// them can still use the deferred tool catalog for its other tools.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod operator_tool_catalog;
 /// #1390: stop and shutdown await interrupted members' end of turn as typed
 /// signals, concurrently and off the actor loop.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]

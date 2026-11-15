@@ -1549,6 +1549,116 @@ impl<B: SessionAgentBuilder + 'static> meerkat_runtime::live_context_mirror::Liv
     }
 }
 
+type MemberActorWitnessSlots =
+    Arc<std::sync::Mutex<std::collections::HashMap<SessionId, crate::LiveSessionActorWitnessSlot>>>;
+
+/// The one extracted live pipeline, borrowed from a member host's
+/// composition: [`ServiceMemberLiveHost`] builds it per trait call, and the
+/// channel refresher it installs builds it per refresh.
+#[allow(clippy::too_many_arguments)]
+fn member_live_orchestrator<'a, B: SessionAgentBuilder + 'static>(
+    service: &'a Arc<PersistentSessionService<B>>,
+    staged_sessions: &'a Arc<StagedSessionRegistry>,
+    staged_capacity_admissions: &'a StagedCapacityAdmissions,
+    runtime_adapter: &'a Arc<MeerkatMachine>,
+    actor_witness_slots: &MemberActorWitnessSlots,
+    host: &Arc<LiveAdapterHost>,
+    realm_id: Option<&'a RealmId>,
+    instance_id: Option<&'a str>,
+    backend: Option<&'a str>,
+) -> LiveOrchestrator<'a, B> {
+    let actor_witness_slots = Arc::clone(actor_witness_slots);
+    LiveOrchestrator {
+        service,
+        staged_sessions,
+        staged_capacity_admissions,
+        runtime_adapter,
+        host: Some(Arc::clone(host)),
+        config_runtime: None,
+        default_llm_client: None,
+        agent_llm_client_decorator: None,
+        external_tools: None,
+        archive_runtime_cleanup: ArchiveRuntimeCleanup {
+            runtime_adapter: Arc::clone(runtime_adapter),
+            pending_session_event_streams: None,
+            mcp_state: None,
+            mob_state: None,
+        },
+        realm_id,
+        instance_id,
+        backend,
+        ingress_reconciler: Some(&MOB_OWNED_ONLY_INGRESS),
+        actor_witness_capture: Arc::new(move |session_id, actor_witness_slot| {
+            actor_witness_slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(session_id, actor_witness_slot);
+        }),
+        // Bridge live commands are member-addressed: the member's mob
+        // checked the member before it asked this host.
+        session_addressing: LiveSessionAddressing::MobMember,
+    }
+}
+
+/// Refreshes a live channel through the member host's own pipeline: the
+/// same [`LiveOrchestrator::refresh_live_channel`] its `refresh` verb runs.
+///
+/// [`ServiceMemberLiveHost::new`] installs it on the composed
+/// [`LiveAdapterHost`], which asks for a refresh when a live tool call
+/// loaded deferred tools for the session, so the provider has the new tool
+/// list before it gets the load's result. The host owns this object, so it
+/// holds the composition weakly: a composition that is gone refuses the
+/// refresh.
+struct ServiceLiveChannelRefresher<B: SessionAgentBuilder + 'static> {
+    service: std::sync::Weak<PersistentSessionService<B>>,
+    runtime_adapter: std::sync::Weak<MeerkatMachine>,
+    host: std::sync::Weak<LiveAdapterHost>,
+    staged_sessions: Arc<StagedSessionRegistry>,
+    staged_capacity_admissions: StagedCapacityAdmissions,
+    actor_witness_slots: MemberActorWitnessSlots,
+    realm_id: Option<RealmId>,
+    instance_id: Option<String>,
+    backend: Option<String>,
+}
+
+#[async_trait]
+impl<B: SessionAgentBuilder + 'static> meerkat_live::LiveChannelRefresher
+    for ServiceLiveChannelRefresher<B>
+{
+    async fn refresh_live_channel(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<
+        Vec<meerkat_core::live_adapter::LiveToolRefusal>,
+        meerkat_live::LiveChannelRefreshError,
+    > {
+        let (Some(service), Some(runtime_adapter), Some(host)) = (
+            self.service.upgrade(),
+            self.runtime_adapter.upgrade(),
+            self.host.upgrade(),
+        ) else {
+            return Err(meerkat_live::LiveChannelRefreshError::new(
+                "the live composition that owns this channel is gone",
+            ));
+        };
+        member_live_orchestrator(
+            &service,
+            &self.staged_sessions,
+            &self.staged_capacity_admissions,
+            &runtime_adapter,
+            &self.actor_witness_slots,
+            &host,
+            self.realm_id.as_ref(),
+            self.instance_id.as_deref(),
+            self.backend.as_deref(),
+        )
+        .refresh_live_channel_after_tool_load(&host, channel_id)
+        .await
+        .map(|(_queued, withheld)| withheld)
+        .map_err(|error| meerkat_live::LiveChannelRefreshError::new(error.to_string()))
+    }
+}
+
 impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     #[must_use]
     pub fn new(config: ServiceMemberLiveHostConfig<B>) -> Self {
@@ -1561,14 +1671,34 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 service: Arc::downgrade(&config.service),
                 host: Arc::downgrade(&config.host),
             }));
+        let staged_sessions = Arc::new(StagedSessionRegistry::new());
+        let staged_capacity_admissions: StagedCapacityAdmissions =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let actor_witness_slots: MemberActorWitnessSlots =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        // A deferred tool the realtime model loads inside a conversation
+        // reaches the provider through this pipeline's own refresh. Every
+        // composition that can open a channel builds this host, so none has
+        // wiring of its own to forget.
+        config
+            .host
+            .set_live_channel_refresher(Arc::new(ServiceLiveChannelRefresher {
+                service: Arc::downgrade(&config.service),
+                runtime_adapter: Arc::downgrade(&config.runtime_adapter),
+                host: Arc::downgrade(&config.host),
+                staged_sessions: Arc::clone(&staged_sessions),
+                staged_capacity_admissions: Arc::clone(&staged_capacity_admissions),
+                actor_witness_slots: Arc::clone(&actor_witness_slots),
+                realm_id: config.realm_id.clone(),
+                instance_id: config.instance_id.clone(),
+                backend: config.backend.clone(),
+            }));
         Self {
             service: config.service,
-            staged_sessions: Arc::new(StagedSessionRegistry::new()),
-            staged_capacity_admissions: Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            staged_sessions,
+            staged_capacity_admissions,
             runtime_adapter: config.runtime_adapter,
-            actor_witness_slots: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            actor_witness_slots,
             host: config.host,
             ws_state: config.ws_state,
             base_url: config.base_url,
@@ -1692,37 +1822,17 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     }
 
     pub(crate) fn orchestrator(&self) -> LiveOrchestrator<'_, B> {
-        let actor_witness_slots = Arc::clone(&self.actor_witness_slots);
-        LiveOrchestrator {
-            service: &self.service,
-            staged_sessions: &self.staged_sessions,
-            staged_capacity_admissions: &self.staged_capacity_admissions,
-            runtime_adapter: &self.runtime_adapter,
-            host: Some(Arc::clone(&self.host)),
-            config_runtime: None,
-            default_llm_client: None,
-            agent_llm_client_decorator: None,
-            external_tools: None,
-            archive_runtime_cleanup: ArchiveRuntimeCleanup {
-                runtime_adapter: Arc::clone(&self.runtime_adapter),
-                pending_session_event_streams: None,
-                mcp_state: None,
-                mob_state: None,
-            },
-            realm_id: self.realm_id.as_ref(),
-            instance_id: self.instance_id.as_deref(),
-            backend: self.backend.as_deref(),
-            ingress_reconciler: Some(&MOB_OWNED_ONLY_INGRESS),
-            actor_witness_capture: Arc::new(move |session_id, actor_witness_slot| {
-                actor_witness_slots
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(session_id, actor_witness_slot);
-            }),
-            // Bridge live commands are member-addressed: the member's mob
-            // checked the member before it asked this host.
-            session_addressing: LiveSessionAddressing::MobMember,
-        }
+        member_live_orchestrator(
+            &self.service,
+            &self.staged_sessions,
+            &self.staged_capacity_admissions,
+            &self.runtime_adapter,
+            &self.actor_witness_slots,
+            &self.host,
+            self.realm_id.as_ref(),
+            self.instance_id.as_deref(),
+            self.backend.as_deref(),
+        )
     }
 
     /// Serve WebRTC for member opens with this signaling state: tokens mint

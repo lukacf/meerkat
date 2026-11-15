@@ -972,8 +972,10 @@ Security, Upgrade and Changed.
     stays as it is, and an update that would give it another value or
     remove it is refused `reserved_key` (at `set.labels` or
     `set.labels_remove`).
-  - The eight tools may wait behind the deferred tool catalog: in a session
-    whose catalog is exact, their definitions are loaded on demand.
+  - The eight tools are in every request of an agent that may create
+    agents: they never wait behind the deferred tool catalog. In a session
+    whose catalog is exact, the catalog defers the deferrable tools of the
+    agent's other sources, and the eight definitions stay.
   - Rust API: `identity_creation::{IdentityAgentTools, IdentityToolCaller,
     IdentityToolCallSite, IdentityToolAnswer, IdentityToolFault,
     identity_tool_defs, identity_tool_catalog, identity_tool_provenance,
@@ -1308,6 +1310,35 @@ Security, Upgrade and Changed.
 - Console sidebar: the Workbench section now sits between **Needs you** and
   the roster, so the roster's search and view controls are directly above
   the roster list.
+
+- Agents with many tools send a short tool list and load the rest on demand.
+  The gateway gives every agent the mob tools and memory search, and until
+  now a session that mounts either sent every tool definition in every
+  request, whatever their size. Core's mob tools and memory search now
+  report an exact tool catalog (see Core's changelog), and Meta's own tool
+  wrappers pass that on. An agent whose deferrable tools (the tools of its
+  connectors and other MCP servers)
+  together reach Core's budget of 8,192 bytes of names, descriptions and
+  schemas now sends `tool_catalog_search` and `tool_catalog_load` in place
+  of their definitions, and its model loads a tool before it calls it. A
+  loaded tool stays loaded for the agent. An agent under the budget is
+  unchanged, and so is one that mounts a tool source without an exact
+  catalog. An agent resumed after the upgrade is in the same position: a
+  tool its earlier turns called directly is loaded once before its next
+  call. For such an agent, while it is live,
+  `meta/identity/resolved_tools` answers the tools its next request
+  carries: the short list with the two control tools, without the tools
+  that wait behind its catalog.
+- Unless one of a member's tool sources asks for them always (an MCP server
+  configured at its build does) or is still connecting, its requests carry
+  `tool_catalog_search` and `tool_catalog_load` only while a tool waits
+  behind its catalog. Meta's agent mob tool wrapper mounts the two control
+  tools for every member and asks for them on demand.
+- The member capability check verifies more members. It compares a member's
+  declared tool categories with its live tool catalog and could not do so
+  for a member whose catalog was not exact (it recorded such a member as
+  unverifiable). These members now have an exact catalog, so a declared
+  category that is missing from one is reported as a verified gap, at WARN.
 
 ### Fixed
 

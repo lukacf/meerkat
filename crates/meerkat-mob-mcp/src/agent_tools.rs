@@ -816,13 +816,14 @@ impl AgentMobToolSurface {
 
     /// Resolve spawn tooling into inherited tool filter and optional override profile.
     ///
-    /// - `InheritParent`: snapshot parent's visible tools, apply overlays
+    /// - `InheritParent`: snapshot the parent's effective tools (the visible
+    ///   ones and the ones behind its deferred catalog), apply overlays
     /// - `Minimal`: only comms tools (send, send_message, reply_to_peer,
     ///   send_request, send_response, peers)
     /// - `Profile`: resolve the profile from inline/realm source; the
-    ///   profile decides what the child mounts, and the parent's visible
+    ///   profile decides what the child mounts, and the parent's effective
     ///   tools (with any overlays) cap what it may dispatch, so a
-    ///   profile-sourced child never gains a tool its parent cannot see
+    ///   profile-sourced child never gains a tool its parent cannot use
     async fn resolve_spawn_tooling(
         &self,
         tooling: &meerkat_mob::SpawnTooling,
@@ -937,16 +938,17 @@ impl AgentMobToolSurface {
 
                 // The profile's ToolConfig decides what the child mounts
                 // (builtins, shell, etc.) through build_agent_config(). The
-                // parent's visible tools, narrowed by any overlays, become the
-                // inherited filter on session metadata: an immutable ceiling
-                // on what the child may dispatch, so a profile cannot switch
-                // on a tool its parent cannot use.
+                // parent's effective tools (visible or behind its deferred
+                // catalog), narrowed by any overlays, become the inherited
+                // filter on session metadata: an immutable ceiling on what
+                // the child may dispatch, so a profile cannot switch on a
+                // tool its parent cannot use.
                 let provider = match &self.snapshot_context {
                     meerkat_core::service::MobToolSnapshotContext::ParentOwned(p) => p,
                     meerkat_core::service::MobToolSnapshotContext::Standalone => {
                         return Err(ToolError::execution_failed(
                             "Profile tooling requires a parent tool scope (ParentOwned context), \
-                             because the child is narrowed to the parent's visible tools, \
+                             because the child is narrowed to the parent's tools, \
                              but this agent is running in Standalone mode",
                         ));
                     }
@@ -2861,6 +2863,18 @@ impl AgentToolDispatcher for EmptyAgentToolSurface {
 impl AgentToolDispatcher for AgentMobToolSurface {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::clone(&self.tools)
+    }
+
+    /// The agent mob tools are one fixed list for the surface's whole life,
+    /// and `tool_catalog()` below lists exactly them, each as an inline
+    /// session entry: this source's exact registry. Reporting it lets a
+    /// session that mounts the agent mob tools keep an exact composed
+    /// catalog.
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        meerkat_core::ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: false,
+        }
     }
 
     async fn dispatch(
@@ -6523,6 +6537,199 @@ mod tests {
             dispatcher.tools().is_empty(),
             "ambient mob enablement must not surface operator tools without runtime-injected capabilities"
         );
+    }
+
+    /// The agent mob tools report an exact catalog, so a session that mounts
+    /// them can still use the deferred tool catalog for its other tools. The
+    /// catalog is the listed tools in names and order, every entry inline,
+    /// and `fork_off` and `council` keep their own deadline.
+    #[tokio::test]
+    async fn agent_mob_tool_catalog_is_exact_and_mirrors_its_tools() {
+        let state = MobMcpState::new_in_memory();
+        let factory = AgentMobToolSurfaceFactory::new(state);
+        let dispatcher = factory
+            .build_mob_tools(meerkat_core::service::MobToolsBuildArgs {
+                session_id: SessionId::new(),
+                model: "claude-sonnet-4-5".to_string(),
+                provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
+                authority_context: Some(create_only_authority()),
+                effective_authority: None,
+                comms_name: None,
+                comms_runtime: None,
+                snapshot_context: meerkat_core::service::MobToolSnapshotContext::Standalone,
+            })
+            .await
+            .expect("build_mob_tools");
+
+        let capabilities = dispatcher.tool_catalog_capabilities();
+        assert!(
+            capabilities.exact_catalog,
+            "the agent mob tool catalog must be exact"
+        );
+        assert!(!capabilities.may_require_catalog_control_plane);
+
+        let tools = dispatcher.tools();
+        let catalog = dispatcher.tool_catalog();
+        assert!(
+            tools.iter().any(|tool| tool.name == TOOL_FORK_OFF),
+            "the agent mob tools are listed"
+        );
+        assert_eq!(
+            catalog
+                .iter()
+                .map(|entry| entry.tool.name.to_string())
+                .collect::<Vec<_>>(),
+            tools
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect::<Vec<_>>(),
+            "the catalog lists the tools in names and order"
+        );
+        for (tool, entry) in tools.iter().zip(catalog.iter()) {
+            assert_eq!(
+                serde_json::to_value(tool.as_ref()).unwrap(),
+                serde_json::to_value(entry.tool.as_ref()).unwrap()
+            );
+            assert_eq!(entry.plane, meerkat_core::ToolPlaneClass::Session);
+            assert_eq!(
+                entry.deferred_eligibility,
+                meerkat_core::ToolCatalogDeferredEligibility::InlineOnly,
+                "{} stays inline",
+                tool.name
+            );
+            assert!(entry.callability.is_callable());
+            let expected = if matches!(tool.name.as_str(), TOOL_FORK_OFF | TOOL_COUNCIL) {
+                meerkat_core::ToolExecutionContract::default().with_tool_owned_deadline()
+            } else {
+                meerkat_core::ToolExecutionContract::default()
+            };
+            assert_eq!(entry.execution, expected, "{}", tool.name);
+        }
+    }
+
+    /// A host tool source with an exact catalog whose tools may wait behind
+    /// the deferred catalog. Each tool's description is half the deferred
+    /// catalog's byte budget, so two of them are over it together and the
+    /// session defers them; a few small tools would stay in every request.
+    struct DeferredEligibleHostTools {
+        catalog: Arc<[meerkat_core::ToolCatalogEntry]>,
+    }
+
+    impl DeferredEligibleHostTools {
+        fn new(names: &[&str]) -> Self {
+            let provenance = meerkat_core::types::ToolProvenance {
+                kind: meerkat_core::types::ToolSourceKind::Callback,
+                source_id: "host-tools".into(),
+                artifact: None,
+            };
+            let mut description = String::from("A host tool.");
+            while description.len()
+                < meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD / 2
+            {
+                description.push_str(" It reads one record of the host and returns it.");
+            }
+            let catalog = names
+                .iter()
+                .map(|name| {
+                    let mut tool =
+                        ToolDef::new(*name, description.as_str(), json!({"type": "object"}));
+                    tool.provenance = Some(provenance.clone());
+                    meerkat_core::ToolCatalogEntry::session_deferred(
+                        Arc::new(tool),
+                        true,
+                        provenance.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into();
+            Self { catalog }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for DeferredEligibleHostTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.catalog
+                .iter()
+                .map(|entry| Arc::clone(&entry.tool))
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+            meerkat_core::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    /// A session the agent factory builds with the agent mob tools beside a
+    /// host tool source: the composed catalog is exact, the host's tools wait
+    /// behind the deferred catalog and the agent mob tools stay visible.
+    #[tokio::test]
+    async fn a_session_with_agent_mob_tools_composes_an_exact_catalog_and_defers_host_tools() {
+        let mob_factory = Arc::new(AgentMobToolSurfaceFactory::new(MobMcpState::new_in_memory()));
+        let temp = tempfile::tempdir().expect("temp agent factory dir");
+        let factory = meerkat::AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .mob(true)
+            .mob_tools_factory(mob_factory.clone());
+        let mut build = meerkat::AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(meerkat_core::Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.override_mob = meerkat_core::ToolCategoryOverride::Enable;
+        build.mob_tool_authority_context = Some(create_only_authority());
+        build.mob_tools = Some(mob_factory);
+        build.external_tools = Some(Arc::new(DeferredEligibleHostTools::new(&[
+            "host_alpha",
+            "host_beta",
+        ])));
+
+        let agent = factory
+            .build_agent(build, &meerkat_core::Config::default())
+            .await
+            .expect("build the session");
+        let view = agent
+            .tool_catalog_view()
+            .expect("the agent reports its catalog view");
+        assert!(
+            view.exact_catalog,
+            "a session with the agent mob tools reports an exact catalog"
+        );
+        assert_eq!(view.mode, meerkat_core::ToolCatalogMode::Deferred);
+        let visibility = |name: &str| {
+            view.entries
+                .iter()
+                .find(|entry| entry.name.as_str() == name)
+                .map(|entry| entry.visibility)
+        };
+        for name in ["host_alpha", "host_beta"] {
+            assert_eq!(
+                visibility(name),
+                Some(meerkat_core::ToolCatalogVisibility::Deferred),
+                "{name} waits behind the deferred catalog"
+            );
+        }
+        for name in [TOOL_FORK_OFF, "tool_catalog_search", "tool_catalog_load"] {
+            assert_eq!(
+                visibility(name),
+                Some(meerkat_core::ToolCatalogVisibility::Visible),
+                "{name} stays visible"
+            );
+        }
     }
 
     #[tokio::test]

@@ -286,6 +286,16 @@ impl AgentToolDispatcher for ComposedExternalTools {
         }
     }
 
+    /// The stronger answer of the two halves (`Never < OnDemand < Always`):
+    /// either half may hold the source that needs the catalog control tools,
+    /// and the composition adds none of its own. Without this the trait
+    /// default would turn a half's `OnDemand` into `Always`.
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.primary
+            .tool_catalog_control_plane()
+            .max(self.fallback.tool_catalog_control_plane())
+    }
+
     /// Primary entries verbatim, then every fallback entry whose name the
     /// primary does not advertise - the same precedence `tools()` applies.
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
@@ -1176,5 +1186,199 @@ mod tests {
             assert!(half.last_bound_is(None));
             assert_eq!(half.bind_count(), 2);
         }
+    }
+
+    /// A tool source with one small deferrable tool (far under the deferred
+    /// catalog's byte budget) that asks for the catalog control tools the
+    /// way `plane` says.
+    struct DeferrableSource {
+        name: &'static str,
+        plane: meerkat_core::ToolCatalogControlPlane,
+    }
+
+    impl DeferrableSource {
+        fn tool(&self) -> Arc<ToolDef> {
+            Arc::new(ToolDef {
+                audience: Default::default(),
+                name: self.name.into(),
+                description: "a small registered tool".into(),
+                input_schema: json!({"type": "object"}),
+                provenance: None,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentToolDispatcher for DeferrableSource {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            vec![self.tool()].into()
+        }
+
+        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+            ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: true,
+            }
+        }
+
+        fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+            self.plane
+        }
+
+        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+            vec![ToolCatalogEntry::session_deferred(
+                self.tool(),
+                true,
+                meerkat_core::ToolProvenance {
+                    kind: meerkat_core::ToolSourceKind::Callback,
+                    source_id: "registered".into(),
+                    artifact: None,
+                },
+            )]
+            .into()
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    fn on_demand(name: &'static str) -> Arc<dyn AgentToolDispatcher> {
+        Arc::new(DeferrableSource {
+            name,
+            plane: meerkat_core::ToolCatalogControlPlane::OnDemand,
+        })
+    }
+
+    /// What a session built over `tools` sends its model: the names of the
+    /// tools in its request, and its system prompt.
+    async fn request_of(
+        tools: Arc<dyn AgentToolDispatcher>,
+    ) -> (std::collections::BTreeSet<String>, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = meerkat::AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let mut build = meerkat::AgentBuildConfig::new("claude-sonnet-4-5");
+        build.llm_client_override = Some(Arc::new(meerkat_llm_core::TestClient::new(Vec::new())));
+        build.override_builtins = meerkat_core::ToolCategoryOverride::Disable;
+        build.external_tools = Some(tools);
+        let agent = factory
+            .build_agent(build, &meerkat_core::Config::default())
+            .await
+            .unwrap();
+        let Some(meerkat_core::Message::System(system)) = agent.session().messages().first() else {
+            panic!("a built session starts with its system prompt");
+        };
+        let prompt = system.content.clone();
+        let shown = agent
+            .tool_scope()
+            .visible_tool_names()
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        (shown, prompt)
+    }
+
+    fn names(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    /// A source that asks for the catalog control tools on demand keeps
+    /// asking on demand behind the composition, as either half: while its
+    /// small tool is in the request, the request carries no control tool and
+    /// the system prompt says nothing about the catalog.
+    #[tokio::test]
+    async fn an_on_demand_source_behind_the_composition_sends_no_control_tool_under_the_budget() {
+        let (shown, prompt) = request_of(on_demand("registered_lookup")).await;
+        assert_eq!(
+            shown,
+            names(&["registered_lookup"]),
+            "the source alone: its small tool and no control tool"
+        );
+        assert!(!prompt.contains("tool_catalog_"), "{prompt}");
+
+        for (half, composed, expected) in [
+            (
+                "primary",
+                ComposedExternalTools::over(
+                    on_demand("registered_lookup"),
+                    Some(Probe::new(vec!["weather"])),
+                ),
+                names(&["registered_lookup", "weather"]),
+            ),
+            (
+                "fallback",
+                ComposedExternalTools::over(
+                    Probe::new(vec!["weather"]),
+                    Some(on_demand("registered_lookup")),
+                ),
+                names(&["registered_lookup", "weather"]),
+            ),
+        ] {
+            let plane = composed.tool_catalog_control_plane();
+            let (shown, prompt) = request_of(composed).await;
+            assert_eq!(
+                shown, expected,
+                "the on-demand source as the {half} half: no control tool in the request"
+            );
+            assert!(
+                !prompt.contains("tool_catalog_"),
+                "the on-demand source as the {half} half: no catalog guidance: {prompt}"
+            );
+            assert_eq!(
+                plane,
+                meerkat_core::ToolCatalogControlPlane::OnDemand,
+                "the on-demand source as the {half} half"
+            );
+        }
+    }
+
+    /// The composition takes the stronger answer of its two halves
+    /// (`Never < OnDemand < Always`), whichever half holds it: a half that
+    /// asks for the control tools always keeps them, and their guidance, in
+    /// the request of a session whose tools are all in the request.
+    #[tokio::test]
+    async fn the_composition_takes_the_stronger_answer_of_its_halves() {
+        use meerkat_core::ToolCatalogControlPlane::{Always, Never, OnDemand};
+        let source = |name: &'static str, plane| -> Arc<dyn AgentToolDispatcher> {
+            Arc::new(DeferrableSource { name, plane })
+        };
+        for (primary, fallback, expected) in [
+            (Never, Never, Never),
+            (OnDemand, Never, OnDemand),
+            (Never, OnDemand, OnDemand),
+            (OnDemand, OnDemand, OnDemand),
+            (Always, OnDemand, Always),
+            (OnDemand, Always, Always),
+            (Always, Never, Always),
+            (Never, Always, Always),
+        ] {
+            let composed = ComposedExternalTools::over(
+                source("primary_lookup", primary),
+                Some(source("fallback_lookup", fallback)),
+            );
+            assert_eq!(
+                composed.tool_catalog_control_plane(),
+                expected,
+                "primary {primary:?} over fallback {fallback:?}"
+            );
+        }
+
+        let composed = ComposedExternalTools::over(
+            source("primary_lookup", OnDemand),
+            Some(source("fallback_lookup", Always)),
+        );
+        let (shown, prompt) = request_of(composed).await;
+        assert_eq!(
+            shown,
+            names(&[
+                "fallback_lookup",
+                "primary_lookup",
+                "tool_catalog_load",
+                "tool_catalog_search"
+            ]),
+            "a half that asks always keeps both control tools in the request"
+        );
+        assert!(prompt.contains("tool_catalog_search"), "{prompt}");
     }
 }

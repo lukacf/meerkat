@@ -11,6 +11,8 @@ mod brain_swap_promotion_tests;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod budget_warning_tests;
 mod builder;
+#[cfg(all(test, feature = "workspace-tests"))]
+mod catalog_control_visibility_tests;
 pub mod comms_impl;
 pub mod compact;
 #[cfg(all(test, feature = "workspace-tests"))]
@@ -3017,6 +3019,28 @@ pub trait AgentToolDispatcher: Send + Sync {
         ToolCatalogCapabilities::default()
     }
 
+    /// How this dispatcher needs the deferred catalog's control tools shown.
+    ///
+    /// The default follows
+    /// [`ToolCatalogCapabilities::may_require_catalog_control_plane`]: a
+    /// source that sets it needs the control tools in every model request
+    /// ([`ToolCatalogControlPlane::Always`]), one that does not asks for
+    /// nothing. A source whose tools arrive later can answer
+    /// [`ToolCatalogControlPlane::OnDemand`]: the control tools are mounted
+    /// and stay out of the request until a deferrable tool waits behind the
+    /// catalog. A wrapper forwards its inner dispatcher's answer, and a
+    /// composition takes the strongest of its parts.
+    fn tool_catalog_control_plane(&self) -> crate::ToolCatalogControlPlane {
+        if self
+            .tool_catalog_capabilities()
+            .may_require_catalog_control_plane
+        {
+            crate::ToolCatalogControlPlane::Always
+        } else {
+            crate::ToolCatalogControlPlane::Never
+        }
+    }
+
     /// Return the precedence-resolved tool catalog for this dispatcher.
     ///
     /// The default implementation mirrors `tools()` as a visible-only inline
@@ -3381,6 +3405,33 @@ fn validate_fenced_root_dispatch<T: AgentToolDispatcher + ?Sized + 'static>(
     Ok(())
 }
 
+/// A live bridge operation runs Fast tool calls only: it commits nothing to
+/// its member's session and cannot hold asynchronous work. A call whose
+/// resolved plan is detached or streaming is refused here as that call's own
+/// tool error, before preparation and before any dispatcher code runs, so
+/// nothing is submitted and the operation goes on. The plan's kind is read
+/// from the accessor [`dispatch_admitted_plan`] dispatches on; a bridge call
+/// is one whose context carries the operation's dispatch admission.
+fn refuse_non_fast_live_bridge_call(
+    call: ToolCallView<'_>,
+    context: &ToolDispatchContext,
+    plan: &crate::ResolvedToolExecutionPlan,
+) -> Result<(), crate::error::ToolError> {
+    if context.live_bridge_admission().is_none() {
+        return Ok(());
+    }
+    let execution = match plan.kind() {
+        crate::ResolvedExecutionKind::Fast => return Ok(()),
+        crate::ResolvedExecutionKind::Detached(_) => "detached",
+        crate::ResolvedExecutionKind::Streaming(_) => "streaming",
+    };
+    Err(crate::error::ToolError::execution_failed(format!(
+        "a live bridge operation runs Fast tool calls only: this call of {} asked for \
+         {execution} execution and was not started",
+        call.name
+    )))
+}
+
 /// Under governed work, a comms or memory tool's plan must carry targets of
 /// its owner's kind only: a peer delivery or the peer directory for comms,
 /// a memory operation for memory. Those owners attach one to every plan
@@ -3720,6 +3771,7 @@ async fn fenced_dispatch<T: AgentToolDispatcher + ?Sized + 'static>(
 ) -> FencedOutcome {
     let deadline = DispatchDeadline::start(plan);
     validate_fenced_root_dispatch(dispatcher, call, context, plan)?;
+    refuse_non_fast_live_bridge_call(call, context, plan)?;
     // Retain one binding with the actual resolved call. Its generation is
     // checked here after the dispatch queue, and again by adapters after any
     // further preparation waits, such as application consequence policy.
@@ -4565,6 +4617,10 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
 
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
         self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog_control_plane(&self) -> crate::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
     }
 
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {

@@ -1275,7 +1275,9 @@ take a `MobProfileInput`, so host-only fields such as `mcp_servers` or
 sources. `tooling` on `delegate` and `mob_spawn_member` is `inherit_parent`
 (default; `allow_overlay`/`deny_overlay` narrow it), `minimal` (comms tools
 only), or `profile` (`realm_profile` or `inline`), and a profile is capped by
-the spawning agent's visible tools. On a managed host
+the spawning agent's tools: the ones its model sees and the ones waiting
+behind its deferred tool catalog, which it can load at any time. Whether the
+child defers tools is decided for the child, as for any session. On a managed host
 (`MobMcpState::with_tool_consequence_policy_registry`), members of
 agent-created child mobs and `delegate` helpers run under
 `MobMcpState::with_child_application_tool_policy`; without one, `mob_create`,

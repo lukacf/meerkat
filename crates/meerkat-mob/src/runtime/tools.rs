@@ -91,6 +91,10 @@ impl AgentToolDispatcher for NameFilteredDispatcher {
         self.inner.tool_catalog_capabilities()
     }
 
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
+    }
+
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
         self.inner
             .tool_catalog()
@@ -279,6 +283,10 @@ impl AgentToolDispatcher for NameOrderedDispatcher {
 
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
         self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
     }
 
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
@@ -511,6 +519,10 @@ impl AgentToolDispatcher for BundleProvenanceDispatcher {
 
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
         self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
     }
 
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
@@ -760,6 +772,10 @@ impl AgentToolDispatcher for McpProvenanceFilter {
 
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
         self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
     }
 
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
@@ -2230,6 +2246,19 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
             Arc::clone(&self.tools)
         } else {
             Arc::from(Vec::<Arc<ToolDef>>::new())
+        }
+    }
+
+    /// The operator tools are one fixed list, listed as a whole or hidden as
+    /// a whole by the session's authority, and `tools()` answers for the
+    /// current binding on every call. The default catalog (each listed tool
+    /// as an inline session entry) is therefore this source's exact
+    /// registry, and a hidden tool has no entry. Reporting it lets a member
+    /// that mounts the operator tools keep an exact composed catalog.
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        meerkat_core::ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: false,
         }
     }
 

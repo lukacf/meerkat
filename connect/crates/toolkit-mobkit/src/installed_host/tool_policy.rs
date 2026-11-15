@@ -707,6 +707,55 @@ mod tests {
         assert!(validate_installed_surface(&unknown, &[lazy]).is_ok());
         assert!(!unknown.contains(&identity("lazy")));
     }
+    /// A member whose tool sources all report an exact catalog prepares a
+    /// complete surface, and one that can need the deferred catalog carries
+    /// the two catalog control tools. The list stored when the same member
+    /// still had a source without an exact catalog holds its tools and no
+    /// control tool: against that list the new surface is refused. Against a
+    /// list compiled from the new surface it is accepted.
+    #[test]
+    fn a_surface_that_gained_the_catalog_control_tools_needs_a_recompiled_installed_list() {
+        let own = identity("member_tool");
+        let lazy = identity("deferred_tool");
+        let search = identity("tool_catalog_search");
+        let load = identity("tool_catalog_load");
+        let entry = |identity: &ToolIdentity, plane, deferred_eligible| {
+            meerkat_core::PreparedCatalogEntry {
+                identity: identity.clone(),
+                plane,
+                callability: meerkat_core::ToolCallability::Callable,
+                deferred_eligible,
+            }
+        };
+
+        let stored = [own.clone(), lazy.clone()];
+        let before = PreparedToolSurface {
+            tools: vec![own.clone(), lazy.clone()],
+            projected: vec![own.clone(), lazy.clone()],
+            catalog: PreparedToolCatalog::VisibleOnly,
+        };
+        assert!(validate_installed_surface(&before, &stored).is_ok());
+
+        let after = PreparedToolSurface {
+            tools: vec![own.clone(), lazy.clone(), search.clone(), load.clone()],
+            projected: vec![own.clone(), search.clone(), load.clone()],
+            catalog: PreparedToolCatalog::Complete(vec![
+                entry(&own, meerkat_core::ToolPlaneClass::Session, false),
+                entry(&lazy, meerkat_core::ToolPlaneClass::Session, true),
+                entry(&search, meerkat_core::ToolPlaneClass::Control, false),
+                entry(&load, meerkat_core::ToolPlaneClass::Control, false),
+            ]),
+        };
+        assert!(
+            validate_installed_surface(&after, &stored).is_err(),
+            "the stored list has no association for the two control tools"
+        );
+        assert!(
+            validate_installed_surface(&after, &[own.clone(), lazy.clone(), search]).is_err(),
+            "each control tool needs its own association"
+        );
+        assert!(validate_installed_surface(&after, &after.tools).is_ok());
+    }
     #[test]
     fn successor_keeps_actual_provider_and_registry_and_fences_prior_desired_revision() {
         fn at(revision: u64, source: &str) -> Vec<u8> {

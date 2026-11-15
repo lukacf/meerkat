@@ -242,11 +242,33 @@ async fn an_empty_publication_advertises_nothing_and_refuses_calls() {
     assert!(entry.tools().is_empty());
     assert!(entry.tool_catalog().is_empty());
     assert!(entry.tool_catalog_capabilities().exact_catalog);
+    assert_eq!(
+        entry.tool_catalog_control_plane(),
+        meerkat_core::ToolCatalogControlPlane::Never,
+        "an empty publication asks for no catalog control tool"
+    );
     let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
     assert!(matches!(
         entry.dispatch(call("lookup", &args)).await,
         Err(ToolError::NotFound { .. })
     ));
+}
+
+/// The identity's dispatcher answers for the catalog control tools as the
+/// published scope does: a published `OnDemand` stays `OnDemand` (the trait
+/// default would answer `Always`).
+#[test]
+fn a_published_scope_keeps_its_catalog_control_plane_answer() {
+    let registry = CustomizerToolRegistry::new();
+    let id = identity("domain:calendar");
+    let entry = registry.publish(
+        &id,
+        Some(crate::tool_application_test_support::on_demand_catalog_probe()),
+    );
+    assert_eq!(
+        entry.tool_catalog_control_plane(),
+        meerkat_core::ToolCatalogControlPlane::OnDemand
+    );
 }
 
 #[test]

@@ -49,9 +49,12 @@ use meerkat_core::ToolError;
 use meerkat_core::live_adapter::{
     LiveAdapter, LiveAdapterCommand, LiveAdapterError, LiveAdapterErrorCode,
     LiveAdapterObservation, LiveAdapterStatus, LiveInputChunk, LiveResponseAccounting,
-    LiveResponseFailure, LiveToolResult,
+    LiveResponseFailure, LiveToolRefusal, LiveToolResult,
 };
 use meerkat_core::types::{SessionId, StopReason, ToolCall, ToolName, ToolResult, Usage};
+use meerkat_core::{
+    DeferredToolLoadAvailability, DeferredToolLoadRefusalReason, DeferredToolLoadStage,
+};
 use meerkat_core::{
     RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeUserContentApplyOutcome,
 };
@@ -1869,6 +1872,47 @@ pub trait LiveToolDispatcher: Send + Sync {
     ) -> Result<ToolDispatchOutcome, LiveToolDispatchError>;
 }
 
+/// Rebuilds one live channel's provider configuration from its session and
+/// queues it on the channel, through the composition's existing refresh
+/// pipeline (the one its `refresh` verb runs).
+///
+/// [`LiveAdapterHost`] asks for this when a live tool call loaded deferred
+/// tools for the session: the provider must have the new tool list before it
+/// gets the load's result, or the model cannot call the tool in the same
+/// conversation. The host cannot build a provider configuration itself, so
+/// the composition that owns the pipeline installs this with
+/// [`LiveAdapterHost::set_live_channel_refresher`].
+#[async_trait::async_trait]
+pub trait LiveChannelRefresher: Send + Sync {
+    /// Queue a refresh of `channel_id` for tools its session just loaded.
+    /// `Ok` means the channel's command queue accepted it, ahead of whatever
+    /// the caller queues next.
+    ///
+    /// The returned tools were left out of the queued tool list because the
+    /// channel's provider would refuse their definitions
+    /// ([`LiveAdapterHost::tools_refused_by_channel`]); a refresh that sent
+    /// one would end the conversation. Empty when every tool was sent.
+    async fn refresh_live_channel(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<Vec<LiveToolRefusal>, LiveChannelRefreshError>;
+}
+
+/// Why a [`LiveChannelRefresher`] could not queue a refresh.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("live channel refresh failed: {message}")]
+pub struct LiveChannelRefreshError {
+    message: String,
+}
+
+impl LiveChannelRefreshError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
 /// Error returned by a [`LiveToolDispatcher`].
 ///
 /// D113: failure semantics are typed, not prose-parsed. A
@@ -2042,6 +2086,11 @@ pub struct LiveAdapterHost {
     /// that point, so we expose [`set_live_tool_dispatcher`] as a late setter.
     /// Reads are short and fully sync — never held across an `.await`.
     tool_dispatcher: std::sync::Mutex<Option<Arc<dyn LiveToolDispatcher>>>,
+    /// Late-bindable refresher for a channel whose session loaded deferred
+    /// tools in a live tool call. Installed by the composition that owns the
+    /// refresh pipeline; without one a load is reported as not available in
+    /// the conversation. Reads are short and never held across an `.await`.
+    channel_refresher: std::sync::Mutex<Option<Arc<dyn LiveChannelRefresher>>>,
     /// Per-tool-call dispatch timeout. `dispatch_tool_call` races the
     /// dispatcher future against
     /// [`tokio::time::timeout`](tokio::time::timeout); on elapse, the host
@@ -2103,6 +2152,7 @@ impl LiveAdapterHost {
             })),
             projection_sink,
             tool_dispatcher: std::sync::Mutex::new(None),
+            channel_refresher: std::sync::Mutex::new(None),
             tool_timeout: DEFAULT_LIVE_TOOL_TIMEOUT,
         }
     }
@@ -2169,6 +2219,32 @@ impl LiveAdapterHost {
     /// reason: NoDispatcher }`.
     fn load_dispatcher(&self) -> Option<Arc<dyn LiveToolDispatcher>> {
         self.tool_dispatcher
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(Arc::clone))
+    }
+
+    /// Install the refresher for channels whose session loads deferred tools
+    /// in a live tool call. It replaces whatever was installed before.
+    ///
+    /// The composition that owns the live refresh pipeline calls this once
+    /// its pipeline exists. Without a refresher a load made in a live
+    /// conversation is still committed for the session, and its result says
+    /// the tool cannot be called in that conversation yet.
+    pub fn set_live_channel_refresher(&self, refresher: Arc<dyn LiveChannelRefresher>) {
+        if let Ok(mut slot) = self.channel_refresher.lock() {
+            *slot = Some(refresher);
+        }
+    }
+
+    /// Whether a [`LiveChannelRefresher`] is installed.
+    #[must_use]
+    pub fn has_live_channel_refresher(&self) -> bool {
+        self.load_refresher().is_some()
+    }
+
+    fn load_refresher(&self) -> Option<Arc<dyn LiveChannelRefresher>> {
+        self.channel_refresher
             .lock()
             .ok()
             .and_then(|slot| slot.as_ref().map(Arc::clone))
@@ -2497,6 +2573,21 @@ impl LiveAdapterHost {
                 LiveAdapterHostError::PlaybackTerminalSettlementFailed(reason.clone()),
             ));
         }
+    }
+
+    /// The tools of `tools` the provider of `channel_id` would refuse, each
+    /// with the provider-side reason: the adapter's own local check, no
+    /// provider I/O. A refresher asks before it queues a tool list that
+    /// holds tools the model loaded during the conversation.
+    pub async fn tools_refused_by_channel(
+        &self,
+        channel_id: &LiveChannelId,
+        tools: &[meerkat_core::ToolDef],
+    ) -> Result<Vec<LiveToolRefusal>, LiveAdapterHostError> {
+        let adapter = self
+            .adapter_for(channel_id, /* require_ready = */ false)
+            .await?;
+        Ok(adapter.refused_tools(tools))
     }
 
     /// Enqueue a refresh command and return typed queue-acceptance evidence.
@@ -3408,6 +3499,7 @@ impl LiveAdapterHost {
         };
         match dispatch_result {
             Ok(outcome) => {
+                let outcome = self.settle_deferred_tool_load(channel_id, outcome).await;
                 let live_result =
                     tool_result_from_dispatch(provider_call_id.clone(), outcome.result);
                 self.submit_tool_result(channel_id, live_result).await?;
@@ -3442,6 +3534,96 @@ impl LiveAdapterHost {
             provider_call_id: provider_call_id.0.clone(),
             tool_name: tool_name.to_string(),
         })
+    }
+
+    /// The step between a live tool call's dispatch and its result, for a
+    /// call that loaded deferred tools for the session.
+    ///
+    /// The session has the tools, but the provider of this conversation
+    /// still holds the tool list it was opened with. The channel is
+    /// refreshed here, before the caller submits the load's result: the
+    /// adapter's command queue keeps that order, so the provider gets the
+    /// new tool list first and the model's continuation can call the tool.
+    /// The result then states what is true for this conversation, per tool:
+    /// available now when the refresh was queued with the tool, loaded but
+    /// not available here when no refresher is installed, the refresh could
+    /// not be queued in time, or the channel's provider would refuse the
+    /// tool's definition (the refresher withheld it, so the load does not
+    /// end the conversation). Any other outcome passes through unchanged.
+    async fn settle_deferred_tool_load(
+        &self,
+        channel_id: &LiveChannelId,
+        outcome: ToolDispatchOutcome,
+    ) -> ToolDispatchOutcome {
+        let Some(load) = outcome
+            .deferred_tool_load()
+            .filter(|load| load.stage() == DeferredToolLoadStage::LoadedForSession)
+        else {
+            return outcome;
+        };
+        let (availability, withheld) = match self.load_refresher() {
+            None => {
+                tracing::warn!(
+                    channel = %channel_id,
+                    "deferred tools were loaded for the session, but no live channel refresher \
+                     is installed: this conversation's tool list is not updated"
+                );
+                (
+                    DeferredToolLoadAvailability::LoadedNotInThisConversation,
+                    Vec::new(),
+                )
+            }
+            Some(refresher) => {
+                let refresh = refresher.refresh_live_channel(channel_id);
+                match tokio::time::timeout(self.tool_timeout, refresh).await {
+                    Ok(Ok(withheld)) => (DeferredToolLoadAvailability::AvailableNow, withheld),
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            channel = %channel_id,
+                            %error,
+                            "deferred tools were loaded for the session, but this \
+                             conversation's tool list could not be updated"
+                        );
+                        (
+                            DeferredToolLoadAvailability::LoadedNotInThisConversation,
+                            Vec::new(),
+                        )
+                    }
+                    Err(_elapsed) => {
+                        tracing::warn!(
+                            channel = %channel_id,
+                            timeout = ?self.tool_timeout,
+                            "deferred tools were loaded for the session, but updating this \
+                             conversation's tool list timed out"
+                        );
+                        (
+                            DeferredToolLoadAvailability::LoadedNotInThisConversation,
+                            Vec::new(),
+                        )
+                    }
+                }
+            }
+        };
+        // A tool the refresher withheld is loaded for the session and not in
+        // this conversation, whatever the rest of the load is.
+        let load = withheld.into_iter().fold(load, |load, refusal| {
+            tracing::warn!(
+                channel = %channel_id,
+                tool = %refusal.name,
+                reason = %refusal.reason,
+                "a loaded deferred tool was left out of this conversation: its provider \
+                 would refuse the tool's definition"
+            );
+            load.refuse(
+                refusal.name.as_str(),
+                DeferredToolLoadRefusalReason::RefusedByConversationProvider {
+                    detail: refusal.reason,
+                },
+            )
+        });
+        outcome
+            .with_deferred_tool_load(load)
+            .with_deferred_load_availability(availability)
     }
 
     /// Helper: fetch the live adapter for a channel, optionally enforcing
@@ -3657,8 +3839,9 @@ impl LiveAdapterHost {
     /// A second handle over the same transport state, for owned work that
     /// outlives the caller's borrow (the deferred close settlement replaying
     /// deferred projections at the turn boundary). It shares channels, the
-    /// projection sink, and the tool dispatcher installed so far; a dispatcher
-    /// installed later on either handle is not visible to the other.
+    /// projection sink, and the tool dispatcher and channel refresher
+    /// installed so far; one installed later on either handle is not visible
+    /// to the other.
     #[must_use]
     pub fn owned_handle(&self) -> LiveAdapterHost {
         LiveAdapterHost {
@@ -3666,6 +3849,12 @@ impl LiveAdapterHost {
             projection_sink: Arc::clone(&self.projection_sink),
             tool_dispatcher: std::sync::Mutex::new(
                 self.tool_dispatcher
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            ),
+            channel_refresher: std::sync::Mutex::new(
+                self.channel_refresher
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone(),
@@ -5978,6 +6167,341 @@ mod tests {
         let submitted = adapter.submitted_results.lock().unwrap();
         assert_eq!(submitted.len(), 1);
         assert_eq!(submitted[0].call_id.0, "call_42");
+    }
+
+    // -- A live tool call that loads deferred tools for the session --
+
+    /// What the refresher and the adapter saw, in order.
+    type Sequence = Arc<StdMutex<Vec<&'static str>>>;
+
+    /// Dispatcher whose outcome is the catalog load's: a JSON body, and the
+    /// typed report of the names it accepted at the given stage.
+    struct LoadingDispatcher {
+        loaded_for_session: bool,
+        /// The tools the load accepted.
+        names: Vec<&'static str>,
+        /// The accepted tools the session's own boundary refused as hidden.
+        hidden_by_session_filter: Vec<&'static str>,
+    }
+
+    impl LoadingDispatcher {
+        fn of_alpha(loaded_for_session: bool) -> Self {
+            Self {
+                loaded_for_session,
+                names: vec!["alpha"],
+                hidden_by_session_filter: Vec::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LiveToolDispatcher for LoadingDispatcher {
+        async fn dispatch_live_tool_call(
+            &self,
+            _session_id: &SessionId,
+            call: ToolCall,
+        ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
+            let load = meerkat_core::DeferredToolLoad::requested(
+                self.names.iter().map(|name| ToolName::new(*name)),
+            );
+            let load = self
+                .hidden_by_session_filter
+                .iter()
+                .fold(load, |load, name| {
+                    load.refuse(name, DeferredToolLoadRefusalReason::HiddenBySessionFilter)
+                });
+            let load = if self.loaded_for_session {
+                load.loaded_for_session()
+            } else {
+                load
+            };
+            Ok(
+                ToolDispatchOutcome::from(meerkat_core::types::ToolResult::new(
+                    call.id,
+                    r#"{"accepted_names":["alpha"]}"#.into(),
+                    false,
+                ))
+                .with_deferred_tool_load(load),
+            )
+        }
+    }
+
+    enum RefreshScript {
+        Queued,
+        /// Queued, with this tool left out because the channel's provider
+        /// would refuse its definition.
+        QueuedWithout(&'static str),
+        Refused,
+        Hangs,
+    }
+
+    struct ScriptedRefresher {
+        script: RefreshScript,
+        sequence: Sequence,
+    }
+
+    #[async_trait]
+    impl LiveChannelRefresher for ScriptedRefresher {
+        async fn refresh_live_channel(
+            &self,
+            _channel_id: &LiveChannelId,
+        ) -> Result<Vec<LiveToolRefusal>, LiveChannelRefreshError> {
+            self.sequence.lock().unwrap().push("refresh");
+            match self.script {
+                RefreshScript::Queued => Ok(Vec::new()),
+                RefreshScript::QueuedWithout(name) => Ok(vec![LiveToolRefusal {
+                    name: ToolName::new(name),
+                    reason: "scripted schema refusal".to_string(),
+                }]),
+                RefreshScript::Refused => Err(LiveChannelRefreshError::new("scripted refusal")),
+                RefreshScript::Hangs => std::future::pending().await,
+            }
+        }
+    }
+
+    struct SequenceAdapter {
+        sequence: Sequence,
+        results: StdMutex<Vec<LiveToolResult>>,
+    }
+
+    #[async_trait]
+    impl LiveAdapter for SequenceAdapter {
+        async fn send_command(&self, command: LiveAdapterCommand) -> Result<(), LiveAdapterError> {
+            if let LiveAdapterCommand::SubmitToolResult { result } = command {
+                self.sequence.lock().unwrap().push("result");
+                self.results.lock().unwrap().push(result);
+            }
+            Ok(())
+        }
+
+        async fn next_observation(
+            &self,
+        ) -> Result<Option<LiveAdapterObservation>, LiveAdapterError> {
+            Ok(None)
+        }
+
+        fn status(&self) -> LiveAdapterStatus {
+            LiveAdapterStatus::Ready
+        }
+
+        async fn close(&self) -> Result<(), LiveAdapterError> {
+            Ok(())
+        }
+    }
+
+    /// One load call through a host composed with `refresher`; returns what
+    /// the refresher and the adapter saw, in order, and the submitted result
+    /// as JSON.
+    async fn deferred_load_through_host(
+        loaded_for_session: bool,
+        refresher: Option<RefreshScript>,
+        tool_timeout: Duration,
+    ) -> (Vec<&'static str>, serde_json::Value) {
+        deferred_load_through_host_with(
+            LoadingDispatcher::of_alpha(loaded_for_session),
+            refresher,
+            tool_timeout,
+        )
+        .await
+    }
+
+    async fn deferred_load_through_host_with(
+        dispatcher: LoadingDispatcher,
+        refresher: Option<RefreshScript>,
+        tool_timeout: Duration,
+    ) -> (Vec<&'static str>, serde_json::Value) {
+        let sequence: Sequence = Arc::default();
+        let adapter = Arc::new(SequenceAdapter {
+            sequence: Arc::clone(&sequence),
+            results: StdMutex::new(Vec::new()),
+        });
+        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink))
+            .with_tool_timeout(tool_timeout)
+            .with_live_tool_dispatcher(Arc::new(dispatcher));
+        assert!(!host.has_live_channel_refresher());
+        if let Some(script) = refresher {
+            host.set_live_channel_refresher(Arc::new(ScriptedRefresher {
+                script,
+                sequence: Arc::clone(&sequence),
+            }));
+            assert!(host.has_live_channel_refresher());
+        }
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+        host.attach_adapter(&ch, Arc::clone(&adapter) as _)
+            .await
+            .unwrap();
+        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
+            .await
+            .unwrap();
+        let outcome = host
+            .apply_observation(
+                &ch,
+                &LiveAdapterObservation::ToolCallRequested {
+                    provider_call_id: ToolCallId::new("call_load"),
+                    tool_name: ToolName::new("tool_catalog_load"),
+                    arguments: serde_json::json!({ "names": ["alpha"] }),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ObservationOutcome::ToolCallDispatched { .. }
+        ));
+        let results = adapter.results.lock().unwrap();
+        assert_eq!(results.len(), 1, "the load's result is always submitted");
+        assert!(!results[0].is_error);
+        let body = serde_json::from_str(&meerkat_core::types::text_content(&results[0].content))
+            .expect("a JSON result body");
+        let sequence = sequence.lock().unwrap().clone();
+        (sequence, body)
+    }
+
+    /// The channel is refreshed before the load's result is submitted, and
+    /// the result then says the tool can be called now.
+    #[tokio::test]
+    async fn a_deferred_tool_load_refreshes_the_channel_before_its_result() {
+        let (sequence, body) = deferred_load_through_host(
+            true,
+            Some(RefreshScript::Queued),
+            DEFAULT_LIVE_TOOL_TIMEOUT,
+        )
+        .await;
+        assert_eq!(sequence, ["refresh", "result"]);
+        assert_eq!(body["availability"], "available_now");
+        assert_eq!(body["accepted_names"][0], "alpha");
+    }
+
+    /// Without a refresher the tool list of the conversation cannot be
+    /// updated: the result says the tool is loaded but not available here,
+    /// never a bare acceptance.
+    #[tokio::test]
+    async fn a_deferred_tool_load_without_a_refresher_is_not_available_in_the_conversation() {
+        let (sequence, body) =
+            deferred_load_through_host(true, None, DEFAULT_LIVE_TOOL_TIMEOUT).await;
+        assert_eq!(sequence, ["result"]);
+        assert_eq!(body["availability"], "loaded_not_in_this_conversation");
+    }
+
+    /// A refresh that is refused, or that does not finish within the tool
+    /// timeout, gives the same truthful result, and the call still ends.
+    #[tokio::test]
+    async fn a_deferred_tool_load_whose_refresh_fails_is_not_available_in_the_conversation() {
+        let (sequence, body) = deferred_load_through_host(
+            true,
+            Some(RefreshScript::Refused),
+            DEFAULT_LIVE_TOOL_TIMEOUT,
+        )
+        .await;
+        assert_eq!(sequence, ["refresh", "result"]);
+        assert_eq!(body["availability"], "loaded_not_in_this_conversation");
+
+        let (sequence, body) =
+            deferred_load_through_host(true, Some(RefreshScript::Hangs), Duration::from_millis(50))
+                .await;
+        assert_eq!(sequence, ["refresh", "result"]);
+        assert_eq!(body["availability"], "loaded_not_in_this_conversation");
+    }
+
+    /// A load that is only requested (not committed for the session) is not
+    /// this host's to settle: nothing is refreshed and the result is passed
+    /// on unchanged.
+    #[tokio::test]
+    async fn a_requested_but_uncommitted_deferred_tool_load_refreshes_nothing() {
+        let (sequence, body) = deferred_load_through_host(
+            false,
+            Some(RefreshScript::Queued),
+            DEFAULT_LIVE_TOOL_TIMEOUT,
+        )
+        .await;
+        assert_eq!(sequence, ["result"]);
+        assert_eq!(body, serde_json::json!({ "accepted_names": ["alpha"] }));
+    }
+
+    /// A load the session's boundary settled only in part is one result,
+    /// per tool: the channel is refreshed for the tool that loaded, which is
+    /// available now, and the tool the session refused stays named as not
+    /// loaded. The summary says the tools differ.
+    #[tokio::test]
+    async fn a_partly_loaded_deferred_tool_load_is_stated_per_tool() {
+        let (sequence, body) = deferred_load_through_host_with(
+            LoadingDispatcher {
+                loaded_for_session: true,
+                names: vec!["alpha", "beta"],
+                hidden_by_session_filter: vec!["beta"],
+            },
+            Some(RefreshScript::Queued),
+            DEFAULT_LIVE_TOOL_TIMEOUT,
+        )
+        .await;
+        assert_eq!(
+            sequence,
+            ["refresh", "result"],
+            "the tool that loaded reaches the conversation before the result"
+        );
+        assert_eq!(body["availability"], "mixed");
+        assert_eq!(
+            body["tool_availability"][0],
+            serde_json::json!({ "name": "alpha", "availability": "available_now" })
+        );
+        assert_eq!(body["tool_availability"][1]["name"], "beta");
+        assert_eq!(body["tool_availability"][1]["availability"], "not_loaded");
+        assert!(
+            body["tool_availability"][1]["reason"].is_string(),
+            "a refused tool says why: {body}"
+        );
+    }
+
+    /// A loaded tool whose definition the channel's provider would refuse
+    /// was withheld from the refresh: the result names it as loaded for the
+    /// session and not in this conversation, with the provider's reason, and
+    /// the other tool of the same load is available now.
+    #[tokio::test]
+    async fn a_loaded_tool_the_channels_provider_refuses_is_named_in_the_result() {
+        let (sequence, body) = deferred_load_through_host_with(
+            LoadingDispatcher {
+                loaded_for_session: true,
+                names: vec!["alpha", "beta"],
+                hidden_by_session_filter: Vec::new(),
+            },
+            Some(RefreshScript::QueuedWithout("beta")),
+            DEFAULT_LIVE_TOOL_TIMEOUT,
+        )
+        .await;
+        assert_eq!(sequence, ["refresh", "result"]);
+        assert_eq!(body["availability"], "mixed");
+        assert_eq!(
+            body["tool_availability"][0],
+            serde_json::json!({ "name": "alpha", "availability": "available_now" })
+        );
+        assert_eq!(body["tool_availability"][1]["name"], "beta");
+        assert_eq!(
+            body["tool_availability"][1]["availability"],
+            "loaded_not_in_this_conversation"
+        );
+        assert!(
+            body["tool_availability"][1]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("scripted schema refusal")),
+            "the provider's reason is given: {body}"
+        );
+
+        // The only tool of a load withheld: nothing of it is available now.
+        let (sequence, body) = deferred_load_through_host(
+            true,
+            Some(RefreshScript::QueuedWithout("alpha")),
+            DEFAULT_LIVE_TOOL_TIMEOUT,
+        )
+        .await;
+        assert_eq!(sequence, ["refresh", "result"]);
+        assert_eq!(body["availability"], "loaded_not_in_this_conversation");
+        assert_eq!(
+            body["tool_availability"][0]["availability"],
+            "loaded_not_in_this_conversation"
+        );
     }
 
     #[tokio::test]

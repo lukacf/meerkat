@@ -159,6 +159,11 @@ impl AgentToolDispatcher for PrivateRequestTool {
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
         self.0.tool_catalog_capabilities()
     }
+    /// The wrapped dispatcher's answer, as for its capabilities. Without this
+    /// forward the trait default would turn an inner `OnDemand` into `Always`.
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.0.tool_catalog_control_plane()
+    }
     fn tool_mutation_class(&self, name: &str) -> ToolMutationClass {
         if PRIVATE_TOOLS.contains(&name) {
             self.0.tool_mutation_class(name)

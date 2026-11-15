@@ -10589,7 +10589,9 @@ impl AgentFactory {
             "tool composition: final dispatcher"
         );
 
-        if CatalogControlDispatcher::should_compose_for(tools.as_ref()) {
+        // The system prompt explains the control tools only to a session
+        // that starts with them in its requests.
+        if CatalogControlDispatcher::should_announce_for(tools.as_ref()) {
             if !tool_usage_instructions.is_empty() {
                 tool_usage_instructions.push_str("\n\n");
             }
@@ -17050,8 +17052,9 @@ mod tests {
             assert_eq!(resolution(&loaded, "echo")["accepted"], true, "{loaded:?}");
             assert_eq!(
                 resolution(&loaded, "add")["rejected_reason"],
-                "not_filterable",
-                "the narrowed-away tool cannot be requested: {loaded:?}"
+                "unknown_key",
+                "the narrowed-away tool cannot be requested, and its load answers as a name \
+                 the catalog does not hold: {loaded:?}"
             );
             let listed = listed_in_a_turn(&mut resumed, "after reconnect", &captured).await;
             assert!(
@@ -17081,6 +17084,338 @@ mod tests {
 
             resumed.release_owned_resources().await;
             parent.release_owned_resources().await;
+        }
+    }
+
+    /// What a helper inherits from a parent whose tools wait behind the
+    /// deferred catalog. The handoff (`inherit_parent`) is a ceiling over the
+    /// parent's EFFECTIVE tool set: its visible tools and the tools it may
+    /// still load. Whether the helper itself defers is decided for the helper
+    /// by the same rule as for any session. A tool the parent's own filters
+    /// hide is in neither set and stays outside the ceiling.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod inherited_deferred_ceiling {
+        use super::*;
+        use meerkat_core::types::ToolCall;
+
+        const HOST_ALPHA: &str = "host_alpha";
+        const HOST_BETA: &str = "host_beta";
+        const HOST_GAMMA: &str = "host_gamma";
+
+        /// A host tool source with an exact catalog of deferred-eligible
+        /// tools. `over_budget` gives each tool a description of half the
+        /// deferred catalog's byte budget, so two of them make a session
+        /// defer; without it the tools are small and stay in every request.
+        struct HostTools {
+            catalog: Arc<[meerkat_core::ToolCatalogEntry]>,
+        }
+
+        impl HostTools {
+            fn new(names: &[&str], over_budget: bool) -> Self {
+                let provenance = meerkat_core::ToolProvenance {
+                    kind: meerkat_core::ToolSourceKind::Callback,
+                    source_id: "host-tools".into(),
+                    artifact: None,
+                };
+                let mut description = String::from("A host tool.");
+                while over_budget
+                    && description.len()
+                        < meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD / 2
+                {
+                    description.push_str(" It reads one record of the host and returns it.");
+                }
+                let catalog = names
+                    .iter()
+                    .map(|name| {
+                        let mut tool = meerkat_core::ToolDef::new(
+                            *name,
+                            description.as_str(),
+                            serde_json::json!({"type": "object"}),
+                        );
+                        tool.provenance = Some(provenance.clone());
+                        meerkat_core::ToolCatalogEntry::session_deferred(
+                            Arc::new(tool),
+                            true,
+                            provenance.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .into();
+                Self { catalog }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl meerkat_core::AgentToolDispatcher for HostTools {
+            fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+                self.catalog
+                    .iter()
+                    .map(|entry| Arc::clone(&entry.tool))
+                    .collect::<Vec<_>>()
+                    .into()
+            }
+
+            fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+                meerkat_core::ToolCatalogCapabilities {
+                    exact_catalog: true,
+                    may_require_catalog_control_plane: false,
+                }
+            }
+
+            fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+                Arc::clone(&self.catalog)
+            }
+
+            async fn dispatch(
+                &self,
+                call: meerkat_core::types::ToolCallView<'_>,
+            ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::ToolError>
+            {
+                Ok(meerkat_core::types::ToolResult::new(
+                    call.id.to_string(),
+                    format!("ran {}", call.name),
+                    false,
+                )
+                .into())
+            }
+        }
+
+        /// An agent over `tools` on its own runtime registration, with the
+        /// handed-off `ceiling` when it is a helper.
+        async fn build(
+            factory: &AgentFactory,
+            tools: HostTools,
+            ceiling: Option<meerkat_core::InheritedToolVisibilityAuthority>,
+        ) -> DynAgent {
+            let session = Session::new();
+            let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+            let bindings = runtime
+                .prepare_bindings(session.id().clone())
+                .await
+                .expect("runtime bindings");
+            let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+            build.provider = Some(Provider::Anthropic);
+            build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+            build.resume_session = Some(session);
+            build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+            build.override_builtins = ToolCategoryOverride::Disable;
+            build.external_tools = Some(Arc::new(tools));
+            build.initial_tool_visibility_state = ceiling;
+            factory
+                .build_agent(build, &Config::default())
+                .await
+                .expect("the agent builds")
+        }
+
+        /// The composition authority that mints `parent`'s handoffs, as the
+        /// mob spawn tooling holds it.
+        fn handoff_authority(
+            parent: &DynAgent,
+        ) -> meerkat_core::service::ParentToolCompositionAuthority {
+            // SAFETY: factory tests use the same facade bridge token as
+            // production AgentFactory to mint a parent composition authority.
+            #[allow(unsafe_code)]
+            let authority = unsafe {
+                core_agent_factory_parent_tool_composition_authority_new(
+                    agent_factory_policy_bridge_token(),
+                    None,
+                )
+            }
+            .expect("parent composition authority");
+            // SAFETY: same sealed facade bridge token as authority creation.
+            #[allow(unsafe_code)]
+            unsafe {
+                core_agent_factory_parent_tool_composition_authority_set_tool_scope(
+                    agent_factory_policy_bridge_token(),
+                    &authority,
+                    parent.tool_scope(),
+                )
+            }
+            .expect("the parent's live ToolScope");
+            authority
+        }
+
+        async fn call(
+            agent: &mut DynAgent,
+            name: &str,
+            args: serde_json::Value,
+        ) -> meerkat_core::ops::ToolDispatchOutcome {
+            agent
+                .dispatch_external_tool_call(ToolCall::new(
+                    format!("{name}-call"),
+                    name.to_string(),
+                    args,
+                ))
+                .await
+                .expect("an external call outcome")
+        }
+
+        fn allows(ceiling: &meerkat_core::InheritedToolVisibilityAuthority, name: &str) -> bool {
+            match ceiling.filter() {
+                meerkat_core::ToolFilter::All => true,
+                meerkat_core::ToolFilter::Allow(names) => {
+                    names.iter().any(|allowed| allowed.as_str() == name)
+                }
+                meerkat_core::ToolFilter::Deny(names) => {
+                    !names.iter().any(|denied| denied.as_str() == name)
+                }
+            }
+        }
+
+        fn visibility(agent: &DynAgent, name: &str) -> Option<meerkat_core::ToolCatalogVisibility> {
+            agent
+                .tool_catalog_view()
+                .expect("a catalog view")
+                .entries
+                .iter()
+                .find(|entry| entry.name.as_str() == name)
+                .map(|entry| entry.visibility)
+        }
+
+        /// A parent whose tools wait behind its catalog hands a helper the
+        /// tools it may load, not only the ones it has loaded: the helper
+        /// loads one the parent never loaded and calls it. The tool the
+        /// parent's own filter hides stays outside the helper's ceiling.
+        #[tokio::test]
+        async fn a_helper_of_a_deferring_parent_can_load_and_call_a_tool_behind_the_parents_catalog()
+         {
+            let temp = tempfile::tempdir().expect("temp root");
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+            let mut parent = build(
+                &factory,
+                HostTools::new(&[HOST_ALPHA, HOST_BETA, HOST_GAMMA], true),
+                None,
+            )
+            .await;
+            parent
+                .stage_external_tool_filter(meerkat_core::ToolFilter::Deny(
+                    [HOST_GAMMA.to_string()].into_iter().collect(),
+                ))
+                .expect("stage the parent's own deny");
+            parent.set_runtime_execution_kind(Some(
+                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+            ));
+            parent
+                .run(meerkat_core::ContentInput::Text("parent boundary".into()))
+                .await
+                .expect("a parent turn, which applies its filter");
+            assert_eq!(
+                parent.tool_catalog_view().expect("parent view").mode,
+                meerkat_core::ToolCatalogMode::Deferred,
+                "precondition: the parent defers"
+            );
+            for name in [HOST_ALPHA, HOST_BETA] {
+                assert_eq!(
+                    visibility(&parent, name),
+                    Some(meerkat_core::ToolCatalogVisibility::Deferred),
+                    "precondition: {name} waits behind the parent's catalog"
+                );
+            }
+            assert_eq!(
+                visibility(&parent, HOST_GAMMA),
+                Some(meerkat_core::ToolCatalogVisibility::Hidden),
+                "precondition: the parent's own filter hides {HOST_GAMMA}"
+            );
+
+            let ceiling = handoff_authority(&parent)
+                .authorize_inherited_tool_visibility_with_overlays(None, None)
+                .expect("the parent's inherit_parent handoff");
+            for name in [HOST_ALPHA, HOST_BETA] {
+                assert!(
+                    allows(&ceiling, name),
+                    "the handoff covers {name}, which the parent may load: {:?}",
+                    ceiling.filter()
+                );
+            }
+            assert!(
+                !allows(&ceiling, HOST_GAMMA),
+                "the handoff leaves out {HOST_GAMMA}, which the parent's filter hides: {:?}",
+                ceiling.filter()
+            );
+
+            let mut helper = build(
+                &factory,
+                HostTools::new(&[HOST_ALPHA, HOST_BETA, HOST_GAMMA], true),
+                Some(ceiling),
+            )
+            .await;
+            let loaded = call(
+                &mut helper,
+                "tool_catalog_load",
+                serde_json::json!({ "names": [HOST_ALPHA] }),
+            )
+            .await;
+            assert!(
+                !loaded.result.is_error,
+                "the helper loads a tool its parent never loaded: {}",
+                loaded.result.text_content()
+            );
+            let ran = call(&mut helper, HOST_ALPHA, serde_json::json!({})).await;
+            assert!(
+                !ran.result.is_error && ran.result.text_content() == format!("ran {HOST_ALPHA}"),
+                "the helper calls the loaded tool: {}",
+                ran.result.text_content()
+            );
+            let refused = call(
+                &mut helper,
+                "tool_catalog_load",
+                serde_json::json!({ "names": [HOST_GAMMA] }),
+            )
+            .await;
+            let refused_text = refused.result.text_content();
+            assert!(
+                !refused_text.contains(&format!("\"accepted_names\":[\"{HOST_GAMMA}\"]")),
+                "the helper cannot load the tool its parent's filter hides: {refused_text}"
+            );
+            assert_ne!(
+                visibility(&helper, HOST_GAMMA),
+                Some(meerkat_core::ToolCatalogVisibility::Visible),
+                "{HOST_GAMMA} is not visible to the helper"
+            );
+        }
+
+        /// A parent that defers nothing hands over what it handed over
+        /// before: exactly its visible tools.
+        #[tokio::test]
+        async fn a_helper_of_a_parent_that_defers_nothing_inherits_its_visible_tools() {
+            let temp = tempfile::tempdir().expect("temp root");
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+            let parent = build(
+                &factory,
+                HostTools::new(&[HOST_ALPHA, HOST_BETA], false),
+                None,
+            )
+            .await;
+            assert_eq!(
+                parent.tool_catalog_view().expect("parent view").mode,
+                meerkat_core::ToolCatalogMode::Inline,
+                "precondition: two small tools stay in the parent's requests"
+            );
+            let mut visible = parent
+                .tool_scope_snapshot()
+                .expect("parent scope")
+                .visible_names
+                .iter()
+                .map(|name| name.as_str().to_string())
+                .collect::<Vec<_>>();
+            visible.sort();
+
+            let ceiling = handoff_authority(&parent)
+                .authorize_inherited_tool_visibility_with_overlays(None, None)
+                .expect("the parent's inherit_parent handoff");
+            let mut handed = match ceiling.filter() {
+                meerkat_core::ToolFilter::Allow(names) => names
+                    .iter()
+                    .map(|name| name.as_str().to_string())
+                    .collect::<Vec<_>>(),
+                other => panic!("the handoff is an allow list: {other:?}"),
+            };
+            handed.sort();
+            assert_eq!(
+                handed, visible,
+                "a parent that defers nothing hands over its visible tools"
+            );
+            assert!(handed.iter().any(|name| name == HOST_ALPHA));
         }
     }
 
@@ -27732,7 +28067,7 @@ impl AgentFactory {
 }
 
 fn deferred_catalog_guidance() -> &'static str {
-    "Additional tools may be available in a deferred catalog. Use `tool_catalog_search` to discover deferred tools and `tool_catalog_load` to stage the ones you need."
+    "Additional tools may be available in a deferred catalog. Use `tool_catalog_search` to discover deferred tools and `tool_catalog_load` to load the ones you need: a loaded tool can be called from your next step, unless the load's result says otherwise."
 }
 
 #[cfg(test)]
@@ -28418,7 +28753,12 @@ mod prompt_tests {
         });
         let secret_audit = Arc::new(ToolDef {
             name: "secret_audit".into(),
-            description: "Audit a secret value".to_string(),
+            // Over the deferred catalog's byte budget, so the session starts
+            // deferred and its prompt explains the control tools.
+            description: format!(
+                "Audit a secret value {}",
+                "x".repeat(meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD)
+            ),
             input_schema: serde_json::json!({"type":"object"}),
             provenance: None,
             audience: Default::default(),
@@ -28508,6 +28848,84 @@ mod prompt_tests {
                 .contains("tool_catalog_search"),
             "control-plane tools should not be injected when there is no deferred catalog"
         );
+    }
+
+    /// An exact session whose deferrable tools are under the byte budget
+    /// starts inline. Its stored system prompt is, byte for byte, the prompt
+    /// of the same tools without an exact catalog, and the tools it shows
+    /// are theirs in the same order: the catalog control tools are mounted
+    /// for the deferrable tools and left out of the request.
+    #[tokio::test]
+    async fn an_exact_session_under_the_budget_has_the_prompt_and_tools_of_an_inexact_one() {
+        async fn build(exact_catalog: bool) -> (String, Vec<String>, Vec<String>) {
+            let temp = tempfile::tempdir().unwrap();
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+            let tool = |name: &str, description: &str| {
+                Arc::new(ToolDef {
+                    name: name.into(),
+                    description: description.to_string(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                    provenance: None,
+                    audience: Default::default(),
+                })
+            };
+            let dispatcher = UsageTestDispatcher {
+                tools: vec![
+                    tool("secret_lookup", "Look up a secret value"),
+                    tool("visible", "Always-inline tool"),
+                    tool("secret_audit", "Audit a secret value"),
+                ]
+                .into(),
+                exact_catalog,
+                may_require_control_plane: false,
+                pending_sources: Arc::from([]),
+            };
+            let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+            build_config.llm_client_override = Some(Arc::new(PromptTestClient));
+            build_config.override_builtins = ToolCategoryOverride::Disable;
+            build_config.external_tools = Some(Arc::new(dispatcher));
+            let agent = factory
+                .build_agent(build_config, &Config::default())
+                .await
+                .unwrap();
+            let Some(Message::System(message)) = agent.session().messages().first() else {
+                unreachable!("expected system prompt");
+            };
+            let shown = agent
+                .tool_scope()
+                .visible_tools()
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect();
+            let mounted = agent
+                .tool_catalog_view()
+                .map(|view| {
+                    view.entries
+                        .iter()
+                        .map(|entry| entry.name.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (message.content.clone(), shown, mounted)
+        }
+
+        let (exact_prompt, exact_shown, exact_mounted) = build(true).await;
+        let (inexact_prompt, inexact_shown, _) = build(false).await;
+        assert_eq!(
+            exact_prompt, inexact_prompt,
+            "an inline exact session stores the prompt it would store without an exact catalog"
+        );
+        assert_eq!(
+            exact_shown, inexact_shown,
+            "and shows the same tools in the same order"
+        );
+        assert_eq!(exact_shown, ["secret_lookup", "visible", "secret_audit"]);
+        for name in ["tool_catalog_search", "tool_catalog_load"] {
+            assert!(
+                exact_mounted.iter().any(|tool| tool == name),
+                "{name} is mounted for the deferrable tools and left out: {exact_mounted:?}"
+            );
+        }
     }
 
     #[tokio::test]

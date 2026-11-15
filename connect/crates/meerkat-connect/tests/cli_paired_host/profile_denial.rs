@@ -21,7 +21,6 @@ fn catalog_wait_observation(activation: &Value, last: Option<&Value>, offered: &
     let status = |value: &Value| match value.as_str() {
         Some("loaded") => "loaded",
         Some("deferred") => "deferred",
-        Some("blocked_by_filter") => "blocked_by_filter",
         Some("pending_source") => "pending_source",
         Some("temporarily_unavailable") => "temporarily_unavailable",
         _ => "unrecognized_or_missing",
@@ -758,7 +757,7 @@ fn catalog_wait_diagnostics_keep_status_and_exclude_untrusted_text() {
         "private":"must-not-appear"});
     let last = json!({"catalog_exact":true,"total_matches":51,"pending_sources":["toolkit-setup","must-not-appear"],
         "empty_result_status":"must-not-appear","error":"must-not-appear",
-        "results":[{"name":"setup_prepare","visibility_status":"blocked_by_filter",
+        "results":[{"name":"setup_prepare","visibility_status":"temporarily_unavailable",
             "currently_callable":false,"description":"must-not-appear"},
             {"name":"setup_help","visibility_status":"must-not-appear"}]});
     let observed = catalog_wait_observation(&activation, Some(&last), &["setup_job"]);
@@ -766,7 +765,10 @@ fn catalog_wait_diagnostics_keep_status_and_exclude_untrusted_text() {
     assert_eq!(observed["total_matches"], 51);
     assert_eq!(observed["pending_count"], 2);
     assert_eq!(observed["setup_pending"], true);
-    assert_eq!(observed["required"][0]["visibility"], "blocked_by_filter");
+    assert_eq!(
+        observed["required"][0]["visibility"],
+        "temporarily_unavailable"
+    );
     assert_eq!(
         observed["required"][1]["visibility"],
         "unrecognized_or_missing"

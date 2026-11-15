@@ -2711,16 +2711,30 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
 
     /// The wrapper patches three tool definitions of the inner catalog and
     /// adds none to it, so the inner exactness holds for them. The identity
-    /// tools it adds for a member are its own exact entries, and they may
-    /// wait behind the deferred catalog: a member's surface can come to need
-    /// the catalog's control plane when the mob's identity family comes to
-    /// take changes, after the surface was built.
+    /// tools it adds for a member are its own exact entries, listed inline:
+    /// they never wait behind the deferred catalog. A member's surface has
+    /// the catalog's control plane mounted all the same, so a deferrable
+    /// tool that reaches the member after the surface was built can wait
+    /// behind the catalog.
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
         let inner = self.inner.tool_catalog_capabilities();
         meerkat_core::ToolCatalogCapabilities {
             exact_catalog: inner.exact_catalog,
             may_require_catalog_control_plane: inner.may_require_catalog_control_plane
                 || self.caller.is_some(),
+        }
+    }
+    /// The stronger of the wrapped dispatcher's answer and on demand, for a
+    /// member's surface: the control tools it has mounted (above) are in a
+    /// request only while a tool waits behind the catalog. Without this
+    /// method the trait default would answer `Always` for every member's
+    /// surface.
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        let inner = self.inner.tool_catalog_control_plane();
+        if self.caller.is_some() {
+            inner.max(meerkat_core::ToolCatalogControlPlane::OnDemand)
+        } else {
+            inner
         }
     }
 
@@ -15701,6 +15715,17 @@ mod tests {
         assert!(patched("delegate"));
         assert!(patched("mob_spawn_member"));
         assert!(!patched("mob_list_members"));
+
+        // The wrapper answers for the catalog control tools as the
+        // dispatcher it wraps does (the trait default would answer `Always`).
+        let on_demand = AutoWireParentMobToolDispatcher {
+            inner: crate::tool_application_test_support::on_demand_catalog_probe(),
+            ..wrapper_with_overrides(ImplicitDelegateRetirementOverrides::default())
+        };
+        assert_eq!(
+            on_demand.tool_catalog_control_plane(),
+            meerkat_core::ToolCatalogControlPlane::OnDemand
+        );
     }
 
     #[test]

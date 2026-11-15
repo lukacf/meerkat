@@ -168,9 +168,65 @@ rust_test(
     ),
 )
 
+rust_test(
+    name = "exact_catalog_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-memory",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "exact_catalog",
+    crate_root = "tests/exact_catalog.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "skills/memory-retrieval/SKILL.md",
+    ],
+    srcs = [
+        "tests/exact_catalog.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_BIN_NAME": "exact_catalog",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-memory",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-memory",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-contracts:meerkat_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-memory:meerkat_memory",
+        "//crates/meerkat-skills:meerkat_skills",
+        "//crates/meerkat-sqlite:meerkat_sqlite",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-memory",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 test_suite(
     name = "fast_tests",
     tests = [
+        ":exact_catalog_test",
         ":meerkat_memory_unit_test",
     ],
 )

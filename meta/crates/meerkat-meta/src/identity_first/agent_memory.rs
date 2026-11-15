@@ -2059,6 +2059,17 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
         }
     }
 
+    /// The wrapped surface's answer, as for its capabilities: the recorder's
+    /// own tool is inline and asks for no catalog control tool. Without this
+    /// forward the trait default would turn an inner `OnDemand` into
+    /// `Always`.
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        match self.inner.as_ref() {
+            Some(inner) => inner.tool_catalog_control_plane(),
+            None => meerkat_core::ToolCatalogControlPlane::Never,
+        }
+    }
+
     /// Inner entries except a shadowed `memory`, then the recorder tool as a
     /// visible inline session entry - the same order `tools()` advertises.
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
@@ -4501,6 +4512,39 @@ memory = false
         let authority = session_mob_authority();
         recorder.bind_session_mob_tool_authority(Some(Arc::clone(&authority)));
         assert!(inner.last_bound_is(Some(&authority)));
+        Ok(())
+    }
+
+    /// The recorder answers for the catalog control tools as the tools it
+    /// wraps do: an inner `OnDemand` stays `OnDemand` (the trait default
+    /// would answer `Always`), and the recorder alone asks for none.
+    #[test]
+    fn the_memory_recorder_forwards_the_inner_catalog_control_plane() -> Result<(), Box<dyn Error>>
+    {
+        let dir = tempfile::tempdir()?;
+        let provider: Arc<dyn AgentMemoryProvider> =
+            Arc::new(SqliteAgentMemoryStore::open(dir.path())?);
+        let wrapping = RecorderToolDispatcher::new(
+            Some(crate::tool_application_test_support::on_demand_catalog_probe()),
+            MemoryRecorder::new(
+                Arc::clone(&provider),
+                AgentMemoryConfig::default(),
+                identity()?,
+                None,
+            ),
+        );
+        assert_eq!(
+            wrapping.tool_catalog_control_plane(),
+            meerkat_core::ToolCatalogControlPlane::OnDemand
+        );
+        let alone = RecorderToolDispatcher::new(
+            None,
+            MemoryRecorder::new(provider, AgentMemoryConfig::default(), identity()?, None),
+        );
+        assert_eq!(
+            alone.tool_catalog_control_plane(),
+            meerkat_core::ToolCatalogControlPlane::Never
+        );
         Ok(())
     }
 

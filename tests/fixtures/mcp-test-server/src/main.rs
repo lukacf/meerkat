@@ -17,6 +17,8 @@
 //!   resource (`resources/list`, `resources/read`), so a test can read a
 //!   resource over a launched connection. Without the flag the server
 //!   advertises tools only, as before.
+//! - `--describe-bytes N` pads the description of `echo` by `N` bytes, so a
+//!   test can ask for a tool listing over a size of its choice.
 //!
 //! With `--tool-prefix PREFIX` every tool is listed and called as
 //! `PREFIX<name>`, so two servers of one test serve distinct names. With
@@ -322,6 +324,17 @@ fn handle_request(
                     "inputSchema": schema_for::<ViewArgs>(),
                     "_meta": { "ui": { "resourceUri": UI_VIEW_URI } }
                 }));
+            }
+            // `--describe-bytes N`: a listing of a chosen size.
+            if let Some(bytes) = std::env::args()
+                .skip_while(|arg| arg != "--describe-bytes")
+                .nth(1)
+                .and_then(|bytes| bytes.parse::<usize>().ok())
+            {
+                listed["result"]["tools"][0]["description"] = json!(format!(
+                    "Returns the input message as output {}",
+                    "x".repeat(bytes)
+                ));
             }
             listed
         }

@@ -250,6 +250,155 @@ pub struct ToolDispatchOutcome {
     /// Tool-authored `is_error` results intentionally leave this empty; callers
     /// must not infer canonical timeout/failure classes by parsing result text.
     terminal_cause: Option<ToolDispatchTerminalCause>,
+    /// The deferred tools a `tool_catalog_load` call accepted, and how far
+    /// the load has got. Read it through [`Self::deferred_tool_load`].
+    deferred_tool_load: Option<DeferredToolLoad>,
+}
+
+/// How far a `tool_catalog_load` call has got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeferredToolLoadStage {
+    /// The catalog accepted the names. A newly requested tool waits for the
+    /// session's next boundary.
+    Requested,
+    /// Every accepted name is callable for the session: the owner of the
+    /// boundary after an external call committed the request.
+    LoadedForSession,
+}
+
+/// The deferred tools a `tool_catalog_load` call accepted (newly requested,
+/// or requested or loaded before), with the stage the load has reached.
+///
+/// It is typed data for whoever owns the boundary after the call. The agent
+/// loop applies a request at its next model-call boundary. An external call
+/// (a live conversation's tool call) has no such boundary, so the agent
+/// commits the request before the call returns and reports
+/// [`DeferredToolLoadStage::LoadedForSession`]; a live host then updates its
+/// provider's tool list before it hands the result to the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredToolLoad {
+    names: Vec<crate::types::ToolName>,
+    stage: DeferredToolLoadStage,
+    refused: Vec<DeferredToolLoadRefusal>,
+}
+
+/// Why a tool that a `tool_catalog_load` call accepted cannot be called
+/// where the load was made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeferredToolLoadRefusalReason {
+    /// The session's active tool filter hides the tool. The request stays
+    /// recorded; the tool is not callable.
+    HiddenBySessionFilter,
+    /// The provider of the conversation that made the load would refuse the
+    /// tool's definition, so the tool was withheld from that conversation's
+    /// tool list. It is loaded for the session.
+    RefusedByConversationProvider {
+        /// The provider-side reason, as its adapter's local check gave it.
+        detail: String,
+    },
+}
+
+impl DeferredToolLoadRefusalReason {
+    /// What the refusal means for the tool, as the result states it.
+    #[must_use]
+    pub fn availability(&self) -> crate::tool_catalog::DeferredToolLoadAvailability {
+        match self {
+            Self::HiddenBySessionFilter => {
+                crate::tool_catalog::DeferredToolLoadAvailability::NotLoaded
+            }
+            Self::RefusedByConversationProvider { .. } => {
+                crate::tool_catalog::DeferredToolLoadAvailability::LoadedNotInThisConversation
+            }
+        }
+    }
+
+    /// One plain sentence for the model.
+    #[must_use]
+    pub fn note(&self) -> String {
+        match self {
+            Self::HiddenBySessionFilter => "The session's tool filter hides this tool. It becomes \
+                                            callable at the session's next model call if the \
+                                            filter allows it."
+                .to_string(),
+            Self::RefusedByConversationProvider { detail } => format!(
+                "This conversation's provider cannot take this tool's definition, so the tool \
+                 was left out of this conversation: {detail}"
+            ),
+        }
+    }
+}
+
+/// One tool of a load that cannot be called where the load was made, with
+/// the reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredToolLoadRefusal {
+    name: crate::types::ToolName,
+    reason: DeferredToolLoadRefusalReason,
+}
+
+impl DeferredToolLoadRefusal {
+    #[must_use]
+    pub fn name(&self) -> &crate::types::ToolName {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn reason(&self) -> &DeferredToolLoadRefusalReason {
+        &self.reason
+    }
+}
+
+impl DeferredToolLoad {
+    /// The load a catalog control tool reports for the names it accepted.
+    #[must_use]
+    pub fn requested(names: impl IntoIterator<Item = crate::types::ToolName>) -> Self {
+        Self {
+            names: names.into_iter().collect(),
+            stage: DeferredToolLoadStage::Requested,
+            refused: Vec::new(),
+        }
+    }
+
+    /// The accepted names that are not refused.
+    #[must_use]
+    pub fn names(&self) -> &[crate::types::ToolName] {
+        &self.names
+    }
+
+    #[must_use]
+    pub fn stage(&self) -> DeferredToolLoadStage {
+        self.stage
+    }
+
+    /// The accepted names that cannot be called where the load was made,
+    /// each with its reason.
+    #[must_use]
+    pub fn refused(&self) -> &[DeferredToolLoadRefusal] {
+        &self.refused
+    }
+
+    /// The same load with `name` moved from the accepted names to the
+    /// refused ones. A name the load does not hold changes nothing.
+    #[must_use]
+    pub fn refuse(mut self, name: &str, reason: DeferredToolLoadRefusalReason) -> Self {
+        if let Some(position) = self.names.iter().position(|held| held.as_str() == name) {
+            let name = self.names.remove(position);
+            self.refused.push(DeferredToolLoadRefusal { name, reason });
+        }
+        self
+    }
+
+    /// The same load once its names are callable for the session. The owner
+    /// of the boundary after an external call reports this, after it
+    /// committed the request and found every name it keeps visible. A
+    /// report made by anyone else goes through that boundary again.
+    #[must_use]
+    pub fn loaded_for_session(mut self) -> Self {
+        self.stage = DeferredToolLoadStage::LoadedForSession;
+        self
+    }
 }
 
 /// Optional timeout policy supplied by an external tool-dispatch caller.
@@ -280,6 +429,27 @@ impl ToolDispatchTimeoutPolicy {
     }
 }
 
+/// One `tool_availability` entry of a load's result body.
+fn tool_availability_entry(
+    name: &str,
+    availability: crate::tool_catalog::DeferredToolLoadAvailability,
+    reason: Option<String>,
+) -> serde_json::Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+        "name".to_string(),
+        serde_json::Value::String(name.to_string()),
+    );
+    entry.insert(
+        "availability".to_string(),
+        serde_json::Value::String(availability.as_str().to_string()),
+    );
+    if let Some(reason) = reason {
+        entry.insert("reason".to_string(), serde_json::Value::String(reason));
+    }
+    serde_json::Value::Object(entry)
+}
+
 impl ToolDispatchOutcome {
     /// Create an outcome with explicit async operations and session effects.
     pub fn new(
@@ -292,12 +462,170 @@ impl ToolDispatchOutcome {
             async_ops,
             session_effects,
             terminal_cause: None,
+            deferred_tool_load: None,
         }
     }
 
     /// Create an outcome with no async operations or session effects (synchronous tool).
     pub fn sync_result(result: crate::types::ToolResult) -> Self {
         Self::new(result, Vec::new(), Vec::new())
+    }
+
+    /// The deferred tools this call's `tool_catalog_load` accepted, when it
+    /// accepted any, and the stage the load has reached.
+    ///
+    /// A dispatcher that only emits [`SessionEffect::RequestDeferredTools`]
+    /// reports the names of that effect as requested.
+    #[must_use]
+    pub fn deferred_tool_load(&self) -> Option<DeferredToolLoad> {
+        if let Some(load) = self.deferred_tool_load.as_ref() {
+            return Some(load.clone());
+        }
+        let names = self
+            .session_effects
+            .iter()
+            .filter_map(|effect| match effect {
+                SessionEffect::RequestDeferredTools { authorities } => Some(authorities),
+                _ => None,
+            })
+            .flatten()
+            .map(|authority| authority.name.clone())
+            .collect::<Vec<_>>();
+        (!names.is_empty()).then(|| DeferredToolLoad::requested(names))
+    }
+
+    /// Report the deferred tools this call's `tool_catalog_load` accepted.
+    #[must_use]
+    pub fn with_deferred_tool_load(mut self, load: DeferredToolLoad) -> Self {
+        self.deferred_tool_load = Some(load);
+        self
+    }
+
+    /// State in the result, per tool, whether the tools a committed load
+    /// made callable for the session can be called in the conversation that
+    /// loaded them.
+    ///
+    /// `availability` is the caller's fact about the tools the load still
+    /// holds; the tools the load refuses carry their own. The result's JSON
+    /// body gets `tool_availability` (one entry per tool: `name`,
+    /// `availability`, and a `reason` for a refused one), the summary field
+    /// `availability` (the one value when every tool has the same, `mixed`
+    /// otherwise) and one plain sentence beside it, so the model is told
+    /// what is true instead of a bare acceptance. The caller that knows the
+    /// conversation (a live host, after it updated or failed to update its
+    /// provider's tool list) states the fact; the wording is owned here.
+    #[must_use]
+    pub fn with_deferred_load_availability(
+        mut self,
+        availability: crate::tool_catalog::DeferredToolLoadAvailability,
+    ) -> Self {
+        use crate::tool_catalog::DeferredToolLoadAvailability;
+        let per_tool: Vec<(String, DeferredToolLoadAvailability, Option<String>)> = self
+            .deferred_tool_load
+            .iter()
+            .flat_map(|load| {
+                let held = load
+                    .names()
+                    .iter()
+                    .map(|name| (name.to_string(), availability, None));
+                let refused = load.refused().iter().map(|refusal| {
+                    (
+                        refusal.name().to_string(),
+                        refusal.reason().availability(),
+                        Some(refusal.reason().note()),
+                    )
+                });
+                held.chain(refused)
+            })
+            .collect();
+        // One value when every tool has the same (or the outcome names no
+        // tool), `mixed` otherwise.
+        let every_tool_has = match per_tool.first() {
+            None => Some(availability),
+            Some((_, first, _)) => per_tool
+                .iter()
+                .all(|(_, other, _)| other == first)
+                .then_some(*first),
+        };
+        let (summary, note) = match every_tool_has {
+            Some(same) => (same.as_str(), same.note()),
+            None => (
+                crate::tool_catalog::DEFERRED_TOOL_LOAD_AVAILABILITY_MIXED,
+                crate::tool_catalog::DEFERRED_TOOL_LOAD_AVAILABILITY_MIXED_NOTE,
+            ),
+        };
+        let entries = per_tool
+            .into_iter()
+            .map(|(name, availability, reason)| {
+                tool_availability_entry(&name, availability, reason)
+            })
+            .collect::<Vec<_>>();
+        let mut body = self.deferred_load_result_body();
+        body.insert(
+            "availability".to_string(),
+            serde_json::Value::String(summary.to_string()),
+        );
+        body.insert(
+            "availability_note".to_string(),
+            serde_json::Value::String(note.to_string()),
+        );
+        if entries.is_empty() {
+            body.remove("tool_availability");
+        } else {
+            body.insert(
+                "tool_availability".to_string(),
+                serde_json::Value::Array(entries),
+            );
+        }
+        self.result
+            .set_text_content(serde_json::Value::Object(body).to_string());
+        self
+    }
+
+    /// Name in the result the tools this load refuses, each with its reason.
+    /// The boundary that refuses them calls this, so the result is truthful
+    /// even when no host states the conversation's side afterwards (a host
+    /// that does replaces the list with the whole one).
+    #[must_use]
+    pub(crate) fn with_deferred_load_refusals_stated(mut self) -> Self {
+        let entries = self
+            .deferred_tool_load
+            .iter()
+            .flat_map(|load| {
+                load.refused().iter().map(|refusal| {
+                    tool_availability_entry(
+                        refusal.name().as_str(),
+                        refusal.reason().availability(),
+                        Some(refusal.reason().note()),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            return self;
+        }
+        let mut body = self.deferred_load_result_body();
+        body.insert(
+            "tool_availability".to_string(),
+            serde_json::Value::Array(entries),
+        );
+        self.result
+            .set_text_content(serde_json::Value::Object(body).to_string());
+        self
+    }
+
+    /// The result's JSON body, or the result's text under `result` when it
+    /// is not a JSON object.
+    fn deferred_load_result_body(&self) -> serde_json::Map<String, serde_json::Value> {
+        let text = self.result.text_content();
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(serde_json::Value::Object(body)) => body,
+            _ => {
+                let mut body = serde_json::Map::new();
+                body.insert("result".to_string(), serde_json::Value::String(text));
+                body
+            }
+        }
     }
 
     #[must_use]
@@ -1108,5 +1436,178 @@ mod tests {
         assert!(outcome.result.is_error);
         assert!(!outcome.is_runtime_tool_timeout());
         assert_eq!(outcome.terminal_cause(), None);
+    }
+
+    fn deferred_load_authority(name: &str) -> DeferredToolLoadAuthority {
+        DeferredToolLoadAuthority::new(
+            name,
+            crate::session::ToolVisibilityWitness {
+                last_seen_provenance: None,
+            },
+        )
+    }
+
+    /// A plain outcome reports no deferred load; one that requests deferred
+    /// tools reports their names as requested; an explicit report wins.
+    #[test]
+    fn deferred_tool_load_is_reported_from_the_request_effect_or_the_explicit_report() {
+        let plain = ToolDispatchOutcome::sync_result(crate::types::ToolResult::new(
+            "t1".into(),
+            "ok".into(),
+            false,
+        ));
+        assert_eq!(plain.deferred_tool_load(), None);
+
+        let mut requesting = plain;
+        requesting
+            .session_effects
+            .push(SessionEffect::RequestDeferredTools {
+                authorities: vec![deferred_load_authority("alpha")],
+            });
+        let load = requesting.deferred_tool_load().expect("a requested load");
+        assert_eq!(load.stage(), DeferredToolLoadStage::Requested);
+        assert_eq!(load.names(), ["alpha"]);
+
+        let explicit = requesting
+            .with_deferred_tool_load(DeferredToolLoad::requested(["alpha".into(), "beta".into()]));
+        let load = explicit.deferred_tool_load().expect("the explicit report");
+        assert_eq!(load.names(), ["alpha", "beta"]);
+        assert_eq!(
+            load.loaded_for_session().stage(),
+            DeferredToolLoadStage::LoadedForSession
+        );
+    }
+
+    /// The availability a host states lands in the load's result as a typed
+    /// field with one plain sentence, and the rest of the body is kept.
+    #[test]
+    fn deferred_load_availability_is_stated_in_the_result_body() {
+        use crate::tool_catalog::DeferredToolLoadAvailability;
+        let body =
+            r#"{"accepted_names":["alpha"],"resolutions":[{"name":"alpha","accepted":true}]}"#;
+        let outcome = || {
+            ToolDispatchOutcome::sync_result(crate::types::ToolResult::new(
+                "t1".into(),
+                body.into(),
+                false,
+            ))
+        };
+
+        let available: serde_json::Value = serde_json::from_str(
+            &outcome()
+                .with_deferred_load_availability(DeferredToolLoadAvailability::AvailableNow)
+                .result
+                .text_content(),
+        )
+        .expect("a JSON body");
+        assert_eq!(available["availability"], "available_now");
+        assert_eq!(available["accepted_names"][0], "alpha");
+        assert_eq!(available["resolutions"][0]["accepted"], true);
+
+        let not_here = outcome().with_deferred_load_availability(
+            DeferredToolLoadAvailability::LoadedNotInThisConversation,
+        );
+        assert!(
+            !not_here.result.is_error,
+            "loaded for the session is a result, not an error"
+        );
+        let not_here: serde_json::Value =
+            serde_json::from_str(&not_here.result.text_content()).expect("a JSON body");
+        assert_eq!(not_here["availability"], "loaded_not_in_this_conversation");
+        assert!(
+            not_here["availability_note"]
+                .as_str()
+                .is_some_and(|note| note.contains("cannot be called in this conversation yet")),
+            "the note says the tools are not callable here yet: {not_here}"
+        );
+
+        // A body that is not a JSON object is kept whole under `result`.
+        let wrapped: serde_json::Value = serde_json::from_str(
+            &ToolDispatchOutcome::sync_result(crate::types::ToolResult::new(
+                "t1".into(),
+                "loaded".into(),
+                false,
+            ))
+            .with_deferred_load_availability(DeferredToolLoadAvailability::AvailableNow)
+            .result
+            .text_content(),
+        )
+        .expect("a JSON body");
+        assert_eq!(wrapped["result"], "loaded");
+        assert_eq!(wrapped["availability"], "available_now");
+    }
+
+    /// A load that holds tools and refuses others is stated per tool: every
+    /// tool has an entry, a refused one says why, and the summary field is
+    /// one value only when every tool has the same.
+    #[test]
+    fn deferred_load_availability_is_stated_per_tool() {
+        use crate::tool_catalog::DeferredToolLoadAvailability;
+        let outcome = |load: DeferredToolLoad| {
+            ToolDispatchOutcome::sync_result(crate::types::ToolResult::new(
+                "t1".into(),
+                r#"{"accepted_names":["alpha","beta"]}"#.into(),
+                false,
+            ))
+            .with_deferred_tool_load(load.loaded_for_session())
+        };
+        let body = |outcome: ToolDispatchOutcome| -> serde_json::Value {
+            serde_json::from_str(&outcome.result.text_content()).expect("a JSON body")
+        };
+        let both = DeferredToolLoad::requested(["alpha".into(), "beta".into()]);
+
+        let all = body(
+            outcome(both.clone())
+                .with_deferred_load_availability(DeferredToolLoadAvailability::AvailableNow),
+        );
+        assert_eq!(all["availability"], "available_now");
+        assert_eq!(
+            all["tool_availability"],
+            serde_json::json!([
+                { "name": "alpha", "availability": "available_now" },
+                { "name": "beta", "availability": "available_now" },
+            ])
+        );
+
+        let partial = both
+            .refuse("beta", DeferredToolLoadRefusalReason::HiddenBySessionFilter)
+            // A name the load does not hold changes nothing.
+            .refuse(
+                "gamma",
+                DeferredToolLoadRefusalReason::HiddenBySessionFilter,
+            );
+        assert_eq!(partial.names(), ["alpha"]);
+        assert_eq!(partial.refused().len(), 1);
+        assert_eq!(partial.refused()[0].name().as_str(), "beta");
+
+        // The boundary that refuses a tool names it even when no host states
+        // the conversation's side.
+        let refusals_only = body(outcome(partial.clone()).with_deferred_load_refusals_stated());
+        assert_eq!(refusals_only["tool_availability"][0]["name"], "beta");
+        assert_eq!(
+            refusals_only["tool_availability"][0]["availability"],
+            "not_loaded"
+        );
+        assert!(refusals_only.get("availability").is_none());
+
+        let mixed = body(
+            outcome(partial)
+                .with_deferred_load_refusals_stated()
+                .with_deferred_load_availability(DeferredToolLoadAvailability::AvailableNow),
+        );
+        assert_eq!(mixed["availability"], "mixed");
+        assert_eq!(
+            mixed["tool_availability"][0],
+            serde_json::json!({ "name": "alpha", "availability": "available_now" })
+        );
+        assert_eq!(mixed["tool_availability"][1]["name"], "beta");
+        assert_eq!(mixed["tool_availability"][1]["availability"], "not_loaded");
+        assert!(
+            mixed["tool_availability"][1]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("tool filter hides this tool")),
+            "a refused tool says why: {mixed}"
+        );
+        assert_eq!(mixed["tool_availability"].as_array().map(Vec::len), Some(2));
     }
 }

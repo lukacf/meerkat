@@ -499,10 +499,11 @@ impl meerkat_core::AgentToolDispatcher for ScopePinnedWorkGraphTools {
     /// EMPTY catalog, which is not a conservative choice - it is a different
     /// surface than the one being wrapped.
     ///
-    /// Both flags are load-bearing, not decorative. `AgentBuilder` only fills
-    /// `deferred_tool_names` when `exact_catalog` holds AND
-    /// (`may_require_catalog_control_plane` or a Control-plane entry exists)
-    /// AND the catalog mode is `Deferred`. The inner surface declares both and
+    /// The catalog declarations are load-bearing, not decorative.
+    /// `AgentBuilder` only fills `deferred_tool_names` when `exact_catalog`
+    /// holds AND (`may_require_catalog_control_plane` or a Control-plane
+    /// entry exists) AND the catalog mode is `Deferred`. The inner surface
+    /// declares an exact catalog (it does not ask for the control plane) and
     /// mints `session_deferred` entries with WorkGraph provenance for
     /// `workgraph_attention_reassign` and `workgraph_policy_escalate`. Dropping
     /// them left the deferred set empty while an attention overlay still
@@ -516,6 +517,11 @@ impl meerkat_core::AgentToolDispatcher for ScopePinnedWorkGraphTools {
     /// apply. Forwarding it to the inner would bypass both.
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
         self.inner.tool_catalog_capabilities()
+    }
+    /// The wrapped dispatcher's answer, as for its capabilities. Without this
+    /// forward the trait default would turn an inner `OnDemand` into `Always`.
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
     }
 
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
@@ -843,6 +849,11 @@ mod tests {
             wrapped.exact_catalog,
             "both sides regressed to the default: an exact catalog is what makes \
              the deferred set reachable at all"
+        );
+        assert_eq!(
+            wrapper.tool_catalog_control_plane(),
+            inner.tool_catalog_control_plane(),
+            "wrapper must ask for the catalog control tools as the inner surface does"
         );
 
         // `ToolCatalogEntry` is not `PartialEq`, so compare an explicit

@@ -5593,6 +5593,510 @@ async fn e2e_scenario_91_live_adapter_image_input_dominant_color()
 }
 
 // ===========================================================================
+// Scenario 108: a deferred tool loaded inside a live conversation is called
+//               in that conversation.
+//
+// The session's client registers callback tools whose definitions are over
+// the deferred catalog's byte budget together, so the session runs in the
+// deferred mode: the realtime model is given the catalog control tools, not
+// the callback tools. The budget is reached by the number of tools, not by
+// the length of one: every description stays under 1,000 bytes, since a
+// realtime provider may refuse a longer one, and a refused tool list update
+// ends the channel. One text input asks the model to search the catalog,
+// load the order status tool and call it. The load is committed for the
+// session and the channel's tool list is updated before the load's result
+// reaches the provider; the model can call a tool only when the provider
+// lists it, so the loaded tool's `tool/execute` callback is the proof that
+// the provider applied a tool list update sent between a function call and
+// its output.
+//
+// One live channel, one text response, no retry: a refused or limited
+// credential fails `live/open` at once.
+//
+// What a red means is named by its class:
+//   S108 NO_TOOL_CALL             no tool call was seen at all: the session
+//                                 may not be in the deferred mode, or the
+//                                 model ignored the steps
+//   S108 MODEL_DID_NOT_LOAD       tool calls were seen, the load was not
+//   S108 CHANNEL_CLOSED_AFTER_LOAD the channel closed or reported an error
+//                                 after the load: the provider did not take
+//                                 the tool list update (or failed otherwise);
+//                                 this says nothing about the order of the
+//                                 update and the result
+//   S108 LOADED_TOOL_NOT_CALLED   the load ran, the channel stayed open and
+//                                 the loaded tool was not called
+//   S108 NOT_IN_DEFERRED_MODE     the tool was called without a load
+// ===========================================================================
+
+const SCENARIO_108_ORDER_TOOL: &str = "lookup_order_status";
+const SCENARIO_108_ORDER_ID: &str = "4711";
+
+/// The longest description scenario 108 registers, in bytes.
+const SCENARIO_108_DESCRIPTION_LIMIT: usize = 1_000;
+
+/// `summary`, then `detail` repeated while the text stays under 950 bytes:
+/// long enough that nine such tools are over the deferred catalog's byte
+/// budget together, and under the length a realtime provider may refuse.
+fn scenario_108_long_description(summary: &str, detail: &str) -> String {
+    let mut text = summary.to_owned();
+    while text.len() + 1 + detail.len() <= 950 {
+        text.push(' ');
+        text.push_str(detail);
+    }
+    text
+}
+
+/// The callback tools of scenario 108, as `tools/register` takes them: the
+/// order status tool the model is asked to load, two other short ones, and
+/// nine with long descriptions that carry the catalog over the byte budget.
+/// Each takes `label`, the argument this harness keys a callback by.
+fn scenario_108_tools() -> Vec<Value> {
+    let tool = |name: &str, description: String, label: &str| {
+        json!({
+            "name": name,
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {"label": {"type": "string", "description": label}},
+                "required": ["label"]
+            }
+        })
+    };
+    let mut tools = vec![
+        tool(
+            SCENARIO_108_ORDER_TOOL,
+            "Look up the shipping status of a customer order. Returns the current status of that order.".to_string(),
+            "The numeric order id.",
+        ),
+        tool(
+            "lookup_weather_forecast",
+            "Look up the weather forecast for a city. Returns the forecast temperature and conditions.".to_string(),
+            "The city name.",
+        ),
+        tool(
+            "convert_currency_amount",
+            "Convert an amount of money from one currency to another at today's rate. Returns the converted amount.".to_string(),
+            "The amount and the two currency codes.",
+        ),
+    ];
+    let long: [(&str, &str, &str, &str); 9] = [
+        (
+            "find_train_connection",
+            "Find a train connection between two stations.",
+            "The answer lists the departure time, the arrival time and the number of changes of the next connection.",
+            "The two station names.",
+        ),
+        (
+            "read_library_opening_hours",
+            "Read the opening hours of a public library.",
+            "The answer gives the hours for each day of the week and says whether the reading room is open on that day.",
+            "The library's name.",
+        ),
+        (
+            "measure_route_distance",
+            "Measure the road distance between two towns.",
+            "The answer gives the distance in kilometres along the shortest road route and the usual driving time for it.",
+            "The two town names.",
+        ),
+        (
+            "list_recipe_ingredients",
+            "List the ingredients of a recipe.",
+            "The answer names each ingredient with its quantity for four portions and marks the ones that can be left out.",
+            "The recipe's name.",
+        ),
+        (
+            "check_parking_availability",
+            "Check how many parking spaces are free in a car park.",
+            "The answer gives the number of free spaces counted in the last five minutes and the hourly price of a space.",
+            "The car park's name.",
+        ),
+        (
+            "translate_short_phrase",
+            "Translate a short phrase into another language.",
+            "The answer gives one translation in everyday wording and, where the phrase is ambiguous, a second reading.",
+            "The phrase and the target language.",
+        ),
+        (
+            "look_up_plant_care",
+            "Look up how to care for a house plant.",
+            "The answer says how often the plant is watered, how much light it wants and when it is moved to a larger pot.",
+            "The plant's name.",
+        ),
+        (
+            "read_museum_ticket_price",
+            "Read the ticket price of a museum.",
+            "The answer gives the price of a day ticket for an adult, the reduced price and the day on which entry is free.",
+            "The museum's name.",
+        ),
+        (
+            "find_ferry_departure",
+            "Find the next ferry departure from a harbour.",
+            "The answer gives the time of the next departure, the pier it leaves from and how long the crossing takes.",
+            "The harbour's name.",
+        ),
+    ];
+    for (name, summary, detail, label) in long {
+        tools.push(tool(
+            name,
+            scenario_108_long_description(summary, detail),
+            label,
+        ));
+    }
+    tools
+}
+
+/// What scenario 108 can decide without a provider, before it opens a
+/// channel: no description is long enough for a provider to refuse it for
+/// its length, and the registered definitions select the deferred mode for
+/// an exact catalog, by Core's own selector. The RPC server has no read of
+/// a session's catalog mode; that the session's catalog is exact follows
+/// from how the scenario creates it (see its `session/create`).
+fn scenario_108_assert_tools_select_the_deferred_mode(tools: &[Value]) {
+    let provenance = meerkat_core::ToolProvenance {
+        kind: meerkat_core::ToolSourceKind::Callback,
+        source_id: "scenario-108".into(),
+        artifact: None,
+    };
+    let catalog = tools
+        .iter()
+        .map(|tool| {
+            let name = tool["name"].as_str().expect("a tool name");
+            let description = tool["description"].as_str().expect("a tool description");
+            assert!(
+                description.len() < SCENARIO_108_DESCRIPTION_LIMIT,
+                "scenario 108: the description of {name} is {} bytes; a realtime provider may \
+                 refuse a description of {SCENARIO_108_DESCRIPTION_LIMIT} bytes or more",
+                description.len()
+            );
+            meerkat_core::ToolCatalogEntry::session_deferred(
+                std::sync::Arc::new(meerkat_core::ToolDef::new(
+                    name,
+                    description,
+                    tool["input_schema"].clone(),
+                )),
+                true,
+                provenance.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        meerkat_core::select_catalog_mode_from_snapshot(true, &catalog, &[]),
+        meerkat_core::ToolCatalogMode::Deferred,
+        "scenario 108: its registered tools must select the deferred mode ({} bytes of \
+         deferrable definitions, the budget is {})",
+        meerkat_core::deferred_session_schema_volume(&catalog),
+        meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD
+    );
+}
+
+/// The channel's observations until it is idle, without losing what was seen
+/// when the channel closes or reports an error: the tool calls seen, and the
+/// close or error text if there was one. A turn completion does not end the
+/// read: a response that holds only a tool call completes a turn too, and the
+/// calls and the close that follow it are what the classes are decided from.
+async fn scenario_108_observations_until_idle(
+    reader: &mut LiveWsRead,
+    timeout_secs: u64,
+) -> (Vec<String>, Option<String>) {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let idle_window = Duration::from_millis(LIVE_OUTPUT_IDLE_SETTLE_MS);
+    let mut capture = LiveObservationCapture::default();
+    let mut channel_error = None;
+    while Instant::now() < deadline {
+        let remaining = std::cmp::min(
+            deadline.saturating_duration_since(Instant::now()),
+            idle_window,
+        );
+        match live_ws_next_text_frame(reader, remaining).await {
+            Ok(Some(text)) => {
+                if let Err(error) = observe_live_json_frame(&mut capture, &text) {
+                    channel_error = Some(error.to_string());
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(error) => {
+                channel_error = Some(error.to_string());
+                break;
+            }
+        }
+    }
+    (capture.tool_call_requests, channel_error)
+}
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_108_live_deferred_tool_load_rpc_ws() -> Result<(), Box<dyn std::error::Error>>
+{
+    // Decided without a provider, so the skip paths below check it too.
+    let scenario_tools = scenario_108_tools();
+    scenario_108_assert_tools_select_the_deferred_mode(&scenario_tools);
+
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    if openai_api_key().is_none() {
+        eprintln!("Skipping: no OpenAI API key configured");
+        return Ok(());
+    }
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let ws_port = {
+        let l = TcpListener::bind("127.0.0.1:0")?;
+        l.local_addr()?.port()
+    };
+
+    let mut rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "scenario-108-live-deferred",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--live-ws",
+            &format!("127.0.0.1:{ws_port}"),
+        ],
+        None,
+    )
+    .await?;
+
+    let result = async {
+        let mut pump = RpcEventPump::default();
+        eprintln!("[scenario 108] initialize");
+        pump.call(
+            &mut rpc,
+            "initialize",
+            json!({
+                "client_info": {"name": "scenario-108-live-deferred-test", "version": "0.0.1"},
+            }),
+            10,
+        )
+        .await?;
+
+        // The callback tools: over the deferred catalog's byte budget
+        // together (checked at the top of this scenario), each description
+        // under the length a realtime provider may refuse.
+        eprintln!("[scenario 108] register callback tools");
+        pump.call(
+            &mut rpc,
+            "tools/register",
+            json!({ "tools": scenario_tools }),
+            20,
+        )
+        .await?;
+
+        eprintln!("[scenario 108] create session");
+        // Memory search and the mob tools are off: a session that mounts
+        // either reports no exact tool catalog, and without one every tool
+        // stays in the request and nothing waits behind the catalog. The
+        // builtin and shell tools are off too, so the session is composed
+        // like the sessions of the deterministic deferred catalog rows of
+        // the RPC server (crates/meerkat-rpc/tests/integration_server.rs).
+        let create_result = pump
+            .call(
+                &mut rpc,
+                "session/create",
+                json!({
+                    "prompt": "You are a test assistant. Follow the user's numbered steps exactly, in order, and keep every answer to one short sentence.",
+                    "model": "gpt-realtime-2",
+                    "provider": "openai",
+                    "initial_turn": "deferred",
+                    "enable_builtins": false,
+                    "enable_shell": false,
+                    "enable_memory": false,
+                    "enable_mob": false,
+                }),
+                30,
+            )
+            .await?;
+        let session_id = create_result["session_id"]
+            .as_str()
+            .ok_or("missing session_id")?
+            .to_string();
+
+        eprintln!("[scenario 108] live/open + WebSocket connect");
+        // The one provider request that can be refused for the credential:
+        // it fails here, at once, and nothing below retries it.
+        let open_result = pump
+            .call(
+                &mut rpc,
+                "live/open",
+                json!({
+                    "session_id": session_id,
+                    "transport": "websocket",
+                    "turning_mode": "explicit_commit",
+                }),
+                30,
+            )
+            .await?;
+        let channel_id = open_result["channel_id"]
+            .as_str()
+            .ok_or("missing channel_id in live/open result")?
+            .to_string();
+        let ws_url = open_result["transport"]["url"]
+            .as_str()
+            .ok_or("missing transport.url in live/open result")?
+            .to_string();
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await?;
+        let (ws_write, mut ws_read) = futures::StreamExt::split(ws_stream);
+        collect_live_observations_until_ready_or_idle(&mut ws_read, 10).await?;
+
+        eprintln!("[scenario 108] send the one text input and ask for a text response");
+        let sent = pump
+            .call(
+                &mut rpc,
+                "live/send_input",
+                json!({
+                    "channel_id": channel_id,
+                    "chunk": {
+                        "kind": "text",
+                        "text": format!(
+                            "Do these steps in order, in this conversation. \
+                             1) Call the tool tool_catalog_search with the query 'order status'. \
+                             2) Call the tool tool_catalog_load with names set to [\"{SCENARIO_108_ORDER_TOOL}\"]. \
+                             3) Call the tool {SCENARIO_108_ORDER_TOOL} with label set to \"{SCENARIO_108_ORDER_ID}\". \
+                             4) Tell me the order's status in one short sentence. \
+                             The status is not knowable without step 3."
+                        ),
+                    }
+                }),
+                30,
+            )
+            .await?;
+        assert_eq!(
+            sent["status"], "sent",
+            "scenario 108: live/send_input must acknowledge queue admission"
+        );
+        pump.call(
+            &mut rpc,
+            "live/commit_input",
+            json!({
+                "channel_id": channel_id,
+                "response_modality": {"modality": "text"},
+            }),
+            30,
+        )
+        .await?;
+
+        // The decisive fact: the loaded tool's callback arrives. Until it
+        // does, the channel's observations wait in the socket; they are read
+        // afterwards, in order, to say what the model did.
+        let callback = pump
+            .wait_for_callback(&mut rpc, SCENARIO_108_ORDER_ID, 120)
+            .await;
+        if let Err(wait_error) = callback {
+            let (seen, channel_error) =
+                scenario_108_observations_until_idle(&mut ws_read, 5).await;
+            let rpc_stderr = read_available_stderr(&mut rpc, 500).await;
+            let loaded = seen.iter().any(|tool| tool == "tool_catalog_load");
+            let what = match (&channel_error, loaded, seen.is_empty()) {
+                (Some(error), true, _) => format!(
+                    "S108 CHANNEL_CLOSED_AFTER_LOAD: the model called tool_catalog_load and \
+                     the channel then closed or reported an error ({error}); the provider did \
+                     not take the tool list update, or the channel failed otherwise. This says \
+                     nothing about the order of the update and the load's result"
+                ),
+                (Some(error), false, _) => format!(
+                    "S108 MODEL_DID_NOT_LOAD: the channel closed or reported an error ({error}) \
+                     before the model called tool_catalog_load"
+                ),
+                (None, true, _) => format!(
+                    "S108 LOADED_TOOL_NOT_CALLED: the model called tool_catalog_load, the \
+                     channel stayed open and the loaded tool {SCENARIO_108_ORDER_TOOL} was not \
+                     called in this conversation"
+                ),
+                (None, false, true) => "S108 NO_TOOL_CALL: no tool call was seen at all; the \
+                     session may not be in the deferred mode (then the model has no catalog \
+                     tool to call), or the model ignored the steps"
+                    .to_string(),
+                (None, false, false) => "S108 MODEL_DID_NOT_LOAD: the model called tools and \
+                     not tool_catalog_load; this is the model not following the prompt, not a \
+                     fact about the tool list update"
+                    .to_string(),
+            };
+            return Err(format!(
+                "{what} (tool calls seen: {seen:?}; {wait_error})\nrpc stderr:\n{}",
+                rpc_stderr.trim()
+            )
+            .into());
+        }
+        let called = pump
+            .callbacks
+            .get(SCENARIO_108_ORDER_ID)
+            .and_then(|callback| callback["params"]["name"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(
+            called, SCENARIO_108_ORDER_TOOL,
+            "scenario 108: the callback is the loaded tool's"
+        );
+        eprintln!("[scenario 108] the loaded tool was called; answering its callback");
+        pump.respond_callback(
+            &mut rpc,
+            SCENARIO_108_ORDER_ID,
+            "{\"order_id\":\"4711\",\"status\":\"shipped on the 9th\"}",
+        )
+        .await?;
+
+        // The observations, in the channel's own order: the model loaded the
+        // tool before it called it, and it gives one text response.
+        let capture = collect_live_observations_until(&mut ws_read, 90, |capture| {
+            capture.saw_turn_completed
+                && !capture.output_text.trim().is_empty()
+                && capture
+                    .tool_call_requests
+                    .iter()
+                    .any(|tool| tool == SCENARIO_108_ORDER_TOOL)
+        })
+        .await?;
+        let position = |tool: &str| {
+            capture
+                .tool_call_requests
+                .iter()
+                .position(|requested| requested == tool)
+        };
+        let loaded_at = position("tool_catalog_load").ok_or_else(|| {
+            format!(
+                "S108 NOT_IN_DEFERRED_MODE: the tool was called without a \
+                 tool_catalog_load call, so the session did not run in the deferred mode \
+                 and the run says nothing about the tool list update \
+                 (tool calls seen: {:?})",
+                capture.tool_call_requests
+            )
+        })?;
+        let called_at = position(SCENARIO_108_ORDER_TOOL).ok_or("the loaded tool's call")?;
+        assert!(
+            loaded_at < called_at,
+            "scenario 108: the model loads the tool before it calls it: {:?}",
+            capture.tool_call_requests
+        );
+        eprintln!(
+            "[scenario 108] tool calls: {:?}; response: {}",
+            capture.tool_call_requests,
+            capture.output_text.trim()
+        );
+
+        live_close_channel(&mut pump, &mut rpc, ws_write, &channel_id).await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+
+    shutdown_child(rpc.child).await?;
+    result
+}
+
+// ===========================================================================
 // Scenario 71: Live adapter realtime audio roundtrip with TTS, barge-in,
 //              and post-barge recall through the new live/open + WebSocket
 //              surface. (Tool dispatch is NOT covered here — that requires

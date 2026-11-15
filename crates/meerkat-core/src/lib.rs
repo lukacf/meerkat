@@ -482,7 +482,8 @@ pub use operation_account::{
     InvalidQualifiedAccount, MAX_QUALIFIED_ACCOUNT_PART_BYTES, OperationAccount, QualifiedAccount,
 };
 pub use ops::{
-    AsyncOpRef, ConcurrencyLimits, ContextStrategy, DeclaredToolRestriction, ForkBranch,
+    AsyncOpRef, ConcurrencyLimits, ContextStrategy, DeclaredToolRestriction, DeferredToolLoad,
+    DeferredToolLoadRefusal, DeferredToolLoadRefusalReason, DeferredToolLoadStage, ForkBranch,
     ForkBudgetPolicy, OpEvent, OperationId, OperationPolicy, OperationResult, OperationSpec,
     ResultShape, SessionEffect, SpawnSpec, SpawnToolAccessPolicy, ToolAccessConstraint,
     ToolAccessPolicy, ToolDispatchAdmissionSource, ToolDispatchOutcome,
@@ -701,10 +702,11 @@ pub use tool_application::{
 };
 pub use tool_bundle::RegisteredToolBundleDispatcher;
 pub use tool_catalog::{
-    ToolCallability, ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,
-    ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolCatalogMode, ToolCatalogView,
-    ToolCatalogViewEntry, ToolCatalogVisibility, ToolPlaneClass, ToolUnavailableReason,
-    deferred_session_entry_count, deferred_session_schema_volume,
+    DEFERRED_TOOL_LOAD_AVAILABILITY_MIXED, DeferredToolLoadAvailability, ToolCallability,
+    ToolCatalogCapabilities, ToolCatalogControlPlane, ToolCatalogDeferredEligibility,
+    ToolCatalogEntry, ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolCatalogMode,
+    ToolCatalogView, ToolCatalogViewEntry, ToolCatalogVisibility, ToolPlaneClass,
+    ToolUnavailableReason, deferred_session_entry_count, deferred_session_schema_volume,
     select_catalog_mode_from_snapshot,
 };
 pub use tool_consequence_policy::{

@@ -15,7 +15,6 @@ use crate::session::{
 };
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::tool_scope::{
     EXTERNAL_TOOL_FILTER_METADATA_KEY, GeneratedToolVisibilityOwner,
     INHERITED_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope, validate_inherited_filter_witnesses,
@@ -628,38 +627,24 @@ impl AgentBuilder {
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
         let catalog_mode = select_tool_catalog_mode(tools.as_ref());
         let catalog_capabilities = tools.tool_catalog_capabilities();
-        let (control_tool_names, deferred_tool_names) = if catalog_capabilities.exact_catalog {
-            let catalog = tools.tool_catalog();
-            let control_names = catalog
-                .iter()
-                .filter(|entry| entry.plane == ToolPlaneClass::Control)
-                .map(|entry| entry.tool.name.clone())
-                .collect::<std::collections::HashSet<_>>();
-            let deferred_names = if (!control_names.is_empty()
-                || catalog_capabilities.may_require_catalog_control_plane)
-                && matches!(catalog_mode, ToolCatalogMode::Deferred)
-            {
-                catalog
-                    .iter()
-                    .filter(|entry| entry.plane == ToolPlaneClass::Session)
-                    .filter(|entry| {
-                        matches!(
-                            entry.deferred_eligibility,
-                            ToolCatalogDeferredEligibility::DeferredEligible { .. }
-                        )
-                    })
-                    .map(|entry| entry.tool.name.clone())
-                    .collect()
-            } else {
-                std::collections::HashSet::new()
-            };
-            (control_names, deferred_names)
-        } else {
-            (
-                std::collections::HashSet::new(),
-                std::collections::HashSet::new(),
-            )
-        };
+        // The same projection every model-call boundary applies.
+        let build_catalog = catalog_capabilities
+            .exact_catalog
+            .then(|| (tools.tool_catalog(), tools.pending_catalog_sources()));
+        let crate::tool_catalog::CatalogBoundaryProjection {
+            control_tool_names,
+            control_tools_always_visible,
+            deferred_tool_names,
+            ..
+        } = crate::tool_catalog::catalog_boundary_projection(
+            catalog_capabilities,
+            tools.tool_catalog_control_plane(),
+            build_catalog.as_ref().map(|(catalog, _)| catalog.as_ref()),
+            build_catalog
+                .as_ref()
+                .map_or(&[][..], |(_, pending)| pending.as_ref()),
+            catalog_mode,
+        );
         let tool_scope = match tool_visibility_owner {
             Some(owner) => ToolScope::new_with_visibility_owner(
                 tools.tools(),
@@ -676,6 +661,11 @@ impl AgentBuilder {
                 deferred_tool_names,
             ),
         };
+        tool_scope
+            .set_control_tools_always_visible(control_tools_always_visible)
+            .map_err(|err| AgentBuildPolicyError::ToolVisibilityCatalog {
+                message: err.to_string(),
+            })?;
         // Cadence metadata is the single typed owner; ingress fails closed on
         // corrupt metadata and persists the one-time migration immediately.
         let compaction_cadence = crate::agent::compact::load_compaction_cadence(&mut session)

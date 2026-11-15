@@ -31,8 +31,14 @@ turn. They are not a durable planning system by themselves.
   text inspection.
 - Use `tool_catalog_search` and `tool_catalog_load` when deferred tool entries
   exist and the current visible tool list is not enough. Search reads the
-  catalog; load requests visibility at the next admitted tool boundary and can
-  be refused by session filters or missing scope authority.
+  catalog. A load makes an accepted tool callable from your next step (in a
+  live conversation, once the load returns). Read the load's result: its
+  `availability` field, and each tool's entry in `tool_availability`, say when
+  a tool cannot be called in this conversation yet, and a load can be refused
+  for missing scope authority. The catalog holds only tools the
+  session's tool filters allow: a name it does not return cannot be loaded
+  (`unknown_key`), and a tool whose source is still connecting may appear in
+  a later search.
 
 ## Boundaries
 

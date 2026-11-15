@@ -97,8 +97,8 @@
     },
     {
       "path": "guides/host-composition.mdx",
-      "source_sha256": "e4ed1d3f6e4c1af69fb1c61c94859edc4edc0ac03d0b7829a2e381aaefe222cf",
-      "rendered_sha256": "9ccd5d1c460cf095af15731a66c09d343083d053d6249700b6d57d654f842a2c"
+      "source_sha256": "a9778883b45f42ee97be37cd708117b191691e469c426604a7a1d5507429fb3c",
+      "rendered_sha256": "677ca169869b59bfd3537fdc8f4511040c728949953cb0341aa70d8ecdc3d02b"
     },
     {
       "path": "guides/manage-connections.mdx",
@@ -107,8 +107,8 @@
     },
     {
       "path": "guides/native-mcp.mdx",
-      "source_sha256": "1219eb97543dea8adc1599b4eba9f9a675a607ae7d6fcd9dafc1ab5dd0ea3907",
-      "rendered_sha256": "3f9208e13f4a8b78777aff19e59b128107b5160d5357a23cf5fba0130c6a2fd0"
+      "source_sha256": "02790028761a61d73aba5408b37f685a9489c27a1d8bf8ec11b2a3e54f092f9b",
+      "rendered_sha256": "2a9ccbb612370d7492981ab3c8208a144ba7c0e2a36e840337be180bd4255676"
     },
     {
       "path": "guides/port-an-integration.mdx",

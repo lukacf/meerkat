@@ -273,6 +273,17 @@ impl AgentToolDispatcher for IdentityCustomizerTools {
         }
     }
 
+    /// The published dispatcher's answer, as for its capabilities. Without
+    /// this forward the trait default would turn a published `OnDemand` into
+    /// `Always`.
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        match self.snapshot().dispatcher {
+            Some(dispatcher) => dispatcher.tool_catalog_control_plane(),
+            // An empty publication has no source that could ask.
+            None => meerkat_core::ToolCatalogControlPlane::Never,
+        }
+    }
+
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
         match self.snapshot().dispatcher {
             Some(dispatcher) => dispatcher.tool_catalog(),

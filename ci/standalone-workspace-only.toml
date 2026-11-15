@@ -440,6 +440,7 @@ excluded = [
     { path = "tests/brain_swap_surface_parity.rs", reason = "scans sibling crates' surface sources" },
     { path = "tests/host_launch_sites.rs", reason = "workspace launch-site gate over clippy.toml and every crate's sources" },
     { path = "tests/admission_fence_sites.rs", reason = "workspace admission fence gate over every crate's sources" },
+    { path = "tests/tool_dispatcher_wrapper_sites.rs", reason = "workspace tool dispatcher wrapper gate over every Core crate's sources" },
     { path = "tests/integration.rs", reason = "needs the unpublished mcp-test-server crate" },
     { path = "tests/governed_realm.rs", reason = "needs the unpublished mcp-test-server crate" },
     { path = "tests/governed_realm_account_binding.rs", reason = "needs the unpublished mcp-test-server crate" },

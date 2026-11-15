@@ -315,3 +315,109 @@ async fn sqlite_lease_renewal_is_multi_host_and_exact_claim_authoritative() {
         "real expiry and reclaim must remain durably observable"
     );
 }
+
+struct NoTargetProbe;
+
+#[async_trait::async_trait]
+impl meerkat_schedule::ScheduleTargetProbe for NoTargetProbe {
+    async fn probe_target(
+        &self,
+        _occurrence: &Occurrence,
+    ) -> Result<meerkat_schedule::TargetProbeOutcome, meerkat_schedule::ScheduleDomainError> {
+        Ok(meerkat_schedule::TargetProbeOutcome::Ready)
+    }
+}
+
+struct NoTargetDelivery;
+
+#[async_trait::async_trait]
+impl meerkat_schedule::ScheduleTargetDelivery for NoTargetDelivery {
+    async fn deliver_occurrence(
+        &self,
+        _occurrence: &Occurrence,
+        _identity: &meerkat_schedule::ScheduleDeliveryIdentity,
+    ) -> Result<meerkat_schedule::DeliveryDispatch, meerkat_schedule::ScheduleDomainError> {
+        Err(meerkat_schedule::ScheduleDomainError::Internal(
+            "the executor lease rows schedule nothing".to_string(),
+        ))
+    }
+}
+
+fn executor_lease_test_driver(
+    store: std::sync::Arc<dyn ScheduleStore>,
+    owner_id: &str,
+) -> meerkat_schedule::ScheduleDriver {
+    meerkat_schedule::ScheduleDriver::new(
+        meerkat_schedule::ScheduleService::new(std::sync::Arc::clone(&store)),
+        store,
+        std::sync::Arc::new(NoTargetProbe),
+        std::sync::Arc::new(NoTargetDelivery),
+        owner_id,
+        meerkat_schedule::ScheduleDriverConfig {
+            claim_limit: 1,
+            lease_duration: Duration::seconds(30),
+        },
+    )
+}
+
+/// The SQLite store commits an executor-lease renewal and the reply never
+/// reaches the driver: the row carries the new expiry, the driver's witness
+/// the old one. The driver's next tick is locked out behind its own lease and
+/// says so; a second host on the same file stays a plain standby.
+#[tokio::test]
+async fn sqlite_lost_executor_renew_reply_is_reported_as_a_lockout_behind_the_drivers_own_lease() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("schedules.sqlite3");
+    let store: std::sync::Arc<dyn ScheduleStore> =
+        std::sync::Arc::new(SqliteScheduleStore::open(&path).expect("open store"));
+    let driver = executor_lease_test_driver(std::sync::Arc::clone(&store), "sqlite-host");
+
+    let report = driver.tick_once().await.expect("the first tick acquires");
+    assert!(report.executor_authorized);
+    assert!(report.executor_lockout.is_none());
+
+    // What a committed renewal leaves in the row when its reply is lost:
+    // only the expiry moves.
+    let conn = rusqlite::Connection::open(&path).expect("open sqlite");
+    let changed = conn
+        .execute(
+            "UPDATE schedule_executor_lease SET expires_at_ms = expires_at_ms + 1000 WHERE singleton = 1",
+            [],
+        )
+        .expect("commit the renewal behind the driver");
+    assert_eq!(changed, 1);
+    drop(conn);
+
+    let held = store
+        .observe_executor_lease()
+        .await
+        .expect("the executor lease view reads")
+        .active
+        .expect("the store holds the renewed lease");
+    assert!(held.owner_id.starts_with("sqlite-host:"));
+
+    let report = driver
+        .tick_once()
+        .await
+        .expect("a locked-out tick is not an error");
+    assert!(!report.executor_authorized);
+    assert!(!report.made_progress());
+    let lockout = report
+        .executor_lockout
+        .as_ref()
+        .expect("the tick reports the lockout behind the driver's own lease");
+    assert_eq!(lockout.holder_owner_id, held.owner_id);
+    assert_eq!(lockout.held_since_utc, Some(held.acquired_at_utc));
+    assert_eq!(lockout.expires_at_utc, held.expires_at_utc);
+
+    // A second host on the same file is behind another executor's lease.
+    let other: std::sync::Arc<dyn ScheduleStore> =
+        std::sync::Arc::new(SqliteScheduleStore::open(&path).expect("open second handle"));
+    let standby = executor_lease_test_driver(other, "second-sqlite-host");
+    let report = standby.tick_once().await.expect("the standby's tick");
+    assert!(!report.executor_authorized);
+    assert!(
+        report.executor_lockout.is_none(),
+        "another host's lease is not a lockout: {report:?}"
+    );
+}

@@ -36,6 +36,7 @@ pub(super) mod member_wake_turn;
 mod operator_instructions;
 mod owned_edges;
 mod placed_external_routes;
+pub(super) mod quiesce_marker_fold;
 pub(super) mod reload_revival;
 mod resume_post_commit;
 mod resume_rollback;
@@ -9746,6 +9747,11 @@ pub(super) struct MobActor {
     pub(super) roster: Arc<RwLock<RosterAuthority>>,
     pub(super) events: Arc<dyn MobEventStore>,
     pub(super) placed_completion_durable_index: Arc<std::sync::Mutex<PlacedCompletionDurableIndex>>,
+    /// The journal's latest quiesce marker, for the marker's idempotency
+    /// check: a fold of the journal, caught up before every check. Holds no
+    /// lifecycle fact.
+    pub(super) placed_completion_quiesce_marker:
+        quiesce_marker_fold::PlacedCompletionQuiesceMarkerFold,
     pub(super) run_store: Arc<dyn MobRunStore>,
     pub(super) provisioner: Arc<dyn MobProvisioner>,
     /// Session-operation binding authority shared with the provisioner's
@@ -26467,8 +26473,18 @@ impl MobActor {
                 .next_back()
                 == Some(if quiescing { Some(intent) } else { None })
         };
-        let replay = self.events.replay_all().await?;
-        if latest_matches(&replay) {
+        // The journal's latest marker, from the fold caught up to the
+        // journal now: what a whole replay answers, without the replay.
+        let latest = self
+            .placed_completion_quiesce_marker
+            .refreshed(self.events.as_ref(), &self.definition.id)
+            .await?;
+        let wanted = if quiescing {
+            quiesce_marker_fold::LatestQuiesceMarker::Started(intent)
+        } else {
+            quiesce_marker_fold::LatestQuiesceMarker::Closed
+        };
+        if latest == wanted {
             return Ok(());
         }
         let append = self
@@ -31033,7 +31049,7 @@ impl MobActor {
                 } => {
                     match target {
                         super::state::RetireTarget::Exact(expected_incarnation) => {
-                            let result = self.validate_retire_member_incarnation(&expected_incarnation).await;
+                            let result = self.admit_exact_retire(&expected_incarnation).await;
                             // A caller other than the host leaves a rotation
                             // held for its host held: decided here, in this
                             // command's own step, by the actor's one hold
@@ -31047,11 +31063,23 @@ impl MobActor {
                             };
                             if !self.respawn_topology_reply_withheld {
                                 match result {
-                                    Ok(()) => self.start_retirement(
+                                    Ok(retirement_io::ExactRetire::Retire) => self.start_retirement(
                                         agent_identity, deadline, Some(admission_tx),
                                         retirement_io::RetirementReply::Retire(reply_tx),
                                         redrive,
                                     ).await,
+                                    // The incarnation the handle read is
+                                    // retired already (this command was held
+                                    // behind the retirement that did it):
+                                    // MobMachine answers as it answers the
+                                    // retire of an absent identity.
+                                    Ok(retirement_io::ExactRetire::Retired) => {
+                                        let result = self.retire_absent_admission(
+                                            &agent_identity,
+                                            "retire_exact_incarnation_retired",
+                                        );
+                                        let _ = reply_tx.send(result);
+                                    }
                                     Err(error) => { let _ = reply_tx.send(Err(error)); }
                                 }
                             }
@@ -52687,14 +52715,37 @@ impl MobActor {
         Ok(())
     }
 
+    /// What an exact retire of `expected` meets, decided in the retire
+    /// command's own step. The handle read `expected` from the roster before
+    /// it sent the command, and the actor may have retired that incarnation
+    /// itself since (its own re-drive, a batch, another retirement of the
+    /// member this command was held behind), so a roster that no longer
+    /// lists the incarnation does not make the request stale. MobMachine
+    /// decides:
     ///
-    /// Mark-then-cleanup: event first, mark Retiring, disposal pipeline
-    /// (policy-driven), then roster removal only after critical archive cleanup
-    /// succeeds.
-    async fn validate_retire_member_incarnation(
+    /// - It holds other material for the identity, or none: the request
+    ///   names a superseded incarnation and is stale.
+    /// - It holds this material and the roster lists the incarnation as the
+    ///   request read it: retire it.
+    /// - It holds this material, maps the identity to no runtime, holds no
+    ///   respawn of the identity, and the roster lists nothing: this
+    ///   incarnation's retirement completed (MobMachine keeps an identity's
+    ///   last material once it unmaps the identity, and the roster anchor
+    ///   goes last).
+    /// - It holds this material and marks the identity's runtime Retiring,
+    ///   while the roster lists the member with another transport: the
+    ///   incarnation's retirement is durably started and the retire joins
+    ///   it.
+    /// - Otherwise (a member that is not retiring whose roster transport
+    ///   changed, a mapped identity without a roster anchor, an anchor that
+    ///   remains for an identity mapped to no runtime, an identity whose
+    ///   respawn MobMachine holds: its retirement was the respawn's, a
+    ///   successor is owed, and `Ok(())` would call the member retired) the
+    ///   request is stale.
+    async fn admit_exact_retire(
         &self,
         expected: &super::state::RetireMemberIncarnation,
-    ) -> Result<(), MobError> {
+    ) -> Result<retirement_io::ExactRetire, MobError> {
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&expected.agent_identity);
         let machine_material = self
             .dsl_authority
@@ -52713,19 +52764,32 @@ impl MobActor {
             .await
             .get(&expected.agent_identity)
             .cloned();
-        if roster_entry.as_ref().is_none_or(|entry| {
-            entry.agent_runtime_id != expected.agent_runtime_id
-                || entry.generation != expected.generation
-                || entry.fence_token != expected.fence_token
-                || entry.member_ref != expected.member_ref
+        if roster_entry.as_ref().is_some_and(|entry| {
+            entry.agent_runtime_id == expected.agent_runtime_id
+                && entry.generation == expected.generation
+                && entry.fence_token == expected.fence_token
+                && entry.member_ref == expected.member_ref
         }) {
-            return Err(MobError::StaleMemberOperatorAuthority {
+            return Ok(retirement_io::ExactRetire::Retire);
+        }
+        let state = self.dsl_authority.state();
+        match (roster_entry, state.identity_to_runtime.get(&dsl_identity)) {
+            (None, None) if !state.pending_respawn_topology.contains(&dsl_identity) => {
+                Ok(retirement_io::ExactRetire::Retired)
+            }
+            (Some(_), Some(runtime))
+                if *runtime == mob_dsl::AgentRuntimeId::from_domain(&expected.agent_runtime_id)
+                    && state.member_state_markers.get(runtime)
+                        == Some(&mob_dsl::MobMemberState::Retiring) =>
+            {
+                Ok(retirement_io::ExactRetire::Retire)
+            }
+            _ => Err(MobError::StaleMemberOperatorAuthority {
                 member_id: expected.agent_identity.clone(),
                 reason: "retire command no longer matches the exact roster transport incarnation"
                     .to_string(),
-            });
+            }),
         }
-        Ok(())
     }
 
     /// Observe the archive authority's terminal truth before re-emitting a

@@ -8,6 +8,8 @@ mod created_identity_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod declared_apply_rows;
 mod ensure_convergence_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod event_log_reads;
 #[cfg(feature = "openai-live")]
 mod existing_live_delegation;
 mod historical_metadata;
@@ -36,6 +38,8 @@ mod member_tool_grant_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod member_wake_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod owed_lifecycle_intent;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod parallel_resume_restore;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod poisoned_scope_rows;
@@ -43,6 +47,8 @@ mod poisoned_scope_rows;
 mod respawn_abandonment_replay_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod retryable_restore_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32"), unix))]
+mod rewind_fork_seam_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod rotation_intent_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -5935,6 +5941,158 @@ impl MockSessionService {
     }
 }
 
+impl MockSessionService {
+    /// The member check of a member rewind read, as the persistent service
+    /// decides it first: the persisted session under `session_id` when it
+    /// is bound to `member_binding`, `None` when no session is persisted
+    /// under the id, and not found for every other session (another
+    /// member's, nobody's, or one without session metadata).
+    async fn member_rewind_session(
+        &self,
+        session_id: &SessionId,
+        member_binding: &meerkat_core::MobMemberBinding,
+    ) -> Result<Option<Session>, SessionError> {
+        let Some(session) = self.persisted_session_clone(session_id).await else {
+            return Ok(None);
+        };
+        let bound = session
+            .session_metadata()
+            .and_then(|metadata| metadata.mob_member_binding);
+        if bound.as_ref() != Some(member_binding) {
+            return Err(SessionError::NotFound {
+                id: session_id.clone(),
+            });
+        }
+        Ok(Some(session))
+    }
+
+    /// The persisted source of a member rewind fork, as the persistent
+    /// service reads it, its answers in the owner's order: the member
+    /// check, then the busy answer for a source that is running a turn,
+    /// then an archived session only when it is read as a lineage session.
+    async fn member_rewind_source(
+        &self,
+        request: &meerkat_core::service::MemberRewindForkRequest,
+    ) -> Result<Session, SessionError> {
+        let session_id = &request.source_session_id;
+        let not_found = || SessionError::NotFound {
+            id: session_id.clone(),
+        };
+        let session = self
+            .member_rewind_session(session_id, &request.member_binding)
+            .await?;
+        if self.active_sessions.read().await.contains(session_id) {
+            return Err(SessionError::Busy {
+                id: session_id.clone(),
+            });
+        }
+        let archived = self.archived_session_ids.read().await.contains(session_id);
+        if archived && request.source != meerkat_core::service::MemberRewindSource::ArchivedLineage
+        {
+            return Err(not_found());
+        }
+        session.ok_or_else(not_found)
+    }
+
+    /// The child a member rewind fork of `request` commits, and the
+    /// evidence it must show. Nothing is stored. The refusals are the
+    /// persistent service's, in its order: the source read, a source
+    /// without build state, the source's unanswered end, the complete
+    /// boundary, the inherited instruction policy, and, for the preflight
+    /// only (as in the owner), a comms name that is not the member
+    /// binding's. The owner's blob preflight has no counterpart here: the
+    /// double holds no blob store.
+    async fn planned_member_rewind_child(
+        &self,
+        request: &meerkat_core::service::MemberRewindForkRequest,
+        preflight: bool,
+    ) -> Result<(meerkat_core::service::MemberRewindForkEvidence, Session), SessionError> {
+        if !self.supports_persistent_sessions() {
+            return Err(super::session_service::durable_fork_unsupported());
+        }
+        let source_session_id = &request.source_session_id;
+        let source = self.member_rewind_source(request).await?;
+        let mut metadata = source
+            .session_metadata()
+            .ok_or_else(|| SessionError::NotFound {
+                id: source_session_id.clone(),
+            })?;
+        let build_state = source
+            .try_build_state()
+            .map_err(|error| SessionError::Unsupported(error.to_string()))?
+            .ok_or_else(|| SessionError::fork_source_build_state_missing(source_session_id))?;
+        if request.message_count == source.messages().len() {
+            let pending = meerkat_core::pending_continuation::resolve_pending_continuation(
+                meerkat_core::pending_continuation::observe_session_tail(source.messages()),
+                0,
+            )
+            .map_err(|error| SessionError::Unsupported(error.to_string()))?;
+            if matches!(
+                pending.disposition,
+                meerkat_core::pending_continuation::PendingContinuationDisposition::RunPending
+            ) {
+                return Err(SessionError::Busy {
+                    id: source_session_id.clone(),
+                });
+            }
+        }
+        let mut child = source
+            .fork_at_complete_boundary_with_identity(
+                request.message_count,
+                request.planned_child_session_id.clone(),
+            )
+            .map_err(meerkat_core::TranscriptEditError::into_session_error)?;
+        child
+            .apply_fork_instruction_policies(
+                source_session_id,
+                meerkat_core::ForkInstructionPolicy::ReactivateInherited,
+                meerkat_core::ForkInstructionPolicy::ReactivateInherited,
+            )
+            .map_err(SessionError::ForkInstructionRefused)?;
+        let member_comms_name = request
+            .member_binding
+            .comms_name()
+            .map_err(|error| SessionError::Unsupported(error.to_string()))?
+            .to_string();
+        if preflight && metadata.comms_name.as_deref() != Some(member_comms_name.as_str()) {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "session {source_session_id} carries a comms name that is not its member binding's"
+                )),
+            ));
+        }
+        let evidence = meerkat_core::service::MemberRewindForkEvidence {
+            prefix_message_count: request.message_count,
+            prefix_digest: child
+                .transcript_prefix_digest(request.message_count)
+                .map_err(|error| SessionError::Unsupported(error.to_string()))?,
+            tool_access_policy: metadata.tooling.tool_access_policy.clone(),
+            auth_binding: metadata.auth_binding.clone(),
+            realm_id: metadata.realm_id.clone(),
+        };
+        // The child as the owner's fork commits it: bound to the member,
+        // launched under the source's effective tool access policy, with
+        // the fork child projection of the source's build state, and
+        // without a fork seed (its own or one the source never delivered).
+        metadata.comms_name = Some(member_comms_name);
+        metadata.peer_meta = None;
+        metadata.keep_alive = false;
+        metadata.mob_member_binding = Some(request.member_binding.clone());
+        metadata.tooling.spawn_tool_access_policy =
+            Some(meerkat_core::ops::SpawnToolAccessPolicy::from_launch(
+                metadata.tooling.tool_access_policy.clone(),
+            ));
+        child
+            .set_session_metadata(metadata)
+            .map_err(|error| SessionError::Unsupported(error.to_string()))?;
+        child
+            .set_build_state(build_state.fork_child_projection())
+            .map_err(|error| SessionError::Unsupported(error.to_string()))?;
+        child.remove_metadata(meerkat_core::fork_notice::SESSION_FORK_SEED_KEY);
+        Ok((evidence, child))
+    }
+}
+
 #[async_trait]
 impl MobSessionService for MockSessionService {
     /// Records the snapshot in the session's committed document (and in its
@@ -6573,6 +6731,150 @@ impl MobSessionService for MockSessionService {
             },
             session_ref: None,
             reactivated_instruction_count: 0,
+        })
+    }
+
+    async fn preflight_member_rewind_fork(
+        &self,
+        fork: &crate::MemberRewindFork,
+    ) -> Result<meerkat_core::service::MemberRewindForkEvidence, SessionError> {
+        let (evidence, _child) = self
+            .planned_member_rewind_child(fork.request(), true)
+            .await?;
+        Ok(evidence)
+    }
+
+    async fn fork_member_rewind_child(
+        &self,
+        fork: &crate::MemberRewindFork,
+    ) -> Result<meerkat_core::service::MemberRewindChildObservation, SessionError> {
+        if !self.supports_persistent_sessions() {
+            return Err(super::session_service::durable_fork_unsupported());
+        }
+        let request = fork.request();
+        // As the owner: the member check and the busy answer come before
+        // the look for a planned child that already exists.
+        self.member_rewind_session(&request.source_session_id, &request.member_binding)
+            .await?;
+        if self
+            .active_sessions
+            .read()
+            .await
+            .contains(&request.source_session_id)
+        {
+            return Err(SessionError::Busy {
+                id: request.source_session_id.clone(),
+            });
+        }
+        // As the owner: whose the session under the planned child id is,
+        // is decided before that session is read, so a session that is not
+        // the member's answers not found in whatever state it is.
+        self.member_rewind_session(&request.planned_child_session_id, &request.member_binding)
+            .await?;
+        if let Some(observed) = self
+            .observe_member_rewind_child(&request.planned_child_session_id)
+            .await?
+        {
+            // As the owner: only the member's own child is returned.
+            if observed.member_binding.as_ref() != Some(&request.member_binding) {
+                return Err(SessionError::NotFound {
+                    id: request.planned_child_session_id.clone(),
+                });
+            }
+            return Ok(observed);
+        }
+        let (_evidence, child) = self.planned_member_rewind_child(request, false).await?;
+        let child_session_id = child.id().clone();
+        self.persisted_sessions
+            .write()
+            .await
+            .insert(child_session_id.clone(), child);
+        self.issue_persisted_session_revision(&child_session_id)
+            .await;
+        self.observe_member_rewind_child(&child_session_id)
+            .await?
+            .ok_or(SessionError::NotFound {
+                id: child_session_id,
+            })
+    }
+
+    async fn observe_member_rewind_child(
+        &self,
+        planned_child_session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::service::MemberRewindChildObservation>, SessionError> {
+        if !self.supports_persistent_sessions() {
+            return Err(super::session_service::durable_fork_unsupported());
+        }
+        let Some(child) = self.persisted_session_clone(planned_child_session_id).await else {
+            return Ok(None);
+        };
+        // The owner's error for a session that does not end as a fork
+        // child ends (a session between an instruction delivery and its
+        // next turn, for one).
+        let reactivated = child.fork_reactivation_suffix_len().map_err(|error| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "member rewind child {planned_child_session_id} does not end with its fork re-activation: {error}"
+            )))
+        })?;
+        let prefix_message_count = child.messages().len().saturating_sub(reactivated);
+        let prefix_digest = child
+            .transcript_prefix_digest(prefix_message_count)
+            .map_err(|error| SessionError::Unsupported(error.to_string()))?;
+        let metadata = child.session_metadata();
+        Ok(Some(meerkat_core::service::MemberRewindChildObservation {
+            session_id: planned_child_session_id.clone(),
+            evidence: meerkat_core::service::MemberRewindForkEvidence {
+                prefix_message_count,
+                prefix_digest,
+                tool_access_policy: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.tooling.tool_access_policy.clone()),
+                auth_binding: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.auth_binding.clone()),
+                realm_id: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.realm_id.clone()),
+            },
+            member_binding: metadata.and_then(|metadata| metadata.mob_member_binding),
+            archived: self
+                .archived_session_ids
+                .read()
+                .await
+                .contains(planned_child_session_id),
+        }))
+    }
+
+    async fn read_member_rewind_lineage_session(
+        &self,
+        witness: crate::MemberRewindLineageWitness,
+        prefix_message_count: usize,
+    ) -> Result<meerkat_core::service::MemberRewindLineageRead, SessionError> {
+        if !self.supports_persistent_sessions() {
+            return Err(super::session_service::durable_fork_unsupported());
+        }
+        let session_id = witness.session_id();
+        let not_found = || SessionError::NotFound {
+            id: session_id.clone(),
+        };
+        // Read whether or not the session is archived or running.
+        let session = self
+            .member_rewind_session(session_id, witness.member_binding())
+            .await?
+            .ok_or_else(not_found)?;
+        let message_count = session.messages().len();
+        let prefix_digest = if prefix_message_count <= message_count {
+            Some(
+                session
+                    .transcript_prefix_digest(prefix_message_count)
+                    .map_err(|error| SessionError::Unsupported(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        Ok(meerkat_core::service::MemberRewindLineageRead {
+            message_count,
+            prefix_digest,
         })
     }
 
@@ -71624,7 +71926,7 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
     assert_eq!(
         service.turn_finalization_acquire_counts(),
         (boundary_baseline.0 + 1, boundary_baseline.1),
-        "retry must observe the retained result instead of starting a duplicate takeover"
+        "retry must join the retained takeover instead of starting a duplicate one"
     );
 
     drop(held_gate);
@@ -71780,6 +72082,129 @@ async fn test_explicit_resume_terminal_survives_observer_drop_and_is_shared() {
         "observer drop and concurrent observers must not replay Resume"
     );
     responder.await.expect("Resume responder task");
+}
+
+/// What a kept answer says, by its own structured data, about asking again.
+fn kept_answer_says_retryable(error: &MobError) -> Option<bool> {
+    error
+        .structured_data()
+        .and_then(|data| data.get("retryable").and_then(serde_json::Value::as_bool))
+}
+
+/// Ask for a lift on a handle that keeps `kept`: the answer of an earlier
+/// explicit resume that no caller has read. Returns what the lift answered
+/// and how many Resume commands it sent to the actor; each one is admitted
+/// and answered Ok.
+async fn lift_over_a_kept_resume_answer(
+    kept: Result<(), MobError>,
+) -> (Result<(), MobError>, usize) {
+    // A row asks this more than once: each mob needs an id of its own.
+    let (handle, _service) =
+        create_test_mob(with_unique_mob_id(sample_definition(), "kept-answer")).await;
+    let (command_tx, mut command_rx) =
+        tokio::sync::mpsc::channel::<super::scope_gate::RoutedMobCommand>(4);
+    let shared_handle = MobHandle {
+        command_tx,
+        explicit_resume_operations: Arc::new(super::handle::ResumeOperationRegistry::default()),
+        ..handle
+    };
+    shared_handle.install_terminal_resume_result_for_test(kept);
+    let commands = Arc::new(AtomicUsize::new(0));
+    let responder_commands = Arc::clone(&commands);
+    let responder = tokio::spawn(async move {
+        while let Some(routed) = command_rx.recv().await {
+            let super::state::MobCommand::ResumeLifecycle {
+                admission,
+                reply_tx,
+                ..
+            } = routed.cmd
+            else {
+                panic!("expected ResumeLifecycle command");
+            };
+            responder_commands.fetch_add(1, Ordering::SeqCst);
+            admission.admit();
+            let _ = reply_tx.send(Ok(()));
+        }
+    });
+    let answer = tokio::time::timeout(
+        Duration::from_secs(5),
+        shared_handle.resume_until_for_test(Instant::now() + Duration::from_secs(5)),
+    )
+    .await
+    .expect("the lift answers");
+    let sent = commands.load(Ordering::SeqCst);
+    responder.abort();
+    (answer, sent)
+}
+
+/// A kept answer that is itself a retryable refusal is not a later lift's
+/// answer: the lift that finds it runs an attempt of its own.
+#[tokio::test]
+async fn test_a_lift_over_a_kept_retryable_refusal_runs_its_own_attempt() {
+    for kept in [
+        MobError::LifecycleOperationPending {
+            intent: "explicit_resume_attachment_retirement:kept".to_string(),
+        },
+        MobError::LifecycleOperationAdmissionPending {
+            intent: "explicit_resume".to_string(),
+            stage: "actor_command_admission",
+        },
+    ] {
+        assert_eq!(
+            kept_answer_says_retryable(&kept),
+            Some(true),
+            "precondition: the kept refusal says a retry can succeed: {kept}"
+        );
+        let refusal = kept.to_string();
+        let (answer, sent) = lift_over_a_kept_resume_answer(Err(kept)).await;
+        if let Err(error) = answer {
+            panic!("the lift was answered with a refusal (kept: `{refusal}`): {error}");
+        }
+        assert_eq!(
+            sent, 1,
+            "the lift over the kept refusal `{refusal}` ran one attempt of its own"
+        );
+    }
+}
+
+/// A kept Ok is still the answer of the lift that finds it: the mob was
+/// lifted, and no second Resume reaches the actor.
+#[tokio::test]
+async fn test_a_lift_over_a_kept_ok_is_answered_that_ok() {
+    let (answer, sent) = lift_over_a_kept_resume_answer(Ok(())).await;
+    answer.expect("the lift is answered the kept Ok");
+    assert_eq!(sent, 0, "a kept Ok is not replayed to the actor");
+}
+
+/// A kept error that does not say a retry can succeed (it says nothing about
+/// a retry, or says a retry cannot succeed) is still the answer of the lift
+/// that finds it.
+#[tokio::test]
+async fn test_a_lift_over_a_kept_hard_error_is_answered_that_error() {
+    for kept in [
+        MobError::Internal("kept hard failure".to_string()),
+        MobError::MemberReloadRequired {
+            member_id: AgentIdentity::from("kept-reload-member"),
+            reason: "kept durability reload".to_string(),
+        },
+    ] {
+        assert_ne!(
+            kept_answer_says_retryable(&kept),
+            Some(true),
+            "precondition: the kept error does not say a retry can succeed: {kept}"
+        );
+        let failure = kept.to_string();
+        let (answer, sent) = lift_over_a_kept_resume_answer(Err(kept)).await;
+        let error = answer.expect_err("the lift is answered the kept error");
+        assert!(
+            matches!(&error, MobError::SharedLifecycleFailure(inner) if inner.to_string() == failure),
+            "the lift is answered the kept error `{failure}`: {error:?}"
+        );
+        assert_eq!(
+            sent, 0,
+            "the kept error `{failure}` is not replayed to the actor"
+        );
+    }
 }
 
 #[tokio::test]
@@ -105813,6 +106238,11 @@ mod retire_absent;
 /// names, admitted in every step's own actor command, or nothing.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod retire_at_scope;
+/// An exact retire converges with what became of the incarnation it names:
+/// `Ok(())` once its retirement completed, a join of one durably started,
+/// and the stale refusal only for a request that is stale.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod retire_converges;
 mod retirement_isolation;
 /// #1814 owned rollbacks release the turn-finalization boundary before they
 /// take the lease a concurrent raw unregister holds into its cleanup.

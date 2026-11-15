@@ -2326,6 +2326,9 @@ fn deliver<'a>(
         if let JobOwner::Gone = owner {
             return ForkRelinkAction::OwnerGone;
         }
+        // The forker's agent reads this outcome: a mob with a member tool
+        // audience answers it no free text of a failed run.
+        let completion = completion.for_agent(child_mob, handle.has_member_tool_audience());
         let outcome = match serde_json::to_value(&completion) {
             Ok(outcome) => outcome,
             Err(error) => return ForkRelinkAction::Failed(error.to_string()),

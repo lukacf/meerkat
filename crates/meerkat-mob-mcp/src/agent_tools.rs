@@ -245,7 +245,42 @@ impl AgentMobToolSurface {
     /// principal acts for the calling agent, so chokepoint (a) also applies
     /// the agent lane's own rules: a member command addressed to an
     /// identity entry is refused `identity_member`.
-    async fn bound_handle(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
+    /// A lookup that answers no handle answers the typed refusal an agent is
+    /// told ([`crate::AgentMobLookupRefusal`]). A quarantined mob gets its
+    /// on-demand restore re-attempt only when this surface's own authority
+    /// names the mob id; [`Self::bound_own_handle`] is for a mob the caller
+    /// did not name by argument.
+    async fn bound_handle(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<MobHandle, crate::AgentMobLookupRefusal> {
+        self.bound_handle_with(mob_id, self.authority_names_mob(mob_id))
+            .await
+    }
+
+    /// [`Self::bound_handle`] for the mob this surface's session is seated
+    /// in, created, or owns as its implicit mob: the id is the session's
+    /// own, not an argument.
+    async fn bound_own_handle(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<MobHandle, crate::AgentMobLookupRefusal> {
+        self.bound_handle_with(mob_id, true).await
+    }
+
+    async fn bound_handle_with(
+        &self,
+        mob_id: &MobId,
+        names_mob: bool,
+    ) -> Result<MobHandle, crate::AgentMobLookupRefusal> {
+        // The session that created a mob with its own create holds, after a
+        // restart, an authority that names no mob: its grant is re-derived
+        // from the mob's creation record while it may still create mobs
+        // (`authority_over`). The same condition decides whether the lookup
+        // asks that record of a quarantined mob for this session.
+        let authority = self.authority_context_snapshot();
+        let creator = (authority.is_generated_authority_context() && authority.can_create_mobs())
+            .then(|| self.owner_bridge_session_id.clone());
         // Handle resolution (store restore + runtime rebind in
         // `MobMcpState::ensure_restored`) is reached from inside the calling
         // agent's tool-dispatch poll; run it on its own task so its
@@ -254,7 +289,9 @@ impl AgentMobToolSurface {
         let state = Arc::clone(&self.state);
         let mob_id = mob_id.clone();
         let handle = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
-            state.handle_for(&mob_id).await
+            state
+                .handle_for_agent(&mob_id, names_mob, creator.as_ref())
+                .await
         })
         .await?;
         Ok(
@@ -262,6 +299,83 @@ impl AgentMobToolSurface {
                 self.control_principal.clone(),
             )),
         )
+    }
+
+    /// Whether this surface's authority names the mob id at all: a manage
+    /// grant, a spawn profile scope or a recorded incarnation under it.
+    /// Read from the authority context alone, before any lookup.
+    fn authority_names_mob(&self, mob_id: &MobId) -> bool {
+        let authority = self.authority_context_snapshot();
+        authority.managed_mob_scope().contains(mob_id.as_str())
+            || authority
+                .spawn_profile_scope()
+                .contains_key(mob_id.as_str())
+            || authority.mob_incarnations().contains_key(mob_id.as_str())
+    }
+
+    /// The answer of a tool whose lookup of the mob `mob_id` answered no
+    /// handle. An unknown id is answered as before. A held or quarantined
+    /// mob is answered its kind, its reason or class and whether a retry
+    /// can help, and nothing else: no owner session and no cause. A lookup
+    /// that failed is logged whole and answered as a fixed text.
+    /// `admission` names the admission the lookup was made for, in the
+    /// tools that say so in their refusal.
+    fn map_lookup_refusal(
+        tool_name: &str,
+        admission: Option<&str>,
+        mob_id: &MobId,
+        refusal: crate::AgentMobLookupRefusal,
+    ) -> ToolError {
+        let failed = match admission {
+            Some(admission) => format!("tool '{tool_name}' {admission} failed"),
+            None => format!("tool '{tool_name}' failed"),
+        };
+        match refusal {
+            crate::AgentMobLookupRefusal::NotFound => {
+                let error = MobError::MobNotFound(mob_id.clone());
+                let message = format!("{failed}: {error}");
+                match (admission, error.structured_data()) {
+                    (None, Some(data)) => ToolError::execution_failed_with_data(message, data),
+                    _ => ToolError::execution_failed(message),
+                }
+            }
+            crate::AgentMobLookupRefusal::Held { reason } => ToolError::execution_failed_with_data(
+                format!("{failed}: mob {mob_id} is held before activation ({reason})"),
+                json!({
+                    "kind": MobError::HELD_BEFORE_ACTIVATION_KIND,
+                    "code": "SESSION_RUNTIME_UNAVAILABLE",
+                    "mob_id": mob_id.as_str(),
+                    "reason": reason,
+                    "content_retained": true,
+                    "retryable": true,
+                }),
+            ),
+            crate::AgentMobLookupRefusal::Quarantined { class } => {
+                ToolError::execution_failed_with_data(
+                    format!("{failed}: mob '{mob_id}' is quarantined ({class})"),
+                    json!({
+                        "kind": MobError::MOB_QUARANTINED_KIND,
+                        "mob_id": mob_id.as_str(),
+                        "class": class.as_str(),
+                        "retryable": class.is_retryable(),
+                        "content_retained": true,
+                    }),
+                )
+            }
+            crate::AgentMobLookupRefusal::Unshown(error) => {
+                tracing::warn!(
+                    mob_id = %mob_id,
+                    tool = tool_name,
+                    error = %error,
+                    "an agent mob tool's mob lookup failed; the caller is answered a fixed \
+                     text in place of this error"
+                );
+                ToolError::execution_failed(format!(
+                    "{failed}: the mob could not be looked up. The call can be retried; the \
+                     host's log has the cause."
+                ))
+            }
+        }
     }
 
     /// Create a new agent mob tool surface.
@@ -454,6 +568,139 @@ impl AgentMobToolSurface {
         }
     }
 
+    /// The refusal `error` the mob `handle` serves answered this call, as
+    /// the calling agent is answered it: whole from a mob with no member
+    /// tool audience, and from a mob that has one only when its type says
+    /// that it names nothing but what the call names
+    /// ([`crate::mob_refusal_for_agent`]). `named` are the members the call
+    /// names by argument, which the tool asked the audience about before
+    /// the mob, or which the call itself seats.
+    fn map_mob_refusal(
+        call: ToolCallView<'_>,
+        handle: &MobHandle,
+        named: &[&AgentIdentity],
+        error: MobError,
+    ) -> ToolError {
+        Self::answer_mob_refusal(
+            call,
+            crate::mob_refusal_for_agent(
+                call.name,
+                handle.mob_id(),
+                handle.has_member_tool_audience(),
+                named,
+                error,
+            ),
+        )
+    }
+
+    /// The tool error of a decided refusal: the mob's own refusal, or the
+    /// fixed text with the refusal's class in its text and as `class` in
+    /// its data when the refusal has one an agent may be told.
+    fn answer_mob_refusal(call: ToolCallView<'_>, refusal: crate::AgentMobRefusal) -> ToolError {
+        match refusal {
+            crate::AgentMobRefusal::Whole(error) => Self::map_mob_error(call, error),
+            crate::AgentMobRefusal::NotShown { class, retryable } => {
+                let message = format!(
+                    "tool '{}' failed: {}",
+                    call.name,
+                    crate::AgentMobRefusal::not_shown_text(class, retryable)
+                );
+                // The data holds the two typed facts kept of a refusal
+                // that is not passed on, and nothing else of it.
+                let mut data = serde_json::Map::new();
+                if let Some(class) = class {
+                    data.insert("class".to_string(), json!(class));
+                }
+                if retryable {
+                    data.insert("retryable".to_string(), json!(true));
+                }
+                if data.is_empty() {
+                    ToolError::execution_failed(message)
+                } else {
+                    ToolError::execution_failed_with_data(message, data.into())
+                }
+            }
+        }
+    }
+
+    /// [`Self::map_mob_refusal`] for a refusal of the admission `admission`,
+    /// which is answered as a text with no data.
+    fn map_admission_refusal(
+        tool_name: &str,
+        admission: &str,
+        handle: &MobHandle,
+        error: MobError,
+    ) -> ToolError {
+        let refused = match crate::mob_refusal_for_agent(
+            tool_name,
+            handle.mob_id(),
+            handle.has_member_tool_audience(),
+            &[],
+            error,
+        ) {
+            crate::AgentMobRefusal::Whole(error) => error.to_string(),
+            crate::AgentMobRefusal::NotShown { class, retryable } => {
+                crate::AgentMobRefusal::not_shown_text(class, retryable)
+            }
+        };
+        ToolError::execution_failed(format!(
+            "tool '{tool_name}' {admission} admission failed: {refused}"
+        ))
+    }
+
+    /// A failure of this call on the mob `handle` serves whose form carries
+    /// no typed refusal, as the calling agent is answered it: `text` from a
+    /// mob with no member tool audience, the fixed text from a mob that has
+    /// one ([`crate::mob_failure_text_for_agent`]).
+    fn map_mob_failure_text(tool_name: &str, handle: &MobHandle, text: String) -> ToolError {
+        ToolError::execution_failed(crate::mob_failure_text_for_agent(
+            tool_name,
+            handle.mob_id(),
+            handle.has_member_tool_audience(),
+            text,
+        ))
+    }
+
+    /// The refusal of a create that the host could not admit because of a
+    /// mob the call did not name: the creating session's provenance is
+    /// not known while that mob's roster cannot be read. The agent is
+    /// answered why, and not which mob that is; the refusal, which names
+    /// the mob, is logged whole.
+    fn map_unnamed_mob_refusal(tool_name: &str, error: &MobError) -> ToolError {
+        tracing::warn!(
+            tool = tool_name,
+            error = %error,
+            "an agent's create was refused because of a mob its call did not name; the \
+             caller is answered the reason without that mob's id"
+        );
+        ToolError::execution_failed(format!(
+            "tool '{tool_name}' failed: {}",
+            crate::CREATOR_NOT_RECORDED
+        ))
+    }
+
+    /// The refusal of a read that looks for this session's own seat across
+    /// the mobs the state manages, before any mob is known. It can come
+    /// from a mob the caller has nothing to do with, so it is answered
+    /// whole only when its type says that it names nothing; otherwise it is
+    /// logged whole and answered as a fixed text.
+    fn map_seat_lookup_error(call: ToolCallView<'_>, error: MobError) -> ToolError {
+        if crate::refusal_names_nothing(&error) {
+            return Self::map_mob_error(call, error);
+        }
+        tracing::warn!(
+            tool = call.name,
+            error = %error,
+            "an agent mob tool could not look up its session's seat; the caller is answered \
+             a fixed text in place of this error"
+        );
+        ToolError::execution_failed(format!(
+            "tool '{}' failed: the session's seat could not be looked up. The call can be \
+             retried; the host's log has the cause.",
+            call.name
+        ))
+    }
+
     fn map_destroy_error(call: ToolCallView<'_>, error: crate::MobMcpDestroyError) -> ToolError {
         match error {
             crate::MobMcpDestroyError::Incomplete { report } => {
@@ -472,21 +719,60 @@ impl AgentMobToolSurface {
 
     fn map_bounded_member_run_error(
         call: ToolCallView<'_>,
+        handle: &MobHandle,
+        named: &[&AgentIdentity],
         error: meerkat_mob::BoundedMemberRunError,
     ) -> ToolError {
         match error {
             meerkat_mob::BoundedMemberRunError::Admission(error) => {
-                Self::map_mob_error(call, error)
+                Self::map_mob_refusal(call, handle, named, error)
             }
-            other => ToolError::execution_failed(format!(
-                "tool '{}' exact bounded child turn failed: {other}",
-                call.name
-            )),
+            other => Self::map_mob_failure_text(
+                call.name,
+                handle,
+                format!(
+                    "tool '{}' exact bounded child turn failed: {other}",
+                    call.name
+                ),
+            ),
         }
     }
 
-    fn map_council_error(call: ToolCallView<'_>, error: TemporaryCouncilError) -> ToolError {
-        ToolError::execution_failed(format!("tool '{}' failed: {error}", call.name))
+    /// The failure of a council, as the convener is answered it: whole when
+    /// no source mob of its participants has a member tool audience
+    /// (`guarded` is false), and otherwise logged whole and answered as the
+    /// fixed text of [`crate::MOB_REFUSED`].
+    fn map_council_error(
+        call: ToolCallView<'_>,
+        guarded: bool,
+        error: TemporaryCouncilError,
+    ) -> ToolError {
+        ToolError::execution_failed(format!(
+            "tool '{}' failed: {}",
+            call.name,
+            Self::council_failure_text(call.name, guarded, &error)
+        ))
+    }
+
+    /// The text of a council's failure as its convener reads it, in the
+    /// tool's answer and in a detached council's completion: the
+    /// failure's own text, or the fixed text when a source mob of the
+    /// participants has a member tool audience.
+    fn council_failure_text(
+        tool_name: &str,
+        guarded: bool,
+        error: &TemporaryCouncilError,
+    ) -> String {
+        if !guarded {
+            return error.to_string();
+        }
+        tracing::warn!(
+            tool = tool_name,
+            error = %error,
+            "a council over a mob with a member tool audience failed; the convener is \
+             answered a fixed text in place of this failure"
+        );
+        crate::MOB_REFUSED.to_string()
     }
 
     fn authority_context_snapshot(&self) -> MobToolAuthorityContext {
@@ -668,10 +954,8 @@ impl AgentMobToolSurface {
     ) -> Result<MobHandle, ToolError> {
         // Manage scope is observed for the incarnation of the mob this call
         // resolved: a grant for an earlier mob under the id does not match.
-        let handle = self.bound_handle(mob_id).await.map_err(|error| {
-            ToolError::execution_failed(format!(
-                "tool '{tool_name}' member admission failed: {error}"
-            ))
+        let handle = self.bound_handle(mob_id).await.map_err(|refusal| {
+            Self::map_lookup_refusal(tool_name, Some("member admission"), mob_id, refusal)
         })?;
         // A member the mob's host hides from the caller's member tools is
         // answered as a name the mob does not hold, whatever the caller's
@@ -695,11 +979,8 @@ impl AgentMobToolSurface {
         match handle
             .resolve_owned_member_target_admission(can_manage_mob, caller.as_ref(), target)
             .await
-            .map_err(|error| {
-                ToolError::execution_failed(format!(
-                    "tool '{tool_name}' member admission failed: {error}"
-                ))
-            })? {
+            .map_err(|error| Self::map_admission_refusal(tool_name, "member", &handle, error))?
+        {
             meerkat_mob::OwnedMemberTargetAdmission::Allowed => Ok(handle),
             meerkat_mob::OwnedMemberTargetAdmission::Denied => {
                 Err(ToolError::access_denied(tool_name))
@@ -719,10 +1000,8 @@ impl AgentMobToolSurface {
         tool_name: &str,
         mob_id: &MobId,
     ) -> Result<MobHandle, ToolError> {
-        let handle = self.bound_handle(mob_id).await.map_err(|error| {
-            ToolError::execution_failed(format!(
-                "tool '{tool_name}' current-mob admission failed: {error}"
-            ))
+        let handle = self.bound_handle(mob_id).await.map_err(|refusal| {
+            Self::map_lookup_refusal(tool_name, Some("current-mob admission"), mob_id, refusal)
         })?;
         if self
             .current_mob_admission(tool_name, mob_id, &handle)
@@ -753,9 +1032,7 @@ impl AgentMobToolSurface {
             .resolve_current_mob_admission(can_manage_mob)
             .await
             .map_err(|error| {
-                ToolError::execution_failed(format!(
-                    "tool '{tool_name}' current-mob admission failed: {error}"
-                ))
+                Self::map_admission_refusal(tool_name, "current-mob", handle, error)
             })?;
         Ok(matches!(
             admission,
@@ -780,10 +1057,8 @@ impl AgentMobToolSurface {
         // each arg's pure `.is_some()` presence and the raw per-profile scope
         // set membership; args this surface's spawn tool does not accept stay
         // `false`.
-        let handle = self.bound_handle(mob_id).await.map_err(|error| {
-            ToolError::execution_failed(format!(
-                "tool '{tool_name}' spawn-member admission failed: {error}"
-            ))
+        let handle = self.bound_handle(mob_id).await.map_err(|refusal| {
+            Self::map_lookup_refusal(tool_name, Some("spawn-member admission"), mob_id, refusal)
         })?;
         let incarnation = handle.incarnation();
         let authority = self.authority_over(mob_id, &handle).await;
@@ -804,9 +1079,7 @@ impl AgentMobToolSurface {
             .resolve_spawn_member_admission(observations)
             .await
             .map_err(|error| {
-                ToolError::execution_failed(format!(
-                    "tool '{tool_name}' spawn-member admission failed: {error}"
-                ))
+                Self::map_admission_refusal(tool_name, "spawn-member", &handle, error)
             })?;
         match admission {
             meerkat_mob::SpawnMemberAdmission::Allowed => Ok(handle),
@@ -1246,10 +1519,30 @@ impl AgentMobToolSurface {
             .admit_child_tool_policy()
             .map_err(Self::child_policy_denial)?;
 
-        let (mob_id, first_delegate) = self
-            .ensure_implicit_mob()
-            .await
-            .map_err(|e| Self::map_mob_error(call, e))?;
+        let (mob_id, first_delegate) =
+            self.ensure_implicit_mob()
+                .await
+                .map_err(|error| match error {
+                    // The session's implicit mob did not restore: the agent is
+                    // answered its class, as for any quarantined mob it names,
+                    // and not the cause of the failed restore.
+                    MobError::MobQuarantined {
+                        mob_id,
+                        class,
+                        cause: _,
+                    } => Self::map_lookup_refusal(
+                        call.name,
+                        None,
+                        &mob_id,
+                        crate::AgentMobLookupRefusal::Quarantined { class },
+                    ),
+                    // The implicit mob could not be created because of a
+                    // mob the call did not name.
+                    error @ MobError::ProvenanceUnavailable { mob_id: Some(_) } => {
+                        Self::map_unnamed_mob_refusal(call.name, &error)
+                    }
+                    error => Self::map_mob_error(call, error),
+                })?;
         self.state.pause_agent_call().await;
 
         // The mob under the implicit id must still be this session's own
@@ -1257,9 +1550,9 @@ impl AgentMobToolSurface {
         // the id since (after a destroy) is refused before anything touches
         // it or any grant names it.
         let handle = self
-            .bound_handle(&mob_id)
+            .bound_own_handle(&mob_id)
             .await
-            .map_err(|error| Self::map_mob_error(call, error))?;
+            .map_err(|refusal| Self::map_lookup_refusal(call.name, None, &mob_id, refusal))?;
         if !Self::is_implicit_mob_of(&handle, &self.owner_bridge_session_id) {
             return Err(ToolError::access_denied(call.name));
         }
@@ -1267,7 +1560,7 @@ impl AgentMobToolSurface {
         if let Some(objective_id) = objective_id {
             self.bind_objective_owner_boxed(&handle, objective_id)
                 .await
-                .map_err(|error| Self::map_mob_error(call, error))?;
+                .map_err(|error| Self::map_mob_refusal(call, &handle, &[], error))?;
         }
 
         let session_effects = self.implicit_mob_grant_effects(call.name, &mob_id, &handle)?;
@@ -1319,40 +1612,53 @@ impl AgentMobToolSurface {
         {
             Ok(execution) => execution,
             Err(DelegationExecutionError::Spawn(error)) => {
-                return Err(Self::map_mob_error(call, error));
+                return Err(Self::map_mob_refusal(call, &handle, &[&identity], error));
             }
             Err(DelegationExecutionError::WorkAdmission {
                 error,
                 retirement_error,
             }) => {
-                return Err(ToolError::execution_failed(format!(
-                    "tool '{}' failed to admit delegated helper turn: {error}; retirement_error={retirement_error:?}",
-                    call.name
-                )));
+                return Err(Self::map_mob_failure_text(
+                    call.name,
+                    &handle,
+                    format!(
+                        "tool '{}' failed to admit delegated helper turn: {error}; retirement_error={retirement_error:?}",
+                        call.name
+                    ),
+                ));
             }
             Err(DelegationExecutionError::Turn {
                 error,
                 retirement_error,
             }) => {
-                return Err(ToolError::execution_failed(format!(
-                    "tool '{}' delegated turn failed: {error}; retirement_error={retirement_error:?}",
-                    call.name
-                )));
+                return Err(Self::map_mob_failure_text(
+                    call.name,
+                    &handle,
+                    format!(
+                        "tool '{}' delegated turn failed: {error}; retirement_error={retirement_error:?}",
+                        call.name
+                    ),
+                ));
             }
             Err(DelegationExecutionError::SourceBusy {
                 source_identity,
                 waited_ms,
             }) => {
-                return Err(ToolError::execution_failed(format!(
-                    "tool '{}' source member {source_identity} was still mid-turn after {waited_ms} ms; nothing was delegated",
-                    call.name
-                )));
+                return Err(Self::map_mob_failure_text(
+                    call.name,
+                    &handle,
+                    format!(
+                        "tool '{}' source member {source_identity} was still mid-turn after {waited_ms} ms; nothing was delegated",
+                        call.name
+                    ),
+                ));
             }
             Err(error) => {
-                return Err(ToolError::execution_failed(format!(
-                    "tool '{}' delegated helper failed: {error}",
-                    call.name
-                )));
+                return Err(Self::map_mob_failure_text(
+                    call.name,
+                    &handle,
+                    format!("tool '{}' delegated helper failed: {error}", call.name),
+                ));
             }
         };
         let turn = execution.turn();
@@ -1419,18 +1725,17 @@ impl AgentMobToolSurface {
         // minting it cannot newly fail; the create outcome and the grant leave
         // as one effect bundle for the turn owner to commit (row #211).
         let authority_context = self.authority_context_snapshot();
-        let created = mob_create_with_owner_bridge_boxed(
+        let named = definition.id.clone();
+        let created = match mob_create_with_owner_bridge_boxed(
             Arc::clone(&self.state),
             definition,
             self.owner_bridge_session_id.clone(),
         )
         .await
-        .map_err(|e| match e {
-            MobError::ToolBundleNotOffered { .. } => {
-                ToolError::invalid_arguments(call.name, e.to_string())
-            }
-            e => Self::map_mob_error(call, e),
-        })?;
+        {
+            Ok(created) => created,
+            Err(error) => return Err(self.map_create_refusal(call, &named, error).await),
+        };
         let authority_context = meerkat_runtime::mob_operator_authority::grant_manage_mob(
             &authority_context,
             created.mob_id.as_str(),
@@ -1449,13 +1754,57 @@ impl AgentMobToolSurface {
         // The provenance record goes to the mob this create started: a mob
         // registered under the id since then is another incarnation and
         // gets none.
-        if let Ok(handle) = self.bound_handle(&mob_id).await
+        if let Ok(handle) = self.bound_own_handle(&mob_id).await
             && handle.incarnation() == created.incarnation.incarnation()
         {
             self.record_successful_operator_action_boxed(&handle, call.name)
                 .await;
         }
         Self::encode_result_with_effects(call, json!({"mob_id": mob_id}), session_effects)
+    }
+
+    /// The refusal of a create. A create under an id that a quarantined
+    /// or held mob already holds is refused by the lookup of that mob,
+    /// and is answered as every agent tool that names it: the
+    /// quarantine's class or the hold's reason, and no cause and no owner
+    /// session. A create the host cannot admit because of a mob the call
+    /// did not name is answered why, and not which mob that is. Any other
+    /// refusal is the create's own, of a mob that does not exist yet.
+    async fn map_create_refusal(
+        &self,
+        call: ToolCallView<'_>,
+        named: &MobId,
+        error: MobError,
+    ) -> ToolError {
+        match error {
+            MobError::ToolBundleNotOffered { .. } => {
+                ToolError::invalid_arguments(call.name, error.to_string())
+            }
+            MobError::ProvenanceUnavailable { mob_id: Some(_) } => {
+                Self::map_unnamed_mob_refusal(call.name, &error)
+            }
+            MobError::MobQuarantined {
+                mob_id,
+                class,
+                cause: _,
+            } => Self::map_lookup_refusal(
+                call.name,
+                None,
+                &mob_id,
+                crate::AgentMobLookupRefusal::Quarantined { class },
+            ),
+            error if error.is_held_before_activation() => {
+                // The hold's reason is read from the state's own typed
+                // lookup, which starts nothing; a mob that is no longer
+                // held by then is answered the lookup's fixed text.
+                let refusal = match self.state.handle_for_agent(named, false, None).await {
+                    Err(held @ crate::AgentMobLookupRefusal::Held { .. }) => held,
+                    _ => crate::AgentMobLookupRefusal::Unshown(error),
+                };
+                Self::map_lookup_refusal(call.name, None, named, refusal)
+            }
+            error => Self::map_mob_error(call, error),
+        }
     }
 
     #[inline(never)]
@@ -1587,13 +1936,13 @@ impl AgentMobToolSurface {
         if let Some(objective_id) = objective_id {
             self.bind_objective_owner_boxed(&audit_handle, objective_id)
                 .await
-                .map_err(|error| Self::map_mob_error(call, error))?;
+                .map_err(|error| Self::map_mob_refusal(call, &audit_handle, &[], error))?;
         }
 
-        let mut spec = SpawnMemberSpec::new(
-            ProfileName::from(args.profile),
-            AgentIdentity::from(args.member_id),
-        );
+        // The member the call seats: a refusal that names it and nothing
+        // else names only what the caller said.
+        let seated = AgentIdentity::from(args.member_id);
+        let mut spec = SpawnMemberSpec::new(ProfileName::from(args.profile), seated.clone());
         spec.initial_message = initial_message;
         spec.objective_id = objective_id;
         spec.runtime_mode = args.runtime_mode;
@@ -1620,7 +1969,7 @@ impl AgentMobToolSurface {
         let spawn_result = self
             .spawn_spec_with_generated_owner_context_boxed(&audit_handle, spec)
             .await
-            .map_err(|e| Self::map_mob_error(call, e))?;
+            .map_err(|e| Self::map_mob_refusal(call, &audit_handle, &[&seated], e))?;
         let parent_wiring = self
             .spawn_parent_wiring(
                 &audit_handle,
@@ -1671,16 +2020,16 @@ impl AgentMobToolSurface {
             .state
             .member_for_bridge_session(&self.owner_bridge_session_id)
             .await
-            .map_err(|error| Self::map_mob_error(call, error))?
+            .map_err(|error| Self::map_seat_lookup_error(call, error))?
             .ok_or_else(|| {
                 ToolError::execution_failed(
                     "fork_off requires the current session to be a durable mob member",
                 )
             })?;
         let audit_handle = self
-            .bound_handle(&mob_id)
+            .bound_own_handle(&mob_id)
             .await
-            .map_err(|error| Self::map_mob_error(call, error))?;
+            .map_err(|refusal| Self::map_lookup_refusal(call.name, None, &mob_id, refusal))?;
         let source_entry = audit_handle
             .roster()
             .await
@@ -1705,12 +2054,14 @@ impl AgentMobToolSurface {
         let admission = audit_handle
             .resolve_spawn_member_admission(observations)
             .await
-            .map_err(|error| Self::map_mob_error(call, error))?;
+            .map_err(|error| Self::map_mob_refusal(call, &audit_handle, &[], error))?;
         if matches!(admission, meerkat_mob::SpawnMemberAdmission::Denied) {
             return Err(ToolError::access_denied(call.name));
         }
 
         let child_input = fork_off_child_input(&args.task, args.expected_output.as_deref());
+        // The child the call seats, named by the caller.
+        let seated = AgentIdentity::from(args.member_id.as_str());
         let mut member = SpawnMemberSpec::new(source_entry.role, args.member_id);
         member.initial_message = Some(ContentInput::Text(child_input));
         member.override_profile = source_entry.effective_profile_override;
@@ -1802,6 +2153,9 @@ impl AgentMobToolSurface {
             else {
                 return Ok((fork, Some(run.retire_child_if_abandoned())));
             };
+            // Whether the forker's mob has a member tool audience: the
+            // child's outcome is then delivered with no free text.
+            let guarded = owner.has_member_tool_audience();
             // The child's supervisor owns the run; this custodian only turns
             // its outcome into the owner's one durable completion record.
             let identity = fork.agent_identity.to_string();
@@ -1821,7 +2175,8 @@ impl AgentMobToolSurface {
                 recorder,
                 async move {
                     let completion =
-                        ForkOffCompletion::from_outcome(identity, member_ref, run.outcome().await);
+                        ForkOffCompletion::from_outcome(identity, member_ref, run.outcome().await)
+                            .for_agent(&mob_id, guarded);
                     (
                         serde_json::to_value(&completion),
                         completion.status.terminal_status(),
@@ -1831,7 +2186,14 @@ impl AgentMobToolSurface {
             Ok((fork, None))
         })
         .await
-        .map_err(|error| Self::map_bounded_member_run_error(call, error))?;
+        .map_err(|error| {
+            Self::map_bounded_member_run_error(
+                call,
+                &audit_handle,
+                &[&source_identity, &seated],
+                error,
+            )
+        })?;
         let identity = fork.agent_identity.to_string();
         let member_ref = meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity);
 
@@ -1864,7 +2226,8 @@ impl AgentMobToolSurface {
                     Self::encode_result(call, value)
                 }
                 other => {
-                    let completion = ForkOffCompletion::from_outcome(identity, member_ref, other);
+                    let completion = ForkOffCompletion::from_outcome(identity, member_ref, other)
+                        .for_agent(&mob_id, audit_handle.has_member_tool_audience());
                     Err(ToolError::execution_failed(format!(
                         "tool '{}' child did not complete: {}",
                         call.name,
@@ -1931,6 +2294,9 @@ impl AgentMobToolSurface {
         let mut admitted_sources =
             crate::temporary_council::TemporaryCouncilAdmittedSources::default();
 
+        // Whether a source mob of a participant has a member tool audience:
+        // the council's own failure is then answered as a fixed text.
+        let mut guarded = false;
         for (index, participant) in args.participants.into_iter().enumerate() {
             let source_mob_id = MobId::from(participant.mob_id);
             let source = self
@@ -1951,10 +2317,13 @@ impl AgentMobToolSurface {
                     MobError::MemberNotFound(source_identity),
                 ));
             }
+            guarded |= source.has_member_tool_audience();
             let source_profile = source
                 .effective_member_profile(&source_identity)
                 .await
-                .map_err(|error| Self::map_mob_error(call, error))?;
+                .map_err(|error| {
+                    Self::map_mob_refusal(call, &source, &[&source_identity], error)
+                })?;
             let source_definition = source.definition();
             merge_council_definition_dependencies(call, &mut definition, source_definition)?;
 
@@ -2053,7 +2422,7 @@ impl AgentMobToolSurface {
                     .temporary_council()
                     .run_admitted(request, admitted_sources, recorded_convener)
                     .await
-                    .map_err(|error| Self::map_council_error(call, error))?;
+                    .map_err(|error| Self::map_council_error(call, guarded, error))?;
                 let mut value = council_outcome_json(&outcome);
                 value["blocked_because"] = json!(reason);
                 return Self::encode_result(call, value);
@@ -2090,7 +2459,9 @@ impl AgentMobToolSurface {
                         council_terminal_status(&outcome),
                     ),
                     Err(error) => (
-                        Ok(json!({"error": error.to_string()})),
+                        Ok(json!({
+                            "error": Self::council_failure_text(TOOL_COUNCIL, guarded, &error)
+                        })),
                         meerkat_core::event::BackgroundJobTerminalStatus::Failed,
                     ),
                 };
@@ -2241,16 +2612,28 @@ impl AgentMobToolSurface {
             .state
             .objective_principal_for_bridge_session(&self.owner_bridge_session_id)
             .await
-            .map_err(|error| Self::map_mob_error(call, error))?
+            .map_err(|error| Self::map_seat_lookup_error(call, error))?
             .ok_or_else(|| {
                 ToolError::execution_failed(
                     "conclude_objective could not resolve this session to its objective lead principal",
                 )
             })?;
-        self.state
+        if let Err(error) = self
+            .state
             .mob_conclude_objective(&mob_id, &identity, objective_id, args.outcome)
             .await
-            .map_err(|error| Self::map_mob_error(call, error))?;
+        {
+            // The mob is the one this session is seated in or owns. Its
+            // handle says whether it has a member tool audience; a mob
+            // that cannot be looked up is answered as one that has.
+            return Err(match self.bound_own_handle(&mob_id).await {
+                Ok(handle) => Self::map_mob_refusal(call, &handle, &[&identity], error),
+                Err(_) => Self::answer_mob_refusal(
+                    call,
+                    crate::mob_refusal_for_agent(call.name, &mob_id, true, &[&identity], error),
+                ),
+            });
+        }
         Self::encode_result(
             call,
             json!({"ok": true, "objective_id": objective_id.to_string()}),
@@ -2272,9 +2655,9 @@ impl AgentMobToolSurface {
             .await?;
         self.state.pause_agent_call().await;
 
-        crate::MobMcpState::mob_retire_on(&audit_handle, identity)
+        crate::MobMcpState::mob_retire_on(&audit_handle, identity.clone())
             .await
-            .map_err(|e| Self::map_mob_error(call, e))?;
+            .map_err(|e| Self::map_mob_refusal(call, &audit_handle, &[&identity], e))?;
 
         self.record_successful_operator_action(&audit_handle, call.name)
             .await;
@@ -2299,7 +2682,7 @@ impl AgentMobToolSurface {
 
         let snapshot = crate::MobMcpState::mob_member_status_on(&handle, &identity)
             .await
-            .map_err(|e| Self::map_mob_error(call, e))?;
+            .map_err(|e| Self::map_mob_refusal(call, &handle, &[&identity], e))?;
 
         let member_ref =
             meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), identity.as_str());
@@ -2325,11 +2708,8 @@ impl AgentMobToolSurface {
         let mob_id = MobId::from(args.mob_id);
         // One resolution: the admission, the owner view and the list all
         // read the mob this handle serves.
-        let handle = self.bound_handle(&mob_id).await.map_err(|error| {
-            ToolError::execution_failed(format!(
-                "tool '{}' current-mob admission failed: {error}",
-                call.name
-            ))
+        let handle = self.bound_handle(&mob_id).await.map_err(|refusal| {
+            Self::map_lookup_refusal(call.name, Some("current-mob admission"), &mob_id, refusal)
         })?;
         let manage = self
             .current_mob_admission(call.name, &mob_id, &handle)
@@ -2353,14 +2733,14 @@ impl AgentMobToolSurface {
             .state
             .mob_list_members_on(&handle)
             .await
-            .map_err(|e| Self::map_mob_error(call, e))?;
+            .map_err(|e| Self::map_mob_refusal(call, &handle, &[], e))?;
         if let Some(caller) = owner_view {
             let mut owned = Vec::with_capacity(members.len());
             for member in members {
                 let admission = handle
                     .resolve_owned_member_admission(false, Some(&caller), &member.agent_identity)
                     .await
-                    .map_err(|e| Self::map_mob_error(call, e))?;
+                    .map_err(|e| Self::map_mob_refusal(call, &handle, &[], e))?;
                 if matches!(admission, meerkat_mob::CurrentMobAdmission::Allowed) {
                     owned.push(member);
                 }
@@ -2412,7 +2792,11 @@ impl AgentMobToolSurface {
                     {
                         fields.insert(
                             "failure".to_string(),
-                            json!(crate::wire_mob_lifecycle_failure(failure)),
+                            json!(crate::wire_mob_lifecycle_failure_for_agent(
+                                &id,
+                                handle.has_member_tool_audience(),
+                                failure,
+                            )),
                         );
                     }
                     mob_list.push(row);
@@ -2450,6 +2834,19 @@ impl AgentMobToolSurface {
         }
     }
 
+    /// The members a wire or unwire names by argument: its local member
+    /// and, when the peer is a member of the same mob, that peer.
+    fn wire_ends_named(
+        local: &AgentIdentity,
+        target: &meerkat_mob::PeerTarget,
+    ) -> Vec<AgentIdentity> {
+        let mut ends = vec![local.clone()];
+        if let meerkat_mob::PeerTarget::Local(peer) = target {
+            ends.push(peer.clone());
+        }
+        ends
+    }
+
     async fn dispatch_mob_wire(
         &self,
         call: ToolCallView<'_>,
@@ -2465,10 +2862,13 @@ impl AgentMobToolSurface {
         let target = wire_peer_target_from_args(args.peer);
         self.ensure_wire_ends_shown(call, &audit_handle, &local, &target)
             .await?;
+        let ends = Self::wire_ends_named(&local, &target);
         audit_handle
-            .wire(local, target)
+            .wire(local.clone(), target.clone())
             .await
-            .map_err(|e| Self::map_mob_error(call, e))?;
+            .map_err(|e| {
+                Self::map_mob_refusal(call, &audit_handle, &ends.iter().collect::<Vec<_>>(), e)
+            })?;
         self.record_successful_operator_action(&audit_handle, call.name)
             .await;
         Self::encode_result(call, json!({ "wired": true }))
@@ -2489,10 +2889,13 @@ impl AgentMobToolSurface {
         let target = unwire_peer_target_from_args(args.peer)?;
         self.ensure_wire_ends_shown(call, &audit_handle, &local, &target)
             .await?;
+        let ends = Self::wire_ends_named(&local, &target);
         audit_handle
-            .unwire(local, target)
+            .unwire(local.clone(), target.clone())
             .await
-            .map_err(|e| Self::map_mob_error(call, e))?;
+            .map_err(|e| {
+                Self::map_mob_refusal(call, &audit_handle, &ends.iter().collect::<Vec<_>>(), e)
+            })?;
         self.record_successful_operator_action(&audit_handle, call.name)
             .await;
         Self::encode_result(call, json!({ "unwired": true }))
@@ -3952,6 +4355,25 @@ impl ForkOffCompletionStatus {
 }
 
 impl ForkOffCompletion {
+    /// This outcome as the forker's agent reads it. The texts of a
+    /// failed run and of a failed retirement are the mob's own: from a
+    /// mob with a member tool audience (`has_audience`) each is logged
+    /// whole and replaced by the fixed text, as a refused call's is; the
+    /// typed fields stay.
+    pub(crate) fn for_agent(mut self, mob_id: &MobId, has_audience: bool) -> Self {
+        for text in [&mut self.error, &mut self.retirement_error] {
+            if let Some(whole) = text.take() {
+                *text = Some(crate::mob_failure_text_for_agent(
+                    TOOL_FORK_OFF,
+                    mob_id,
+                    has_audience,
+                    whole,
+                ));
+            }
+        }
+        self
+    }
+
     pub(crate) fn empty(
         agent_identity: String,
         member_ref: meerkat_contracts::WireMemberRef,
@@ -4965,6 +5387,658 @@ mod tests {
         assert_eq!(data["provider"], "openai");
         assert_eq!(data["realm_id"], "project");
         assert_eq!(data["binding_id"], "openai");
+    }
+
+    /// A refusal that is not passed on keeps the two typed facts that carry
+    /// no member identity, its class and whether a retry can help, in its
+    /// text and in its data, and nothing else of the refusal. The outcome
+    /// of a fork's run and a council's failure follow the mob's audience
+    /// the same way: their texts are the fixed text from a mob that has
+    /// one, and their own from a mob that has none.
+    #[test]
+    fn a_refusal_not_passed_on_keeps_its_class_and_retry_flag_and_nothing_else() {
+        use meerkat_contracts::MobSpawnManyFailureCause as Class;
+        let raw = serde_json::value::RawValue::from_string("{}".to_string()).expect("raw args");
+        let call = ToolCallView {
+            id: "test-1",
+            name: "mob_retire_member",
+            args: &raw,
+        };
+        let answered = |class: Option<Class>, retryable: bool| {
+            let error = AgentMobToolSurface::answer_mob_refusal(
+                call,
+                crate::AgentMobRefusal::NotShown { class, retryable },
+            );
+            (
+                error.to_string(),
+                error.structured_data().map(|data| data.to_string()),
+            )
+        };
+        let (text, data) = answered(None, true);
+        assert!(
+            text.contains(crate::MOB_REFUSED) && text.contains("The call can be retried."),
+            "{text}"
+        );
+        assert_eq!(data, Some(json!({ "retryable": true }).to_string()));
+        let (text, data) = answered(Some(Class::WiringError), false);
+        assert!(
+            text.contains(crate::MOB_REFUSED)
+                && text.contains("Refusal class: wiring_error.")
+                && !text.contains("retried"),
+            "{text}"
+        );
+        assert_eq!(data, Some(json!({ "class": "wiring_error" }).to_string()));
+        let (text, data) = answered(None, false);
+        assert!(text.contains(crate::MOB_REFUSED), "{text}");
+        assert_eq!(data, None, "no member, stage or session reaches the data");
+
+        // The outcome of a fork's run.
+        let mob_id = MobId::from("guarded-mob");
+        let failed = || {
+            let mut completion = ForkOffCompletion::empty(
+                "forked-child".to_string(),
+                meerkat_contracts::WireMemberRef::encode("guarded-mob", "forked-child"),
+                ForkOffCompletionStatus::Failed,
+            );
+            completion.error = Some("the run failed while other-worker held the store".into());
+            completion.retirement_error = Some("retire of other-worker is stuck".into());
+            completion
+        };
+        let whole = failed().for_agent(&mob_id, false);
+        assert_eq!(whole.error, failed().error);
+        assert_eq!(whole.retirement_error, failed().retirement_error);
+        let cut = failed().for_agent(&mob_id, true);
+        for text in [cut.error.as_deref(), cut.retirement_error.as_deref()] {
+            let text = text.expect("the field stays present");
+            assert!(
+                text.contains(crate::MOB_REFUSED) && !text.contains("other-worker"),
+                "{text}"
+            );
+        }
+        assert!(matches!(cut.status, ForkOffCompletionStatus::Failed));
+
+        // A council's failure, as the tool answers it and as a detached
+        // council's completion carries it.
+        let failure = TemporaryCouncilError::InvalidRequest {
+            detail: "participant other-worker is not seated".to_string(),
+        };
+        assert!(
+            AgentMobToolSurface::council_failure_text("council", false, &failure)
+                .contains("other-worker")
+        );
+        assert_eq!(
+            AgentMobToolSurface::council_failure_text("council", true, &failure),
+            crate::MOB_REFUSED
+        );
+    }
+
+    /// A Rust source with its comments, string literals and character
+    /// literals blanked to spaces, line ends kept. What is left is code, so
+    /// a count over it counts calls and not their mention. A lifetime is
+    /// code.
+    fn code_only(source: &str) -> String {
+        let chars: Vec<char> = source.chars().collect();
+        let len = chars.len();
+        let at = |index: usize| chars.get(index).copied().unwrap_or('\0');
+        let is_name = |c: char| c.is_alphanumeric() || c == '_';
+        let mut code = chars.clone();
+        let mut blank = |from: usize, to: usize| {
+            for slot in code.iter_mut().take(to.min(len)).skip(from) {
+                if *slot != '\n' {
+                    *slot = ' ';
+                }
+            }
+        };
+        let mut i = 0;
+        while i < len {
+            match (at(i), at(i + 1)) {
+                ('/', '/') => {
+                    let mut end = i;
+                    while end < len && at(end) != '\n' {
+                        end += 1;
+                    }
+                    blank(i, end);
+                    i = end;
+                }
+                ('/', '*') => {
+                    // Block comments nest.
+                    let mut depth = 1;
+                    let mut end = i + 2;
+                    while end < len && depth > 0 {
+                        match (at(end), at(end + 1)) {
+                            ('/', '*') => {
+                                depth += 1;
+                                end += 2;
+                            }
+                            ('*', '/') => {
+                                depth -= 1;
+                                end += 2;
+                            }
+                            _ => end += 1,
+                        }
+                    }
+                    blank(i, end);
+                    i = end;
+                }
+                ('"', _) => {
+                    let mut end = i + 1;
+                    while end < len && at(end) != '"' {
+                        end += if at(end) == '\\' { 2 } else { 1 };
+                    }
+                    blank(i + 1, end);
+                    i = end + 1;
+                }
+                // A raw string, also behind a `b` or `c` prefix: `r`, any
+                // number of `#`, then the quote. An `r` inside a name is
+                // not one.
+                ('r', '"' | '#')
+                    if i == 0
+                        || !is_name(at(i - 1))
+                        || (matches!(at(i - 1), 'b' | 'c') && (i < 2 || !is_name(at(i - 2)))) =>
+                {
+                    let mut open = i + 1;
+                    while at(open) == '#' {
+                        open += 1;
+                    }
+                    let hashes = open - (i + 1);
+                    if at(open) == '"' {
+                        let mut end = open + 1;
+                        while end < len
+                            && !(at(end) == '"' && (1..=hashes).all(|k| at(end + k) == '#'))
+                        {
+                            end += 1;
+                        }
+                        blank(open + 1, end);
+                        i = end + 1 + hashes;
+                    } else {
+                        i += 1;
+                    }
+                }
+                ('\'', '\\') => {
+                    // The escaped character is never the closing quote.
+                    let mut end = i + 3;
+                    while end < len && at(end) != '\'' {
+                        end += 1;
+                    }
+                    blank(i + 1, end);
+                    i = end + 1;
+                }
+                ('\'', _) if at(i + 2) == '\'' => {
+                    blank(i + 1, i + 2);
+                    i += 3;
+                }
+                _ => i += 1,
+            }
+        }
+        code.into_iter().collect()
+    }
+
+    /// The source guard below counts in code only: a call that stands in a
+    /// comment or in a string literal is not counted, and a quote, a brace
+    /// or a comment mark inside a literal does not move what is read as
+    /// code after it.
+    #[test]
+    fn the_source_guard_reads_code_and_not_comments_or_literals() {
+        for (source, code) in [
+            ("a // b \"c\"\nd", "a         \nd"),
+            ("a /* b /* c */ d */ e", "a                   e"),
+            ("x = \"a\\\"b // c\"; y", "x = \"         \"; y"),
+            ("x = r#\"a\"b\"#; y", "x = r#\"   \"#; y"),
+            ("x = br\"a\\\"; y", "x = br\"  \"; y"),
+            (
+                "x = '{'; y = '\\''; z: &'a str",
+                "x = ' '; y = '  '; z: &'a str",
+            ),
+            ("x = '\\u{7b}'; y", "x = '      '; y"),
+            ("fn r(a: u8) { r\"x\" }", "fn r(a: u8) { r\" \" }"),
+            ("let for_r = 1; \"s\"", "let for_r = 1; \" \""),
+            ("let r#type = '\"'; f(\"}\")", "let r#type = ' '; f(\" \")"),
+        ] {
+            assert_eq!(code_only(source), code, "{source:?}");
+        }
+        let site = "        handle\n            // .map_err(|e| Self::map_mob_refusal(call, e))\n            \
+                    .map_err(|e| other(\"Self::map_mob_refusal(\", e))?;\n";
+        let code = code_only(site);
+        assert_eq!(code.matches("Self::map_mob_refusal(").count(), 0, "{code}");
+        assert_eq!(code.matches(".map_err(").count(), 1, "{code}");
+        assert_eq!(code.lines().count(), site.lines().count());
+    }
+
+    /// Every site at which an agent mob tool answers a refusal of a mob
+    /// asks the mapper. A source guard, by site: the code of each tool's
+    /// function is read from this file (comments and literals blanked,
+    /// [`code_only`]) and must hold its calls of the mapper, and the mob's
+    /// own text (`map_mob_error`) only where the refusal is of no hosted
+    /// mob or is the answer for a name the mob does not hold. A site that
+    /// passes the mob's refusal on as its own text fails the line named
+    /// for it. Every tool function is in the table or is exempt with its
+    /// reason, and the table pins how many error paths (`.map_err(`) each
+    /// listed function has: a new one is recorded here, beside the line
+    /// that says who answers it. What a helper is handed at a site is not
+    /// read here but for the lines that spell their arguments; the helpers
+    /// themselves have a row that runs them.
+    #[test]
+    fn every_agent_mob_tool_site_asks_the_mapper() {
+        let source = code_only(include_str!("agent_tools.rs"));
+        // The two patterns below are spelled so that this line holds neither
+        // the test attribute's text nor a lone brace: the workspace's tool
+        // schema literal gate (meerkat-tools, `rct_manual_schema_literals`)
+        // finds a test module by that text and by the braces of each line,
+        // and would take the rest of this module for production code.
+        let product = source
+            .split(concat!("\n#[cfg(", "test)]\n#[allow("))
+            .next()
+            .expect("the part before the tests");
+        let body = |name: &str| {
+            let start = product
+                .find(&format!("fn {name}("))
+                .unwrap_or_else(|| panic!("fn {name} is in the file"));
+            let rest = &product[start..];
+            let end = rest.find("\n    \u{7d}\n").expect("the function ends");
+            &rest[..end]
+        };
+        // function, needle, times it occurs in the function's code
+        let sites: &[(&str, &str, usize)] = &[
+            (
+                "ensure_owned_member_authority",
+                "Self::map_admission_refusal(",
+                1,
+            ),
+            ("ensure_owned_member_authority", ".map_err(", 2),
+            ("current_mob_admission", "Self::map_admission_refusal(", 1),
+            ("current_mob_admission", ".map_err(", 1),
+            (
+                "ensure_spawn_member_scope",
+                "Self::map_admission_refusal(",
+                1,
+            ),
+            ("ensure_spawn_member_scope", ".map_err(", 2),
+            (
+                "map_bounded_member_run_error",
+                "Self::map_mob_refusal(call, handle, named, error)",
+                1,
+            ),
+            (
+                "map_bounded_member_run_error",
+                "Self::map_mob_failure_text(",
+                1,
+            ),
+            ("dispatch_delegate", "Self::map_mob_refusal(", 2),
+            ("dispatch_delegate", "Self::map_mob_failure_text(", 4),
+            ("dispatch_delegate", "Self::map_unnamed_mob_refusal(", 1),
+            ("dispatch_delegate", "Self::map_mob_error(", 1),
+            ("dispatch_delegate", ".map_err(", 7),
+            ("dispatch_mob_create", "self.map_create_refusal(", 1),
+            ("dispatch_mob_create", "Self::map_mob_error(", 0),
+            ("dispatch_mob_create", ".map_err(", 4),
+            ("map_create_refusal", "Self::map_lookup_refusal(", 2),
+            ("map_create_refusal", "Self::map_unnamed_mob_refusal(", 1),
+            ("map_create_refusal", "Self::map_mob_error(", 1),
+            ("dispatch_mob_spawn_member", "Self::map_mob_refusal(", 2),
+            ("dispatch_mob_spawn_member", "Self::map_mob_error(", 0),
+            ("dispatch_mob_spawn_member", ".map_err(", 5),
+            ("dispatch_fork_off", "Self::map_seat_lookup_error(", 1),
+            ("dispatch_fork_off", "Self::map_mob_refusal(", 1),
+            (
+                "dispatch_fork_off",
+                "Self::map_bounded_member_run_error(",
+                1,
+            ),
+            // The two live deliveries of a fork's outcome, each with the
+            // audience of the forker's own mob.
+            ("dispatch_fork_off", ".for_agent(", 2),
+            (
+                "dispatch_fork_off",
+                "let guarded = owner.has_member_tool_audience();",
+                1,
+            ),
+            ("dispatch_fork_off", ".for_agent(&mob_id, guarded)", 1),
+            (
+                "dispatch_fork_off",
+                ".for_agent(&mob_id, audit_handle.has_member_tool_audience())",
+                1,
+            ),
+            ("dispatch_fork_off", "Self::map_mob_error(", 0),
+            ("dispatch_fork_off", ".map_err(", 7),
+            (
+                "dispatch_council",
+                "guarded |= source.has_member_tool_audience();",
+                1,
+            ),
+            ("dispatch_council", "Self::map_mob_refusal(", 1),
+            (
+                "dispatch_council",
+                "Self::map_council_error(call, guarded, error)",
+                1,
+            ),
+            (
+                "dispatch_council",
+                "Self::council_failure_text(TOOL_COUNCIL, guarded, &error)",
+                1,
+            ),
+            // The answer for a participant the audience hides, in the form
+            // of a name the mob does not hold.
+            ("dispatch_council", "Self::map_mob_error(", 1),
+            ("dispatch_council", ".map_err(", 5),
+            (
+                "dispatch_conclude_objective",
+                "Self::map_seat_lookup_error(",
+                1,
+            ),
+            ("dispatch_conclude_objective", "Self::map_mob_refusal(", 1),
+            (
+                "dispatch_conclude_objective",
+                "crate::mob_refusal_for_agent(call.name, &mob_id, true, &[&identity], error)",
+                1,
+            ),
+            ("dispatch_conclude_objective", "Self::map_mob_error(", 0),
+            ("dispatch_conclude_objective", ".map_err(", 2),
+            ("dispatch_mob_retire_member", "Self::map_mob_refusal(", 1),
+            ("dispatch_mob_retire_member", "Self::map_mob_error(", 0),
+            ("dispatch_mob_retire_member", ".map_err(", 2),
+            ("dispatch_mob_check_member", "Self::map_mob_refusal(", 1),
+            ("dispatch_mob_check_member", "Self::map_mob_error(", 0),
+            ("dispatch_mob_check_member", ".map_err(", 3),
+            ("dispatch_mob_list_members", "Self::map_mob_refusal(", 2),
+            ("dispatch_mob_list_members", "Self::map_mob_error(", 0),
+            ("dispatch_mob_list_members", ".map_err(", 4),
+            (
+                "dispatch_mob_list",
+                "crate::wire_mob_lifecycle_failure_for_agent(",
+                1,
+            ),
+            // The state's own read of the mobs it manages: no hosted mob
+            // answers it.
+            ("dispatch_mob_list", "Self::map_mob_error(", 1),
+            ("dispatch_mob_list", ".map_err(", 1),
+            ("dispatch_mob_wire", "Self::map_mob_refusal(", 1),
+            ("dispatch_mob_wire", "Self::map_mob_error(", 0),
+            ("dispatch_mob_wire", ".map_err(", 2),
+            ("dispatch_mob_unwire", "Self::map_mob_refusal(", 1),
+            ("dispatch_mob_unwire", "Self::map_mob_error(", 0),
+            ("dispatch_mob_unwire", ".map_err(", 2),
+        ];
+        // Tool functions with no line above, each with the reason.
+        let exempt: &[(&str, &str)] = &[
+            (
+                "dispatch_mob_destroy",
+                "a destroy's refusals are answered by the destroy's own decision",
+            ),
+            (
+                "dispatch_mob_profile_create",
+                "acts on the realm's profile store, on no mob",
+            ),
+            (
+                "dispatch_mob_profile_get",
+                "acts on the realm's profile store, on no mob",
+            ),
+            (
+                "dispatch_mob_profile_list",
+                "acts on the realm's profile store, on no mob",
+            ),
+            (
+                "dispatch_mob_profile_update",
+                "acts on the realm's profile store, on no mob",
+            ),
+            (
+                "dispatch_mob_profile_delete",
+                "acts on the realm's profile store, on no mob",
+            ),
+            (
+                "dispatch_mob_profile_list_sources",
+                "reads the caller's own profile sources, on no mob",
+            ),
+            (
+                "dispatch_with_context_stack_bounded",
+                "hands a call to its tool's function",
+            ),
+            (
+                "dispatch_with_context",
+                "hands a call to its tool's function",
+            ),
+        ];
+        let mut wrong = Vec::new();
+        for (name, needle, times) in sites {
+            let found = body(name).matches(needle).count();
+            if found != *times {
+                wrong.push(format!(
+                    "{name}: `{needle}` occurs {found} times, the site needs {times}"
+                ));
+            }
+        }
+        // The census: every tool function is listed with its error paths
+        // or is exempt, and never both.
+        let mut census = Vec::new();
+        for (at, _) in product.match_indices("async fn dispatch_") {
+            let name: String = product[at + "async fn ".len()..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            census.push(name);
+        }
+        assert!(
+            !census.is_empty(),
+            "the tool functions are read from the file"
+        );
+        for name in &census {
+            let listed = sites
+                .iter()
+                .any(|(function, needle, _)| *function == name.as_str() && *needle == ".map_err(");
+            let exempted = exempt
+                .iter()
+                .any(|(function, _)| *function == name.as_str());
+            if listed == exempted {
+                wrong.push(format!(
+                    "{name}: a tool function is in the table with its `.map_err(` count or \
+                     exempt with its reason, and not both (listed: {listed}, exempt: {exempted})"
+                ));
+            }
+        }
+        for (name, reason) in exempt {
+            if !census.iter().any(|function| function.as_str() == *name) {
+                wrong.push(format!("{name}: exempt ({reason}) and not in the file"));
+            }
+        }
+        // Every tool's call is handed to a function of the census: each
+        // arm of the dispatcher but its last hands the call on, and to
+        // nothing else.
+        let router = body("dispatch_with_context_stack_bounded");
+        let handed = router.matches("self.").count();
+        for (at, _) in router.match_indices("self.") {
+            let callee: String = router[at + "self.".len()..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let known = callee
+                .strip_suffix("_boxed")
+                .is_some_and(|name| census.iter().any(|function| function.as_str() == name));
+            if !known {
+                wrong.push(format!(
+                    "{callee}: the dispatcher hands a tool's call to it, and it is no tool \
+                     function of the census"
+                ));
+            }
+        }
+        let arms = router.matches("=>").count();
+        if arms != handed + 1 {
+            wrong.push(format!(
+                "the dispatcher has {arms} arms and hands {handed} calls on: an arm other than \
+                 the last answers a tool without a function of the census"
+            ));
+        }
+        // A fork's outcome delivered after a restart goes through the same
+        // cut, at the re-link's one delivery point.
+        let relinked = code_only(include_str!("fork_relink.rs"))
+            .matches("completion.for_agent(child_mob, handle.has_member_tool_audience())")
+            .count();
+        if relinked != 1 {
+            wrong.push(format!(
+                "fork_relink deliver: the outcome is cut for the forker's agent {relinked} times, \
+                 the site needs 1"
+            ));
+        }
+        assert!(
+            wrong.is_empty(),
+            "a site no longer asks the mapper as recorded here:\n{}",
+            wrong.join("\n")
+        );
+    }
+
+    /// The helpers through which a tool answers a mob's refusal, the
+    /// refusal of an admission, a failure text and the error of a bounded
+    /// run read the audience of the mob they are handed: a free text
+    /// reaches the agent from a mob with no member tool audience and is
+    /// the fixed text from a mob that has one.
+    #[tokio::test]
+    async fn the_helpers_that_answer_a_mobs_refusal_read_the_audience_of_the_mob_they_are_handed() {
+        const FREE_TEXT: &str = "archive refused while member kept-peer held the store";
+        let state = MobMcpState::new_in_memory();
+        let guarded = host_mob_with_kept_members(&state, "helpers-guarded", &[]).await;
+        let open = meerkat_mob::MobBuilder::new(
+            sample_definition("helpers-open"),
+            meerkat_mob::MobStorage::in_memory(),
+        )
+        .with_session_service(state.session_service())
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("create the mob with no audience");
+        assert!(guarded.has_member_tool_audience());
+        assert!(!open.has_member_tool_audience());
+
+        let raw = serde_json::value::RawValue::from_string("{}".to_string()).expect("raw args");
+        let call = ToolCallView {
+            id: "test-1",
+            name: "mob_retire_member",
+            args: &raw,
+        };
+        let refusal = || MobError::Internal(FREE_TEXT.to_string());
+        let answers = |handle: &MobHandle| {
+            [
+                (
+                    "a mob's refusal",
+                    AgentMobToolSurface::map_mob_refusal(call, handle, &[], refusal()),
+                ),
+                (
+                    "an admission's refusal",
+                    AgentMobToolSurface::map_admission_refusal(
+                        call.name,
+                        "member",
+                        handle,
+                        refusal(),
+                    ),
+                ),
+                (
+                    "a failure text",
+                    AgentMobToolSurface::map_mob_failure_text(
+                        call.name,
+                        handle,
+                        format!("tool '{}' failed: {FREE_TEXT}", call.name),
+                    ),
+                ),
+                (
+                    "a bounded run refused at its admission",
+                    AgentMobToolSurface::map_bounded_member_run_error(
+                        call,
+                        handle,
+                        &[],
+                        meerkat_mob::BoundedMemberRunError::Admission(refusal()),
+                    ),
+                ),
+                (
+                    "a bounded run that failed after it started",
+                    AgentMobToolSurface::map_bounded_member_run_error(
+                        call,
+                        handle,
+                        &[],
+                        meerkat_mob::BoundedMemberRunError::CleanupDebt {
+                            operation: Box::new(meerkat_mob::BoundedMemberRunError::Admission(
+                                refusal(),
+                            )),
+                            retirement_error: refusal(),
+                        },
+                    ),
+                ),
+            ]
+        };
+        let mut wrong = Vec::new();
+        for (what, answer) in answers(&open) {
+            let text = answer.to_string();
+            if !text.contains(FREE_TEXT) {
+                wrong.push(format!(
+                    "{what}, from a mob with no audience, is answered whole: {text}"
+                ));
+            }
+        }
+        for (what, answer) in answers(&guarded) {
+            let text = format!("{answer} | {answer:?} | {}", answer.to_error_payload());
+            if !text.contains(crate::MOB_REFUSED) || text.contains("kept-peer") {
+                wrong.push(format!(
+                    "{what}, from a mob with an audience, is the fixed text: {text}"
+                ));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "a helper does not read the audience of the mob it is handed:\n{}",
+            wrong.join("\n")
+        );
+    }
+
+    /// The refusal of a read that looks for the session's own seat across
+    /// the state's mobs is answered whole only when its type says that it
+    /// names nothing: it can come from a mob the caller has nothing to do
+    /// with. A council's failure is answered whole unless a source mob of
+    /// its participants has a member tool audience.
+    #[test]
+    fn a_seat_lookup_refusal_and_a_guarded_councils_failure_are_fixed_texts() {
+        let raw = serde_json::value::RawValue::from_string("{}".to_string()).expect("raw args");
+        let call = |name: &'static str| ToolCallView {
+            id: "test-1",
+            name,
+            args: &raw,
+        };
+
+        let typed = AgentMobToolSurface::map_seat_lookup_error(
+            call("fork_off"),
+            MobError::ActorCommandChannelClosed,
+        );
+        assert!(
+            typed
+                .to_string()
+                .contains(&MobError::ActorCommandChannelClosed.to_string()),
+            "{typed}"
+        );
+        for elsewhere in [
+            MobError::Internal("restore of member other-worker failed".into()),
+            MobError::MobNotFound(MobId::from("another-mob")),
+            MobError::MemberNotFound(AgentIdentity::from("other-worker")),
+        ] {
+            let answered = AgentMobToolSurface::map_seat_lookup_error(call("fork_off"), elsewhere);
+            let text = format!(
+                "{answered} | {answered:?} | {}",
+                answered.to_error_payload()
+            );
+            assert!(
+                text.contains("the session's seat could not be looked up")
+                    && !text.contains("other-worker")
+                    && !text.contains("another-mob")
+                    && answered.structured_data().is_none(),
+                "{text}"
+            );
+        }
+
+        let failure = || TemporaryCouncilError::InvalidRequest {
+            detail: "participant other-worker is not seated".to_string(),
+        };
+        let whole = AgentMobToolSurface::map_council_error(call("council"), false, failure());
+        assert!(whole.to_string().contains("other-worker"), "{whole}");
+        let cut = AgentMobToolSurface::map_council_error(call("council"), true, failure());
+        assert!(
+            cut.to_string().contains(crate::MOB_REFUSED)
+                && !cut.to_string().contains("other-worker"),
+            "{cut}"
+        );
     }
 
     fn canonical_agent_wire_peer_arg() -> WirePeerArg {
@@ -8895,11 +9969,18 @@ mod tests {
                     "{binding}: a member the caller is shown is answered as absent: {shown}"
                 ));
             }
+            // The mob has a member tool audience, so the binding's refusal,
+            // a free text, reaches the agent as the fixed text.
             match refusal {
-                Some(refusal) if !(shown.starts_with("error:") && shown.contains(refusal)) => {
+                Some(refusal)
+                    if !(shown.starts_with("error:")
+                        && shown.contains(crate::MOB_REFUSED)
+                        && shown.contains("Refusal class: wiring_error.")
+                        && !shown.contains(refusal)) =>
+                {
                     told_apart.push(format!(
-                        "{binding}: a member the caller is shown is not answered the binding's \
-                         refusal: {shown}"
+                        "{binding}: a member the caller is shown is not answered the fixed \
+                         text for the binding's refusal: {shown}"
                     ));
                 }
                 None if !shown.starts_with("ok:") => {
@@ -9083,6 +10164,98 @@ mod tests {
         assert!(
             shown_failed.contains("mixed-shown") && shown_failed.contains("the archive is refused"),
             "the failure of the member the caller is shown is answered: {shown_failed}"
+        );
+    }
+
+    /// What an agent mob tool answers when the lookup of the mob it names
+    /// answered no handle: an unknown id as before; a held mob its kind,
+    /// reason and that a retry can help; a quarantined mob its kind, class
+    /// and whether a retry can help; a lookup that failed a fixed text.
+    /// None of them carries an owner session, a cause or the text of the
+    /// failure.
+    #[test]
+    fn a_mob_lookup_refusal_is_answered_an_agent_without_owner_or_cause() {
+        let mob_id = MobId::from("lookup-mob");
+        let answer = |admission: Option<&str>, refusal: crate::AgentMobLookupRefusal| {
+            AgentMobToolSurface::map_lookup_refusal("mob_wire", admission, &mob_id, refusal)
+        };
+        let admission = Some("current-mob admission");
+
+        let unknown = answer(admission, crate::AgentMobLookupRefusal::NotFound);
+        assert_eq!(
+            unknown.to_string(),
+            "Tool execution failed: tool 'mob_wire' current-mob admission failed: mob not \
+             found: lookup-mob"
+        );
+        assert!(unknown.structured_data().is_none(), "{unknown:?}");
+        let unknown = answer(None, crate::AgentMobLookupRefusal::NotFound);
+        assert_eq!(
+            unknown.to_string(),
+            "Tool execution failed: tool 'mob_wire' failed: mob not found: lookup-mob"
+        );
+
+        let held = answer(
+            admission,
+            crate::AgentMobLookupRefusal::Held {
+                reason: "owner_absent",
+            },
+        );
+        assert_eq!(
+            held.structured_data(),
+            Some(json!({
+                "kind": MobError::HELD_BEFORE_ACTIVATION_KIND,
+                "code": "SESSION_RUNTIME_UNAVAILABLE",
+                "mob_id": "lookup-mob",
+                "reason": "owner_absent",
+                "content_retained": true,
+                "retryable": true,
+            })),
+            "{held:?}"
+        );
+
+        for (class, token, retryable) in [
+            (
+                meerkat_mob::MobQuarantineClass::StoreUnavailable,
+                "store_unavailable",
+                true,
+            ),
+            (
+                meerkat_mob::MobQuarantineClass::StoreUnreadable,
+                "store_unreadable",
+                false,
+            ),
+        ] {
+            let quarantined = answer(
+                admission,
+                crate::AgentMobLookupRefusal::Quarantined { class },
+            );
+            assert_eq!(
+                quarantined.structured_data(),
+                Some(json!({
+                    "kind": MobError::MOB_QUARANTINED_KIND,
+                    "mob_id": "lookup-mob",
+                    "class": token,
+                    "retryable": retryable,
+                    "content_retained": true,
+                })),
+                "{quarantined:?}"
+            );
+        }
+
+        let failed = answer(
+            admission,
+            crate::AgentMobLookupRefusal::Unshown(MobError::Internal(
+                "restore of member kept-worker session 0191-kept failed".to_string(),
+            )),
+        );
+        let forms = format!("{failed} | {failed:?}");
+        assert!(
+            !forms.contains("kept-worker") && !forms.contains("0191-kept"),
+            "a lookup that failed tells nothing of its error: {forms}"
+        );
+        assert!(
+            forms.contains("the mob could not be looked up") && failed.structured_data().is_none(),
+            "{forms}"
         );
     }
 
@@ -9271,8 +10444,10 @@ mod tests {
     /// One name given as both ends of `mob_wire` or `mob_unwire`: an
     /// identity entry the host's audience hides from the caller answers
     /// exactly as a name the mob does not hold, member not found. A member
-    /// the caller is shown still answers that the call needs two different
-    /// members. (The mob's own row asks a hidden approval branch too.)
+    /// the caller is shown is still refused, and not as a member not found:
+    /// the mob answers that the call needs two different members, which an
+    /// agent of a mob with a member tool audience reads as the fixed text.
+    /// (The mob's own row asks a hidden approval branch too.)
     #[tokio::test]
     async fn mob_wire_and_unwire_answer_a_hidden_name_given_twice_as_absent() {
         let state = MobMcpState::new_in_memory();
@@ -9336,13 +10511,18 @@ mod tests {
                      {hidden_entry}"
                 ));
             }
+            // The mob has a member tool audience, so its refusal that the
+            // call needs two different members, a free text, reaches the
+            // agent as the fixed text: still not as a member not found.
             if !(shown.starts_with("error:")
-                && shown.contains("requires distinct")
+                && shown.contains(crate::MOB_REFUSED)
+                && shown.contains("Refusal class: wiring_error.")
+                && !shown.contains("requires distinct")
                 && !shown.contains("mob member not found"))
             {
                 told_apart.push(format!(
-                    "{tool}: a member the caller is shown, given twice, does not answer that \
-                     the call needs two different members: {shown}"
+                    "{tool}: a member the caller is shown, given twice, is not answered the \
+                     fixed text for the mob's refusal: {shown}"
                 ));
             }
         }

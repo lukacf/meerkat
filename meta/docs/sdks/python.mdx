@@ -584,7 +584,7 @@ system instruction only ahead of the conversation, and a short conversation
 may never reach the compaction that brings it into effect. `rt.reset(name)`
 does, and gives the agent's conversation up. `rt.instruction_status` is the
 authority for whether a change is in effect; see
-[Changing an agent's instructions](/concepts/roster#changing-an-agents-instructions).
+[Changing an agent's instructions](/concepts/roster#changing-an-agent%E2%80%99s-instructions).
 
 The first answer of an `archive`, an `unarchive` and a `remove` also carries
 the agent's `schedules` (`SchedulesFollowed`: `effect`, `count`,
@@ -717,6 +717,61 @@ this SDK, so keep them as they are. These replace
 `activate_member_instruction` (`meta/member_activate_instruction`,
 deprecated since 0.9.11). See
 [Operator instructions](/api/rpc#operator-instructions).
+
+### Compacting a member's conversation
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+From 0.9.15. `compact_member` compacts a member's conversation now: the
+member runs one maintenance turn in which the older turns are summarized and
+the most recent ones are kept. It costs one model turn and two in-place
+rebuilds of the member, one before that turn and one after it, on the same
+conversation.
+A `meta/compact_member` call that is admitted rebuilds the identity, whether
+it then compacts, compacts nothing or fails; for an identity that created
+mobs with its own
+tools that costs it the listing and management of those mobs (see the
+`meta/compact_member` section of the RPC reference). Have such an identity
+destroy a mob it created before the call if it must not be left running
+unmanaged.
+Call it against a 0.9.15 gateway: on 0.9.9 through 0.9.14 a call that fails
+leaves the agent with the call's low compaction threshold.
+It is a host method only (`meta/compact_member`): the Console's RPC route
+does not forward it.
+
+```python
+result = await rt.compact_member("triage:main")
+result["compaction_applied"]             # check it: False means not compacted
+result["messages_before"], result["messages_after"]
+
+# A lower threshold for a shorter conversation, a longer watch for a long turn.
+# A conversation of only a few turns may not get smaller whatever the floor,
+# and the call can then fail with compact_member_completion_failed.
+await rt.compact_member("triage:main", floor_tokens=256, timeout=180)
+```
+
+A changed instruction that waits for a compaction takes effect with it: an
+update whose `instructions` outcome is `applies_after_compaction`, because
+the member's model takes a system instruction only ahead of the
+conversation.
+
+`floor_tokens` is the member's compaction threshold for that one turn
+(gateway default 1024 tokens). A conversation shorter than the floor is left
+as it is, so always check the result's `compaction_applied`: `False` means
+the conversation holds no fewer messages than before the call. `timeout`
+(seconds, gateway default 60) is how long the gateway watches the
+maintenance turn; past it the call raises even if the compaction completes
+later. The gateway holds the call for longer than `timeout`, so the call
+waits for the reply for `timeout` plus 30 seconds, whatever the transport's
+own request timeout is.
+
+The result is the gateway's, as it is: `identity`, `session_id`,
+`floor_tokens`, `messages_before`, `messages_after`, `compaction_applied`,
+`head_revision` and `last_rewrite_reason`. A failure raises `RpcError` whose
+`data["kind"]` names it, for example `compact_member_busy`,
+`compact_member_timeout` or `compact_member_completion_failed`, with
+`data["stage"]` and `data["operation_id"]`. See
+[`meta/compact_member`](/api/rpc#meta%2Fcompact_member).
 
 ## Mob-Level API
 

@@ -21263,7 +21263,14 @@ external_addressable = true
              materialized every member"
         );
     }
-    let init_result = json!({
+    // The members the mob holds broken at this moment, as `meta/status`
+    // names them: the start tried to build or verify each and could not.
+    // Read from the roster and the machine state the mob's actor last
+    // published, so it builds no member and never waits on the mob actor. A
+    // member that breaks later is in `meta/status` only.
+    let broken_members =
+        crate::mob_handle_runtime::broken_member_facts_of(&runtime.mob_handle()).await;
+    let mut init_result = json!({
         "http_base_url": http_base_url,
         // Proxy-facing base the launch advertised through
         // runtime_options.http_public_base_url; null when none was
@@ -21291,6 +21298,13 @@ external_addressable = true
         // unknown result fields.
         "control_listen_address": control_listen_address,
     });
+    // Present only when the mob holds a member broken, as in `meta/status`:
+    // a start that left none broken writes the result it always wrote.
+    // Wire-additive.
+    if !broken_members.is_empty() {
+        init_result["broken_members"] =
+            crate::unified_runtime::http::broken_members_json(&broken_members);
+    }
     if shutdown_requested.load(Ordering::Acquire) {
         let (request, report) = abort_init_for_shutdown(
             Some(runtime.as_ref()),
@@ -21303,6 +21317,17 @@ external_addressable = true
         resources.init_abort_report = report;
         resources.init_aborted_for_shutdown = true;
         return Ok(());
+    }
+    // Written only for an init that goes on to report ready: an init aborted
+    // for shutdown sends no init result, so its log must not point at one.
+    if !broken_members.is_empty() {
+        tracing::warn!(
+            broken_member_count = broken_members.len(),
+            members = %crate::unified_runtime::http::broken_member_names_for_log(&broken_members),
+            "the mob's start left members broken: they serve nothing until they are repaired \
+             (`broken_members` in the init result and in `meta/status` names each with its \
+             reason)"
+        );
     }
     // The dispatch loop's one SIGINT/SIGTERM listener, registered before any
     // work is admitted and held across every admission below. A signal that

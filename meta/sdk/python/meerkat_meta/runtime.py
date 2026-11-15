@@ -267,6 +267,14 @@ _ANNOUNCEMENT_METHODS_BEFORE_SOURCES = frozenset(
 # Transport allowance beyond a server-side wait's own deadline, so the
 # gateway's typed answer at the deadline arrives before the transport gives up.
 _SERVER_WAIT_TRANSPORT_HEADROOM_SECONDS = 5.0
+# The gateway's ``timeout_ms`` for ``meta/compact_member`` when the caller
+# names none: the base of the transport deadline of such a call.
+_COMPACT_MEMBER_DEFAULT_TIMEOUT_SECONDS = 60.0
+# Transport allowance beyond ``meta/compact_member``'s ``timeout_ms``. The
+# gateway holds the call past that deadline: for its own 5 s secondary
+# observation budget, and for what it does outside the deadline (the two
+# in-place rebuilds of the member and the transcript reads around them).
+_COMPACT_MEMBER_TRANSPORT_HEADROOM_SECONDS = 30.0
 # Backoff between exact-ticket observation retries after an admitted
 # delivery's wait failed for a transport or RPC reason; bounded by the
 # caller's remaining deadline.
@@ -2475,6 +2483,108 @@ class MetaRuntime:
         if note is not None:
             params["note"] = note
         raw = await self._rpc("meta/prune_member_system_rows", params)
+        return raw if isinstance(raw, dict) else {}
+
+    async def compact_member(
+        self,
+        identity: str,
+        *,
+        floor_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Compact a member's conversation now.
+
+        Host-only (``meta/compact_member``); the Console's RPC route does
+        not forward it. The member runs one maintenance turn that compacts
+        its conversation: the older turns are summarized and the most recent
+        ones are kept. The call costs one model turn and two in-place
+        rebuilds of the member, one before that turn and one after it, on
+        the same conversation. A ``meta/compact_member`` call that is
+        admitted rebuilds the identity, whether it then compacts, compacts
+        nothing or fails; for an
+        identity that created mobs with its own tools that costs it the
+        listing and management of those mobs (see the
+        ``meta/compact_member`` section of the RPC reference). Have such an
+        identity destroy a mob it created before the call if it must not be
+        left running unmanaged. Call it against a 0.9.15 gateway: on 0.9.9
+        through 0.9.14 a call that fails leaves the agent with the call's
+        low compaction threshold. A changed instruction that waits for a
+        compaction takes effect with it: an update answered
+        ``applies_after_compaction`` because the member's model takes a
+        system instruction only ahead of the conversation.
+
+        ``floor_tokens`` is the member's compaction threshold for that one
+        turn, in tokens (gateway default 1024, a positive integer). A
+        conversation shorter than the floor is left as it is, so name a
+        lower floor for a shorter one; a conversation of only a few turns
+        may not get smaller whatever the floor, and the call can then fail
+        with ``compact_member_completion_failed`` (see the RPC reference).
+        Always check the result's
+        ``compaction_applied``: ``False`` means the conversation holds no
+        fewer messages than before the call, so treat it as not compacted.
+
+        ``timeout`` (seconds; gateway default 60) is how long the gateway
+        watches the maintenance turn. It bounds the watching, not the turn:
+        past it the call raises even if the compaction completes later. The
+        gateway holds the call for longer than ``timeout`` (a further 5
+        seconds of watching, and the two rebuilds), so this call waits for
+        the reply for ``timeout`` plus 30 seconds, whatever the transport's
+        own request timeout is. If that wait ends first, the transport's
+        timeout error is raised and the gateway still owns the operation;
+        a second call for the member then raises ``compact_member_busy``
+        while it does.
+
+        Returns the gateway's result as it is: ``{"identity", "session_id",
+        "floor_tokens", "messages_before", "messages_after",
+        "compaction_applied", "head_revision", "last_rewrite_reason"}``. The
+        message counts, ``compaction_applied`` and the revision facts are
+        ``None`` when the gateway has no transcript-edit service.
+
+        A failure raises ``RpcError`` (``-32000``) whose ``data["kind"]``
+        names it, with ``data["stage"]``, ``data["operation_id"]`` and
+        ``data["identity"]``: ``compact_member_busy`` (a compaction already
+        owns the member), ``compact_member_refused`` (the member has no
+        durable session), ``compact_member_timeout`` (``stage``
+        ``"terminal_pending"``: the turn has not ended, or its end is not
+        known, and the gateway keeps the operation; ``"profile_restored"``:
+        the turn completed after the deadline and the member is back on its
+        own threshold), ``compact_member_completion_failed`` (the turn ended
+        without success; ``data["completion_type"]`` says how),
+        ``compact_member_superseded`` (the member was rebuilt or replaced
+        meanwhile), ``compact_member_admission_pending``,
+        ``compact_member_admission_failed``,
+        ``compact_member_observation_failed`` and
+        ``compact_member_rebuild_failed``. The list is open: a kind or a
+        stage it does not name reaches the caller the same way, and a later
+        release may change which stage a failure reports. A gateway whose
+        wiring cannot serve the verb raises ``RpcError`` ``-32016`` before
+        anything changes. Raises ``ValueError``, before any request, for a
+        ``timeout`` that is not a finite number of at least one millisecond.
+        """
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout < 0.001
+        ):
+            raise ValueError(
+                "timeout must be a finite number of at least 0.001 seconds or None"
+            )
+        params: dict[str, Any] = {"identity": identity}
+        if floor_tokens is not None:
+            params["floor_tokens"] = floor_tokens
+        if timeout is not None:
+            params["timeout_ms"] = int(timeout * 1000)
+        watched_seconds = (
+            _COMPACT_MEMBER_DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout
+        )
+        raw = await self._rpc(
+            "meta/compact_member",
+            params,
+            transport_timeout=(
+                watched_seconds + _COMPACT_MEMBER_TRANSPORT_HEADROOM_SECONDS
+            ),
+        )
         return raw if isinstance(raw, dict) else {}
 
     async def grant_tool(

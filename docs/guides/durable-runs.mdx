@@ -222,7 +222,7 @@ whose run cannot continue to queued, as every start does.
   answer the stop gives the queued prompts it keeps,
   `requeued_across_stop` (`RequeuedAcrossStop`), the same answer a run that
   a store fence gap suspends gives (see
-  [One writer, fenced](#one-writer%2C-fenced)).
+  [One writer, fenced](#one-writer-fenced)).
 - **The run continues at the next start**, when its session is opened again
   or its mob rebuilds the member, before the kept queued prompts run.
   Meerkat does not look for such runs at start-up.
@@ -531,7 +531,7 @@ are dispatched again the same way, and a callback request to a client is
 sent again.
 
 A run that a store fence gap suspends (see
-[One writer, fenced](#one-writer%2C-fenced)) resumes the same way, in the same
+[One writer, fenced](#one-writer-fenced)) resumes the same way, in the same
 process, once the fence is back, which can be seconds later. A tool whose
 work outlives its call (a job it started, a request still in flight) can
 then see the same call again while that work still runs: the dedupe key is

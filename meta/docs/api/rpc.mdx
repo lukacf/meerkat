@@ -34,6 +34,14 @@ enforce contract compatibility compare `result.contract_version` before
 sending later requests. After init, `meta/capabilities` returns the methods
 available on that runtime.
 
+From 0.9.15 a gateway that is ready while Core holds members of its mob
+Broken says so: the result then carries `broken_members`, those members at
+that moment, each with its reason. The field is absent when there are none.
+A member whose start is owed a retry, or whose custody restore was deferred,
+is not Broken and is not in the list: read it from its member status. See
+[`meta/status`](#meta%2Fstatus), which carries the same entries whenever it is
+asked.
+
 #### Accepted then settled (opt-in)
 
 Startup runs provider callbacks (roster, topology, agent builds), each
@@ -1540,7 +1548,7 @@ in effect: the agent's slot reads `pending` (with the reason
 `leading_prefix_only_lowering` for such a model) until it is, then
 `effective`. The kinds, the reasons and
 the limits are in
-[Changing an agent's instructions](/concepts/roster#changing-an-agents-instructions).
+[Changing an agent's instructions](/concepts/roster#changing-an-agent%E2%80%99s-instructions).
 
 ### `meta/identity/archive`, `meta/identity/unarchive`, `meta/identity/remove`, `meta/identity/adopt`
 
@@ -4364,6 +4372,10 @@ Result: `identity`, `session_id`, `floor_tokens`, `messages_before`,
 `last_rewrite_reason` (message counts and revision facts are `null` when the
 gateway has no concrete transcript-edit service).
 
+From 0.9.15 the SDKs call it as `MetaRuntime.compact_member` (Python) and
+`MetaRuntime.compactMember` (TypeScript); each waits for the reply for
+`timeout_ms` plus 30 seconds, past the secondary observation budget.
+
 #### A conversation the compaction cannot make smaller
 
 A compaction folds at least the oldest turn into a summary and keeps the
@@ -4702,7 +4714,7 @@ Available from Meerkat Meta 0.9.15.
 The namespaces that start with `meerkat.identity.` are the platform's. The
 gateway keeps each agent's own changed instructions there, one record per
 agent in `meerkat.identity.instructions`, keyed by the agent's name (see
-[Changing an agent's instructions](/concepts/roster#changing-an-agents-instructions)).
+[Changing an agent's instructions](/concepts/roster#changing-an-agent%E2%80%99s-instructions)).
 `meta/set_instruction` and `meta/revoke_instruction` refuse such a namespace
 with `-32602` and `instruction_set_code` `invalid_request`, and nothing is
 written: change the agent's instructions in its spec instead.
@@ -5034,11 +5046,32 @@ identity is missing on this host. They serve nothing until they are repaired,
 so a readiness probe can read the list; `/healthz` reports their count in
 JSON (`broken_member_count`) and names none.
 
+From 0.9.15 the `meta/init` result (the legacy response and the `ready`
+`meta/init_settled` notification) carries the same field under the same
+rule, for the moment the gateway became ready: the members its start tried
+to build, or under `member_restore = "on_demand_verified"` to verify, and
+could not. A start that left no member broken writes no `broken_members`,
+and a member left dormant by `member_restore` is never in it. It is a
+snapshot: a member that breaks after ready (its first wake fails, say) is
+named by `meta/status` only. The gateway also logs one warning at ready
+with the count and the names of up to 8 of them. The list names every
+member Core holds Broken to the process that launched the gateway, as
+`meta/status` on the stdio gateway does. In both places the list is Core's:
+it can name a member that the member list (`meta/list_members`) leaves out,
+an earlier incarnation of an identity that list shows under its current one.
+
+A common cause is the session limit: a start that builds more members than
+`runtime_options.max_sessions` admits (16 by default, so an eager restore
+of a larger mob) leaves the members past the limit broken, with
+`Max sessions reached` in `error`. That cause has no `code` (a field from
+0.9.15); read it from `error`.
+
 <Accordion title="broken_members entries">
 | Field | Type | Description |
 |-------|------|-------------|
-| `member_id` | `string` | The member's id, as the member list names it |
+| `member_id` | `string` | The member's id. For a member the member list shows, the id that list names |
 | `error` | `string` | Core's reason |
+| `code` | `string?` | From 0.9.15. Core's stable refusal code, present only when the failure was a refusal that named one, at a restore or at a wake. Two families exist: a refused runtime binding carries the runtime route's error code, and the host's refusal of the member's registration carries `host_refused_registration.` followed by the refused step (`select_destination`, `select_agent_mandate`, `prepare_member_surface`, `verify_member_surface`). A gateway that installs no registration hook, the stock `rpc_gateway` included, never reports the second family. Advisory: most causes have none, and the vocabulary may grow, so tolerate a value you do not know |
 </Accordion>
 
 `quarantined_mobs` is present only when durable child mobs are on and the

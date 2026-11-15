@@ -6733,8 +6733,8 @@ fn console_method_member_fields_or_subject(method: &str) -> &'static [ConsoleMem
 
 /// Every string a field at `path` names in `value` (`*` stands for every
 /// entry of an object or an array), for `visit` to read or replace. A
-/// value on the way that is malformed ([`member_field_malformed`]) is
-/// refused as invalid params.
+/// value on the way, or at the name itself, that is malformed
+/// ([`member_field_malformed`]) is refused as invalid params.
 fn visit_member_field(
     value: &mut Value,
     path: &[&str],
@@ -6743,8 +6743,10 @@ fn visit_member_field(
     let Some((head, rest)) = path.split_first() else {
         return if value.is_string() {
             visit(value)
-        } else {
+        } else if value.is_null() {
             Ok(())
+        } else {
+            Err(malformed_params_error())
         };
     };
     match (*head, value) {
@@ -6764,10 +6766,10 @@ fn visit_member_field(
 }
 
 /// Whether `value` is malformed on the way to the member a field at `path`
-/// names.
+/// names, or at the name itself: a name is a string, or absent.
 fn member_field_malformed(value: &Value, path: &[&str]) -> bool {
     let Some((head, rest)) = path.split_first() else {
-        return false;
+        return !matches!(value, Value::Null | Value::String(_));
     };
     match (*head, value) {
         ("*", Value::Object(entries)) => entries
@@ -12473,18 +12475,24 @@ async fn adoption_wiring_refusal(
     let edges: Vec<&Value> = match params.get("owned_wiring") {
         Some(Value::Array(edges)) => edges.iter().collect(),
         Some(Value::Object(edges)) => edges.values().collect(),
-        _ => Vec::new(),
+        None | Some(Value::Null) => Vec::new(),
+        Some(_) => return Some(malformed_params_error()),
     };
     for edge in edges {
         for end in ["a", "b"] {
-            let Some(name) = edge
-                .get(end)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-            else {
-                continue;
+            // An end is a name, or absent; any other value is malformed.
+            let name = match edge {
+                Value::Object(ends) => match ends.get(end) {
+                    None | Some(Value::Null) => continue,
+                    Some(Value::String(name)) => name.trim(),
+                    Some(_) => return Some(malformed_params_error()),
+                },
+                Value::Null => continue,
+                _ => return Some(malformed_params_error()),
             };
+            if name.is_empty() {
+                continue;
+            }
             let seated = handle
                 .get_member(&crate::member_comms_id::mob_member_id(name))
                 .await

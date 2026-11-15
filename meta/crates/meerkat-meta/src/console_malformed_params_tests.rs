@@ -772,23 +772,23 @@ async fn a_refused_request_changes_nothing() -> TestResult {
     Ok(())
 }
 
-/// Params that carry `name` at `path`.
-fn naming(path: &[&str], name: &str) -> Value {
+/// Params that carry `leaf` at `path`.
+fn naming(path: &[&str], leaf: &Value) -> Value {
     match path.split_first() {
-        None => json!(name),
-        Some((&"*", rest)) => json!([naming(rest, name)]),
+        None => leaf.clone(),
+        Some((&"*", rest)) => json!([naming(rest, leaf)]),
         Some((key, rest)) => Value::Object(serde_json::Map::from_iter([(
             (*key).to_string(),
-            naming(rest, name),
+            naming(rest, leaf),
         )])),
     }
 }
 
 /// `params` with the value `depth` steps down `path` replaced by malformed
-/// params that carry `name`; `None` where that value is none to replace.
+/// params that carry `name`; `None` where no value is there to replace.
 fn malformed_at(params: &Value, path: &[&str], depth: usize, name: &str) -> Option<Value> {
     if depth == 0 {
-        return params.is_object().then(|| malformed(name));
+        return (!params.is_null()).then(|| malformed(name));
     }
     let (head, rest) = path.split_first()?;
     match (*head, params) {
@@ -807,11 +807,11 @@ fn malformed_at(params: &Value, path: &[&str], depth: usize, name: &str) -> Opti
 }
 
 /// Malformed params are refused wherever a request names an agent: for
-/// every method whose params name an agent below their top level, params
-/// that are malformed on the way to the name are answered the one
-/// invalid-params refusal and nothing else, before any method runs, and
-/// the member resolution and the access check refuse them too. The same
-/// params well-formed are not answered that refusal.
+/// every place at which a method's params name an agent, params that are
+/// malformed on the way to the name, or at the name itself, are answered
+/// the one invalid-params refusal and nothing else, before any method runs,
+/// and the member resolution refuses them too. The same params well-formed,
+/// and with no name there, are not answered that refusal.
 #[tokio::test]
 async fn malformed_params_are_refused_wherever_a_request_names_an_agent() -> TestResult {
     const SIDE: &str = "alpha-side";
@@ -838,20 +838,30 @@ async fn malformed_params_are_refused_wherever_a_request_names_an_agent() -> Tes
     let mut unrefused = Vec::new();
     let mut refused = Vec::new();
     for method in methods {
+        // The two methods that end the caller's own login are left out: the
+        // caller makes the requests after them.
+        if matches!(
+            method,
+            crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD | crate::rpc::CONSOLE_SIGN_OUT_METHOD
+        ) {
+            continue;
+        }
         for field in console_method_member_fields(method).unwrap_or_default() {
-            if field.path.len() < 2 {
-                continue;
-            }
             paths.insert(field.path.join("/"));
-            let well_formed = naming(field.path, SIDE);
-            let answer = console_rpc_as(&app, Some(&bob), method, well_formed.clone()).await;
-            if refused_as_malformed(&answer, &id) {
-                refused.push(format!("{method} {well_formed}: {answer}"));
+            let well_formed = naming(field.path, &json!(SIDE));
+            for params in [well_formed.clone(), naming(field.path, &Value::Null)] {
+                let answer = console_rpc_as(&app, Some(&bob), method, params.clone()).await;
+                if refused_as_malformed(&answer, &id) {
+                    refused.push(format!("{method} {params}: {answer}"));
+                }
             }
-            for depth in 1..field.path.len() {
+            for depth in 1..=field.path.len() {
                 let Some(params) = malformed_at(&well_formed, field.path, depth, SIDE) else {
                     continue;
                 };
+                if params == well_formed {
+                    continue;
+                }
                 let answer = console_rpc_as(&app, Some(&bob), method, params.clone()).await;
                 if !refused_as_malformed(&answer, &id) {
                     unrefused.push(format!("{method} {params}: {answer}"));
@@ -867,16 +877,23 @@ async fn malformed_params_are_refused_wherever_a_request_names_an_agent() -> Tes
     assert_eq!(
         paths.iter().map(String::as_str).collect::<Vec<_>>(),
         [
+            "agent_id",
+            "agent_identity",
             "agents/*/name",
+            "identity",
+            "local_member_id",
             "member/identity",
+            "member_id",
+            "name",
             "operations/*/edge/a/identity",
             "operations/*/edge/b/identity",
             "owned_wiring/*/a",
             "owned_wiring/*/b",
             "role_targets/*/*",
+            "source_member_id",
             "target/identity",
         ],
-        "the paths below the top level at which a method's params name an agent"
+        "the places at which a method's params name an agent"
     );
     assert!(unrefused.is_empty(), "{unrefused:#?}");
     assert!(refused.is_empty(), "{refused:#?}");

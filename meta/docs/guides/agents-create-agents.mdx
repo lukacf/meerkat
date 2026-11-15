@@ -253,15 +253,28 @@ conversation, and it goes on listing and managing the mobs it created.
   peer metadata of its conversation and takes none away, so a removed
   label stays in what its peers read of it until the agent starts a new
   conversation. Nothing is decided on it.
+- **A fork inherits the new labels.** A fork of the agent takes the labels
+  the roster reads for it at the fork, which are the update's from the
+  update on, also while the agent is busy and still runs on what it was
+  built with: a label that was added is inherited, and a label that was
+  removed is not.
 - **The seat's own journal row trails.** The record of the agent's seat in
   the mob's journal keeps the labels the agent was seated with until the
   agent is next seated (a respawn, a profile move, a runtime-mode change, a
   reset). It decides nothing an update can change. It is what an earlier
   release that serves the same store reads, so it matters before a
-  rollback: Meerkat's upgrade guide says how to find such agents. The only
-  way to bring it in line is to seat the agent again (`meta/respawn`),
-  which costs an agent that created mobs their listing and management:
-  there is no way that keeps both.
+  rollback: Meerkat's upgrade guide says how to find such agents. No turn,
+  wake, build or restart of the agent brings it in line. Before rolling
+  back, either respawn the agent (`meta/respawn`; it then no longer lists
+  or manages mobs it created), or set its labels back to the ones it was
+  seated with and apply the change again after the return: for an agent
+  that is idle, that update brings the record in line without seating the
+  agent again, and it keeps its mobs. An agent that held work at that
+  update keeps its record as it was, and the answer does not say so: once
+  it is idle, send another update of it (a new request that changes
+  something, its display name for example; the same request sent again
+  only reads back its first answer). Meerkat's upgrade guide has the
+  query that lists the agents still to settle.
 - **A broken agent is the exception.** An agent whose build was refused for
   good is `broken` and serves nothing. Once its labels have changed since
   it was last seated, any update of it seats it again, the update that
@@ -272,6 +285,25 @@ conversation, and it goes on listing and managing the mobs it created.
   by its next update, whatever that update changes. If it had created mobs
   before it broke, it no longer lists or manages them, as after a profile
   move.
+- **One label is never given.** `decision.approval_branch` is the label of
+  an approval branch, a one-time member that Meerkat opens itself to run
+  approved work, and no change of an agent gives it. A create that gives
+  it is refused `reserved_key` at `agents[i].labels`, and no agent of the
+  request is created; an update that adds it is refused `reserved_key` at
+  `set.labels`, and the agent is unchanged; an adoption
+  (`meta/identity/adopt`) of an agent whose configuration gives it is
+  refused `reserved_key` at `name`, and the agent stays configured.
+  `meta/identity/plan` does not check this key: it answers such a request
+  as it answers any other label, and the change itself is then refused. An
+  agent whose record carries the label already keeps it through an update
+  that does not add it, and `set.labels_remove` takes it off. While its
+  record carries it the agent is never seated again: a respawn is refused,
+  and a profile move or a runtime-mode change changes its record and
+  leaves its member as it was. The names of approval branches are kept
+  the same way: a create or an adoption of an agent whose name begins
+  `approval-branch-` and holds only ASCII letters, digits, `-` and `_` (a
+  name Meerkat holds as written) is refused `invalid_name` at that name
+  (`agents[i].name`, `name`).
 
 ## Moving a profile
 

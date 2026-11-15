@@ -1128,6 +1128,23 @@ Security, Upgrade and Changed.
   locally hosted mob members signed TCP comms endpoints
   (`runtime_options.member_comms_address`), as TypeScript `memberCommsTcp`
   does: what a member of another gateway needs to reach them.
+- The changes of the mob's long-term agents (`meta/identity/create`,
+  `meta/identity/update`, `meta/identity/adopt`, and the `identity_create`
+  and `identity_update` tools) never give an agent the label or a name of
+  Meerkat's approval branches. A create whose agent gives the label
+  `decision.approval_branch` is refused `reserved_key`, naming the key, at
+  `agents[i].labels`; an update that adds it, at `set.labels`; and an
+  adoption of an agent whose configuration gives it, at `name`. A create
+  or an adoption of an agent whose name begins `approval-branch-` and
+  holds only ASCII letters, digits, `-` and `_` (a name Meerkat holds as
+  written) is refused `invalid_name` at
+  that name (`agents[i].name`, `name`). Nothing is created or changed.
+  Meerkat seats that label and those names only on an approval branch it
+  opens itself, so no agent with one could be seated. An agent whose
+  record carries the label already keeps it through an update that does
+  not add it, and `set.labels_remove` takes it off. `meta/identity/plan`
+  does not check the key or the prefix: it answers as for any other label
+  or name, and the change itself is then refused.
 
 - A spawn whose draft sets one provider param keeps the
   `reasoning_effort` level its profile declares in `provider_params`, as it
@@ -1166,10 +1183,17 @@ Security, Upgrade and Changed.
   durable, a placed agent and an agent wired to a placed agent are not
   released by a label change and keep their build. What
   trails until the agent is next seated is the record of its seat in the
-  mob's journal: it decides nothing an update can change, it is what an
-  earlier release that serves the same store reads, and only seating the
-  agent again (`meta/respawn`, with what that costs an agent that created
-  mobs) brings it in line; see the rollback notes of Meerkat's upgrade
+  mob's journal: it decides nothing an update can change, and it is what
+  an earlier release that serves the same store reads. No turn, wake,
+  build or restart of the agent brings it in line. Before rolling back,
+  either respawn the agent (`meta/respawn`; it then no longer lists or
+  manages mobs it created) or set its labels back to the ones it was
+  seated with and apply the change again after the return. If the agent
+  held work at that update, its record is brought in line only by
+  another update of it once it is idle (a new request that changes
+  something: the same request sent again reads back its first answer);
+  see the
+  rollback notes of Meerkat's upgrade
   guide before a rollback. A removed label stays in the peer metadata of
   the agent's conversation, which its peers read, until the agent starts a
   new conversation. One agent is still seated again: a broken one (its

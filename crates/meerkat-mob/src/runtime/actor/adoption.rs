@@ -146,6 +146,20 @@ impl MobActor {
                 problem: error.to_string(),
             })
         })?;
+        // An adopted identity's record takes no approval branch's
+        // reservation: a roster spec that carries the branch's label or
+        // names its identity prefix, and an open approval branch adopted as
+        // a worker (every branch is seated under that prefix, with its
+        // label), are refused before anything is written, since no seat
+        // could follow such a record.
+        if crate::runtime::approval_branch::takes_approval_branch_reservation(
+            &spec.identity,
+            Some(&spec.labels),
+        ) {
+            return Err(MobError::ApprovalBranchReserved {
+                identity: commit.identity.clone(),
+            });
+        }
         // An agent requester's grant covers the identity's role.
         grant_covers_the_commit(
             commit.grant.as_ref(),

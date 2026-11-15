@@ -64,6 +64,15 @@ them.
   tells a door whether a failed read was this refusal. A mob target does not
   refuse the member yet. See Known limitations.
 
+- Behaviour-only (not measured by the gate): `meerkat-mob`:
+  `MobHandle::create_store_owned_identities`,
+  `MobHandle::update_store_owned_identity` and `MobHandle::adopt_identity`
+  refuse `MobError::ApprovalBranchReserved` for a record that would take
+  an approval branch's label `decision.approval_branch` or its identity
+  prefix `approval-branch-`. 0.9.11 through 0.9.14 accepted such a record
+  from these three calls (from a create, for an identity it leaves
+  unseated). See Fixed and the Upgrade notes.
+
 - Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
   `meerkat-machine-kernels`: the schedule lifecycle machine gains a state
   field and two inputs, and its public types follow.
@@ -1940,6 +1949,29 @@ them.
   sources). Mobs that were destroyed this way are not restored by upgrading
   (read from the source).
 
+- `meerkat-mob`: the record of a store-owned identity takes no approval
+  branch's reservation. A create
+  (`MobHandle::create_store_owned_identities`) of an identity that takes
+  the label `decision.approval_branch` or the identity prefix
+  `approval-branch-`, whether the create seats the identity or leaves it
+  unseated; an update (`MobHandle::update_store_owned_identity`) whose
+  labels add the label to a record that does not carry it; and an adoption
+  (`MobHandle::adopt_identity`) of a spec that takes either, or of an open
+  approval branch, are each refused `MobError::ApprovalBranchReserved`
+  (`approval_branch_reserved`), with nothing written. Every seat refuses
+  the label and the prefix, so no seat could follow such a record. A
+  record that carries the label already is untouched and stays changeable:
+  an update that keeps the label is admitted, and an update that removes
+  it commits, after which the agent can be seated again (for a record
+  pending its preparation, the host's settle then succeeds). A pending record that
+  holds a reserved name has its removal as its only way out. To find the
+  records that carry the label in a mob's store: `sqlite3 -readonly
+  <store> "SELECT mob_id, agent_identity FROM mob_identity_intents WHERE
+  json_extract(CAST(record_json AS TEXT),
+  '$.spec.labels.\"decision.approval_branch\"') IS NOT NULL;"`. Affected
+  releases, for each of the three calls: 0.9.11 through 0.9.14 (by reading
+  their code: the adoption is the same in all four).
+
 - `meerkat-core`: a turn that fails because a provider failure outlasted the
   retries now says what failed. Its typed turn error (`error.data.error` of
   a JSON-RPC turn, `details.error` of REST, the `error=` JSON of the CLI's
@@ -2639,6 +2671,25 @@ them.
 
 ### Upgrade notes
 
+- Mob: `MobHandle::create_store_owned_identities`,
+  `MobHandle::update_store_owned_identity` and `MobHandle::adopt_identity`
+  refuse `MobError::ApprovalBranchReserved` for a record that would take
+  an approval branch's label `decision.approval_branch` or its identity
+  prefix `approval-branch-` (see Fixed): a host that asks for one gets a
+  refusal now. Nothing stored moves. A record that carries the label
+  already stays as it is until an update removes the label; remove it
+  before a rollback too, since the restamp such a record owes cannot be
+  settled while it carries the label (its respawn is refused). A host
+  that adopts an identity whose roster spec carries the label gets the
+  refusal from `MobHandle::adopt_identity` now: take the label out of the
+  roster's spec (no seat could carry it) and adopt again. An identity
+  whose name takes the prefix is not adopted: declare it under another
+  name. An identity that was adopted under the label on 0.9.11 through
+  0.9.14 keeps its record, which is read, updated and removed as any
+  other: an update that keeps the label is admitted, and an update that
+  removes it lets the agent be seated again. One adopted under a reserved
+  name stays as it is until it is removed.
+
 - A configuration document an earlier release wrote keeps its mode until
   the engine next rewrites it. To make the existing ones owner-only now, run
   `chmod 600` on each that exists: `~/.rkat/config.toml`,
@@ -2790,11 +2841,18 @@ them.
   its runtime mode. A label update never seats the member again, so
   every seated identity whose labels were updated owes the restamp until
   its next seat row, and a retry of the update or a later update of other
-  fields does not settle it. The respawn seats the member again on the
+  fields does not settle it. No turn, wake, build or restart settles it
+  either. The respawn seats the member again on the
   same session and cancels a turn in flight, and an agent that created
   mobs with its own tools then no longer lists or manages them: have it
   destroy such a mob first, or leave that identity unsettled (it is out
-  of service while rolled back, and nothing of it is lost). A member no same-session
+  of service while rolled back, and nothing of it is lost). Or set the
+  identity's labels back to the labels its member was seated with, and
+  apply the label change again after the return: for an idle member
+  that update lets the key go without seating the member again, so the
+  agent keeps the mobs it created; a member that holds work at that
+  update is answered `deferred` and keeps the key until the same update
+  is sent again once it is idle. A member no same-session
   successor can serve (placed, wired to a placed member, or on a session
   service that keeps no durable sessions) is settled by none of these:
   rotate it (`MobHandle::rotate_member`), or archive or remove its
@@ -3055,6 +3113,14 @@ them.
   the mobs of an archived owner. To remove one, archive its owner's session
   id (the archive removes the mobs bound to an id even when no session is
   stored under it; read from the source), or destroy the mob itself.
+
+- Mob: `MobHandle::import_created_identities`, a host operator's Rust
+  call, restores an export's records as written, so a record of the
+  export that carries the label `decision.approval_branch` or a name with
+  the prefix `approval-branch-` is restored with it. No seat follows such
+  a record; clean it as for any record that carries the label (see
+  Fixed). A restored record that holds a reserved name has its removal
+  as its only way out.
 
 - The owner-only rule of this release (see Security) covers the
   configuration documents, the comms binding file and `identity.key`. Two

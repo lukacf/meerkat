@@ -57,7 +57,7 @@ def main() -> int:
     try:
         result = api_request("POST", "/sessions", {
             "prompt": "What are the three pillars of observability?",
-            "model": "claude-sonnet-4-6",
+            "model": "claude-sonnet-5-5",
             "system_prompt": "You are a DevOps expert. Be concise.",
         })
         session_id = result["session_id"]

@@ -2206,6 +2206,21 @@ them.
   signatures. If a pack that left your machine holds its signing key, the
   key is exposed: see the Upgrade notes. Affects 0.4.1 through 0.9.14.
 
+- `rkat`, `meerkat-mob-pack`: a signed pack is signed with the same read of
+  the key file that it leaves out. `rkat mob pack --sign <key>` opens the
+  key file once, before it reads the mob directory, and takes from that one
+  open both the file it leaves out and the key it signs with: on Linux and
+  macOS the file left out is the opened file, by its identity, and on
+  Windows the file with the name the path resolved to at that open. A
+  `--sign` path that names no file is refused before the directory is read,
+  with the exit status (1) and the message it had
+  (`Error: mob pack failed: I/O error: <system error>`); where the mob
+  directory has a fault of its own as well, this message is now the one
+  printed, not the directory's. No output file is written. The archive
+  format and the signature are unchanged. In Rust, `pack_directory` and
+  `pack_directory_with_excludes` return that `PackValidationError::Io`
+  before they read the directory. Affects 0.4.1 through 0.9.14.
+
 - Mob: a `mob_destroy` refused by the mob tells an agent nothing of a
   member the host's member tool audience
   (`MobBuilder::with_member_tool_audience`) hides from that agent. Before,

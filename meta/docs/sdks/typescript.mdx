@@ -1007,7 +1007,7 @@ const runtime = await Meta.builder()
   .persistentState("state/meta")
   // Declare an in-memory runtime store (sessions do not survive restart).
   .runtimeStore(runtimeStore.memory())
-  // Declare a bounded queryable in-process event log — or eventLog.nullStore().
+  // Declare a queryable in-process event log (it has no size limit) — or eventLog.nullStore().
   .eventLog(eventLog.memory({ batchSize: 64 }))
   .gateway("/path/to/rpc_gateway")
   .build();

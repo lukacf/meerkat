@@ -6,7 +6,7 @@
  * no ingestion at all (the honest silent case). The two wire-supported
  * storage kinds are both *declared ephemeral* choices:
  *
- * - {@link memory} — a bounded, queryable in-process store
+ * - {@link memory} — a queryable in-process store
  *   (`{"storage": "memory"}`); serves `meta/query_events`.
  * - {@link nullStore} — events are explicitly dropped
  *   (`{"storage": "null"}`); queries return empty.
@@ -23,7 +23,7 @@ export interface EventLogDeclaration {
   toDict(): Record<string, unknown>;
 }
 
-/** Declare a bounded queryable in-process event store. */
+/** Declare a queryable in-process event store. */
 export function memory(options?: {
   batchSize?: number;
   flushIntervalMs?: number;

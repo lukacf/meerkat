@@ -337,7 +337,7 @@ export class MetaBuilder {
    * ```
    *
    * The gateway accepts only the declared ephemeral storage kinds
-   * (`"memory"` — bounded queryable in-process store; `"null"` — events
+   * (`"memory"` — queryable in-process store; `"null"` — events
    * dropped) and rejects anything else at startup. Without this call no
    * events are ingested at all. The legacy raw form
    * `eventLog({ storage: ..., batch_size: ... })` keeps working.

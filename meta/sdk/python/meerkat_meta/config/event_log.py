@@ -5,7 +5,7 @@ The gateway ingests operational events only when
 no ingestion at all (the honest silent case). The two wire-supported
 storage kinds are both *declared ephemeral* choices:
 
-- :func:`memory` — a bounded, queryable in-process store
+- :func:`memory` — a queryable in-process store
   (``{"storage": "memory"}``); serves ``meta/query_events``.
 - :func:`null` — events are explicitly dropped (``{"storage": "null"}``);
   queries return empty.
@@ -65,7 +65,7 @@ def memory(
     batch_size: int | None = None,
     flush_interval_ms: int | None = None,
 ) -> MemoryEventLogConfig:
-    """Declare a bounded queryable in-process event store."""
+    """Declare a queryable in-process event store."""
     return MemoryEventLogConfig(
         batch_size=batch_size,
         flush_interval_ms=flush_interval_ms,

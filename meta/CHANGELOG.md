@@ -2700,6 +2700,13 @@ Security, Upgrade and Changed.
   LLM-authored write pending review. Read from the source, not run; the
   memory module is unchanged from 0.9.14.
 
+- The in-process event log (`event_log` with `storage = "memory"`) has no
+  size limit, though the reference and both SDK pages called it bounded: it
+  keeps every event until the gateway stops, and each `meta/query_events`
+  reads all of them, so a long-running gateway's memory grows with its
+  events. Where the events are not queried, declare `event_log` with
+  `storage = "null"`. Read from the source, not run.
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

@@ -698,7 +698,7 @@ impl SessionTaintTracker {
                     source = %state.source,
                     "agent memory taint: session ingested untrusted content; LLM-authored \
                      memory writes from this session will quarantine until a fresh-context \
-                     boundary (reset/respawn/fresh spawn)"
+                     boundary (reset or fresh spawn)"
                 );
                 self.emit_event(
                     crate::memory::events::MemoryTimelineEvent::TaintTransition {

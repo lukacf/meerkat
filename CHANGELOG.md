@@ -2369,8 +2369,10 @@ them.
   edge recorded as incident to it, the other agent's edge included. On
   0.9.14 such an agent also refused delivered messages (`mob/member_send`)
   (from runs on the published 0.9.14). A pair that was wired before an
-  adoption that owns its edge could no longer message each other: see Known
-  limitations. The pass now holds each agent to the edges its own
+  adoption that owns its edge could no longer message each other: that
+  defect has its own entry in this section (the one that begins "after an
+  agent's identity declaration was adopted"), with the remedies for a
+  released version. The pass now holds each agent to the edges its own
   declaration owns, so such an agent converges again and its owner's changes
   become active. The edge stays in the store, and the agent whose
   declaration owns it is still held to it (see Known limitations). An agent

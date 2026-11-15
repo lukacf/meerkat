@@ -1332,6 +1332,49 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
+      # The runner's size and 12 GiB of swap for a row that builds
+      # meerkat-meta (see main-unit, whose steps this job copies). A pull
+      # request leaves meerkat-meta's unit tests to the push, so its rows
+      # skip both steps.
+      - name: Show the runner's size and add swap (meerkat-meta rows)
+        if: ${{ contains(matrix.packages, '-p meerkat-meta') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          show_resources() {
+            nproc
+            free -m
+            if [[ -d /mnt ]]; then
+              df -h / /mnt
+            else
+              df -h /
+            fi
+            swapon --show || true
+          }
+          show_resources
+          vmstat -t 30 >"${RUNNER_TEMP}/meta-unit-vmstat.log" 2>&1 </dev/null &
+          swapfile=/meta-unit-swapfile
+          need_gib=40
+          if mountpoint -q /mnt; then
+            mnt_avail_kib="$(df --output=avail -k /mnt | tail -n 1 | tr -d ' ')"
+            if ((mnt_avail_kib >= 20 * 1024 * 1024)); then
+              swapfile=/mnt/meta-unit-swapfile
+              need_gib=20
+            fi
+          fi
+          avail_kib="$(df --output=avail -k "$(dirname "${swapfile}")" | tail -n 1 | tr -d ' ')"
+          if ((avail_kib < need_gib * 1024 * 1024)); then
+            echo "::warning title=Meta unit row swap::under ${need_gib} GiB free for ${swapfile}: no swap added"
+            exit 0
+          fi
+          echo "Adding 12 GiB of swap at ${swapfile}"
+          sudo fallocate -l 12GiB "${swapfile}"
+          sudo chmod 600 "${swapfile}"
+          sudo mkswap "${swapfile}"
+          sudo swapon "${swapfile}"
+          show_resources
+
       - name: Unit tests (changed packages, lib and bin targets)
         shell: bash
         env:
@@ -1411,6 +1454,42 @@ jobs:
               exit 1
             fi
             grep -E "^ *Summary " "${RUNNER_TEMP}/known-reds.out"
+          fi
+
+      # Memory, swap and disk after a meerkat-meta row's tests (see main-unit).
+      - name: Show memory after the unit tests (meerkat-meta rows)
+        if: ${{ always() && contains(matrix.packages, '-p meerkat-meta') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          nproc
+          free -m
+          if [[ -d /mnt ]]; then
+            df -h / /mnt
+          else
+            df -h /
+          fi
+          swapon --show || true
+          echo "Since boot, in pages of $(getconf PAGESIZE) bytes:"
+          grep -E '^(pswpin|pswpout|oom_kill) ' /proc/vmstat || true
+          if [[ -r /proc/pressure/memory ]]; then
+            cat /proc/pressure/memory
+          fi
+          vmstat_log="${RUNNER_TEMP}/meta-unit-vmstat.log"
+          if [[ -f "${vmstat_log}" ]]; then
+            awk '
+              $1 ~ /^[0-9]+$/ {
+                if (line == "" || $3 + 0 > peak) { peak = $3 + 0; line = $0 }
+                if (low == "" || $4 + 0 < low) low = $4 + 0
+              }
+              END {
+                if (line != "") printf "Most swap in use: %d KiB. Least free memory: %d KiB. The sample with the most swap:\n%s\n", peak, low, line
+              }
+            ' "${vmstat_log}"
+            echo "::group::vmstat every 30 seconds"
+            cat "${vmstat_log}"
+            echo "::endgroup::"
           fi
 
       - name: Upload sccache server log
@@ -2119,6 +2198,63 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
+      # The rows that build meerkat-meta (meta, meta[openai-live],
+      # meta[extension-state]). Its library and its library test binary
+      # compile side by side: two rustc processes that held 17.2 to 17.8 GiB
+      # together at their peak, then the test binary alone about 14.2 GiB,
+      # measured on another machine. A hosted runner lost the
+      # meta[openai-live] row in that compile ("The hosted runner lost
+      # communication with the server"), and no log of this lane stated the
+      # runner's size. Release job 130962629487 printed it for the
+      # ubuntu-24.04 image 20261101.360.1: 15 GiB of memory, 3 GiB of swap,
+      # 85 GiB free on /, and /mnt on the same disk.
+      # This step prints the processors, memory, swap and disk, then adds
+      # 12 GiB of swap the way release.yml's "Make room for the wasm build"
+      # does for the same signature: on /mnt when that is a separate disk
+      # with 20 GiB free, else on / when 40 GiB are free there (the swap file
+      # and the about 17 GiB this build wrote to the target directory when
+      # measured), else none, with a warning. Swap turns an OOM kill into a
+      # slower tail; it lowers no peak. vmstat logs every 30 seconds for the
+      # step after the tests. Nothing here can fail a lane.
+      - name: Show the runner's size and add swap (meerkat-meta rows)
+        if: ${{ contains(matrix.packages, '-p meerkat-meta') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          show_resources() {
+            nproc
+            free -m
+            if [[ -d /mnt ]]; then
+              df -h / /mnt
+            else
+              df -h /
+            fi
+            swapon --show || true
+          }
+          show_resources
+          vmstat -t 30 >"${RUNNER_TEMP}/meta-unit-vmstat.log" 2>&1 </dev/null &
+          swapfile=/meta-unit-swapfile
+          need_gib=40
+          if mountpoint -q /mnt; then
+            mnt_avail_kib="$(df --output=avail -k /mnt | tail -n 1 | tr -d ' ')"
+            if ((mnt_avail_kib >= 20 * 1024 * 1024)); then
+              swapfile=/mnt/meta-unit-swapfile
+              need_gib=20
+            fi
+          fi
+          avail_kib="$(df --output=avail -k "$(dirname "${swapfile}")" | tail -n 1 | tr -d ' ')"
+          if ((avail_kib < need_gib * 1024 * 1024)); then
+            echo "::warning title=Meta unit row swap::under ${need_gib} GiB free for ${swapfile}: no swap added"
+            exit 0
+          fi
+          echo "Adding 12 GiB of swap at ${swapfile}"
+          sudo fallocate -l 12GiB "${swapfile}"
+          sudo chmod 600 "${swapfile}"
+          sudo mkswap "${swapfile}"
+          sudo swapon "${swapfile}"
+          show_resources
+
       - name: Unit tests (workspace shard, lib and bin targets)
         shell: bash
         env:
@@ -2200,6 +2336,47 @@ jobs:
             grep -E "^ *Summary " "${RUNNER_TEMP}/known-reds.out"
           fi
 
+      # The same print after the tests, also when they failed: the pages
+      # swapped in and out and the OOM kills since boot, the time tasks
+      # stalled on memory, the vmstat sample with the most swap in use, and
+      # the whole vmstat log. Swap in use at the peak says the row needed
+      # more than the runner's memory; none says memory did not stop it. A
+      # lost runner runs no step, so only a row that ends shows this.
+      - name: Show memory after the unit tests (meerkat-meta rows)
+        if: ${{ always() && contains(matrix.packages, '-p meerkat-meta') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          nproc
+          free -m
+          if [[ -d /mnt ]]; then
+            df -h / /mnt
+          else
+            df -h /
+          fi
+          swapon --show || true
+          echo "Since boot, in pages of $(getconf PAGESIZE) bytes:"
+          grep -E '^(pswpin|pswpout|oom_kill) ' /proc/vmstat || true
+          if [[ -r /proc/pressure/memory ]]; then
+            cat /proc/pressure/memory
+          fi
+          vmstat_log="${RUNNER_TEMP}/meta-unit-vmstat.log"
+          if [[ -f "${vmstat_log}" ]]; then
+            awk '
+              $1 ~ /^[0-9]+$/ {
+                if (line == "" || $3 + 0 > peak) { peak = $3 + 0; line = $0 }
+                if (low == "" || $4 + 0 < low) low = $4 + 0
+              }
+              END {
+                if (line != "") printf "Most swap in use: %d KiB. Least free memory: %d KiB. The sample with the most swap:\n%s\n", peak, low, line
+              }
+            ' "${vmstat_log}"
+            echo "::group::vmstat every 30 seconds"
+            cat "${vmstat_log}"
+            echo "::endgroup::"
+          fi
+
       - name: Upload sccache server log
         if: ${{ always() }}
         # Diagnostics can never fail a lane.
@@ -2257,6 +2434,47 @@ jobs:
           tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
+
+      # The runner's size and 12 GiB of swap for a row that builds
+      # meerkat-meta (see main-unit).
+      - name: Show the runner's size and add swap (meerkat-meta rows)
+        if: ${{ contains(matrix.packages, '-p meerkat-meta') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          show_resources() {
+            nproc
+            free -m
+            if [[ -d /mnt ]]; then
+              df -h / /mnt
+            else
+              df -h /
+            fi
+            swapon --show || true
+          }
+          show_resources
+          vmstat -t 30 >"${RUNNER_TEMP}/meta-unit-vmstat.log" 2>&1 </dev/null &
+          swapfile=/meta-unit-swapfile
+          need_gib=40
+          if mountpoint -q /mnt; then
+            mnt_avail_kib="$(df --output=avail -k /mnt | tail -n 1 | tr -d ' ')"
+            if ((mnt_avail_kib >= 20 * 1024 * 1024)); then
+              swapfile=/mnt/meta-unit-swapfile
+              need_gib=20
+            fi
+          fi
+          avail_kib="$(df --output=avail -k "$(dirname "${swapfile}")" | tail -n 1 | tr -d ' ')"
+          if ((avail_kib < need_gib * 1024 * 1024)); then
+            echo "::warning title=Meta unit row swap::under ${need_gib} GiB free for ${swapfile}: no swap added"
+            exit 0
+          fi
+          echo "Adding 12 GiB of swap at ${swapfile}"
+          sudo fallocate -l 12GiB "${swapfile}"
+          sudo chmod 600 "${swapfile}"
+          sudo mkswap "${swapfile}"
+          sudo swapon "${swapfile}"
+          show_resources
 
       - name: Unit tests (workspace shard, lib and bin targets)
         shell: bash
@@ -2330,6 +2548,42 @@ jobs:
               exit 1
             fi
             grep -E "^ *Summary " "${RUNNER_TEMP}/known-reds.out"
+          fi
+
+      # Memory, swap and disk after a meerkat-meta row's tests (see main-unit).
+      - name: Show memory after the unit tests (meerkat-meta rows)
+        if: ${{ always() && contains(matrix.packages, '-p meerkat-meta') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          nproc
+          free -m
+          if [[ -d /mnt ]]; then
+            df -h / /mnt
+          else
+            df -h /
+          fi
+          swapon --show || true
+          echo "Since boot, in pages of $(getconf PAGESIZE) bytes:"
+          grep -E '^(pswpin|pswpout|oom_kill) ' /proc/vmstat || true
+          if [[ -r /proc/pressure/memory ]]; then
+            cat /proc/pressure/memory
+          fi
+          vmstat_log="${RUNNER_TEMP}/meta-unit-vmstat.log"
+          if [[ -f "${vmstat_log}" ]]; then
+            awk '
+              $1 ~ /^[0-9]+$/ {
+                if (line == "" || $3 + 0 > peak) { peak = $3 + 0; line = $0 }
+                if (low == "" || $4 + 0 < low) low = $4 + 0
+              }
+              END {
+                if (line != "") printf "Most swap in use: %d KiB. Least free memory: %d KiB. The sample with the most swap:\n%s\n", peak, low, line
+              }
+            ' "${vmstat_log}"
+            echo "::group::vmstat every 30 seconds"
+            cat "${vmstat_log}"
+            echo "::endgroup::"
           fi
 
       - name: Upload sccache server log

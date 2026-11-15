@@ -17,6 +17,9 @@ function parseArgs(args) {
     if (args[i] === '--port' && args[i + 1]) {
       opts.port = parseInt(args[i + 1], 10);
       i++;
+    } else if (args[i] === '--host' && args[i + 1]) {
+      opts.host = args[i + 1];
+      i++;
     } else if (args[i] === '--cors-origin' && args[i + 1]) {
       opts.allowOrigin = args[i + 1];
       i++;
@@ -28,7 +31,23 @@ Usage:
 
 Options:
   --port <number>         Port to listen on (default: 3100, or PORT env var)
-  --cors-origin <origin>  CORS allowed origin (default: *)
+  --host <address>        Address to listen on (default: 127.0.0.1, the loopback
+                          interface, which every user and process of this
+                          machine reaches). The proxy does not check who calls
+                          it. On a loopback address it answers loopback Host
+                          names only (localhost, any 127.x.x.x, [::1]). On any
+                          other address it does not check the Host, and a caller
+                          on the network that sends no Origin header is
+                          forwarded: put the proxy behind your own
+                          authentication.
+  --cors-origin <origin>  The one origin whose pages may call the proxy, or *
+                          for any origin (default: loopback origins only:
+                          localhost, any 127.x.x.x, [::1], on any port). A
+                          request or preflight from another origin is refused
+                          before the provider is called. A request without an
+                          Origin header (curl, server code) is served, unless a
+                          browser marks it Sec-Fetch-Site: cross-site and the
+                          option is not *.
   -h, --help              Show this help
 
 Environment variables:
@@ -38,9 +57,9 @@ Environment variables:
   PORT                    Port to listen on (overridden by --port)
 
 The WASM client uses per-provider base URLs to point at this proxy:
-  anthropicBaseUrl: 'http://localhost:3100/anthropic'
-  openaiBaseUrl:    'http://localhost:3100/openai'
-  geminiBaseUrl:    'http://localhost:3100/gemini'
+  anthropicBaseUrl: 'http://127.0.0.1:3100/anthropic'
+  openaiBaseUrl:    'http://127.0.0.1:3100/openai'
+  geminiBaseUrl:    'http://127.0.0.1:3100/gemini'
 `);
       process.exit(0);
     }

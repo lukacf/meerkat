@@ -57,7 +57,52 @@ Security, Upgrade and Changed.
   Core holds a member as an identity entry, and a session bridge has
   neither trait. No Meerkat code relied on them.
 
+- Behaviour-only (not measured by the gate): the Console's request entry
+  points (`POST /console/rpc` and `/console/rpc/multipart`) refuse a request
+  whose parameters are malformed, as invalid params (`-32602`), before any
+  method runs. A client that follows the RPC reference is not affected, and
+  no shipped client sends such a request.
+
+- Behaviour-only (not measured by the gate): on the Console, an adopt
+  declaration (`mob/adopt_member_identity_declaration`) whose owned wiring
+  names, as an end of an edge, a name that is not a member its caller may
+  view is refused as naming an unknown agent (`-32001`). 0.9.14 accepted an
+  edge to an agent that was not seated yet. Seat the other agent first, or
+  declare the edge through the stdio gateway.
+
 ### Security
+
+- The Console's request entry points now refuse malformed parameters. This
+  closes a case in which a request could be served without the access check
+  for the agent it named. Who could make such a request: a person signed in
+  to the Console who is not an access administrator. Affected: 0.9.9
+  through 0.9.14 where the check is an access rule, and 0.9.11 through
+  0.9.14 where it is the rule about an agent private to a person
+  (`console.private_to`); read from the code at each of the tags v0.9.9,
+  v0.9.10, v0.9.11, v0.9.12, v0.9.13 and v0.9.14 (0.9.11 is the first
+  release with agents private to a person).
+
+- An adopt declaration made on the Console
+  (`mob/adopt_member_identity_declaration`) can no longer name, as the far
+  end of a wiring edge it owns, an agent its caller may not see: such an
+  adoption is refused as naming an unknown agent, and nothing is recorded.
+  Who could make such an adoption: a caller who may adopt, which is a
+  holder of `runtime.admin` where access rules are enforced and any person
+  signed in where they are not, and only while adopting an agent they could
+  see that had no declaration yet, and only toward an agent whose name
+  sorts after it. The effect: such a caller could make an agent it cannot
+  view stop taking messages at that agent's owner's next change. Under
+  `identity_owned` wiring custody the other agent stops converging (at once
+  if it had not converged yet, otherwise from its owner's next change on),
+  its owner's later changes do not become active, and, if it had converged
+  before, it stops taking messages; under the default custody nothing
+  shows. Every such edge has this effect, also one adopted with permission
+  (see Upgrade and Fixed); what the access check now closes is that a
+  caller could cause it for an agent it could not view. Affected: 0.9.11
+  through 0.9.14: the edge ends were not checked at any of the tags v0.9.9,
+  v0.9.10, v0.9.11, v0.9.12, v0.9.13 and v0.9.14 (read from the code at
+  each), and agents private to a person exist from 0.9.11. What such an
+  adoption left behind stays in the store: see Upgrade.
 
 - The Console decides an agent for which no member is seated on the
   agent's own record (its profile as its role, and its labels) wherever a
@@ -196,6 +241,62 @@ Security, Upgrade and Changed.
   affected.
 
 ### Upgrade
+
+- If you run a client of your own against the Console's request entry
+  points (`POST /console/rpc`, `/console/rpc/multipart`), check that it
+  sends each request's parameters as the RPC reference documents them. A
+  request whose parameters are malformed is now refused with `-32602`.
+
+- If a client of yours adopts an identity through the Console with wiring
+  the adoption owns, each end of an edge must be a seated agent the caller
+  may view: an edge to an agent that is not seated yet is refused on the
+  Console (see Breaking). Seat that agent first, or make the adoption
+  through the stdio gateway.
+
+- An adopt declaration made on the Console before this upgrade may have
+  recorded a wiring edge to an agent its caller could not see (see
+  Security). The upgrade deletes nothing. Such an edge stays in the
+  adopting agent's declaration and in the other agent's stored plan. No
+  method removes it yet: a second adopt of either agent is refused, and a
+  new declaration of the other agent does not drop it (read from the
+  source). Retiring the adopting agent does not free the other one (run on
+  the published Meta 0.9.14). Measured on a store that holds such an edge:
+  the edge wires nothing and adds no trust. When the other agent is under
+  the default wiring custody (`external_managed`) it converges as before,
+  and its owner's next change is committed and becomes active. When the
+  other agent is under `identity_owned` wiring custody, it reads
+  `repair_blocked` instead of converged: at once if it had not converged
+  yet, otherwise from its owner's next change on. A change its owner makes
+  is then committed but does not become active, and if the agent had
+  converged before, it also refuses messages (admission closed for identity
+  convergence); a restart does not clear it. This is so for every edge
+  another agent's declaration owns toward such an agent, also one adopted
+  with permission (run on the published Meta 0.9.14; 0.8.26 through 0.9.13
+  read from the source; see Fixed). The adopting agent itself reads
+  `repair_blocked` and refuses messages from its first reconcile pass,
+  whatever is at the other end of its edge (run on the published Meta
+  0.9.14). Not run: a gateway with an identity roster, Core's own
+  `rkat-rpc`, and versions before 0.9.14. To find such edges, list the
+  adopted declarations that own wiring. The query is read-only; run it
+  against a copy of the mob store (in a gateway's state directory, the
+  database `event_log.sqlite3`). It was run on a store that holds such an
+  edge:
+
+  ```sql
+  SELECT mob_id, agent_identity,
+         json_extract(CAST(record_json AS TEXT), '$.intent.owned_wiring')
+  FROM mob_identity_intents
+  WHERE json_valid(CAST(record_json AS TEXT))
+    AND json_array_length(CAST(record_json AS TEXT),
+                          '$.intent.owned_wiring') > 0;
+  ```
+
+  It lists each adopting agent's row with the edges it owns (`a` is the
+  adopting agent, `b` the other agent); the other agent's own row shows the
+  edge under its stored plan. For each row, the agents to look at are those
+  named as `b`: read each one's wiring custody and its status. The query
+  cannot tell an edge recorded without permission from one recorded with
+  it: review each against who may view the other agent.
 
 - A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
   or the `bootstrap_with_*` family must complete the bootstrap before an

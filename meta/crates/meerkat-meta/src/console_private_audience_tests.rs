@@ -122,7 +122,7 @@ fn member_requests(name: &str) -> Vec<(&'static str, Value)> {
 /// over a Core that holds `member` live on its own session (registered after
 /// the fork that seated the member, which an identity of the name refuses),
 /// with agent memory in `memory_dir`, and an aggregator over the runtime.
-async fn fully_composed_console(
+pub(super) async fn fully_composed_console(
     runtime: &MobRuntime,
     member: &str,
     memory_dir: &std::path::Path,

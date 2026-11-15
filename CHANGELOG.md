@@ -290,9 +290,13 @@ them.
   mob profile sent to `mob/create`, `mob/spawn`'s `override_profile`, a
   `mob/turn_start` request, a REST `POST /sessions` body, and a profile
   or definition an agent writes with the mob tools; the key never reached
-  a provider (`mob/create`: by a run on the published 0.9.14 binary and by
-  reading its source; the other four: by reading its source; the CLI's
-  mob verbs: not determined). A client that sent the key there by mistake
+  a provider (by a run on the published 0.9.14 binaries for `mob/create`,
+  `mob/spawn`'s `override_profile`, `mob/turn_start`, REST `POST /sessions`
+  and the `mob_create` tool; the agents' other mob tools: not run, by
+  reading the source; the CLI's mob verbs: not determined; a Meta 0.9.14
+  gateway refuses a `mob.toml` profile with the key when it starts, so
+  Meta definition files are not a sixth place). A client that sent the key
+  there by mistake
   now sets a level: a value that is not a level is refused when the
   request is read, a level the model's route does not accept is refused
   with the typed `reasoning_effort_refused` data, and a level the route
@@ -316,7 +320,13 @@ them.
   A mob already stored by 0.9.14 keeps no level: only a definition or
   request sent again sets one. Before upgrading, look for the key in
   those five places; remove it, or keep it on purpose and accept the
-  level and the busy rule for those members (see the upgrade guide). On
+  level and the busy rule for those members (see the upgrade guide).
+  Nothing a 0.9.14 server keeps shows the key for the first four: it was
+  dropped when the request was read, so no stored mob, session, history
+  or log holds it. Search what sends those requests: your client's code,
+  your mob definition files and the SDK calls that pass `provider_params`.
+  For the fifth, read the transcripts of agents that have mob tools: the
+  tool call and its arguments are in the calling agent's history. On
   `session/create`, `turn/start` and the MCP tools, 0.9.14 refused the
   key as an unknown field.
 
@@ -1783,7 +1793,7 @@ them.
   and the session were not affected. Now a level the route refuses is
   refused with the typed refusal (`-32602`, `reasoning_effort_refused`)
   while that turn runs, and a request the route takes is answered `-32002`
-  (`SESSION_BUSY`, retryable) with the data
+  (`SESSION_BUSY`: send it again when the session is idle) with the data
   `{"kind": "reasoning_effort_change_needs_idle_session"}` at once and
   stores nothing: wait for the running turn's answer, then send it again
   (the cases are under Known limitations). On a stored session that is not
@@ -1798,7 +1808,8 @@ them.
   changed a session's level or model could end other work queued on that
   session; such requests are no longer queued, and no client sequence
   reaches that any more; one race between two requests sent without
-  waiting for each other remains until a later release (see Known
+  waiting for each other remains; a later release is planned to close it
+  (see Known
   limitations). A session that holds no
   provider-neutral level queues its turns as in 0.9.14, a model change and
   a provider's own effort parameter (`provider_tag`) included. Measured by
@@ -3121,9 +3132,17 @@ them.
   names the level also for a request that only changed the model. Wait for
   the running turn's answer, then send the request again; do not poll. A
   session with standing work may never be idle for such a request: stop
-  sending, let the queue drain, then make the change. A later release
-  queues these turns. (Confirmed by tests of this change, on a session, on
-  a mob member's session and through the JSON-RPC router.)
+  sending, let the queue drain, then make the change. Unfinished work is
+  not only a running turn: an event queued on an idle session counts. A
+  session that received a `session/external_event` while idle (confirmed
+  by a test of this change), or one configured with silent comms intents
+  that holds an unread silent request (by reading the code, not run),
+  counts that input as unfinished work until its next turn and is answered
+  busy. Nothing is running to wait for: send a plain turn first, then the
+  change, or set the level when the session is created; the busy answer's
+  text says so. A later release
+  is planned to queue these turns. (Confirmed by tests of this change, on
+  a session, on a mob member's session and through the JSON-RPC router.)
 
   The reason: a level is judged again when its turn starts, and a level
   refused at a turn's start is still a failed start, which ends the

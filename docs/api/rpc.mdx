@@ -1665,7 +1665,7 @@ the data `{"kind": "reasoning_effort_change_needs_idle_session"}` and
 stores nothing: wait for the running turn's answer, then send it again.
 The cases are in the table under
 [Model settings on a busy session](#model-settings-on-a-busy-session). A
-later release queues it.
+later release is planned to queue it.
 
 Since 0.9.5, `"session_events": false` asks that the turn's events not be
 written as `session/event` notifications. A caller that reads them from a
@@ -4865,8 +4865,9 @@ A level is judged again when its turn starts. A `turn/start` refused
 there, after its input was stored, is a failed start: its stored input ends
 as abandoned with the reason `stopped`, not with the refusal, the session's
 live runtime is retired, and the other requests queued on that session end
-without a run (see Known limitations in the changelog; a later release
-changes this). What can still be refused at its start: a deferred create's
+without a run (see Known limitations in the changelog; a later release is
+planned to change this). What can still be refused at its start: a
+deferred create's
 first turn; a turn on a stored session that is not live whose level cannot
 be judged yet (`supported_levels_unavailable`); a request sent without
 waiting for another one, when it reaches admission in the time between
@@ -4936,7 +4937,15 @@ and on a deferred session while its first turn is still building it.
   A model-identity change carried by such an input, or by a member turn
   an in-process Rust host starts with a model, provider, params or
   binding option, is queued and judged only when its turn starts.
-- A later release queues these turns.
+- Unfinished work is not only a running turn: an event queued on an idle
+  session counts. A session that received a `session/external_event`
+  while idle (confirmed by a test of this change), or one configured with
+  silent comms intents that holds an unread silent request (by reading the
+  code, not run), counts that input as unfinished work until its next
+  turn, and a turn from a busy cell is answered busy there. Nothing is
+  running to wait for: send a plain turn first, then the change, or set
+  the level when the session is created. The busy answer's text says so.
+- A later release is planned to queue these turns.
 
 ### comms/send error data
 

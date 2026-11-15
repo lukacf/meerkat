@@ -542,6 +542,7 @@ send the turn again; do not poll. A later release is planned to queue such a
 turn.
 
 ```typescript
+const runningTurn = session.turn("Summarize the report"); // a turn in flight
 try {
   await session.turn("Think harder", { reasoningEffort: "high" });
 } catch (error) {

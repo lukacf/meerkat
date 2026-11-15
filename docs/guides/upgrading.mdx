@@ -429,7 +429,7 @@ route (the four differences are listed under Changed in the changelog).
   holds no provider-neutral level queues everything as on 0.9.14, except
   a turn that sets a level. The table is in the
   [JSON-RPC reference](/api/rpc#model-settings-on-a-busy-session). A
-  later release queues these turns.
+  later release is planned to queue these turns.
 - **Older servers.** A server before 0.9.15 refuses the `reasoning_effort`
   field on `turn/start` and `mob/turn_start` and ignores it on
   `session/create` and in REST bodies. The nested key
@@ -456,10 +456,20 @@ route (the four differences are listed under Changed in the changelog).
   five places, where it was accepted and dropped: a mob profile sent to
   `mob/create`, `mob/spawn`'s `override_profile`, a `mob/turn_start`
   request, a REST `POST /sessions` body, and a profile or definition an
-  agent's mob tools write (`mob/create`: by a run on the published 0.9.14
-  binary and by reading its source; the other four: by reading its
-  source; the CLI's mob verbs: not determined). Before upgrading, look
-  for the key in those five places. From 0.9.15 it sets a level there:
+  agent's mob tools write (by a run on the published 0.9.14 binaries for
+  `mob/create`, `mob/spawn`'s `override_profile`, `mob/turn_start`, REST
+  `POST /sessions` and the `mob_create` tool; the agents' other mob tools:
+  not run, by reading the source; the CLI's mob verbs: not determined). A
+  Meta 0.9.14 gateway refuses a `mob.toml` profile with the key when it
+  starts, so Meta definition files are not a sixth place. Before
+  upgrading, look for the key in those five places. Nothing a 0.9.14
+  server keeps shows the key for the first four: it was dropped when the
+  request was read, so no stored mob, session, history or log holds it.
+  Search what sends those requests: your client's code, your mob
+  definition files and the SDK calls that pass `provider_params`. For the
+  fifth, read the transcripts of agents that have mob tools: the tool call
+  and its arguments are in the calling agent's history. From 0.9.15 it
+  sets a level there:
   either remove it, or accept the level and the busy rule for those
   members. If it stays: a value that is no level is refused when the
   request is read; a profile that carries the key beside a different

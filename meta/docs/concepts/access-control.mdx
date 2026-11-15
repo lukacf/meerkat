@@ -40,7 +40,7 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `gating.view` / `gating.decide` | Read and decide approval gates. From 0.9.15, `gating.view` also reads the open [question sets](/concepts/gating#question-sets) (`meta/gating/questions`), and `gating.decide` answers or dismisses them; both only for agents the caller may view |
 | `decisions.view` | Read the durable decisions the caller may see on the Console: `meta/decisions/list`, `get` and `rendering` (see [durable decision methods](/api/rpc#durable-decision-methods)) |
 | `decisions.decide` | Reserved for deciding durable decisions on the Console; the Console decides none yet |
-| `decisions.admin` | Read every durable decision whole on the Console, and withdraw one (`meta/decisions/withdraw`) |
+| `decisions.admin` | Read every durable decision whole on the Console, and withdraw one (`meta/decisions/withdraw`). From 0.9.15 a question set (kind `ask_user.questions`) is read, and withdrawn, only by a caller who may view its asking agent; to anyone else, an administrator included, it is a decision that is not there |
 | `workgraph.view` | Read WorkGraph snapshots, items, attention, events, and facts; observe the wake stream |
 | `workgraph.manage` | Mutate WorkGraph items, goals, links, and attention bindings |
 | `mob.observe` | Subscribe to whole-mob raw event streams |

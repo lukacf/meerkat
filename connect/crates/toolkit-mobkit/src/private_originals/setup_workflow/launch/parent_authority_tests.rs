@@ -171,11 +171,7 @@ async fn actual_g_catalog_requires_independently_admitted_parent_operation_ceili
                     .await
                     .unwrap();
             }
-            let p =
-                c.f.source
-                    .submit_authenticated_original(c.parent.clone())
-                    .await
-                    .unwrap();
+            let p = submit_planning_parent(&c.f.source, &c.parent).await;
             finish(&c, "planning_parent", &p).await;
             let parent =
                 c.f.source
@@ -244,16 +240,15 @@ async fn actual_g_catalog_requires_independently_admitted_parent_operation_ceili
             let dispatch = probe.captured();
             assert_eq!(dispatch.origin_session_id(), Some(&c.f.session));
             let original = c.f.source.acquisition_original(&dispatch).await.unwrap();
-            let planning =
-                c.f.source
-                    .prepare_workflow_planning(
-                        &c.parent.original,
-                        c.lead.clone(),
-                        c.terms.clone(),
-                        c.lineage.clone(),
-                    )
-                    .await
-                    .unwrap();
+            let planning = prepare_planning(
+                &c.f.source,
+                &c.parent.original,
+                &c.lead,
+                &c.terms,
+                &c.lineage,
+            )
+            .await
+            .unwrap();
             let (membership, snapshot) = join_waiter(
                 &c.f,
                 &planning,
@@ -333,11 +328,7 @@ async fn operational_parent_cold_restore_checks_actual_grants_without_new_input(
         let mut saved = None;
         let body = AssertUnwindSafe(Box::pin(async {
             prepare(&c, &selected).await;
-            let p =
-                c.f.source
-                    .submit_authenticated_original(c.parent.clone())
-                    .await
-                    .unwrap();
+            let p = submit_planning_parent(&c.f.source, &c.parent).await;
             finish(&c, "planning_parent", &p).await;
             let association =
                 c.f.source

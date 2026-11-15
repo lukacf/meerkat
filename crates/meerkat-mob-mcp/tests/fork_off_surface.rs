@@ -35,8 +35,8 @@ use meerkat_mob_mcp::{
 };
 use serde_json::{Value, json};
 use support::{
-    CouncilFixture, GatedClaimCouncilStore, ScriptedTurn, TurnGate, council_definition,
-    last_user_text, role_in_request, user_text,
+    CouncilFixture, GatedClaimCouncilStore, OneShotFailingCouncilStore, ScriptedTurn, TurnGate,
+    council_definition, last_user_text, role_in_request, user_text,
 };
 
 /// Marker in every child task, so the script can tell a child's turn from
@@ -1905,6 +1905,103 @@ async fn forker_checks_lists_and_retires_only_its_own_children() {
             .unwrap()
             .is_some()
     );
+    fixture.teardown().await;
+}
+
+/// A member's hold on its own children, and its owner view of the member
+/// list, rest on its seat in the mob and on the spawn record, not on an
+/// authority that names the mob. The forker's session with an authority
+/// that names no mob at all checks, lists and retires its own child, is
+/// still denied a member it does not own, and a bystander with such an
+/// authority still gets its empty owner view: none of them is answered as
+/// a caller of a mob it has nothing to do with.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_whose_authority_names_no_mob_keeps_its_owner_view_and_its_children() {
+    let fixture = CouncilFixture::new_runtime_backed(routed_script(
+        RequestLog::default(),
+        vec![(CHILD_TASK, ChildReply::Text(CHILD_REPLY))],
+    ));
+    fixture.seed_source_mob(&["forker", "bystander"]).await;
+    let mob_id = fixture.source_mob_id().to_string();
+    let forker = member_surface(&fixture, "forker").await;
+    let job_id =
+        start_detached_fork(&forker, "kept-child", fork_args("kept-child", CHILD_TASK)).await;
+    wait_for_completion(&fixture, &forker.session, &job_id).await;
+
+    let names_no_mob = || {
+        let authority =
+            meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
+                .expect("generated authority");
+        let authority =
+            meerkat_runtime::mob_operator_authority::set_create_authority(&authority, false)
+                .expect("no create scope");
+        assert!(
+            authority.managed_mob_scope().is_empty()
+                && authority.spawn_profile_scope().is_empty()
+                && authority.mob_incarnations().is_empty(),
+            "the authority names no mob"
+        );
+        authority
+    };
+    let forker = bind_surface(&fixture.state, forker.session.clone(), names_no_mob());
+    let bystander = bind_surface(
+        &fixture.state,
+        member_session(&fixture, "bystander").await,
+        names_no_mob(),
+    );
+
+    let checked = call(
+        &forker.surface,
+        "mob_check_member",
+        json!({"mob_id": mob_id, "member_id": "kept-child"}),
+    )
+    .await
+    .expect("the forker checks its own child");
+    assert_eq!(checked["output_preview"], CHILD_REPLY, "{checked}");
+    let listed = call(
+        &forker.surface,
+        "mob_list_members",
+        json!({"mob_id": mob_id}),
+    )
+    .await
+    .expect("owner view of the member list");
+    assert_eq!(member_names(&listed), vec!["kept-child"], "{listed}");
+    let listed = call(
+        &bystander.surface,
+        "mob_list_members",
+        json!({"mob_id": mob_id}),
+    )
+    .await
+    .expect("a member without children gets an empty owner view");
+    assert!(member_names(&listed).is_empty(), "{listed}");
+    for (surface, target) in [
+        (&forker.surface, "bystander"),
+        (&bystander.surface, "kept-child"),
+    ] {
+        for tool in ["mob_check_member", "mob_retire_member"] {
+            assert!(
+                matches!(
+                    call(
+                        surface,
+                        tool,
+                        json!({"mob_id": mob_id, "member_id": target})
+                    )
+                    .await,
+                    Err(ToolError::AccessDenied { .. })
+                ),
+                "{tool} on {target} is denied to a member that does not own it"
+            );
+        }
+    }
+
+    call(
+        &forker.surface,
+        "mob_retire_member",
+        json!({"mob_id": mob_id, "member_id": "kept-child"}),
+    )
+    .await
+    .expect("the forker retires its own child");
+    assert_not_seated(&source_handle(&fixture).await, "kept-child").await;
     fixture.teardown().await;
 }
 
@@ -3914,6 +4011,500 @@ async fn fork_off_of_an_activated_member_runs_when_the_host_opts_in() {
             .count(),
         1,
         "the inherited history row is a header without its body"
+    );
+    fixture.teardown().await;
+}
+
+// ===========================================================================
+// Council convener: who convened a council, as its create and record say it
+// ===========================================================================
+
+/// Record every request the host's create hook is asked, in order, and
+/// admit them all.
+fn record_create_requests(
+    state: &MobMcpState,
+) -> Arc<Mutex<Vec<meerkat_mob_mcp::MobCreateRequest>>> {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&asked);
+    state
+        .set_before_create(Arc::new(
+            move |request: meerkat_mob_mcp::MobCreateRequest| {
+                recorder.lock().unwrap().push(request);
+                Box::pin(async { Ok(()) })
+            },
+        ))
+        .expect("bind the create hook");
+    asked
+}
+
+/// The one request the create hook was asked for the mob of `council_id`.
+fn council_create_request(
+    asked: &Mutex<Vec<meerkat_mob_mcp::MobCreateRequest>>,
+    council_id: &meerkat_mob::temporary_council::TemporaryCouncilId,
+) -> meerkat_mob_mcp::MobCreateRequest {
+    let mob_id = council_id.temporary_mob_id();
+    let mut asked: Vec<_> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.mob_id == mob_id)
+        .cloned()
+        .collect();
+    assert_eq!(
+        asked.len(),
+        1,
+        "the create hook is asked once for the council's mob: {asked:?}"
+    );
+    asked.remove(0)
+}
+
+/// `request` says the mob is the mob of `council_id`, convened by the
+/// session `convener`, and the mob's owner session is another session.
+fn assert_names_convener(
+    request: &meerkat_mob_mcp::MobCreateRequest,
+    council_id: &meerkat_mob::temporary_council::TemporaryCouncilId,
+    convener: &SessionId,
+) {
+    let origin = request
+        .council
+        .as_ref()
+        .unwrap_or_else(|| panic!("the create hook is told the mob is a council's: {request:?}"));
+    assert_eq!(&origin.council_id, council_id, "{request:?}");
+    assert_eq!(
+        origin.convener_session_id.as_ref(),
+        Some(convener),
+        "the create hook is told the session that convened the council: {request:?}"
+    );
+    let owner = request
+        .owner_bridge_session_id
+        .as_ref()
+        .unwrap_or_else(|| panic!("a council's mob has an owner session: {request:?}"));
+    assert_ne!(
+        owner, convener,
+        "the mob's owner session stays a session of the council's own"
+    );
+    assert!(!request.implicit_delegation_mob, "{request:?}");
+}
+
+async fn council_record(
+    state: &Arc<MobMcpState>,
+    council_id: &meerkat_mob::temporary_council::TemporaryCouncilId,
+) -> meerkat_mob::store::TemporaryCouncilRecord {
+    state
+        .temporary_council()
+        .load(council_id)
+        .await
+        .expect("load the council record")
+        .expect("the council record exists")
+}
+
+/// A second surface with a convener's authority, bound to `member`'s
+/// session.
+async fn convener_surface(fixture: &CouncilFixture, member: &str) -> BoundSurface {
+    let mob_id = fixture.source_mob_id().to_string();
+    bind_surface(
+        &fixture.state,
+        member_session(fixture, member).await,
+        convener_authority(&mob_id, live_incarnation(&fixture.state, &mob_id).await),
+    )
+}
+
+/// A script whose council round turns wait at `gate`, so a council can be
+/// observed and joined while it runs.
+fn gated_rounds_script(
+    gate: Arc<TurnGate>,
+) -> impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static {
+    move |request| {
+        if user_text(request).contains("bounded plain-text summary") {
+            return ScriptedTurn::Text(COUNCIL_SUMMARY.to_string());
+        }
+        if let Some(role) = role_in_request(request) {
+            return ScriptedTurn::Gated(Arc::clone(&gate), format!("position from {role}"));
+        }
+        ScriptedTurn::Text(FOLLOW_UP_REPLY.to_string())
+    }
+}
+
+/// A council convened through the `council` tool tells the host's create
+/// hook who convened it: the session the tool's surface is bound to. The
+/// mob's owner session is still a session of the council's own. Here the
+/// council runs detached.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_convened_council_tells_the_create_hook_its_convener() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(routed_script(RequestLog::default(), Vec::new()));
+    let asked = record_create_requests(&fixture.state);
+    fixture.seed_source_mob(&["convener", "alice", "bob"]).await;
+    let convener = convener_surface(&fixture, "convener").await;
+
+    let started = call(
+        &convener.surface,
+        "council",
+        council_args(&fixture, Some("convened-detached")),
+    )
+    .await
+    .expect("council starts");
+    assert_eq!(started["status"], "running", "{started}");
+    let job_id = started["job_id"].as_str().expect("job id").to_string();
+    let record = wait_for_completion(&fixture, &convener.session, &job_id).await;
+    assert_eq!(
+        record.status,
+        BackgroundJobTerminalStatus::Completed,
+        "{record:?}"
+    );
+
+    let council_id = fixture.council_id("convened-detached");
+    assert_names_convener(
+        &council_create_request(&asked, &council_id),
+        &council_id,
+        &convener.session,
+    );
+    fixture.teardown().await;
+}
+
+/// The same on a host that cannot deliver later, where the council runs in
+/// the convener's call: that route records no job, and the create hook is
+/// still told the convener.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blocking_tool_convened_council_tells_the_create_hook_its_convener() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(routed_script(RequestLog::default(), Vec::new()));
+    let asked = record_create_requests(&fixture.state);
+    fixture.seed_source_mob(&["convener", "alice", "bob"]).await;
+    fixture
+        .state
+        .set_detached_completion_delivery(DetachedCompletionDelivery::Unavailable);
+    let convener = convener_surface(&fixture, "convener").await;
+
+    let result = call(
+        &convener.surface,
+        "council",
+        council_args(&fixture, Some("convened-blocking")),
+    )
+    .await
+    .expect("blocking council returns the sealed result");
+    assert!(result.get("job_id").is_none(), "{result}");
+
+    let council_id = fixture.council_id("convened-blocking");
+    assert_names_convener(
+        &council_create_request(&asked, &council_id),
+        &council_id,
+        &convener.session,
+    );
+    let record = council_record(&fixture.state, &council_id).await;
+    assert!(
+        record.detached_job.is_none(),
+        "the blocking route records no job"
+    );
+    assert_eq!(
+        record
+            .convener
+            .as_ref()
+            .map(|convener| &convener.session_id),
+        Some(&convener.session),
+        "the blocking route records its convener"
+    );
+    fixture.teardown().await;
+}
+
+/// What a council convened by one session and then presented again, by
+/// that session and by another one, leaves behind.
+struct TwiceConvened {
+    fixture: CouncilFixture,
+    asked: Arc<Mutex<Vec<meerkat_mob_mcp::MobCreateRequest>>>,
+    council_id: meerkat_mob::temporary_council::TemporaryCouncilId,
+    first: SessionId,
+    second: SessionId,
+    /// The council record while the first convener's council was running.
+    while_running: meerkat_mob::store::TemporaryCouncilRecord,
+    /// The second session's result of the same request, presented while the
+    /// council ran.
+    joined: Value,
+    /// Round turns the model ran in all.
+    round_turns: usize,
+}
+
+/// Convene one council from the session of `convener`, present the same id
+/// and request from the session of `second` while it runs, and then present
+/// it once more from each after it sealed.
+async fn convene_twice(label: &str) -> TwiceConvened {
+    let gate = TurnGate::new();
+    let _open_on_drop = OpenOnDrop(Arc::clone(&gate));
+    let fixture = CouncilFixture::new_runtime_backed(gated_rounds_script(Arc::clone(&gate)));
+    let asked = record_create_requests(&fixture.state);
+    fixture
+        .seed_source_mob(&["convener", "second", "alice", "bob"])
+        .await;
+    fixture
+        .state
+        .set_detached_completion_delivery(DetachedCompletionDelivery::Unavailable);
+    let first = convener_surface(&fixture, "convener").await;
+    let second = convener_surface(&fixture, "second").await;
+    let council_id = fixture.council_id(label);
+    let args = council_args(&fixture, Some(label));
+
+    let surface = Arc::clone(&first.surface);
+    let first_args = args.clone();
+    let first_call = tokio::spawn(async move { call(&surface, "council", first_args).await });
+    gate.wait_entered(1).await;
+    let while_running = council_record(&fixture.state, &council_id).await;
+    assert!(
+        while_running.result.is_none(),
+        "the council is still running"
+    );
+
+    let surface = Arc::clone(&second.surface);
+    let second_args = args.clone();
+    let second_call = tokio::spawn(async move { call(&surface, "council", second_args).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !second_call.is_finished(),
+        "the same request from another session waits for the running council"
+    );
+    gate.open();
+    let first_result = tokio::time::timeout(Duration::from_mins(2), first_call)
+        .await
+        .expect("the convener's call returns")
+        .expect("join")
+        .expect("the convener's council seals");
+    let joined = tokio::time::timeout(Duration::from_mins(2), second_call)
+        .await
+        .expect("the second session's call returns")
+        .expect("join")
+        .expect("the same request from another session is no conflict");
+    assert_eq!(first_result["replayed"], false, "{first_result}");
+
+    for surface in [&first.surface, &second.surface] {
+        let replayed = call(surface, "council", args.clone())
+            .await
+            .expect("a sealed council replays");
+        assert_eq!(replayed["replayed"], true, "{replayed}");
+        assert_eq!(replayed["result"], first_result["result"], "{replayed}");
+    }
+    let round_turns = gate.entered();
+    TwiceConvened {
+        asked,
+        council_id,
+        first: first.session,
+        second: second.session,
+        while_running,
+        joined,
+        round_turns,
+        fixture,
+    }
+}
+
+/// The convener is outside the request fingerprint: the same council id and
+/// request from another bound session joins the running council (or replays
+/// its result) and is never a conflicting request, and the council's model
+/// work runs once.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_council_request_from_another_session_joins() {
+    let convened = convene_twice("joined-by-another-session").await;
+    assert!(
+        convened.joined["result"]
+            .to_string()
+            .contains("COUNCIL-SUMMARY-9Z"),
+        "the second session gets the council's sealed result: {}",
+        convened.joined
+    );
+    assert_eq!(
+        convened.round_turns, 2,
+        "two participants ran one round once, whoever presented the request"
+    );
+    assert_ne!(convened.first, convened.second);
+    convened.fixture.teardown().await;
+}
+
+/// The council record names its convener from its first durable write, and
+/// nothing changes it afterwards: not the seal, not a second session that
+/// presents the same request while the council runs, and not a replay from
+/// either session. The create hook is asked once, with the first convener.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_council_record_keeps_its_convener() {
+    let convened = convene_twice("keeps-its-convener").await;
+    let convener =
+        meerkat_mob::temporary_council::TemporaryCouncilConvener::new(convened.first.clone());
+    assert_eq!(
+        convened.while_running.convener.as_ref(),
+        Some(&convener),
+        "the record names its convener before any participant is seated"
+    );
+    let sealed = council_record(&convened.fixture.state, &convened.council_id).await;
+    assert!(sealed.result.is_some(), "the council sealed");
+    assert_eq!(
+        sealed.convener.as_ref(),
+        Some(&convener),
+        "the seal, the join and the replays left the first convener in place"
+    );
+    assert_names_convener(
+        &council_create_request(&convened.asked, &convened.council_id),
+        &convened.council_id,
+        &convened.first,
+    );
+    convened.fixture.teardown().await;
+}
+
+/// A council whose coordinator died is sealed by recovery, which never
+/// creates the mob again and leaves the record's convener as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recovered_council_keeps_its_convener() {
+    // Fail the custody commit that follows the second seating: a real
+    // temporary mob and two seated members exist and no result is sealed.
+    // Commit order: claim, the temporary mob's create intent, then per
+    // participant {acquire-intent, capability, seated}, then phase=Running:
+    // index 8 is that last advance.
+    let failing = Arc::new(std::sync::OnceLock::<Arc<OneShotFailingCouncilStore>>::new());
+    let failing_slot = Arc::clone(&failing);
+    let mut fixture = CouncilFixture::new_with(
+        routed_script(RequestLog::default(), Vec::new()),
+        move |state, root| {
+            let path = MobMcpState::persistent_forked_participant_store_path(root);
+            let inner: Arc<dyn meerkat_mob::store::TemporaryCouncilStore> = Arc::new(
+                meerkat_mob::store::SqliteTemporaryCouncilStore::open(&path)
+                    .expect("open durable council custody"),
+            );
+            let store = Arc::new(OneShotFailingCouncilStore::new(inner, 8));
+            let _ = failing_slot.set(Arc::clone(&store));
+            state.with_temporary_council_store(store)
+        },
+    );
+    let asked = record_create_requests(&fixture.state);
+    fixture.seed_source_mob(&["convener", "alice", "bob"]).await;
+    fixture
+        .state
+        .set_detached_completion_delivery(DetachedCompletionDelivery::Unavailable);
+    let convener = convener_surface(&fixture, "convener").await;
+    let council_id = fixture.council_id("recovered");
+
+    call(
+        &convener.surface,
+        "council",
+        council_args(&fixture, Some("recovered")),
+    )
+    .await
+    .expect_err("the injected custody fault ends the council's task");
+    assert!(failing.get().expect("store installed").fired());
+    let interrupted = council_record(&fixture.state, &council_id).await;
+    assert!(interrupted.result.is_none(), "no result was sealed");
+    let expected =
+        meerkat_mob::temporary_council::TemporaryCouncilConvener::new(convener.session.clone());
+    assert_eq!(interrupted.convener.as_ref(), Some(&expected));
+    assert_names_convener(
+        &council_create_request(&asked, &council_id),
+        &council_id,
+        &convener.session,
+    );
+
+    // Quiesce this lifetime's mob actors, then recover as a restarted
+    // process would: another coordinator, once the dead one's lease is
+    // observed expired.
+    let temporary_mob_id = council_id.temporary_mob_id();
+    if let Ok(handle) = fixture.state.handle_for(&temporary_mob_id).await {
+        handle.shutdown().await.expect("quiesce the temporary mob");
+    }
+    if let Ok(handle) = fixture.state.handle_for(&fixture.source_mob_id()).await {
+        handle.shutdown().await.expect("quiesce the source mob");
+    }
+    drop(convener);
+    let restarted = fixture.restart_state();
+    drop(std::mem::replace(
+        &mut fixture.state,
+        Arc::clone(&restarted),
+    ));
+    let recreated = record_create_requests(&restarted);
+    let held = restarted.temporary_council_store_for_tests();
+    fixture.expire_claim_lease(&held, &council_id).await;
+    // The post-restore sweep may take the record before this call does:
+    // either way the record ends sealed by recovery.
+    let deadline = std::time::Instant::now() + Duration::from_mins(1);
+    let recovered = loop {
+        restarted
+            .temporary_council()
+            .recover_unfinished()
+            .await
+            .expect("the recovery sweep runs");
+        let record = council_record(&restarted, &council_id).await;
+        if record.result.is_some() {
+            break record;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "recovery never sealed the interrupted council"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        recovered.result.as_ref().map(|result| &result.exit_reason),
+        Some(&meerkat_mob::temporary_council::TemporaryCouncilExitReason::CoordinatorInterrupted)
+    );
+    assert_eq!(
+        recovered.convener.as_ref(),
+        Some(&expected),
+        "recovery leaves the record's convener as it was written"
+    );
+    assert!(
+        recreated
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.mob_id != temporary_mob_id),
+        "recovery never creates the council's mob again"
+    );
+    fixture.teardown().await;
+}
+
+/// The `council` tool takes no convener: its schema names none, and an
+/// argument that claims one (under any of the names the record and the
+/// create request use) changes nothing that is stored or told to the host.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_council_tool_takes_no_convener_argument() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(routed_script(RequestLog::default(), Vec::new()));
+    let asked = record_create_requests(&fixture.state);
+    fixture.seed_source_mob(&["convener", "alice", "bob"]).await;
+    fixture
+        .state
+        .set_detached_completion_delivery(DetachedCompletionDelivery::Unavailable);
+    let convener = convener_surface(&fixture, "convener").await;
+
+    let tools = convener.surface.tools();
+    let council_tool = tools
+        .iter()
+        .find(|tool| tool.name.as_str() == "council")
+        .expect("the council tool is listed");
+    let schema = council_tool.input_schema.to_string().to_lowercase();
+    assert!(
+        !schema.contains("convener"),
+        "the council tool's schema names no convener: {schema}"
+    );
+
+    let claimed = member_session(&fixture, "alice").await;
+    let mut args = council_args(&fixture, Some("claimed-convener"));
+    args["convener"] = json!({ "session_id": claimed });
+    args["convener_session_id"] = json!(claimed);
+    args["council"] = json!({
+        "council_id": fixture.council_id("claimed-convener").as_str(),
+        "convener_session_id": claimed,
+    });
+    call(&convener.surface, "council", args)
+        .await
+        .expect("the claimed keys are not arguments of the tool");
+
+    let council_id = fixture.council_id("claimed-convener");
+    assert_names_convener(
+        &council_create_request(&asked, &council_id),
+        &council_id,
+        &convener.session,
+    );
+    let record = council_record(&fixture.state, &council_id).await;
+    assert_eq!(
+        record
+            .convener
+            .as_ref()
+            .map(|convener| &convener.session_id),
+        Some(&convener.session),
+        "the record names the session the tool's surface is bound to"
     );
     fixture.teardown().await;
 }

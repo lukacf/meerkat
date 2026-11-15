@@ -268,12 +268,20 @@ JSON-RPC target schema.
 
 From 0.9.15 a session can carry a provider-neutral
 [reasoning effort](/concepts/providers#reasoning-effort) level, but a
-reasoning-effort level is not accepted in a schedule's session settings in
-0.9.15: a `create` spec whose `provider_params` carries `reasoning_effort`
-is refused when the schedule is created or updated (invalid params on
-JSON-RPC, HTTP 400 on REST, an invalid-arguments error from the schedule
-tools), and nothing is stored. A provider's own effort under
+reasoning-effort level is not accepted on a schedule in 0.9.15. On session
+and identity targets a `reasoning_effort` key is refused when the schedule is
+created or updated: directly in a `create` spec (the form `session/create`
+takes), in the spec's `provider_params`, and directly on the prompt action
+of a session or identity target (the form a turn request takes). The answer
+is invalid params on JSON-RPC, HTTP 400 on REST and
+an invalid-arguments error from the schedule tools; nothing is stored, and a
+refused update leaves the schedule as it was. 0.9.14 read the two direct
+forms as unknown members and dropped them without a word. Other unknown
+members are still dropped, as is the key with a `null` value, which names no
+level, and the key on an event action, which carries no prompt (an event's
+`payload` is its own data). A provider's own effort under
 `provider_params.provider_tag` is accepted in the spec, as on 0.9.14.
+[Mob targets](#mob-targets) do not refuse the key yet.
 
 ### Identity targets
 
@@ -318,6 +326,10 @@ Example flow target:
   "params": { "severity": "high" }
 }
 ```
+
+A `reasoning_effort` key written on a mob target (on a `member` target's
+action or on a helper target) is not refused in 0.9.15: it is read as an
+unknown member and dropped, so the delivery runs without a level.
 
 ### Host-runnable targets
 
@@ -470,6 +482,25 @@ occurrence claim lease is 60 seconds. A delivery renews it around the
 half-lease point while the target admits it and while it runs, so a slow
 admission keeps its claim too.
 
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+From 0.9.15 a driver reports when it is locked out behind its own executor
+lease (through 0.9.14 such a tick read as a healthy standby). When a reply on
+the lease is lost (the store committed an acquisition or a renewal and the
+driver saw an error), a tick is dropped while that call is in flight, or a
+release fails, the store holds the lease under
+that driver's own executor owner id and the driver has no witness to renew
+or release it with. Nothing is claimed until that lease expires. Such a tick
+is not a healthy standby: its report carries `executor_lockout` (the
+driver's own executor owner id, when the store says the lease was acquired,
+and when it expires), and the schedule host logs the incident class
+`executor_lease_self_lockout`, an error when it starts and a rate-limited
+warning while it lasts. That string is a stable log class: a host's log
+handling may match on it. The report changes nothing else: the tick succeeds,
+the lease ends by expiry, and occurrences that came due in the gap follow
+their misfire policy. A driver behind another executor's lease, a restarted
+host behind its previous incarnation's lease included, stays a plain standby.
+
 Each dispatch also carries a stable occurrence-level delivery identity. If
 target admission succeeds but recording the receipt fails, a later reclaim
 retries the same identity. Target hosts must reconcile or deduplicate that
@@ -479,6 +510,32 @@ input's outcome and records it. While that outcome cannot be read yet, the
 occurrence keeps its lease and re-reads it for up to five lease periods; then
 it ends `delivery_failed` with failure class `internal_error` (runtime
 completion authority unavailable).
+
+From 0.9.15, when the driver cannot start a dispatch it has claimed (the
+schedule cannot be read, the target probe fails, or the write that records
+the dispatch start fails), it gives the claim back at once instead of holding
+it for the rest of the lease (through 0.9.14 the claim stayed until its lease
+lapsed). The occurrence is pending again (the release counts no
+attempt; the claim that follows does, as every claim does), and its receipt
+history gains a `lease_expired` receipt with
+failure class `lease_lost` and the detail `claim released because dispatch
+could not start`: a release before dispatch reports under that stage, as a
+lapse does, and the detail tells the two apart. The next tick claims the
+occurrence again while its misfire window is open, so one transient store
+fault no longer costs an occurrence under the default 60 second lease and 30
+second `skip` grace. The window is not widened: a claim given back past the
+misfire deadline ends `misfired`. The driver tries the release once: it
+reads the occurrence's receipt history and then writes the release. If that
+read or that write fails too, the claim stays and lapses with its lease as
+described next, so one transient fault is covered, not two in a row. An occurrence
+that fails before dispatch on every tick is given back each time and gains
+one such receipt per failed tick, at the pace of the host's failure backoff.
+Each of those claims counts toward `attempt_count`, and so toward the five
+attempts described below: an occurrence given back four times inside its
+window and then admitted has no reclaim left if that run loses its executor
+past the deadline. Only a claim with no recorded dispatch is given back. A
+reclaim of an occurrence whose earlier attempt recorded its dispatch keeps
+its claim when its dispatch cannot start, and lapses with its lease.
 
 A reclaim after a lapsed lease follows the misfire policy unless an earlier
 attempt recorded its dispatch. With `skip`, a lapse after the grace window

@@ -5,13 +5,18 @@ import copy
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
 from ._transport import PersistentTransport
 from .errors import GatewayTransportConflictError
 from .identity_first_models import IdentityBootstrapMode, RoleMigrationDeclaration
 from .live import ExperimentalLiveGatewayConfig, OpenAiLiveGatewayConfig
 from .models import AuthBindingRef, NativeRealm, ToolArtifactRef
+
+if TYPE_CHECKING:
+    # Named by the annotation of `MetaBuilder.build`, which imports it when
+    # it runs. Without this a type checker cannot tell what `build` returns.
+    from .runtime import MetaRuntime
 
 
 @dataclass

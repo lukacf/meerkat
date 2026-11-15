@@ -430,7 +430,7 @@ static PUBLIC_TOOLS: &[PublicTool] = &[
     },
     PublicTool {
         name: "meerkat_mob_respawn",
-        description: "Respawn a mob member with topology restore.",
+        description: "Respawn a mob member with topology restore. A worker's successor starts on a new session: the mobs its earlier session created and its delegates are not carried over and end at the next start of the host.",
         schema: typed_schema::<MeerkatMobRespawnInput>,
     },
     PublicTool {
@@ -2216,6 +2216,128 @@ mod tests {
             .collect();
         assert!(names.contains(&"meerkat_mob_create".to_string()));
         assert!(!names.contains(&"mob_create".to_string()));
+    }
+
+    /// The public `meerkat_mob_create` makes no ordinary mob under an id of
+    /// the form temporary councils own: invalid params, as for any invalid
+    /// definition, naming the reserved identifier.
+    #[tokio::test]
+    async fn public_mob_create_refuses_an_id_of_the_council_form() {
+        let state = MobMcpState::new_in_memory();
+        let err = handle_public_tools_call(
+            &state,
+            "meerkat_mob_create",
+            &json!({
+                "definition": {
+                    "id": "council--from-a-client",
+                    "profiles": {
+                        "lead": {
+                            "model": "gpt-5.4",
+                            "tools": {"comms": true}
+                        }
+                    }
+                }
+            }),
+        )
+        .await
+        .expect_err("an ordinary mob under the council form must be refused");
+        assert_eq!(err.code, -32602);
+        assert!(
+            err.message.contains("reserved_system_identifier")
+                && err.message.contains("council--from-a-client"),
+            "the refusal names the reserved id: {}",
+            err.message
+        );
+        assert!(
+            state
+                .handle_for(&meerkat_mob::MobId::from("council--from-a-client"))
+                .await
+                .is_err(),
+            "no mob is created"
+        );
+    }
+
+    /// The public `meerkat_mob_create` takes a definition and nothing else:
+    /// a key that claims a temporary council or a convener, beside the
+    /// definition or inside it, is refused as invalid parameters before the
+    /// host's create hook is asked, and the create it does make is no
+    /// council's.
+    #[tokio::test]
+    async fn public_mob_create_refuses_a_claimed_council_or_convener() {
+        let state = MobMcpState::new_in_memory();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&asked);
+        state
+            .set_before_create(Arc::new(move |request: crate::MobCreateRequest| {
+                recorder
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(request);
+                Box::pin(async { Ok(()) })
+            }))
+            .expect("bind the create hook");
+        let definition = |id: &str| {
+            json!({
+                "id": id,
+                "profiles": {
+                    "worker": {
+                        "model": "gpt-5.4",
+                        "tools": {"comms": true}
+                    }
+                }
+            })
+        };
+        let claim = json!({
+            "council_id": "claimed-council",
+            "convener_session_id": meerkat_core::SessionId::new(),
+        });
+
+        for key in ["council", "convener", "convener_session_id"] {
+            let mut beside = json!({ "definition": definition("claims-beside") });
+            beside[key] = claim.clone();
+            let err = handle_public_tools_call(&state, "meerkat_mob_create", &beside)
+                .await
+                .expect_err("a key beside the definition is refused");
+            assert_eq!(err.code, -32602, "{key} beside the definition");
+
+            let mut inside = definition("claims-inside");
+            inside[key] = claim.clone();
+            let err = handle_public_tools_call(
+                &state,
+                "meerkat_mob_create",
+                &json!({ "definition": inside }),
+            )
+            .await
+            .expect_err("a key inside the definition is refused");
+            assert_eq!(err.code, -32602, "{key} inside the definition");
+        }
+        assert!(
+            asked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "a refused request never reaches the create hook"
+        );
+
+        let created = handle_public_tools_call(
+            &state,
+            "meerkat_mob_create",
+            &json!({ "definition": definition("public-create") }),
+        )
+        .await
+        .expect("typed public create");
+        assert_eq!(created["mob_id"], "public-create");
+        assert_eq!(
+            *asked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![crate::MobCreateRequest {
+                mob_id: meerkat_mob::MobId::from("public-create"),
+                owner_bridge_session_id: None,
+                implicit_delegation_mob: false,
+                council: None,
+            }]
+        );
     }
 
     #[tokio::test]

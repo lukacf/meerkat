@@ -479,6 +479,7 @@ const EPOCH_EVENT_POLL_LIMIT: usize = 1024;
 ///
 /// Shared by the boot seed and the cache-equivalence tests so the incremental
 /// fold below provably reproduces the historical `replay_all` slice.
+#[cfg(test)]
 pub(crate) fn current_epoch_events_for_mob(events: &[MobEvent], mob_id: &MobId) -> Vec<MobEvent> {
     let mob_events = events
         .iter()

@@ -369,10 +369,36 @@ impl IdentityRuntime {
         register: bool,
         customizer: Option<&dyn AgentCustomizer>,
     ) -> RosterDeclaration {
+        self.declare_roster_with(
+            bridge,
+            specs,
+            complete,
+            locks,
+            register,
+            customizer,
+            BTreeMap::new(),
+        )
+        .await
+    }
+
+    /// [`Self::declare_roster`] with the builds in `composed` carried from
+    /// the first round: an identity whose build a caller composed already is
+    /// declared with it, and no customizer is asked for it again.
+    #[allow(clippy::too_many_arguments)]
+    async fn declare_roster_with(
+        &self,
+        bridge: &Arc<dyn SessionBridge>,
+        specs: &[DurableAgentSpec],
+        complete: bool,
+        locks: DeclarationLocks,
+        register: bool,
+        customizer: Option<&dyn AgentCustomizer>,
+        composed: BTreeMap<AgentIdentity, AgentBuildDraft>,
+    ) -> RosterDeclaration {
         let mut declaration = RosterDeclaration {
             outcomes: BTreeMap::new(),
             unlisted: BTreeMap::new(),
-            composed: BTreeMap::new(),
+            composed,
         };
         let mut peers = self
             .entries
@@ -952,22 +978,31 @@ impl IdentityRuntime {
     /// move, a held creation, a deferral, a refusal, a failure) is the
     /// door's typed refusal ([`Self::declared_answer_error`]), recorded for
     /// the views when it is final or held.
+    ///
+    /// `composed` is the build the caller's step composed for the identity's
+    /// seat already, under the same lifecycle lock (a respawn's seat that
+    /// Core's same-session step then did not serve): the declaration carries
+    /// it from its first round, and the host is asked for no other.
     pub(crate) async fn declare_identity_locked(
         &self,
         spec: &DurableAgentSpec,
         customizer: Option<&dyn AgentCustomizer>,
+        composed: Option<AgentBuildDraft>,
     ) -> Result<SeatOutcome, IdentityRuntimeError> {
         let identity = &spec.identity;
         let bridge = Arc::clone(self.core_bridge(identity)?);
         let before = self.sessions_held_before(std::slice::from_ref(spec)).await;
         let mut declaration = self
-            .declare_roster(
+            .declare_roster_with(
                 &bridge,
                 std::slice::from_ref(spec),
                 false,
                 DeclarationLocks::Held,
                 false,
                 customizer,
+                composed
+                    .map(|draft| BTreeMap::from([(identity.clone(), draft)]))
+                    .unwrap_or_default(),
             )
             .await;
         let draft = declaration

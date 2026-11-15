@@ -236,7 +236,9 @@ fn description(name: &str) -> String {
              reserves stays as it is: an update that would give it another value or remove \
              it is refused `reserved_key` (at `set.labels` or `set.labels_remove`). \
              `profile` moves the \
-             agent to that profile's model, tools and skills on the same conversation. A \
+             agent to that profile's model, tools and skills on the same conversation. The \
+             move seats the agent again on that conversation; an agent that created mobs goes \
+             on listing and managing them when its new profile has the mob tools. A \
              move into a profile whose agents the host prepares is refused `unsupported` at \
              `set.profile`: create the agent in that profile instead. \
              `peers_add` and `peers_remove` change who it can message.\n\n\

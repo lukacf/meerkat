@@ -7118,6 +7118,105 @@ async fn a_retiring_member_whose_runtime_residue_cannot_be_read_degrades_and_the
     let _ = handle.shutdown().await;
 }
 
+/// The same degraded start, with the retire meeting the mob's own re-drive of
+/// the member's retirement. Once the stores serve the reads again, the mob's
+/// backoff wake restores the member's custody and re-drives its durably
+/// started retirement on its own. A retire called while that re-drive runs
+/// names the same member: the mob holds it until its own retirement of the
+/// member ended and answers `Ok(())`, the member being retired. It used to
+/// be refused with `StaleMemberOperatorAuthority` ("retire command no longer
+/// matches the exact roster transport incarnation") although the member was
+/// retired and a second retire answered `Ok(())`.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retire_that_meets_the_mobs_own_redrive_of_a_retiring_member_completes() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let label = "retire-meets-redrive";
+    let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
+    let session_id = retiring_member_after_a_crash(&paths, &power_store, false, label).await;
+    let (service, _store) = persistent_head_canonical_service(&paths, runtime_store);
+    let persistent_owner: Arc<dyn MobSessionService> = service.clone();
+    let faulting = FailingOnceSessionService::new(persistent_owner, None, None, 0, false);
+    faulting.fail_session_loads(session_id.clone(), support::SessionLoadFault::Absent);
+    power_store
+        .fail_lifecycle_reads_of(meerkat_runtime::LogicalRuntimeId::for_session(&session_id));
+    let handle = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(faulting.clone())
+    .with_default_llm_client(openai_test_client())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .unwrap_or_else(|error| panic!("[{label}] the mob starts: {error}"));
+    let status = handle.status().await;
+    assert!(
+        matches!(status, Ok(meerkat_mob::MobState::Running)),
+        "[{label}] the start runs: {status:?}"
+    );
+    let identity = AgentIdentity::from("w-1");
+    let member = handle
+        .member_status(&identity)
+        .await
+        .unwrap_or_else(|error| panic!("[{label}] the degraded member's status: {error}"));
+    assert!(
+        member.custody_deferred.is_some(),
+        "[{label}] the member's status shows its deferred custody: {member:?}"
+    );
+    let listed = |members: &[MobMemberListEntry]| {
+        members.iter().any(|entry| entry.agent_identity == identity)
+    };
+    assert!(
+        listed(&handle.list_members_including_retiring().await),
+        "[{label}] the degraded member is listed"
+    );
+
+    // The stores serve again: the mob's backoff wake re-drives the member's
+    // retirement on its own. The retire is called once that re-drive is
+    // under way (its progress is published).
+    power_store.serve_lifecycle_reads();
+    faulting.serve_session_loads();
+    let waiting = Instant::now();
+    let met_the_redrive = loop {
+        if handle.retirement_settlement(&identity).is_some() {
+            break true;
+        }
+        if !listed(&handle.list_members_including_retiring().await) {
+            break false;
+        }
+        assert!(
+            waiting.elapsed() < Duration::from_mins(2),
+            "[{label}] the mob never re-drove the member's retirement on its own"
+        );
+        sleep(Duration::from_millis(1)).await;
+    };
+    let first = handle.retire(identity.clone()).await;
+    eprintln!(
+        "[{label}] retire called with the mob's re-drive under way: {met_the_redrive}; answer: {first:?}"
+    );
+    first.unwrap_or_else(|error| {
+        panic!(
+            "[{label}] a retire that meets the mob's own retirement of the member answers Ok once the member is retired: {error:?}"
+        )
+    });
+    let members = handle.list_members_including_retiring().await;
+    assert!(
+        !listed(&members),
+        "[{label}] the member's retirement completed: {members:?}"
+    );
+    handle
+        .retire(identity.clone())
+        .await
+        .unwrap_or_else(|error| panic!("[{label}] a second retire answers Ok: {error:?}"));
+    let _ = handle.shutdown().await;
+}
+
 /// A retiring member whose durable tail its recovery withholds from resume
 /// (held for recovery, or refused by recovery) meets the settle's typed
 /// refusal at start, before any read of its session. That is the member's
@@ -13541,8 +13640,10 @@ async fn a_compaction_request_wakes_no_dormant_member_and_is_recorded_on_a_live_
 
 /// A host's settle whose reply is lost, then a retry: the settle went
 /// through (the kept run's tail is closed), and the retry finds nothing
-/// retained. Its proof is the kept run's input, whose receipt reads
-/// cancelled through the existing receipt read. No model request is made.
+/// retained. Its proof is the kept run's input, which reads its committed
+/// terminal, cancelled, through the existing receipt read as soon as the
+/// retry answers, and whose receipt is then finalized. No model request is
+/// made.
 /// RED before: no such verb.
 #[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread")]
@@ -13597,23 +13698,57 @@ async fn a_host_settle_retried_after_a_lost_reply_answers_not_retained() {
         meerkat_runtime::RetainedRunSettlement::NotRetained,
         "a retry after the settle finds nothing retained"
     );
-    let read = held
-        .runtime
-        .input_terminal_receipt(&run.w1_sid, InteractionSelector::InputId(kept_input))
-        .await
-        .expect("the kept input's receipt reads")
-        .expect("the kept input has a receipt");
-    let InputTerminalReceiptRead::Finalized(receipt) = read.report else {
-        panic!(
-            "the kept input's receipt is finalized, not {:?}",
-            read.report
+    let cancelled = meerkat_runtime::input_state::InputTerminalOutcome::Abandoned {
+        reason: meerkat_runtime::input_state::InputAbandonReason::Cancelled,
+    };
+    let (runtime, session, kept_input) = (&held.runtime, &run.w1_sid, &kept_input);
+    let read_kept_receipt = move || async move {
+        runtime
+            .input_terminal_receipt(session, InteractionSelector::InputId(kept_input.clone()))
+            .await
+            .expect("the kept input's receipt reads")
+            .expect("the kept input has a receipt")
+            .report
+    };
+    // The retry's proof holds as soon as it answers: the kept run's input
+    // reads its committed terminal, cancelled. Its receipt may still read
+    // pending then: the session's runtime loop finalizes it on its own time,
+    // after it closed the run's tail.
+    let mut read = read_kept_receipt().await;
+    let committed = match &read {
+        InputTerminalReceiptRead::Pending { terminal, .. } => terminal.as_ref(),
+        InputTerminalReceiptRead::Finalized(receipt) => Some(receipt.terminal()),
+        InputTerminalReceiptRead::TerminalWithoutReceipt { terminal, .. } => Some(terminal),
+        _ => None,
+    };
+    assert_eq!(
+        committed,
+        Some(&cancelled),
+        "the retry's proof: the kept run's input reads cancelled at once: {read:?}"
+    );
+    // The receipt is finalized within the row's deadline; one that never is
+    // fails the row with its last read.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let receipt = loop {
+        if let InputTerminalReceiptRead::Finalized(receipt) = read {
+            break receipt;
+        }
+        // A read that is resolved and not finalized never becomes finalized:
+        // it fails the row here, at once, not at the deadline.
+        assert!(
+            !read.is_resolved(),
+            "the kept input's receipt read is resolved without a finalized receipt: {read:?}"
         );
+        assert!(
+            Instant::now() < deadline,
+            "the kept input's receipt is finalized, not {read:?}"
+        );
+        sleep(Duration::from_millis(50)).await;
+        read = read_kept_receipt().await;
     };
     assert_eq!(
         receipt.terminal(),
-        &meerkat_runtime::input_state::InputTerminalOutcome::Abandoned {
-            reason: meerkat_runtime::input_state::InputAbandonReason::Cancelled,
-        },
+        &cancelled,
         "the retry's proof: the kept run's input ended cancelled"
     );
     assert_eq!(

@@ -336,6 +336,7 @@ impl McpScheduleContext {
                     schedule_tools: None,
                     workgraph_tools: None,
                     workgraph_namespace_grant: None,
+                    host_tools: None,
                     mob_tool_authority_context: None,
                     preload_skills: materialized_preload_skills(&create.preload_skills),
                     realm_id,

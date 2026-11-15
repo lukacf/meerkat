@@ -125,7 +125,10 @@ resolved path only. The identity comparison is tested through hard links;
 a file system that ignores case and the Windows comparison were read from
 the source, not run. From 0.9.15 a key or output path that cannot be
 resolved, for another reason than that the file does not exist, fails the
-command instead of being compared as written.
+command instead of being compared as written. From 0.9.15 the key file is
+opened once, before the mob directory is read: the file that is left out and
+the key the pack is signed with come from that one open, and a `--sign` path
+that names no file fails the command before the directory is read.
 
 In every release a copy of the key is another file and is packed, and so are
 a key file this pack is not signed with, a key file when the pack is not

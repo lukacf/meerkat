@@ -341,6 +341,32 @@ async fn console_mutations_write_audit_rows() -> TestResult {
     Ok(())
 }
 
+/// A change the console refuses for malformed params writes its row, as a
+/// change it refuses for a missing member of its params does.
+#[tokio::test]
+async fn a_change_refused_for_malformed_params_writes_its_row() -> TestResult {
+    const MOB: &str = "console-audit-malformed-params";
+    let state_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let runtime = audited_runtime(state_dir.path(), MOB, None).await?;
+    let router = console_router(&runtime);
+    let bob = bob();
+    let method = crate::rpc::mob_methods::APPLY_MEMBER_TOOL_DECLARATION;
+    let answers = [
+        console_rpc_as(&router, Some(&bob), method, json!({ "mob_id": MOB })).await,
+        console_rpc_as(&router, Some(&bob), method, json!([MOB])).await,
+    ];
+    let rows = audit_rows(&router, &bob).await;
+    assert_eq!(rows.len(), 2, "one row per refused change: {rows:#?}");
+    for (answer, row) in answers.iter().zip(&rows) {
+        assert_eq!(answer["error"]["code"], json!(-32602), "{answer:#}");
+        assert_eq!(row["method"], json!(method), "{row:#}");
+        assert_eq!(row["outcome"], json!("refused"), "{row:#}");
+        assert_eq!(row["code"], json!(-32602), "{row:#}");
+    }
+    let _ = runtime.shutdown().await;
+    Ok(())
+}
+
 /// A console decide writes a row that cites the decision: the gating entry
 /// it decided and its action, with the outcome the owner recorded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

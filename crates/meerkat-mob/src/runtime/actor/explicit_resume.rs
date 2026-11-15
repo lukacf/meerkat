@@ -396,17 +396,24 @@ impl MobActor {
     /// durable worker is rebuilt with its resume gate. A member whose own spawn
     /// the epoch does not hold is refused on `session_id`, never rebuilt as
     /// ephemeral.
+    ///
+    /// The read is the member wake path's: the continuity index the actor's
+    /// start seeded, caught up to the journal by cursor first, so it folds
+    /// the events appended since its last read and never replays the journal
+    /// per member.
     pub(super) async fn recorded_member_continuity_intent(
-        &self,
+        &mut self,
         entry: &RosterEntry,
         session_id: &SessionId,
     ) -> Result<crate::runtime::SpawnContinuityIntent, MobError> {
-        let events = self.events.replay_all().await?;
-        let epoch = crate::runtime::remote_turn_reconciler::current_epoch_events_for_mob(
-            &events,
-            &self.definition.id,
-        );
-        let recorded = crate::runtime::builder::recorded_continuity_intents(&epoch);
+        self.member_wakes
+            .continuity
+            .refresh(&self.events, &self.definition.id)
+            .await?;
+        let recorded = self
+            .member_wakes
+            .continuity
+            .slice_for(&entry.agent_identity);
         crate::runtime::builder::entry_continuity_intent(&recorded, entry).map_err(|reason| {
             MobError::MemberRestoreFailed {
                 member_id: entry.agent_identity.clone(),

@@ -122,22 +122,53 @@ async fn refuse_foreign_host_for_health_summary(
     }
 }
 
-/// Core's broken members on the wire: each member's public alias and
-/// Core's reason.
+/// Core's broken members on the wire, in the gateway's init result and in
+/// `meta/status`: each member's public alias and Core's reason, and
+/// MobMachine's stable refusal code when it recorded one. The code is
+/// advisory and absent for most causes.
 pub(crate) fn broken_members_json(
-    broken_members: &[(meerkat_mob::AgentIdentity, String)],
+    broken_members: &[crate::mob_handle_runtime::BrokenMember],
 ) -> serde_json::Value {
     serde_json::Value::Array(
         broken_members
             .iter()
-            .map(|(member, reason)| {
-                serde_json::json!({
-                    "member_id": crate::member_comms_id::runtime_alias_str(member.as_str()),
-                    "error": reason,
-                })
+            .map(|broken| {
+                let mut entry = serde_json::json!({
+                    "member_id": crate::member_comms_id::runtime_alias_str(broken.member.as_str()),
+                    "error": broken.reason,
+                });
+                if let Some(code) = &broken.code {
+                    entry["code"] = serde_json::json!(code);
+                }
+                entry
             })
             .collect(),
     )
+}
+
+/// The most broken members the gateway's ready-time warning names; it
+/// counts the rest.
+pub(crate) const READY_WARNING_NAMED_MEMBERS: usize = 8;
+
+/// The names of the broken members for the gateway's ready-time warning:
+/// the public alias of the first [`READY_WARNING_NAMED_MEMBERS`], then how
+/// many more there are. Names only: no reason text and no member content.
+pub(crate) fn broken_member_names_for_log(
+    broken_members: &[crate::mob_handle_runtime::BrokenMember],
+) -> String {
+    let named = broken_members
+        .iter()
+        .take(READY_WARNING_NAMED_MEMBERS)
+        .map(|broken| crate::member_comms_id::runtime_alias_str(broken.member.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match broken_members
+        .len()
+        .checked_sub(READY_WARNING_NAMED_MEMBERS)
+    {
+        Some(more) if more > 0 => format!("{named} and {more} more"),
+        _ => named,
+    }
 }
 
 /// Default cap on the requests the stock reference app router serves at once.
@@ -1084,14 +1115,71 @@ mod tests {
     use meerkat_mob::{MobDefinition, MobRuntimeMode, ProfileName};
 
     use super::{
-        DEFAULT_REFERENCE_APP_MAX_CONCURRENT_REQUESTS, healthz_response,
+        DEFAULT_REFERENCE_APP_MAX_CONCURRENT_REQUESTS, READY_WARNING_NAMED_MEMBERS,
+        broken_member_names_for_log, broken_members_json, healthz_response,
         session_authoritative_agent_event_stream,
     };
     use crate::identity_first::{
         AgentAddressability, AgentIdentity, DurableAgentSpec, LocalContinuityStore,
         LocalLeaseProvider, MutableRosterProvider,
     };
+    use crate::mob_handle_runtime::BrokenMember;
     use crate::unified_runtime::UnifiedRuntimeBuilder;
+
+    fn broken_member(member: &str, code: Option<&str>) -> BrokenMember {
+        BrokenMember {
+            member: meerkat_mob::AgentIdentity::from(member),
+            reason: format!("the reason of {member}"),
+            code: code.map(str::to_string),
+        }
+    }
+
+    /// A broken member's entry carries the refusal code MobMachine recorded
+    /// for it, and no `code` key when it recorded none.
+    #[test]
+    fn a_broken_member_entry_carries_the_recorded_code_and_omits_an_absent_one() {
+        let entries = broken_members_json(&[
+            broken_member(
+                "coded",
+                Some("host_refused_registration.select_destination"),
+            ),
+            broken_member("plain", None),
+        ]);
+        assert_eq!(
+            entries,
+            serde_json::json!([
+                {
+                    "member_id": "coded",
+                    "error": "the reason of coded",
+                    "code": "host_refused_registration.select_destination",
+                },
+                { "member_id": "plain", "error": "the reason of plain" },
+            ])
+        );
+    }
+
+    /// The ready-time warning names every broken member up to its bound,
+    /// and beyond it names the first of them and counts the rest.
+    #[test]
+    fn the_ready_warning_names_at_most_its_bound_and_counts_the_rest() {
+        let members = |count: usize| -> Vec<BrokenMember> {
+            (1..=count)
+                .map(|index| broken_member(&format!("m{index:02}"), None))
+                .collect()
+        };
+        assert_eq!(broken_member_names_for_log(&members(0)), "");
+        assert_eq!(broken_member_names_for_log(&members(2)), "m01, m02");
+        let at_the_bound = broken_member_names_for_log(&members(READY_WARNING_NAMED_MEMBERS));
+        assert_eq!(at_the_bound, "m01, m02, m03, m04, m05, m06, m07, m08");
+        assert_eq!(
+            broken_member_names_for_log(&members(READY_WARNING_NAMED_MEMBERS + 1)),
+            format!("{at_the_bound} and 1 more")
+        );
+        assert_eq!(
+            broken_member_names_for_log(&members(READY_WARNING_NAMED_MEMBERS + 3)),
+            format!("{at_the_bound} and 3 more")
+        );
+    }
 
     #[tokio::test]
     async fn host_console_payload_policy_is_explicit_and_cannot_be_replaced_by_later_views() {

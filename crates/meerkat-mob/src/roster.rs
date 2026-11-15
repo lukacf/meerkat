@@ -801,10 +801,10 @@ impl Roster {
     ///
     /// A store-owned member's seat carries its row's labels and no others,
     /// and the row is the identity's record. So the roster follows the row
-    /// before any restamp seats the row's labels: in the step that commits
-    /// an update of the identity (whatever its member step then answers: a
-    /// restamp, or none because the member holds work, the step failed or
-    /// no same-session successor can serve it), and at a start for a row
+    /// before any seat row carries the row's labels: in the step that
+    /// commits an update of the identity (whatever its member step then
+    /// answers: the member released, or left as it is because it holds
+    /// work), and at a start for a row
     /// that records its seat is owed a label restamp
     /// (`CreatedIdentityRecord::label_restamp_owed`). No other seat is
     /// touched: a label only a seat carries stays on its entry. Only the
@@ -813,8 +813,8 @@ impl Roster {
     /// it was built with until its next build.
     ///
     /// The roster is not the journal. The journal's last seat row of the
-    /// member keeps the labels it was seated with until the member's
-    /// restamp (an update of the identity while it is idle, a respawn, a
+    /// member keeps the labels it was seated with until the member's next
+    /// seat row (a respawn, a runtime-mode or role restamp, a rotation, a
     /// reset), and with it its three readers: a predecessor build, which
     /// seats the member from that row; the binding journal's labels
     /// (`MemberBinding::labels`); and the record census

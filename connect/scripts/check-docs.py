@@ -12,7 +12,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -102,32 +102,151 @@ def has_unclosed_fence(text: str) -> bool:
     return in_fence
 
 
-def slugify(heading: str) -> str:
-    heading = re.sub(r"`([^`]*)`", r"\1", heading)
-    heading = re.sub(r"<[^>]+>", "", heading)
-    heading = re.sub(r"\s+", "-", heading.strip().lower())
+# Anchors are judged by the rule of the site that publishes these pages: a
+# heading's id is the slug Mintlify derives from its rendered text,
+# percent-decoded and with this punctuation removed, and a link's fragment
+# selects the id equal to its percent-decoded form. Meerkat's
+# scripts/validate-mintlify-docs.py holds the same functions and its test file
+# compares them: change both together.
+# The class is the renderer's own (cleanHeadingId in @mintlify/common). Its
+# square brackets are from source, no published sample: no published heading
+# holds one.
+HEADING_ID_STRIPPED_RE = re.compile(r"""[?,;:!'"()\[\]{}]""")
+TYPOGRAPHIC_QUOTES = {'"': (chr(0x201C), chr(0x201D)), "'": (chr(0x2018), chr(0x2019))}
+LONG_DASH = chr(0x2014)
 
-    # Mintlify first applies encodeURIComponent to the heading and then runs
-    # @sindresorhus/slugify while preserving percent escapes and underscores.
-    # In particular, `capabilities/get` becomes `capabilities%2Fget`, not
-    # `capabilitiesget`. Keep this local validator aligned so official Mintlify
-    # anchor checks cannot expose a false green after merge.
-    encoded = quote(heading, safe="-_.!~*'()")
+
+def heading_characters(heading: str) -> list[tuple[str, bool]]:
+    """Return the characters a heading renders, each with whether it is code.
+
+    A code span is literal. In prose a backslash escape renders its character
+    (`\\{id\\}` renders `{id}`). An inline tag renders nothing, in prose and,
+    as this check has always read it, in a code span.
+    """
+    characters: list[tuple[str, bool]] = []
+    for index, part in enumerate(re.split(r"`([^`]*)`", heading)):
+        if index % 2:
+            characters.extend((char, True) for char in re.sub(r"<[^>]+>", "", part))
+            continue
+        for match in re.finditer(r"\\([!-/:-@\[-`{-~])|<[^>]+>|(.)", part):
+            char = match.group(1) or match.group(2)
+            if char:
+                characters.append((char, False))
+    return characters
+
+
+def typographic_text(characters: list[tuple[str, bool]]) -> str:
+    """Return the heading text with the typography the site's renderer applies.
+
+    The renderer runs remark-smartypants over a heading before it derives the
+    id: straight quotes in prose become curly ones (`The host's own inputs`
+    gets the id `the-host\u2019s-own-inputs`) and two hyphens become a long dash
+    (`run --resume` gets `run-\u2014resume`). The quote rule is that plugin's:
+    code is never changed and counts as a word, and the heading starts after a
+    space.
+    """
+    text = [char for char, _ in characters]
+    count = len(text)
+
+    def kind(position: int) -> str | None:
+        if position < 0:
+            return "space"
+        if position >= count:
+            return None
+        if characters[position][1] or text[position].isalnum():
+            return "word"
+        return "space" if text[position].isspace() else "mark"
+
+    for position in range(count):
+        char = text[position]
+        if characters[position][1] or char not in TYPOGRAPHIC_QUOTES:
+            continue
+        opening, closing = TYPOGRAPHIC_QUOTES[char]
+        previous, following = kind(position - 1), kind(position + 1)
+        # The next token is a run of one repeated mark, or a run of word characters.
+        end = position + 1
+        if following == "mark":
+            while end < count and kind(end) == "mark" and text[end] == text[position + 1]:
+                end += 1
+        elif following == "word":
+            while kind(end) == "word":
+                end += 1
+        token = "".join(text[position + 1 : end])
+        after = kind(end)
+        if following == "mark" and after != "word":
+            text[position] = closing
+        elif following == "mark" and token in TYPOGRAPHIC_QUOTES:
+            text[position] = opening
+            text[position + 1] = TYPOGRAPHIC_QUOTES[token][0]
+        elif following == "word" and re.fullmatch(r"\d\ds", token):
+            text[position] = closing
+        elif previous != "word" and following == "word":
+            text[position] = opening
+        elif previous == "word":
+            text[position] = closing
+        elif following in {None, "space"}:
+            text[position] = closing
+        else:
+            text[position] = opening
+
+    # Exactly two hyphens in prose are one long dash; other runs stay.
+    rendered: list[str] = []
+    position = 0
+    while position < count:
+        end = position
+        while end < count and text[end] == "-" and not characters[end][1]:
+            end += 1
+        if end == position:
+            rendered.append(text[position])
+            position += 1
+            continue
+        rendered.append(LONG_DASH if end - position == 2 else "-" * (end - position))
+        position = end
+    return "".join(rendered)
+
+
+def encoded_slug(heading: str) -> str:
+    """Return the slug Mintlify derives from a heading, percent escapes kept.
+
+    Mintlify lower-cases the rendered heading, turns white space into hyphens,
+    applies encodeURIComponent and then runs @sindresorhus/slugify while
+    preserving percent escapes and underscores: `capabilities/get` becomes
+    `capabilities%2Fget`, not `capabilitiesget`.
+    """
+    text = typographic_text(heading_characters(heading))
+    text = re.sub(r"\s+", "-", text.strip().lower())
+    encoded = quote(text, safe="-_.!~*'()")
     encoded = encoded.replace("'", "")
     encoded = re.sub(r"[^A-Za-z0-9%_]+", "-", encoded)
     encoded = re.sub(r"-+", "-", encoded)
     return encoded.strip("-")
 
 
-def normalize_anchor(anchor: str) -> str:
-    """Lower-case an anchor the way `slugify` does without corrupting escapes.
+def clean_heading_id(slug: str) -> str:
+    """Return the id the published page gives a heading with this slug.
 
-    `slugify` lower-cases the heading text and then percent-encodes it, so the
-    hex digits of an escape stay upper-case (`capabilities%2Fget`). Lower-casing
-    the whole link anchor turned that into `capabilities%2fget` and rejected the
-    only form Mintlify resolves for a heading containing a slash.
+    The site decodes the percent escapes and removes `? , ; : ! ' " ( ) [ ] { }`
+    (cleanHeadingId in @mintlify/common), so `One writer, fenced` has the id
+    `one-writer-fenced` and `capabilities/get` the id `capabilities/get`.
+    Hyphens left side by side stay.
     """
-    return re.sub(r"%[0-9a-fA-F]{2}", lambda match: match.group(0).upper(), anchor.lower())
+    return HEADING_ID_STRIPPED_RE.sub("", unquote(slug))
+
+
+def slugify(heading: str) -> str:
+    """Return the id of a heading on the published site."""
+    return clean_heading_id(encoded_slug(heading))
+
+
+def normalize_anchor(anchor: str) -> str:
+    """Return the id a link's anchor selects, in the case `slugify` writes.
+
+    A browser scrolls to the element whose id equals the percent-decoded
+    fragment, so `#capabilities%2Fget` and `#capabilities/get` both reach the
+    id `capabilities/get`, and `#one-writer%2C-fenced` reaches nothing: the id
+    holds no comma.
+    """
+    return unquote(anchor).lower()
 
 
 def heading_slugs(path: Path) -> set[str]:
@@ -138,12 +257,13 @@ def heading_slugs(path: Path) -> set[str]:
         match = re.match(r"^(#{2,6})\s+(.+?)\s*$", line)
         if not match:
             continue
-        base = slugify(match.group(2))
+        # Mintlify numbers repeated slugs before it cleans them into ids.
+        base = encoded_slug(match.group(2))
         if not base:
             continue
         count = counts.get(base, 0)
         counts[base] = count + 1
-        slugs.add(base if count == 0 else f"{base}-{count + 1}")
+        slugs.add(clean_heading_id(base if count == 0 else f"{base}-{count + 1}"))
     return slugs
 
 

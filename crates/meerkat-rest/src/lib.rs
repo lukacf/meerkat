@@ -1523,7 +1523,7 @@ async fn discard_rebuilt_rest_session_after_api_error_locked(
 
 /// Take back the runtime of a session whose create failed after it was
 /// registered. The session was not archived, so this is the cleanup of a
-/// session that stays ([`RuntimeCleanupScope::KeptSession`]): it destroys no
+/// session that stays ([`cleanup_kept_session_runtime`]): it destroys no
 /// mob.
 async fn cleanup_rest_session_after_api_error(
     state: &AppState,
@@ -1531,13 +1531,7 @@ async fn cleanup_rest_session_after_api_error(
     primary: ApiError,
     operation: &str,
 ) -> ApiError {
-    match cleanup_rest_session_runtime_until_terminal(
-        state,
-        session_id,
-        RuntimeCleanupScope::KeptSession,
-    )
-    .await
-    {
+    match cleanup_kept_session_runtime(state, session_id).await {
         Ok(()) => primary,
         Err(cleanup) => ApiError::Internal(runtime_cleanup_failure_message(
             api_error_message(&primary),
@@ -1774,14 +1768,15 @@ async fn cleanup_rest_runtime_after_completion_outcome(
             if runtime_termination_cleanup
                 && !state.runtime_adapter.contains_session(session_id).await =>
         {
-            // No cleanup authority was generated; the archive read above is
-            // the fact it would have been given. A session that is not
-            // archived keeps what it owns.
+            // No generated authority named a cleanup here, so this is never
+            // the archive's: an archived session whose registration is gone
+            // returned above, and a session that is not archived keeps what
+            // it owns.
             cleanup_rest_runtime_after_verified_termination(
                 state,
                 session_id,
                 &runtime_termination_proof,
-                RuntimeCleanupScope::of_completion_cleanup(archived_now),
+                RuntimeCleanupScope::KeptSession,
             )
             .await?;
             return Ok(true);
@@ -1792,14 +1787,14 @@ async fn cleanup_rest_runtime_after_completion_outcome(
             )));
         }
     };
-    if cleanup_authority.requires_runtime_cleanup() {
-        // A cleanup the authority asks for is the session's archive only when
-        // the authority says the session is archived. A turn whose apply
-        // failed retires the session's live runtime, which its next turn
-        // builds again, and leaves the session what it owns: its mobs are
-        // destroyed by its archive, never by a failed turn.
-        let scope =
-            RuntimeCleanupScope::of_completion_cleanup(cleanup_authority.archived_by_authority);
+    // The machine names the cleanup: none, the runtime's only, or the
+    // archive's. This surface hands the action to the one exhaustive mapping
+    // every surface shares and chooses nothing. A turn
+    // whose apply failed retires the session's live runtime, which its next
+    // turn builds again, and leaves the session what it owns: its mobs are
+    // destroyed by its archive, never by a failed turn.
+    let cleanup_scope = RuntimeCleanupScope::of_completion_action(cleanup_authority.action);
+    if let Some(scope) = cleanup_scope {
         match state.session_service.discard_live_session(session_id).await {
             Ok(()) | Err(SessionError::NotFound { .. }) => {}
             Err(error) => return Err(error),
@@ -6154,6 +6149,7 @@ async fn create_session_inner(
         schedule_tools: None,
         workgraph_tools: None,
         workgraph_namespace_grant: None,
+        host_tools: None,
         mob_tool_authority_context: None,
         preload_skills: req.preload_skills.clone(),
         realm_id: Some(state.realm.clone()),
@@ -6437,9 +6433,53 @@ fn parse_label_filters(
     Ok(if map.is_empty() { None } else { Some(map) })
 }
 
+/// The JSON body of `POST /schedules` and `PATCH /schedules/{id}`.
+///
+/// It is the plain JSON body in every respect but one. A body that does not
+/// read because it writes `reasoning_effort` directly in a `create` spec or
+/// on a prompt action is a refused schedule, not a malformed body: it gets
+/// the answer the schedule service gives the `provider_params` form (400
+/// with the refusal's sentence), so the refusal has one answer on this door.
+/// The schedule types refuse the member when they are read, and a parser
+/// reports that as text only, so the refusal is recognised by its sentence
+/// (`meerkat_schedule::direct_reasoning_effort_refusal`, reached through the
+/// facade). Every other rejection is
+/// the JSON extractor's own, unchanged.
+struct ScheduleRequestJson<T>(T);
+
+impl<S, T> axum::extract::FromRequest<S> for ScheduleRequestJson<T>
+where
+    S: Send + Sync,
+    T: serde::de::DeserializeOwned,
+{
+    type Rejection = Response;
+
+    async fn from_request(
+        request: axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(request, state).await {
+            Ok(Json(request)) => Ok(Self(request)),
+            Err(rejection) => Err(schedule_request_rejection(rejection)),
+        }
+    }
+}
+
+fn schedule_request_rejection(rejection: axum::extract::rejection::JsonRejection) -> Response {
+    if let axum::extract::rejection::JsonRejection::JsonDataError(_) = &rejection
+        && let Some(refusal) = meerkat::direct_reasoning_effort_refusal(&rejection.body_text())
+    {
+        return schedule_error_to_api(meerkat::ScheduleDomainError::InvalidSchedule(
+            refusal.to_string(),
+        ))
+        .into_response();
+    }
+    rejection.into_response()
+}
+
 async fn create_schedule(
     State(state): State<AppState>,
-    Json(request): Json<meerkat::CreateScheduleRequest>,
+    ScheduleRequestJson(request): ScheduleRequestJson<meerkat::CreateScheduleRequest>,
 ) -> Result<Json<meerkat_contracts::wire::Schedule>, ApiError> {
     state
         .ensure_schedule_host_started()
@@ -6592,7 +6632,7 @@ async fn get_schedule(
 async fn update_schedule(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(request): Json<meerkat::UpdateScheduleRequest>,
+    ScheduleRequestJson(request): ScheduleRequestJson<meerkat::UpdateScheduleRequest>,
 ) -> Result<Json<meerkat_contracts::wire::Schedule>, ApiError> {
     let schedule_id = resolve_schedule_id(&id)?;
     state
@@ -7462,6 +7502,7 @@ async fn continue_session_inner(
             schedule_tools: None,
             workgraph_tools: None,
             workgraph_namespace_grant: None,
+            host_tools: None,
             mob_tool_authority_context: None,
             preload_skills: None,
             realm_id: Some(state.realm.clone()),
@@ -8853,6 +8894,17 @@ async fn cleanup_archived_session_runtime(
         RuntimeCleanupScope::ArchivedSession,
     )
     .await
+}
+
+/// The cleanup of a session that stays: the runtime's teardown and the
+/// surface steps that follow it, and never the destroy of the mobs the
+/// session owns. The entry point for a cleanup that is never an archive.
+async fn cleanup_kept_session_runtime(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<(), SessionError> {
+    cleanup_rest_session_runtime_until_terminal(state, session_id, RuntimeCleanupScope::KeptSession)
+        .await
 }
 
 /// [`cleanup_archived_session_runtime`] for a completed turn's cleanup: join
@@ -14077,6 +14129,164 @@ mod tests {
         );
     }
 
+    /// `POST /schedules` and `PATCH /schedules/{id}` refuse a
+    /// `reasoning_effort` member written directly in a `create` spec or on a
+    /// prompt action with HTTP 400 and a text that names the member: the
+    /// answer the `provider_params` form gets. A refused create stores
+    /// nothing, and a refused update leaves the schedule as it was. The same
+    /// request with another unknown member is taken as before, and a body
+    /// that does not read for another reason keeps the answer it had (422).
+    #[tokio::test]
+    async fn schedule_create_and_update_refuse_a_direct_reasoning_effort_member() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let app = router(state.clone());
+        let send = |method: &'static str, uri: String, body: Value| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
+        };
+        let on_demand = |create: Value, action: Value| {
+            json!({
+                "target_kind": "session",
+                "type": "materialize_on_demand_session",
+                "create": create,
+                "action": action
+            })
+        };
+        let create_request = |target: Value| {
+            json!({
+                "name": "nightly",
+                "trigger": {
+                    "type": "once",
+                    "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+                },
+                "target": target,
+                "planning_horizon_days": 1,
+                "planning_horizon_occurrences": 1
+            })
+        };
+        // The two direct forms, and the `provider_params` form beside them.
+        let refused_targets = [
+            (
+                on_demand(
+                    json!({"model": "claude-sonnet-4-6", "reasoning_effort": "high"}),
+                    json!({"type": "prompt", "prompt": "Check."}),
+                ),
+                "not accepted in a schedule's session settings",
+            ),
+            (
+                on_demand(
+                    json!({"model": "claude-sonnet-4-6"}),
+                    json!({"type": "prompt", "prompt": "Check.", "reasoning_effort": "high"}),
+                ),
+                "not accepted on a schedule's prompt action",
+            ),
+            (
+                on_demand(
+                    json!({
+                        "model": "claude-sonnet-4-6",
+                        "provider_params": {"reasoning_effort": "high"}
+                    }),
+                    json!({"type": "prompt", "prompt": "Check."}),
+                ),
+                "not accepted in a schedule's session settings",
+            ),
+        ];
+        let assert_refused = |(status, body): (StatusCode, String), sentence: &str| {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(
+                body.contains("reasoning_effort") && body.contains(sentence),
+                "{body}"
+            );
+        };
+
+        for (refused, sentence) in &refused_targets {
+            let answer = send(
+                "POST",
+                "/schedules".to_string(),
+                create_request(refused.clone()),
+            )
+            .await;
+            assert_refused(answer, sentence);
+        }
+        assert!(
+            state.schedule_service.list().await.unwrap().is_empty(),
+            "nothing is stored"
+        );
+
+        let mut accepted = missing_target_schedule_tool_args();
+        accepted["trigger"] = json!({
+            "type": "once",
+            "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+        });
+        accepted["target"]["action"]["colour"] = json!("blue");
+        let (status, body) = send("POST", "/schedules".to_string(), accepted).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "another unknown member is taken as before: {body}"
+        );
+        let stored = state.schedule_service.list().await.unwrap();
+        assert_eq!(stored.len(), 1);
+        let before = serde_json::to_value(meerkat_contracts::wire::Schedule::from(&stored[0]))
+            .expect("wire schedule");
+        assert!(!before.to_string().contains("colour"), "{before}");
+
+        let schedule_uri = format!("/schedules/{}", stored[0].schedule_id);
+        for (refused, sentence) in &refused_targets {
+            let answer = send("PATCH", schedule_uri.clone(), json!({ "target": refused })).await;
+            assert_refused(answer, sentence);
+        }
+        let after = state
+            .schedule_service
+            .get(&stored[0].schedule_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(meerkat_contracts::wire::Schedule::from(&after))
+                .expect("wire schedule"),
+            before,
+            "a refused update changes nothing"
+        );
+
+        // A body that does not read for another reason: the answer it had.
+        let (status, body) = send(
+            "POST",
+            "/schedules".to_string(),
+            create_request(json!({"target_kind": "session", "type": "no_such_target"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        let (status, body) = send(
+            "PATCH",
+            schedule_uri,
+            json!({ "target": {"target_kind": "session", "type": "no_such_target"} }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
+
     #[tokio::test]
     async fn test_config_envelope_redacts_paths_by_default() {
         let temp = TempDir::new().unwrap();
@@ -16066,16 +16276,17 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
     /// cancels it: the real route, by the request's id, whose cancel action
     /// abandons the request's exact queued input. That input ends as a
     /// runtime termination, and the request's completion cleanup answers
-    /// that outcome by retiring the session's runtime. The session keeps the
-    /// child mob it owns and its implicit mob, stays stored and not archived,
-    /// and runs its next turn.
+    /// that outcome by keeping the session's runtime, which still serves.
+    /// The session keeps the child mob it owns and its implicit mob, stays
+    /// stored and not archived, and runs its next turn.
     ///
     /// The completion cleanup takes the session's runtime registration lock
     /// first. The row holds that lock from before the cancel until the turn
-    /// ahead of the queued request has ended, so the cleanup retires a
+    /// ahead of the queued request has ended, so the cleanup runs on a
     /// runtime with no turn in flight: the row measures what the cleanup
-    /// does to the session's mobs, not what becomes of a turn whose runtime
-    /// is retired under it. That turn's own answer is not asserted.
+    /// does to the session's mobs and its runtime. The row below measures
+    /// what becomes of a turn that is still running when the cleanup runs.
+    /// That turn's own answer is not asserted here.
     ///
     /// The fixture's model never holds a turn, so the row first unloads the
     /// session (its live session and its runtime registration, as for a
@@ -16213,10 +16424,10 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             "only the running turn reached the model: the cancelled request never ran"
         );
         // The cleanup under test ran to its end: the cancelled input's
-        // outcome retired the session's runtime. Nothing else here does.
+        // outcome kept the session's runtime, which serves on.
         assert!(
-            !state.runtime_adapter.contains_session(&session_id).await,
-            "the cancelled request's completion cleanup retired the session's runtime"
+            state.runtime_adapter.contains_session(&session_id).await,
+            "the cancelled request's completion cleanup kept the session's runtime"
         );
 
         assert_eq!(
@@ -16232,6 +16443,9 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             session.stored_and_not_archived().await,
             "the session is still stored, and not archived, after the cancelled queued request"
         );
+        // The kept runtime still calls the gated model: its next requests
+        // are served.
+        model_gate.add_permits(64);
         let next = session.continue_turn("the next turn").await;
         assert!(
             matches!(next, RequestTerminal::Publish(Ok(_))),
@@ -16240,6 +16454,156 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         assert!(
             session.model_requests() > requests_before + 1,
             "the next turn reached the model"
+        );
+    }
+
+    /// A caller's cancel of a request whose input is queued behind a running
+    /// turn ends that one request and nothing else. Set up as the row above,
+    /// but without holding the registration lock: the running turn is still
+    /// held at the model when the queued request is cancelled and its
+    /// completion cleanup runs. The running turn then completes and its
+    /// request is answered its result, the session's runtime stays
+    /// registered, the session keeps its mobs and stays stored, and its next
+    /// turn runs.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn a_cancelled_queued_request_leaves_the_running_turn_of_a_rest_session() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
+        const CANCELLED_REQUEST: &str = "cancelled-request-behind-a-running-turn";
+
+        let session = RestSessionWithOwnedMobs::live().await;
+        let session_id = session.session_id.clone();
+
+        session
+            .state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live session");
+        unregister_rest_runtime_session_until_terminal_for_test(&session.state, &session_id).await;
+        let model_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut state = session.state.clone();
+        state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&session.llm_calls),
+            release: Arc::clone(&model_gate),
+        }));
+        let requests_before = session.model_requests();
+
+        // The running turn: it attaches the session again and is held at the
+        // model.
+        let running = spawn_tracked_rest_continue(
+            &state,
+            &session_id,
+            "running-turn-ahead-of-the-cancelled-request",
+            "the running turn",
+        );
+        wait_for_rest_llm_calls(
+            &session.llm_calls,
+            requests_before + 1,
+            "the running turn reaches the model",
+        )
+        .await;
+        let ahead = state
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("the running turn's inputs");
+        assert!(
+            !ahead.is_empty(),
+            "the running turn's input is an active input of the session"
+        );
+
+        // The request under test: admitted to the runtime, its input queued
+        // behind the running turn. Its handler holds the registration lock
+        // until it has installed its cancel action and attached its
+        // completion cleanup: taking the lock once waits for that.
+        let cancelled =
+            spawn_tracked_rest_continue(&state, &session_id, CANCELLED_REQUEST, "the queued turn");
+        let _queued_input = wait_for_rest_queued_input(&state, &session_id, &ahead).await;
+        {
+            let registration_lock = rest_runtime_registration_lock(&state, &session_id);
+            drop(registration_lock.mutex().lock().await);
+        }
+
+        let response = tokio::time::timeout(
+            FAILURE_BOUND,
+            router(state.clone()).oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/requests/{CANCELLED_REQUEST}/cancel"))
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("the cancel of a queued request does not wait for the running turn")
+        .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::OK, "the cancel answers: {payload}");
+        assert_eq!(payload["cancelled"], true, "{payload}");
+        // The cancelled request is answered while the running turn is still
+        // held at the model. If it is not, the row lets the model answer so
+        // that both requests end, and says so.
+        let mut cancelled = cancelled;
+        let answered_while_the_turn_runs =
+            tokio::time::timeout(std::time::Duration::from_secs(5), &mut cancelled).await;
+        let cancelled_before_the_turn_ended = answered_while_the_turn_runs.is_ok();
+        // The model answers now, and every later model request is served.
+        model_gate.add_permits(64);
+        let (cancelled_status, cancelled_body) = match answered_while_the_turn_runs {
+            Ok(answered) => answered.expect("cancelled request task"),
+            Err(_) => tokio::time::timeout(FAILURE_BOUND, cancelled)
+                .await
+                .expect("the cancelled request is answered")
+                .expect("cancelled request task"),
+        };
+        let (running_status, running_body) = tokio::time::timeout(FAILURE_BOUND, running)
+            .await
+            .expect("the running turn's request is answered")
+            .expect("running turn task");
+        let mut registered = true;
+        for _ in 0..40 {
+            registered = state.runtime_adapter.contains_session(&session_id).await;
+            if !registered {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            (
+                cancelled_before_the_turn_ended,
+                cancelled_status,
+                running_status,
+                registered,
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+                session.stored_and_not_archived().await,
+            ),
+            (
+                true,
+                StatusCode::from_u16(499).expect("499 is a valid status"),
+                StatusCode::OK,
+                true,
+                true,
+                true,
+                true
+            ),
+            "(the cancelled request answered while the turn ahead of it still runs, its answer, \
+             the running turn's answer, the session's runtime registered, child mob, implicit \
+             mob, stored session) after the queued request was cancelled; the cancelled request \
+             was answered {cancelled_body}, the running turn {running_body}"
+        );
+        let next = session.continue_turn("the next turn").await;
+        assert!(
+            matches!(next, RequestTerminal::Publish(Ok(_))),
+            "the session's next turn runs: {next:?}"
         );
     }
 
@@ -17303,6 +17667,107 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(payload["session_id"].is_string());
         assert_eq!(payload["text"], "ok");
+    }
+
+    /// A `POST /sessions` whose reasoning effort level the route does not
+    /// accept is refused by the session's build, before a session exists:
+    /// HTTP 400 with the typed details, which name no created session, and
+    /// no session is listed or stored afterwards. The mock client reports
+    /// no route, so every level is refused as unknown.
+    #[tokio::test]
+    async fn test_create_session_refused_for_its_level_leaves_no_session() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let app = router(state.clone());
+
+        // The level in both forms a create names it in: the direct member
+        // and the nested `provider_params` key.
+        for (form, body) in [
+            (
+                "direct",
+                serde_json::json!({"prompt": "Reply briefly.", "reasoning_effort": "high"}),
+            ),
+            (
+                "nested",
+                serde_json::json!({
+                    "prompt": "Reply briefly.",
+                    "provider_params": {"reasoning_effort": "high"}
+                }),
+            ),
+        ] {
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                app.clone().oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/sessions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                ),
+            )
+            .await
+            .expect("the refused create route timed out")
+            .unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{form}: {payload}");
+            assert_eq!(payload["code"], "INVALID_PARAMS", "{form}: {payload}");
+            assert_eq!(
+                payload["details"]["kind"], "reasoning_effort_refused",
+                "{form}: {payload}"
+            );
+            assert_eq!(
+                payload["details"]["reasoning_effort_refusal"]["reason"],
+                "supported_levels_unknown",
+                "{form}: {payload}"
+            );
+            assert_eq!(
+                (
+                    payload["details"].get("session_id"),
+                    payload["details"].get("session_created"),
+                ),
+                (None, None),
+                "{form}: the build refused the level before a session was created: {payload}"
+            );
+        }
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            listed["sessions"],
+            serde_json::json!([]),
+            "a create refused for its level leaves no session listed"
+        );
+        let stored = state
+            .session_service
+            .list(meerkat_core::service::SessionQuery::default())
+            .await
+            .expect("list the sessions the service holds");
+        assert!(
+            stored.is_empty(),
+            "a create refused for its level leaves no session: {} left",
+            stored.len()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -18713,6 +19178,194 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             ),
             (true, true),
             "the refused continue changes nothing: the session is live and registered"
+        );
+    }
+
+    /// A message that names the reasoning effort level, or a model, for a
+    /// session this server holds live is not served, and it is refused the
+    /// same way whether or not a turn is running: at once, with REST's own
+    /// answer (HTTP 500, `INTERNAL_ERROR`, a text that says the session is
+    /// busy), and nothing is stored or queued for it. A turn that is running
+    /// and a plain message queued behind it both complete, and the session
+    /// takes its next turn. The answer is never a JSON-RPC error text.
+    ///
+    /// `provider_params` is not a member of this request: a message that
+    /// carries it is read without it, as a plain message, and sets no level.
+    #[tokio::test]
+    async fn test_continue_session_level_on_a_live_session_is_refused_at_once_busy_or_idle() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
+        for (form, change) in [
+            ("level", serde_json::json!({"reasoning_effort": "high"})),
+            (
+                "clear",
+                serde_json::json!({"reasoning_effort": {"action": "clear"}}),
+            ),
+            ("model", serde_json::json!({"model": "claude-opus-4-8"})),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let mut state = load_rest_state_with_capacity(&temp, 4).await;
+            let calls = Arc::new(tokio::sync::watch::channel(0).0);
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+                calls: Arc::clone(&calls),
+                release: Arc::clone(&release),
+            }));
+            let session_id = create_deferred_rest_runtime_session(&state).await;
+            let app = router(state.clone());
+            let post = |body: serde_json::Value| {
+                let app = app.clone();
+                let uri = format!("/sessions/{session_id}/messages");
+                tokio::spawn(async move {
+                    let response = app
+                        .oneshot(
+                            axum::http::Request::builder()
+                                .method("POST")
+                                .uri(uri)
+                                .header("content-type", "application/json")
+                                .body(Body::from(body.to_string()))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let status = response.status();
+                    let body = response.into_body().collect().await.unwrap().to_bytes();
+                    let payload: serde_json::Value = serde_json::from_slice(&body)
+                        .unwrap_or_else(|_| serde_json::json!(String::from_utf8_lossy(&body)));
+                    (status, payload)
+                })
+            };
+            let message = |prompt: &str| serde_json::json!({"session_id": session_id.to_string(), "prompt": prompt});
+            let active_inputs = || async {
+                state
+                    .runtime_adapter
+                    .list_active_inputs(&session_id)
+                    .await
+                    .expect("the session's active inputs")
+                    .len()
+            };
+            let assert_not_served = |answer: &(StatusCode, serde_json::Value), when: &str| {
+                let (status, payload) = answer;
+                assert_eq!(
+                    *status,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "{form}, {when}: {payload}"
+                );
+                assert_eq!(
+                    payload["code"], "INTERNAL_ERROR",
+                    "{form}, {when}: {payload}"
+                );
+                let text = payload["error"].as_str().unwrap_or_default();
+                assert!(
+                    text.contains("session is busy"),
+                    "{form}, {when}: {payload}"
+                );
+                assert!(
+                    !text.contains("-32600") && !text.contains("destroyed"),
+                    "{form}, {when}: the answer is REST's own: {payload}"
+                );
+            };
+            let mut change_message = message("change the session");
+            for (member, value) in change.as_object().expect("a change is an object") {
+                change_message[member.as_str()] = value.clone();
+            }
+
+            // While a turn runs: refused at once, and nothing is stored.
+            let running = post(message("hold the turn open"));
+            wait_for_rest_llm_calls(&calls, 1, "the turn reaches the LLM").await;
+            assert_eq!(active_inputs().await, 1, "{form}: the running turn's input");
+            let refused = tokio::time::timeout(FAILURE_BOUND, post(change_message.clone()))
+                .await
+                .unwrap_or_else(|_| panic!("{form}: the change is answered while the turn runs"))
+                .expect("change task");
+            assert!(!running.is_finished(), "{form}: the turn is still running");
+            assert_not_served(&refused, "while a turn runs");
+            assert_eq!(
+                active_inputs().await,
+                1,
+                "{form}: the refused message stored and queued nothing"
+            );
+
+            // A plain message behind the running turn queues, and both run.
+            let mut plain = post(message("plain behind"));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(300), &mut plain)
+                    .await
+                    .is_err(),
+                "{form}: a plain message waits behind the running turn"
+            );
+            release.add_permits(16);
+            let (status, payload) = tokio::time::timeout(FAILURE_BOUND, running)
+                .await
+                .expect("the running turn finishes once released")
+                .expect("running turn task");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{form}: the running turn: {payload}"
+            );
+            let (status, payload) = tokio::time::timeout(FAILURE_BOUND, plain)
+                .await
+                .expect("the queued message finishes")
+                .expect("queued message task");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{form}: the queued message: {payload}"
+            );
+
+            // On the idle live session: the same answer, and nothing stored.
+            assert_eq!(active_inputs().await, 0, "{form}: the session is idle");
+            let refused = tokio::time::timeout(FAILURE_BOUND, post(change_message))
+                .await
+                .unwrap_or_else(|_| panic!("{form}: the change is answered on the idle session"))
+                .expect("change task");
+            assert_not_served(&refused, "when idle");
+            assert_eq!(active_inputs().await, 0, "{form}: nothing stored when idle");
+
+            // The session takes its next turn.
+            let (status, payload) = tokio::time::timeout(FAILURE_BOUND, post(message("next turn")))
+                .await
+                .expect("the next turn finishes")
+                .expect("next turn task");
+            assert_eq!(status, StatusCode::OK, "{form}: the next turn: {payload}");
+        }
+
+        // `provider_params` is not read on this request: the message runs
+        // as a plain one.
+        let temp = TempDir::new().unwrap();
+        let mut state = load_rest_state_with_capacity(&temp, 4).await;
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_deferred_rest_runtime_session(&state).await;
+        let response = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{session_id}/messages"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "session_id": session_id.to_string(),
+                            "prompt": "a message with provider params",
+                            "provider_params": {"reasoning_effort": "high"}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a message that carries `provider_params` runs as a plain message: {}",
+            String::from_utf8_lossy(&body)
         );
     }
 

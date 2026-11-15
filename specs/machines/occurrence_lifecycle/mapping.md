@@ -663,6 +663,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ReleaseLeaseForPausedScheduleAfterSupersession`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ReleaseClaimBeforeDispatchFromClaimed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseClaimBeforeDispatchAfterSupersession`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `Claimed`

@@ -14,12 +14,13 @@
 # otherwise. With the counters left out the reachable space is finite,
 # so each run explores all of it, with no step bound. It checks two runs over
 # their whole space with TLC coverage:
-# - the lifecycle run (AuditSpec) with its four action properties, the two
+# - the lifecycle run (AuditSpec) with its five action properties, the two
 #   invariants that check the reasons of its not-covered list and the
 #   invariant that the replay of a respawn's abandonment of a generation the
 #   identity has moved past is answered once (AuditStaleAbandonmentAnsweredOnce);
 # - the scope run (AuditScopeSpec) with its two RetireAtScope invariants, its
-#   RetireAbsent invariant and the two destroy action properties.
+#   RetireAbsent invariant, the two destroy action properties and the
+#   member work cancel action property.
 # Each run must finish without an error, reach at least its floor of distinct
 # states (so a guard that silently disables arms fails the lane instead of
 # shrinking the space), and fire every action of its covered list (TLC
@@ -27,7 +28,7 @@
 # space once per reachability witness, with that witness's negation as an
 # extra invariant (a state goal) or action property (a step goal), and
 # requires TLC to report exactly that violation, so the properties are not
-# vacuous. With --mutants it then seeds fourteen defects into a copy of the
+# vacuous. With --mutants it then seeds sixteen defects into a copy of the
 # generated model and requires TLC to refuse each: a progress arm without its
 # observation_monotonic guard (AuditObservationMonotonic); the same guard
 # rendered as a plain `<=` between option records, which TLC cannot evaluate
@@ -46,7 +47,9 @@
 # predecessor's execution-health entries (AuditMintClearsExecutionHealth);
 # a runtime destroy observation that ends the mob, one that leaves its
 # runtime live, and one that resets the mob's run count
-# (AuditRuntimeDestroyedRemovesOnlyItsRuntime); a completed mob without its
+# (AuditRuntimeDestroyedRemovesOnlyItsRuntime); a force cancel of the
+# member, and a cancel of all work of its runtime, that resets the mob's run
+# count (AuditMemberWorkCancelKeepsActiveRuns); a completed mob without its
 # RetireAbsent arm, which leaves the retire of an absent identity to the
 # shell, and that arm without its identity_absent guard, which answers it
 # for a mapped identity (AuditRetireAbsentAnsweredInEveryPhase); and the
@@ -133,6 +136,10 @@ covered_actions=(
   ResumeStopped
   AuditStartRun
   FinishRunRunning
+  ForceCancelRunning
+  ForceCancelRunningRuntimeNotLive
+  ForceCancelRunningAlreadyRetiring
+  CancelAllWorkRunning
 )
 
 # Every RetireAtScope verdict arm, the completion and destruction arms that
@@ -242,8 +249,8 @@ read -r step_index epoch_index life_resets_index life_ends_index <<<"${view_posi
 
 # usage: write_cfg <run> <file> <extra invariant lines> <extra property lines>
 # where <run> is lifecycle (AuditSpec and its action properties) or scope
-# (AuditScopeSpec, its three invariants and the two destroy action
-# properties).
+# (AuditScopeSpec, its three invariants, the two destroy action
+# properties and the member work cancel action property).
 write_cfg() {
   local run="$1" cfg="$2" invariants="$3" properties="$4"
   cp "${ci_cfg}" "${cfg}"
@@ -267,7 +274,8 @@ write_cfg() {
   AuditMintClearsExecutionHealth
   AuditMintClearsFailureRecords
   AuditRuntimeDestroyedRemovesOnlyItsRuntime
-  AuditDestroyedOnlyThroughAnAdmittedDestroy${properties}
+  AuditDestroyedOnlyThroughAnAdmittedDestroy
+  AuditMemberWorkCancelKeepsActiveRuns${properties}
 INVARIANTS
   AuditPlacementAbsent
   AuditRetiringRuntimeMapped
@@ -278,6 +286,7 @@ INVARIANTS
       replace_exact_line "INVARIANTS" "PROPERTIES
   AuditRuntimeDestroyedRemovesOnlyItsRuntime
   AuditDestroyedOnlyThroughAnAdmittedDestroy
+  AuditMemberWorkCancelKeepsActiveRuns
 INVARIANTS
   AuditRetireAtScopeCoherent
   AuditRetireAtScopeExactlyOne
@@ -620,6 +629,36 @@ body = body.replace(
 text = text[: block.start()] + body + text[block.end():]
 open(path, "w").write(text)
 PY
+
+  # A cancel of the member's work that resets the mob's run count, as both
+  # active cancel arms once did: a run of the mob on another member was then
+  # uncounted, and a Stop was admitted under it.
+  for cancel_arm in "force_cancel:ForceCancelRunning" "cancel_all_work:CancelAllWorkRunning"; do
+    CANCEL_ARM="${cancel_arm#*:}" mutate lifecycle "${cancel_arm%%:*}_resets_the_runs" \
+      "Error: Action property AuditMemberWorkCancelKeepsActiveRuns is violated" "$@" <<'PY'
+import os, re
+path = os.environ["MODEL"]
+arm = os.environ["CANCEL_ARM"]
+text = open(path).read()
+block = re.search(r"^" + arm + r"\(.*?\n\n", text, re.S | re.M)
+assert block, arm + " not found"
+body = block.group(0)
+frames = re.findall(r"^    /\\ (UnchangedFrame_[0-9a-f]+)$", body, re.M)
+assert len(frames) == 1, "expected one UNCHANGED frame in " + arm
+frame = frames[0]
+definition = re.findall(r"^" + frame + r" == UNCHANGED << (.*) >>$", text, re.M)
+assert len(definition) == 1, "expected one definition of " + frame
+names = [name.strip() for name in definition[0].split(",")]
+assert "active_run_count" in names, "the arm no longer leaves active_run_count unchanged"
+kept = ", ".join(name for name in names if name != "active_run_count")
+body = body.replace(
+    "    /\\ " + frame,
+    "    /\\ active_run_count' = 0\n    /\\ UNCHANGED << " + kept + " >>",
+)
+text = text[: block.start()] + body + text[block.end():]
+open(path, "w").write(text)
+PY
+  done
 
   # A completed mob without its RetireAbsent arm, which leaves the retire of
   # an absent identity unanswered by the machine (the shell answered it),

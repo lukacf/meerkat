@@ -554,6 +554,8 @@ impl UnifiedRuntime {
         }
         // Console schedule fires stop with the Console they send through.
         self.console_schedule_doors.clear();
+        // The members' questions stop with the Console they are shown on.
+        self.stop_ask_user();
 
         // Phase 4: Shutdown modules
         let module_shutdown = self.module_runtime.lock().await.shutdown();

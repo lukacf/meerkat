@@ -1635,6 +1635,92 @@ async fn unsupported_level_is_refused_before_any_provider_request() {
     }
 }
 
+/// Gemini 4 Hydrogen on the direct generateContent route. Google's thinking
+/// guide lists the levels low, medium, high (its default) and xhigh for the
+/// model, and no minimal. Its catalog row states low, medium and high,
+/// the levels Meerkat sends in this release, so a session that asks for
+/// `xhigh` or `minimal` is refused when it is built, with the typed refusal
+/// that lists the row's levels and names the catalog as their source, and
+/// nothing is sent. A session at `high` sends `thinkingLevel: "high"`; a
+/// session without a level sends no thinking config, so the model thinks at
+/// its own default.
+#[tokio::test]
+async fn gemini_4_hydrogen_sends_low_to_high_and_refuses_xhigh_at_the_build() {
+    const MODEL: &str = "gemini-4-hydrogen";
+    let stub = Stub::spawn(&[Reply::Text]).await;
+    let mut fixture = Param::GeminiDirect
+        .fixture(Stage::Stated, &stub.base)
+        .expect("staged");
+    let levels = match catalog_facts(Provider::Gemini, MODEL) {
+        ReasoningLevelFacts::Stated {
+            levels,
+            source: ReasoningFactsSource::Catalog,
+        } => levels,
+        other => panic!("the catalog row of {MODEL} states levels: {other:?}"),
+    };
+    assert_eq!(
+        levels,
+        [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High]
+    );
+    fixture.model = MODEL.to_string();
+    fixture.wire_model = MODEL.to_string();
+    fixture.supported = levels.clone();
+    fixture.catalog = Some(levels);
+
+    for level in [EffortLevel::Minimal, EffortLevel::Xhigh] {
+        let refusal = match build(&fixture, Build::level(level)).await {
+            Err(BuildAgentError::ReasoningEffortRefused(refusal)) => *refusal,
+            Err(other) => panic!("{level:?}: expected the typed refusal, got {other}"),
+            Ok(_) => panic!("{level:?}: the build must refuse the level"),
+        };
+        assert_eq!(
+            refusal,
+            expected_refusal(
+                &fixture,
+                level,
+                ReasoningEffortRefusalReason::UnsupportedLevel,
+                Some(fixture.supported.clone()),
+                Some(fixture.facts),
+            ),
+            "{level:?}"
+        );
+    }
+    assert_eq!(
+        stub.recorded().len(),
+        0,
+        "nothing is sent: {:?}",
+        stub.recorded()
+    );
+
+    let mut agent = build(&fixture, Build::level(EffortLevel::High))
+        .await
+        .unwrap_or_else(|error| panic!("the agent builds at high: {error}"));
+    let (result, _) = run(&mut agent, "Hello.").await;
+    result.unwrap_or_else(|error| panic!("the run at high completes: {error}"));
+    let mut agent = build(&fixture, Build::default())
+        .await
+        .unwrap_or_else(|error| panic!("the agent builds without a level: {error}"));
+    let (result, _) = run(&mut agent, "Hello.").await;
+    result.unwrap_or_else(|error| panic!("the run without a level completes: {error}"));
+
+    let recorded = stub.recorded();
+    assert_eq!(recorded.len(), 2, "{recorded:?}");
+    for request in &recorded {
+        assert!(request.path.contains(MODEL), "{}", request.path);
+    }
+    assert_eq!(
+        recorded[0].body["generationConfig"]["thinkingConfig"],
+        json!({"thinkingLevel": "high"}),
+        "{}",
+        recorded[0].body
+    );
+    assert!(
+        recorded[1].body["generationConfig"]["thinkingConfig"].is_null(),
+        "{}",
+        recorded[1].body
+    );
+}
+
 /// A level nothing states the facts for is refused as unknown before any
 /// request is sent: a model without a catalog row, a row that records no
 /// levels, a self-hosted model without operator levels, a Copilot entry

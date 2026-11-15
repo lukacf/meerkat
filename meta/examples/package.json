@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@rkat/meta-sdk": "file:../sdk/typescript",
     "playwright": "1.55.0",
     "tsx": "4.20.5",
     "yaml": "2.8.1"

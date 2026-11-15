@@ -16,7 +16,17 @@
 //! other spawn, ensure, respawn and fork path, and nothing wires, unwires or
 //! respawns an open branch: each is refused
 //! [`MobError::ApprovalBranchReserved`], in the mob's own admission, so every
-//! surface inherits the refusal.
+//! surface inherits the refusal. A store-owned identity's record takes
+//! neither: its create is refused both, whatever its entry would be unseated
+//! for; its update is refused the label it does not already carry
+//! ([`introduces_approval_branch_label`]); and its adoption is refused
+//! both, an open branch's adoption as a worker included (its name takes
+//! the prefix). Each is refused with the same refusal and before anything
+//! is written, since no seat could follow such a record. One call still
+//! writes such a record: the import of an export
+//! (`MobHandle::import_created_identities`, a host operator's) restores
+//! its records as written, since a restore must keep taking the records an
+//! earlier release wrote.
 
 use std::collections::BTreeMap;
 
@@ -31,6 +41,11 @@ use crate::ids::AgentIdentity;
 /// branches' own opening.
 pub(crate) const APPROVAL_BRANCH_IDENTITY_PREFIX: &str = "approval-branch-";
 
+/// Whether `labels` carry an approval branch's authority label.
+fn carries_approval_branch_label(labels: &BTreeMap<String, String>) -> bool {
+    labels.contains_key(APPROVAL_BRANCH_LABEL)
+}
+
 /// Whether `identity` or `labels` take an approval branch's reserved
 /// identity prefix or its authority label.
 pub(crate) fn takes_approval_branch_reservation(
@@ -40,7 +55,22 @@ pub(crate) fn takes_approval_branch_reservation(
     identity
         .as_str()
         .starts_with(APPROVAL_BRANCH_IDENTITY_PREFIX)
-        || labels.is_some_and(|labels| labels.contains_key(APPROVAL_BRANCH_LABEL))
+        || labels.is_some_and(carries_approval_branch_label)
+}
+
+/// Whether a change of a store-owned record's labels from `stored` to
+/// `requested` introduces an approval branch's authority label: `requested`
+/// carry it and `stored` do not. An update is refused the label only then.
+/// A record that carries it already (a build that did not refuse it wrote
+/// it) stays changeable, with the label kept under its value or another,
+/// and an update that removes it is how such a record lets it go. The
+/// identity prefix is its create's to refuse: an update names an identity
+/// that exists.
+pub(crate) fn introduces_approval_branch_label(
+    stored: &BTreeMap<String, String>,
+    requested: &BTreeMap<String, String>,
+) -> bool {
+    carries_approval_branch_label(requested) && !carries_approval_branch_label(stored)
 }
 
 /// Admit `spec`'s claim on an approval branch's reservation, after the

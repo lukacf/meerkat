@@ -341,10 +341,13 @@ async fn remote_ambiguous_custody_recovers_and_revokes_after_its_source_disappea
                 None,
                 state.session_service(),
             );
+            // Commit order: 0 claim, 1 the temporary mob's create intent, 2
+            // the participant's acquire-intent, 3 its capability. Index 3 is
+            // the post-create commit whose completion is lost.
             state
                 .with_temporary_council_store(Arc::new(AmbiguousThenPanicCouncilStore::new(
                     inner,
-                    2,
+                    3,
                     gate_for_store,
                 )))
                 .with_controlling_acceptor(acceptor)

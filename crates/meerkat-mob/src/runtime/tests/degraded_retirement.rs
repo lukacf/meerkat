@@ -20,6 +20,12 @@ use crate::runtime::actor::retirement_stage_test_hooks as stages;
 /// a failure.
 const STEP: Duration = Duration::from_secs(10);
 
+/// Bound for a retire's answer. A retire still running when its caller
+/// budget ends answers in progress only then, so this is the budget of the
+/// build and slack for a loaded run; it only turns a hang into a failure.
+const RETIRE_ANSWER: Duration =
+    past_window(crate::runtime::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT);
+
 /// Degrade `session`'s registration and start its runtime loop's teardown,
 /// as a boundary commit that failed would, so a reload can claim the loop's
 /// handoff.
@@ -50,7 +56,7 @@ async fn start_degraded_teardown(mob: &IsolationMob, session: &SessionId) {
 /// Drive `member`'s retirement, a plain retire or a redrive, until it answers
 /// other than in progress.
 async fn settle(mob: &IsolationMob, member: &AgentIdentity, redrive: bool) -> Result<(), MobError> {
-    tokio::time::timeout(STEP, async {
+    tokio::time::timeout(RETIRE_ANSWER, async {
         loop {
             let answer = if redrive {
                 mob.handle.redrive_retirement(member.clone()).await
@@ -66,7 +72,7 @@ async fn settle(mob: &IsolationMob, member: &AgentIdentity, redrive: bool) -> Re
         }
     })
     .await
-    .expect("the retirement settles within the step bound")
+    .expect("the retirement settles within its bound")
 }
 
 /// Start `member`'s retirement and hold it at its ingress detach, before the
@@ -120,7 +126,7 @@ async fn a_member_that_degrades_after_its_quiesce_is_reloaded_at_its_ingress_det
     degrade_with_teardown(&mob, &session).await;
     hold.release();
 
-    let first = tokio::time::timeout(STEP, retire)
+    let first = tokio::time::timeout(RETIRE_ANSWER, retire)
         .await
         .expect("the retire answers")
         .expect("join the retire");
@@ -180,7 +186,7 @@ async fn a_retiring_member_refuses_a_webrtc_live_open_as_it_refuses_a_websocket_
     assert_eq!(webrtc.wire_error_code(), websocket.wire_error_code());
 
     hold.release();
-    match tokio::time::timeout(STEP, retire)
+    match tokio::time::timeout(RETIRE_ANSWER, retire)
         .await
         .expect("the retire answers")
         .expect("join the retire")
@@ -225,7 +231,7 @@ async fn a_reload_refused_at_the_ingress_detach_sticks_repair_blocked_until_a_re
     degrade_with_teardown(&mob, &session).await;
     stages::refuse_next_ingress_stage_reload(&session);
     hold.release();
-    let _first = tokio::time::timeout(STEP, retire)
+    let _first = tokio::time::timeout(RETIRE_ANSWER, retire)
         .await
         .expect("the retire answers")
         .expect("join the retire");

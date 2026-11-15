@@ -1819,9 +1819,10 @@ impl AccessView {
     /// caller the member `identity` names because the attribute cache does
     /// not know it: a member that ended before this process read who it was
     /// private to may have been private, so a caller who is not an admin,
-    /// signed in or not, is shown no memory scope of it and attaches no
-    /// session of it. The one operator of a console that identifies nobody,
-    /// and an admin, are withheld nothing for it.
+    /// signed in or not, is shown no memory scope of it, attaches no
+    /// session of it, and reads and changes no console schedule of it. The
+    /// one operator of a console that identifies nobody, and an admin, are
+    /// withheld nothing for it.
     pub(crate) fn withholds_unknown_member(&self, identity: &str) -> bool {
         self.kept_apart_from_other_people() && !self.knows_agent(identity)
     }

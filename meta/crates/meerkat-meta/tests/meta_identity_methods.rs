@@ -1276,6 +1276,51 @@ fn an_update_changes_what_it_names_and_keeps_the_rest() {
     assert_eq!(profile["field"], json!("set.profile"), "{profile:#}");
 }
 
+/// Through the methods, as the wire answers: a create that gives the label
+/// Meerkat keeps for its approval branches is refused `reserved_key` naming
+/// the key at `agents[0].labels`, a create whose name takes their prefix is
+/// refused `invalid_name` at `agents[0].name`, and an update that adds the
+/// label is refused `reserved_key` at `set.labels`. Nothing is created, and
+/// the agent's record is unchanged.
+#[test]
+fn the_methods_refuse_the_approval_branch_label_and_name_typed() {
+    let label = meerkat_core::approval::decision::APPROVAL_BRANCH_LABEL;
+    let scratch = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::launched(scratch.path(), Some(worker_policy()));
+    let labelled = gateway.refused(
+        "meta/identity/create",
+        json!({"request_id": "create-labelled",
+               "agents": [{"name": "scout", "profile": "worker",
+                           "labels": {(label): "decision:made-up"}}]}),
+    );
+    assert_eq!(labelled["kind"], json!("reserved_key"), "{labelled:#}");
+    assert_eq!(labelled["key"], json!(label), "{labelled:#}");
+    assert_eq!(labelled["field"], json!("agents[0].labels"), "{labelled:#}");
+    let named = gateway.refused(
+        "meta/identity/create",
+        json!({"request_id": "create-named",
+               "agents": [{"name": "approval-branch-made-up", "profile": "worker"}]}),
+    );
+    assert_eq!(named["kind"], json!("invalid_name"), "{named:#}");
+    assert_eq!(named["field"], json!("agents[0].name"), "{named:#}");
+
+    // Neither create left an agent: the name is free.
+    gateway.create("create-1", json!([{"name": "scout", "profile": "worker"}]));
+    let digest = gateway.digest("scout");
+    let added = gateway.refused(
+        "meta/identity/update",
+        json!({"request_id": "update-labelled", "name": "scout",
+               "expected_spec_digest": digest,
+               "set": {"labels": {(label): "decision:made-up"}}}),
+    );
+    assert_eq!(added["kind"], json!("reserved_key"), "{added:#}");
+    assert_eq!(added["key"], json!(label), "{added:#}");
+    assert_eq!(added["field"], json!("set.labels"), "{added:#}");
+    let scout = gateway.get("scout");
+    assert_eq!(scout["spec_revision"], json!(1), "{scout:#}");
+    assert_eq!(scout["spec_digest"], digest, "{scout:#}");
+}
+
 /// An update of descriptive labels writes only what it names: one label
 /// set and another removed keep the agent's authority label (a label the
 /// policy declares an authority field) and every descriptive label the

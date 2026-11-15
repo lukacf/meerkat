@@ -143,13 +143,21 @@ fn recording(seen: &Seen, answer: Result<(), String>) -> RetiredMemberObserver {
 /// The host's Core registration hook in the fixture: it selects as the
 /// governed host does ([`SelectingHook`]) and records each distinct
 /// registration a member build was given
-/// (`MemberRuntimeBuildIdentity::registration`), in order.
+/// (`MemberRuntimeBuildIdentity::registration`), in order. It can be told
+/// to refuse the destination of one member from then on.
 #[derive(Default)]
 struct RecordingRegistrationHook {
     builds: Mutex<Vec<RuntimeSessionRegistrationWitness>>,
+    refused: Mutex<Option<String>>,
 }
 
 impl RecordingRegistrationHook {
+    /// Refuse, from now on, the destination of the member whose name holds
+    /// `identity`.
+    fn refuse(&self, identity: &AgentIdentity) {
+        *self.refused.lock().unwrap() = Some(identity.as_str().to_string());
+    }
+
     fn record(&self, identity: &meerkat_mob::MemberRuntimeBuildIdentity) {
         let mut builds = self.builds.lock().unwrap();
         if !builds.contains(identity.registration()) {
@@ -179,6 +187,12 @@ impl MemberRuntimeRegistrationHook for RecordingRegistrationHook {
         identity: &meerkat_mob::MemberRuntimeBuildIdentity,
     ) -> Result<meerkat_mob::MemberDestinationSelection, meerkat_mob::MobError> {
         self.record(identity);
+        let refused = self.refused.lock().unwrap().clone();
+        if refused.is_some_and(|name| identity.member().member.as_str().contains(&name)) {
+            return Err(meerkat_mob::MobError::WiringError(
+                "the host deliberately refused the member".into(),
+            ));
+        }
         SelectingHook.select_destination(identity).await
     }
 
@@ -1369,5 +1383,49 @@ async fn a_reprofile_never_reaches_the_hook() {
     );
     let calls = fixture.seen.settled().await;
     assert!(calls.is_empty(), "{calls:?}");
+    let _ = fixture.runtime.shutdown().await;
+}
+
+/// The broken-member facts the gateway's init result and `meta/status` are
+/// built from carry the refusal code Core recorded for a member, read from
+/// the mob's published machine state. A released member whose host refuses
+/// its next registration is Broken with that code; the member the host did
+/// not refuse is not named.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_its_host_refuses_is_named_broken_with_the_recorded_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = Fixture::start(&dir, "broken-member-code").await;
+    let none =
+        crate::mob_handle_runtime::broken_member_facts_of(&fixture.runtime.mob_handle()).await;
+    assert!(none.is_empty(), "the start left no member broken: {none:?}");
+
+    fixture
+        .identities()
+        .retire_tracked(&fixture.kept)
+        .await
+        .expect("the member is released");
+    fixture.builds.refuse(&fixture.kept);
+    let refused = fixture.identities().materialize(&fixture.kept).await;
+    assert!(
+        refused.is_err(),
+        "the host refused the member's next registration: {refused:?}"
+    );
+
+    let facts =
+        crate::mob_handle_runtime::broken_member_facts_of(&fixture.runtime.mob_handle()).await;
+    let kept = crate::member_comms_id::roster_member_id_for_identity(fixture.kept.as_str());
+    assert_eq!(
+        facts
+            .iter()
+            .map(|fact| fact.member.as_str())
+            .collect::<Vec<_>>(),
+        vec![kept.as_str()],
+        "only the refused member is named broken: {facts:?}"
+    );
+    assert_eq!(
+        facts[0].code.as_deref(),
+        Some("host_refused_registration.select_destination"),
+        "the entry carries the code Core recorded for the refusal: {facts:?}"
+    );
     let _ = fixture.runtime.shutdown().await;
 }

@@ -76,6 +76,8 @@ import {
   type CompactSessionResult,
   type MobCompactMemberResult,
   type WireCompactionRequestOutcome,
+  type RecallInputResult,
+  type WireQueuedInputRecall,
   type WireRunStopReceipt,
   type JobsArtifactsParams,
   type JobsArtifactsResult,
@@ -806,6 +808,29 @@ function toolGrantSubject(
   return typeof subject === "string"
     ? { kind: "session", session_id: subject }
     : { kind: "identity", mob_id: subject.mobId, identity: subject.identity };
+}
+
+/**
+ * The wire selector of `session/recall_input`. It names the input by
+ * exactly one of its input id and its idempotency key; a key that is
+ * `undefined` or `null` is not named. Throws `INVALID_ARGS`, before
+ * anything is sent, for a selector that names both or neither.
+ */
+function recallSelectorToWire(selector: {
+  inputId?: string | null;
+  idempotencyKey?: string | null;
+}): { by: "input_id" | "idempotency_key"; value: string } {
+  const inputId = selector?.inputId ?? undefined;
+  const idempotencyKey = selector?.idempotencyKey ?? undefined;
+  if ((inputId === undefined) === (idempotencyKey === undefined)) {
+    throw new MeerkatError(
+      "INVALID_ARGS",
+      "recallInput needs exactly one of selector.inputId and selector.idempotencyKey",
+    );
+  }
+  return inputId !== undefined
+    ? { by: "input_id", value: inputId }
+    : { by: "idempotency_key", value: idempotencyKey as string };
 }
 
 /** Options for a mob member event subscription. */
@@ -5307,6 +5332,91 @@ export class MeerkatClient {
         );
     }
     return receipt as unknown as WireRunStopReceipt;
+  }
+
+  /**
+   * @internal Withdraw one input of the session, only while it is still
+   * queued. The selector has `session/input_status`'s wire form. It names
+   * exactly one of `inputId` and `idempotencyKey`, and one that names both
+   * or neither throws `INVALID_ARGS` before anything is sent.
+   */
+  async _recallInput(
+    sessionId: string,
+    selector:
+      | { inputId: string; idempotencyKey?: never }
+      | { idempotencyKey: string; inputId?: never },
+  ): Promise<RecallInputResult> {
+    const result = await this.request("session/recall_input", {
+      session_id: sessionId,
+      selector: recallSelectorToWire(selector),
+    });
+    const context = "Invalid session/recall_input response";
+    if (typeof result.session_id !== "string") {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: missing session_id`);
+    }
+    return {
+      session_id: result.session_id,
+      recall: MeerkatClient.parseQueuedInputRecall(result.recall, context),
+    };
+  }
+
+  /**
+   * Validate the recall answer's discriminator. `abandoned` carries the
+   * attempt count, `not_queued` the input's phase (and the run that holds
+   * it), and `already_terminal` the terminal class.
+   */
+  private static parseQueuedInputRecall(raw: unknown, context: string): WireQueuedInputRecall {
+    if (typeof raw !== "object" || raw === null) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: recall must be an object`);
+    }
+    const recall = raw as Record<string, unknown>;
+    if (typeof recall.input_id !== "string") {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: recall.input_id must be a string`);
+    }
+    switch (recall.outcome) {
+      case "abandoned": {
+        const attempts = recall.attempt_count ?? 0;
+        if (typeof attempts !== "number" || !Number.isInteger(attempts) || attempts < 0) {
+          throw new MeerkatError(
+            "INVALID_RESPONSE",
+            `${context}: attempt_count must be a non-negative integer`,
+          );
+        }
+        recall.attempt_count = attempts;
+        break;
+      }
+      case "not_queued":
+        if (typeof recall.phase !== "string") {
+          throw new MeerkatError("INVALID_RESPONSE", `${context}: a not_queued recall needs a phase`);
+        }
+        if (
+          recall.run_id !== undefined &&
+          recall.run_id !== null &&
+          typeof recall.run_id !== "string"
+        ) {
+          throw new MeerkatError("INVALID_RESPONSE", `${context}: run_id must be a string`);
+        }
+        break;
+      case "already_terminal":
+        if (typeof recall.terminal !== "string") {
+          throw new MeerkatError(
+            "INVALID_RESPONSE",
+            `${context}: an already_terminal recall needs a terminal`,
+          );
+        }
+        break;
+      default:
+        if (typeof recall.outcome !== "string" || recall.outcome.length === 0) {
+          throw new MeerkatError(
+            "INVALID_RESPONSE",
+            `${context}: recall.outcome must be a string`,
+          );
+        }
+        // An outcome this SDK does not know is kept as it is: the list of
+        // outcomes can grow, and the caller reads the string it got.
+        break;
+    }
+    return recall as unknown as WireQueuedInputRecall;
   }
 
   /** @internal */

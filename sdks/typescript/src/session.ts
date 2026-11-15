@@ -22,6 +22,7 @@
 import type {
   CompactSessionResult,
   PeerDirectoryEntry,
+  RecallInputResult,
   StopRunResult,
 } from "./generated/types.js";
 import type {
@@ -140,6 +141,25 @@ export class Session {
    */
   async stopRun(runId: string, reason: string): Promise<StopRunResult> {
     return this._client._stopRun(this._id, runId, reason);
+  }
+
+  /**
+   * Withdraw one input of this session, only while it is still queued. Name
+   * the input by the `inputId` its submit answered, or by the
+   * `idempotencyKey` it was submitted under. `recall.outcome` is `abandoned`
+   * (the input was queued and is now withdrawn: its terminal is `cancelled`
+   * and no run will take it), `not_queued` (a run holds it: nothing was
+   * touched and the run is not interrupted) or `already_terminal`. An input
+   * this session does not hold is refused as invalid params. Throws
+   * `INVALID_ARGS`, before anything is sent, unless the selector names
+   * exactly one of `inputId` and `idempotencyKey`.
+   */
+  async recallInput(
+    selector:
+      | { inputId: string; idempotencyKey?: never }
+      | { idempotencyKey: string; inputId?: never },
+  ): Promise<RecallInputResult> {
+    return this._client._recallInput(this._id, selector);
   }
 
   /**
@@ -418,6 +438,25 @@ export class DeferredSession {
    */
   async stopRun(runId: string, reason: string): Promise<StopRunResult> {
     return this._client._stopRun(this._id, runId, reason);
+  }
+
+  /**
+   * Withdraw one input of this session, only while it is still queued. Name
+   * the input by the `inputId` its submit answered, or by the
+   * `idempotencyKey` it was submitted under. `recall.outcome` is `abandoned`
+   * (the input was queued and is now withdrawn: its terminal is `cancelled`
+   * and no run will take it), `not_queued` (a run holds it: nothing was
+   * touched and the run is not interrupted) or `already_terminal`. An input
+   * this session does not hold is refused as invalid params. Throws
+   * `INVALID_ARGS`, before anything is sent, unless the selector names
+   * exactly one of `inputId` and `idempotencyKey`.
+   */
+  async recallInput(
+    selector:
+      | { inputId: string; idempotencyKey?: never }
+      | { idempotencyKey: string; inputId?: never },
+  ): Promise<RecallInputResult> {
+    return this._client._recallInput(this._id, selector);
   }
 
   /**

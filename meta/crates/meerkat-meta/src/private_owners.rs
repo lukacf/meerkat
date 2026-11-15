@@ -19,9 +19,10 @@
 //! records its own labels (the base session layer's pre-build hook,
 //! [`PrivateOwners::after_hook`]), every mob a member creates records its
 //! creator's owner (the agent mob tools' create admission,
-//! [`PrivateOwners::before_create_hook`]), and the seed reads the durable
-//! records: the event log of the runtime's mob and of every mob its members
-//! created (each spawn with its labels, retired members included), the
+//! [`PrivateOwners::before_create_hook`]; a temporary council's mob is
+//! created by the member that convened the council), and the seed reads the
+//! durable records: the event log of the runtime's mob and of every mob its
+//! members created (each spawn with its labels, retired members included), the
 //! creation record of each such mob (which member created it), and the
 //! retirements the memory store recorded as private
 //! ([`PrivateOwners::bind_private_retirements`]). The seed runs in the
@@ -415,6 +416,18 @@ impl PrivateOwners {
             .or_insert(owner);
     }
 
+    /// What this record holds of who mob `mob_id` is private to, for tests
+    /// outside this module: `Some(owner)` for a mob whose owner it knows
+    /// (`Some(None)` for a mob private to no one), `None` for a mob it does
+    /// not know or cannot decide. The two layers are the fact under test: a
+    /// mob recorded as private to no one is not a mob the record does not
+    /// know.
+    #[cfg(test)]
+    #[allow(clippy::option_option)]
+    pub(crate) fn recorded_mob_owner(&self, mob_id: &str) -> Option<Option<String>> {
+        self.mob_owner(mob_id).ok()
+    }
+
     /// `self`, once the seed has read `log` (the event log of the runtime's
     /// mob), then the event log and the creation record of every mob the
     /// runtime's agent mob tools host: the first call that reads them all
@@ -743,6 +756,19 @@ impl PrivateOwners {
     /// when there is one) decides first, then the mob is recorded as private
     /// to its creator's owner. A creator whose owner cannot be read refuses
     /// the create.
+    ///
+    /// The creator is the member whose session the create names: the owner
+    /// session, or, for the mob of a temporary council, the session that
+    /// convened the council (the council's owner session is a session of
+    /// its own and names no member). A council no member convened (a host
+    /// ran it) has no creator, like a host's own create.
+    ///
+    /// The record decides who a member spawned into the mob later is
+    /// private to ([`Self::apply_child`]). A council participant is not
+    /// such a spawn: it is a fork built with its source's labels.
+    ///
+    /// The record is this process's: a council's mob left over from before
+    /// a restart is read as private to no one.
     pub(crate) fn before_create_hook(
         &self,
         state: Weak<meerkat_mob_mcp::MobMcpState>,
@@ -757,7 +783,11 @@ impl PrivateOwners {
                 if let Some(then) = then {
                     then(request.clone()).await?;
                 }
-                let owner = match (request.owner_bridge_session_id.as_ref(), state.upgrade()) {
+                let creator_session = match request.council.as_ref() {
+                    Some(council) => council.convener_session_id.as_ref(),
+                    None => request.owner_bridge_session_id.as_ref(),
+                };
+                let owner = match (creator_session, state.upgrade()) {
                     (Some(session), Some(state)) => {
                         match state.member_for_bridge_session(session).await {
                             Ok(Some((mob_id, creator))) => {

@@ -2345,12 +2345,25 @@ impl MeerkatMachine {
                 let prepared = driver
                     .prepare_sole_runless_runtime_termination(&input_id, reason.to_string())
                     .map_err(internal)?;
-                if let Err(error) = driver
+                match driver
                     .abandon_queued_input(&input_id, InputAbandonReason::Cancelled)
                     .await
                 {
-                    driver.rollback_prepared_sole_runless_termination(prepared);
-                    return Err(internal(error));
+                    Ok(true) => {}
+                    // The machine decides: an input it says is not queued is
+                    // not ended here, and is not reported as ended.
+                    Ok(false) => {
+                        driver.rollback_prepared_sole_runless_termination(prepared);
+                        return Err(internal(
+                            crate::meerkat_machine::driver::DriverEntry::queued_read_contradicted(
+                                &input_id,
+                            ),
+                        ));
+                    }
+                    Err(error) => {
+                        driver.rollback_prepared_sole_runless_termination(prepared);
+                        return Err(internal(error));
+                    }
                 }
                 runless_terminal.owe();
                 crate::meerkat_machine::driver::DriverEntry::commit_prepared_sole_runless_termination(

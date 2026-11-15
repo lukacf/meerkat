@@ -161,6 +161,43 @@ export function decisionCardsOf(page: unknown, renderings: ReadonlyMap<string, s
   return [...whole, ...statuses].sort(byDeadline);
 }
 
+/** The decision kind of a question set an agent asked (`ask_user`). */
+export const QUESTION_SET_DECISION_KIND = "ask_user.questions";
+
+/** What the decision cards read of the agents' question list: its status,
+ *  the open sets it holds and the sets this console answered or dismissed. */
+export interface QuestionListView {
+  status?: string;
+  sets: readonly { pendingId: string }[];
+  closed: readonly { set: { pendingId: string } }[];
+}
+
+/** The decision cards the Pending tab lists beside the agents' question
+ *  sets. A question set is a durable decision too, so the decisions' read
+ *  lists it; a set the question list holds is the question list's to show,
+ *  as the card a person answers (or as the card of a set this console
+ *  closed), and its decision card is left out: nobody gets one set twice.
+ *  A set the question list was read without (one the question read does not
+ *  list) keeps its decision card, the one place that then shows it. Before
+ *  the first read of the question list (`loading`) nothing is known of the
+ *  sets yet, and every decision card of a question set waits for that read.
+ *  Where the question sets are not read (no list, or one that failed, was
+ *  refused or is not offered), the decision card is the one place that
+ *  shows a set. */
+export function decisionCardsBesideQuestions(
+  cards: readonly DecisionCardView[],
+  questions: QuestionListView | undefined,
+): readonly DecisionCardView[] {
+  const status = questions?.status;
+  if (!questions || (status !== "loading" && status !== "ready" && status !== "stale")) return cards;
+  if (status === "loading") return cards.filter((card) => card.kind !== QUESTION_SET_DECISION_KIND);
+  const held = new Set([
+    ...questions.sets.map((set) => set.pendingId),
+    ...questions.closed.map((closed) => closed.set.pendingId),
+  ]);
+  return cards.filter((card) => card.kind !== QUESTION_SET_DECISION_KIND || !held.has(card.decisionId));
+}
+
 /** The params of one `meta/decisions/list` page of open decisions: at most
  *  `limit` rows, after the cursor `after` when the panel follows one. */
 export function decisionPageParams(limit: number, after?: string): Record<string, unknown> {

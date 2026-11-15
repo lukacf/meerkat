@@ -30,7 +30,8 @@ pub use sqlite::{
 pub(crate) use sqlite::{IDENTITY_RUNTIME_WRITE_FENCE_WAIT, identity_fence_test_hooks};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use sqlite::{
-    MemberBindingStoreRead, read_identity_record_rows_at, read_member_binding_store_at,
+    MemberBindingStoreRead, read_definition_journal_at, read_identity_record_rows_at,
+    read_member_binding_store_at,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sqlite::{

@@ -219,6 +219,9 @@ import {
   parseGatingWithdrawResult,
   parseGatingAuditEntry,
   parseGatingPendingEntry,
+  parseGatingQuestionSet,
+  parseGatingQuestionSetResult,
+  gatingQuestionAnswerToWire,
   parseRediscoverReport,
   parseReconcileEdgesReport,
   parsePersistedEvent,
@@ -320,6 +323,9 @@ import {
   type GatingWithdrawResult,
   type GatingAuditEntry,
   type GatingPendingEntry,
+  type GatingQuestionAnswer,
+  type GatingQuestionSet,
+  type GatingQuestionSetResult,
   type RediscoverReport,
   type ReconcileEdgesReport,
   type PersistedEvent,
@@ -516,6 +522,18 @@ function definedParams(params: Record<string, unknown>): Record<string, unknown>
  * up.
  */
 const SERVER_WAIT_TRANSPORT_HEADROOM_MS = 5_000;
+/**
+ * The gateway's `timeout_ms` for `meta/compact_member` when the caller names
+ * none: the base of the transport deadline of such a call.
+ */
+const COMPACT_MEMBER_DEFAULT_TIMEOUT_MS = 60_000;
+/**
+ * Transport allowance beyond `meta/compact_member`'s `timeout_ms`. The
+ * gateway holds the call past that deadline: for its own 5 s secondary
+ * observation budget, and for what it does outside the deadline (the two
+ * in-place rebuilds of the member and the transcript reads around them).
+ */
+const COMPACT_MEMBER_TRANSPORT_HEADROOM_MS = 30_000;
 // Backoff between exact-ticket observation retries after an admitted
 // delivery's wait failed for a transport or RPC reason; bounded by the
 // caller's remaining deadline.
@@ -3157,6 +3175,99 @@ export class MetaRuntime {
   }
 
   /**
+   * Compact a member's conversation now.
+   *
+   * Host-only (`meta/compact_member`); the Console's RPC route does not
+   * forward it. The member runs one maintenance turn that compacts its
+   * conversation: the older turns are summarized and the most recent ones
+   * are kept. The call costs one model turn and two in-place rebuilds of the
+   * member, one before that turn and one after it, on the same conversation.
+   * A `meta/compact_member` call that is admitted rebuilds the identity,
+   * whether it then compacts, compacts nothing or fails. On a 0.9.15
+   * gateway a completed call keeps an identity's listing and management
+   * of the mobs it created with its own tools (one run; a call that
+   * times out, or completes without compacting, rebuilds by the same
+   * step: read from the source, not run), unless the same-session step
+   * does not serve its member (see the RPC reference); against a
+   * gateway on 0.9.9 through 0.9.14 the call costs it that, and
+   * upgrading does not give it back (see the `meta/compact_member`
+   * section of the RPC reference). Where the cost applies, have the
+   * identity destroy a mob it created before the call if it must not be
+   * left running unmanaged. Call it against a 0.9.15 gateway: on 0.9.9
+   * through 0.9.14 a call that fails leaves the agent with the call's low
+   * compaction threshold.
+   * A changed instruction that waits for a compaction takes effect with it:
+   * an update answered `applies_after_compaction` because the member's model
+   * takes a system instruction only ahead of the conversation.
+   *
+   * `options.floorTokens` is the member's compaction threshold for that one
+   * turn, in tokens (gateway default 1024, a positive integer). A
+   * conversation shorter than the floor is left as it is, so name a lower
+   * floor for a shorter one; a conversation of only a few turns may not get
+   * smaller whatever the floor, and the call can then fail with
+   * `compact_member_completion_failed` (see the RPC reference). Always
+   * check the result's `compaction_applied`:
+   * `false` means the conversation holds no fewer messages than before the
+   * call, so treat it as not compacted.
+   *
+   * `options.timeoutMs` (gateway default 60000) is how long the gateway
+   * watches the maintenance turn. It bounds the watching, not the turn: past
+   * it the call rejects even if the compaction completes later. The gateway
+   * holds the call for longer than `timeoutMs` (a further 5 seconds of
+   * watching, and the two rebuilds), so this call waits for the reply for
+   * `timeoutMs` plus 30 seconds, whatever the transport's own request
+   * timeout is. If that wait ends first, the call rejects with the
+   * transport's timeout error and the gateway still owns the operation; a
+   * second call for the member then rejects with `compact_member_busy` while
+   * it does.
+   *
+   * Resolves to the gateway's result as it is: `{ identity, session_id,
+   * floor_tokens, messages_before, messages_after, compaction_applied,
+   * head_revision, last_rewrite_reason }`. The message counts,
+   * `compaction_applied` and the revision facts are `null` when the gateway
+   * has no transcript-edit service.
+   *
+   * A failure rejects with an RPC error (`-32000`) whose `data.kind` names
+   * it, with `data.stage`, `data.operation_id` and `data.identity`:
+   * `compact_member_busy` (a compaction already owns the member),
+   * `compact_member_refused` (the member has no durable session),
+   * `compact_member_timeout` (`stage` `"terminal_pending"`: the turn has not
+   * ended, or its end is not known, and the gateway keeps the operation;
+   * `"profile_restored"`: the turn completed after the deadline and the
+   * member is back on its own threshold), `compact_member_completion_failed`
+   * (the turn ended without success; `data.completion_type` says how),
+   * `compact_member_superseded` (the member was rebuilt or replaced
+   * meanwhile), `compact_member_admission_pending`,
+   * `compact_member_admission_failed`, `compact_member_observation_failed`
+   * and `compact_member_rebuild_failed`. The list is open: a kind or a stage
+   * it does not name reaches the caller the same way, and a later release
+   * may change which stage a failure reports. A gateway whose wiring cannot
+   * serve the verb rejects with an RPC error `-32016` before anything
+   * changes. A `timeoutMs` that is not a finite number of at least one
+   * millisecond rejects with `RangeError` before any request.
+   */
+  async compactMember(
+    identity: string,
+    options: { floorTokens?: number; timeoutMs?: number } = {},
+  ): Promise<Record<string, unknown>> {
+    const { floorTokens, timeoutMs } = options;
+    if (timeoutMs !== undefined && !(Number.isFinite(timeoutMs) && timeoutMs >= 1)) {
+      throw new RangeError(
+        "compactMember timeoutMs must be a finite number of at least 1 millisecond",
+      );
+    }
+    const params: Record<string, unknown> = { identity };
+    if (floorTokens !== undefined) params.floor_tokens = floorTokens;
+    if (timeoutMs !== undefined) params.timeout_ms = Math.floor(timeoutMs);
+    const watchedMs =
+      timeoutMs === undefined ? COMPACT_MEMBER_DEFAULT_TIMEOUT_MS : Math.floor(timeoutMs);
+    const raw = await this._rpc("meta/compact_member", params, {
+      transportTimeoutMs: watchedMs + COMPACT_MEMBER_TRANSPORT_HEADROOM_MS,
+    });
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
    * Grant one of an identity's grant-gated tool names or tool families.
    *
    * Name exactly one of `tool` and `family`: the gate the member's next
@@ -4671,6 +4782,71 @@ export class MobHandle {
         ? (((raw as Record<string, unknown>).entries as unknown[]) ?? [])
         : [];
     return (entries as unknown[]).map(parseGatingAuditEntry);
+  }
+
+  /**
+   * List the open question sets agents asked with `ask_user`
+   * (`meta/gating/questions`), soonest deadline first. A question set is not
+   * part of `gatingPending()`. Answer one with `gatingAnswer()` or dismiss
+   * it with `gatingDismiss()`; a set nobody answers ends `timed_out` at its
+   * deadline.
+   */
+  async gatingQuestions(): Promise<GatingQuestionSet[]> {
+    const raw = await this._runtime._rpc("meta/gating/questions");
+    const entries =
+      typeof raw === "object" && raw !== null
+        ? (((raw as Record<string, unknown>).question_sets as unknown[]) ?? [])
+        : [];
+    return (entries as unknown[]).map(parseGatingQuestionSet);
+  }
+
+  /**
+   * Answer an open question set (`meta/gating/decide` with `answers`); the
+   * asking agent then receives the typed answers. `presentedDigest` is the
+   * set's `subjectDigest`. `answers` holds one entry per answered question;
+   * at least one is needed, and a question left out reaches the agent as
+   * `unanswered`. The gateway refuses an invalid answer set and a set that
+   * is no longer open as invalid params.
+   */
+  async gatingAnswer(
+    pendingId: string,
+    options: {
+      approverId: string;
+      presentedDigest: string;
+      answers: readonly GatingQuestionAnswer[];
+    },
+  ): Promise<GatingQuestionSetResult> {
+    if (options.answers.length === 0) {
+      throw new Error("gatingAnswer needs at least one answer");
+    }
+    return parseGatingQuestionSetResult(
+      await this._runtime._rpc("meta/gating/decide", {
+        pending_id: pendingId,
+        decision: "approve",
+        approver_id: options.approverId,
+        presented_digest: options.presentedDigest,
+        answers: options.answers.map(gatingQuestionAnswerToWire),
+      }),
+    );
+  }
+
+  /**
+   * Dismiss an open question set (`meta/gating/decide` with `reject`): the
+   * asking agent is told no answer is coming. `presentedDigest` is the
+   * set's `subjectDigest`.
+   */
+  async gatingDismiss(
+    pendingId: string,
+    options: { approverId: string; presentedDigest: string },
+  ): Promise<GatingQuestionSetResult> {
+    return parseGatingQuestionSetResult(
+      await this._runtime._rpc("meta/gating/decide", {
+        pending_id: pendingId,
+        decision: "reject",
+        approver_id: options.approverId,
+        presented_digest: options.presentedDigest,
+      }),
+    );
   }
 
   // -- Durable decisions (the stdio host's `meta/decisions/*`) --------------

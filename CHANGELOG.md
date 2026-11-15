@@ -4147,6 +4147,17 @@ them.
   runs on this release's code; 0.8.29 through 0.9.14 read from the source).
   The fix is not in this release.
 
+- Mob: a member that another member seated with its member tools
+  (`spawn_member`, `spawn_many_members`, `mob_spawn_member`) keeps its seat
+  when that member is retired, but turns dispatched to it are then refused
+  (`operation owner is retired`) until the host restarts. A turn started for
+  it as a turn-driven member and a scheduled delivery fail; a message from a
+  peer and a turn a person starts are still taken. A `delegate` helper, and
+  a member that a host or an operator method seated, are not affected.
+  Retire such members before the member that seated them, or restart the
+  host. Affects 0.7.29 through this release (the refused scheduled delivery
+  by a run on this release's code; the rest read from the source).
+
 - A turn that asks for a reasoning effort level its session's route refuses
   is answered with the typed refusal and makes no provider request. Through
   the JSON-RPC session runtime a turn is refused before its input is

@@ -16716,16 +16716,16 @@ async fn handle_console_runtime_rpc_with_visibility(
                 spec = spec.with_context(ctx);
             }
             if let Some(sid) = resume_session_id {
-                spec = match seat_on_stored_session(
-                    runtime,
-                    &sid,
-                    spec.with_resume_bridge_session_id(sid.clone()),
-                )
-                .await
-                {
-                    Ok(spec) => spec,
-                    Err(error) => return response_value(response_id, None, Some(error)),
-                };
+                spec = spec.with_resume_bridge_session_id(sid.clone());
+                // A session the caller may not know of goes on as a fresh id
+                // no store holds: nothing can be seated on it, and it is
+                // answered as a session that does not exist.
+                if absent_session.is_none() {
+                    spec = match seat_on_stored_session(runtime, &sid, spec).await {
+                        Ok(spec) => spec,
+                        Err(error) => return response_value(response_id, None, Some(error)),
+                    };
+                }
             }
             if let Some(instructions) = additional_instructions {
                 spec = spec.with_additional_instructions(instructions);
@@ -18383,9 +18383,16 @@ async fn handle_console_runtime_rpc_with_visibility(
                     bridge_session_id: bridge_session_id.clone(),
                 },
             );
-            let spec = match seat_on_stored_session(runtime, &bridge_session_id, spec).await {
-                Ok(spec) => spec,
-                Err(error) => return response_value(response_id, None, Some(error)),
+            // A session the caller may not know of goes on as a fresh id no
+            // store holds: nothing can be seated on it, and it is answered as
+            // a session that does not exist.
+            let spec = if absent_session.is_some() {
+                spec
+            } else {
+                match seat_on_stored_session(runtime, &bridge_session_id, spec).await {
+                    Ok(spec) => spec,
+                    Err(error) => return response_value(response_id, None, Some(error)),
+                }
             };
             let handle = runtime.handle();
             let spawn_result = Box::pin(handle.spawn_spec(spec)).await;

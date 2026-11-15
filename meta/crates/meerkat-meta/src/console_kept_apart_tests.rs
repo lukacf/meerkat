@@ -2559,6 +2559,12 @@ async fn a_stored_session_that_is_not_archived_is_decided_by_its_stored_document
     let service = restarted
         .session_service()
         .ok_or("the restarted runtime's session service")?;
+    let served = meerkat_core::service::SessionService::read(service.as_ref(), &session).await?;
+    assert_eq!(
+        crate::access::private_owner(&served.state.labels),
+        None,
+        "Core serves the session with a label map that names nobody"
+    );
     let document =
         match meerkat_mob::MobSessionService::load_session_for_resume(service.as_ref(), &session)
             .await?
@@ -2598,5 +2604,84 @@ async fn a_stored_session_that_is_not_archived_is_decided_by_its_stored_document
         );
     }
     restarted.handle().shutdown().await?;
+    Ok(())
+}
+
+/// The answer of `method` to a caller with no token who seats a member named
+/// `member` on `session`, named under the parameter `key`, with the
+/// session's id replaced by a placeholder.
+async fn seat_answer(
+    app: &Router,
+    method: &str,
+    key: &str,
+    member: &str,
+    session: &meerkat_core::types::SessionId,
+) -> String {
+    let mut params = json!({ "role": "worker", "agent_identity": member });
+    params[key] = json!(session.to_string());
+    console_rpc_as(app, None, method, params)
+        .await
+        .to_string()
+        .replace(&session.to_string(), "<session>")
+}
+
+/// A session the caller may not know of is answered as a session nobody ran
+/// on by both methods that seat a member on a stored session: on a console
+/// that identifies nobody whose read of a stored session fails, an ended
+/// private member's session and a session nobody ran on are answered in the
+/// words a console that reads its sessions answers a session nobody ran on,
+/// and nobody is seated.
+#[tokio::test]
+async fn a_session_the_caller_may_not_know_is_answered_as_one_nobody_ran_on_by_both_methods()
+-> TestResult {
+    const MOB: &str = "kept-apart-seat-unreadable";
+    const MEMBER: &str = "seat-unreadable";
+    let left = state_after_a_console_with_sign_in(MOB).await?;
+    let restarted = persistent_gateway_runtime_in(left.state.path(), MOB, "", "").await?;
+    let handle = restarted.handle();
+    assert!(restarted.private_owners().seeded(&handle).await.landed());
+    let never_ran = meerkat_core::types::SessionId::new();
+    let service = crate::console_aggregator::tests::DelayedHistorySessionService::new(
+        restarted
+            .session_service()
+            .cloned()
+            .ok_or("the restarted runtime keeps its session service")?,
+        Duration::ZERO,
+    );
+    service.refuse_resume_loads();
+    let unreadable = MobRuntime::from_handle(restarted.handle())
+        .with_session_service_for_test(Arc::new(service));
+    assert!(unreadable.private_owners().seeded(&handle).await.landed());
+    let readable_app = console_json_router_with_state(console_that_identifies_nobody(&restarted));
+    let unreadable_app =
+        console_json_router_with_state(console_that_identifies_nobody(&unreadable));
+    for (method, key) in [
+        ("meta/attach_existing_session", "session_id"),
+        ("meta/ensure_member", "resume_session_id"),
+    ] {
+        let unknown = seat_answer(&readable_app, method, key, MEMBER, &never_ran).await;
+        assert!(
+            unknown.contains("\"error\":{"),
+            "{method}: a console that reads its sessions seats nobody on a session nobody ran \
+             on: {unknown}"
+        );
+        for (session, whose) in [
+            (&left.side_chat_session, "an ended private member's session"),
+            (&never_ran, "a session nobody ran on"),
+        ] {
+            assert_eq!(
+                seat_answer(&unreadable_app, method, key, MEMBER, session).await,
+                unknown,
+                "{method}: {whose}"
+            );
+        }
+    }
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from(MEMBER))
+            .await?
+            .is_none(),
+        "nobody is seated"
+    );
     Ok(())
 }

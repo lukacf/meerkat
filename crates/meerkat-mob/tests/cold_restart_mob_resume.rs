@@ -15579,3 +15579,267 @@ async fn a_plain_retire_of_a_dormant_member_leaves_its_owed_projection_owed() {
     start.assert_no_model_request("plain retire");
     let _ = start.handle.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// A member the identity reconcile rebuilds keeps its wired peers: peer
+// messages read from the receiver's stored conversation.
+// ---------------------------------------------------------------------------
+
+/// A mob led by `lead-1` with the workers `w-1` and `w-2` joined by a wiring
+/// call, over stores on disk.
+#[cfg(feature = "test-support")]
+struct WiredPair {
+    handle: MobHandle,
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    /// The mob's id, the prefix of its members' comms names.
+    mob_id: MobId,
+    w1_sid: meerkat::SessionId,
+    w2_sid: meerkat::SessionId,
+}
+
+#[cfg(feature = "test-support")]
+impl WiredPair {
+    async fn start(paths: &Paths, runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>) -> Self {
+        let (service, _store) = persistent_head_canonical_service(paths, runtime_store);
+        let storage = MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage");
+        let definition = mob_definition(MobRuntimeMode::TurnDriven);
+        let mob_id = definition.id.clone();
+        let handle = MobBuilder::new(definition, storage)
+            .with_session_service(service.clone())
+            .with_default_llm_client(openai_test_client())
+            .create()
+            .await
+            .expect("create persistent mob");
+        for (profile, identity) in [("lead", "lead-1"), ("worker", "w-1"), ("worker", "w-2")] {
+            handle
+                .spawn_spec(SpawnMemberSpec::new(profile, AgentIdentity::from(identity)))
+                .await
+                .unwrap_or_else(|error| panic!("spawn {identity}: {error}"));
+        }
+        handle
+            .wire(AgentIdentity::from("w-1"), AgentIdentity::from("w-2"))
+            .await
+            .expect("wire the two workers");
+        let w1_sid = handle
+            .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
+            .await
+            .expect("w1 session id");
+        let w2_sid = handle
+            .resolve_bridge_session_id(&AgentIdentity::from("w-2"))
+            .await
+            .expect("w2 session id");
+        Self {
+            handle,
+            service,
+            mob_id,
+            w1_sid,
+            w2_sid,
+        }
+    }
+
+    fn session(&self, worker: &str) -> &meerkat::SessionId {
+        match worker {
+            "w-1" => &self.w1_sid,
+            "w-2" => &self.w2_sid,
+            other => panic!("no worker {other}"),
+        }
+    }
+
+    /// Each worker sends the other a peer message, and each message is read
+    /// from its receiver's stored conversation.
+    async fn exchange(&self, when: &str) {
+        for (from, to) in [("w-1", "w-2"), ("w-2", "w-1")] {
+            let token = format!(
+                "PEER_{}_{}_TO_{}",
+                when.to_uppercase().replace([' ', '-'], "_"),
+                from.to_uppercase().replace('-', ""),
+                to.to_uppercase().replace('-', "")
+            );
+            send_peer_message_direct(
+                self.service.as_ref(),
+                self.session(from),
+                &format!("{}/worker/{to}", self.mob_id),
+                &format!("{token}: a message for {to}"),
+            )
+            .await;
+            wait_for_history_contains_all(
+                self.service.as_ref(),
+                self.session(to),
+                &[token.as_str()],
+                &format!("{when}: {from} to {to}"),
+            )
+            .await;
+        }
+    }
+
+    /// The member list shows the two workers wired to each other.
+    async fn assert_listed_wired(&self, when: &str) {
+        for (holder, peer) in [("w-1", "w-2"), ("w-2", "w-1")] {
+            let entry = member_entry(&self.handle, holder).await;
+            assert!(
+                entry.wired_to.contains(&AgentIdentity::from(peer)),
+                "[{when}] the member list shows {holder} wired to {peer}: {:?}",
+                entry.wired_to
+            );
+        }
+    }
+
+    /// Commit a declaration change (shell enabled) for an adopted worker,
+    /// as its desired revision 2.
+    async fn change_the_declaration(&self, worker: &str) {
+        use meerkat_mob::identity::{
+            ApplyMemberToolDeclaration, IdentityConvergenceMode, IdentityIntent,
+            IdentityStoredObservation, MemberToolCommitOutcome, MemberToolMutationId,
+        };
+        let identity = AgentIdentity::from(worker);
+        let record = match self
+            .handle
+            .identity_intent(&identity)
+            .await
+            .expect("read the identity intent")
+        {
+            IdentityStoredObservation::Valid(record) => record,
+            other => panic!("the adoption persists the intent: {other:?}"),
+        };
+        let mut declaration = match &record.intent {
+            IdentityIntent::Present { member, .. } => member.material.member_tool_declaration(),
+            IdentityIntent::Absent { .. } => panic!("the adoption persists a present intent"),
+        };
+        declaration.category_overrides.shell = meerkat_core::ToolCategoryOverride::Enable;
+        let update = self
+            .handle
+            .apply_member_tool_declaration(ApplyMemberToolDeclaration {
+                mob_id: self.handle.mob_id().clone(),
+                agent_identity: identity,
+                request_id: MemberToolMutationId::new(format!("shell-for-{worker}"))
+                    .expect("mutation id"),
+                expected_intent_revision: record.intent_revision,
+                declaration,
+                convergence: IdentityConvergenceMode::CancelActive,
+            })
+            .await
+            .expect("apply the tool declaration");
+        assert!(
+            matches!(
+                update.commit,
+                MemberToolCommitOutcome::Committed {
+                    desired_revision: 2
+                }
+            ),
+            "{:?}",
+            update.commit
+        );
+    }
+}
+
+/// Two workers joined by a wiring call exchange peer messages. One of them
+/// is adopted under the default wiring custody, and its owner then changes
+/// its declaration: after each, the status reads converged, the member list
+/// shows the edge, and the two still exchange peer messages, each read from
+/// its receiver's stored conversation.
+#[cfg(feature = "test-support")]
+async fn a_rebuilt_worker_and_its_wired_peer_still_exchange_messages(adopted: &str) {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(&paths.realm_db_path)
+            .expect("open the runtime store"),
+    );
+    let pair = WiredPair::start(&paths, runtime_store).await;
+    pair.exchange("wired").await;
+
+    let identity = AgentIdentity::from(adopted);
+    adopt_at_baseline(&pair.handle, &identity, pair.session(adopted)).await;
+    await_identity_converged(&pair.handle, &identity, 1).await;
+    pair.assert_listed_wired("after the adoption").await;
+    pair.exchange("adopted").await;
+
+    pair.change_the_declaration(adopted).await;
+    await_identity_converged(&pair.handle, &identity, 2).await;
+    pair.assert_listed_wired("after the change").await;
+    pair.exchange("changed").await;
+
+    pair.handle.shutdown().await.expect("shutdown mob");
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wired_pair_still_exchanges_messages_after_its_smaller_named_end_is_adopted_and_changed()
+{
+    a_rebuilt_worker_and_its_wired_peer_still_exchange_messages("w-1").await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wired_pair_still_exchanges_messages_after_its_larger_named_end_is_adopted_and_changed() {
+    a_rebuilt_worker_and_its_wired_peer_still_exchange_messages("w-2").await;
+}
+
+/// A wired pair one end of which is an adopted identity exchanges peer
+/// messages after the mob is stopped and started over its stores: the store
+/// carries the edge and the adoption, and the start materializes both ends
+/// with the trust of the edge the mob holds.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wired_pair_with_an_adopted_end_exchanges_messages_after_a_stop_and_start() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(&paths.realm_db_path)
+            .expect("open the runtime store"),
+    );
+    let pair = WiredPair::start(&paths, runtime_store.clone()).await;
+    pair.exchange("wired").await;
+    let identity = AgentIdentity::from("w-1");
+    adopt_at_baseline(&pair.handle, &identity, &pair.w1_sid).await;
+    await_identity_converged(&pair.handle, &identity, 1).await;
+    pair.assert_listed_wired("before the stop").await;
+
+    let lead_sid = pair
+        .handle
+        .resolve_bridge_session_id(&AgentIdentity::from("lead-1"))
+        .await
+        .expect("lead session id");
+    pair.handle.shutdown().await.expect("shutdown mob");
+    for session_id in [&lead_sid, &pair.w1_sid, &pair.w2_sid] {
+        pair.service
+            .discard_live_session(session_id)
+            .await
+            .expect("discard live session before the start");
+    }
+    let WiredPair {
+        handle,
+        service,
+        mob_id,
+        w1_sid,
+        w2_sid,
+    } = pair;
+    drop(handle);
+    drop(service);
+
+    let (service, _store) = persistent_head_canonical_service(&paths, runtime_store);
+    let storage = MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage");
+    let handle = MobBuilder::for_resume(storage)
+        .with_session_service(service.clone())
+        .with_default_llm_client(openai_test_client())
+        .notify_orchestrator_on_resume(false)
+        .with_member_restore_policy(meerkat_mob::MemberRestorePolicy::Eager)
+        .resume()
+        .await
+        .expect("resume after the stop");
+    let pair = WiredPair {
+        handle,
+        service,
+        mob_id,
+        w1_sid,
+        w2_sid,
+    };
+    for worker in ["w-1", "w-2"] {
+        assert_member_active(&member_entry(&pair.handle, worker).await, "after the start");
+    }
+    await_identity_converged(&pair.handle, &identity, 1).await;
+    pair.assert_listed_wired("after the start").await;
+    pair.exchange("started").await;
+
+    pair.handle.shutdown().await.expect("shutdown mob");
+}

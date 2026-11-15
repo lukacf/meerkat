@@ -411,14 +411,16 @@ Security, Upgrade and Changed.
   another agent's declaration owns toward such an agent, also one adopted
   with permission (run on the published Meta 0.9.14; 0.8.26 through 0.9.13
   read from the source; see Fixed). The adopting agent itself reads
-  `repair_blocked` and refuses messages from its first reconcile pass,
-  whatever is at the other end of its edge (run on the published Meta
-  0.9.14). Not run: a gateway with an identity roster, Core's own
-  `rkat-rpc`, and versions before 0.9.14. To find such edges, list the
-  adopted declarations that own wiring. The query is read-only; run it
-  against a copy of the mob store (in a gateway's state directory, the
-  database `event_log.sqlite3`). It was run on a store that holds such an
-  edge:
+  `repair_blocked` and refuses messages from its first reconcile pass when
+  no wiring call made that edge (on 0.9.14: always; run on the published
+  Meta 0.9.14). Not run: a gateway with an identity roster, and versions
+  before 0.9.14. On Core's own `rkat-rpc` 0.9.14 the same was run; there a
+  turn the host starts (`mob/turn_start`) still runs on a blocked agent,
+  while delivered messages (`mob/member_send`) are refused. To find such
+  edges, list the adopted declarations that own wiring. The query is
+  read-only; run it against a copy of the mob store (in a gateway's state
+  directory, the database `event_log.sqlite3`). It was run on a store that
+  holds such an edge:
 
   ```sql
   SELECT mob_id, agent_identity,

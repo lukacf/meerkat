@@ -4,6 +4,8 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.15
+
 - `MetaRuntime.compact_member(identity, *, floor_tokens=None, timeout=None)`
   calls `meta/compact_member`: the member's conversation is compacted now
   (the older turns summarized, the most recent ones kept) in one

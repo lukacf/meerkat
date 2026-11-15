@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.15] - 2026-11-15
+
 A console that can identify a person shows a timeline frame stored without
 member attributes, the memory steward's conflict signals and the system
 page's records that speak of an agent, to an administrator only. See

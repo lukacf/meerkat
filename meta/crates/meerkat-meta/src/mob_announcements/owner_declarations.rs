@@ -27,10 +27,10 @@ use crate::mob_announcements::declarations::{
     DeclaredSource, DeclaredSubscription, read_sidecar, validate,
 };
 use crate::mob_announcements::declarations::{PutRoleTemplate, RoleTemplate};
-use crate::mob_announcements::native::{MemberRoute, NativeUnavailable};
+use crate::mob_announcements::native::{MemberProblem, MemberRoute, NativeUnavailable};
 use crate::mob_announcements::sources::RosterFacts;
 use crate::mob_announcements::sources::{
-    AnnouncementSource, SourceChange, SourceHealthStatus, SourceState,
+    AnnouncementSource, SourceChange, SourceConfig, SourceHealthStatus, SourceState,
 };
 use crate::mob_announcements::store::{
     AnnouncementStore, AppliedDeclarations, DeclarationMark, RoleChildStatus, RoleExpansion,
@@ -41,7 +41,7 @@ use crate::mob_announcements::types::{
     SubscriptionChange, SubscriptionId, SubscriptionState, sha256_hex,
 };
 
-use super::{AnnouncementError, AnnouncementService, member_problem};
+use super::{AnnouncementError, AnnouncementService, HiddenMember, member_problem};
 
 /// The refusal a declared record or a role child is pending with: the
 /// typed kind the same refusal carries on the wire, and its message.
@@ -450,9 +450,15 @@ impl AnnouncementService {
 
     /// `declarations/apply`: the declarations an apply carries (a gateway
     /// with inline declarations or none), or its sidecar read again.
+    ///
+    /// `hidden` judges the members the apply's caller may not see, when the
+    /// caller is not the host: the declarations it carries are then admitted
+    /// first ([`Self::admitted_declarations`]), and the answer lists no
+    /// record of such a member.
     pub(super) async fn apply_declared(
         &self,
         declarations: Option<Declarations>,
+        hidden: Option<HiddenMember<'_>>,
     ) -> Result<DeclarationsView, AnnouncementError> {
         let own = self.declaring_mob()?;
         let sidecar = self
@@ -461,6 +467,8 @@ impl AnnouncementService {
             .declarations
             .as_deref()
             .and_then(DeclarationsSource::sidecar);
+        // The sidecar is the host's own: nothing a caller carries is in it.
+        let admitting = hidden.filter(|_| sidecar.is_none());
         let declarations = match (declarations, sidecar) {
             (Some(declarations), None) => {
                 validate(&declarations, &own)?;
@@ -479,9 +487,16 @@ impl AnnouncementService {
             }
         };
         {
-            let (declarations, own) = (&declarations, &own);
+            let own = &own;
             self.under_gate(move || async move {
-                self.record_applied(declarations, own).await?;
+                let declarations = match admitting {
+                    Some(hidden) => {
+                        self.admitted_declarations(declarations, own, hidden)
+                            .await?
+                    }
+                    None => declarations,
+                };
+                self.record_applied(&declarations, own).await?;
                 self.reconcile_applied(own).await?;
                 self.reconcile_roles().await
             })
@@ -489,7 +504,188 @@ impl AnnouncementService {
         }
         // The view takes the gate itself, so it is read once this apply's
         // gate is released: never inside the block above.
-        self.declared_view().await
+        self.declared_view(hidden).await
+    }
+
+    /// The declarations a caller who is not the host applies, once the
+    /// sources and the subscriptions of single members they carry are
+    /// admitted against the applied ones, under the declarations gate:
+    ///
+    /// - a source or a subscription the applied declarations hold unchanged
+    ///   is carried as it is;
+    /// - an id the applied declarations hold for a subscription of a member
+    ///   the caller may not see is refused as taken;
+    /// - any other subscription of a single member, new or changed, is
+    ///   refused as one of an unknown member unless its member is a seated
+    ///   member the caller may see, with the one answer for every other
+    ///   name, and so is any other source that names anyone else
+    ///   ([`Self::admit_source_members`]);
+    /// - and the applied subscriptions of members the caller may not see
+    ///   stay declared as they are: an apply that does not carry them neither
+    ///   ends nor changes them.
+    ///
+    /// A refusal applies nothing.
+    async fn admitted_declarations(
+        &self,
+        mut declarations: Declarations,
+        own: &MobId,
+        hidden: HiddenMember<'_>,
+    ) -> Result<Declarations, AnnouncementError> {
+        let applied = self
+            .stored("applied_declarations", |store| async move {
+                store.applied_declarations().await
+            })
+            .await?
+            .map(|applied| applied.declarations);
+        let (applied_sources, applied) = match applied {
+            Some(applied) => (applied.sources, applied.subscriptions),
+            None => (Vec::new(), Vec::new()),
+        };
+        let mut unchanged_sources = BTreeSet::new();
+        for before in &applied_sources {
+            unchanged_sources.insert((before.source_id.clone(), before.digest(own)?));
+        }
+        for declared in &declarations.sources {
+            let declared_form = (declared.source_id.clone(), declared.digest(own)?);
+            if !unchanged_sources.contains(&declared_form) {
+                self.admit_source_members(&declared.config(), hidden)
+                    .await?;
+            }
+        }
+        let of_hidden_member =
+            |subscription: &DeclaredSubscription| subscription.member.as_ref().is_some_and(hidden);
+        for declared in &declarations.subscriptions {
+            let before = applied
+                .iter()
+                .find(|before| before.subscription_id == declared.subscription_id);
+            if let Some(before) = before {
+                if of_hidden_member(before) {
+                    return Err(AnnouncementStoreError::SubscriptionIdTaken {
+                        subscription_id: declared.subscription_id.clone(),
+                    }
+                    .into());
+                }
+                if before.digest(own)? == declared.digest(own)? {
+                    continue;
+                }
+            }
+            let Some(member) = &declared.member else {
+                continue;
+            };
+            self.admit_member(member, hidden).await?;
+        }
+        declarations
+            .subscriptions
+            .extend(applied.into_iter().filter(of_hidden_member));
+        Ok(declarations)
+    }
+
+    /// Refuse a source a caller who is not the host puts or declares when it
+    /// names, in an audience member grant, a triage route, a forward
+    /// audience or its conversation members, anyone other than a seated
+    /// member the caller may see: the one answer for every other name, the
+    /// refusal of an unknown member. While a member's check cannot be read
+    /// the source is refused for now, whoever it names.
+    pub(crate) async fn admit_source_members(
+        &self,
+        config: &SourceConfig,
+        hidden: HiddenMember<'_>,
+    ) -> Result<(), AnnouncementError> {
+        for member in config.named_members() {
+            self.admit_member(member, hidden).await?;
+        }
+        Ok(())
+    }
+
+    /// Admit `member`, named by a caller who is not the host. Its check is
+    /// asked first: while it cannot be read the request is refused for now
+    /// with the native owner's unavailable refusal, whatever the name. Then
+    /// a member the caller may not see and a member that is not seated get
+    /// the one answer, the refusal of an unknown member.
+    async fn admit_member(
+        &self,
+        member: &Member,
+        hidden: HiddenMember<'_>,
+    ) -> Result<(), AnnouncementError> {
+        let not_seated = self.member_not_seated(member).await?;
+        if hidden(member) || not_seated {
+            return Err(AnnouncementError::UnknownMember(member.clone()));
+        }
+        Ok(())
+    }
+
+    /// Whether `member` is not seated now, by the check a put of its
+    /// subscription makes on the route the member takes: every definite
+    /// answer of the route or of the check other than "seated" (unknown,
+    /// invalid, unusable, an unusable peer, an ambiguous mob). A route or a
+    /// check that cannot be read now answers neither way: the native owner's
+    /// unavailable refusal.
+    async fn member_not_seated(&self, member: &Member) -> Result<bool, AnnouncementError> {
+        let (native, asked) = (Arc::clone(&self.inner.native), member.clone());
+        let route = bounded(
+            Waited::Native("route_for"),
+            async move { native.route_for(&asked).await },
+            |detail| Err(MemberProblem::Unavailable(detail)),
+        )
+        .await;
+        let checked = match route {
+            Ok(route) => self.check_member(member, route.route).await,
+            Err(problem) => Err(problem),
+        };
+        match checked {
+            Ok(()) => Ok(false),
+            Err(MemberProblem::Unavailable(detail)) => {
+                Err(AnnouncementError::NativeUnavailable(detail))
+            }
+            Err(_) => Ok(true),
+        }
+    }
+
+    /// The member each applied declaration's subscription of a single member
+    /// delivers into, by the subscription's id.
+    async fn declared_members(&self) -> Result<BTreeMap<String, Member>, AnnouncementError> {
+        let applied = self
+            .stored("applied_declarations", |store| async move {
+                store.applied_declarations().await
+            })
+            .await?;
+        Ok(applied
+            .map(|applied| applied.declarations.subscriptions)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|subscription| {
+                let id = subscription.subscription_id.to_string();
+                subscription.member.map(|member| (id, member))
+            })
+            .collect())
+    }
+
+    /// The member the record `id` delivers into: as `declared` names it
+    /// ([`Self::declared_members`]), or as the subscription under the id
+    /// holds it. None for an id that is neither.
+    async fn record_member(
+        &self,
+        declared: &BTreeMap<String, Member>,
+        id: &str,
+    ) -> Result<Option<Member>, AnnouncementError> {
+        if let Some(member) = declared.get(id) {
+            return Ok(Some(member.clone()));
+        }
+        let Ok(id) = SubscriptionId::new(id) else {
+            return Ok(None);
+        };
+        Ok(self.subscription(&id).await?.map(|found| found.member))
+    }
+
+    /// The member a declared subscription or a role child delivers into, by
+    /// the record's id: as the applied declarations name it, or as the
+    /// subscription under the id holds it. None for an id that is neither.
+    pub(crate) async fn declared_subscription_member(
+        &self,
+        id: &str,
+    ) -> Result<Option<Member>, AnnouncementError> {
+        let declared = self.declared_members().await?;
+        self.record_member(&declared, id).await
     }
 
     /// Reconcile at a trigger: the options' declarations when they are newer
@@ -1516,8 +1712,53 @@ impl AnnouncementService {
     /// reconcile so stopped leaves what it left, as after a store failure,
     /// until the health pass finishes it; a read so stopped answers the
     /// call's failure. No caller holds the gate when it calls this.
-    pub(super) async fn declared_view(&self) -> Result<DeclarationsView, AnnouncementError> {
-        self.under_gate(move || self.declared_view_held()).await
+    ///
+    /// With `hidden`, the judge of the members the reader may not see, the
+    /// view lists no declared subscription and no role child of such a
+    /// member.
+    pub(super) async fn declared_view(
+        &self,
+        hidden: Option<HiddenMember<'_>>,
+    ) -> Result<DeclarationsView, AnnouncementError> {
+        self.under_gate(move || async move {
+            let mut view = self.declared_view_held().await?;
+            if let Some(hidden) = hidden {
+                let declared = self.declared_members().await?;
+                let mut shown = Vec::with_capacity(view.records.len());
+                for mut record in view.records {
+                    let of_hidden_member = match record.kind {
+                        DeclarationRecordKind::Source => {
+                            // A source is pending with the subscriber its
+                            // routes would reach twice: a member of a
+                            // record, which the reader may not see. The
+                            // reader is shown the refusal without it.
+                            if let Some(refusal) = record
+                                .refusal
+                                .as_mut()
+                                .filter(|refusal| refusal.kind == "route_overlap")
+                            {
+                                refusal.message =
+                                    crate::mob_announcements::rpc::route_overlap_without_member(
+                                        &record.id,
+                                    );
+                            }
+                            false
+                        }
+                        DeclarationRecordKind::Subscription | DeclarationRecordKind::RoleChild => {
+                            self.record_member(&declared, &record.id)
+                                .await?
+                                .is_some_and(|member| hidden(&member))
+                        }
+                    };
+                    if !of_hidden_member {
+                        shown.push(record);
+                    }
+                }
+                view.records = shown;
+            }
+            Ok(view)
+        })
+        .await
     }
 
     /// [`Self::declared_view`] for a caller that holds the declarations

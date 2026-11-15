@@ -427,6 +427,14 @@ pub trait NativeDelivery: Send + Sync {
         None
     }
 
+    /// Whether `mob_id` is positively a mob on another gateway: one this
+    /// gateway's contact directory files a peer under. False when nothing
+    /// says so.
+    fn files_peer(&self, mob_id: &MobId) -> bool {
+        let _ = mob_id;
+        false
+    }
+
     /// The incarnation of the hosted mob `mob_id` and who created it, from
     /// Meerkat's durable records. `Ok(None)` when it is not running here
     /// now: gone, or held until its owner resolves.
@@ -1987,6 +1995,12 @@ impl NativeDelivery for AnnouncementNativeDelivery {
 
     fn own_mob(&self) -> Option<MobId> {
         NativeDelivery::own_mob(self.local.as_ref())
+    }
+
+    fn files_peer(&self, mob_id: &MobId) -> bool {
+        self.remote
+            .as_deref()
+            .is_some_and(|remote| remote.files(mob_id))
     }
 
     async fn hosted_mob_ids(&self) -> Result<BTreeSet<MobId>, NativeUnavailable> {

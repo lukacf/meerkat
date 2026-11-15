@@ -1905,6 +1905,23 @@ them.
   it does not read as archived. A stopped runtime with inputs still queued
   is cleaned up as before.
 
+- `meerkat-mob`: an agent under identity-owned wiring custody
+  (`wiring_custody: identity_owned`) that another agent's declaration wires
+  to (names as the far end of its owned wiring) stopped converging, and its
+  owner's changes did not become active. Its status read `repair_blocked`
+  with the detail "generated obligation ReconcileWiring has no actuator in
+  the retained sealed-intent reconciliation slice" on every reconcile pass,
+  a change committed for it stayed at its desired revision with the earlier
+  revision active, and no call cleared it: the pass held the agent to every
+  edge recorded as incident to it, the other agent's edge included. The pass
+  now holds each agent to the edges its own declaration owns, so such an
+  agent converges again and its owner's changes become active. The edge
+  stays in the store, and the agent whose declaration owns it is still held
+  to it (see Known limitations). An agent under the default custody was not
+  affected by this. Nothing stored and no request or answer changes.
+  Affected: 0.8.26 through 0.9.14 (run on Core and Meta 0.9.14; earlier
+  versions read from the source).
+
 - `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`: a
   turn refused for its reasoning effort level at its start no longer ends
   the session's other queued requests. A turn that had been accepted and
@@ -3061,6 +3078,25 @@ them.
   the source, not run). See Added.
 
 ### Known limitations
+
+- Do not use identity-owned wiring custody (`wiring_custody:
+  identity_owned`) for an agent that has, or will get, a wiring edge. Under
+  identity-owned custody an agent answers for every edge in which it is the
+  smaller-named end: an edge its declaration owns must be realized, and no
+  release realizes one; an edge a wiring call made that its declaration
+  does not own counts as a difference. So after this release an agent under
+  that custody still reads `repair_blocked` ("generated obligation
+  ReconcileWiring has no actuator in the retained sealed-intent
+  reconciliation slice"): from its adoption on when its declaration owns an
+  edge, whether or not the edge was wired before; and from its next
+  reconcile pass on (the periodic scan, a start, or its owner's next change)
+  when a wiring call has joined it to a larger-named agent. While it reads
+  so, its owner's changes are committed and do not become active. An agent
+  under that custody whose edges all lead to smaller-named agents converges
+  (rows `an_identity_wired_to_a_smaller_named_member_converges_at_its_next_change`,
+  `an_identity_wired_to_a_larger_named_member_is_held_at_its_next_change`,
+  `an_adopter_whose_owned_edge_is_not_realized_stays_blocked`,
+  `an_adopter_whose_owned_edge_was_wired_first_stays_blocked`).
 
 - An input queued behind a turn that fails at its start is not run. The
   failed start retires the session's runtime registration, and an input

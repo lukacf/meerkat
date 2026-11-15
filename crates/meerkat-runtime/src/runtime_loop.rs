@@ -4901,9 +4901,10 @@ fn machine_terminal_completion_error(
             //
             // DO NOT DERIVE A CAUSE FROM `last_runtime_apply_failure_cause`
             // HERE the way the `Completed` arm does. That field is run-scoped
-            // only because `RunFailed` assigns it; `RunCancelled` does not
-            // touch it either, so on a cancelled run it is exactly as stale as
-            // `terminal_cause_kind`.
+            // only where `RunFailed` assigned it. `RunCancelled` drops it,
+            // but the other transitions that leave a `Cancelled` outcome do
+            // not write it, so on a cancelled run it can be exactly as stale
+            // as `terminal_cause_kind`.
             Ok(None)
         }
         crate::meerkat_machine::dsl::TurnTerminalOutcome::Failed

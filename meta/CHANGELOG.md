@@ -433,6 +433,65 @@ Security, Upgrade and Changed.
   would no longer list a council's participants; 0.9.14 shipped without
   this change and still lists them.
 
+- On a Console that several people sign in to, with agent memory on (it is
+  off unless `runtime_options.agent_memory` is set at the gateway's start):
+  what a private side chat, or a member it created, stored in agent memory
+  can become readable to other people after that member has ended, once a
+  later member takes the same name or an agent is registered or created
+  under it: to the person that later member or agent is private to, or, when
+  it is private to nobody, to everyone who may see it. An agent registered
+  or created under that name is also given those notes itself: on its turns,
+  by default and whatever its profile, the full text of each note that
+  shares a word with the message it is answering; and when it starts, if its
+  profile has the memory tools, a list of the notes with their titles and
+  descriptions, where a note that names the agent can be given in full. A
+  later member of that name that has the memory tool can also change or
+  remove what was stored, and the person who stored it can lose sight of it
+  in the Console. Affects 0.9.11 through 0.9.15.
+
+  Until a fix, on such a gateway leave agent memory out (do not set
+  `runtime_options.agent_memory`) and restart. Leaving agent memory out
+  costs every agent its memory. While it is out, every memory read through
+  the Console is refused, no agent has the memory tool, and nothing more is
+  given to any agent from the store. This deletes nothing and takes nothing
+  back. The stored records stay on disk, and they are served, and given to
+  agents, again as soon as agent memory is turned back on. An agent that was
+  built while agent memory was on keeps what it was already given: the list
+  of titles and descriptions in its instructions, and every note text and
+  recall result already in its conversation, and it sends them to its model
+  on every later turn. While agent memory is out, resetting such an agent
+  (`meta/reset`) ends its conversation and removes them with it; taking it
+  off the roster and declaring it again does not. With agent memory on,
+  under any of the narrower settings below, a reset does not help: the agent
+  is built with the list again and is given the notes again on its turns.
+  Three narrower settings each close a part.
+  `agent_memory.per_turn_injection: "off"` stops the notes that are added to
+  agents' turns, for every agent of the gateway, and nothing else: an agent
+  whose profile has the memory tools is still given the list when it starts,
+  and the whole text of a note that names it. `agent_memory.recorder_tool:
+  false` stops members storing, recalling, changing and removing with their
+  own tool; it does not remove what is already stored, does not stop the
+  Console's memory panel from showing it, and does not stop what agents are
+  given when they start and on their turns. Where access control is already
+  enabled, a deny rule on `agent.memory.read` with no `subjects` or `groups`
+  and no resource selector closes the Console's memory panel, the memory
+  recall and manifest reads through the Console, and the memory quarantine
+  decisions, to everyone who is not listed under `admins`, and keeps the
+  agents' own memory; it does not stop a member's own memory tool, nor what
+  agents are given when they start and on their turns. Where a memory
+  steward is configured (`agent_memory.steward`), turn it off as well (leave
+  the `steward` key out, or set `"enabled": false` in it; a `steward` block
+  without `enabled` turns it on): once a later member or agent holds such a
+  name, the steward's next run can copy the ended member's notes into the
+  mob's shared memory, where they stay; every agent of the gateway is then
+  given their titles and descriptions, and an administrator, a person
+  granted `mob.memory.read`, or anyone where access control is off, can read
+  them whole in the Console. Before an agent is registered or created, an
+  administrator looks for its name in the memory panel. What a member's tool
+  changed or removed is kept in the store, marked as superseded or removed,
+  and is not deleted. A fix is planned as the first change of the next
+  release.
+
 ### Upgrade
 
 - Required host step after upgrading a gateway that serves mob announcements:

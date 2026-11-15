@@ -1867,6 +1867,50 @@ them.
   sources). Mobs that were destroyed this way are not restored by upgrading
   (read from the source).
 
+- `meerkat-mob`: after an agent's identity declaration was adopted
+  (`mob/adopt_member_identity_declaration`) or changed
+  (`mob/apply_member_tool_declaration`), the agent and the agents it was
+  wired to could no longer message each other: a send answered that the
+  peer was not found or not trusted. How to see it: the two agents no
+  longer list each other among their peers (the `peers` list of an agent
+  with no other edge is empty), although the member list still shows the
+  pair wired (`wired_to`); the member list is not evidence of delivery.
+  Under the default wiring custody the agent's status read `converged`;
+  under identity-owned custody the agent whose declaration owns the edge
+  read `repair_blocked`, and every other agent read `converged`. A later
+  tool declaration did not restore the pair. The reconcile pass rebuilds
+  such an agent on its session, and the rebuilt agent came back without the
+  trust of its wiring edges while the agents it was wired to had dropped
+  theirs. The rebuild now restores, on both ends, the trust of every edge
+  the mob holds for the agent, as a respawn does and as wiring the same
+  pair again does, so the agents keep their wiring. It adds no edge: a pair
+  that was unwired stays unwired. An edge whose restore fails does not fail
+  the rebuild; the mob retries it. A wiring call for the agent that is
+  still in flight settles before the pass rebuilds the agent. An agent
+  adopted under identity-owned custody owning an edge that a wiring call
+  made first now converges. An agent changed by a rotation or a respawn was
+  not affected. On a released version the remedy depends on the host (from
+  runs on the published 0.9.14 binaries). On a Core host, wire the pair
+  again: `mob/wire` for each wired edge of the agent, with params
+  `{"mob_id": ..., "member": ..., "peer": {"local": ...}}` naming the same
+  two agents; it adds no second edge (run on Core 0.9.14 after an adoption
+  and after a declaration change). A restart of a Core host restores the
+  pair too (run after both). On a Meta gateway no call wires a member pair
+  (`mob/wire` is not served there); the remedy is a restart (run on Meta
+  0.9.14 after an adoption and after a declaration change, two
+  independent runs for each). On a released version the remedy is needed
+  after every adoption and every declaration change, not once: each later
+  declaration change silences the pair again until the next restart (Meta)
+  or the next `mob/wire` of the edge (Core); one such change after a
+  restored adoption was tried, in one run on Meta 0.9.14. Meta's
+  `reconcile_edges()` does not repair the pair (two independent runs after
+  an adoption; not run after a declaration change) and is unchanged: it
+  reads the edges the mob holds, never the agents' trust of each other, so
+  it finds nothing to wire; seating both agents again does not repair it
+  either. Nothing stored and no request or answer changes. Affected:
+  0.8.42 through 0.9.14 (run on Core and Meta 0.9.14; earlier versions
+  read from the source).
+
 - `meerkat-core`: a turn that fails because a provider failure outlasted the
   retries now says what failed. Its typed turn error (`error.data.error` of
   a JSON-RPC turn, `details.error` of REST, the `error=` JSON of the CLI's
@@ -2537,6 +2581,30 @@ them.
   is readable by others. The admission fence file keeps its own rule:
   `admission.lock` is 0640 with its directory's group in every directory.
 
+- A wired pair that stopped messaging on an earlier version, after one of
+  its agents was adopted (`mob/adopt_member_identity_declaration`) or had
+  its declaration changed (`mob/apply_member_tool_declaration`), is not
+  repaired by a running host on its own. The store kept the edge; only the
+  running agents' trust of each other was lost, so their `peers` lists no
+  longer hold each other while the member list still shows the pair wired
+  (`wired_to`). What restores the pair depends on the host. On a Core host,
+  wire the pair again: `mob/wire` for each wired edge of the agent, with
+  params `{"mob_id": ..., "member": ..., "peer": {"local": ...}}` naming
+  the same two agents (run on Core 0.9.14 after an adoption and after a
+  declaration change); a restart restores it too (run after both). On a
+  Meta gateway no call wires a member pair (`mob/wire` is not served
+  there); the remedy is a restart (run on Meta 0.9.14 after an adoption
+  and after a declaration change, two independent runs for each). On an
+  earlier version the remedy is needed after every adoption and every
+  declaration change, not once: each later declaration change silences the
+  pair again until the next restart (Meta) or the next `mob/wire` of the
+  edge (Core); one such change was tried, in one run on Meta 0.9.14.
+  Meta's `reconcile_edges()` does not repair the pair (run twice after an
+  adoption), nor does seating its agents again. From this version on a
+  declaration change no longer silences the pair, and a pair that is
+  silent has its wiring back at the adopted agent's next declaration
+  change (by a test).
+
 - `rkat run --comms-binding-out <PATH>` no longer writes into what is
   already at the path: it removes the file there and creates a new one that
   only its owner can read (0600 on Unix), whatever the umask and whatever
@@ -2876,16 +2944,19 @@ them.
 
 ### Known limitations
 
-- Do not use identity-owned wiring custody (`wiring_custody:
-  identity_owned`) for an agent that has, or will get, a wiring edge. Under
+- Under identity-owned wiring custody (`wiring_custody: identity_owned`),
+  state in an agent's declaration exactly the edges in which it is the
+  smaller-named end, and wire each before the adoption. Under
   identity-owned custody an agent answers for every edge in which it is the
-  smaller-named end: an edge its declaration owns must be realized, and no
-  release realizes one; an edge a wiring call made that its declaration
+  smaller-named end: an edge its declaration owns must be realized, which a
+  wiring call does and no reconcile step does; an edge a wiring call made
+  that its declaration
   does not own counts as a difference. So after this release an agent under
   that custody still reads `repair_blocked` ("generated obligation
   ReconcileWiring has no actuator in the retained sealed-intent
   reconciliation slice"): from its adoption on when its declaration owns an
-  edge, whether or not the edge was wired before; and from its next
+  edge that no wiring call has made (an agent adopted owning an edge that
+  was wired first converges); and from its next
   reconcile pass on (the periodic scan, a start, or its owner's next change)
   when a wiring call has joined it to a larger-named agent. While it reads
   so, its owner's changes are committed and do not become active. An agent
@@ -2893,7 +2964,7 @@ them.
   (rows `an_identity_wired_to_a_smaller_named_member_converges_at_its_next_change`,
   `an_identity_wired_to_a_larger_named_member_is_held_at_its_next_change`,
   `an_adopter_whose_owned_edge_is_not_realized_stays_blocked`,
-  `an_adopter_whose_owned_edge_was_wired_first_stays_blocked`).
+  `an_adopter_whose_owned_edge_was_wired_first_converges`).
 
 - An input queued behind a turn that fails at its start is not run. The
   failed start retires the session's runtime registration, and an input

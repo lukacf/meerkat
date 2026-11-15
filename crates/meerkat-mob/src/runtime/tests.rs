@@ -15382,6 +15382,8 @@ struct PersistentMockComms {
     seed: String,
     /// How often the session was built since it was given a seed.
     builds: u64,
+    /// The comms runtime the session's latest build made.
+    runtime: Option<Arc<MockCommsRuntime>>,
 }
 
 /// The sessions [`PersistentMockBuilder`] builds with a comms runtime. Keyed
@@ -15404,7 +15406,19 @@ fn set_persistent_mock_comms_seed(session: &SessionId, seed: &str) {
         .or_insert_with(|| PersistentMockComms {
             seed: seed.to_string(),
             builds: 0,
+            runtime: None,
         });
+}
+
+/// The comms runtime [`PersistentMockBuilder`] built `session` with at its
+/// latest build: the mock itself, for a row that sets its behavior or takes
+/// a trust row off it.
+fn persistent_mock_comms_runtime(session: &SessionId) -> Option<Arc<MockCommsRuntime>> {
+    persistent_mock_comms()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(session)
+        .and_then(|comms| comms.runtime.clone())
 }
 
 /// How often [`PersistentMockBuilder`] built `session` since the session was
@@ -15605,6 +15619,14 @@ impl SessionAgentBuilder for PersistentMockBuilder {
             }
             Arc::new(comms)
         });
+        if let Some(built) = comms.as_ref()
+            && let Some(entry) = persistent_mock_comms()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_mut(session.id())
+        {
+            entry.runtime = Some(Arc::clone(built));
+        }
         Ok(PersistentMockAgent {
             session,
             llm_identity: test_llm_identity(req.model.clone()),
@@ -105042,6 +105064,10 @@ mod owned_retirement;
 /// The durable tail presence check a resume spawn asks fails closed.
 #[cfg(not(target_arch = "wasm32"))]
 mod provisional_tail_check;
+/// A member the identity reconcile pass rebuilds keeps the wiring trust of
+/// the edges the mob holds for it.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod reconcile_rebuild_wiring_trust;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod resume_bind_custody;
 /// The retire of an identity with no roster incarnation is MobMachine's

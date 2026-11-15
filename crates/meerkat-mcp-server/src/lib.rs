@@ -7477,9 +7477,14 @@ mod tests {
 
     /// The session of a mob member that is not live, owned by a mob in this
     /// process: what `meerkat_resume` answers when it carries a reasoning
-    /// effort level the route does not take, and what `meerkat_comms_send`
-    /// answers, for an owner whose wake succeeds and for one whose wake
-    /// fails.
+    /// effort level, and what `meerkat_comms_send` answers, for an owner
+    /// whose wake fails and for one whose wake answers ready.
+    ///
+    /// The failing owner's arms are the row's subject: a wake that fails as
+    /// a mob's wake fails for a member whose build is refused for its level.
+    /// The ready owner is scripted and builds nothing, so its arms hold what
+    /// the server does after such a wake (its own resume builds the
+    /// session), not what a real mob's successful wake leaves.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_dormant_members_session_with_a_refused_level_answers() {
@@ -7547,10 +7552,20 @@ mod tests {
                 );
                 let names_a_level = level.as_object().is_some_and(|level| !level.is_empty());
                 match (wake, *call) {
-                    // The wake answered ready: the resume's own build judges
-                    // the level it carries, and refuses it typed.
+                    // The three "ready" arms: the scripted owner answers
+                    // ready and builds nothing, so the server's own resume
+                    // builds the member's session. They hold what the server
+                    // answers after a wake that built nothing, and say
+                    // nothing of a mob that builds its member when it wakes
+                    // it: no row covers a real mob's successful wake
+                    // followed by a resume that carries a level.
+                    //
+                    // Here the resume's own build judges the level it
+                    // carries and refuses it typed: the levels of the
+                    // member's route are not known
+                    // (`supported_levels_unknown`).
                     ("ready", _) if names_a_level => {
-                        let refused = answer.expect_err("the route takes no level");
+                        let refused = answer.expect_err("the route's levels are not known");
                         let data = refused.data.clone().unwrap_or_default();
                         assert_eq!(
                             (
@@ -7573,17 +7588,27 @@ mod tests {
                              {refused:?}"
                         );
                     }
-                    ("ready", "meerkat_resume plain") => {
-                        assert!(answer.is_ok(), "{call}: {answer:?}");
-                        assert_eq!(
+                    // A plain resume after the same scripted wake: the
+                    // server's resume builds the session and runs the turn.
+                    // Like the module's other cold resumes, accept the one
+                    // post-turn failure this harness can raise, the
+                    // peer-ingress refresh.
+                    ("ready", "meerkat_resume plain") => match &answer {
+                        Ok(_) => assert_eq!(
                             live_after,
                             Some(true),
                             "{call}: the resume built the session"
-                        );
-                    }
+                        ),
+                        Err(error) => assert!(
+                            error
+                                .message
+                                .contains("failed to update peer ingress context"),
+                            "{call}: the resume reaches its post-completion boundary: {answer:?}"
+                        ),
+                    },
                     // The scripted owner built nothing, so no comms runtime
-                    // exists: this arm says nothing of a mob that builds its
-                    // member when it wakes it.
+                    // exists: like the two arms above, this one says nothing
+                    // of a mob that builds its member when it wakes it.
                     ("ready", _) => {
                         let refused = answer.expect_err("no comms runtime");
                         let data = refused.data.clone().unwrap_or_default();

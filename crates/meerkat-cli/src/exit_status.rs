@@ -1208,8 +1208,11 @@ mod tests {
     /// provider-auth session error: its document is `INTERNAL_ERROR` with
     /// the typed data as details. A running session's turn that meets it is
     /// a failed turn: its document is `PROVIDER_ERROR` with the typed turn
-    /// error, not retryable (an abandoned input without its error is an
-    /// untyped failure: `INTERNAL_ERROR`, no details). None is the exit 2
+    /// error, not retryable. The `Abandoned` outcome carries the same typed
+    /// error and this surface does not hand it on: its document is
+    /// `INTERNAL_ERROR` with no details (JSON-RPC answers the typed error
+    /// for both outcomes: the rows pin that difference between surfaces as
+    /// it is). None is the exit 2
     /// `INVALID_PARAMS` of a refused `reasoning_effort` level, and none says
     /// `retryable: true`.
     #[test]

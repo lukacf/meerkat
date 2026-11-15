@@ -20232,9 +20232,12 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
     /// twice) has two answers. A build that meets it answers HTTP 500
     /// `AGENT_ERROR` with the typed session error's message and no details.
     /// A running session's turn that meets it answers HTTP 500: a failed
-    /// turn, `TURN_ABANDONED` with the typed turn error, not retryable (an
-    /// abandoned input without its error is `INTERNAL_ERROR` without
-    /// details). None is the 400 `INVALID_PARAMS` of a refused
+    /// turn, `TURN_ABANDONED` with the typed turn error, not retryable. The
+    /// `Abandoned` outcome carries the same typed error and this surface
+    /// does not hand it on: it answers `INTERNAL_ERROR` without details
+    /// (JSON-RPC answers the typed error for both outcomes: the rows pin
+    /// that difference between surfaces as it is). None is the 400
+    /// `INVALID_PARAMS` of a refused
     /// `reasoning_effort` level, and none says `retryable: true`.
     #[tokio::test]
     async fn a_sign_in_that_must_be_renewed_answers_500() {

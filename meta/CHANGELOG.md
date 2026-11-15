@@ -2017,6 +2017,11 @@ Security, Upgrade and Changed.
   of is still answered as a session that does not exist. A host that
   attached such sessions and expected a shared member must not rely on that.
 
+- A schedule aimed at a private Console side chat, or at a member it forked,
+  is deleted when that member ends, whoever made the schedule (see Fixed). A
+  schedule that should outlive such a member must target a member that
+  stays.
+
 ### Fixed
 
 - An agent created at run time that the mob's start seats before the
@@ -2582,6 +2587,39 @@ Security, Upgrade and Changed.
   cancels the mob's active flow runs before it stops the mob, as a teardown
   without a force cancel always did (see Core's changelog, Fixed: the
   mob's count of active flow runs).
+
+- Meta: when a private Console side chat ends (its owner closes it or it is
+  retired), every schedule aimed at it that was there at its end is deleted,
+  whoever made it: the schedules it made for itself, its owner's deferred
+  Console sends to it, and schedules a host made for it. A member it forked
+  ends with it, and its schedules are deleted in the same way, also when it
+  idles out. A member it spawned stays seated when the side chat is closed;
+  its schedules stay until it ends, and their deliveries fail meanwhile.
+  Before, these schedules were kept and fired into any later member given
+  the same name, an ordinary name an agent picks again for a helper
+  included; once a shared member held the name, other agents that have the
+  schedule tools could list and read them, prompt included, and change,
+  pause, resume and delete them. A respawn and a reset of a private member
+  are not ends and keep its schedules. Each delete is logged with the
+  schedule's id, never with what it sends. A schedule ended in this way is
+  no longer listed and never fires. An agent that names its id is still
+  answered its record and its occurrences, and an update or a second delete
+  of it is accepted and changes nothing that can fire; pausing and resuming
+  it are refused. Once it is deleted, no agent tool gives its id to an agent
+  that is not that person's own. Not covered: schedules left by a private
+  member that ended before the upgrade (its owner can delete them from
+  another private side chat of hers; where a shared member has since taken
+  such a name, other agents may already have been shown them); a private
+  member of a mob that an agent created; a member that a private side chat
+  spawned on a role whose profile declares `durable = true`; a long-term
+  agent private to a person, whose schedules follow the agent's own
+  lifecycle; a respawn of such a member that fails, which leaves its
+  schedules aimed at a name no member holds; and a host that runs Meta on a
+  mob event store of its own, or stops within moments of such an end during
+  its start. Where the schedules of an ended member cannot be deleted, the
+  gateway logs `the schedules that target an ended member private to a
+  person could not all be deleted` and they stay. (By tests and by ten runs
+  on this release's code; 0.9.11 through 0.9.14 read from the source.)
 
 ### Known limitations
 

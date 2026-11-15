@@ -57,8 +57,6 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 
 ## Upgrading to 0.9.15
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 This section is for systems running 0.9.14 or 0.9.13. The full list of
 changes is in the CHANGELOG under `## [0.9.15]`.
 
@@ -496,8 +494,6 @@ store:
 
 ### Reasoning effort is one setting for every provider
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 0.9.15 adds the provider-neutral `reasoning_effort` option (see
 [Reasoning effort](/concepts/providers#reasoning-effort)). A caller who
 sets no level gets 0.9.14's behavior on every route: the same requests,
@@ -652,8 +648,6 @@ route (the four differences are listed under Changed in the changelog).
   [Rolling back to 0.9.14](#rolling-back-to-0-9-14).
 
 ### A catalog model you had defined yourself: `gemini-4-hydrogen`
-
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 Model IDs are unique across the catalog, `[models.<id>]` entries and
 self-hosted models, and 0.9.15 adds `gemini-4-hydrogen` to the catalog. A
@@ -3259,8 +3253,6 @@ without them no longer compiles:
   `live_session_own_operator_instruction_entry_placement`, which says where
   the operator-instruction entry rows a live session wrote itself stand.
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 Forward these new methods too. They have defaults, so a wrapper without them
 compiles, but the default disables what they carry:
 
@@ -3601,8 +3593,6 @@ different: 0.9.8 decodes a mob's identity intents as a whole and does not
 open the mob's storage while one of them is a created entry's row. Before a
 downgrade, a mob on a host store must hold no created identity entry.
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 A removal writes a row of the same schema for either custody (a removed
 roster-owned identity's tombstone included), and so do an archive and a
 store-owned identity's pending preparation, so the paragraph above applies to
@@ -3641,8 +3631,6 @@ The count names the seat rows a downgrade would read: step 3 of the
 downgrade cycle brings them up to date.
 Change receipts are rows of the identity store's receipts table under keys
 0.9.8 never asks for.
-
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 From 0.9.10 the rows are also counted with no running mob, by the same
 rule, read-only. `MobStorage::read_identity_record_rows` counts a store

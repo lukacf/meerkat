@@ -1712,8 +1712,6 @@ Do not require this envelope on every failure. Auth routes may return only
 `{"error":"..."}`; webhook admission has route-specific error projections,
 and framework JSON/path extraction errors can use different bodies.
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 A `reasoning_effort` level that the model's route does not accept answers
 HTTP `400` with code `INVALID_PARAMS` and `details`
 `{"kind": "reasoning_effort_refused", "retryable": <bool>, "reasoning_effort_refusal": {...}}`,

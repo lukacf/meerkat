@@ -4937,15 +4937,19 @@ that was retired): the schedule stays listed until it is deleted. An
 identity released with `meta/retire` is materialized by the fire, as by any
 console send.
 
-`list`, `update`, `pause`, `resume` and `delete` answer a caller the Console
-keeps apart from other people for an agent the Console does not know as for
-an agent that does not exist: an empty list, and `schedule_not_found` for a
-schedule named by its id. That is so for a short time after a gateway
-start, until the Console has read who its members are private to (and for
-as long as that read fails; it is tried again), for a
-member that ended before the start, the person it was private to included;
-ask again. An access administrator is answered at once (see
-[Access control](/concepts/access-control)).
+From 0.9.15 `list`, `update`, `pause`, `resume` and `delete` answer a caller
+who is not an access administrator, for an agent the Console does not know,
+as for an agent that does not exist: an empty list, and `schedule_not_found`
+for a schedule named by its id. An access administrator is answered at once
+(see [Access control](/concepts/access-control)). On a Console that
+identifies nobody the rule holds for its one operator only until the Console
+has read who its members are private to.
+
+For an agent that did exist, the rule applies for a short time after a
+gateway start: until the Console has read who its members are private to, it
+does not know a member that ended before the start, and it answers so to the
+person that member was private to as well. The read is tried again for as
+long as it fails; ask again.
 
 | Code | `data.kind` | When |
 |------|-------------|------|
@@ -5349,28 +5353,45 @@ change with a tool error naming the candidate launch): queued work and
 changes belong to the authoritative launch. On the
 console, `subscriptions/put` refuses a `member` whose identity is `_system`
 or `__console__` (`-32602`), the identities the console reserves for its own
-events. On the console the methods keep an agent private to another person,
-and its records, from a caller who is not its owner (see
+events. From 0.9.15 the methods keep, on the console, an agent private to
+another person, and its records, from a caller who is not its owner (see
 [Access control](/concepts/access-control#private-side-chats)): a
 subscription, a delivery, a declared subscription and an escalation of such
 an agent are answered as ones that do not exist and are left as they are, a
 listing leaves their rows out and fills its page from the other rows, and
-an answer about a source, and a refusal, name no such agent. On the
-console, `declarations/apply` and `sources/put` refuse (`unknown_member`,
-nothing applied or written) a subscription of one member, and a source
-naming a member, that the applied declarations do not already hold
-unchanged, when the member is not seated (a member this gateway does not
-serve and a member of a peer that cannot be used are not), or is private to
-another person; while the member's check cannot be read they refuse for now
-(`native_unavailable`, nothing applied or written; ask again later);
-the stdio gateway keeps such a subscription pending and stores such a
-source.
-The host announces a development to a mob hosted on
-this gateway, once per mob and source key. Every member subscription that
-names the mob and one of the announcement's topics captures it in the same
-transaction, and each subscriber receives what it is owed in bounded batches,
-each as one Meerkat host continuation. The design, defaults and limits are in
-`docs/design/mob-announcements.md` in the repository.
+an answer about a source, and a refusal, name no such agent. A
+`subscriptions/put` that names such an agent is answered as one naming a
+member that does not exist (`-32047`; its kind is `unknown_member` under the
+gateway's own mob and under a mob an agent created that is hosted here and
+running, and the route's own kind otherwise); through 0.9.14 the console
+refused it as naming an unknown agent (`-32001`). From 0.9.15
+`declarations/apply` and `sources/put` refuse, on the console, a
+subscription of one member, and a source naming a member, when the member is
+not seated or is private to another person: `-32047` `unknown_member`, and
+nothing is applied or written. A member this gateway does not serve, and a
+member of a peer that cannot be used, are not seated. What the applied
+declarations already hold unchanged, a `declarations/apply` carries as it
+is. While the member's check cannot be read, both refuse for now (`-32047`
+`native_unavailable`, nothing applied or written): make the same request
+again later. For a member of a mob hosted here that does not run, that is
+once the mob runs again. A mob held until its owner resolves runs again when
+the session of the agent that created it is restored (the gateway looks at
+its held mobs again at its next pass); if that agent is archived the mob is
+torn down instead, and its members are then answered as not seated. A
+quarantined mob is listed with its `class` under `quarantined_mobs` in
+`meta/status`: a `store_unavailable` mob is restored again by the next call
+that addresses it through the runtime and by the next start; for
+`store_unreadable` and `resume_refused`, repair the mob's store and restart
+the gateway (see Meerkat's mobs guide, "Quarantined mobs and degraded
+members"). The refusal itself retries nothing. Through 0.9.14 they accepted
+a member that was not seated. The stdio gateway keeps such a subscription
+pending and stores such a source. The host announces a development to a mob
+hosted on this gateway, once per mob and source key. Every member
+subscription that names the mob and one of the announcement's topics
+captures it in the same transaction, and each subscriber receives what it is
+owed in bounded batches, each as one Meerkat host continuation. The design,
+defaults and limits are in `docs/design/mob-announcements.md` in the
+repository.
 
 | Method | Params | Result |
 |--------|--------|--------|

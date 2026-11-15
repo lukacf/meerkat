@@ -1907,9 +1907,9 @@ them.
   an adoption; not run after a declaration change) and is unchanged: it
   reads the edges the mob holds, never the agents' trust of each other, so
   it finds nothing to wire; seating both agents again does not repair it
-  either. Nothing stored and no request or answer changes. Affected:
-  0.8.42 through 0.9.14 (run on Core and Meta 0.9.14; earlier versions
-  read from the source).
+  either (run on Meta 0.9.14). Nothing stored and no request or answer
+  changes. Affected: 0.8.42 through 0.9.14 (run on Core and Meta 0.9.14;
+  earlier versions read from the source).
 
 - `meerkat-core`: a turn that fails because a provider failure outlasted the
   retries now says what failed. Its typed turn error (`error.data.error` of
@@ -2959,8 +2959,11 @@ them.
   was wired first converges); and from its next
   reconcile pass on (the periodic scan, a start, or its owner's next change)
   when a wiring call has joined it to a larger-named agent. While it reads
-  so, its owner's changes are committed and do not become active. An agent
-  under that custody whose edges all lead to smaller-named agents converges
+  so, its owner's changes are committed and do not become active. A host
+  delivery to it (`mob/member_send`) is refused meanwhile (the identity's
+  admission is closed); its wired peers still reach it, and it them (by a
+  test). An agent under that custody whose edges all lead to smaller-named
+  agents converges
   (rows `an_identity_wired_to_a_smaller_named_member_converges_at_its_next_change`,
   `an_identity_wired_to_a_larger_named_member_is_held_at_its_next_change`,
   `an_adopter_whose_owned_edge_is_not_realized_stays_blocked`,

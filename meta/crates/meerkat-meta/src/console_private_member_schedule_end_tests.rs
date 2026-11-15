@@ -50,13 +50,20 @@ const TAKE_BY_MEMBER_SPAWN: &str = "TAKE-THE-NAME-BY-MEMBER-SPAWN-6R";
 const TAKE_BY_FORK: &str = "TAKE-THE-NAME-BY-FORK-6R";
 /// A turn whose prompt holds this word and `child=<name>` calls `fork_off`
 /// with that name as the child's; with `make=yes` the child's task is to
-/// make a schedule, and the child is retired once it has been idle a second.
+/// make a schedule, and with `idle=yes` too the child is retired once it has
+/// been idle a second.
 const FORK_A_CHILD: &str = "FORK-A-CHILD-6R";
 /// A turn whose prompt holds this word calls `meerkat_schedule_list`.
 const LIST_SCHEDULES: &str = "LIST-THE-SCHEDULES-6R";
 /// A turn whose prompt holds this word and `id=<schedule id>` calls
 /// `meerkat_schedule_get` for that id.
 const GET_SCHEDULE: &str = "GET-THE-SCHEDULE-6R";
+/// A turn whose prompt holds this word, `tool=<schedule tool>` and
+/// `id=<schedule id>` calls that tool for that id (an update renames it).
+const CALL_SCHEDULE_TOOL: &str = "CALL-A-SCHEDULE-TOOL-6R";
+/// A turn whose prompt holds this word and `child=<name>` calls the member
+/// tool `spawn_member` for a member of that name.
+const SPAWN_A_CHILD: &str = "SPAWN-A-CHILD-6R";
 const MOB_SPAWN_MEMBER: &str = "mob_spawn_member";
 const SPAWN_MEMBER: &str = "spawn_member";
 const FORK_OFF: &str = "fork_off";
@@ -139,12 +146,7 @@ impl LlmClient for ScriptedClient {
                 meerkat_core::Usage::default(),
             ),
         };
-        let holds = |name: &str| {
-            request
-                .tools
-                .iter()
-                .any(|tool| tool.name.to_string() == name)
-        };
+        let holds = |name: &str| request.tools.iter().any(|tool| tool.name == name);
         let call = |id: &str, name: &str, args: serde_json::Value| {
             vec![
                 LlmEvent::ToolCallComplete {
@@ -169,6 +171,20 @@ impl LlmClient for ScriptedClient {
                 READ_CALL,
                 SCHEDULE_GET,
                 json!({ "schedule_id": word(&last, "id=") }),
+            )
+        } else if first && last.contains(CALL_SCHEDULE_TOOL) {
+            let tool = word(&last, "tool=");
+            let args = if tool == "meerkat_schedule_update" {
+                json!({ "schedule_id": word(&last, "id="), "name": "renamed" })
+            } else {
+                json!({ "schedule_id": word(&last, "id=") })
+            };
+            call(READ_CALL, &tool, args)
+        } else if first && last.contains(SPAWN_A_CHILD) && holds(SPAWN_MEMBER) {
+            call(
+                "spawn-a-child",
+                SPAWN_MEMBER,
+                json!({ "profile": "planner", "member_id": word(&last, "child=") }),
             )
         } else if first && last.contains(TAKE_BY_SPAWN) && holds(MOB_SPAWN_MEMBER) {
             call(
@@ -196,11 +212,16 @@ impl LlmClient for ScriptedClient {
                 }),
             )
         } else if first && last.contains(FORK_A_CHILD) && holds(FORK_OFF) {
-            let args = if last.contains("make=yes") {
+            let args = if last.contains("make=yes") && last.contains("idle=yes") {
                 json!({
                     "member_id": word(&last, "child="),
                     "task": format!("{MAKE} every=6 remind me of what I told you"),
                     "idle_retire_secs": 1
+                })
+            } else if last.contains("make=yes") {
+                json!({
+                    "member_id": word(&last, "child="),
+                    "task": format!("{MAKE} every=6 remind me of what I told you")
                 })
             } else {
                 json!({
@@ -339,6 +360,16 @@ runtime_mode = "turn_driven"
 external_addressable = true
 
 [profiles.planner.tools]
+comms = true
+schedule = true
+mob = true
+
+[profiles.reviewer]
+model = "{PLANNER_MODEL}"
+runtime_mode = "turn_driven"
+external_addressable = true
+
+[profiles.reviewer.tools]
 comms = true
 schedule = true
 mob = true
@@ -585,6 +616,31 @@ impl Launch {
         false
     }
 
+    /// The schedule's occurrences as the store holds them now, in order:
+    /// each one's ordinal, phase and failure.
+    async fn occurrences(&self, schedule_id: &str) -> Vec<String> {
+        let id = meerkat::ScheduleId::parse(schedule_id).expect("schedule id");
+        let mut occurrences = self
+            .attached
+            .service
+            .list_occurrences(&id)
+            .await
+            .expect("list the occurrences");
+        occurrences.sort_by_key(|occurrence| occurrence.occurrence_ordinal.0);
+        occurrences
+            .into_iter()
+            .map(|occurrence| {
+                format!(
+                    "#{} {:?} {:?} {:?}",
+                    occurrence.occurrence_ordinal.0,
+                    occurrence.phase,
+                    occurrence.failure_class,
+                    occurrence.failure_detail
+                )
+            })
+            .collect()
+    }
+
     /// Whether a model request made after the first `since` holds the
     /// schedule's prompt, waited for `seconds`.
     async fn fired_within(&self, since: usize, seconds: u64) -> bool {
@@ -761,6 +817,40 @@ async fn a_private_side_chats_schedule_is_deleted_when_its_owner_closes_it() {
         !launch.schedule_ids().await.contains(&schedule),
         "the closed private side chat's schedule is no longer listed by the service",
     );
+    // What its occurrences do: none waits to fire, and none is delivered.
+    let since = launch.seen.all().len();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let waiting: Vec<String> = launch
+        .attached
+        .service
+        .list_occurrences(&meerkat::ScheduleId::parse(&schedule).expect("schedule id"))
+        .await
+        .expect("list the occurrences")
+        .into_iter()
+        .filter(|occurrence| {
+            matches!(
+                occurrence.phase,
+                meerkat::OccurrencePhase::Pending
+                    | meerkat::OccurrencePhase::Claimed
+                    | meerkat::OccurrencePhase::Dispatching
+                    | meerkat::OccurrencePhase::AwaitingCompletion
+            )
+        })
+        .map(|occurrence| {
+            format!(
+                "#{} {:?}",
+                occurrence.occurrence_ordinal.0, occurrence.phase
+            )
+        })
+        .collect();
+    launch.expect(
+        waiting.is_empty(),
+        format!("no occurrence of the deleted schedule waits to fire (waiting: {waiting:?})"),
+    );
+    launch.expect(
+        !launch.marker_since(since),
+        "no model request made after the delete holds the schedule's prompt",
+    );
     launch.finish().await;
 }
 
@@ -828,42 +918,67 @@ async fn a_closed_private_side_chats_schedule_fires_into_no_member_an_agents_for
     a_shared_agent_takes_a_closed_private_side_chats_name(Door::ForkOff).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_private_side_chats_fork_childs_schedule_is_deleted_when_the_child_idles_out() {
-    let launch = boot("idle").await;
-    let (_app, _owner) = private_side_chat(&launch).await;
+/// How a private side chat's fork child ends.
+#[derive(Debug, Clone, Copy)]
+enum ChildEnd {
+    /// The child is retired once it has been idle, while its side chat
+    /// lives.
+    IdlesOut,
+    /// The owner closes the side chat, and the child ends with it (or is
+    /// closed by her too, where the close leaves it seated).
+    ClosedWithItsSideChat,
+}
+
+/// A private side chat forks a child under an ordinary name; the child
+/// makes a schedule for itself and ends as `end` says. Then a shared agent
+/// forks a child of its own under the same name.
+async fn a_private_side_chats_fork_child_ends(end: ChildEnd) {
+    let launch = boot("child").await;
+    let (app, owner) = private_side_chat(&launch).await;
     launch.shared("planner", "gamma").await;
     let child = "report-helper";
 
     // The private side chat forks a child whose task is to make a schedule
     // for itself.
+    let idle = match end {
+        ChildEnd::IdlesOut => "idle=yes",
+        ChildEnd::ClosedWithItsSideChat => "idle=no",
+    };
     let before = launch.schedule_ids().await;
     launch
         .turn(
             SIDE_NAME,
-            &format!("{FORK_A_CHILD} child={child} make=yes please"),
+            &format!("{FORK_A_CHILD} child={child} make=yes {idle} please"),
         )
         .await;
     let schedule = launch.new_schedule(&before, 20).await;
-    let seat = launch.entry(child).await;
-    launch.expect(
-        seat.as_ref().is_some_and(|seat| seat.private_to.is_some()),
-        "the private side chat's fork child is seated, private to the same person",
-    );
-
-    // The child idles out.
-    launch.expect(
-        launch.gone_within(child, 40).await,
-        "the fork child is retired once it has been idle",
-    );
-    launch.expect(
-        launch.entry(SIDE_NAME).await.is_some(),
-        "the private side chat itself is still seated",
-    );
+    match end {
+        ChildEnd::IdlesOut => {
+            launch.expect(
+                launch.gone_within(child, 40).await,
+                "the fork child is retired once it has been idle",
+            );
+            launch.expect(
+                launch.entry(SIDE_NAME).await.is_some(),
+                "the private side chat itself is still seated",
+            );
+        }
+        ChildEnd::ClosedWithItsSideChat => {
+            let seat = launch.entry(child).await;
+            launch.expect(
+                seat.as_ref().is_some_and(|seat| seat.private_to.is_some()),
+                "the private side chat's fork child is seated, private to the same person",
+            );
+            close(&launch, &app, &owner, SIDE_NAME).await;
+            if launch.entry(child).await.is_some() {
+                close(&launch, &app, &owner, child).await;
+            }
+        }
+    }
     launch.expect(
         launch.deleted_within(&schedule, 10).await,
         format!(
-            "the ended fork child's schedule is deleted (it is {:?})",
+            "{end:?}: the ended fork child's schedule is deleted (it is {:?})",
             launch.phase(&schedule).await
         ),
     );
@@ -879,24 +994,29 @@ async fn a_private_side_chats_fork_childs_schedule_is_deleted_when_the_child_idl
         .await;
     launch.expect(
         later.is_some(),
-        "a shared agent's fork_off seats a child under the same name",
+        format!("{end:?}: a shared agent's fork_off seats a child under the same name"),
     );
     if let Some(later) = later {
         launch.expect(
             later.private_to.is_none(),
-            "the shared agent's child is private to no one",
+            format!("{end:?}: the shared agent's child is private to no one"),
         );
         // Two intervals of the ended child's schedule.
         tokio::time::sleep(Duration::from_secs(13)).await;
         launch.expect(
             !launch.marker_since(since),
-            "no model request made after the name was taken holds the ended child's schedule \
-             prompt",
+            format!(
+                "{end:?}: no model request made after the name was taken holds the ended \
+                 child's schedule prompt"
+            ),
         );
         if let Some(session) = later.session.as_ref() {
             launch.expect(
                 !launch.history_holds_marker(session).await,
-                "the later child's transcript does not hold the ended child's schedule prompt",
+                format!(
+                    "{end:?}: the later child's transcript does not hold the ended child's \
+                     schedule prompt"
+                ),
             );
         }
     }
@@ -904,7 +1024,17 @@ async fn a_private_side_chats_fork_childs_schedule_is_deleted_when_the_child_idl
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn another_agent_reads_no_schedule_of_a_closed_private_side_chat_once_its_name_is_held() {
+async fn a_private_side_chats_fork_childs_schedule_is_deleted_when_the_child_idles_out() {
+    a_private_side_chats_fork_child_ends(ChildEnd::IdlesOut).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_side_chats_fork_childs_schedule_is_deleted_when_the_side_chat_is_closed() {
+    a_private_side_chats_fork_child_ends(ChildEnd::ClosedWithItsSideChat).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_agent_is_listed_no_schedule_of_a_closed_private_side_chat_once_its_name_is_held() {
     let launch = boot("reads").await;
     let (app, owner) = private_side_chat(&launch).await;
     launch.shared("planner", "beta").await;
@@ -937,6 +1067,7 @@ async fn another_agent_reads_no_schedule_of_a_closed_private_side_chat_once_its_
     );
 
     // A shared member holds the name.
+    let since = launch.seen.all().len();
     launch
         .mob()
         .handle()
@@ -954,13 +1085,140 @@ async fn another_agent_reads_no_schedule_of_a_closed_private_side_chat_once_its_
         "another agent's meerkat_schedule_list holds nothing of the closed side chat's \
          schedule once a shared member holds the name",
     );
+    // No list shows the schedule, so an agent comes by its id on no surface
+    // of its tools. By its id the record of a deleted schedule is still
+    // read: the tools answer it with its phase.
     let got = launch
         .schedule_read("beta", &format!("{GET_SCHEDULE} id={schedule} please"))
         .await;
+    println!(
+        "ROW: meerkat_schedule_get of the deleted schedule by its id answers: {}",
+        got.chars().take(600).collect::<String>()
+    );
     launch.expect(
-        !got.contains(MARKER),
-        "another agent's meerkat_schedule_get answers nothing of the closed side chat's \
-         schedule once a shared member holds the name",
+        got.contains(&schedule) && got.contains("deleted"),
+        format!("a get by its id answers the deleted schedule's record: {got}"),
+    );
+    // The same agent's writes by the id: the schedule lifecycle refuses a
+    // pause and a resume of a deleted schedule, and accepts an update and a
+    // repeated delete of its record; after each the schedule is deleted
+    // still.
+    for (tool, refused) in [
+        ("meerkat_schedule_update", false),
+        ("meerkat_schedule_pause", true),
+        ("meerkat_schedule_resume", true),
+        ("meerkat_schedule_delete", false),
+    ] {
+        let answer = launch
+            .schedule_read(
+                "beta",
+                &format!("{CALL_SCHEDULE_TOOL} tool={tool} id={schedule} please"),
+            )
+            .await;
+        println!(
+            "ROW: {tool} of the deleted schedule by its id answers: {}",
+            answer.chars().take(400).collect::<String>()
+        );
+        launch.expect(
+            answer.contains("is_error: true") == refused,
+            format!("{tool} of the deleted schedule by its id: refused is {refused}: {answer}"),
+        );
+        launch.expect(
+            launch.phase(&schedule).await == Some(meerkat::SchedulePhase::Deleted),
+            format!(
+                "after another agent's {tool} the schedule stays deleted (it is {:?})",
+                launch.phase(&schedule).await
+            ),
+        );
+    }
+    // Nothing of the deleted schedule fires, into the member that holds the
+    // name or anywhere else.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let fired: Vec<String> = launch
+        .seen
+        .all()
+        .into_iter()
+        .skip(since)
+        .filter(|request| request.last_user_text.contains(MARKER))
+        .map(|request| request.last_user_text)
+        .collect();
+    launch.expect(
+        fired.is_empty(),
+        format!("no occurrence of the deleted schedule fires once the name is held: {fired:?}"),
+    );
+    launch.finish().await;
+}
+
+/// A member a private side chat spawned with its member tool makes a
+/// schedule for itself. When the side chat is closed, the member either
+/// ends with it or goes on; its schedule is kept while it lives and deleted
+/// when it ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_a_private_side_chat_spawned_loses_its_schedule_when_it_ends() {
+    let launch = boot("spawned").await;
+    let (app, owner) = private_side_chat(&launch).await;
+    let child = "report-helper";
+    let seat = launch
+        .agent_seats(
+            SIDE_NAME,
+            &format!("{SPAWN_A_CHILD} child={child} please"),
+            child,
+        )
+        .await;
+    launch.expect(
+        seat.as_ref().is_some_and(|seat| seat.private_to.is_some()),
+        "the member a private side chat spawned is seated, private to the same person",
+    );
+    if seat.is_none() {
+        launch.finish().await;
+        return;
+    }
+    let before = launch.seen.all().len();
+    let schedule = launch.make_schedule(child, 2).await;
+    launch.expect(
+        launch.fired_within(before, 15).await,
+        "the schedule fires into the spawned member while it lives",
+    );
+
+    close(&launch, &app, &owner, SIDE_NAME).await;
+    let ended_with_it = launch.gone_within(child, 5).await;
+    println!(
+        "ROW: the member a private side chat spawned ended with the side chat: {ended_with_it}"
+    );
+    if !ended_with_it {
+        // It goes on, and its schedule with it.
+        let since = launch.seen.all().len();
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        launch.expect(
+            launch.phase(&schedule).await == Some(meerkat::SchedulePhase::Active),
+            format!(
+                "the spawned member's schedule stays active while it lives (it is {:?})",
+                launch.phase(&schedule).await
+            ),
+        );
+        println!(
+            "ROW: after the side chat's close the spawned member's schedule fired into it \
+             again within six seconds: {} ; its occurrences: {:?}",
+            launch.fired_since(since),
+            launch.occurrences(&schedule).await
+        );
+        launch
+            .mob()
+            .handle()
+            .retire(AgentIdentity::from(child))
+            .await
+            .expect("retire the spawned member");
+        launch.expect(
+            launch.gone_within(child, 10).await,
+            "the roster no longer holds the retired spawned member",
+        );
+    }
+    launch.expect(
+        launch.deleted_within(&schedule, 10).await,
+        format!(
+            "the ended spawned member's schedule is deleted (it is {:?})",
+            launch.phase(&schedule).await
+        ),
     );
     launch.finish().await;
 }
@@ -1032,5 +1290,343 @@ async fn a_respawned_private_side_chat_keeps_its_schedule() {
         launch.fired_within(since, 15).await,
         "the schedule fires into the respawned private side chat",
     );
+    launch.finish().await;
+}
+
+/// A follower that keeps the ends it is handed.
+#[derive(Default)]
+struct KeptEnds(Mutex<Vec<crate::private_owners::EndedPrivateMember>>);
+
+#[async_trait::async_trait]
+impl crate::private_owners::PrivateMemberEndFollower for KeptEnds {
+    async fn member_ended(&self, ended: &crate::private_owners::EndedPrivateMember) {
+        self.0.lock().unwrap().push(ended.clone());
+    }
+}
+
+impl KeptEnds {
+    fn members(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|ended| ended.member.clone())
+            .collect()
+    }
+}
+
+/// The whole journal of the launch's mob.
+async fn journal(launch: &Launch) -> Vec<meerkat_mob::MobEvent> {
+    let handle = launch.mob().handle();
+    let mut events = Vec::new();
+    loop {
+        let after = events
+            .last()
+            .map_or(0, |event: &meerkat_mob::MobEvent| event.cursor);
+        let page = handle
+            .poll_events(after, 512)
+            .await
+            .expect("poll the journal");
+        if page.is_empty() {
+            return events;
+        }
+        events.extend(page);
+    }
+}
+
+/// The retirement start of a closed private side chat, shown to the record
+/// only after a shared member was built under its name (a pump that had
+/// fallen behind): the record of the members this process built names
+/// nobody for the name by then, and the end is still handed to the
+/// follower, because Core's member history holds the labels of the
+/// incarnation the retirement names.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_end_shown_after_a_shared_member_holds_the_name_is_still_a_private_members_end() {
+    let launch = boot("history").await;
+    let (app, owner) = private_side_chat(&launch).await;
+    close(&launch, &app, &owner, SIDE_NAME).await;
+    launch.shared("worker", SIDE_NAME).await;
+    let owners = launch.mob().private_owners().clone();
+    assert_eq!(
+        owners.owner_of(&launch.mob_id, SIDE_NAME),
+        None,
+        "the record of the built members names nobody for the name once a shared member \
+         holds it"
+    );
+
+    let kept = Arc::new(KeptEnds::default());
+    owners.follow_member_ends(kept.clone()).await;
+    let started = journal(&launch)
+        .await
+        .into_iter()
+        .find(|event| {
+            matches!(
+                &event.kind,
+                meerkat_mob::MobEventKind::MemberRetirementStarted { agent_identity, .. }
+                    if agent_identity.as_str() == SIDE_NAME
+            )
+        })
+        .expect("the journal holds the closed side chat's retirement start");
+    owners
+        .observe_mob_event(&launch.mob().handle(), &started)
+        .await;
+    launch.expect(
+        kept.members() == vec![SIDE_NAME.to_string()],
+        format!(
+            "the closed private side chat's end is handed to the follower (handed: {:?})",
+            kept.members()
+        ),
+    );
+    launch.finish().await;
+}
+
+/// A reset of the gateway's own mob retires every member: a private side
+/// chat ends with it, and so does its schedule.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_side_chats_schedule_is_deleted_when_its_mob_is_reset() {
+    let launch = boot("mobreset").await;
+    let (_app, _owner) = private_side_chat(&launch).await;
+    let schedule = launch.make_schedule(SIDE_NAME, 2).await;
+    let reset = launch.mob().handle().reset().await;
+    launch.expect(
+        reset.is_ok(),
+        format!("the mob is reset: {:?}", reset.as_ref().err()),
+    );
+    launch.expect(
+        launch.gone_within(SIDE_NAME, 15).await,
+        "the roster no longer holds the private side chat after the reset",
+    );
+    launch.expect(
+        launch.deleted_within(&schedule, 15).await,
+        format!(
+            "the private side chat's schedule is deleted by the reset of its mob (it is {:?})",
+            launch.phase(&schedule).await
+        ),
+    );
+    launch.finish().await;
+}
+
+/// The labels of a member the host seats private to a person, below the
+/// console's doors.
+fn private_labels() -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::from([(
+        PRIVATE_TO.to_string(),
+        crate::personal_accounts::private_owner_key(
+            "https://issuer.example.test",
+            "oidc-sub-a-person",
+        ),
+    )])
+}
+
+/// The spec of the member `name` of profile `profile`, private to a
+/// person; seated as a long-term agent (a durable identity) when `durable`.
+fn private_member_spec(profile: &str, name: &str, durable: bool) -> meerkat_mob::SpawnMemberSpec {
+    let mut spec = meerkat_mob::SpawnMemberSpec::new(profile, AgentIdentity::from(name))
+        .with_labels(private_labels());
+    if durable {
+        spec.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: name.to_string(),
+        };
+    }
+    spec
+}
+
+/// A member private to a person under `name`, seated by the host, with a
+/// schedule of its own that has fired into it: the schedule's id.
+async fn private_member_with_a_schedule(launch: &Launch, name: &str, durable: bool) -> String {
+    launch
+        .mob()
+        .handle()
+        .spawn_spec(private_member_spec("planner", name, durable))
+        .await
+        .expect("seat a member private to a person");
+    let before = launch.seen.all().len();
+    let schedule = launch.make_schedule(name, 2).await;
+    launch.expect(
+        launch.fired_within(before, 15).await,
+        "the schedule fires into the private member while it lives",
+    );
+    schedule
+}
+
+/// After `what`, the schedule is still active and fires into the member
+/// that holds the name.
+async fn expect_kept(launch: &Launch, schedule: &str, what: &str) {
+    let since = launch.seen.all().len();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    launch.expect(
+        launch.phase(schedule).await == Some(meerkat::SchedulePhase::Active),
+        format!(
+            "{what}: the private member's schedule stays active (it is {:?})",
+            launch.phase(schedule).await
+        ),
+    );
+    launch.expect(
+        launch.fired_within(since, 15).await,
+        format!("{what}: the schedule fires into the member again"),
+    );
+}
+
+/// A rebuild that keeps a member private to a person under its name.
+#[derive(Debug, Clone, Copy)]
+enum Rebuild {
+    /// A respawn: the call the Console's respawn and reset make for a live
+    /// member that is no side chat.
+    Respawn,
+    /// A respawn onto another profile.
+    ProfileMove,
+    /// A rotation onto a fresh session: a reset.
+    Reset,
+}
+
+async fn a_private_members_schedule_is_kept_across(rebuild: Rebuild) {
+    let launch = boot("rebuild").await;
+    let name = "notes";
+    let schedule = private_member_with_a_schedule(&launch, name, false).await;
+    let handle = launch.mob().handle();
+    let rebuilt = match rebuild {
+        Rebuild::Respawn => handle
+            .respawn(AgentIdentity::from(name), None)
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}")),
+        Rebuild::ProfileMove => handle
+            .respawn_with_successor_spec(private_member_spec("reviewer", name, false))
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}")),
+        Rebuild::Reset => handle
+            .rotate_member(private_member_spec("planner", name, false))
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}")),
+    };
+    launch.expect(
+        rebuilt.is_ok(),
+        format!("{rebuild:?}: the member is rebuilt: {rebuilt:?}"),
+    );
+    let seat = launch.entry(name).await;
+    launch.expect(
+        seat.as_ref().is_some_and(|seat| seat.private_to.is_some()),
+        format!("{rebuild:?}: the rebuilt member is seated, private to the same person"),
+    );
+    expect_kept(&launch, &schedule, &format!("{rebuild:?}")).await;
+    launch.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_members_schedule_is_kept_across_a_respawn() {
+    a_private_members_schedule_is_kept_across(Rebuild::Respawn).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_members_schedule_is_kept_across_a_profile_move() {
+    a_private_members_schedule_is_kept_across(Rebuild::ProfileMove).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_members_schedule_is_kept_across_a_reset() {
+    a_private_members_schedule_is_kept_across(Rebuild::Reset).await;
+}
+
+/// An ephemeral member private to a person that is no side chat, retired by
+/// its host: it ends, and so does its schedule.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ephemeral_private_members_schedule_is_deleted_when_the_member_is_retired() {
+    let launch = boot("retired").await;
+    let name = "notes";
+    let schedule = private_member_with_a_schedule(&launch, name, false).await;
+    launch
+        .mob()
+        .handle()
+        .retire(AgentIdentity::from(name))
+        .await
+        .expect("retire the private member");
+    launch.expect(
+        launch.gone_within(name, 10).await,
+        "the roster no longer holds the retired member",
+    );
+    launch.expect(
+        launch.deleted_within(&schedule, 10).await,
+        format!(
+            "the retired private member's schedule is deleted (it is {:?})",
+            launch.phase(&schedule).await
+        ),
+    );
+    launch.finish().await;
+}
+
+/// A long-term agent private to a person whose member is retired and seated
+/// again on its name, as a rebuild that keeps the agent does where Core
+/// seats no successor in one step (a forced compaction, a reload): the
+/// retirement is no end of the agent, and its schedule is kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_long_term_agents_schedule_is_kept_when_its_member_is_retired_and_seated_again() {
+    let launch = boot("longterm").await;
+    let name = "keeper";
+    let schedule = private_member_with_a_schedule(&launch, name, true).await;
+    launch
+        .mob()
+        .handle()
+        .retire(AgentIdentity::from(name))
+        .await
+        .expect("retire the long-term agent's member");
+    launch.expect(
+        launch.gone_within(name, 10).await,
+        "the roster no longer holds the retired member",
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    launch.expect(
+        launch.phase(&schedule).await == Some(meerkat::SchedulePhase::Active),
+        format!(
+            "the long-term agent's schedule stays active while no member holds its name (it \
+             is {:?})",
+            launch.phase(&schedule).await
+        ),
+    );
+    let seated = launch
+        .mob()
+        .handle()
+        .spawn_spec(private_member_spec("planner", name, true))
+        .await;
+    launch.expect(
+        seated.is_ok(),
+        format!(
+            "the long-term agent's member is seated again: {:?}",
+            seated.as_ref().err()
+        ),
+    );
+    expect_kept(&launch, &schedule, "seated again").await;
+    launch.finish().await;
+}
+
+/// The Console refuses to respawn or reset a side chat (it is closed and
+/// forked again); a refused call ends nothing, and the private side chat's
+/// schedule stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_side_chats_schedule_stays_when_the_console_refuses_its_respawn_and_reset() {
+    let launch = boot("refused").await;
+    let (app, owner) = private_side_chat(&launch).await;
+    let before = launch.seen.all().len();
+    let schedule = launch.make_schedule(SIDE_NAME, 2).await;
+    launch.expect(
+        launch.fired_within(before, 15).await,
+        "the schedule fires into the private side chat while it lives",
+    );
+    for (method, params) in [
+        ("meta/respawn_member", json!({ "member_id": SIDE_NAME })),
+        ("meta/reset", json!({ "identity": SIDE_NAME })),
+    ] {
+        let answer = console_rpc_as(&app, Some(&owner), method, params).await;
+        launch.expect(
+            !answer["error"].is_null(),
+            format!("{method} of a side chat is refused: {answer}"),
+        );
+        launch.expect(
+            launch.entry(SIDE_NAME).await.is_some(),
+            format!("{method}: the side chat is still seated"),
+        );
+    }
+    expect_kept(&launch, &schedule, "refused respawn and reset").await;
     launch.finish().await;
 }

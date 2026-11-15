@@ -36,6 +36,18 @@
 //! the record picks none) gets no owner from the seed: who it is private to
 //! cannot be read, so a spawn into it is refused, and the members already
 //! seated there keep the owner their own spawn gave them.
+//!
+//! The end of an ephemeral member private to a person (a side chat, or a
+//! member, a fork or a helper such a member made), in the runtime's own mob,
+//! is handed to the follower a composition installs
+//! ([`PrivateOwners::follow_member_ends`]): the runtime's mob event pump
+//! shows each journal event to [`PrivateOwners::observe_mob_event`], which
+//! tells an end (a retirement that seats no next incarnation under the name
+//! and is no step of a long-term agent's own lifecycle) from a respawn, a
+//! reset, a role migration and a rebuild, and reads what the ended
+//! incarnation was from Core's member history. An end seen before a
+//! follower is installed is held, in memory, and handed over at the
+//! install.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, PoisonError, RwLock, Weak};
@@ -89,8 +101,41 @@ impl Default for FirstReadsSignal {
     }
 }
 
+/// The most ends held for a follower that is not installed yet
+/// ([`PrivateOwners::member_ended`]); the oldest is dropped past it.
+const HELD_ENDS_MAX: usize = 1024;
+
 /// A member, keyed as its mob's roster names it: (mob id, roster member id).
 type MemberKey = (String, String);
+
+/// A member private to a person that ended: its retirement seats no next
+/// incarnation under its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EndedPrivateMember {
+    pub(crate) mob_id: String,
+    /// The member, as its mob's roster named it.
+    pub(crate) member: String,
+    /// The session the member held at its end, when it held one.
+    pub(crate) session: Option<String>,
+}
+
+/// What a composition does once a member private to a person ended
+/// ([`PrivateOwners::follow_member_ends`]).
+#[async_trait::async_trait]
+pub(crate) trait PrivateMemberEndFollower: Send + Sync {
+    /// `ended` ended. Called once per end the record sees, and again for
+    /// the same member when its end is seen again (an event delivered a
+    /// second time): a follower leaves what it already did as it is.
+    async fn member_ended(&self, ended: &EndedPrivateMember);
+}
+
+/// The follower of the ends of members private to a person, and the ends
+/// seen while none was installed.
+#[derive(Default)]
+struct MemberEnds {
+    follower: Option<Arc<dyn PrivateMemberEndFollower>>,
+    held: Vec<EndedPrivateMember>,
+}
 
 /// One page of a mob's member spawns: (mob id, roster member id, the labels
 /// of the spawn) for each, and the cursor to read on from.
@@ -195,6 +240,9 @@ struct Inner {
     first_reads: FirstReadsSignal,
     /// The agent mob tool state of the runtime, whose mobs the seed reads.
     child_mobs: RwLock<Option<Weak<meerkat_mob_mcp::MobMcpState>>>,
+    /// Who follows the end of a member private to a person, and the ends
+    /// held for it.
+    ends: std::sync::Mutex<MemberEnds>,
 }
 
 impl std::fmt::Debug for PrivateOwners {
@@ -721,6 +769,146 @@ impl PrivateOwners {
                 Some(&entry.labels),
             );
         }
+    }
+
+    /// Install `follower` as what follows the end of a member private to a
+    /// person, and hand it the ends seen before it, oldest first. A
+    /// composition installs one follower; a later install replaces it.
+    pub(crate) async fn follow_member_ends(&self, follower: Arc<dyn PrivateMemberEndFollower>) {
+        let held = {
+            let mut ends = self
+                .inner
+                .ends
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            ends.follower = Some(Arc::clone(&follower));
+            std::mem::take(&mut ends.held)
+        };
+        for ended in &held {
+            follower.member_ended(ended).await;
+        }
+    }
+
+    /// Hand `ended` to the installed follower, or hold it for the follower a
+    /// composition installs later ([`Self::follow_member_ends`]). The hold
+    /// is this process's and bounded ([`HELD_ENDS_MAX`]): a launch that
+    /// installs no follower keeps the newest ends and follows none.
+    pub(crate) async fn member_ended(&self, ended: EndedPrivateMember) {
+        let follower = {
+            let mut ends = self
+                .inner
+                .ends
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            match ends.follower.as_ref() {
+                Some(follower) => Arc::clone(follower),
+                None => {
+                    if ends.held.len() >= HELD_ENDS_MAX {
+                        ends.held.remove(0);
+                    }
+                    ends.held.push(ended);
+                    return;
+                }
+            }
+        };
+        follower.member_ended(&ended).await;
+    }
+
+    /// Show the record an event of the journal of `handle`'s mob, the
+    /// runtime's own: the end of a member private to a person is handed to
+    /// the follower ([`Self::member_ended`]).
+    ///
+    /// Only a retirement that ends the member's name is an end. A
+    /// retirement start that carries a rotation (a reset, a same-session
+    /// successor, a role migration, a runtime-mode restamp) or keeps the
+    /// member's topology for its successor (a respawn) seats the next
+    /// incarnation under the name. One that records a cause is a step of an
+    /// identity entry's own lifecycle (an archive, an unlisting, a removal,
+    /// a host's adoption), which the identity family follows. Neither is
+    /// handed over, and nothing of the member is touched.
+    pub(crate) async fn observe_mob_event(
+        &self,
+        handle: &meerkat_mob::MobHandle,
+        event: &meerkat_mob::MobEvent,
+    ) {
+        let meerkat_mob::MobEventKind::MemberRetirementStarted {
+            agent_identity,
+            generation,
+            session_id,
+            releasing,
+            rotation,
+            preserve_machine_topology,
+            cause,
+            ..
+        } = &event.kind
+        else {
+            return;
+        };
+        if rotation.is_some() || *preserve_machine_topology || cause.is_some() {
+            return;
+        }
+        let session = session_id.as_ref().or(releasing.as_ref());
+        if let Some(ended) = self
+            .ended_private(handle, agent_identity, *generation, session)
+            .await
+        {
+            self.member_ended(ended).await;
+        }
+    }
+
+    /// The retiring incarnation `generation` of `member`, when it was an
+    /// ephemeral member private to a person: a side chat, or a member, a
+    /// fork or a helper such a member made. Core's member history says so:
+    /// the incarnation's own binding (the one that named `session`, the
+    /// session its retirement names, else the member's latest) holds the
+    /// labels and the continuity intent it was spawned with, and no later
+    /// member under the name changes them.
+    ///
+    /// A member seated as a durable identity (a long-term agent, a member
+    /// of a profile that declares `durable = true`) is not such a member,
+    /// whoever it is private to, unless it is a side chat (only Meta writes
+    /// a side chat's label, and a side chat is closed and forked again,
+    /// never rebuilt): a long-term agent's member is retired and seated
+    /// again on its session by rebuilds that keep the agent (a forced
+    /// compaction, a reload), and what ends with the agent is the identity
+    /// family's to follow. Where the history holds no binding of that
+    /// incarnation (the mob's storage keeps no history, or the read fails),
+    /// the answer is none: nothing is handed over on a guess.
+    async fn ended_private(
+        &self,
+        handle: &meerkat_mob::MobHandle,
+        member: &meerkat_mob::AgentIdentity,
+        generation: meerkat_mob::Generation,
+        session: Option<&meerkat_core::types::SessionId>,
+    ) -> Option<EndedPrivateMember> {
+        let history = match handle.member_binding_history().await {
+            Ok(history) => history,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    mob_id = %handle.mob_id(),
+                    member = %member,
+                    "the member history of a retiring member could not be read: if the member \
+                     was private to a person, what follows its end is not done"
+                );
+                return None;
+            }
+        };
+        let binding = session
+            .and_then(|session| history.binding_for_session(session))
+            .into_iter()
+            .chain(history.last_binding(member))
+            .find(|binding| binding.identity() == member && binding.generation() == generation)?;
+        let labels = binding.labels();
+        let ephemeral = matches!(
+            binding.continuity_intent(),
+            meerkat_mob::SpawnContinuityIntent::Ephemeral
+        ) || labels.contains_key(crate::side_chat::SIDE_CHAT_OF_LABEL);
+        (ephemeral && crate::access::private_owner(labels).is_some()).then(|| EndedPrivateMember {
+            mob_id: handle.mob_id().to_string(),
+            member: member.to_string(),
+            session: session.or(binding.session_id()).map(ToString::to_string),
+        })
     }
 
     /// `hook`, then record the labels of the member the request builds; a
@@ -1560,5 +1748,67 @@ mod tests {
                 "private: {private}"
             );
         }
+    }
+
+    /// A follower that keeps the ends it is handed.
+    #[derive(Default)]
+    struct KeptEnds(std::sync::Mutex<Vec<EndedPrivateMember>>);
+
+    #[async_trait::async_trait]
+    impl PrivateMemberEndFollower for KeptEnds {
+        async fn member_ended(&self, ended: &EndedPrivateMember) {
+            self.0.lock().unwrap().push(ended.clone());
+        }
+    }
+
+    fn ended(member: &str) -> EndedPrivateMember {
+        EndedPrivateMember {
+            mob_id: "mob".to_string(),
+            member: member.to_string(),
+            session: Some(format!("session-of-{member}")),
+        }
+    }
+
+    /// An end seen before a follower is installed is held and handed over
+    /// at the install, oldest first; an end seen after it goes to the
+    /// follower at once, and nothing is handed over twice.
+    #[tokio::test]
+    async fn an_end_seen_before_a_follower_is_installed_is_followed_at_the_install() {
+        let owners = PrivateOwners::default();
+        owners.member_ended(ended("first")).await;
+        owners.member_ended(ended("second")).await;
+
+        let follower = Arc::new(KeptEnds::default());
+        owners.follow_member_ends(follower.clone()).await;
+        assert_eq!(
+            *follower.0.lock().unwrap(),
+            vec![ended("first"), ended("second")],
+            "the held ends are handed over at the install"
+        );
+
+        owners.member_ended(ended("third")).await;
+        assert_eq!(
+            *follower.0.lock().unwrap(),
+            vec![ended("first"), ended("second"), ended("third")],
+            "a later end goes to the follower, and the held ones are not handed over again"
+        );
+    }
+
+    /// The hold keeps the newest ends of a launch that installs no follower.
+    #[tokio::test]
+    async fn the_hold_of_ends_is_bounded() {
+        let owners = PrivateOwners::default();
+        for index in 0..=HELD_ENDS_MAX {
+            owners.member_ended(ended(&format!("member-{index}"))).await;
+        }
+        let follower = Arc::new(KeptEnds::default());
+        owners.follow_member_ends(follower.clone()).await;
+        let kept = follower.0.lock().unwrap();
+        assert_eq!(kept.len(), HELD_ENDS_MAX);
+        assert_eq!(kept.first(), Some(&ended("member-1")));
+        assert_eq!(
+            kept.last(),
+            Some(&ended(&format!("member-{HELD_ENDS_MAX}")))
+        );
     }
 }

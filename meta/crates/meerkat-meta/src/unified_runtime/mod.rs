@@ -846,6 +846,7 @@ impl UnifiedRuntime {
             mob_events_store.clone(),
             persistent_metadata.clone(),
             mob_runtime.implicit_delegate_retirement_overrides(),
+            mob_runtime.private_owners().clone(),
         );
         // The probe starts at construction while the error hook is installed
         // later (`set_error_hook`), so it holds the late-bound slot and reads
@@ -1008,6 +1009,7 @@ impl UnifiedRuntime {
         idle_retire_overrides: Option<
             crate::mob_handle_runtime::ImplicitDelegateRetirementOverrides,
         >,
+        private_owners: crate::private_owners::PrivateOwners,
     ) -> Option<JoinHandle<()>> {
         let runtime_handle = tokio::runtime::Handle::try_current().ok()?;
         Some(runtime_handle.spawn(run_mob_events_subscription(
@@ -1015,6 +1017,7 @@ impl UnifiedRuntime {
             store,
             persistent_metadata,
             idle_retire_overrides,
+            private_owners,
         )))
     }
 
@@ -4403,6 +4406,7 @@ async fn run_mob_events_subscription(
     store: MobEventsStore,
     persistent_metadata: Arc<dyn PersistentMetadataStore>,
     idle_retire_overrides: Option<crate::mob_handle_runtime::ImplicitDelegateRetirementOverrides>,
+    private_owners: crate::private_owners::PrivateOwners,
 ) {
     let mob_id = handle.mob_id().as_str().to_string();
     let resume_cursor = match persistent_metadata.get_subscription_cursor(&mob_id).await {
@@ -4473,6 +4477,11 @@ async fn run_mob_events_subscription(
         if let Some(overrides) = idle_retire_overrides.as_ref() {
             overrides.observe_mob_event(&mob_id, &event).await;
         }
+        // What follows the end of a member private to a person is done, or
+        // held for the composition's follower, before the cursor moves past
+        // the event: a durable cursor shows the event again after a stop in
+        // between.
+        private_owners.observe_mob_event(&handle, &event).await;
         if let Err(err) = persistent_metadata
             .set_subscription_cursor(&mob_id, envelope.cursor)
             .await

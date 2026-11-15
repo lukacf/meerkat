@@ -1122,6 +1122,116 @@ impl crate::identity_creation::AgentSchedules for MobAgentSchedules {
     }
 }
 
+/// The schedules of a launch, as they follow the end of a member private to
+/// a person ([`crate::private_owners::PrivateMemberEndFollower`]): every
+/// schedule that targets the ended member is deleted, by the schedule's own
+/// lifecycle. A schedule aimed at such a member is that member's: it ends
+/// with it.
+///
+/// A schedule targets the member when it names it in any form a schedule
+/// names a member ([`Self::targets`]), whoever made it: the member itself,
+/// its person on the Console (a deferred send), or a host. A schedule of a
+/// member private to no one is left as it is.
+#[derive(Clone)]
+pub(crate) struct EndedPrivateMemberSchedules {
+    service: ScheduleService,
+}
+
+impl EndedPrivateMemberSchedules {
+    /// How often the deletes of one ended member are tried.
+    const ATTEMPTS: u32 = 3;
+
+    pub(crate) fn new(service: ScheduleService) -> Self {
+        Self { service }
+    }
+
+    /// The form in which `target` names the ended member, when it does: a
+    /// member target of it, a fork helper whose source it is, an identity
+    /// target naming it, a session target naming the session it held at its
+    /// end, or a Console caller's deferred send to it.
+    fn targets(
+        target: &TargetBinding,
+        ended: &crate::private_owners::EndedPrivateMember,
+    ) -> Option<&'static str> {
+        if let Some(send) = crate::console_schedules::ConsoleScheduledSend::of_target(target) {
+            return (send.identity == ended.member
+                || send.identity == crate::member_comms_id::runtime_alias_str(&ended.member))
+            .then_some("console_send");
+        }
+        match target {
+            TargetBinding::Mob(binding) => match binding.as_ref() {
+                MobTargetBinding::Member {
+                    mob_id, member_id, ..
+                } => (*mob_id == ended.mob_id && *member_id == ended.member).then_some("member"),
+                MobTargetBinding::ForkHelper {
+                    mob_id,
+                    source_member_id,
+                    ..
+                } => (*mob_id == ended.mob_id && *source_member_id == ended.member)
+                    .then_some("fork_helper_source"),
+                MobTargetBinding::SpawnHelper { .. } | MobTargetBinding::Flow { .. } => None,
+            },
+            TargetBinding::Identity(binding) => {
+                let names = match parse_mob_member_schedule_identity(binding.identity()) {
+                    Some(named) => named.mob_id == ended.mob_id && named.member == ended.member,
+                    None => binding.identity() == ended.member,
+                };
+                names.then_some("identity")
+            }
+            TargetBinding::Session(session) => (ended.session.is_some()
+                && session_target_session(session) == ended.session)
+                .then_some("session"),
+            TargetBinding::HostRunnable(_) => None,
+        }
+    }
+
+    /// Delete every schedule that targets `ended` and is not deleted. Each
+    /// delete is logged with the schedule's id and the form of its target,
+    /// never with what the schedule sends.
+    async fn delete_targeting(
+        &self,
+        ended: &crate::private_owners::EndedPrivateMember,
+    ) -> Result<(), meerkat::ScheduleDomainError> {
+        for schedule in self.service.list().await? {
+            let Some(names_it_as) = Self::targets(&schedule.target, ended) else {
+                continue;
+            };
+            self.service.delete(&schedule.schedule_id).await?;
+            tracing::info!(
+                mob_id = %ended.mob_id,
+                schedule_id = %schedule.schedule_id,
+                schedule_target = names_it_as,
+                target_member = %ended.member,
+                "a schedule was deleted: the member it targets, private to a person, ended"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::private_owners::PrivateMemberEndFollower for EndedPrivateMemberSchedules {
+    async fn member_ended(&self, ended: &crate::private_owners::EndedPrivateMember) {
+        let mut wait = Duration::from_millis(250);
+        for attempt in 1..=Self::ATTEMPTS {
+            let Err(error) = self.delete_targeting(ended).await else {
+                return;
+            };
+            if attempt == Self::ATTEMPTS {
+                tracing::warn!(
+                    %error,
+                    mob_id = %ended.mob_id,
+                    "the schedules that target an ended member private to a person could not \
+                     all be deleted: the ones left stay as they are"
+                );
+                return;
+            }
+            tokio::time::sleep(wait).await;
+            wait *= 4;
+        }
+    }
+}
+
 /// A schedule aimed at a member private to a person is hidden from every
 /// agent not private to that person (an agent whose turn no member's
 /// session makes is private to no one): its list leaves the schedule out,

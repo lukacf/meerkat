@@ -229,3 +229,97 @@ async fn a_follow_asked_again_after_a_partial_one_answers_as_a_whole_one() {
     }
     assert_eq!(state(&service, &held).await, (Paused, false));
 }
+
+/// A session target that names `session`.
+fn session_target(session: &meerkat_core::types::SessionId) -> TargetBinding {
+    TargetBinding::session(meerkat::SessionTargetBinding::ResumableSession {
+        session_id: session.clone(),
+        action: ScheduledSessionAction::Prompt {
+            prompt: meerkat_core::ContentInput::Text("Check in.".into()),
+            system_prompt: None,
+            render_metadata: None,
+            skill_refs: Vec::new(),
+            additional_instructions: Vec::new(),
+        },
+    })
+}
+
+/// A target that forks a helper named `helper` from the member `source`.
+fn fork_helper_target(source: &str, helper: &str) -> TargetBinding {
+    TargetBinding::Mob(Box::new(MobTargetBinding::ForkHelper {
+        mob_id: MOB.to_owned(),
+        source_member_id: source.to_owned(),
+        member_id: helper.to_owned(),
+        prompt: "Check in.".to_owned(),
+        fork_context: meerkat::ForkContextSpec::default(),
+        options: meerkat::HelperOptionsSpec::default(),
+    }))
+}
+
+/// A target that spawns a helper named `helper`.
+fn spawn_helper_target(helper: &str) -> TargetBinding {
+    TargetBinding::Mob(Box::new(MobTargetBinding::SpawnHelper {
+        mob_id: MOB.to_owned(),
+        member_id: helper.to_owned(),
+        prompt: "Check in.".to_owned(),
+        options: meerkat::HelperOptionsSpec::default(),
+    }))
+}
+
+/// The end of a member private to a person deletes every schedule that
+/// names it, whoever made it and in whichever form: a member target, an
+/// identity target, a session target of the session it held, a fork helper
+/// whose source it is, and a Console caller's deferred send to it. A
+/// schedule that names another member, another session, or only a helper
+/// to be seated under the name, stays as it is; so does everything when the
+/// same end is handed over again.
+#[tokio::test]
+async fn the_end_of_a_private_member_deletes_every_schedule_that_names_it() {
+    use crate::private_owners::{EndedPrivateMember, PrivateMemberEndFollower};
+    use SchedulePhase::{Active, Deleted};
+
+    let service = ScheduleService::new(Arc::new(MemoryScheduleStore::new()));
+    let following = super::EndedPrivateMemberSchedules::new(service.clone());
+    let held = meerkat_core::types::SessionId::new();
+    let other = meerkat_core::types::SessionId::new();
+
+    let mut ended = Vec::new();
+    for (name, target) in [
+        ("member", member_target("side")),
+        ("identity", identity_target("side")),
+        ("session", session_target(&held)),
+        ("fork helper source", fork_helper_target("side", "helper")),
+        ("console send", console_target("side")),
+    ] {
+        ended.push((name, schedule(&service, name, target).await));
+    }
+    let mut kept = Vec::new();
+    for (name, target) in [
+        ("another member", member_target("scout")),
+        ("another identity", identity_target("scout")),
+        ("another session", session_target(&other)),
+        (
+            "another fork helper source",
+            fork_helper_target("scout", "side"),
+        ),
+        ("a helper under the name", spawn_helper_target("side")),
+        ("another console send", console_target("scout")),
+    ] {
+        kept.push((name, schedule(&service, name, target).await));
+    }
+
+    let end = EndedPrivateMember {
+        mob_id: MOB.to_owned(),
+        member: "side".to_owned(),
+        session: Some(held.to_string()),
+    };
+    for pass in ["the end", "the end handed over again"] {
+        following.member_ended(&end).await;
+        for (name, id) in &ended {
+            assert_eq!(state(&service, id).await.0, Deleted, "{pass}: {name}");
+        }
+        for (name, id) in &kept {
+            assert_eq!(state(&service, id).await, (Active, false), "{pass}: {name}");
+        }
+    }
+}

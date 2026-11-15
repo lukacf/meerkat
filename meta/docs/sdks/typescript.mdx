@@ -162,7 +162,7 @@ materializes when it starts; it is sent as `runtime_options.member_restore`:
 ```typescript
 const rt = await Meta.builder()
   .mob("config/mob.toml")
-  .roster(roster)
+  .rosterProvider(roster)
   .memberRestore("on_demand_verified")
   .build();
 ```

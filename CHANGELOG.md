@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.9.15] - 2026-11-15
+
 ### Breaking
 
 - Behaviour-only (not measured by the gate): `meerkat-core`, `rkat`: on Unix
@@ -52632,7 +52634,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.14...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.15...HEAD
+[0.9.15]: https://github.com/lukacf/meerkat/compare/v0.9.14...v0.9.15
 [0.9.14]: https://github.com/lukacf/meerkat/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/lukacf/meerkat/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/lukacf/meerkat/compare/v0.9.11...v0.9.12

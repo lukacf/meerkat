@@ -2660,26 +2660,28 @@ Security, Upgrade and Changed.
   included, and change, pause, resume and delete them. A respawn and a reset
   of a private member are not ends and keep its schedules. Each delete is
   logged with the schedule's id, never with what it sends. A schedule ended
-  in this way is no longer listed and never fires. An agent that names its
-  id is still answered its record and its occurrences, and an update or a
-  second delete of it is accepted and changes nothing that can fire; pausing
-  and resuming it are refused. Once it is deleted, no agent tool gives its
-  id to an agent that is not that person's own. Not covered: schedules left
-  by a private member that ended before the upgrade (its owner can delete
-  them from another private side chat of hers; where a shared member has
-  since taken such a name, other agents may already have been shown them); a
-  private member of a mob that an agent created; a member that a private
-  side chat spawned on a role whose profile declares `durable = true`; a
-  long-term agent private to a person, whose schedules follow the agent's
-  own lifecycle; a respawn of such a member that fails, which leaves its
-  schedules aimed at a name no member holds; a schedule the ending member
-  itself makes in the last moments of its turn, after its end was accepted;
-  and a host that runs Meta on a mob event store of its own, or stops within
-  moments of such an end during its start. Where the schedules of an ended
-  member cannot be deleted, the gateway logs `the schedules that target an
-  ended member private to a person could not all be deleted` and they stay.
-  (By tests and by ten runs on this release's code; 0.9.11 through 0.9.14
-  read from the source.)
+  in this way is no longer listed and never fires. Once a later member holds
+  the name, an agent that names its id is still answered its record and its
+  occurrences. An update of its name, description or labels, and a second
+  delete of it, are accepted; an update of its trigger or its target, a
+  pause and a resume are refused: nothing about it can be made to fire. Once
+  it is deleted, no agent tool gives its id to an agent that is not that
+  person's own. Not covered: schedules left by a private member that ended
+  before the upgrade (its owner can delete them from another private side
+  chat of hers; where a shared member has since taken such a name, other
+  agents may already have been shown them); a private member of a mob that
+  an agent created; a member that a private side chat spawned on a role
+  whose profile declares `durable = true`; a long-term agent private to a
+  person, whose schedules follow the agent's own lifecycle; a respawn of
+  such a member that fails, which leaves its schedules aimed at a name no
+  member holds; a schedule the ending member itself makes in the last
+  moments of its turn, after its end was accepted; and a host that runs Meta
+  on a mob event store of its own, or stops within moments of such an end
+  during its start. Where the schedules of an ended member cannot be
+  deleted, the gateway logs `the schedules that target an ended member
+  private to a person could not all be deleted` and they stay. (By tests and
+  by ten runs on this release's code; 0.9.11 through 0.9.14 read from the
+  source.)
 
 ### Known limitations
 

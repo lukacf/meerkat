@@ -60,6 +60,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -102,6 +103,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -154,6 +156,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -198,6 +201,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -248,6 +252,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -311,6 +316,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = [
         "tests/ephemeral_contract.rs",
@@ -374,6 +380,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = [
         "tests/member_rewind_fork.rs",
@@ -437,6 +444,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = [
         "tests/persistence_compat.rs",
@@ -500,6 +508,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = [
         "tests/planned_identity_fork.rs",
@@ -563,6 +572,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = [
         "tests/regression_lifecycle.rs",
@@ -626,6 +636,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = [
         "tests/session_store_append_only_trybuild.rs",

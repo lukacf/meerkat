@@ -5123,7 +5123,7 @@ change with a tool error naming the candidate launch): queued work and
 changes belong to the authoritative launch. On the
 console, `subscriptions/put` refuses a `member` whose identity is `_system`
 or `__console__` (`-32602`), the identities the console reserves for its own
-events. From 0.9.15, on the console the methods keep an agent private to
+events. From 0.9.15 on the console the methods keep an agent private to
 another person, and its records, from a caller who is not its owner (see
 [Access control](/concepts/access-control#private-side-chats)): a
 subscription, a delivery, a declared subscription and an escalation of such
@@ -5132,8 +5132,8 @@ listing leaves their rows out and fills its page from the other rows, and
 an answer about a source, and a refusal, name no such agent. A
 `subscriptions/put` that names such an agent is answered as one naming a
 member that does not exist (`-32047` `unknown_member`); through 0.9.14 the
-console refused it as naming an unknown agent (`-32001`). From 0.9.15,
-on the console, `declarations/apply` and `sources/put` refuse a
+console refused it as naming an unknown agent (`-32001`). From 0.9.15
+on the console `declarations/apply` and `sources/put` refuse a
 subscription of one member, and a source naming a member, when the member
 is not seated or is private to another person: `-32047` `unknown_member`,
 and nothing is applied or written. A member this gateway does not serve,

@@ -4510,6 +4510,11 @@ them.
   member placed on another host is such a run until that member's turn is
   settled.
 
+- `ask_user`: a call whose asking agent's key,
+  run id and tool-call id together exceed 1,024 bytes is refused as invalid
+  before the question set is held; this can meet a custom model provider
+  that issues very long tool-call ids (read from the source).
+
 ## [0.9.14] - 2026-11-11
 
 ### Highlights

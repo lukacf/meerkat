@@ -2163,6 +2163,16 @@ them.
   owns; a completion cleanup says what became of the session with
   `run_after_runtime_termination_scoped`.
 
+- Rust (`meerkat-core`), announced for a later release: two public enum
+  variants that are unit variants in this release gain fields,
+  `AccountLevelStatement::ListUnavailable` and
+  `ReasoningLevelFacts::Unavailable`, and
+  `ReasoningEffortRefusalReason::is_transient()` moves to the refusal, as
+  `ReasoningEffortRefusal::is_transient()`. Both are breaking changes for
+  Rust embedders: a match on either variant will need `{ .. }`, and
+  `is_transient()` will be called on the refusal, not on its reason. Neither
+  is in this release.
+
 ### Fixed
 
 - `meerkat-rpc`, `meerkat`: a JSON-RPC turn (`turn/start`,
@@ -3998,13 +4008,16 @@ them.
   pack is not signed with (an unsigned pack, or another key) and a pack
   written earlier under another name are packed like every other file in
   the mob directory. On Windows the two files are recognized by their
-  resolved paths only, so a hard link to the key under another name is
-  packed there. Whether Windows recognizes a key or an output typed in
-  another case than it is stored is not established: the standard library
-  resolves a path there by opening it and asking the system for the final
-  path of the handle, and what case that answer has was neither run nor
-  found in the sources at hand. Keep keys and packs outside the mob
-  directory, and check a pack with `rkat mob inspect <pack>`.
+  resolved paths only (the key's as resolved when the command opens it),
+  so the key under any other name in the mob directory is packed there: a
+  hard link, or the key file itself when it has another name while the
+  command reads the directory. Whether Windows recognizes a key or an
+  output typed in another case than it is stored is not established: the
+  standard library resolves a path there by opening it and asking the
+  system for the final path of the handle, and what case that answer has
+  was neither run nor found in the sources at hand. Keep keys and packs
+  outside the mob directory, and check a pack with
+  `rkat mob inspect <pack>`.
 
 - Mob: an explicit resume of a stopped mob (`MobHandle::resume`) rebuilds
   each member from its seat as the host's spawn customizer makes it and
@@ -4073,6 +4086,67 @@ them.
   stopped mob when it starts (the Meta gateways do) always meets this: retire
   the member, then restart the host.
 
+- `meerkat-mob`: a failed `mob/wire` can keep its edge: the call answers an
+  error, yet the member list shows the pair wired. This happens only when an
+  end of the pair was retired or being rebuilt while the wire was in flight;
+  an ordinary failed wire between two seated members reverts its edge.
+  Remedy: unwire the pair and wire it again; a second wire alone restores
+  messaging only until the next start. Affects 0.7.0 through this release,
+  read from the source.
+
+- A schedule a mob member created for itself is kept when the member is
+  retired, and fires into a later member that is given the same name in the
+  same mob: its prompt is delivered to that member as a message. Delete a
+  member's own schedules before retiring it for good. To find the ones left
+  behind, list the schedules (`schedule/list`) and the mob's members
+  (`mob/members`), and delete (`schedule/delete`) each schedule whose
+  `target.identity` begins with `mob_member:` and names a `mob_id` and a
+  `member` that is not among that mob's `agent_identity` values. A member
+  that is only away and will be seated again under the same name keeps its
+  schedule in this way, so delete only for a member that is gone for good.
+  Affects 0.7.12 through this release (the firing and the three calls by a
+  run on this release's code; earlier releases read from the source).
+
+- A message one mob member sends another can be lost when the receiver's
+  host is at its session limit. The sender is answered that the message was
+  accepted; at the receiver the input is tried three times at once, each try
+  fails with "Max sessions reached", and it is then abandoned. Nothing
+  retries it later and the sender is not told. The receiver's host logs one
+  WARN for each such input, with the input's id: from 0.8.49 `input
+  abandoned by generated staged rollback resolution` (with
+  `MaxAttemptsExhausted { attempts: 3 }`), in 0.8.23 through 0.8.48 `input
+  abandoned after generated max stage attempts decision`. The input's status
+  shows it as abandoned after three attempts, and not the reason:
+  `meta/send_status` on a Meta gateway, `session/input_status` on a Core
+  host. Both are asked with the receiver's session and the input's id; the
+  sender's receipt gives neither, the WARN line gives the input's id. The
+  limit is 16 sessions by default on Meta's rpc gateway
+  (`runtime_options.max_sessions`) and 64, not settable, on Meta's Console
+  gateway; a Core host's default is 100,000. Keep it at or above the number
+  of agent sessions (members, helpers and scheduled runs included) that can
+  be awake on the host at once, not only those with a turn running. Affects
+  0.8.23 through this release (by runs on Meta 0.9.14 and on a gateway built
+  from this release's code; earlier releases read from the source).
+
+- `delegate`: a helper is not cancelled or retired when the call that
+  started it ends without the helper's result. That happens at the tool
+  call's time limit (ten minutes by default; `[tools.tool_timeouts]
+  delegate` sets it), where the call answers the generic tool timeout (`Tool
+  'delegate' timed out after 600000ms`), and at a hard interrupt of the
+  calling turn. The helper finishes its turn and then stays seated until its
+  owner's session is archived through a surface (for an owner that is a mob
+  member retired by its mob: until the host's next start); on a Meta gateway
+  the idle sweep retires it once it has been idle for 300 seconds
+  (`implicit_delegate_idle_retire_secs`). A cancel of the calling member's
+  work (the mob's force cancel or cancel-all-work) does not end the call:
+  the member goes on waiting until the tool call's time limit.
+  `spawn_helper` and `fork_helper` do retire a seated helper when their
+  caller is dropped. The 0.8.43 entry names `delegate` among the calls that
+  do so; that was not true of `delegate`: no release retired a delegate
+  helper on a dropped call. Affects every release that has `delegate` (by
+  runs on this release's code; 0.8.29 through 0.9.14 read from the source).
+  The fix is not in this release.
+
 - A turn that asks for a reasoning effort level its session's route refuses
   is answered with the typed refusal and makes no provider request. Through
   the JSON-RPC session runtime a turn is refused before its input is
@@ -4082,10 +4156,11 @@ them.
   A JSON-RPC turn (`turn/start`, `mob/turn_start`) that would change the
   session's model settings beside a provider-neutral level is not queued
   behind unfinished work. On a session that holds a provider-neutral
-  level, anything that changes the model identity needs an idle session;
-  plain turns and true repeats of the level queue. On a session that holds
-  none, only setting a level needs an idle session; everything else queues
-  as on 0.9.14. "Busy" is `-32002` (`SESSION_BUSY`) with `data.kind`
+  level, anything that changes the model identity needs a session with no
+  unfinished work; plain turns and true repeats of the level queue. On a
+  session that holds none, only setting a level needs a session with no
+  unfinished work; everything else queues as on 0.9.14. "Busy" is `-32002`
+  (`SESSION_BUSY`) with `data.kind`
   `reasoning_effort_change_needs_idle_session`, answered at once, with
   nothing stored, while the session has an unfinished turn or queued input
   (a deferred session: while its first turn is still building it):
@@ -4111,19 +4186,38 @@ them.
   client that sets a level once and then varies `provider_params` per turn
   is answered busy whenever another turn runs or is queued. The one `kind`
   names the level also for a request that only changed the model. Wait for
-  the running turn's answer, then send the request again; do not poll. A
-  session with standing work may never be idle for such a request: stop
-  sending, let the queue drain, then make the change. Unfinished work is
-  not only a running turn: an event queued on an idle session counts. A
-  session that received a `session/external_event` while idle (confirmed
-  by a test of this change), or one configured with silent comms intents
-  that holds an unread silent request (by reading the code, not run),
-  counts that input as unfinished work until its next turn and is answered
-  busy. Nothing is running to wait for: send a plain turn first, then the
-  change, or set the level when the session is created; the busy answer's
-  text says so. A later release
-  is planned to queue these turns. (Confirmed by tests of this change, on
-  a session, on a mob member's session and through the JSON-RPC router.)
+  the running turn's answer, then send the request again; do not poll (an
+  autonomous mob member is the exception: see below). A session with
+  standing work may never be idle for such a request: stop sending, let the
+  queue drain, then make the change. Unfinished work is not only a running
+  turn: an event queued on a session that has no turn running counts. A
+  session that received a `session/external_event` while no turn was running
+  (confirmed by a test of this change), or one configured with silent comms
+  intents that holds an unread silent request (by reading the code, not
+  run), counts that input as unfinished work until its next turn and is
+  answered busy. Nothing is running to wait for: send a plain turn first,
+  then the change; or recall the event's input with `session/recall_input`
+  (its `input_id` is in the answer to `session/external_event`), which
+  answers `abandoned` and withdraws the event: the session never receives
+  it; then send the change (seen in a run on a build of this change); or set
+  the level when the session is created. The busy answer's text names the
+  first and the third. On an autonomous mob member (the default runtime
+  mode) the unfinished work can be the member's own: a turn it started for
+  its kickoff or on what its peers sent it, or a peer input queued on it.
+  The caller cannot know when such a member is idle, the standing work is
+  not the caller's to stop, and a plain turn first does not help against the
+  member's own turns: send the request again (in two runs on a build of this
+  change it was taken after 5 s and after 21 s; a member whose peers keep
+  sending may stay busy for longer), or set the level in the member's
+  profile or at its spawn, which does not depend on the member's traffic.
+  `is_active: false` from `session/read` does not promise the change is
+  taken (seen in a run on a build of this change). An autonomous member is
+  addressed by `turn/start` with the member's session id: `mob/turn_start`
+  is refused for it with `-32602` before the rule is reached (seen in a run
+  on a build of this change). A later release is planned to queue these
+  turns. (The rule is confirmed by tests of this change, on a session, on a
+  turn-driven mob member's session and through the JSON-RPC router; the
+  autonomous member's case by the runs named above, not by a test.)
 
   The reason: a level is judged again when its turn starts, and a level
   refused at a turn's start is still a failed start, which ends the
@@ -4135,24 +4229,22 @@ them.
   (`supported_levels_unavailable`: an account's model list that is not
   loaded; confirmed by a test of this change); a request sent without
   waiting for another one, when it reaches admission in the time between
-  that other turn's admission on an idle session and its start (on a
-  stored session that is not live: until that turn's rebuild ends); a
-  model-identity change carried by an input that enters through the
+  that other turn's admission on a session that has no turn running and its
+  start (on a stored session that is not live: until that turn's rebuild
+  ends); a model-identity change carried by an input that enters through the
   runtime without a turn request (a mob's own send, or a member turn an
   in-process Rust host starts with a model, provider, params or binding
   option), which is queued and judged only when it starts; and a turn
-  admitted on an idle session whose
-  model, level or route is changed by something else (a host's
-  reconfiguration of a mob member, a config reload, an account's model
-  list) between its admission and its start (these three read from the
-  source). The
-  refused start costs the session
-  that one turn and nothing it owns: its mobs and their members stay. The
-  runtime retires the session's live runtime (its registration and its
-  MCP adapter) after the refused start, and the next turn builds it again
-  from the stored session; an input queued on that registration behind the
-  refused turn ends with it, without a run, and its sender sends it again.
-  The refusal reason is in the typed details of the answer
+  admitted while no turn was running, on a session whose model, level or
+  route is changed by something else (a host's reconfiguration of a mob
+  member, a config reload, an account's model list) between its admission
+  and its start (these three read from the source). The refused start costs
+  the session that one turn and nothing it owns: its mobs and their members
+  stay. The runtime retires the session's live runtime (its registration and
+  its MCP adapter) after the refused start, and the next turn builds it
+  again from the stored session; an input queued on that registration behind
+  the refused turn ends with it, without a run, and its sender sends it
+  again. The refusal reason is in the typed details of the answer
   (`reasoning_effort_refusal`).
 
 - MCP server: `meerkat_resume` rebuilds the session whenever it names a
@@ -4197,18 +4289,26 @@ them.
   queued behind that plain resume can still be ended by the level resume's
   rebuild. It then answers `-32003` (`session_resume_required`) without
   running; send it again. Second, a plain resume sent at the same moment
-  as a level resume, before either turn has started (on an idle session
-  too), runs or ends with that same answer, depending on which of the two
-  reaches the session first. Third, "wait for the running turn's answer"
-  assumes the running turn is the caller's: when it is not (a peer message
-  on a keep-alive session, a scheduled run), there is no answer to wait
-  for; send the resume again later. The second limit holds, as on
+  as a level resume, before either turn has started (also on a session that
+  has no turn running), runs or ends with that same answer, depending on
+  which of the two reaches the session first. Third, "wait for the running
+  turn's answer" assumes the running turn is the caller's: when it is not (a
+  peer message on a keep-alive session, a scheduled run), there is no answer
+  to wait for; send the resume again later. The second limit holds, as on
   0.9.14, for a plain resume queued beside a resume that rebuilds the
   session for another field (`model`, `max_tokens` and the other build
-  fields): it runs, or it ends with that answer when the rebuild reaches
-  the session first (confirmed by a test of this change for `max_tokens`;
-  the retire before a rebuild is the same code as on 0.9.14, read from the
+  fields): it runs, or it ends with that answer when the rebuild reaches the
+  session first (confirmed by a test of this change for `max_tokens`; the
+  retire before a rebuild is the same code as on 0.9.14, read from the
   source).
+
+- MCP server: a `meerkat_resume` of, or a `meerkat_comms_send` to, the
+  session of a mob member that is not live, when that member's own build is
+  refused for the level in its profile, answers the generic agent error
+  (`-32013`) with a message that contains the refusal's sentence and no
+  `reasoning_effort_refused` data; a level the resume itself carries is
+  judged after the wake and is answered by the typed refusal as everywhere
+  else (read from the source).
 
 - A schedule's session spec is the one surface where the reasoning effort
   level is not accepted in this release. A schedule request that writes

@@ -5047,11 +5047,11 @@ fn machine_terminal_completion_error(
             // - [`realize_runtime_loop_terminal_owned`] calls it after a
             //   successful realization of either `OwnedRuntimeLoopTerminalization`
             //   variant. `Failed` fires `RunFailed`. `Cancelled` fires
-            //   `RunCancelled`, which does NOT assign
-            //   `last_runtime_apply_failure_cause` - but it does set
-            //   `terminal_outcome = Cancelled` unconditionally, so that branch
-            //   lands on the `Cancelled` arm above and never here. That arm
-            //   reads neither field, for exactly this reason.
+            //   `RunCancelled`, which drops
+            //   `last_runtime_apply_failure_cause` (a cancelled run has none)
+            //   and sets `terminal_outcome = Cancelled` unconditionally, so
+            //   that branch lands on the `Cancelled` arm above and never
+            //   here. That arm reads neither field.
             // - [`resolve_process_local_failed_run_waiters`] and
             //   [`resolve_machine_terminal_completion_waiters_under_authority`]
             //   are reached only from failed-run resolution sites that are

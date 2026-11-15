@@ -204,7 +204,12 @@ them.
   of any other failed run is refused as before.
   `RecoverRuntimeCompletionResultCorrelation` now also clears the stored
   cause and its message when it adopts a run's result while the machine
-  holds none. No input, effect, state
+  holds none. The stored cause and its message
+  (`last_runtime_apply_failure_cause`, `last_runtime_apply_failure_message`)
+  now stay with the run result the machine holds open: the arms that start
+  a run (`StartConversationRun`, `StartImmediateAppend`) clear them only
+  when no run's result is held open, where they cleared them always, and
+  `RunCompleted` and `RunCancelled` now clear them. No input, effect, state
   field or outcome value of the machine changes, the machine's version
   stays `1`, and no existing variant's implicit discriminant moves. Every
   enum named here is exhaustive, so a downstream exhaustive match needs the

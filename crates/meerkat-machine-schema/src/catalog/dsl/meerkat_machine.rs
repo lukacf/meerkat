@@ -23027,8 +23027,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
+                // The stored cause is the cause of the run whose result is held
+                // open. While an earlier run's result is still unresolved the
+                // cause stays, so that result is answered on its own cause; it
+                // is dropped when no result is held open.
+                if self.runtime_completion_result_run_id == None
+                    || self.runtime_completion_result_resolved == true
+                {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.extraction_attempts = 0;
                 self.extraction_active = false;
                 self.max_extraction_retries = max_extraction_retries;
@@ -23088,8 +23096,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
+                // The stored cause is the cause of the run whose result is held
+                // open. While an earlier run's result is still unresolved the
+                // cause stays, so that result is answered on its own cause; it
+                // is dropped when no result is held open.
+                if self.runtime_completion_result_run_id == None
+                    || self.runtime_completion_result_resolved == true
+                {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.extraction_attempts = 0;
                 self.extraction_active = false;
                 self.max_extraction_retries = max_extraction_retries;
@@ -23149,8 +23165,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
+                // The stored cause is the cause of the run whose result is held
+                // open. While an earlier run's result is still unresolved the
+                // cause stays, so that result is answered on its own cause; it
+                // is dropped when no result is held open.
+                if self.runtime_completion_result_run_id == None
+                    || self.runtime_completion_result_resolved == true
+                {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.extraction_attempts = 0;
                 self.extraction_active = false;
                 self.max_extraction_retries = max_extraction_retries;
@@ -23210,8 +23234,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
+                // The stored cause is the cause of the run whose result is held
+                // open. While an earlier run's result is still unresolved the
+                // cause stays, so that result is answered on its own cause; it
+                // is dropped when no result is held open.
+                if self.runtime_completion_result_run_id == None
+                    || self.runtime_completion_result_resolved == true
+                {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.extraction_attempts = 0;
                 self.extraction_active = false;
                 self.max_extraction_retries = max_extraction_retries;
@@ -23259,8 +23291,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
+                // The stored cause is the cause of the run whose result is held
+                // open. While an earlier run's result is still unresolved the
+                // cause stays, so that result is answered on its own cause; it
+                // is dropped when no result is held open.
+                if self.runtime_completion_result_run_id == None
+                    || self.runtime_completion_result_resolved == true
+                {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.extraction_attempts = 0;
                 self.extraction_active = false;
                 self.max_extraction_retries = 0;
@@ -23316,8 +23356,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
+                // The stored cause is the cause of the run whose result is held
+                // open. While an earlier run's result is still unresolved the
+                // cause stays, so that result is answered on its own cause; it
+                // is dropped when no result is held open.
+                if self.runtime_completion_result_run_id == None
+                    || self.runtime_completion_result_resolved == true
+                {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.extraction_attempts = 0;
                 self.extraction_active = false;
                 self.max_extraction_retries = 0;
@@ -23372,8 +23420,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
+                // The stored cause is the cause of the run whose result is held
+                // open. While an earlier run's result is still unresolved the
+                // cause stays, so that result is answered on its own cause; it
+                // is dropped when no result is held open.
+                if self.runtime_completion_result_run_id == None
+                    || self.runtime_completion_result_resolved == true
+                {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.extraction_attempts = 0;
                 self.extraction_active = false;
                 self.max_extraction_retries = 0;
@@ -23980,6 +24036,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
                 self.turn_terminal_run_id = Some(run_id);
                 self.runtime_completion_result_run_id = Some(run_id);
+                // This run's result is now the one held open, and this run has
+                // no apply failure cause: the stored cause of an earlier run is
+                // dropped with that run's place.
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 // The same terminal commit stages this run's durable
                 // terminal-completion batch, so the correlation is now an OPEN
                 // obligation until a ResolveRuntimeCompletionResult* arm gives
@@ -24191,6 +24252,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
                 self.runtime_completion_result_run_id = Some(run_id);
+                // This run's result is now the one held open, and this run has
+                // no apply failure cause: the stored cause of an earlier run is
+                // dropped with that run's place.
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 // Open obligation, as in RunCompleted. Cancellation stages the
                 // batch and abandons the same contributors inside ONE terminal
                 // commit and publishes later, so abandoned-plus-pending is the

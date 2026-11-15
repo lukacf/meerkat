@@ -2763,6 +2763,29 @@ Security, Upgrade and Changed.
   either direction: it rests on the version requirements Connect 0.9.14
   published.
 
+- Agent memory: a session's taint is kept in the gateway's memory only.
+  While the gateway process runs, taint is sticky as documented. After a
+  gateway restart it is rebuilt only from the untrusted tool calls and
+  results that are still in the session's transcript, at that agent's next
+  model request: taint whose source a compaction has summarized away, and
+  taint that came from a tainted peer's message, is not restored, and until
+  that next request the session reads as untainted. The gateway also keeps
+  the taint of at most 4,096 sessions per process; once more sessions than
+  that have been tainted since its start, the session tainted earliest reads
+  as untainted again. In each of these cases the session's later
+  LLM-authored memory writes, and a distillation over the session, land
+  `active`, not `quarantined`. Where that matters, set
+  `agent_memory.llm_writes` to `"quarantined"`, which quarantines every
+  LLM-authored write pending review. Read from the source, not run; the
+  memory module is unchanged from 0.9.14.
+
+- The in-process event log (`event_log` with `storage = "memory"`) has no
+  size limit, though the reference and both SDK pages called it bounded: it
+  keeps every event until the gateway stops, and each `meta/query_events`
+  reads all of them, so a long-running gateway's memory grows with its
+  events. Where the events are not queried, declare `event_log` with
+  `storage = "null"`. Read from the source, not run.
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

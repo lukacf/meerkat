@@ -121,6 +121,9 @@
   is a `GatingQuestionAnswer` (a choice, or free text where the question
   allows it); `gatingAnswer` throws without at least one. `gatingPending()`
   does not list question sets.
+- The example in the `MetaBuilder` header comment calls
+  `.rosterProvider(myRoster)`; it called `.roster(myRoster)`, which the
+  TypeScript builder does not have.
 
 ## 0.9.14
 

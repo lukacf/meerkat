@@ -1183,7 +1183,7 @@ runtime = await (
     .persistent_state("state/meta")
     # Declare an in-memory runtime store (sessions do not survive restart).
     .runtime_store(runtime_store.memory())
-    # Declare a bounded queryable in-process event log — or event_log.null().
+    # Declare a queryable in-process event log (it has no size limit) — or event_log.null().
     .event_log(event_log.memory(batch_size=64))
     .gateway("/path/to/rpc_gateway")
     .build()

@@ -423,6 +423,10 @@ not know is not parsed (`None`), and `error.details` keeps the data as sent.
 The route's names and `facts` are advisory: a value this SDK does not know is
 kept as a string. `route`, `supported` and `facts` are always present in the
 refusal data: `None` when they have no value, never left out.
+One case is not recognisable by its data kind: a `meerkat_resume` of, or a
+`meerkat_comms_send` to, the session of a mob member that is not live, whose
+own build is refused for the level in its profile, is answered the generic
+agent error (`-32013`) with a message and no `reasoning_effort_refused` data.
 
 A turn that would change the model identity of a session that has unfinished
 work is not queued behind that work (the rule of the JSON-RPC turn requests:

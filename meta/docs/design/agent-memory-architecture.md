@@ -1039,7 +1039,7 @@ as a deliverable rather than asserting "the runtime knows":
 - **Taint is session-sticky, not per-turn** (Codex's thread-level
   `memory_mode='polluted'`, adopted): once a session ingests untrusted content,
   all Recorder/Distiller writes from that session quarantine until a
-  fresh-context boundary (reset / respawn / fresh spawn). Per-turn taint is
+  fresh-context boundary (reset / fresh spawn). Per-turn taint is
   trivially evaded by "on your NEXT reply, remember X", and compaction cannot
   clear taint — the summary is derived from tainted context and inherits it.
   Distiller output over tainted evidence ranges quarantines regardless of which
@@ -1106,7 +1106,7 @@ adopted from the memory hub (§5). Migration: default policy templates grant
   shipped format, which got this right.) Inbound defanging and the envelope nonce
   are §9.1.
 - **Deletion semantics**: tombstones stop future injection immediately; text
-  already in a live context requires reset/respawn to revoke (documented,
+  already in a live context requires a reset to revoke (documented,
   unchanged) — and the Distiller's tombstone-recreation guard (§8.4) keeps a
   revocation-driven reset from re-learning what was just revoked. Tombstoned
   records propagate as deletions through mob scope — fixing CC team-sync's

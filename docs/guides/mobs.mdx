@@ -90,8 +90,14 @@ that should report back.
 rkat run --tools full "Ask one helper to inspect the test failure, then summarize what it found."
 ```
 
-A delegate helper is ephemeral: it is retired after its one task, and also when
-the calling turn stops waiting for it first.
+A delegate helper is ephemeral: it is retired after its one task. If the
+call that started it ends first (the tool call's time limit, ten minutes by
+default, or a hard interrupt of the calling turn), the call does not retire
+the helper: it finishes its turn and then stays seated, until its owner's
+session is archived through a surface (for an owner that is a mob member
+retired by its mob: until the host's next start). On a Meta gateway the idle
+sweep retires it once it has been idle for
+`implicit_delegate_idle_retire_secs` (300 seconds by default).
 
 Unless its `tooling` supplies a profile, a helper runs on the model and
 provider (and self-hosted server) the calling session runs on when the call
@@ -462,10 +468,16 @@ member's build checks the level against the profile's model and route like
 any session's, and refuses it with the same typed `reasoning_effort_refused`
 data. From 0.9.15, a member built from such a profile holds the level
 (also when the profile came with `mob/spawn`'s `override_profile`): while it has a
-turn running or queued, a JSON-RPC `mob/turn_start` that changes its model,
+turn running or queued, a JSON-RPC request that changes its model,
 provider, provider params, auth binding or level is answered
 `SESSION_BUSY` at once and is not queued (see
 [Model settings on a busy session](/api/rpc#model-settings-on-a-busy-session)).
+The request is `mob/turn_start` for a `turn_driven` member, and
+`turn/start` with the member's session id for an autonomous one
+(`mob/turn_start` is refused for an autonomous member with `-32602`). An
+autonomous member runs turns of its own, so the caller cannot know when
+it is idle: send the request again, or set the level in the profile or
+at the spawn.
 No flow step, kickoff, peer message, member send, scheduled delivery or
 wake is answered busy; the rule is on `turn/start` and `mob/turn_start`.
 A resumed member keeps the level its session recorded. With
@@ -854,7 +866,7 @@ Spawn defaults matter:
 | `entry_custody` (Rust `SpawnMemberSpec` only) | `false`: the member is a worker. `true` (`with_entry_custody(true)`) seats the member of an identity entry through a spawn or a dormant seat: a host's own durable identity, which no worker reconcile spawns or retires (`reconcile` and `ensure_member` refuse a spec with entry custody), no spawn without entry custody takes, and neither the agent lane nor the agent mob tools act on (see [Identity entries](/reference/mob-architecture#identity-entries)) |
 
 Autonomous members run as long-lived peers. `turn_driven` members are useful
-when a host wants explicit dispatch control.
+when a host wants explicit dispatch control: only they take `mob/turn_start`.
 
 A fresh `autonomous_host` member runs exactly one kickoff turn (one model
 request) when it is spawned: on its `initial_message`, or without one on a

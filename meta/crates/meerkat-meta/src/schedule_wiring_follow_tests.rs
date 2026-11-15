@@ -490,3 +490,110 @@ async fn schedules_that_cannot_be_deleted_stay_and_the_warning_names_their_membe
     assert!(warning.contains("target_member=side"), "{warning}");
     assert!(warning.contains("mob_id=follow-mob"), "{warning}");
 }
+
+/// A launch's schedules where the delete of one schedule fails every time
+/// it is asked, and every other delete is the schedule service's own.
+struct OneRefusedDelete {
+    service: ScheduleService,
+    refused: ScheduleId,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl super::EndedMemberSchedules for OneRefusedDelete {
+    async fn listed(
+        &self,
+    ) -> Result<(Vec<meerkat::Schedule>, Vec<String>), meerkat::ScheduleDomainError> {
+        Ok((self.service.list().await?, Vec::new()))
+    }
+
+    async fn delete(&self, schedule_id: &ScheduleId) -> Result<(), meerkat::ScheduleDomainError> {
+        if *schedule_id == self.refused {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(meerkat::ScheduleDomainError::Internal(
+                "the store refuses the write".to_owned(),
+            ));
+        }
+        self.service.delete(schedule_id).await.map(|_| ())
+    }
+}
+
+/// Several schedules target an ended private member, and the delete of the
+/// one listed first fails at every attempt. Every other one is deleted all
+/// the same; the failing one stays as it is, and one warning names the
+/// member they target.
+#[tokio::test]
+async fn a_schedule_whose_delete_fails_keeps_no_other_schedule_of_the_ended_member() {
+    use crate::private_owners::{EndedPrivateMember, PrivateMemberEndFollower};
+
+    let service = ScheduleService::new(Arc::new(MemoryScheduleStore::new()));
+    for name in ["first", "second", "third"] {
+        schedule(&service, name, member_target("side")).await;
+    }
+    let listed: Vec<ScheduleId> = service
+        .list()
+        .await
+        .expect("the schedules are listed")
+        .into_iter()
+        .map(|schedule| schedule.schedule_id)
+        .collect();
+    let (failing, others) = listed.split_first().expect("the first listed schedule");
+    assert_eq!(others.len(), 2, "two other schedules target the member");
+    let refused = Arc::new(OneRefusedDelete {
+        service: service.clone(),
+        refused: failing.clone(),
+        asked: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let following = super::EndedPrivateMemberSchedules::over(refused.clone());
+
+    let log = CapturedLog::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_ansi(false)
+        .finish();
+    // A second registered Dispatch keeps callsite interest from being
+    // cached `never` by threads without a subscriber.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let logged = tracing::subscriber::set_default(subscriber);
+    following
+        .member_ended(&EndedPrivateMember {
+            mob_id: MOB.to_owned(),
+            member: "side".to_owned(),
+            session: None,
+            ended_at: chrono::Utc::now(),
+        })
+        .await;
+    drop(logged);
+
+    for other in others {
+        assert_eq!(
+            state(&service, other).await.0,
+            SchedulePhase::Deleted,
+            "a schedule listed after the failing one is deleted"
+        );
+    }
+    assert_eq!(
+        state(&service, failing).await,
+        (SchedulePhase::Active, false),
+        "the schedule whose delete fails stays as it is"
+    );
+    assert_eq!(
+        refused.asked.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "the failing delete is tried at every attempt"
+    );
+    let log = log.contents();
+    let warnings: Vec<&str> = log
+        .lines()
+        .filter(|line| {
+            line.contains(
+                "the schedules that target an ended member private to a person could not all \
+                 be deleted",
+            )
+        })
+        .collect();
+    assert_eq!(warnings.len(), 1, "one warning: {log}");
+    let warning = warnings.first().copied().unwrap_or_default();
+    assert!(warning.contains("WARN"), "{warning}");
+    assert!(warning.contains("target_member=side"), "{warning}");
+}

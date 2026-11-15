@@ -1604,6 +1604,14 @@ impl MobActor {
             spec.override_profile = entry.effective_profile_override.clone();
             spec.model_override = entry.effective_model_override.clone();
         }
+        // The overrides the request names (a host's freshly composed seat)
+        // stand in for the member's own.
+        if let Some(profile_override) = &request.profile_override {
+            spec.override_profile = profile_override.clone();
+        }
+        if let Some(model_override) = &request.model_override {
+            spec.model_override = model_override.clone();
+        }
         // An auto-compact floor the request names rides the successor's
         // profile override, the carrier a spawn's is: set over the member's
         // own override or its role's profile, or removed again, after which

@@ -5751,8 +5751,9 @@ async fn handle_unified_rpc_json_inner(
                 .await;
             match respawn_result {
                 Ok(scope) => {
-                    // A durable identity is retired and woken onto its same
-                    // session at a new Core generation. Raw-member
+                    // A durable identity's member is replaced by its
+                    // successor on its same session at a new Core
+                    // generation, and woken. Raw-member
                     // respawn remains available only to unregistered/classic
                     // members because it rotates the session. Keep the legacy
                     // warning fields for wire compatibility. A peer-only

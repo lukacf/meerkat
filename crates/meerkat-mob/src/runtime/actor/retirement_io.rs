@@ -973,13 +973,7 @@ impl MobActor {
             async move {
                 let mut results = Vec::new();
                 for anchor in anchors {
-                    let result = provisioner
-                        .abort_member_provision(
-                            &MemberRef::from_bridge_session_id(anchor.session_id.clone()),
-                            &anchor.operation_id,
-                            &anchor.reason,
-                        )
-                        .await;
+                    let result = anchor.settle(&provisioner).await;
                     results.push((anchor, result));
                 }
                 RetirementObservation::PendingAnchorsRetried(results)
@@ -1215,13 +1209,7 @@ impl MobActor {
             "retire-pending-provision-abort",
             RetirementFenceScope::SelfOnly,
             async move {
-                let result = provisioner
-                    .abort_member_provision(
-                        &MemberRef::from_bridge_session_id(anchor.session_id.clone()),
-                        &anchor.operation_id,
-                        &anchor.reason,
-                    )
-                    .await;
+                let result = anchor.settle(&provisioner).await;
                 RetirementObservation::PendingAnchorAborted { anchor, result }
             },
         );

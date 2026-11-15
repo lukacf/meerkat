@@ -36,9 +36,9 @@ entitlement of a particular API organization, ChatGPT workspace, cloud
 deployment, or OAuth account. If `gpt-6-astra` is unavailable to the active
 OpenAI account, explicitly select `gpt-5.5` or set a compatible binding
 `default_model`. `gemini-4-argon` is served only on paid Gemini API tiers; on
-the free tier, select `gemini-3.8-flash` explicitly (`--model
-gemini-3.8-flash`) or keep it as the Gemini default with
-`[models] gemini = "gemini-3.8-flash"` in config.
+the free tier, select `gemini-3.8-flash` or, from 0.9.15,
+`gemini-4-hydrogen` explicitly (`--model gemini-3.8-flash`) or keep one as
+the Gemini default with `[models] gemini = "gemini-3.8-flash"` in config.
 Catalog-default changes alone do not rewrite configured models, binding
 defaults, or the model an existing session recorded (a resumed session keeps
 its recorded model). The CLI has a separate, narrow built-in OAuth repair.
@@ -147,6 +147,7 @@ Use `rkat models` for every supported ID and its current limits.
     |-------|---------|------------|-------------|
     | `gemini-4-carbon` | 1M (shared by input, thinking, and output) | 64K | Google's strongest Gemini 4 reasoning model; paid Gemini API tiers only; thinking levels `low`/`medium`/`high` (default `medium`), no sampling parameters |
     | `gemini-4-argon` | 1M (shared by input, thinking, and output) | 64K | Default Gemini model; paid Gemini API tiers only; thinking levels `low`/`medium`/`high` (default `medium`), no sampling parameters |
+    | `gemini-4-hydrogen` | 1M (shared by input, thinking, and output) | 64K | Google's fast Gemini 4 model, in the catalog from 0.9.15; on the free tier and the paid Gemini API tiers; thinking levels `low`/`medium`/`high` (Google's default for it is `high`) |
     | `gemini-3.8-flash` | 1M | 64K | Recommended Flash model; also available on the free tier |
     | `gemini-3.7-flash` | 1M | 64K | Deprecated upstream; Google serves it with `gemini-3.8-flash` |
     | `gemini-3.6-flash` | 1M | 64K | Supported previous Flash generation |
@@ -387,7 +388,7 @@ rkat run --model gpt-5.5 --reasoning-effort high "Plan the migration"
 | Python and TypeScript SDKs | `reasoning_effort` / `reasoningEffort` on session create, turns and mob member turns |
 | Web SDK | `SessionConfig.reasoningEffort` |
 | Mob profiles | the `reasoning_effort` key of the profile's `provider_params` |
-| Schedules | not on schedules in 0.9.15: a `reasoning_effort` key in a schedule's `create` spec is refused; see [Scheduling](/guides/scheduling#session-targets) |
+| Schedules | not on schedules in 0.9.15: a `reasoning_effort` key written in a schedule's `create` spec (directly or in its `provider_params`) or on its prompt action is refused; see [Scheduling](/guides/scheduling#session-targets) |
 | Rust | `AgentBuildConfig.provider_params.reasoning_effort` |
 
 The setting lives in the session's provider params, so
@@ -504,8 +505,8 @@ model, the provider, the provider params, the auth binding or the level
 itself (setting, changing or clearing it; a level inside `provider_params`
 counts even when it equals the held one), and on a session that holds none
 a turn that sets one. While the session has unfinished work such a turn is
-answered `SESSION_BUSY` (retryable, data kind
-`reasoning_effort_change_needs_idle_session`, the same kind when the
+answered `SESSION_BUSY` (send it again when the session has no unfinished
+work; data kind `reasoning_effort_change_needs_idle_session`, the same kind when the
 request only changed the model) and changes nothing: wait for the running
 turn's answer, then send it again. That answer is not a level refusal.
 Plain turns and turns that repeat the session's level with
@@ -742,10 +743,22 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
 
     Consult `rkat models` for the selected model's effective parameter schema.
     The catalog records the thinking levels each model accepts. A level the
-    selected model refuses, such as `minimal` on `gemini-4-argon`,
-    `gemini-3.8-flash` or `gemini-3.1-pro-preview`, is refused with a typed
-    error before any request is sent (when the agent is built, for build
-    parameters).
+    selected model's catalog row does not list, such as `minimal` on
+    `gemini-4-argon`, `gemini-4-hydrogen`, `gemini-3.8-flash` or
+    `gemini-3.1-pro-preview`, is refused with a typed error before any
+    request is sent (when the agent is built, for build parameters). A
+    request that names no level carries none, so the model thinks at
+    Google's default for it: `medium` on `gemini-4-carbon` and
+    `gemini-4-argon`, `high` on `gemini-4-hydrogen`.
+
+    Google also documents a fourth level, `xhigh`, for `gemini-4-hydrogen`.
+    Meerkat does not send it in 0.9.15: a `reasoning_effort` of `xhigh` on
+    that model is [refused](#reasoning-effort) as `unsupported_level` with
+    `supported` `low`, `medium` and `high`, wherever a level is checked
+    (when the session is created or resumed, on a turn that changes the
+    level or the model, and before a provider request), and the Gemini
+    `provider_tag` has no such value, so a request whose tag names it is
+    rejected when it is read.
   </Tab>
 </Tabs>
 

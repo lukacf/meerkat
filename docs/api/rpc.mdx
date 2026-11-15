@@ -1665,7 +1665,7 @@ the data `{"kind": "reasoning_effort_change_needs_idle_session"}` and
 stores nothing: wait for the running turn's answer, then send it again.
 The cases are in the table under
 [Model settings on a busy session](#model-settings-on-a-busy-session). A
-later release queues it.
+later release is planned to queue it.
 
 Since 0.9.5, `"session_events": false` asks that the turn's events not be
 written as `session/event` notifications. A caller that reads them from a
@@ -4763,7 +4763,7 @@ and `data`, never on the message text.
 | -32602 | Invalid params | Missing or invalid parameters. An input idempotency conflict has `data.code` `INPUT_IDEMPOTENCY_CONFLICT` and names the input the key is bound to in `data.existing_id`; a keyed `mob/member_send` conflict has `data.kind` `input_idempotency_conflict` and `data.delivery_id` |
 | -32603 | Internal error | Server error |
 | -32001 | Session not found | Session ID does not exist |
-| -32002 | Session busy | The session cannot take this request now, for example a `turn/interrupt` while a deferred session is being materialized, a session hosted by another process, or a runtime teardown still in progress. A `turn/start` on a session with a running turn is queued, not refused, with one exception from 0.9.15: `data.kind` `reasoning_effort_change_needs_idle_session` answers a turn that would change the session's model settings beside a provider-neutral reasoning effort level (the cases are under `turn/start`, `reasoning_effort`; the one kind names the level also when the request only changed the model of a session that holds a level), while the session has unfinished work; nothing is stored, and the request is taken once the session is idle. Also a refused `mob/claim_callback_route`, with `data` `{"mob_id", "reason"}`: `claim_token_mismatch` (the token is not the mob's), `not_claimable` (the mob has no claim token), or `held_by_open_connection` (another open connection holds the mob's callback route; once that connection closes, the first claim presenting the token wins) |
+| -32002 | Session busy | The session cannot take this request now, for example a `turn/interrupt` while a deferred session is being materialized, a session hosted by another process, or a runtime teardown still in progress. A `turn/start` on a session with a running turn is queued, not refused, with one exception from 0.9.15: `data.kind` `reasoning_effort_change_needs_idle_session` answers a turn that would change the session's model settings beside a provider-neutral reasoning effort level (the cases are under `turn/start`, `reasoning_effort`; the one kind names the level also when the request only changed the model of a session that holds a level), while the session has unfinished work; nothing is stored, and the request is taken once the session has no unfinished work. Also a refused `mob/claim_callback_route`, with `data` `{"mob_id", "reason"}`: `claim_token_mismatch` (the token is not the mob's), `not_claimable` (the mob has no claim token), or `held_by_open_connection` (another open connection holds the mob's callback route; once that connection closes, the first claim presenting the token wins) |
 | -32003 | Session not running | Session not in running state |
 | -32004 | Duplicate input | The request or input was already admitted; a deduplicated runtime input carries `data.existing_id` |
 | -32005 | Request cancelled | Cancelled before the response was published (see above) |
@@ -4830,8 +4830,8 @@ model list is not loaded): the same request can succeed later with no change.
 Meerkat does not retry a refused level for the caller.
 
 The answer is the same wherever the level is refused, with one exception:
-a schedule's `create` spec refuses the key itself, with the schedule's
-invalid-params answer and no typed refusal data (see
+a schedule's `create` spec and its prompt action refuse the key itself, with
+the schedule's invalid-params answer and no typed refusal data (see
 [Scheduling](/guides/scheduling#session-targets)). A session's level is
 checked when its agent is built: `session/create` answers the refusal (a
 deferred create reports it at its first `turn/start`), and so does the build
@@ -4851,7 +4851,8 @@ when the session has unfinished work (the cases are in the table under
 [Model settings on a busy session](#model-settings-on-a-busy-session)):
 that answer is not a level refusal, it
 carries no `reasoning_effort_refusal`, and the same request is taken once
-the session is idle. The other surfaces answer the same request in their
+the session has no unfinished work. The other surfaces answer the same
+request in their
 own way: REST answers a level on a message for a session it holds live
 with HTTP 500 `session is busy`. The MCP server's `meerkat_resume` that
 names the level while a turn of the session runs is answered the same busy
@@ -4869,7 +4870,9 @@ other requests queued on that session run. When the session is not live at
 the refusal (the level is refused by the session's build), the session's
 runtime registration is retired as after a failed start and the other
 requests queued on that session end without a run (see Known limitations
-in the changelog). What can still be refused at its start: a deferred create's
+in the changelog; a later release is planned to change this). What can
+still be refused at its start: a
+deferred create's
 first turn; a turn on a stored session that is not live whose level cannot
 be judged yet (`supported_levels_unavailable`); a request sent without
 waiting for another one, when it reaches admission in the time between
@@ -4939,7 +4942,15 @@ and on a deferred session while its first turn is still building it.
   A model-identity change carried by such an input, or by a member turn
   an in-process Rust host starts with a model, provider, params or
   binding option, is queued and judged only when its turn starts.
-- A later release queues these turns.
+- Unfinished work is not only a running turn: an event queued on an idle
+  session counts. A session that received a `session/external_event`
+  while idle (confirmed by a test of this change), or one configured with
+  silent comms intents that holds an unread silent request (by reading the
+  code, not run), counts that input as unfinished work until its next
+  turn, and a turn from a busy cell is answered busy there. Nothing is
+  running to wait for: send a plain turn first, then the change, or set
+  the level when the session is created. The busy answer's text says so.
+- A later release is planned to queue these turns.
 
 ### comms/send error data
 

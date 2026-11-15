@@ -128,13 +128,14 @@ or fallback Azure key/endpoint pair the OpenAI environment default.
 
 The catalog defaults are `gpt-6-astra` (OpenAI, and the global default),
 `claude-opus-5-5` (Anthropic) and `gemini-4-argon` (Gemini, on paid Gemini API
-tiers; select `gemini-3.8-flash` on the free tier). Catalog support does not
+tiers; on the free tier select `gemini-3.8-flash` or, from 0.9.15,
+`gemini-4-hydrogen`). Catalog support does not
 guarantee access for an API organization or through Azure, Copilot or custom
 backends, so select an available model explicitly when needed:
 
 ```bash
-rkat run --model gpt-5.5 "Explain async/await"
-rkat run --model claude-sonnet-4-6 "Explain async/await"
+rkat run --model gpt-6-luna "Explain async/await"
+rkat run --model claude-sonnet-5-5 "Explain async/await"
 rkat run --model gemini-3.8-flash "Explain async/await"
 rkat models
 

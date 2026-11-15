@@ -443,6 +443,7 @@ with its refusal first. Wait for the running turn's answer, then send the
 turn again; do not poll. A later release is planned to queue such a turn.
 
 ```python
+running_turn = asyncio.create_task(session.turn("Summarize the report"))  # a turn in flight
 try:
     result = await session.turn("Think harder", reasoning_effort="high")
 except MeerkatError as error:

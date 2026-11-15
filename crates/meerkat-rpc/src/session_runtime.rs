@@ -7806,7 +7806,9 @@ impl SessionRuntime {
     /// (`TurnLevelAdmission::needs_idle_session`) while the session has
     /// an unfinished input. Its data names the reason, so a caller can tell
     /// it from the other busy answers: wait for the running turn's answer,
-    /// then send it again.
+    /// then send it again. The text also names the case with nothing
+    /// running (an event queued on an idle session is an unfinished input)
+    /// and what to do there.
     fn level_change_on_a_busy_session() -> RpcError {
         RpcError {
             code: error::SESSION_BUSY,
@@ -7814,9 +7816,12 @@ impl SessionRuntime {
                       session that holds a reasoning effort level, a turn that changes the \
                       model, the provider, the self-hosted server, the provider params, the \
                       auth binding or the level (sets, changes or clears it; a level inside \
-                      provider_params counts as a change) needs an idle session; so does a \
-                      turn that sets a level on a session that holds none. Send it again \
-                      when the session is idle"
+                      provider_params counts as a change) needs a session with no unfinished \
+                      work; so does a turn that sets a level on a session that holds none. \
+                      Send it again when the session has no unfinished work. An event queued \
+                      on an idle session counts as unfinished work: nothing is running to \
+                      wait for, so send a plain turn first, or set the level when the session \
+                      is created"
                 .to_string(),
             data: Some(serde_json::json!({
                 "kind": "reasoning_effort_change_needs_idle_session"
@@ -43613,6 +43618,129 @@ mod tests {
                 assert_eq!(info.model, model, "{case}");
             }
         }
+    }
+
+    /// A session can be busy with nothing running. `session/external_event`
+    /// queues its event without waking the session: on an idle session the
+    /// event waits for the session's next turn and is an input that has not
+    /// ended until then. The busy rule asks whether the runtime holds such
+    /// an input, so a turn that sets a level is answered that the session
+    /// is busy although no turn runs. A plain turn is taken and takes the
+    /// waiting event with it; after it the same level-setting turn is
+    /// admitted and runs. A pin of what the rule does today, not a design.
+    /// (By reading, not by this row: a peer request with a silent comms
+    /// intent waits the same way on a session configured with such
+    /// intents; a mob member is built with none.)
+    #[tokio::test]
+    async fn a_level_turn_on_an_idle_session_that_holds_an_input_without_a_wake_is_answered_busy() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let client = RecordingHighStatingMockLlmClient::new();
+        let session_client: Arc<dyn LlmClient> = client.clone();
+        runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(session_client),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        spawn_runtime_turn(&runtime, &session_id, "first", None)
+            .await
+            .unwrap()
+            .expect("the first turn runs");
+        let unfinished = || async {
+            runtime
+                .runtime_adapter
+                .list_active_inputs(&session_id)
+                .await
+                .map(|inputs| inputs.len())
+                .unwrap_or(0)
+        };
+        let sets_a_level = || {
+            spawn_runtime_turn(
+                &runtime,
+                &session_id,
+                "sets a level",
+                Some(level_overrides(TurnMetadataOverride::Set(
+                    EffortLevel::High,
+                ))),
+            )
+        };
+
+        // An external event is accepted without a wake: it is queued and
+        // no turn starts.
+        let accepted = runtime
+            .accept_external_event_via_runtime(
+                &session_id,
+                "review.event".to_string(),
+                serde_json::json!({"status": "queued"}),
+                None,
+            )
+            .await
+            .expect("the event is accepted");
+        assert!(
+            matches!(accepted, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+            "{accepted:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let state = runtime.runtime_adapter.runtime_state(&session_id).await;
+        assert_eq!(
+            (unfinished().await, format!("{state:?}").contains("Running")),
+            (1, false),
+            "(inputs that have not ended, a run in progress): the event waits and nothing \
+             runs: {state:?}"
+        );
+
+        // A turn that sets a level is answered busy, with nothing running.
+        let busy = tokio::time::timeout(std::time::Duration::from_secs(30), sets_a_level())
+            .await
+            .expect("the turn is answered")
+            .unwrap()
+            .expect_err("the waiting input counts as unfinished work");
+        assert_eq!(
+            ((busy.code, busy.data.clone()), unfinished().await),
+            (level_change_needs_idle_session(), 1),
+            "((code, data), inputs that have not ended): {busy:?}"
+        );
+        assert_eq!(
+            busy.message,
+            "session is busy: this turn is not queued behind unfinished work. On a session that \
+             holds a reasoning effort level, a turn that changes the model, the provider, the \
+             self-hosted server, the provider params, the auth binding or the level (sets, \
+             changes or clears it; a level inside provider_params counts as a change) needs a \
+             session with no unfinished work; so does a turn that sets a level on a session \
+             that holds none. Send it again when the session has no unfinished work. An event \
+             queued on an idle session counts as unfinished work: nothing is running to wait \
+             for, so send a plain turn first, or set the level when the session is created",
+            "the whole busy text: one term for what the turn needs, and this case named"
+        );
+
+        // A plain turn is taken, and takes the waiting input with it.
+        spawn_runtime_turn(&runtime, &session_id, "plain", None)
+            .await
+            .unwrap()
+            .expect("a plain turn runs");
+        assert_eq!(
+            unfinished().await,
+            0,
+            "the waiting input ended with the plain turn"
+        );
+
+        // Then the same level-setting turn is admitted and runs.
+        tokio::time::timeout(std::time::Duration::from_secs(30), sets_a_level())
+            .await
+            .expect("the turn is answered")
+            .unwrap()
+            .expect("the level-setting turn runs once nothing waits");
     }
 
     /// A deferred create answers its session before anything is judged, so

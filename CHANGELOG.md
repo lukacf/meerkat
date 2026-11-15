@@ -50,6 +50,20 @@ them.
   `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
   read the binding file. See Security and the Upgrade notes.
 
+- Behaviour-only (not measured by the gate): `meerkat-schedule` and the
+  doors that take a schedule request, for session and identity targets: a
+  schedule create or update that writes `reasoning_effort` directly in a
+  session target's `create` spec or on the prompt action of a session or
+  identity target is refused (invalid params on JSON-RPC, HTTP 400 on REST,
+  an invalid-arguments error from the schedule tools) and nothing is stored.
+  0.9.14 read the member as an unknown one and dropped it, so such a request
+  was accepted and its schedule ran without a level. The refusal is given
+  when the request is read (`SessionTargetBinding`'s and
+  `ScheduledSessionAction`'s `Deserialize`); other unknown members are still
+  dropped, and the new `meerkat_schedule::direct_reasoning_effort_refusal`
+  tells a door whether a failed read was this refusal. A mob target does not
+  refuse the member yet. See Known limitations.
+
 - Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
   `meerkat-machine-kernels`: the schedule lifecycle machine gains a state
   field and two inputs, and its public types follow.
@@ -326,9 +340,13 @@ them.
   mob profile sent to `mob/create`, `mob/spawn`'s `override_profile`, a
   `mob/turn_start` request, a REST `POST /sessions` body, and a profile
   or definition an agent writes with the mob tools; the key never reached
-  a provider (`mob/create`: by a run on the published 0.9.14 binary and by
-  reading its source; the other four: by reading its source; the CLI's
-  mob verbs: not determined). A client that sent the key there by mistake
+  a provider (by a run on the published 0.9.14 binaries for `mob/create`,
+  `mob/spawn`'s `override_profile`, `mob/turn_start`, REST `POST /sessions`
+  and the `mob_create` tool; the agents' other mob tools: not run, by
+  reading the source; the CLI's mob verbs: not determined; a Meta 0.9.14
+  gateway refuses a `mob.toml` profile with the key when it starts, so
+  Meta definition files are not a sixth place). A client that sent the key
+  there by mistake
   now sets a level: a value that is not a level is refused when the
   request is read, a level the model's route does not accept is refused
   with the typed `reasoning_effort_refused` data, and a level the route
@@ -352,7 +370,13 @@ them.
   A mob already stored by 0.9.14 keeps no level: only a definition or
   request sent again sets one. Before upgrading, look for the key in
   those five places; remove it, or keep it on purpose and accept the
-  level and the busy rule for those members (see the upgrade guide). On
+  level and the busy rule for those members (see the upgrade guide).
+  Nothing a 0.9.14 server keeps shows the key for the first four: it was
+  dropped when the request was read, so no stored mob, session, history
+  or log holds it. Search what sends those requests: your client's code,
+  your mob definition files and the SDK calls that pass `provider_params`.
+  For the fifth, read the transcripts of agents that have mob tools: the
+  tool call and its arguments are in the calling agent's history. On
   `session/create`, `turn/start` and the MCP tools, 0.9.14 refused the
   key as an unknown field.
 
@@ -631,6 +655,25 @@ them.
   afterwards. A request that names no floor keeps what the member builds
   with. Additive: `MemberRespawn` is non-exhaustive.
 
+- Mob: `MemberRespawn::with_profile_override`,
+  `MemberRespawn::with_model_override` and
+  `MemberRespawn::with_build_inputs_of` seat a member's same-session
+  successor (`MobHandle::respawn_member`) with a host's freshly composed
+  seat: the profile override and the model override the successor
+  carries (`None` seats it with none, so it follows its role's profile and
+  model), and the build inputs a lowered `SpawnMemberSpec` names (its
+  context, additional instructions, system prompt override, budget limits,
+  tool access policy, application tool policy, auth binding and web search
+  override), which the successor's builds on the kept session apply. The
+  rotation's record holds them, so a restarted mob finishes the same
+  successor. A request that names none of them keeps the member's own
+  overrides (under its own role) and what its session's builds recorded,
+  as before. The two override setters are named together: a seat holds
+  its profile override with its model override set on it, so a request
+  that names only one of them seats what the other still says (naming
+  "no model override" alone leaves the earlier model in the kept profile
+  override). Additive: `MemberRespawn` is non-exhaustive.
+
 - Mob: a store-owned identity's row records a label restamp its seat is
   owed (`CreatedIdentityRecord::label_restamp_owed`), and
   `IdentityRecordCensus::label_restamps_owed` counts the rows that do; so
@@ -640,7 +683,7 @@ them.
   update's commit writes it, in the update's own transaction, when a
   member holds the identity and its last seat row carries other labels
   than the updated row; the row lets it go once a seat row carries the
-  row's labels (the update's restamp, a retry's, a runtime-mode or role
+  row's labels (a runtime-mode or role
   restamp, a respawn with the row's labels, a rotation, a seat), and an
   archive or a removal drops it. A row that owes none carries no such key
   and is byte for byte what 0.9.14 writes. See Changed for what reads it,
@@ -1409,6 +1452,17 @@ them.
   session's level (`turn/start`, `mob/turn_start`) goes through
   `resolve_session_provider_params`, the rule it wraps.
 
+- `meerkat-models`: Gemini 4 Hydrogen (`gemini-4-hydrogen`), Google's fast
+  Gemini 4 model, served on the free tier and the paid Gemini API tiers, is
+  a recommended catalog model with the limits and timeouts of Gemini 4 Argon
+  (a 1,048,576-token context window, 64K output, a 900 s call timeout and
+  stream-inactivity window) and the thinking levels `low`, `medium` and
+  `high` (a request that names none gets Google's default for the model,
+  `high`), while the `xhigh` level Google also documents for it is not sent
+  in this release (a `reasoning_effort` of `xhigh` is refused as
+  `unsupported_level`, and the Gemini `provider_tag` has no such value), and
+  the Gemini default model stays `gemini-4-argon`.
+
 ### Changed
 
 - Provider error text (see Security): in the errors of the OpenAI
@@ -1459,56 +1513,58 @@ them.
   document" in `docs/cli/configuration.mdx`.
 
 - Mob: a label update of a store-owned identity
-  (`update_store_owned_identity`) seats the row's labels at once: its
-  seated member is restamped on its own session at the next generation
-  (the same-session respawn a runtime-mode change makes, with
-  `MemberRespawn::with_labels`), and the update answers
-  `DeclaredEntryOutcome::Restamped`. What decides the restamp is the
-  comparison, in the commit of any update of a seated store-owned
-  identity, of its last seat row's labels with the updated row's (the
-  commit records a difference as an owed restamp, see below), not the
-  update's own label change: an update that moves no label restamps a seat that
-  carries other labels than the row, so a seat an earlier release left
-  stale is corrected by the identity's next update, and a label a
-  host-written spawn seated outside the row is dropped by it (for a member
-  a same-session successor can serve; see below). From 0.9.9 through
-  0.9.14 a label
-  update kept the member with the labels it was seated with until its host
-  respawned it (`IdentityRecordCensus::seats_stale` counted the seat).
-  With the label rule above a build must carry exactly its seat's labels,
-  and what decides on a member's labels reads its seat, so the seat
-  follows its row at the update, not at a later respawn. The restamp keeps
-  the member: the same identity entry, session and conversation, its edges
-  and its comms key; nothing is built or woken (a live idle member is
-  released, and its next delivery wakes it), no kickoff runs again, and
-  its next build resumes its session. A member that holds work is not
-  interrupted: the update commits and answers
-  `DeclaredEntryOutcome::Deferred`. A label update of a busy agent is
-  recorded in its row, and the mob's roster reads the row's labels
-  (`get_member`, the member lists) from the step that commits the row,
-  whatever the member step then answers and whether or not the update's
-  caller is still there. The running session takes them at its next build
-  (a key the row dropped stays in a resumed session's own peer metadata,
-  as at every resume). Nothing else of the member moves: the same
-  generation, fence and session, and no seat row is written. The same
-  holds when the member step fails (`Failed`), and for a member a
-  same-session successor cannot serve (a placed member, a member wired to
-  a placed member, a member on a session service that keeps no durable
-  sessions), whose update answers `Kept` as before. Such a member is not
-  left exactly as it was: its release is tried before the respawn that is
-  then refused
-  (in the three cases named it releases nothing; a member whose session
-  cannot be kept, lost or archived say, is released and then kept), and
-  its restamp stays owed. The roster is not the
-  journal: the member's last seat row keeps the labels it was seated with
-  until its restamp, and so do the readers of that row, the binding
-  journal's labels and `seats_stale`. The restamp stays owed, and the row
-  records it (`CreatedIdentityRecord::label_restamp_owed`, see Added). A
-  retry of the same update (it replays) or the identity's next update
-  carries the restamp out once the member is idle; a retry while the
-  member still holds work restamps nothing and leaves it owed. A respawn
-  with the row's labels, a rotation and a reset settle it too, as does a
-  runtime-mode or role restamp of the same update. While the restamp is
+  (`update_store_owned_identity`) keeps its seated member: no successor is
+  seated for a label, and the update of an idle member answers
+  `DeclaredEntryOutcome::Kept`. The member keeps its generation, fence,
+  session, conversation and edges, and with them whatever is bound to its
+  generation. From 0.9.9 through 0.9.14 a label update kept the member
+  too, with the labels it was seated with on its roster entry and at its
+  builds until its host respawned it (`IdentityRecordCensus::seats_stale`
+  counted the seat). Now the mob's roster reads the row's labels
+  (`get_member`, the member lists, the member filter by label) from the
+  step that commits the row, whether or not the update's caller is still
+  there, and the member's next build takes them: an idle live member is
+  released by the update (it stays seated, and its next delivery wakes
+  it), so what it was built with serves nothing more. A member that holds
+  work is not interrupted: the update commits and answers
+  `DeclaredEntryOutcome::Deferred`, and a retry of the update releases the
+  member once it is idle (going idle builds nothing: until it is released
+  it runs on what it was built with). A member the release leaves live
+  answers `Kept` and stays on what it was built with: a placed member
+  and a member wired to a placed member, which a release does not serve,
+  and a member on a session service that keeps no durable sessions, where
+  a release releases nothing. A Broken member alone is still seated again by
+  the update (`Restamped`): its build was refused for good, it serves
+  nothing and holds no live build a release could let go, and only its
+  next incarnation is built again. That holds for every Broken member
+  whose row records the owed restamp, whatever broke it and whichever
+  field the update moves. A build carries every label of the row (a key
+  the row dropped stays in a resumed session's own peer metadata, as at
+  every resume). No seat row is written. The roster is not the journal:
+  the member's last seat row keeps the labels it was seated with until
+  its next seat row, and so do the readers of that row, the binding
+  journal's labels and `seats_stale`. The row records that restamp as owed
+  (`CreatedIdentityRecord::label_restamp_owed`, see Added): the commit of
+  any update of a seated store-owned identity writes it when the member's
+  last seat row carries other labels than the updated row, whichever
+  field the update moved. The seat row is no measure of what a live
+  member was built with, so the row lets the record go once a seat row
+  carries the row's labels and no build of the member can predate them:
+  after a new seat row, or after an update or a retry whose member step
+  was done (it released the member), never after one that was deferred
+  and never while a member the release left live still runs.
+  An update that returns the row to the labels of the member's seat row
+  (a label added and removed again) therefore releases an idle member
+  and then lets the record go, and keeps it for a busy member until a
+  retry released it. No update seats a member for its labels, and
+  neither does a retry of one: while the restamp is owed, each of them
+  releases the idle member again, which costs a build at its next
+  delivery and nothing else. The member's next seat row settles the owed
+  restamp, whatever writes it: a respawn (with the row's labels,
+  `MemberRespawn::with_labels`, the host's chosen step for a seat its row
+  moved past), a runtime-mode or role restamp, a rotation or a reset. A
+  runtime-mode change and a profile move still seat the member's successor
+  on its own session, once it is idle, as before. While the restamp is
   owed, a start seats the row's labels on the member's roster entry (it
   reads the rows anyway, and builds, wakes and writes nothing), and a
   build of the member is compared with the row's labels: a label update
@@ -1524,8 +1580,9 @@ them.
   label it carries at a start and is compared with its own labels at a
   build, as before this release: a label a host seated outside the row is
   kept, or refused by the label rule, never dropped by a start or a
-  build. It goes at the identity's next update, which makes an idle
-  member's seat equal its row, as before. A host's own declaration of a
+  build. The identity's next update takes it off the roster entry and
+  records the owed restamp, and the member's next seat row drops it. A
+  host's own declaration of a
   store-owned identity (`apply_declared_roster` with created custody)
   restamps no label, declared or not: a label reaches a store-owned seat
   through the identity's row. The label rule is unchanged: a label the
@@ -1534,7 +1591,7 @@ them.
   identity's label change is unchanged: its member is kept, and its host
   labels its builds (the declared apply stores no labels). See Upgrade
   notes for seats an earlier release left with other labels than their
-  row.
+  row, and for a rollback.
 
 - Mob: the labels a store-owned member's build carries are compared with
   its seat's after the host's spawn customizer
@@ -1775,6 +1832,41 @@ them.
 
 ### Fixed
 
+- `meerkat-rpc`, `meerkat`: a JSON-RPC turn (`turn/start`,
+  `mob/turn_start`) that names the provider-neutral reasoning effort level
+  is answered for that level when it arrives, in two cases where it was
+  not. Sent while another turn of the session runs, it waited for that
+  turn's end and was then answered `-32600` "the session runtime is
+  destroyed and does not admit this request", with no typed data, whether
+  the route refuses the level or takes it, and so was a model change on a
+  session created with the level; the running turn, the requests behind it
+  and the session were not affected. Now a level the route refuses is
+  refused with the typed refusal (`-32602`, `reasoning_effort_refused`)
+  while that turn runs, and a request the route takes is answered `-32002`
+  (`SESSION_BUSY`: send it again when the session has no unfinished work)
+  with the data
+  `{"kind": "reasoning_effort_change_needs_idle_session"}` at once and
+  stores nothing: wait for the running turn's answer, then send it again
+  (the cases are under Known limitations). On a stored session that is not
+  live (after a restart) a refused level is refused before the turn's
+  input is stored, as on a live session, also for a turn that names no
+  level on a session that holds one: nothing is stored for the turn, and
+  the session's runtime registration and what is queued on it stay.
+  Before, that refusal came at the turn's start, which retired the
+  session's live runtime. A level whose source cannot be read yet
+  (`supported_levels_unavailable`) is still judged at the start of such a
+  turn. In the code of this release before this fix, queued requests that
+  changed a session's level or model could end other work queued on that
+  session; such requests are no longer queued, and no client sequence
+  reaches that any more; one race between two requests sent without
+  waiting for each other remains; a later release is planned to close it
+  (see Known
+  limitations). A session that holds no
+  provider-neutral level queues its turns as in 0.9.14, a model change and
+  a provider's own effort parameter (`provider_tag`) included. Measured by
+  tests of this change, with the level named in `reasoning_effort` and
+  inside `provider_params`.
+
 - `meerkat-runtime`, `meerkat-rpc`, `meerkat-rest`, `meerkat-mcp-server`:
   ending one queued input of a session no longer ends the session's other
   work. A request cancelled while its turn was queued behind a running turn
@@ -1836,39 +1928,6 @@ them.
   names); what is stored for a refused input is the existing
   never-executed record and the turn's typed error. The reasoning effort
   controls are new in this release, so no released version had this.
-
-- `meerkat-rpc`, `meerkat`: a JSON-RPC turn (`turn/start`,
-  `mob/turn_start`) that names the provider-neutral reasoning effort level
-  is answered for that level when it arrives, in two cases where it was
-  not. Sent while another turn of the session runs, it waited for that
-  turn's end and was then answered `-32600` "the session runtime is
-  destroyed and does not admit this request", with no typed data, whether
-  the route refuses the level or takes it, and so was a model change on a
-  session created with the level; the running turn, the requests behind it
-  and the session were not affected. Now a level the route refuses is
-  refused with the typed refusal (`-32602`, `reasoning_effort_refused`)
-  while that turn runs, and a request the route takes is answered `-32002`
-  (`SESSION_BUSY`, retryable) with the data
-  `{"kind": "reasoning_effort_change_needs_idle_session"}` at once and
-  stores nothing: wait for the running turn's answer, then send it again
-  (the cases are under Known limitations). On a stored session that is not
-  live (after a restart) a refused level is refused before the turn's
-  input is stored, as on a live session, also for a turn that names no
-  level on a session that holds one: nothing is stored for the turn, and
-  the session's runtime registration and what is queued on it stay.
-  Before, that refusal came at the turn's start, which retired the
-  session's live runtime. A level whose source cannot be read yet
-  (`supported_levels_unavailable`) is still judged at the start of such a
-  turn. In the code of this release before this fix, queued requests that
-  changed a session's level or model could end other work queued on that
-  session; such requests are no longer queued, and no client sequence
-  reaches that any more; one race between two requests sent without
-  waiting for each other remains until a later release (see Known
-  limitations). A session that holds no
-  provider-neutral level queues its turns as in 0.9.14, a model change and
-  a provider's own effort parameter (`provider_tag`) included. Measured by
-  tests of this change, with the level named in `reasoning_effort` and
-  inside `provider_params`.
 
 - `meerkat-rpc`, `meerkat-rest`, `meerkat`: a session that was cleaned up
   without being archived no longer loses the agents it created to the
@@ -1963,6 +2022,32 @@ them.
   event are unchanged, and no field is new: a stored turn error without the
   three fields still reads, and an earlier release reads one that has them.
   Affects 0.8.0 through 0.9.14.
+
+- `meerkat-mob`: cancelling a member spawn that resumes an existing session
+  no longer archives that session. A spawn in resume mode (JSON-RPC
+  `mob/spawn` with `launch_mode: {"mode": "resume", ...}` and the Python and
+  TypeScript SDK calls over it; for Rust embedders
+  `SpawnMemberSpec::with_resume_bridge_session_id`, also through
+  `ensure_member` of an absent member) names a session that already exists.
+  When the mob was stopped, completed, reset, shut down or destroyed (or,
+  for Rust embedders, all its members were retired with
+  `MobHandle::retire_all`) in the short interval after that spawn had
+  attached the session and before the mob had taken the spawn's result, the
+  cancelled spawn was cleaned up as if it had created the session: the
+  existing session was archived, and the mobs it owned were removed at the
+  next start of the host. A caller that had gone away did not withdraw the
+  spawn, so a stop that followed a disconnected or timed-out request could
+  meet it. The same happened when the mob refused the attached member for a
+  missing capability (an autonomous member whose session offers no
+  interaction event injector). A cancelled or refused spawn now releases a
+  session it resumed, as a failed resume spawn already did: the session
+  stays as it was and a later spawn can resume it. The fix is no wider than
+  that. A spawn that created its session is cleaned up as before. A retire
+  is unchanged in both of its cases: a retire that cancels the pending
+  spawn of a member the mob already holds ends that spawn's session, as
+  before, whether the spawn created or resumed it; a retire of an identity
+  the mob does not hold yet leaves its pending spawn alone, as before.
+  Affects 0.7.29 through 0.9.14; 0.6.0 through 0.7.28 were not checked.
 
 - `meerkat-core`: a configuration write that failed at the write itself was
   reported as saved and replaced the document with an empty file. When the
@@ -2744,8 +2829,9 @@ them.
   `MemberBuildPreparer::prepare_store_owned_seat` or a spawn customizer
   that sets labels: respawn the member with its row's labels
   (`MobHandle::respawn_member` with `MemberRespawn::new().with_labels(..)`),
-  or update the identity while its member is idle (any update then makes
-  the seat equal the row). A host that answers such a member's seat from
+  or update the identity (any update then records the restamp its seat
+  row is owed, and the member's builds are compared with the row's labels
+  from then on). A host that answers such a member's seat from
   its row is otherwise refused the member's build, naming the label keys
   that differ.
 
@@ -2755,10 +2841,17 @@ them.
   Before a rollback, read `MobHandle::identity_record_census()` (or, with
   no running mob, `MobStorage::read_identity_record_rows` or
   `MobStorage::identity_record_rows`) and settle
-  every owed restamp while `label_restamps_owed` is above zero: retry the
-  update, or update the identity again, while its agent is idle, or
-  respawn its member with the row's labels (`MobHandle::respawn_member`
-  with `MemberRespawn::new().with_labels(..)`). A member no same-session
+  every owed restamp while `label_restamps_owed` is above zero: respawn
+  its member with the row's labels (`MobHandle::respawn_member`
+  with `MemberRespawn::new().with_labels(..)`), or move its profile or
+  its runtime mode. A label update never seats the member again, so
+  every seated identity whose labels were updated owes the restamp until
+  its next seat row, and a retry of the update or a later update of other
+  fields does not settle it. The respawn seats the member again on the
+  same session and cancels a turn in flight, and an agent that created
+  mobs with its own tools then no longer lists or manages them: have it
+  destroy such a mob first, or leave that identity unsettled (it is out
+  of service while rolled back, and nothing of it is lost). A member no same-session
   successor can serve (placed, wired to a placed member, or on a session
   service that keeps no durable sessions) is settled by none of these:
   rotate it (`MobHandle::rotate_member`), or archive or remove its
@@ -2959,6 +3052,14 @@ them.
   active, and `rkat run --skill <id>` loads the built-in, not the copy,
   without a message. The copy can be removed.
 
+- A configuration or a mob definition that defines `gemini-4-hydrogen`
+  itself (`[models.gemini-4-hydrogen]`) must drop that entry when upgrading:
+  the catalog now has the id, and a second definition is refused with
+  "model id '<id>' must be unique across built-in, custom, and self-hosted
+  entries", a configuration by configuration validation and a mob definition
+  when one of its members is built (the mob definition case was read from
+  the source, not run). See Added.
+
 ### Known limitations
 
 - An input queued behind a turn that fails at its start is not run. The
@@ -3106,9 +3207,17 @@ them.
   names the level also for a request that only changed the model. Wait for
   the running turn's answer, then send the request again; do not poll. A
   session with standing work may never be idle for such a request: stop
-  sending, let the queue drain, then make the change. A later release
-  queues these turns. (Confirmed by tests of this change, on a session, on
-  a mob member's session and through the JSON-RPC router.)
+  sending, let the queue drain, then make the change. Unfinished work is
+  not only a running turn: an event queued on an idle session counts. A
+  session that received a `session/external_event` while idle (confirmed
+  by a test of this change), or one configured with silent comms intents
+  that holds an unread silent request (by reading the code, not run),
+  counts that input as unfinished work until its next turn and is answered
+  busy. Nothing is running to wait for: send a plain turn first, then the
+  change, or set the level when the session is created; the busy answer's
+  text says so. A later release
+  is planned to queue these turns. (Confirmed by tests of this change, on
+  a session, on a mob member's session and through the JSON-RPC router.)
 
   The reason: a level is judged again when its turn starts, and the rule
   keeps a level change from being refused there behind other work. A turn
@@ -3200,11 +3309,15 @@ them.
   source).
 
 - A schedule's session spec is the one surface where the reasoning effort
-  level is not accepted in this release. A schedule whose `create` spec
-  carries `provider_params.reasoning_effort` is refused when it is created
+  level is not accepted in this release. A schedule request that writes
+  `reasoning_effort` in its `create` spec (directly or in `provider_params`)
+  or on the prompt action of a session or identity target is refused when
+  the schedule is created
   or updated (invalid params on JSON-RPC, HTTP 400 on REST, an
   invalid-arguments error from the MCP server's and an agent's schedule
-  tools), and nothing is stored. A provider's own effort under
+  tools), and nothing is stored. A `reasoning_effort` member written on a
+  mob target (a member send, a helper) is still accepted and ignored: the
+  delivery runs without a level. A provider's own effort under
   `provider_tag` is accepted there as before. The level is planned to
   return on schedules in a later release, together with a way back for
   stores on a rollback.

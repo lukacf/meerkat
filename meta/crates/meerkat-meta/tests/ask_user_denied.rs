@@ -5,6 +5,14 @@
 //! denied tool's call is (the tool is not allowed by policy), and the
 //! member's run goes on. A member without a deny is offered the tool. Real
 //! members, built by the member path through the agent factory.
+//!
+//! The deny works by name, and the stock name is one a deny list may name
+//! on every member build. A member whose host supplies its own tool named
+//! `ask_user` among the build's external tools carries no stock tool; a
+//! profile that denies the name still builds it, and the deny hides and
+//! refuses the host's own tool as it does every tool. A name in
+//! `tools.deny` that is in no tool vocabulary of the build and is no stock
+//! tool's name (a typo) refuses the member's build.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::future::Future;
@@ -204,6 +212,43 @@ impl LlmClient for CallingModel {
     }
 }
 
+/// What the host's own tool named `ask_user` answers a call.
+const HOSTS_OWN_ANSWER: &str = "answered by the host's own tool";
+
+/// A host's own tool named `ask_user`, as a host puts one among a member
+/// build's external tools. It records every call that reaches it.
+struct HostsOwnAskUser(Arc<Mutex<Vec<String>>>);
+
+#[async_trait::async_trait]
+impl meerkat_core::AgentToolDispatcher for HostsOwnAskUser {
+    fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
+        vec![Arc::new(meerkat_core::types::ToolDef::new(
+            "ask_user",
+            "The host's own tool of this name.",
+            json!({"type": "object", "properties": {}}),
+        ))]
+        .into()
+    }
+
+    async fn dispatch(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        self.0.lock().unwrap().push(call.name.to_string());
+        Ok(meerkat_core::ToolDispatchOutcome::sync_result(
+            meerkat_core::types::ToolResult::new(
+                call.id.to_string(),
+                HOSTS_OWN_ANSWER.to_string(),
+                false,
+            ),
+        ))
+    }
+
+    fn capabilities(&self) -> meerkat_core::agent::DispatcherCapabilities {
+        meerkat_core::agent::DispatcherCapabilities::default()
+    }
+}
+
 /// How a row's one member is set up.
 #[derive(Clone, Copy)]
 struct Setup {
@@ -211,6 +256,12 @@ struct Setup {
     mob: &'static str,
     /// The profile's `tools.deny` names `ask_user`.
     profile_denies: bool,
+    /// The profile's `tools.deny` names `ask_usr`, a name no tool of any
+    /// build has.
+    profile_mistypes: bool,
+    /// The host supplies its own tool named `ask_user` among the member
+    /// build's external tools.
+    hosts_own_tool: bool,
     /// The profile configures the listing MCP server, which maps no tool
     /// names.
     mcp_server: bool,
@@ -226,11 +277,21 @@ struct Observed {
     ask_user: (bool, String),
     /// The result of a call its model made to a tool that does not exist.
     no_such_tool: (bool, String),
+    /// The calls that reached the host's own tool named `ask_user`.
+    own_tool_calls: Vec<String>,
+}
+
+/// [`try_observe`] of a member that builds.
+async fn observe(setup: Setup) -> Observed {
+    try_observe(setup)
+        .await
+        .unwrap_or_else(|refused| panic!("the member builds, but its build was refused: {refused}"))
 }
 
 /// Build the mob of `setup`, spawn its one member, and observe what its
-/// model is offered and what its two calls are answered.
-async fn observe(setup: Setup) -> Observed {
+/// model is offered and what its two calls are answered. A refused build
+/// answers its error, after checking that it ran nothing.
+async fn try_observe(setup: Setup) -> Result<Observed, String> {
     let dir = tempfile::tempdir().unwrap();
     let mut config = format!(
         r#"
@@ -249,6 +310,9 @@ comms = true
     );
     if setup.profile_denies {
         config.push_str("deny = [\"ask_user\"]\n");
+    }
+    if setup.profile_mistypes {
+        config.push_str("deny = [\"ask_usr\"]\n");
     }
     if setup.mcp_server {
         let server = listing_server(dir.path());
@@ -289,9 +353,18 @@ args = [{server:?}]
             ["ask_user"].into_iter().collect(),
         ));
     }
-    Box::pin(runtime.handle().spawn_spec(spawn))
-        .await
-        .expect("the member builds");
+    let own_tool_calls = Arc::new(Mutex::new(Vec::new()));
+    if setup.hosts_own_tool {
+        spawn.external_tools = Some(Arc::new(HostsOwnAskUser(Arc::clone(&own_tool_calls))));
+    }
+    if let Err(refused) = Box::pin(runtime.handle().spawn_spec(spawn)).await {
+        assert!(
+            model.requests.lock().unwrap().is_empty(),
+            "a refused build runs no turn"
+        );
+        let _ = runtime.handle().shutdown().await;
+        return Err(refused.to_string());
+    }
     let send = |text: &'static str| {
         let handle = runtime.handle();
         async move {
@@ -308,11 +381,13 @@ args = [{server:?}]
     send(CALL_NO_SUCH_TOOL).await;
     let no_such_tool = model.result_of(NO_SUCH_TOOL_CALL_ID).await;
     let _ = runtime.handle().shutdown().await;
-    Observed {
+    let own_tool_calls = own_tool_calls.lock().unwrap().clone();
+    Ok(Observed {
         offered,
         ask_user,
         no_such_tool,
-    }
+        own_tool_calls,
+    })
 }
 
 fn names(tools: &[&str]) -> Vec<String> {
@@ -358,6 +433,8 @@ async fn a_member_whose_profile_denies_ask_user_is_not_offered_it() {
     let observed = observe(Setup {
         mob: "ask-user-denied-profile",
         profile_denies: true,
+        profile_mistypes: false,
+        hosts_own_tool: false,
         mcp_server: false,
         spawn_denies: false,
     })
@@ -373,6 +450,8 @@ async fn a_member_with_an_mcp_server_whose_profile_denies_ask_user_is_not_offere
     let observed = observe(Setup {
         mob: "ask-user-denied-profile-mcp",
         profile_denies: true,
+        profile_mistypes: false,
+        hosts_own_tool: false,
         mcp_server: true,
         spawn_denies: false,
     })
@@ -388,6 +467,8 @@ async fn a_member_whose_spawn_denies_ask_user_is_not_offered_it() {
     let observed = observe(Setup {
         mob: "ask-user-denied-spawn",
         profile_denies: false,
+        profile_mistypes: false,
+        hosts_own_tool: false,
         mcp_server: false,
         spawn_denies: true,
     })
@@ -403,6 +484,8 @@ async fn a_member_without_a_deny_is_offered_ask_user() {
     let observed = observe(Setup {
         mob: "ask-user-not-denied",
         profile_denies: false,
+        profile_mistypes: false,
+        hosts_own_tool: false,
         mcp_server: false,
         spawn_denies: false,
     })
@@ -422,4 +505,92 @@ async fn a_member_without_a_deny_is_offered_ask_user() {
         "a call to a tool that does not exist is answered as not found: {:?}",
         observed.no_such_tool
     );
+}
+
+/// A host supplies its own tool named `ask_user` among the member build's
+/// external tools, so Meta mounts no stock tool. A profile that denies the
+/// name is still a profile the member builds on, and the deny does to the
+/// host's own tool what it does to every tool: the member's model is not
+/// offered it, a call its model makes to it anyway is refused as not allowed
+/// by policy and never reaches the host's tool, and the member's run goes
+/// on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hosts_own_ask_user_that_the_profile_denies_is_hidden_and_refused() {
+    let observed = observe(Setup {
+        mob: "ask-user-own-tool-denied",
+        profile_denies: true,
+        profile_mistypes: false,
+        hosts_own_tool: true,
+        mcp_server: false,
+        spawn_denies: false,
+    })
+    .await;
+    assert_denied(&observed, &COMMS_TOOLS, "the host's own ask_user, denied");
+    assert!(
+        observed.own_tool_calls.is_empty(),
+        "the refused call never reaches the host's own tool: {:?}",
+        observed.own_tool_calls
+    );
+}
+
+/// The same member without the deny is offered the host's own tool under
+/// the name `ask_user`, and its call reaches that tool, which answers it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hosts_own_ask_user_that_no_profile_denies_is_offered_and_takes_its_call() {
+    let observed = observe(Setup {
+        mob: "ask-user-own-tool",
+        profile_denies: false,
+        profile_mistypes: false,
+        hosts_own_tool: true,
+        mcp_server: false,
+        spawn_denies: false,
+    })
+    .await;
+    let mut offered = COMMS_TOOLS.to_vec();
+    offered.push("ask_user");
+    assert_eq!(observed.offered, names(&offered));
+    assert_eq!(
+        observed.ask_user,
+        (false, HOSTS_OWN_ANSWER.to_string()),
+        "the host's own tool answers the call"
+    );
+    assert_eq!(observed.own_tool_calls, vec!["ask_user".to_string()]);
+    let (is_error, text) = &observed.no_such_tool;
+    assert!(
+        *is_error && text.contains(NOT_FOUND),
+        "a call to a tool that does not exist is answered as not found: {:?}",
+        observed.no_such_tool
+    );
+}
+
+/// A mistyped name in `tools.deny` (`ask_usr`: in no tool vocabulary of the
+/// build, and no stock tool's name) still refuses the member's build, typed,
+/// naming the profile and the name, with the stock tool mounted and with the
+/// host's own tool named `ask_user`. Nothing runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mistyped_deny_name_still_refuses_the_members_build() {
+    for (mob, hosts_own_tool) in [
+        ("ask-user-mistyped", false),
+        ("ask-user-mistyped-own-tool", true),
+    ] {
+        let refused = try_observe(Setup {
+            mob,
+            profile_denies: false,
+            profile_mistypes: true,
+            hosts_own_tool,
+            mcp_server: false,
+            spawn_denies: false,
+        })
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{mob}: a mistyped deny name refuses the build"));
+        println!("MISTYPED DENY NAME ({mob}): {refused}");
+        assert!(
+            refused.contains(
+                "profile 'worker' denies tool 'ask_usr', which is in none of its tool \
+                 vocabularies"
+            ),
+            "{mob}: {refused}"
+        );
+    }
 }

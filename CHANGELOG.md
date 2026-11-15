@@ -2368,13 +2368,15 @@ them.
   revision active, and no call cleared it: the pass held the agent to every
   edge recorded as incident to it, the other agent's edge included. On
   0.9.14 such an agent also refused delivered messages (`mob/member_send`)
-  (from runs on the published 0.9.14). The pass now holds each agent to the
-  edges its own declaration owns, so such an agent converges again and its
-  owner's changes become active. The edge stays in the store, and the agent
-  whose declaration owns it is still held to it (see Known limitations). An
-  agent under the default custody was not affected by this. Nothing stored
-  and no request or answer changes. Affected: 0.8.26 through 0.9.14 (run on
-  Core and Meta 0.9.14; earlier versions read from the source).
+  (from runs on the published 0.9.14). A pair that was wired before an
+  adoption that owns its edge could no longer message each other: see Known
+  limitations. The pass now holds each agent to the edges its own
+  declaration owns, so such an agent converges again and its owner's changes
+  become active. The edge stays in the store, and the agent whose
+  declaration owns it is still held to it (see Known limitations). An agent
+  under the default custody was not affected by this. Nothing stored and no
+  request or answer changes. Affected: 0.8.26 through 0.9.14 (run on Core
+  and Meta 0.9.14; earlier versions read from the source).
 
 - `meerkat-rpc`, `meerkat-rest`, `meerkat`: a session that was cleaned up
   without being archived no longer loses the agents it created to the

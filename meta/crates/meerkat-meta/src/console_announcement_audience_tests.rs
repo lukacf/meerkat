@@ -1220,6 +1220,72 @@ async fn a_member_of_a_mob_that_runs_no_more_is_not_seated() -> TestResult {
     Ok(())
 }
 
+/// While the check of a member cannot be read, a declared subscription and a
+/// source that name the member are refused for now with the one answer,
+/// whoever holds the name, and nothing is applied or written.
+#[tokio::test]
+async fn a_member_whose_check_cannot_be_read_is_refused_for_now() -> TestResult {
+    let mut scenes = scenes("held-mob").await?;
+    for scene in &mut scenes {
+        let (alice, bob) = (scene.alice.clone(), scene.bob.clone());
+        scene.owner.hold_hosted_mob();
+        let of_held =
+            |identity: &str| json!({ "mob_id": SurfaceOwner::HOSTED_MOB, "identity": identity });
+        let declaring = |identity: &str| {
+            json!({
+                "revision": 1,
+                "declarations": {
+                    "revision": 1,
+                    "subscriptions": [{
+                        "subscription_id": "decl-held",
+                        "member": of_held(identity),
+                        "topics": ["news"],
+                    }],
+                },
+            })
+        };
+        let putting = |identity: &str| {
+            let mut request = source("mine", &[SHARED]);
+            request["conversation_members"] = json!([of_held(identity)]);
+            request
+        };
+        for (verb, hidden, absent) in [
+            ("declarations/apply", declaring(PRIVATE), declaring(NOBODY)),
+            ("sources/put", putting(PRIVATE), putting(NOBODY)),
+        ] {
+            let hidden = scene.call(&bob, verb, hidden).await;
+            scene.check(
+                hidden["error"]["data"]["kind"] == json!("native_unavailable"),
+                || format!("{verb} is answered {}", brief(&hidden.to_string())),
+            );
+            let hidden = masked(&hidden, &[PRIVATE]);
+            let absent = masked(&scene.call(&bob, verb, absent).await, &[NOBODY]);
+            scene.check(hidden == absent, || {
+                format!(
+                    "{verb} tells the two names apart: {} | {}",
+                    brief(&hidden),
+                    brief(&absent)
+                )
+            });
+        }
+        let view = scene.expected(&alice, "declarations/get", json!({})).await;
+        scene.check(view["revision"] == json!(0), || {
+            format!("a refused apply was applied: {}", brief(&view.to_string()))
+        });
+        let listed = scene
+            .expected(&alice, "sources/list", json!({ "mob_id": MOB }))
+            .await;
+        scene.check(listed["sources"] == json!([]), || {
+            format!(
+                "a refused source was written: {}",
+                brief(&listed.to_string())
+            )
+        });
+    }
+    nothing_found(scenes);
+    Ok(())
+}
+
 /// The records of a member hidden from the caller stay its audience's alone
 /// when the mob the member was seated in is held here no more.
 #[tokio::test]

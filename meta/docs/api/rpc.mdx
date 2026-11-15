@@ -5097,7 +5097,10 @@ an answer about a source, and a refusal, name no such agent. On the
 console, `declarations/apply` and `sources/put` refuse (`unknown_member`,
 nothing applied or written) a subscription of one member, and a source
 naming a member, that the applied declarations do not already hold
-unchanged, when the member is not seated, or is private to another person;
+unchanged, when the member is not seated (a member this gateway does not
+serve and a member of a peer that cannot be used are not), or is private to
+another person; while the member's check cannot be read they refuse for now
+(`native_unavailable`, nothing applied or written; ask again later);
 the stdio gateway keeps such a subscription pending and stores such a
 source.
 The host announces a development to a mob hosted on

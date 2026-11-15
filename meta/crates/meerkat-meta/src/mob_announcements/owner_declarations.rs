@@ -572,9 +572,7 @@ impl AnnouncementService {
             let Some(member) = &declared.member else {
                 continue;
             };
-            if hidden(member) || self.member_not_seated(member).await {
-                return Err(AnnouncementError::UnknownMember(member.clone()));
-            }
+            self.admit_member(member, hidden).await?;
         }
         declarations
             .subscriptions
@@ -586,16 +584,32 @@ impl AnnouncementService {
     /// names, in an audience member grant, a triage route, a forward
     /// audience or its conversation members, anyone other than a seated
     /// member the caller may see: the one answer for every other name, the
-    /// refusal of an unknown member.
+    /// refusal of an unknown member. While a member's check cannot be read
+    /// the source is refused for now, whoever it names.
     pub(crate) async fn admit_source_members(
         &self,
         config: &SourceConfig,
         hidden: HiddenMember<'_>,
     ) -> Result<(), AnnouncementError> {
         for member in config.named_members() {
-            if hidden(member) || self.member_not_seated(member).await {
-                return Err(AnnouncementError::UnknownMember(member.clone()));
-            }
+            self.admit_member(member, hidden).await?;
+        }
+        Ok(())
+    }
+
+    /// Admit `member`, named by a caller who is not the host. Its check is
+    /// asked first: while it cannot be read the request is refused for now
+    /// with the native owner's unavailable refusal, whatever the name. Then
+    /// a member the caller may not see and a member that is not seated get
+    /// the one answer, the refusal of an unknown member.
+    async fn admit_member(
+        &self,
+        member: &Member,
+        hidden: HiddenMember<'_>,
+    ) -> Result<(), AnnouncementError> {
+        let not_seated = self.member_not_seated(member).await?;
+        if hidden(member) || not_seated {
+            return Err(AnnouncementError::UnknownMember(member.clone()));
         }
         Ok(())
     }
@@ -604,9 +618,9 @@ impl AnnouncementService {
     /// subscription makes on the route the member takes: every definite
     /// answer of the route or of the check other than "seated" (unknown,
     /// invalid, unusable, an unusable peer, an ambiguous mob). A route or a
-    /// check that cannot be read now says nothing: the member is let
-    /// through, as before.
-    async fn member_not_seated(&self, member: &Member) -> bool {
+    /// check that cannot be read now answers neither way: the native owner's
+    /// unavailable refusal.
+    async fn member_not_seated(&self, member: &Member) -> Result<bool, AnnouncementError> {
         let (native, asked) = (Arc::clone(&self.inner.native), member.clone());
         let route = bounded(
             Waited::Native("route_for"),
@@ -618,7 +632,13 @@ impl AnnouncementService {
             Ok(route) => self.check_member(member, route.route).await,
             Err(problem) => Err(problem),
         };
-        !matches!(checked, Ok(()) | Err(MemberProblem::Unavailable(_)))
+        match checked {
+            Ok(()) => Ok(false),
+            Err(MemberProblem::Unavailable(detail)) => {
+                Err(AnnouncementError::NativeUnavailable(detail))
+            }
+            Err(_) => Ok(true),
+        }
     }
 
     /// The member each applied declaration's subscription of a single member

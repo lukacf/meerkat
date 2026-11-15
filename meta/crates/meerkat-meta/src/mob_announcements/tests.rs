@@ -3196,6 +3196,17 @@ impl SurfaceOwner {
             .unwrap()
             .insert(Self::HOSTED_MOB.to_string());
     }
+
+    /// [`Self::HOSTED_MOB`] is held until its owner resolves: it is hosted
+    /// here and does not run.
+    pub(crate) fn hold_hosted_mob(&self) {
+        self.harness
+            .native
+            .held
+            .lock()
+            .unwrap()
+            .insert(Self::HOSTED_MOB.to_string());
+    }
 }
 
 /// A start counts the live subscriptions that deliver into members private

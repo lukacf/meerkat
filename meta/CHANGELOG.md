@@ -22,7 +22,11 @@ Security, Upgrade and Changed.
   `meta/mob_announcements/declarations/apply` refuses a declared
   subscription of one member that the applied declarations do not already
   hold unchanged when it names a member that is not seated, or is private
-  to another person: `-32047` `unknown_member`, and nothing is applied.
+  to another person: `-32047` `unknown_member`, and nothing is applied. A
+  member this gateway does not serve, and a member of a peer that cannot
+  be used, are not seated. While the member's check cannot be read, the
+  apply is refused for now: `-32047` `native_unavailable`, nothing is
+  applied, and the same apply can be made again later.
   Seat the member first, or apply the declarations over the stdio gateway
   (or declare them in the gateway's options or its sidecar), where a
   subscription for a member that is not seated yet is kept pending. A
@@ -33,7 +37,11 @@ Security, Upgrade and Changed.
   `meta/mob_announcements/sources/put` refuses a source that names, in an
   audience member grant, a triage route, a forward audience or its
   conversation members, a member that is not seated, or is private to
-  another person: `-32047` `unknown_member`, and nothing is written. The
+  another person: `-32047` `unknown_member`, and nothing is written. A
+  member this gateway does not serve, and a member of a peer that cannot
+  be used, are not seated. While a named member's check cannot be read,
+  the put is refused for now: `-32047` `native_unavailable`, nothing is
+  written, and the same put can be made again later. The
   same holds for a source declared through
   `meta/mob_announcements/declarations/apply` on the Console, unless the
   applied declarations already hold it unchanged. Seat the member first, or
@@ -1358,7 +1366,7 @@ Security, Upgrade and Changed.
   `meerkat_meta::mob_announcements::private_member_subscriptions` while
   live subscriptions deliver into agents private to a person
   (`console.private_to`): how many there are (active or paused), and how
-  many of those were not made by the agent's own subscription tool. The
+  many of those do not have the id form the agent's own tool gives. The
   line names no agent and no subscription.
 
 ### Fixed

@@ -1265,3 +1265,95 @@ async fn a_wiring_call_that_arrives_while_the_retirement_starts_waits_for_it() {
 
     fixture.handle.shutdown().await.expect("shutdown the mob");
 }
+
+/// The pair is apart: the mob holds no edge for it, neither end holds a
+/// trust row for the other or can message it, and the member list shows no
+/// edge between the two.
+async fn assert_apart(fixture: &WiringFixture, left: &Member, right: &Member, when: &str) {
+    assert!(
+        !held_edges(fixture).contains(&held_edge(left, right)),
+        "{when}: the mob holds no edge for the pair"
+    );
+    assert_silenced(fixture, left, right).await;
+    let members = fixture.handle.list_members().await;
+    for (holder, peer) in [(left, right), (right, left)] {
+        let entry = members
+            .iter()
+            .find(|entry| entry.agent_identity == holder.identity)
+            .unwrap_or_else(|| panic!("{when}: {} is listed", holder.identity));
+        assert!(
+            !entry.wired_to.contains(&peer.identity),
+            "{when}: the member list shows no edge between the pair: {:?}",
+            entry.wired_to
+        );
+    }
+}
+
+/// A pair that was wired and then unwired on purpose stays apart: through
+/// the adoption of one of its members, through that member's declaration
+/// change and through a stop and start, the mob holds no edge for the pair,
+/// neither end holds a trust row for the other or can message it, and the
+/// member list shows no edge. The rebuild restores what the mob holds, and
+/// a wiring that an unwire ended is not among it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pair_unwired_on_purpose_stays_apart_through_adoption_change_and_restart() {
+    let mut fixture = WiringFixture::create("rebuild-trust-unwired-stays-apart").await;
+    let adopted = seat(&fixture, "worker-a").await;
+    let other = seat(&fixture, "worker-b").await;
+    wire(&fixture, &adopted, &other).await;
+    assert_wired_pair(&fixture, &adopted, &other, "after the wiring call").await;
+    fixture
+        .handle
+        .unwire(adopted.identity.clone(), other.identity.clone())
+        .await
+        .expect("unwire the pair");
+    assert_apart(&fixture, &adopted, &other, "after the unwire").await;
+
+    let builds = persistent_mock_comms_builds(&adopted.session);
+    fixture
+        .adopt(
+            &adopted.identity,
+            &adopted.session,
+            IdentityWiringCustody::ExternalManaged,
+            &[],
+        )
+        .await;
+    assert_converged(
+        &adopted.identity,
+        &fixture.settled(&adopted.identity, 1).await,
+    );
+    assert!(
+        persistent_mock_comms_builds(&adopted.session) > builds,
+        "the adoption rebuilt the member"
+    );
+    assert_apart(&fixture, &adopted, &other, "after the adoption").await;
+
+    let builds = persistent_mock_comms_builds(&adopted.session);
+    fixture.change(&adopted.identity).await;
+    let changed = fixture.settled(&adopted.identity, 2).await;
+    assert_converged(&adopted.identity, &changed);
+    assert!(
+        persistent_mock_comms_builds(&adopted.session) > builds,
+        "the change rebuilt the member"
+    );
+    assert_apart(&fixture, &adopted, &other, "after the declaration change").await;
+
+    fixture.restart().await;
+    let after_epoch = changed.lease_epoch.expect("the change held a lease");
+    assert_converged(
+        &adopted.identity,
+        &fixture
+            .settled_within(&adopted.identity, 2, after_epoch, AFTER_START)
+            .await,
+    );
+    for member in [&adopted, &other] {
+        fixture
+            .handle
+            .ensure_member_live(&member.identity)
+            .await
+            .unwrap_or_else(|error| panic!("{} is live after the start: {error}", member.identity));
+    }
+    assert_apart(&fixture, &adopted, &other, "after the start").await;
+
+    fixture.handle.shutdown().await.expect("shutdown the mob");
+}

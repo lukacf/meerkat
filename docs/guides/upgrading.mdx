@@ -478,6 +478,8 @@ not carry yet. A label update of a created agent never seats the agent
 again, so its row carries the key from the update until the agent's next
 seat (a respawn, a profile or runtime-mode change, a rotation or a reset);
 a retry of the update and a later update of other fields do not settle it.
+No turn, wake, build or restart of the agent settles it either: the key
+stays until one of the steps below.
 The row lets the
 key go once a seat row carries the row's labels, and an archive or a
 removal drops it. A row that owes none carries no such key and reads on
@@ -508,6 +510,15 @@ file or `MobStorage::identity_record_rows` for a storage). While
 - a profile move or a runtime-mode change of the agent
   (`MobHandle::update_store_owned_identity`) seats it again and settles it
   too;
+- or set the agent's labels back to the labels it was seated with (an
+  update, `MobHandle::update_store_owned_identity`, whose labels are the
+  ones its seat row carries) and apply the label change again after the
+  return. For an agent that is idle, that update lets the key go without
+  seating the agent again, so the agent keeps the mobs it created; the
+  price is the label change until after the rollback. An agent that holds
+  work at that update is not released: the update is answered `deferred`
+  and the key stays, until the same update is sent again once the agent
+  is idle. Read the count again afterwards;
 - a member no same-session successor can serve (a placed member, a member
   wired to a placed member, a member on a session service that keeps no
   durable sessions) is settled by none of these: rotate it
@@ -526,7 +537,14 @@ sqlite3 -readonly <store> "SELECT mob_id, agent_identity FROM mob_identity_inten
 
 It prints one line per agent whose row carries the key (`<mob>|<agent>`),
 and nothing when none does. A Meta host settles one with `meta/respawn` of
-that agent, at the cost named above.
+that agent, at the cost named above, or with a `meta/identity/update` that
+sets its labels back to the ones it was seated with. If the agent held
+work at that update the key stays, and Meta's answer does not say so: run
+the query again, and for an agent it still lists send another update once
+the agent is idle. That must be a new request that changes something (its
+display name, for example): the same request sent again only reads back
+its first answer, and a request that sets the labels the agent already
+has is refused as empty.
 
 **Operator instruction records past an earlier release's totals.** An
 earlier release bounds the mob as a whole at 64

@@ -1373,7 +1373,7 @@ The kinds a caller of these methods meets:
 | `name_taken` | The name is taken | `by`: `identity`, `removed`, `worker` or `unreadable` |
 | `profile_unknown` | The mob has no profile of this name | `profile` |
 | `peer_unknown`, `peer_not_allowed` | A peer is no agent the caller may name, or the peer rules refuse it | `identity` (not allowed) |
-| `reserved_key`, `authority_field_invalid`, `authority_field_needs_approval` | A label key the policy reserves; an authority field it does not declare or a value it does not allow; an authority field under a rule that does not hold a human decision | `key` |
+| `reserved_key`, `authority_field_invalid`, `authority_field_needs_approval` | A label key the policy reserves, or `decision.approval_branch` on a create, on an update that adds it or on an adoption; an authority field it does not declare or a value it does not allow; an authority field under a rule that does not hold a human decision | `key` |
 | `invalid_request` | Nothing to act on, a contradiction, or a malformed value | `problem`: `empty`, `conflicting` or `malformed` |
 | `text_too_large`, `batch_too_large` | A text over its limit, or more than 256 agents in one create | `limit`, `max` |
 | `operation_reused` | The `request_id` was used with another request | |
@@ -1398,9 +1398,16 @@ error type for all of them.
 | `agents` | `array` | yes | 1 to 256 agents, each `{name, profile, display_name?, instructions?, context?, labels?, first_message?, peers?, addressability?, runtime_mode_override?}` |
 | `proposer`, `source_evidence` | | no | Recorded, never authority |
 
-`name` is unique in the mob. `profile` is one of the mob's profiles.
+`name` is unique in the mob. A name that begins `approval-branch-` and
+holds only ASCII letters, digits, `-` and `_` (a name Meerkat holds as
+written) is refused `invalid_name` at `agents[i].name`: Meerkat keeps
+those names for its approval branches. `profile` is one of the mob's
+profiles.
 `instructions` is a list of strings, the agent's standing brief. `context`
-is any JSON, descriptive only. `labels` is a string map. `peers` lists the
+is any JSON, descriptive only. `labels` is a string map; an agent that
+gives `decision.approval_branch`, the label of Meerkat's approval
+branches, is refused `reserved_key` at `agents[i].labels`, and no agent of
+the request is created. `peers` lists the
 agents it can message, by name: agents of the mob, or other agents of the
 same create. Nothing else is wired to it. `first_message` is its first
 turn, run once. `addressability` (`addressable`, the default, or
@@ -1445,6 +1452,13 @@ without one and send it its first input through the host's governed ingress.
 of Meta's own, or one the policy reserves, that its configuration gave it
 before its adoption) stays through an update that does not name it; an
 update that would change or remove it is refused `reserved_key`.
+`decision.approval_branch`, the label of Meerkat's approval branches, is
+never given: an update that adds it is refused `reserved_key` at
+`set.labels`, and the agent is unchanged. An agent whose record carries it
+already keeps it through an update that does not add it, and
+`set.labels_remove` takes it off. `meta/identity/plan` does not check this
+key, on a create or on an update: it answers as for any other label, and
+the change itself is then refused.
 `set.instructions` and `set.context`
 replace theirs whole. `set.profile` moves the agent to that profile's
 model, tools and skills on the same conversation. A move into a profile
@@ -1475,8 +1489,14 @@ durable, a placed agent and an agent wired to a placed agent are not
 released by a label change and keep their build. What trails until the
 agent is next seated is the record of its seat in the mob's journal,
 which decides nothing an update can change and is what an earlier release
-that serves the same store reads; only seating the agent again
-(`meta/respawn`) brings it in line. A removed label also stays in the
+that serves the same store reads. No turn, wake, build or restart brings
+it in line: seating the agent again (`meta/respawn`) does, and so does an
+update that sets its labels back to the ones it was seated with, for an
+agent that is idle at that update. For an agent that held work then, the
+record stays as it was and the answer does not say so: once the agent is
+idle, another update of it brings the record in line (a new request that
+changes something; the same request sent again reads back its first
+answer). A removed label also stays in the
 peer metadata of the agent's conversation, which its peers read, until
 the agent starts a new conversation. One agent is still seated again:
 a `broken` one (its build was refused for good, it serves nothing). Once
@@ -1547,7 +1567,11 @@ the limits are in
   `meta/status_identity` carries `roster_listing_superseded: true`, the
   roster pass's result names it, and the gateway logs one warning for it:
   the agent is served from its record, and the configuration's entry for
-  it is not applied.
+  it is not applied. An adoption of an agent whose configuration gives it
+  the label `decision.approval_branch` is refused `reserved_key` at
+  `name`, and one whose name Meerkat keeps for its approval branches (see
+  `name` under `meta/identity/create`) `invalid_name` at `name`: the agent
+  stays configured, and nothing is written.
 
 An agent the host's configuration declares answers `owner_read_only` to an
 update, an archive, an unarchive and a removal: change it in the

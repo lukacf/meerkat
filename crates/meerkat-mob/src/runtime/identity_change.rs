@@ -2190,6 +2190,10 @@ pub(super) fn declared_entry_receipt_outcome(
 /// idle member, so that its next build takes the row's labels, and seats
 /// nothing; the member's next seat row, whatever writes it, carries the
 /// row's labels and lets the owed restamp go.
+///
+/// A `spec` whose labels add an approval branch's label to a row that does
+/// not carry it is refused [`MobError::ApprovalBranchReserved`]
+/// (`introduces_approval_branch_label`, the reservation's own rule).
 pub(super) fn store_owned_update_row(
     spec: &CreatedIdentitySpec,
     expected_spec_digest: &str,
@@ -2220,6 +2224,16 @@ pub(super) fn store_owned_update_row(
         _ => return Err(unknown()),
     };
     let current_digest = row.spec_digest().map_err(invalid)?.ok_or_else(unknown)?;
+    // An update never introduces an approval branch's label: no seat plan
+    // carries it, so the record could not be seated again. A record that
+    // carries it already keeps it, or lets it go.
+    if row.spec.as_ref().is_some_and(|stored| {
+        super::approval_branch::introduces_approval_branch_label(&stored.labels, &spec.labels)
+    }) {
+        return Err(MobError::ApprovalBranchReserved {
+            identity: spec.identity.clone(),
+        });
+    }
     let stale =
         (current_digest != expected_spec_digest).then(|| IdentityChangeRefusal::StaleSpec {
             identity: spec.identity.clone(),
@@ -3022,8 +3036,12 @@ impl super::MobHandle {
     /// requester's grant that no longer admits the change at the commit
     /// ([`IdentityChangeRefusal::GrantRevoked`]), and one admitted for
     /// another request or other specs than the change commits
-    /// ([`IdentityChangeRefusal::InvalidRequest`]). A retry of a committed
-    /// operation with the same request answers
+    /// ([`IdentityChangeRefusal::InvalidRequest`]). An identity that takes
+    /// an approval branch's reserved identity prefix or its label is
+    /// refused [`MobError::ApprovalBranchReserved`], with nothing written,
+    /// whether the create would seat it or leave it unseated (awaiting its
+    /// host's preparation, hosted on its first use, held). A retry of a
+    /// committed operation with the same request answers
     /// [`IdentityChangeOutcome::Replayed`].
     pub async fn create_store_owned_identities(
         &self,
@@ -3894,10 +3912,15 @@ impl super::MobHandle {
     /// the identity does not own ([`IdentityChangeRefusal::InvalidRequest`]:
     /// its change ends only its own edges), and
     /// every refusal of [`Self::create_store_owned_identities`] that applies
-    /// to a change. An identity whose member's spawn, wake, retirement,
-    /// removal or archive, or whose held construction, is in flight is
-    /// refused [`MobError::LifecycleOperationPending`], retryable, and so is
-    /// an update while another declared apply of the mob runs.
+    /// to a change. A spec whose labels add an approval branch's label to
+    /// a record that does not carry it is refused
+    /// [`MobError::ApprovalBranchReserved`], with nothing written; a record
+    /// that carries the label already keeps it through an update, and an
+    /// update that leaves it out removes it. An identity whose member's
+    /// spawn, wake, retirement, removal or archive, or whose held
+    /// construction, is in flight is refused
+    /// [`MobError::LifecycleOperationPending`], retryable, and so is an
+    /// update while another declared apply of the mob runs.
     pub async fn update_store_owned_identity(
         &self,
         update: StoreOwnedIdentityUpdate,

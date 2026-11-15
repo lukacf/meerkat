@@ -798,3 +798,155 @@ async fn an_adopted_workers_seat_stays_as_recorded_across_a_start_until_its_next
         "the identity is not among Core's durable identities until its next seat: {durable:?}"
     );
 }
+
+/// Row (RED): an adoption writes no record that takes an approval branch's
+/// reservation. A roster-owned identity whose roster spec carries the
+/// branch's label, owed its seat or seated, and one whose name takes the
+/// branch's identity prefix, is refused with the reservation's own
+/// refusal and nothing is written: no row, the identity is no store-owned
+/// one, and no receipt (the same operation then commits the adoption of a
+/// spec that takes neither).
+///
+/// RED before the adoption refused the reservation: the adoption commits a
+/// record that carries the label, or holds the name.
+#[tokio::test]
+async fn an_adoption_whose_spec_takes_the_approval_branch_reservation_is_refused_and_writes_nothing()
+ {
+    // The label, for an identity owed its seat.
+    let mob = StoreOwnedMob::new("adopt-branch-label-owed").await;
+    mob.declare(&["listed"]).await;
+    tokio::time::timeout(STEP, mob.handle.retire(id("listed")))
+        .await
+        .expect("the retirement answers")
+        .expect("retire the member");
+    mob.unseated_for("listed", UnseatedEntryCause::SeatOwed)
+        .await;
+    assert_branch_reserved(
+        mob.adopt(
+            "adopt-listed",
+            "listed",
+            AdoptionSource::roster(with_branch_label(&spec("listed", "worker"))),
+        )
+        .await,
+        "listed",
+        "the label, owed its seat",
+    );
+    assert!(mob.rows().await.is_empty(), "owed: nothing is written");
+    assert!(!mob.store_owned("listed"), "owed: {:?}", mob.read("listed"));
+    assert!(!mob.is_member("listed").await, "owed: nothing is seated");
+    committed(
+        mob.adopt(
+            "adopt-listed",
+            "listed",
+            AdoptionSource::roster(spec("listed", "worker")),
+        )
+        .await,
+    );
+    assert!(mob.store_owned("listed"));
+
+    // The label, for a seated identity.
+    let mob = StoreOwnedMob::new("adopt-branch-label-seated").await;
+    mob.declare(&["seated"]).await;
+    let member = mob.member("seated").await;
+    assert_branch_reserved(
+        mob.adopt(
+            "adopt-seated",
+            "seated",
+            AdoptionSource::roster(with_branch_label(&spec("seated", "worker"))),
+        )
+        .await,
+        "seated",
+        "the label, seated",
+    );
+    assert!(mob.rows().await.is_empty(), "seated: nothing is written");
+    assert!(
+        !mob.store_owned("seated"),
+        "seated: {:?}",
+        mob.read("seated")
+    );
+    let now = mob.member("seated").await;
+    assert_eq!(
+        (now.generation, now.fence_token, &now.labels),
+        (member.generation, member.fence_token, &member.labels),
+        "seated: the member is as it was"
+    );
+    committed(
+        mob.adopt(
+            "adopt-seated",
+            "seated",
+            AdoptionSource::roster(spec("seated", "worker")),
+        )
+        .await,
+    );
+    assert!(mob.store_owned("seated"));
+
+    // The identity prefix: a roster may declare such a name (no seat
+    // follows it), and its adoption writes no record of it.
+    let prefixed = "approval-branch-made-up";
+    let mob = StoreOwnedMob::new("adopt-branch-prefix").await;
+    mob.declare(&[prefixed]).await;
+    assert!(!mob.is_member(prefixed).await, "no seat takes the prefix");
+    assert_branch_reserved(
+        mob.adopt(
+            "adopt-prefixed",
+            prefixed,
+            AdoptionSource::roster(spec(prefixed, "worker")),
+        )
+        .await,
+        prefixed,
+        "the identity prefix",
+    );
+    assert!(mob.rows().await.is_empty(), "prefix: nothing is written");
+    assert!(
+        !mob.store_owned(prefixed),
+        "prefix: {:?}",
+        mob.read(prefixed)
+    );
+}
+
+/// Row (RED): an open approval branch is not adopted as a worker. Its
+/// adoption is refused with the reservation's own refusal, by the name
+/// every branch is seated under, and the branch stays the branch it was:
+/// its roster entry records its decision on the same incarnation, it is no
+/// store-owned identity, and no row is written.
+///
+/// RED before the adoption refused the reservation: the branch is adopted
+/// into a store-owned record that holds its name and its label.
+#[tokio::test]
+async fn an_open_approval_branch_is_not_adopted_as_a_worker() {
+    let mob = StoreOwnedMob::new("adopt-open-branch").await;
+    mob.spawn_worker("grantee", None, &[]).await;
+    let decision = meerkat_core::approval::decision::DecisionId::derive(
+        &meerkat_core::approval::decision::DecisionKind::new("grant.child").expect("kind"),
+        &meerkat_core::approval::decision::DecisionSubjectKey::new("adopt-target")
+            .expect("subject key"),
+    );
+    let (branch, _) = tokio::time::timeout(
+        STEP,
+        mob.handle.open_approval_branch(&id("grantee"), &decision),
+    )
+    .await
+    .expect("the opening answers")
+    .expect("the approval branch opens");
+    let name = branch.as_str().to_string();
+    let opened = mob.member(&name).await;
+    assert_eq!(opened.approval_branch(), Some(&decision));
+    assert_branch_reserved(
+        mob.adopt(
+            "adopt-branch",
+            &name,
+            AdoptionSource::worker(opened.generation),
+        )
+        .await,
+        &name,
+        "an open approval branch",
+    );
+    assert!(mob.rows().await.is_empty(), "nothing is written");
+    assert!(!mob.store_owned(&name), "{:?}", mob.read(&name));
+    let now = mob.member(&name).await;
+    assert_eq!(
+        (now.approval_branch(), now.generation, now.fence_token),
+        (Some(&decision), opened.generation, opened.fence_token),
+        "the branch is the branch it was"
+    );
+}

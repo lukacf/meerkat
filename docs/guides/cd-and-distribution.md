@@ -251,7 +251,7 @@ before `main`; a linker that leaves them out of the table the process runs at
 start still links a working binary, which then reports no capabilities and
 carries no built-in skill (the Linux x86_64 archives of 0.9.14 and of the
 earlier releases that the
-[0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
+[known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
 names, whose lane linked with gold from binutils 2.35.2; that lane now passes
 `--linkopt=-fuse-ld=bfd`, and `scripts/check-bazel-release-features.py` fails
 a Linux release build case without it).

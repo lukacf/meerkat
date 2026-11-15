@@ -49,7 +49,7 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 use meerkat_machine_schema::catalog::dsl::dsl_meerkat_machine;
-use meerkat_machine_schema::{Expr, TransitionSchema, TriggerMatch};
+use meerkat_machine_schema::{Expr, TransitionSchema, TriggerMatch, Update};
 
 const INPUT: &str = "ResolveRuntimeCompletionCleanup";
 const RESOLVED: &str = "RuntimeCompletionCleanupResolved";
@@ -89,6 +89,17 @@ const APPLY_WAS_REFUSED: &str = "runtime_apply_refused";
 /// The state field that holds the cause of a run's failed apply, and the
 /// cause value of a refused request.
 const APPLY_FAILURE_CAUSE: &str = "last_runtime_apply_failure_cause";
+const APPLY_FAILURE_MESSAGE: &str = "last_runtime_apply_failure_message";
+/// The arms that start a run and reset the turn's facts.
+const RUN_STARTS: [&str; 7] = [
+    "StartConversationRunIdleWithBinding",
+    "StartConversationRunInitializing",
+    "StartConversationRunAttached",
+    "StartConversationRunRunning",
+    "StartImmediateAppendInitializing",
+    "StartImmediateAppendAttached",
+    "StartImmediateAppendRunning",
+];
 const REQUEST_REFUSED: &str = "RequestRefused";
 
 /// The phases in which a runtime takes and runs input.
@@ -499,6 +510,183 @@ fn a_recovered_result_of_another_run_drops_the_stored_cause() {
                 arm.name.as_ref()
             );
         }
+    }
+}
+
+/// Every write of the stored cause or its message in `updates`, each with
+/// the condition it is written under (`None`: always) and the value written.
+fn cause_writes(updates: &[Update], under: Option<&Expr>, found: &mut Vec<CauseWrite>) {
+    for update in updates {
+        match update {
+            Update::Assign { field, expr }
+                if [APPLY_FAILURE_CAUSE, APPLY_FAILURE_MESSAGE].contains(&field.as_str()) =>
+            {
+                found.push(CauseWrite {
+                    field: field.as_str().to_string(),
+                    under: under.map(|condition| format!("{condition:?}")),
+                    drops: matches!(expr, Expr::None),
+                });
+            }
+            Update::Conditional {
+                condition,
+                then_updates,
+                else_updates,
+            } => {
+                cause_writes(then_updates, Some(condition), found);
+                let mut otherwise = Vec::new();
+                cause_writes(else_updates, Some(condition), &mut otherwise);
+                assert!(
+                    otherwise.is_empty(),
+                    "no arm writes the cause in the other branch of a condition"
+                );
+            }
+            Update::ForEach { updates, .. } => {
+                let mut each = Vec::new();
+                cause_writes(updates, under, &mut each);
+                assert!(each.is_empty(), "no arm writes the cause once per member");
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CauseWrite {
+    field: String,
+    under: Option<String>,
+    drops: bool,
+}
+
+/// The stored cause stays with the run result the machine holds open: it is
+/// written, moved or dropped exactly where that result is.
+///
+/// - A run that fails writes its own cause with its result.
+/// - A run that completes or is cancelled makes its own result the one held
+///   open and has no such cause: it drops the stored one.
+/// - A run that starts while nothing is held open (no run's result, or one
+///   that is resolved: the condition under which `Prepare` lets go of the
+///   earlier result) drops the cause. A run that starts while an earlier
+///   run's result is still held open keeps it, so a refused request that is
+///   answered after the next run started is still answered as refused.
+/// - A recovery that adopts a result when none is held drops it (its own
+///   row is above).
+///
+/// No other arm writes the cause.
+#[test]
+fn the_stored_cause_stays_with_the_result_the_machine_holds_open() {
+    let schema = dsl_meerkat_machine();
+    let writes_of = |arm: &TransitionSchema| {
+        let mut found = Vec::new();
+        cause_writes(&arm.updates, None, &mut found);
+        found
+    };
+    let both = |under: Option<String>, drops: bool| {
+        vec![
+            CauseWrite {
+                field: APPLY_FAILURE_CAUSE.to_string(),
+                under: under.clone(),
+                drops,
+            },
+            CauseWrite {
+                field: APPLY_FAILURE_MESSAGE.to_string(),
+                under,
+                drops,
+            },
+        ]
+    };
+
+    // The condition under which `Prepare` lets go of the earlier result.
+    let prepare = schema
+        .transitions
+        .iter()
+        .find(|arm| arm.name.as_ref() == "PrepareIdle")
+        .expect("the arm that prepares a run on an idle runtime");
+    let nothing_held_open = format!("{:?}", guard(prepare, "completion_correlation_settled"));
+    assert!(
+        nothing_held_open.contains("runtime_completion_result_run_id")
+            && nothing_held_open.contains("runtime_completion_result_resolved"),
+        "the condition reads the held result and whether it is resolved, got {nothing_held_open}"
+    );
+
+    let mut writers: Vec<(String, Vec<CauseWrite>)> = schema
+        .transitions
+        .iter()
+        .map(|arm| (arm.name.as_ref().to_string(), writes_of(arm)))
+        .filter(|(_, writes)| !writes.is_empty())
+        .collect();
+    writers.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut expected: Vec<(String, Vec<CauseWrite>)> = Vec::new();
+    expected.push(("RunFailed".to_string(), both(None, false)));
+    for arm in ["RunCompleted", "RunCancelled"] {
+        expected.push((arm.to_string(), both(None, true)));
+    }
+    for arm in RUN_STARTS {
+        expected.push((arm.to_string(), both(Some(nothing_held_open.clone()), true)));
+    }
+    let recovery = arms_on("RecoverRuntimeCompletionResultCorrelation");
+    assert_eq!(
+        recovery.len(),
+        ARM_PHASES.len(),
+        "one recovery arm per phase"
+    );
+    for arm in &recovery {
+        let writes = writes_of(arm);
+        assert!(
+            writes.len() == 2
+                && writes
+                    .iter()
+                    .all(|write| write.drops && write.under.is_some()),
+            "{}: the recovery drops the cause and its message under its condition, got \
+             {writes:?}",
+            arm.name.as_ref()
+        );
+        expected.push((arm.name.as_ref().to_string(), writes));
+    }
+    expected.sort_by(|left, right| left.0.cmp(&right.0));
+    let names = |arms: &[(String, Vec<CauseWrite>)]| -> Vec<String> {
+        arms.iter().map(|(name, _)| name.clone()).collect()
+    };
+    for (arm, writes) in &expected {
+        let found: Vec<CauseWrite> = writers
+            .iter()
+            .filter(|(name, _)| name == arm)
+            .flat_map(|(_, writes)| writes.clone())
+            .collect();
+        assert_eq!(
+            &found, writes,
+            "{arm}: its writes of the stored cause and its message (the field, the condition \
+             it is written under, whether the write drops it)"
+        );
+    }
+    assert_eq!(
+        names(&writers),
+        names(&expected),
+        "the arms that write the stored cause or its message"
+    );
+
+    // Every arm that makes a run's result the one held open writes the
+    // cause in the same update.
+    let holds_a_result_open = |arm: &TransitionSchema| {
+        arm.updates.iter().any(|update| {
+            matches!(
+                update,
+                Update::Assign { field, expr }
+                    if field.as_str() == "runtime_completion_result_run_id"
+                        && !matches!(expr, Expr::None)
+            )
+        })
+    };
+    for arm in schema
+        .transitions
+        .iter()
+        .filter(|arm| holds_a_result_open(arm))
+    {
+        assert!(
+            !writes_of(arm).is_empty(),
+            "{}: an arm that makes a run's result the one held open writes the stored cause",
+            arm.name.as_ref()
+        );
     }
 }
 

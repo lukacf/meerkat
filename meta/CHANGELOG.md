@@ -55,7 +55,8 @@ Security, Upgrade and Changed.
   Console does not know as for an agent that does not exist (an empty list;
   `schedule_not_found` for a schedule named by its id), as the memory reads
   and the session attach do. For a short time after a gateway start, until
-  the gateway has read who its members are private to, that is every member
+  the gateway has read who its members are private to (and for as long as
+  that read fails; it is tried again), that is every member
   that ended before the start, the person it was private to included; a
   Console that identifies nobody answers its one operator so for that time
   too. Ask again: once that read has succeeded the methods answer for an

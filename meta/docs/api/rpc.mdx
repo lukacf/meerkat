@@ -4746,7 +4746,8 @@ console send.
 keeps apart from other people for an agent the Console does not know as for
 an agent that does not exist: an empty list, and `schedule_not_found` for a
 schedule named by its id. That is so for a short time after a gateway
-start, until the Console has read who its members are private to, for a
+start, until the Console has read who its members are private to (and for
+as long as that read fails; it is tried again), for a
 member that ended before the start, the person it was private to included;
 ask again. An access administrator is answered at once (see
 [Access control](/concepts/access-control)).

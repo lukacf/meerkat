@@ -4118,6 +4118,10 @@ mod console_frame_witness_tests;
 mod console_kept_apart_tests;
 
 #[cfg(test)]
+#[path = "console_stored_session_seat_tests.rs"]
+mod console_stored_session_seat_tests;
+
+#[cfg(test)]
 #[path = "console_schedule_tests.rs"]
 mod console_schedule_tests;
 

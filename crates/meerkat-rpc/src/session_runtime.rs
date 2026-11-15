@@ -7816,11 +7816,12 @@ impl SessionRuntime {
                       session that holds a reasoning effort level, a turn that changes the \
                       model, the provider, the self-hosted server, the provider params, the \
                       auth binding or the level (sets, changes or clears it; a level inside \
-                      provider_params counts as a change) needs an idle session; so does a \
-                      turn that sets a level on a session that holds none. Send it again \
-                      when the session has no unfinished work. An event queued on an idle \
-                      session counts as unfinished work: nothing is running to wait for, so \
-                      send a plain turn first, or set the level when the session is created"
+                      provider_params counts as a change) needs a session with no unfinished \
+                      work; so does a turn that sets a level on a session that holds none. \
+                      Send it again when the session has no unfinished work. An event queued \
+                      on an idle session counts as unfinished work: nothing is running to \
+                      wait for, so send a plain turn first, or set the level when the session \
+                      is created"
                 .to_string(),
             data: Some(serde_json::json!({
                 "kind": "reasoning_effort_change_needs_idle_session"
@@ -43710,14 +43711,17 @@ mod tests {
             (level_change_needs_idle_session(), 1),
             "((code, data), inputs that have not ended): {busy:?}"
         );
-        assert!(
-            busy.message.contains(
-                "Send it again when the session has no unfinished work. An event queued on \
-                 an idle session counts as unfinished work: nothing is running to wait for, \
-                 so send a plain turn first, or set the level when the session is created"
-            ),
-            "the busy text names this case and what to do: {}",
-            busy.message
+        assert_eq!(
+            busy.message,
+            "session is busy: this turn is not queued behind unfinished work. On a session that \
+             holds a reasoning effort level, a turn that changes the model, the provider, the \
+             self-hosted server, the provider params, the auth binding or the level (sets, \
+             changes or clears it; a level inside provider_params counts as a change) needs a \
+             session with no unfinished work; so does a turn that sets a level on a session \
+             that holds none. Send it again when the session has no unfinished work. An event \
+             queued on an idle session counts as unfinished work: nothing is running to wait \
+             for, so send a plain turn first, or set the level when the session is created",
+            "the whole busy text: one term for what the turn needs, and this case named"
         );
 
         // A plain turn is taken, and takes the waiting input with it.

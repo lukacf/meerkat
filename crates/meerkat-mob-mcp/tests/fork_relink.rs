@@ -5798,7 +5798,7 @@ const SESSION_CREATE_STACK_CHILD_TEST: &str = "session_create_on_a_sized_worker_
 /// member's turns run on the host's runtime, where they ran on Core's
 /// cleanup runtime before, so the fork child's text-only turn is polled on
 /// these workers, beneath the session task's own poll frame. In a debug build
-/// the restart re-link scenario needs 1,191,936 bytes for it (1,187,840
+/// the restart re-link scenario needs 1,196,032 bytes for it (1,191,936
 /// overflows, at the compaction check of the turn's effects). It needed
 /// 1,343,488 when this budget was set, and 1,519,616 before the run loop,
 /// the run's failure handling and the session task's commands that are not
@@ -5812,7 +5812,7 @@ const SESSION_CREATE_STACK_CHILD_TEST: &str = "session_create_on_a_sized_worker_
 /// inline. The budget was 1,179,648 then. Session creation, which runs no
 /// turn, needed 901,120.
 ///
-/// This budget leaves about 32% (380,928 bytes) over the 1,191,936 need and
+/// This budget leaves about 31.5% (376,832 bytes) over the 1,196,032 need and
 /// stays 25% (524,288 bytes) under a host's 2 MiB, so a regression that eats
 /// that headroom fails here before it nears a host's limit;
 /// [`RELINK_WORKER_STACK_HEADROOM_TARGET`] holds the headroom itself.
@@ -5821,11 +5821,14 @@ const WORKER_STACK_BUDGET: usize = 1_572_864;
 /// headroom under the [`WORKER_STACK_BUDGET`]
 /// ([`restart_relink_keeps_its_worker_stack_headroom`]).
 ///
-/// In a debug build the scenario needs 1,191,936 bytes (1,187,840 overflows,
+/// In a debug build the scenario needs 1,196,032 bytes (1,191,936 overflows,
 /// in the member's turn, at the compaction check of its turn effects) with
 /// the run loop, the run's failure handling and the session task's commands
 /// that are not a turn awaited through boxed forms. This target is that need
-/// plus 32,768 bytes, so the path keeps 348,160 bytes (22%) under the budget.
+/// plus 28,672 bytes, so the path keeps 348,160 bytes (22%) under the budget.
+/// The need is that of a build of Core's whole selection with its test
+/// features, the form of the `closure-tests` rows; a build of this package
+/// alone needs 1,191,936.
 ///
 /// A change that takes the need past this target has spent headroom the
 /// budget row cannot see. Take the growth off the path where it arose (box

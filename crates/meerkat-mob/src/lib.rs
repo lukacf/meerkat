@@ -431,8 +431,8 @@ pub use runtime::{
     DeliveryUnknownCause,
 };
 pub use runtime::{
-    DeliveryScopeDecodeError, MEMBER_DELIVERY_SCOPE_VERSION, MemberBinding, MemberBindingHistory,
-    MemberBindingHistoryReadError, MemberBindingState, MemberDeliveryScope,
+    DeliveryScopeDecodeError, LineageSteps, MEMBER_DELIVERY_SCOPE_VERSION, MemberBinding,
+    MemberBindingHistory, MemberBindingHistoryReadError, MemberBindingState, MemberDeliveryScope,
     MemberIdentityManagement, ScopeIncarnation, ScopedRecoveryUnresolved, ScopedWorkRecovery,
     ScopedWorkState, WorkAdmissionStage,
 };

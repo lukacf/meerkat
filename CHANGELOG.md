@@ -518,6 +518,17 @@ them.
   cleanup of a session that stays, for a caller that is never an archive
   (taking back the runtime registration a failed recovery or create made).
 
+- `meerkat-mob`: a member binding answers where its chain of same-session
+  successors began. `MemberBinding::same_session_lineage_start(LineageSteps)`
+  is the first generation of the unbroken chain of same-session successor
+  steps that seated the binding's incarnation on its session (its own
+  generation when no such step seated it), read from the journal rows of
+  those steps alone; `LineageSteps::same_session_successors()` follows the
+  steps that kept the member's role, and `.with_role_migrations(true)` the
+  ones that seated the successor under another role too. It answers `None`
+  once the mob's journal holds a mob reset. Like the binding it is a history
+  fact and authorizes nothing by itself.
+
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
   requests themselves (see Security).
   `meerkat_core::redact::redact_credentials` removes credentials from text
@@ -1897,6 +1908,48 @@ them.
   sources). Mobs that were destroyed this way are not restored by upgrading
   (read from the source).
 
+- `meerkat-mob-mcp`: a member that created mobs with the agent mob tools
+  keeps managing them after its member is replaced by a same-session
+  successor, once or several times in a row
+  (`MobHandle::respawn_member`, a declared role migration, a runtime-mode
+  restamp, `MobHandle::respawn` of an identity entry's member). The
+  creator's manage grant was re-derived only for the member generation the
+  mob's creation record names, so a successor's session no longer listed
+  the mobs it had created and its calls on them (`mob_list_members`,
+  `mob_check_member`, `mob_retire_member`, `mob_destroy`) were refused as
+  `access_denied`, in the same process and after a restart, while those mobs
+  went on running. A same-session successor now keeps that management,
+  through any number of such steps, in the same process and after a restart;
+  the steps below say which changes of a member keep it and which end it.
+  Mobs created before this release are covered without any call. The
+  session's create capability and its current role's tools decide each call
+  as before.
+  - Keeps the creator's management: `MobHandle::respawn_member`, once or
+    many times; a declared role migration and a runtime-mode restamp of an
+    identity entry's member, a store-owned identity's profile move and
+    runtime-mode change among them; `MobHandle::respawn` of an identity
+    entry's member; and every other request that seats the member's
+    successor on its own session. A wake of the member, a restart of the
+    host and an adoption of the member change nothing.
+  - Still ends it, as before: a reset onto a fresh session
+    (`rotate_member`) and a worker's respawn, which takes a fresh session;
+    a member that was retired and later seated again on its kept session,
+    whatever seated it (a spawn or `ensure_member` that resumes the session,
+    an unlisted identity listed again, an archived identity unarchived); a
+    session binding recovery that moves the member to another session;
+    every later generation of a member of a mob that was ever reset.
+  - Not covered: a member whose own mob is stored in custom stores without
+    the built-in identity and member store. Its member history cannot be
+    read, so its successor keeps nothing, as before.
+  - Not brought back: a creator that was retired and seated again on its
+    session before the upgrade stays without its management of the mobs it
+    created; upgrading does not give back a management lost that way. Those
+    mobs end as before, with the session that owns them (see the Upgrade
+    notes).
+  The 0.9.4 Known limitation about a member "reset to its next generation,
+  over the same session" described this case; it no longer applies to a
+  same-session successor.
+
 - `meerkat-core`: a turn that fails because a provider failure outlasted the
   retries now says what failed. Its typed turn error (`error.data.error` of
   a JSON-RPC turn, `details.error` of REST, the `error=` JSON of the CLI's
@@ -2583,6 +2636,15 @@ them.
 
 ### Upgrade notes
 
+- A member that created mobs with the agent mob tools and was then replaced
+  by a same-session successor (see Fixed) manages those mobs again after the
+  upgrade, with no call: it lists them and its calls on them are admitted.
+  The upgrade does not bring back the management of a creator that was
+  retired and seated again on its session before it: such a mob stays
+  unlisted for its creator and goes on running until the session that owns
+  it is archived (a reset or a removal of the member) and the host starts
+  again, or until the host destroys it.
+
 - A configuration document an earlier release wrote keeps its mode until
   the engine next rewrites it. To make the existing ones owner-only now, run
   `chmod 600` on each that exists: `~/.rkat/config.toml`,
@@ -2735,10 +2797,10 @@ them.
   every seated identity whose labels were updated owes the restamp until
   its next seat row, and a retry of the update or a later update of other
   fields does not settle it. The respawn seats the member again on the
-  same session and cancels a turn in flight, and an agent that created
-  mobs with its own tools then no longer lists or manages them: have it
-  destroy such a mob first, or leave that identity unsettled (it is out
-  of service while rolled back, and nothing of it is lost). A member no same-session
+  same session and cancels a turn in flight; an agent that created mobs
+  with its own tools goes on listing and managing them (see Fixed). An
+  identity left unsettled is out of service while rolled back, and
+  nothing of it is lost. A member no same-session
   successor can serve (placed, wired to a placed member, or on a session
   service that keeps no durable sessions) is settled by none of these:
   rotate it (`MobHandle::rotate_member`), or archive or remove its

@@ -3639,6 +3639,91 @@ async fn a_broken_store_owned_member_is_built_again_after_a_label_update_or_a_re
     builds_with_labels(&mob, "closed", &session, &moved_team("closed")).await;
 }
 
+/// Row: the seat a label update gives a Broken store-owned member is its
+/// same-session successor's. The member's journal shows the step whole: the
+/// next incarnation holds the session the Broken one held, and the chain of
+/// same-session successors of that session goes on across the seat, from the
+/// generation the Broken member had. So what follows a member through its
+/// same-session successors (its session's management of the mobs its agent
+/// created is one such thing) follows it through this seat too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_broken_members_restamp_goes_on_with_its_same_session_chain() {
+    use crate::runtime::{LineageSteps, MemberBuildPreparationRefusal};
+    let preparer = ScriptedPreparer::new();
+    let mob = seat_composing_mob("broken-member-chain", &preparer).await;
+    committed(
+        mob.create(host_create("create-quiet", &["quiet"]), ALLOW)
+            .await,
+    );
+    preparer.compose_seats(SeatScript::Refuse(MemberBuildPreparationRefusal::Final {
+        reason: "the host refuses this seat".to_string(),
+    }));
+    assert!(wake(&mob, "quiet").await.is_err(), "the build is refused");
+    assert!(
+        matches!(
+            mob.read("quiet"),
+            IdentityEntryRead::Entry(view) if view.broken.is_some()
+        ),
+        "the member is Broken"
+    );
+    let session = mob.session("quiet").await;
+    let generation = mob.generation("quiet").await.expect("a member");
+    // The live binding of the member's session: its generation, and where
+    // the chain of same-session successors that seated it begins.
+    let chain = |mob: &StoreOwnedMob| {
+        let handle = mob.handle.clone();
+        let session = session.clone();
+        async move {
+            let history = handle
+                .member_binding_history()
+                .await
+                .expect("the member history reads");
+            let binding = history
+                .binding_for_session(&session)
+                .expect("the journal binds the member's session");
+            assert!(binding.is_live(), "the session's binding is live");
+            (
+                binding.generation(),
+                binding.same_session_lineage_start(LineageSteps::same_session_successors()),
+            )
+        }
+    };
+    assert_eq!(
+        chain(&mob).await,
+        (generation, Some(generation)),
+        "the Broken member's own seat starts its chain"
+    );
+
+    preparer.compose_seats(host_answers_moved_team(&["quiet"]));
+    let before = spec("quiet", "worker");
+    let updated = mob
+        .update(
+            "relabel-quiet",
+            before.clone().with_labels(moved_team("quiet")),
+            &spec_digest(&before),
+        )
+        .await
+        .expect("the label update commits");
+    assert_eq!(
+        answer_kind(updated.applied.as_ref().expect("the update's answer")),
+        "restamped",
+        "{updated:?}"
+    );
+    assert_eq!(
+        mob.session("quiet").await,
+        session,
+        "the next incarnation holds the session the Broken one held"
+    );
+    assert_eq!(
+        chain(&mob).await,
+        (
+            generation.next().expect("a next generation"),
+            Some(generation)
+        ),
+        "the chain goes on from the Broken member's generation"
+    );
+}
+
 /// Row (guard, passes before and after): a release gets no Broken member
 /// out. `quiet`'s first build is refused for good, so the member is Broken.
 /// It holds no live build: a release of it releases nothing, and it is

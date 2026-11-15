@@ -1060,29 +1060,28 @@ Security, Upgrade and Changed.
   trails until the agent is next seated is the record of its seat in the
   mob's journal: it decides nothing an update can change, it is what an
   earlier release that serves the same store reads, and only seating the
-  agent again (`meta/respawn`, with what that costs an agent that created
-  mobs) brings it in line; see the rollback notes of Meerkat's upgrade
-  guide before a rollback. A removed label stays in the peer metadata of
+  agent again (`meta/respawn`) brings it in line; see the rollback notes
+  of Meerkat's upgrade guide before a rollback. A removed label stays in the peer metadata of
   the agent's conversation, which its peers read, until the agent starts a
   new conversation. One agent is still seated again: a broken one (its
   build was refused for good, it serves nothing). Once its labels have
   changed since it was last seated, any update of it seats it again, the
-  update that changes them included; if it had created mobs before, it no
-  longer lists or manages them. See "Changing labels" in the created
+  update that changes them included; if it had created mobs before, it
+  goes on listing and managing them. See "Changing labels" in the created
   agents guide.
 
-- The texts say what a profile move of an agent created at run time costs.
+- The texts say what a profile move of an agent created at run time does.
   A profile move (`set.profile`), and a host's change of the runtime mode
   (`set.runtime_mode_override`), seats the agent again on the same
-  conversation, and an agent that is seated again no longer lists or
-  manages the mobs it created with its own tools: its mob tools answer no
-  such mob and its calls that name one are refused, while the mobs and
-  their members stay as they are. Another agent the host's rules let
-  change it can do that to an agent through `identity_update` (a profile
-  move), and a host through `meta/identity/update`; an agent cannot do it
-  to itself. Have the agent destroy such a mob first, or leave the profile
-  and the runtime mode of an agent that must go on managing its mobs as
-  they are. The `identity_update` tool's description says so now, and so
+  conversation, and an agent seated again this way goes on listing and
+  managing the mobs it created with its own tools (see Fixed: an identity
+  keeps managing the mobs it created); its new profile's tools decide what
+  it can call. Another agent the host's rules let change it can do that to
+  an agent through `identity_update` (a profile move), and a host through
+  `meta/identity/update`; an agent cannot do it to itself. What still ends
+  that management is a reset or a delete of the agent and an archive
+  followed by an unarchive: have the agent destroy such a mob first. The
+  `identity_update` tool's description says so now, and so
   do "Moving a profile" in the created agents guide, the long-term agents
   guide and `meta/identity/update` in the RPC reference. Text only: no
   call answers differently.
@@ -1449,7 +1448,7 @@ Security, Upgrade and Changed.
   were kept. A respawn that completed removed no mobs, and neither did one
   whose identity woke again on its session before the process stopped. This
   entry is about whether the mobs exist: what a respawned identity's own
-  tools list and manage of the mobs it created is not changed by this fix.
+  tools list and manage of the mobs it created is the next entry's subject.
   Mobs lost this way are not restored by the upgrade. `meta/respawn`
   (`MetaRuntime.respawn` in both SDKs, `IdentityRuntime::respawn`), the
   Console's respawn and the two rebuilds of `meta/compact_member` were
@@ -1521,6 +1520,40 @@ Security, Upgrade and Changed.
     answers `BridgeError::Unsupported`. It uses the new
     `MemberRespawn::with_profile_override`, `with_model_override` and
     `with_build_inputs_of` of Meerkat's mob (see Meerkat's changelog).
+
+- An identity keeps managing the mobs it created with its own `mob_create`
+  after it is respawned. In Meta 0.9.9 through 0.9.14, once an identity
+  that had created a mob was respawned (`meta/respawn`, the Console's
+  respawn, each rebuild of `meta/compact_member`), its own mob tools no
+  longer listed that mob and refused its calls on it (`mob_list_members`,
+  `mob_check_member`, `mob_retire_member`, `mob_destroy`), at once and
+  after a restart, while the mob and its members went on running. No
+  gateway call was found that lists, stops or destroys such a mob (read
+  from the source). From this release an
+  identity whose member is replaced by its successor on its own session
+  keeps that management (the fix is Meerkat's: see its changelog, Fixed,
+  `meerkat-mob-mcp`).
+  - Keeps it: `meta/respawn` and the Console's respawn of a served member
+    (see the entry above for which members are served); the rebuilds of
+    `meta/compact_member`, which take the same step; a move of an agent
+    created at run time to another profile and a change of its runtime
+    mode (`meta/identity/update`, the `identity_update` tool). The
+    respawn, the profile move and the mode change are confirmed by tests;
+    the compact call's rebuilds are read from the source.
+  - Still ends it: `meta/reset`, `meta/reset_all` and
+    `meta/delete_identity`, which take a fresh session; a respawn of a
+    member that is not served (it is retired and then woken, as in
+    0.9.14); a raw member that is retired and attached again
+    (`meta/retire_member`, then `meta/attach_existing_session` or
+    `meta/ensure_member` with a resume session); an identity the roster
+    unlisted and lists again; an agent that is archived and unarchived.
+    The reset, the delete, and the archive with its unarchive are
+    confirmed by tests; the others are read from the source.
+  - Not brought back: a mob whose creator lost its management on 0.9.14
+    stays as it is. Upgrading does not bring the mob back into its
+    creator's reach. On a stock gateway the way found to end it is a
+    reset or a delete of the identity, followed by the gateway's next
+    start (read from the source).
 
 - A name an agent holds through its record in the mob's identity store
   that the host's roster lists too (the host adopted the agent into the

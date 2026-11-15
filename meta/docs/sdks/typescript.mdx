@@ -352,6 +352,12 @@ const state = await identities.operation({ requestId: "adopt-scout-1" });
 | `directory({ query?, after? })` | | `AgentDirectoryPage` |
 | `plan(change, request)` | `change` and a `CreateAgents`, `UpdateAgent` or `AgentRef` | `IdentityChangePlan` |
 
+An `archive` ends the agent's management of the mobs it created, and an
+`unarchive` does not give it back: the mobs are removed with their stores at
+the next start, unless the agent was unarchived and has run again before it;
+then they stay running with no agent managing them. Have the agent destroy
+them first (see [`meta/identity/archive`](/api/rpc#meta%2Fidentity%2Farchive%2C-meta%2Fidentity%2Funarchive%2C-meta%2Fidentity%2Fremove%2C-meta%2Fidentity%2Fadopt)).
+
 Options and answers are camelCase; the SDK spells the wire's names. A change
 needs your `requestId`: the same id and request return the same state and
 commit at most once. `expectedSpecDigest` is the agent's `specDigest` as you

@@ -367,7 +367,7 @@ let (tx, mut rx) = mpsc::channel::<AgentEvent>(100);
 tokio::spawn(async move {
     while let Some(event) = rx.recv().await {
         match event {
-            AgentEvent::TextDelta { delta } => print!("{}", delta),
+            AgentEvent::TextDelta { delta, .. } => print!("{}", delta),
             AgentEvent::ToolExecutionStarted { name, .. } => {
                 println!("[Calling {}...]", name);
             }
@@ -454,16 +454,16 @@ match event {
     AgentEvent::HookDenied { hook_id, point, reason_code, message, .. } => {}
 
     // LLM interaction
-    AgentEvent::TurnStarted { turn_number } => {}
-    AgentEvent::ReasoningDelta { delta } => {}
-    AgentEvent::ReasoningComplete { content } => {}
-    AgentEvent::TextDelta { delta } => {}
-    AgentEvent::TextComplete { content } => {}
-    AgentEvent::ServerToolContent { id, kind, content } => {}
-    AgentEvent::AssistantImageAppended { image } => {}
+    AgentEvent::TurnStarted { turn_number, assistant_message_id } => {}
+    AgentEvent::ReasoningDelta { delta, assistant_message_id } => {}
+    AgentEvent::ReasoningComplete { content, assistant_message_id } => {}
+    AgentEvent::TextDelta { delta, assistant_message_id } => {}
+    AgentEvent::TextComplete { content, assistant_message_id } => {}
+    AgentEvent::ServerToolContent { id, kind, content, assistant_message_id } => {}
+    AgentEvent::AssistantImageAppended { image, assistant_message_id } => {}
     AgentEvent::ToolCallRequested { id, name, args } => {}
     AgentEvent::ToolResultReceived { id, name, content, is_error } => {}
-    AgentEvent::TurnCompleted { stop_reason, usage } => {}
+    AgentEvent::TurnCompleted { stop_reason, usage, assistant_message_id } => {}
 
     // Tool execution
     AgentEvent::ToolExecutionStarted { id, name } => {}
@@ -487,7 +487,7 @@ match event {
     AgentEvent::BudgetWarning { budget_type, used, limit, percent } => {}
 
     // Retry (typed LlmRetrySchedule owns failure kind + attempt/delay plan)
-    AgentEvent::Retrying { retry } => {}
+    AgentEvent::Retrying { retry, assistant_message_id } => {}
 
     // Model fallback
     AgentEvent::ModelFallbackSkipped { retry, target } => {}

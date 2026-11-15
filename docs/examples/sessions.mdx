@@ -620,7 +620,7 @@ archived targets successful no-ops, and direct substrate calls differ.
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
-                AgentEvent::TextDelta { delta } => print!("{}", delta),
+                AgentEvent::TextDelta { delta, .. } => print!("{}", delta),
                 AgentEvent::TurnCompleted { usage: Some(usage), .. } => {
                     // Per-call usage: `accounting` names the resolved model and
                     // the normalized presented input for this one call.

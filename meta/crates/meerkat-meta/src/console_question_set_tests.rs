@@ -2212,6 +2212,84 @@ fn a_build_that_names_ask_user_keeps_its_own() {
     );
 }
 
+/// A gate that is never asked: the rows that install it only look at what a
+/// build carries before it is prepared.
+struct NeverAsked;
+
+#[async_trait::async_trait]
+impl meerkat_core::ToolSurfaceGate for NeverAsked {
+    async fn decide(
+        &self,
+        _surface: &meerkat_core::PreparedToolSurface,
+    ) -> Result<meerkat_core::ToolSurfaceSelection, meerkat_core::ToolSurfaceRefusal> {
+        Err(meerkat_core::ToolSurfaceRefusal::new(
+            "this gate is never asked",
+        ))
+    }
+}
+
+/// A member build that runs through its registration's tool-surface gate
+/// gets no tool: the host that installed the gate decides the build's
+/// prepared surface whole, so the build carries only the tools it was asked
+/// for, and host tools the host put on it stay as they are. The same build
+/// on the same registration carries the tool while the registration has no
+/// gate, as every member build of a runtime without such a host does.
+#[tokio::test]
+async fn a_build_through_its_registrations_surface_gate_gets_no_tool() {
+    let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+    let session = meerkat_core::types::SessionId::new();
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("register the member's session");
+    let registration = machine
+        .current_session_registration_witness(&session)
+        .await
+        .expect("the registration is current");
+    let bindings = machine
+        .prepare_bindings(session)
+        .await
+        .expect("prepare the registration's bindings");
+    let build_on_the_registration = || {
+        let mut request = build_request(Some("agent-a"), None);
+        request
+            .build
+            .as_mut()
+            .expect("build options")
+            .runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
+        request
+    };
+    let slot = AskUserSlot::default();
+
+    let mut ungated = build_on_the_registration();
+    slot.mount(&mut ungated);
+    assert_eq!(
+        names_of(build_of(&ungated).host_tools.as_ref()),
+        vec![ASK_USER_TOOL.to_string()],
+        "a build on a registration without a gate carries the tool"
+    );
+
+    machine
+        .bind_session_tool_surface_gate(&registration, Arc::new(NeverAsked))
+        .await
+        .expect("install the host's gate");
+    let mut gated = build_on_the_registration();
+    slot.mount(&mut gated);
+    assert!(
+        build_of(&gated).host_tools.is_none(),
+        "a build through its registration's gate carries no tool it was not asked for"
+    );
+
+    let own = Named::of(&["host_probe"]);
+    let mut hosted = build_on_the_registration();
+    hosted.build.as_mut().expect("build options").host_tools = Some(Arc::clone(&own));
+    slot.mount(&mut hosted);
+    assert!(
+        same_dispatcher(build_of(&hosted).host_tools.as_ref(), Some(&own)),
+        "the host tools of a build through a gate stay as they are"
+    );
+}
+
 /// Meta's capability invariant judges the dispatchers a build supplies to
 /// the factory. The tool's dispatcher is exact, so the invariant judges
 /// every build with the tool as it judges it without. The build's host

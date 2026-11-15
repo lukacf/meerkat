@@ -5123,8 +5123,8 @@ change with a tool error naming the candidate launch): queued work and
 changes belong to the authoritative launch. On the
 console, `subscriptions/put` refuses a `member` whose identity is `_system`
 or `__console__` (`-32602`), the identities the console reserves for its own
-events. From 0.9.15 the console's methods keep an agent private to another
-person, and its records, from a caller who is not its owner (see
+events. From 0.9.15 the methods keep, on the console, an agent private to
+another person, and its records, from a caller who is not its owner (see
 [Access control](/concepts/access-control#private-side-chats)): a
 subscription, a delivery, a declared subscription and an escalation of such
 an agent are answered as ones that do not exist and are left as they are, a

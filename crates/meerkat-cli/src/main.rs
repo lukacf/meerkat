@@ -16217,6 +16217,7 @@ async fn run_agent(
             schedule_tools: None,
             workgraph_tools: None,
             workgraph_namespace_grant: None,
+            host_tools: None,
             mob_tool_authority_context: None,
             preload_skills,
             realm_id: Some(storage_scope.locator.realm.clone()),
@@ -24430,6 +24431,18 @@ async fn execute_mob_deploy_internal(
         "mob deploy failed",
     )
     .await?;
+    // One rule at every create: an id of the form temporary councils own
+    // makes no ordinary mob. Both surfaces build the pack's mob themselves,
+    // outside the mob state's create admission, so the form is refused
+    // here, once the pack is verified and before either surface builds.
+    if meerkat_mob::temporary_council::is_temporary_council_mob_id(&archive.definition.id) {
+        anyhow::bail!(
+            "mob deploy failed: {}",
+            meerkat_mob::temporary_council::reserved_temporary_council_mob_id_refusal(
+                &archive.definition.id
+            )
+        );
+    }
     validate_required_capabilities(&archive.manifest, &runtime_capabilities(invocation.surface))
         .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
     let mut effective_config = load_deploy_realm_config(scope).await?;
@@ -36841,6 +36854,103 @@ auth_profile = "inline"
                 "unexpected error: {err}"
             );
         }
+    }
+
+    /// `rkat mob deploy <pack>` makes no ordinary mob under an id of the form
+    /// temporary councils own, on either surface: the pack is refused with
+    /// the diagnostic every other create door gives, before a mob is built.
+    /// One hyphen is an ordinary id and deploys.
+    #[cfg(all(feature = "mob", feature = "rpc-surface"))]
+    #[tokio::test]
+    async fn test_mob_deploy_refuses_a_pack_under_the_council_id_form_on_both_surfaces() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        scope.user_config_root = Some(temp.path().to_path_buf());
+        let definition = |id: &str| {
+            serde_json::json!({
+                "id": id,
+                "orchestrator": {"profile": "lead"},
+                "profiles": {
+                    "lead": {
+                        "model": "claude-sonnet-4-5",
+                        "skills": [],
+                        "tools": {"comms": true},
+                        "peer_description": "Lead",
+                        "external_addressable": true
+                    }
+                },
+                "skills": {}
+            })
+        };
+        let reserved_id = format!("council--{}", unique_test_mob_id("from-a-pack"));
+        let reserved_dir =
+            write_mobpack_fixture_dir(temp.path(), "reserved", &definition(&reserved_id), true);
+        let reserved_pack = temp.path().join("reserved.mobpack");
+        execute_mob_pack(&reserved_dir, &reserved_pack, None)
+            .await
+            .expect("pack succeeds");
+
+        let cli_err = execute_mob_deploy(
+            &scope,
+            &reserved_pack,
+            "hello",
+            Some(TrustPolicyArg::Permissive),
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect_err("the cli surface refuses the reserved id");
+
+        let (_client_in, server_in) = tokio::io::duplex(1024);
+        let (server_out, _client_out) = tokio::io::duplex(1024);
+        let rpc_deploy = Box::pin(execute_mob_deploy_internal(
+            &scope,
+            &reserved_pack,
+            "hello",
+            DeployInvocation {
+                cli_trust_policy: Some(TrustPolicyArg::Permissive),
+                surface: DeploySurfaceArg::Rpc,
+                cli_overrides: CliOverrides::default(),
+                rpc_io: Some((Box::new(BufReader::new(server_in)), Box::new(server_out))),
+                config_observer: None,
+            },
+        ));
+        let rpc_err = tokio::time::timeout(Duration::from_secs(20), rpc_deploy)
+            .await
+            .expect("the rpc surface refuses the reserved id instead of serving the mob")
+            .expect_err("the rpc surface refuses the reserved id");
+
+        for err in [&cli_err, &rpc_err] {
+            let text = err.to_string();
+            assert!(
+                text.contains("mob deploy failed")
+                    && text.contains("reserved_system_identifier")
+                    && text.contains(&reserved_id),
+                "unexpected error: {text}"
+            );
+        }
+
+        let ordinary_id = format!("council-{}", unique_test_mob_id("from-a-pack"));
+        let ordinary_dir =
+            write_mobpack_fixture_dir(temp.path(), "ordinary", &definition(&ordinary_id), true);
+        let ordinary_pack = temp.path().join("ordinary.mobpack");
+        execute_mob_pack(&ordinary_dir, &ordinary_pack, None)
+            .await
+            .expect("pack succeeds");
+        let output = execute_mob_deploy(
+            &scope,
+            &ordinary_pack,
+            "hello",
+            Some(TrustPolicyArg::Permissive),
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect("an id with one hyphen deploys");
+        assert!(
+            output.contains(&format!("deployed\tmob={ordinary_id}")),
+            "unexpected output: {output}"
+        );
     }
 
     #[cfg(feature = "mob")]

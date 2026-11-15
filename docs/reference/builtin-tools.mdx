@@ -670,6 +670,28 @@ placed member's calls are asked about as that member's. The audience is
 handed the labels the calling member and the target carry on their own
 roster rows, so its rule can rest on a member's durable labels.
 
+From 0.9.15: the
+other mob tools of an agent (`mob_spawn_member`, `fork_off`,
+`council`, `conclude_objective`, `mob_check_member`, `mob_retire_member`,
+`mob_list_members`, `mob_wire` and `mob_unwire`) follow the same rule for a
+mob that has an audience: a refusal the mob answers is passed on whole only
+when its type shows that it names nothing but the mob and the members the
+call itself names, and any other is answered as `the mob refused the call.
+The host's log has the cause.`, the whole refusal logged at `warn`. When
+the refusal has a class that describes the refused operation
+(`wiring_error`, `session_error`, `storage_error` and the like) the answer
+ends with `Refusal class: <class>.` and carries it as `class` in its data.
+A provider authentication failure keeps its typed data, and a retirement
+still in progress keeps `retryable: true`. The outcome of a `fork_off` run
+and the error of a `council` that could not run follow the same rule; a
+`council` that started and then failed answers its outcome with the mob's
+own texts. A mob
+with no audience answers these tools whole, with one exception on every
+host: a failed read of the calling session's own seat (`fork_off`,
+`conclude_objective`) is answered as a fixed text unless its type names
+nothing. Through 0.9.14 every mob answers these tools whole. A call that
+seats a member still tells whether its name is taken.
+
 In 0.9.11 through 0.9.14 only the three tools named first keep to the
 audience. A member list names a member the audience hides. Through the wire
 tools a member with manage scope over the mob can learn that a member hidden
@@ -1309,7 +1331,7 @@ The refusal is an ordinary invalid-arguments tool error, returned to the
 model, and nothing is written. Reading (`view_image`, `blob_load_file`, an
 update hunk's context of an ordinary file) is not restricted by this rule,
 and neither is the `shell` tool, whose reach its
-[confinement](/concepts/configuration#the-hosts-own-inputs) decides. To change
+[confinement](/concepts/configuration#the-host%E2%80%99s-own-inputs) decides. To change
 engine configuration, use the CLI (`rkat mcp add`, `rkat config`,
 `rkat auth`, `rkat skill add`) or edit the files yourself.
 

@@ -970,7 +970,12 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
             outcome = &mut first_turn => match outcome {
                 // Built by some other path than a promotion.
                 Ok(Ok(_)) => {}
-                Ok(Err(rpc_err)) => return RpcResponse::from_error(id, rpc_err),
+                Ok(Err(rpc_err)) => {
+                    return RpcResponse::from_error(
+                        id,
+                        leave_no_session_for_a_refused_level(&runtime, &session_id, rpc_err).await,
+                    );
+                }
                 Err(_) => {
                     return RpcResponse::error(
                         id,
@@ -1015,7 +1020,10 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
         {
             Ok(r) => r,
             Err(rpc_err) => {
-                return RpcResponse::from_error(id, rpc_err);
+                return RpcResponse::from_error(
+                    id,
+                    leave_no_session_for_a_refused_level(&runtime, &session_id, rpc_err).await,
+                );
             }
         }
     };
@@ -1025,6 +1033,43 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
         .realm_id()
         .map(|realm| meerkat_contracts::format_session_ref(&realm, &response.session_id));
     RpcResponse::success(id, response)
+}
+
+/// The answer of a create whose first turn failed. A first turn refused for
+/// the session's reasoning effort level before the session was built leaves
+/// no session: the create staged the session with the level before any
+/// build judged it, and the refusal names no session a caller could turn
+/// to, so the staged session is archived with everything prepared for it,
+/// as a create that fails before its first turn leaves none. Only a session
+/// that was never built is removed: the same refusal can be raised inside
+/// the turn, after the build accepted the level (the route's levels are
+/// read again before each provider request), and a built session stays,
+/// with its transcript. The refusal keeps its typed code and data. Any
+/// other failure is answered as it is, and so is a deferred create's first
+/// turn, which never comes here: that create has answered its session id,
+/// and its session stays for a turn that names another level.
+async fn leave_no_session_for_a_refused_level(
+    runtime: &SessionRuntime,
+    session_id: &meerkat_core::SessionId,
+    mut rpc_err: crate::protocol::RpcError,
+) -> crate::protocol::RpcError {
+    let refused_for_its_level = rpc_err
+        .data
+        .as_ref()
+        .and_then(meerkat_core::SessionError::reasoning_effort_refusal_from_data)
+        .is_some();
+    // Still staged: the refused build put the staged session back, and no
+    // other request can have built it, since no caller was given its id.
+    if refused_for_its_level
+        && runtime.pending_session_exists(session_id).await
+        && let Err(cleanup_error) = runtime.archive_session(session_id).await
+    {
+        rpc_err.message = format!(
+            "{}; staged session cleanup failed: {}",
+            rpc_err.message, cleanup_error.message
+        );
+    }
+    rpc_err
 }
 
 /// Log a failure of a `keep_alive` create's first turn that the create does

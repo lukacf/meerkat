@@ -25,7 +25,10 @@ the methods answer `mob_announcements_unavailable`.
 
 The console serves the same methods on `/console/rpc`. Every one of them,
 the reads included, needs the `runtime.admin` grant, and a read-only console
-refuses the ones that change state.
+refuses the ones that change state. They keep an agent private to another
+person, and its subscriptions and deliveries, from a caller who is not its
+owner: they are answered as ones that do not exist (see
+[Access control](/concepts/access-control)).
 
 ## Announcements
 

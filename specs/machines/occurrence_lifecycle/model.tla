@@ -612,7 +612,7 @@ ClassifyTransitionFailureNotPendingForClaimDeliveryFailed(refusal_kind, trigger)
 
 ClassifyTransitionFailureNotClaimedPending(refusal_kind, trigger) ==
     /\ phase = "Pending"
-    /\ ((trigger = "DispatchStarted") /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "DispatchStarted") THEN TRUE ELSE (trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "Pending"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -620,7 +620,7 @@ ClassifyTransitionFailureNotClaimedPending(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotClaimedClaimed(refusal_kind, trigger) ==
     /\ phase = "Claimed"
-    /\ ((trigger = "DispatchStarted") /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "DispatchStarted") THEN TRUE ELSE (trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "Claimed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -628,7 +628,7 @@ ClassifyTransitionFailureNotClaimedClaimed(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotClaimedDispatching(refusal_kind, trigger) ==
     /\ phase = "Dispatching"
-    /\ ((trigger = "DispatchStarted") /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "DispatchStarted") THEN TRUE ELSE (trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "Dispatching"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -636,7 +636,7 @@ ClassifyTransitionFailureNotClaimedDispatching(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotClaimedAwaitingCompletion(refusal_kind, trigger) ==
     /\ phase = "AwaitingCompletion"
-    /\ ((trigger = "DispatchStarted") /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "DispatchStarted") THEN TRUE ELSE (trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "AwaitingCompletion"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -644,7 +644,7 @@ ClassifyTransitionFailureNotClaimedAwaitingCompletion(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotClaimedCompleted(refusal_kind, trigger) ==
     /\ phase = "Completed"
-    /\ ((trigger = "DispatchStarted") /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "DispatchStarted") THEN TRUE ELSE (trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -652,7 +652,7 @@ ClassifyTransitionFailureNotClaimedCompleted(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotClaimedSkipped(refusal_kind, trigger) ==
     /\ phase = "Skipped"
-    /\ ((trigger = "DispatchStarted") /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "DispatchStarted") THEN TRUE ELSE (trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "Skipped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -660,7 +660,7 @@ ClassifyTransitionFailureNotClaimedSkipped(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotClaimedMisfired(refusal_kind, trigger) ==
     /\ phase = "Misfired"
-    /\ ((trigger = "DispatchStarted") /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "DispatchStarted") THEN TRUE ELSE (trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "Misfired"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -668,7 +668,7 @@ ClassifyTransitionFailureNotClaimedMisfired(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotClaimedSuperseded(refusal_kind, trigger) ==
     /\ phase = "Superseded"
-    /\ ((trigger = "DispatchStarted") /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "DispatchStarted") THEN TRUE ELSE (trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "Superseded"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -676,7 +676,7 @@ ClassifyTransitionFailureNotClaimedSuperseded(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotClaimedDeliveryFailed(refusal_kind, trigger) ==
     /\ phase = "DeliveryFailed"
-    /\ ((trigger = "DispatchStarted") /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "DispatchStarted") THEN TRUE ELSE (trigger = "ReleaseClaimBeforeDispatch")) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "DeliveryFailed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -2292,6 +2292,31 @@ ReleaseLeaseForPausedScheduleAfterSupersession(at_utc_ms) ==
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
+ReleaseClaimBeforeDispatchFromClaimed(admission_evidence, at_utc_ms) ==
+    /\ phase = "Claimed"
+    /\ (admission_evidence = "Unrecorded")
+    /\ phase' = "Pending"
+    /\ model_step_count' = model_step_count + 1
+    /\ claimed_by' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ claimed_at_utc_ms' = None
+    /\ claim_token' = None
+    /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
+    /\ receipt_stage' = Some("LeaseExpired")
+    /\ receipt_failure_class' = Some("LeaseLost")
+    /\ receipt_detail' = Some("claim released because dispatch could not start")
+    /\ dispatched_at_utc_ms' = None
+    /\ UnchangedFrame_3970f5df13f0db16
+
+
+ReleaseClaimBeforeDispatchAfterSupersession(admission_evidence, at_utc_ms) ==
+    /\ phase = "Superseded"
+    /\ phase' = "Superseded"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_dac7ac5b0d5b99b3
+
+
 Next ==
     \/ (phase = "Pending") /\ \E refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E trigger \in OccurrenceLifecycleInputVariantValues : ClassifyTransitionFailurePlanRejectedPending(refusal_kind, trigger)
     \/ (phase = "Claimed") /\ \E refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E trigger \in OccurrenceLifecycleInputVariantValues : ClassifyTransitionFailurePlanRejectedClaimed(refusal_kind, trigger)
@@ -2508,6 +2533,8 @@ Next ==
     \/ (phase = "Dispatching") /\ \E at_utc_ms \in 0..2 : ReleaseLeaseForPausedScheduleFromDispatching(at_utc_ms)
     \/ (phase = "AwaitingCompletion") /\ \E at_utc_ms \in 0..2 : ReleaseLeaseForPausedScheduleFromAwaitingCompletion(at_utc_ms)
     \/ (phase = "Superseded") /\ \E at_utc_ms \in 0..2 : ReleaseLeaseForPausedScheduleAfterSupersession(at_utc_ms)
+    \/ (phase = "Claimed") /\ \E admission_evidence \in AdmissionEvidenceValues : \E at_utc_ms \in 0..2 : ReleaseClaimBeforeDispatchFromClaimed(admission_evidence, at_utc_ms)
+    \/ (phase = "Superseded") /\ \E admission_evidence \in AdmissionEvidenceValues : \E at_utc_ms \in 0..2 : ReleaseClaimBeforeDispatchAfterSupersession(admission_evidence, at_utc_ms)
     \/ TerminalStutter
 
 live_claim_requires_owner == (IF ~(is_live_claim_phase(phase)) THEN TRUE ELSE (claimed_by # None))

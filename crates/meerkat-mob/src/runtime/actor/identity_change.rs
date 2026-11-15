@@ -325,6 +325,23 @@ impl MobActor {
         for item in &items {
             Self::declare_owned_edges(&mut probe, &item.spec.identity, &item.peers)?;
         }
+        // An approval branch's identity prefix and its label are the
+        // branch's own opening's: refused to every identity of a create
+        // here, before anything is written, whatever its entry is unseated
+        // for. The seat planned below refuses them too; an entry that is
+        // owed no seat at the commit (awaiting its host's preparation,
+        // hosted on its first use, held) would otherwise be recorded with
+        // them, and no seat could follow it.
+        if let Some(item) = items.iter().find(|item| {
+            crate::runtime::approval_branch::takes_approval_branch_reservation(
+                &item.spec.identity,
+                item.spec.labels.as_ref(),
+            )
+        }) {
+            return Err(MobError::ApprovalBranchReserved {
+                identity: item.spec.identity.clone(),
+            });
+        }
         let mut entries = Vec::with_capacity(items.len());
         for (item, cause) in items.into_iter().zip(causes) {
             // Only an entry owed its seat is seated by the commit step: one

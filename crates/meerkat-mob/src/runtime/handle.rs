@@ -325,10 +325,31 @@ pub(super) struct PendingResumeOperation {
     progress_rx: tokio::sync::watch::Receiver<super::state::LifecycleProgressObservation>,
 }
 
+impl PendingResumeOperation {
+    /// Whether this operation already ended with a refusal that itself says
+    /// asking again can succeed (the `retryable` fact of its own structured
+    /// data). An operation still in flight, one that ended Ok and one that
+    /// ended with any other error answer `false`.
+    fn ended_with_retryable_refusal(&self) -> bool {
+        match &*self.state_tx.borrow() {
+            ResumeOperationState::Terminal(result) => match result.as_ref() {
+                Ok(()) => false,
+                Err(error) => error.says_retryable(),
+            },
+            ResumeOperationState::AwaitingLifecycleAdmission
+            | ResumeOperationState::LifecycleAuthorityAdmitted
+            | ResumeOperationState::InvalidatedByLifecycleAuthority => false,
+        }
+    }
+}
+
 #[derive(Default)]
 struct ResumeOperationRegistryState {
     generation: u64,
     current: Vec<Arc<PendingResumeOperation>>,
+    /// How many operations this registry started.
+    #[cfg(test)]
+    started: u64,
 }
 
 /// Handle-clone shared custody for one process-owned explicit Resume.
@@ -337,6 +358,13 @@ struct ResumeOperationRegistryState {
 /// deadline. Actor-admitted Stop/Reset/Complete/Destroy/Shutdown advances the
 /// generation and invalidates the current slot, so a predecessor Resume
 /// terminal cannot be replayed after intervening lifecycle authority.
+///
+/// A kept result that is itself a retryable refusal is not replayed either.
+/// It can be the late answer of an attempt whose caller already left at its
+/// progress budget, and what it refused over (a member's retirement still in
+/// flight) may have ended since: the caller that finds it drops it and runs
+/// an attempt of its own. A kept Ok, a kept error that is not retryable and
+/// an operation still in flight are joined as before.
 #[derive(Default)]
 pub(super) struct ResumeOperationRegistry {
     state: std::sync::Mutex<ResumeOperationRegistryState>,
@@ -352,12 +380,18 @@ impl ResumeOperationRegistry {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(current) = state
+        let kept = state
             .current
             .iter()
             .find(|current| current.command_authority == *command_authority)
-        {
-            return (Arc::clone(current), false);
+            .cloned();
+        if let Some(current) = kept {
+            if !current.ended_with_retryable_refusal() {
+                return (current, false);
+            }
+            state
+                .current
+                .retain(|operation| !Arc::ptr_eq(operation, &current));
         }
         let (state_tx, _) =
             tokio::sync::watch::channel(ResumeOperationState::AwaitingLifecycleAdmission);
@@ -371,7 +405,32 @@ impl ResumeOperationRegistry {
             progress_rx,
         });
         state.current.push(Arc::clone(&pending));
+        #[cfg(test)]
+        {
+            state.started = state.started.wrapping_add(1);
+        }
         (pending, true)
+    }
+
+    /// How many operations this registry started, and whether it keeps an
+    /// answer of `command_authority`'s operation that no caller has read.
+    #[cfg(test)]
+    fn observation_for_test(
+        &self,
+        command_authority: &crate::control_policy::CommandAuthority,
+    ) -> (u64, bool) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let kept = state.current.iter().any(|current| {
+            current.command_authority == *command_authority
+                && matches!(
+                    &*current.state_tx.borrow(),
+                    ResumeOperationState::Terminal(_)
+                )
+        });
+        (state.started, kept)
     }
 
     pub(super) fn invalidate_after_lifecycle_admission(&self) {
@@ -8717,6 +8776,14 @@ impl MobHandle {
         self.send_resume_actor_command_until(deadline).await
     }
 
+    /// How many explicit Resume operations this handle's registry started,
+    /// and whether it keeps an answer no caller has read.
+    #[cfg(test)]
+    pub(super) fn explicit_resume_operations_for_test(&self) -> (u64, bool) {
+        self.explicit_resume_operations
+            .observation_for_test(&self.command_authority)
+    }
+
     #[cfg(test)]
     pub(super) fn install_terminal_resume_result_for_test(&self, result: Result<(), MobError>) {
         let (operation, is_new) = self.explicit_resume_operations.get_or_insert(
@@ -8783,6 +8850,11 @@ impl MobHandle {
         }
     }
 
+    /// Whether MobMachine shows the key's exact incarnation in a durably
+    /// admitted retirement: it still holds the incarnation's material, and
+    /// either marks its runtime Retiring or, past the retirement's archive
+    /// observation, maps the identity to no runtime (the roster anchor then
+    /// goes last).
     fn retirement_exactly_durably_admitted(&self, key: &RetirementOperationKey) -> bool {
         let state = self.machine_state_watch_rx.borrow().clone();
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&key.agent_identity);
@@ -8791,8 +8863,9 @@ impl MobHandle {
             .member_runtime_material_for_identity(&dsl_identity)
             .map(|material| material.to_domain_for_identity(&key.agent_identity))
             == Some((key.agent_runtime_id.clone(), key.fence_token))
-            && state.member_state_markers.get(&dsl_runtime_id)
+            && (state.member_state_markers.get(&dsl_runtime_id)
                 == Some(&mob_dsl::MobMemberState::Retiring)
+                || !state.identity_to_runtime.contains_key(&dsl_identity))
     }
 
     async fn wait_for_retirement_operation(
@@ -9956,7 +10029,8 @@ impl MobHandle {
     }
 
     /// The mob's lifecycle as observed without asking its actor: the last
-    /// phase the actor published and, once the actor has stopped, why. See
+    /// phase the actor published, the lifecycle intent the mob still owes
+    /// and, once the actor has stopped, why. See
     /// [`MobLifecycleObservation`](super::MobLifecycleObservation).
     ///
     /// The failure is the cause the actor recorded when it fail-stopped,
@@ -9971,6 +10045,16 @@ impl MobHandle {
         // exit (Shutdown, Complete, Destroy) that published its phase first.
         let task_ended =
             self.lifecycle_observations.actor_task_end() != super::ActorTaskEnd::Running;
+        // The owed intent is read before the phase: the actor publishes a
+        // machine phase change's phase before its machine state, so the
+        // phase read here is never older than the state that answered
+        // "nothing owed". One seam publishes the machine state first: a
+        // destroy's admission turns the public phase Destroyed after its
+        // state is out, so this can show an owed Destroy beside the last
+        // live phase for an instant, which errs on the side of waiting.
+        let owed_intent = super::lifecycle_observation::owed_lifecycle_intent(
+            &self.machine_state_watch_rx.borrow(),
+        );
         let phase = self.status_observation_snapshot();
         let failure = match self.lifecycle_observations.fail_stop_cause() {
             Some(cause) => Some(cause),
@@ -9981,7 +10065,7 @@ impl MobHandle {
             }
             None => None,
         };
-        super::MobLifecycleObservation::new(phase, failure)
+        super::MobLifecycleObservation::new(phase, failure, owed_intent)
     }
 
     /// Access the mob definition.
@@ -11485,6 +11569,15 @@ impl MobHandle {
             }
             Err(_) => Roster::new(),
         }
+    }
+
+    /// Whether the mob's host installed a member tool audience
+    /// ([`MobBuilder::with_member_tool_audience`](super::MobBuilder::with_member_tool_audience)).
+    /// The audience is given to the builder, so this is a fact of the mob
+    /// as this handle's build made it: a mob with none hides no member from
+    /// any caller.
+    pub fn has_member_tool_audience(&self) -> bool {
+        self.member_tool_audience.is_some()
     }
 
     /// The members among `targets` that the host's member tool audience
@@ -15851,7 +15944,14 @@ impl MobHandle {
     /// identity. A retire that races a spawn of the same identity (the spawn
     /// committed its membership after the retire read the roster) is refused
     /// with [`MobError::LifecycleOperationPending`], which is retryable:
-    /// retried after the spawn settles, it retires the new incarnation.
+    /// retried after the spawn settles, it retires the new incarnation. A
+    /// retire that meets a retirement of the same member the mob already
+    /// runs (its own re-drive of a started retirement, a batch retirement)
+    /// joins it: it waits within its own budget and answers `Ok(())` once
+    /// the member is retired. A retire held behind a respawn or a rotation
+    /// of the member names the incarnation that operation superseded: it is
+    /// refused with [`MobError::StaleMemberOperatorAuthority`] (inside
+    /// [`MobError::SharedRetirementFailure`]) and retires nothing.
     ///
     /// A successful return is the terminal lifecycle barrier for work owned by
     /// this mob incarnation. New member work has been fenced, any Mob-owned
@@ -18633,6 +18733,72 @@ impl MobHandle {
             // The actor is gone (its state watch closed) or the hang guard
             // elapsed: the refusal stands.
             Ok(Err(_)) | Err(_) => Err(refusal),
+        }
+    }
+
+    /// Wait until the mob owes no lifecycle intent, and return the phase it
+    /// then has.
+    ///
+    /// An owed intent is one
+    /// [`MobLifecycleObservation::owed_intent`](super::MobLifecycleObservation::owed_intent)
+    /// reports: a Stop, Complete, Reset, retirement of every member or
+    /// Destroy that was durably begun and has not landed, whether this
+    /// process began it or a resume recovered it. The returned phase is read
+    /// from the same machine state that owes nothing, so a caller that lifts
+    /// a Stopped mob after this wait does not race a Stop that lands later.
+    /// A mob that owes nothing returns at once.
+    ///
+    /// The wait asks the actor nothing, loads nothing and has no bound: the
+    /// caller owns the bound. An intent that nothing drives stays owed and
+    /// keeps the wait pending on a live, healthy actor:
+    /// - a Stop whose caller got a refusal back (for example at a member's
+    ///   hang guard) stays owed until a Stop is issued again;
+    /// - a Reset a resume recovered, on a mob whose admission was closed
+    ///   before the Reset ran, cannot run on that actor any more (the actor
+    ///   refuses a Reset once its admission is closed, and the recovery stops
+    ///   trying), so the wait ends only when the actor ends.
+    ///
+    /// When the actor ends first, what a waiter gets depends on how it
+    /// ended:
+    /// - the actor fail-stopped: the recorded cause in
+    ///   [`MobError::SharedLifecycleFailure`], as [`Self::status`] reports
+    ///   it;
+    /// - its task ended in a live phase with no recorded cause: the
+    ///   closed-actor error `status` reports;
+    /// - it ended in a terminal public phase with the intent still owed and
+    ///   no recorded cause (a graceful Shutdown over an owed Complete, Reset,
+    ///   retirement of every member or Destroy, or an admitted destroy whose
+    ///   cleanup did not finish): [`MobError::ActorCommandChannelClosed`],
+    ///   although `status` answers that phase;
+    /// - a graceful Shutdown over an owed Stop: `Ok(MobState::Stopped)`. The
+    ///   Shutdown leaves that actor's machine Stopped, the state a landed
+    ///   Stop leaves, so nothing is owed on that handle and `status` answers
+    ///   Stopped too. That actor admits no Resume.
+    ///
+    /// In each of these the intent stays durable, and the next resume
+    /// reports it as owed and drives it. So an `Ok(MobState::Stopped)` from
+    /// this wait is the answer of that actor: a host that records "stopped"
+    /// durably takes it from the next start's wait, not from a wait a
+    /// Shutdown may have ended.
+    pub async fn wait_until_no_lifecycle_intent_is_owed(&self) -> Result<MobState, MobError> {
+        let mut state_rx = self.machine_state_watch_rx.clone();
+        let settled = state_rx
+            .wait_for(|state| super::lifecycle_observation::owed_lifecycle_intent(state).is_none())
+            .await
+            .map(|state| super::lifecycle_observation::phase_owing_no_lifecycle_intent(&state));
+        match settled {
+            Ok(phase) => Ok(phase),
+            // The actor has ended (its state watch closed) with the intent
+            // still owed.
+            Err(_) => Err(match self.lifecycle_observations.fail_stop_cause() {
+                Some(cause) => MobError::SharedLifecycleFailure(cause),
+                None => Self::status_from_closed_actor(
+                    MobError::ActorCommandChannelClosed,
+                    self.status_observation_snapshot(),
+                )
+                .err()
+                .unwrap_or(MobError::ActorCommandChannelClosed),
+            }),
         }
     }
 

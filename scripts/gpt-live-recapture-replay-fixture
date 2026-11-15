@@ -3,6 +3,7 @@
 #
 #   OPENAI_API_KEY=... scripts/gpt-live-recapture-replay-fixture S104
 #
+# The scenario is any of the eleven GPT Live gate scenarios, S97 to S107.
 # Builds the live e2e binary, runs the scenario once against gpt-live-1, and
 # when the run's journal ends `passed`, scrubs its provider-stream.jsonl into
 # tests/integration/fixtures/gpt_live_replay/<scenario>.provider-stream.jsonl
@@ -14,10 +15,19 @@ set -euo pipefail
 
 scenario="${1:-}"
 case "$scenario" in
+  S97) test_name=e2e_scenario_97_gpt_live_public_client_context_vertical ;;
+  S98) test_name=e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen ;;
+  S99) test_name=e2e_scenario_99_gpt_live_public_concurrent_context ;;
+  S100) test_name=e2e_scenario_100_gpt_live_public_morning_standup ;;
+  S101) test_name=e2e_scenario_101_gpt_live_public_busy_backend ;;
+  S102) test_name=e2e_scenario_102_gpt_live_public_who_are_you ;;
+  S103) test_name=e2e_scenario_103_gpt_live_public_interrupt_and_recover ;;
   S104) test_name=e2e_scenario_104_gpt_live_public_handoff_voice_typed_voice ;;
+  S105) test_name=e2e_scenario_105_gpt_live_public_fork_and_merge_parallel ;;
   S106) test_name=e2e_scenario_106_gpt_live_public_long_haul ;;
+  S107) test_name=e2e_scenario_107_gpt_live_public_stuck_close_convergence ;;
   *)
-    echo "usage: OPENAI_API_KEY=... $0 S104|S106" >&2
+    echo "usage: OPENAI_API_KEY=... $0 S97|S98|S99|S100|S101|S102|S103|S104|S105|S106|S107" >&2
     exit 2
     ;;
 esac

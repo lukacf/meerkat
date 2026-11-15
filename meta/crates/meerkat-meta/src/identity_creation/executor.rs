@@ -1060,6 +1060,9 @@ async fn commit_adopt(
         Ok(requester) => requester,
         Err(refusal) => return refused(refusal),
     };
+    // The labels the adoption would record, read back should Core refuse
+    // it its approval branches' reservation.
+    let configured_labels = row.labels.clone();
     match commit
         .mob
         .adopt_identity(
@@ -1069,7 +1072,10 @@ async fn commit_adopt(
         .await
     {
         Ok(change) => core_commit::committed(commit, &change),
-        Err(error) => executor.after_core_error(commit, error).await,
+        Err(error) => match core_commit::adoption_reservation_refusal(&error, &configured_labels) {
+            Some(refusal) => refused(refusal),
+            None => executor.after_core_error(commit, error).await,
+        },
     }
 }
 

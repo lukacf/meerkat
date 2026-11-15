@@ -64,7 +64,7 @@ async function main() {
     // Create a session, then invoke the skill on it.
     const skill: SkillKey = { sourceUuid, skillName };
     const session = await client.createSession("Hello", {
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5-5",
     });
     const result = await session.invokeSkill(
       skill,

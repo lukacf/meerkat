@@ -12,7 +12,7 @@ digest pinned in the package (unless `MEERKAT_BIN_PATH` is set or an
 root:
 
 ```bash
-# The quick-start examples (002, 003, 010) select claude-sonnet-4-6 and need
+# The quick-start examples (002, 003, 010) select an Anthropic model and need
 # only the Anthropic key.
 export ANTHROPIC_API_KEY=sk-...
 

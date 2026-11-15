@@ -4,6 +4,34 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `MetaRuntime.compact_member(identity, *, floor_tokens=None, timeout=None)`
+  calls `meta/compact_member`: the member's conversation is compacted now
+  (the older turns summarized, the most recent ones kept) in one
+  maintenance turn, at the cost of one model turn and two in-place rebuilds
+  of the member.
+  A `meta/compact_member` call that is admitted rebuilds the identity,
+  whether it then compacts, compacts nothing or fails. On a 0.9.15 gateway a
+  completed call keeps an identity's listing and management of the mobs it
+  created with its own tools (one run; a call that times out, or completes
+  without compacting, rebuilds by the same step: read from the source, not
+  run), unless the same-session step does not serve its member (see the RPC
+  reference); against a gateway on 0.9.9 through 0.9.14 the call costs it
+  that, and upgrading does not give it back (see the `meta/compact_member`
+  section of the RPC reference). Where the cost applies, have the identity
+  destroy a mob it created before the call if it must not be left running
+  unmanaged.
+  A changed instruction that waits for a compaction (an update answered
+  `applies_after_compaction`) takes effect with it.
+  `floor_tokens` is the member's compaction threshold for that turn
+  (gateway default 1024): a conversation shorter than it is left as it is,
+  so check the result's `compaction_applied`. `timeout` (seconds, gateway
+  default 60) is how long the gateway watches the turn; the call waits for
+  the reply for `timeout` plus 30 seconds, whatever the transport's request
+  timeout is, because the gateway holds the call past its deadline. Returns
+  the gateway's result as a dict. A failure raises `RpcError` with
+  `data["kind"]` (for example `compact_member_busy`,
+  `compact_member_timeout`); a `timeout` that is not a finite number of at
+  least one millisecond raises `ValueError` before any request.
 - `MetaRuntime.identities` (`IdentitiesHandle`) calls the long-term agent
   host methods (`meta/identity/*`): `create`, `update`, `archive`,
   `unarchive`, `remove`, `adopt`, `withdraw`, `changes_hold`, `list`, `get`,
@@ -110,6 +138,29 @@ All notable changes to the Python SDK are documented here.
   from the released sources; confirmed by a run on 0.9.14). For what to do
   on an affected release, see the known issue on the Meta 0.9.14 release
   page: https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14
+- `MobHandle.gating_questions()` lists the open question sets agents asked
+  with `ask_user` (`meta/gating/questions`) as `GatingQuestionSet`
+  (`GatingQuestion`, `GatingQuestionChoice`). `MobHandle.gating_answer(
+  pending_id, *, approver_id, presented_digest, answers)` answers one and
+  `MobHandle.gating_dismiss(pending_id, *, approver_id, presented_digest)`
+  dismisses one, both through `meta/gating/decide`; they return a
+  `GatingQuestionSetResult` (`outcome`: `answered` or `dismissed`). An answer
+  is a `GatingQuestionAnswer` (`.choice(...)`, or `.free_text(...)` where the
+  question allows it) or its wire form; `gating_answer` raises `ValueError`
+  without at least one. `gating_pending()` does not list question sets.
+
+- A type checker now sees what `MetaBuilder.build()` returns. Its annotation
+  named `MetaRuntime` without importing it for type checkers, so the result
+  of `await Meta.builder()....build()` was unknown to pyright and mypy and
+  no call on the runtime was checked, although the package is typed
+  (`py.typed`). The same held for the return or parameter types of twelve
+  `MobHandle` methods: `query_events`, `query_mob_events`,
+  `subscribe_mob_events`, `member_status`, `spawn_helper`, `fork_helper`,
+  `attach_session`, `flow_status`, `list_runs`, `collect_completed`,
+  `wait_one` and `wait_all`. Nothing changes at run time. Code that was
+  never checked is checked now, so a type checker can report errors it
+  did not report before. Present in 0.9.14 as well (read from the released
+  source).
 
 ## 0.9.14
 

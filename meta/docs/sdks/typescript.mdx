@@ -84,6 +84,65 @@ to this SDK, so keep them as they are. These replace
 `activateMemberInstruction` (`meta/member_activate_instruction`, deprecated
 since 0.9.11). See [Operator instructions](/api/rpc#operator-instructions).
 
+## Compacting a member's conversation
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+From 0.9.15. `compactMember` compacts a member's conversation now: the member
+runs one maintenance turn in which the older turns are summarized and the
+most recent ones are kept. It costs one model turn and two in-place rebuilds
+of the member, one before that turn and one after it, on the same
+conversation.
+A `meta/compact_member` call that is admitted rebuilds the identity, whether
+it then compacts, compacts nothing or fails. On a 0.9.15 gateway a completed
+call keeps an identity's listing and management of the mobs it created with
+its own tools (one run; a call that times out, or completes without
+compacting, rebuilds by the same step: read from the source, not run), unless
+the same-session step does not serve its member (see Known limitations in
+Meta's changelog, the entry on the loss of an identity's mobs after a
+respawn); against a gateway on 0.9.9 through 0.9.14 the call costs it that,
+and upgrading does not give it back (see the `meta/compact_member` section of
+the RPC reference). Where the cost applies, have the identity destroy a mob
+it created before the call if it must not be left running unmanaged.
+Call it against a 0.9.15 gateway: on 0.9.9 through 0.9.14 a call that fails
+leaves the agent with the call's low compaction threshold.
+It is a host method only (`meta/compact_member`): the Console's RPC route
+does not forward it.
+
+```typescript
+const result = await rt.compactMember("triage:main");
+result.compaction_applied; // check it: false means not compacted
+result.messages_before, result.messages_after;
+
+// A lower threshold for a shorter conversation, a longer watch for a long turn.
+// A conversation of only a few turns may not get smaller whatever the floor,
+// and the call can then fail with compact_member_completion_failed.
+await rt.compactMember("triage:main", { floorTokens: 256, timeoutMs: 180_000 });
+```
+
+A changed instruction that waits for a compaction takes effect with it: an
+update whose `instructions` outcome is `applies_after_compaction`, because
+the member's model takes a system instruction only ahead of the
+conversation.
+
+`floorTokens` is the member's compaction threshold for that one turn (gateway
+default 1024 tokens). A conversation shorter than the floor is left as it is,
+so always check the result's `compaction_applied`: `false` means the
+conversation holds no fewer messages than before the call. `timeoutMs`
+(gateway default 60000) is how long the gateway watches the maintenance turn;
+past it the call rejects even if the compaction completes later. The gateway
+holds the call for longer than `timeoutMs`, so the call waits for the reply
+for `timeoutMs` plus 30 seconds, whatever the transport's own request timeout
+is.
+
+The result is the gateway's, as it is: `identity`, `session_id`,
+`floor_tokens`, `messages_before`, `messages_after`, `compaction_applied`,
+`head_revision` and `last_rewrite_reason`. A failure rejects with an RPC
+error whose `data.kind` names it, for example `compact_member_busy`,
+`compact_member_timeout` or `compact_member_completion_failed`, with
+`data.stage` and `data.operation_id`. See
+[`meta/compact_member`](/api/rpc#meta%2Fcompact_member).
+
 ## Fork instruction policy
 
 A member forked with `fork_off`, a delegation fork or a council does not run
@@ -352,6 +411,12 @@ const state = await identities.operation({ requestId: "adopt-scout-1" });
 | `directory({ query?, after? })` | | `AgentDirectoryPage` |
 | `plan(change, request)` | `change` and a `CreateAgents`, `UpdateAgent` or `AgentRef` | `IdentityChangePlan` |
 
+An `archive` ends the agent's management of the mobs it created, and an
+`unarchive` does not give it back: the mobs are removed with their stores at
+the next start, unless the agent was unarchived and has run again before it;
+then they stay running with no agent managing them. Have the agent destroy
+them first (see [`meta/identity/archive`](/api/rpc#meta%2Fidentity%2Farchive-meta%2Fidentity%2Funarchive-meta%2Fidentity%2Fremove-meta%2Fidentity%2Fadopt)).
+
 Options and answers are camelCase; the SDK spells the wire's names. A change
 needs your `requestId`: the same id and request return the same state and
 commit at most once. `expectedSpecDigest` is the agent's `specDigest` as you
@@ -372,7 +437,7 @@ a short conversation may never reach the compaction that brings it into
 effect. `rt.reset(name)` does, and gives the agent's conversation up.
 `rt.instructionStatus` is the authority for whether a change is in
 effect; see
-[Changing an agent's instructions](/concepts/roster#changing-an-agents-instructions).
+[Changing an agent's instructions](/concepts/roster#changing-an-agent%E2%80%99s-instructions).
 
 The first answer of an `archive`, an `unarchive` and a `remove` also carries
 the agent's `schedules` (`SchedulesFollowed`: `effect`, `count`,
@@ -591,11 +656,56 @@ compatibility with existing TypeScript objects; parsed responses use `null` when
 a field is absent or malformed. Unknown outcome strings are preserved.
 `nextPendingId` identifies an escalation successor; the SDK does not automatically
 retry or execute the action. See [Gating](/concepts/gating) for decision semantics.
+`gatingDecide` reads the result of a gated action. From 0.9.15
+`meta/gating/decide` answers a question set's `pending_id` with another
+result, which carries `kind: "question_set"` and no `action_id`: decide a
+question set with `gatingAnswer` or `gatingDismiss`, which read it.
 
 `handle.gatingWithdraw(pendingId, reason?)` withdraws a pending request this host
 minted, with no decision: it returns `pendingId`, `actionId`, `actorId`,
 `outcome` (`safe_draft`), `withdrawnAtMs`, `withdrawnBy` and `reason`. A request
 that was already decided, timed out or withdrawn is refused as an unknown id.
+
+From 0.9.15. `handle.gatingQuestions()` lists the open
+[question sets](/concepts/gating#question-sets) agents asked with `ask_user`
+(they are not part of `gatingPending()`). Each `GatingQuestionSet` carries the
+`pendingId` a decision takes, the asking agent as `origin`, a `title` (or
+`null`), its `questions` (`id`, `prompt`, `choices`, `allowFreeText`,
+`recommended`), `createdAtMs`, `deadlineAtMs` and the `subjectDigest` a
+decision sends back. Both decisions go through `meta/gating/decide`, so the
+host names the approver:
+
+```ts
+for (const set of await handle.gatingQuestions()) {
+  const result = await handle.gatingAnswer(set.pendingId, {
+    approverId: "operator",
+    presentedDigest: set.subjectDigest,
+    answers: [
+      { questionId: "region", answer: { kind: "choice", choiceId: "eu" } },
+      { questionId: "start", answer: { kind: "free_text", text: "After the 16:00 freeze" } },
+    ],
+  });
+  // result.outcome === "answered"
+}
+```
+
+At least one answer is needed (`gatingAnswer` throws otherwise, before
+anything is sent); a question left out reaches the agent as `unanswered`, and
+free text is allowed only where the question sets `allowFreeText`.
+`handle.gatingDismiss(pendingId, { approverId, presentedDigest })` tells the
+agent no answer is coming. Both return a `GatingQuestionSetResult`
+(`pendingId`, `kind`, `outcome`: `answered` or `dismissed`, `decidedAtMs`). The
+gateway refuses an invalid answer set as invalid params (`-32602`). A set that
+itself refuses the decide (it is no longer open, or `presentedDigest` is not
+its digest) is refused `-32602` with the typed refusal in the error's data:
+`data.kind = "decision_refused"` and `data.decision_refusal.kind` (`not_open`,
+`subject_changed`, `expired` or `not_eligible`); see
+[Answering a question set](/api/rpc#answering-a-question-set).
+
+There is no Meta SDK for the browser: the browser client of these methods is
+the Console's own `@console-core` package (`normalizeQuestionSet`,
+`createQuestionSetResource` and the `listQuestionSets` command), and the Core
+Web SDK (`@rkat/web`) has no Meta surface.
 
 `ModuleConfig` is not a public TypeScript SDK export. Pass module declaration
 objects to `.modules(...)`, whose public parameter type is `unknown[]`.

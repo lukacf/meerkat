@@ -77,6 +77,7 @@ pub use llm_client::{
 };
 pub mod approval;
 pub mod artifact;
+pub mod ask_user;
 pub mod auth;
 pub mod authorization;
 pub mod blob;
@@ -356,7 +357,9 @@ pub use exact_operation::{
     OperationWaitError, ProjectedTerminalText, ResultProjectionValidationError, TerminalReceipt,
     ValidatedResultProjectionSpec,
 };
-pub use gateway::{DynamicToolComposite, ToolGateway, ToolGatewayBuilder};
+pub use gateway::{
+    DynamicToolComposite, SHARED_TOOL_NAME_LOG_TARGET, ToolGateway, ToolGatewayBuilder,
+};
 pub use governance_config::{
     DecisionGovernanceConfig, GovernanceConfig, StockConsentAssurance, StockReviewConfig,
     StockReviewRule, StockReviewTarget, StockReviewTier, StockReviewerSelection,

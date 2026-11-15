@@ -63,7 +63,11 @@
 \* RecoverRosterMemberAddressabilityRunning and the stale abandonment arm,
 \* which takes every runtime id, fence and generation of the domains;
 \* RecoverRosterMemberRetirementStartedReleasingAlreadyApplied does too
-\* unless it records a topology preservation.
+\* unless it records a topology preservation. So do the four arms of a
+\* cancel of the member's work: ForceCancelRunning (a live member),
+\* ForceCancelRunningRuntimeNotLive, ForceCancelRunningAlreadyRetiring and
+\* CancelAllWorkRunning, which takes every runtime id and fence of the
+\* domains.
 \*
 \* A second, smaller run (AuditScopeSpec) checks the RetireAtScope
 \* classifier: the same lifecycle arms without the progress observations,
@@ -107,6 +111,12 @@
 \*     (two members) pins it.
 \*   AuditDestroyedOnlyThroughAnAdmittedDestroy (action property, in both
 \*     runs): the mob becomes Destroyed only through a destroy it admitted.
+\*   AuditMemberWorkCancelKeepsActiveRuns (action property, in both runs):
+\*     a cancel of the member's work, a force cancel in each of its three
+\*     arms or a cancel of all work of its runtime, keeps the mob's phase
+\*     and its active runs: the cancel is of one member's work, so a run of
+\*     the mob stays counted until its own end and a Stop still waits for
+\*     it. Both active cancel arms used to reset the mob-wide count.
 \*   AuditPlacementAbsent and AuditRetiringRuntimeMapped (invariants): no
 \*     member is ever placed, and every Retiring runtime is the one its
 \*     identity maps to. They check the reasons in the not-covered list
@@ -167,7 +177,10 @@
 \* requires AuditMintClearsExecutionHealth to fail, and makes
 \* ObserveRuntimeDestroyed end the mob, leave its runtime live, and reset the
 \* mob's run count, and requires AuditRuntimeDestroyedRemovesOnlyItsRuntime to
-\* fail for each, drops the RetireAbsentCompleted arm, and then only its
+\* fail for each, makes ForceCancelRunning, and then CancelAllWorkRunning,
+\* reset the mob's run count, and requires
+\* AuditMemberWorkCancelKeepsActiveRuns to fail for each,
+\* drops the RetireAbsentCompleted arm, and then only its
 \* identity_absent guard, and requires AuditRetireAbsentAnsweredInEveryPhase
 \* to fail for each, and drops the stale abandonment arm, and then only its
 \* later_generation_recorded guard (the arm then answers a marker of a
@@ -353,6 +366,25 @@ AuditRuntimeDestroyed ==
 AuditStartRun == active_run_count = 0 /\ StartRunRunning
 
 AuditFinishRun == FinishRunRunning
+
+\* A cancel of the member's work: a force cancel of the member, in each of
+\* its three arms (live, runtime gone, already retiring), and a cancel of all
+\* work of its runtime. The mob's active runs must stay counted.
+AuditForceCancel == ForceCancelRunning(AuditIdentity)
+
+AuditForceCancelRuntimeNotLive == ForceCancelRunningRuntimeNotLive(AuditIdentity)
+
+AuditForceCancelAlreadyRetiring == ForceCancelRunningAlreadyRetiring(AuditIdentity)
+
+AuditCancelAllWork ==
+    \E rid \in AuditRuntimes, fence \in AuditFences :
+        CancelAllWorkRunning(AuditIdentity, rid, fence)
+
+AuditMemberWorkCancelArm ==
+    \/ AuditForceCancel
+    \/ AuditForceCancelRuntimeNotLive
+    \/ AuditForceCancelAlreadyRetiring
+    \/ AuditCancelAllWork
 
 AuditQuiesceForStop == BeginPlacedCompletionLifecycleQuiesceFreshStop("Stop")
 
@@ -554,6 +586,10 @@ AuditStepCountOnlyNext ==
     \/ AuditRecoverRetiringReplay
     \/ AuditRecoverAddressability
     \/ AuditStaleAbandonmentReplay
+    \/ AuditForceCancel
+    \/ AuditForceCancelRuntimeNotLive
+    \/ AuditForceCancelAlreadyRetiring
+    \/ AuditCancelAllWork
 
 AuditNext ==
     \/ AuditLifecycleNext
@@ -654,6 +690,14 @@ AuditRuntimeDestroyedRemovesOnlyItsRuntime ==
 \* (AdmitDestroyCleanup or DestroyMob).
 AuditDestroyedOnlyThroughAnAdmittedDestroy ==
     [][(phase # "Destroyed" /\ phase' = "Destroyed") => destroy_admitted' = TRUE]_vars
+
+\* A cancel of the member's work keeps the mob's phase and its active runs:
+\* a run of the mob stays counted until its own end.
+AuditMemberWorkCancelKeepsActiveRuns ==
+    [][AuditMemberWorkCancelArm =>
+          /\ phase' = phase
+          /\ active_run_count' = active_run_count
+      ]_vars
 
 \* No arm here places a member: the placed archive, retirement-start and
 \* remote Retire arms need a placement.

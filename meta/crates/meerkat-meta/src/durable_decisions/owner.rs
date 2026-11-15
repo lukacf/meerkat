@@ -119,6 +119,13 @@ impl RuntimeDecisions {
         self
     }
 
+    /// These decisions over `owner`: a row gives the owner its own clock.
+    #[cfg(test)]
+    pub(crate) fn with_owner_for_test(mut self, owner: DurableDecisionService) -> Self {
+        self.owner = owner;
+        self
+    }
+
     /// The decision owner. A host composition holds its own kinds' decisions
     /// through it.
     pub fn owner(&self) -> &DurableDecisionService {

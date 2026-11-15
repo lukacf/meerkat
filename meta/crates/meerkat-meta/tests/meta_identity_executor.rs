@@ -1583,3 +1583,412 @@ async fn the_seam_refuses_a_move_into_a_prepared_profile_whatever_let_it_through
     assert!(rig.seated(CREATED), "{:?}", rig.standing(CREATED));
     rig.shutdown().await;
 }
+
+/// The approval branch's authority label, from Core, its owner.
+const BRANCH_LABEL: &str = meerkat_core::approval::decision::APPROVAL_BRANCH_LABEL;
+
+/// `name`'s spec with the approval branch's label among its labels.
+fn spec_with_branch_label(name: &str) -> DurableAgentSpec {
+    let mut labelled = spec(name);
+    labelled
+        .labels
+        .insert(BRANCH_LABEL.to_owned(), "decision:made-up".to_owned());
+    labelled
+}
+
+/// The `reserved_key` refusal of the approval branch's label at `field`,
+/// as the wire's `error.data`.
+fn branch_label_reserved_at(field: &str) -> Value {
+    json!({"kind": "reserved_key", "key": BRANCH_LABEL, "field": field})
+}
+
+/// Row (RED): a create that carries the approval branch's reserved label is
+/// refused `reserved_key`, naming the key, at the labels of the agent that
+/// carries it (`agents[i].labels`), and Core holds no agent of the request
+/// afterwards: for a profile whose agent is seated by its create (the
+/// second agent of the request carries the label, and the first is not
+/// created either), and for a profile its host prepares first.
+///
+/// RED before Core's reservation was translated and the prepared create
+/// refused it: the create on the plain profile answers no typed refusal
+/// (Core refuses the seat's plan with an error the seam does not name),
+/// and the create on the prepared profile commits the agent pending its
+/// preparation, a record no settle can seat.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_that_carries_the_approval_branch_label_is_refused_reserved_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "preparation": {"worker": {"mode": "required"}},
+        "approval": {"rules": [{"change": ["create"], "outcome": {"kind": "allow"}}]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    let facts = RequesterFacts::host(SURFACE);
+    let mob = rig.mob();
+    let requester = host();
+    let cases = [
+        (
+            "plain",
+            vec![spec("archer"), spec_with_branch_label(CREATED)],
+            "agents[1].labels",
+        ),
+        (
+            "prepared",
+            vec![spec_with_branch_label("warden")],
+            "agents[0].labels",
+        ),
+    ];
+    // Every case is run before the row fails, so one run shows what each
+    // answered.
+    let mut wrong = Vec::new();
+    for (case, specs, field) in cases {
+        let request = create_request(&facts, &specs);
+        let operation_id =
+            OperationId::for_request(&requester.recorded(), &format!("create-{case}"))
+                .expect("a request id");
+        let consent = consent_of_plan(&request.plan).expect("the policy allows the change");
+        let mut commit =
+            ChangeCommit::new(&mob, &operation_id, &requester, consent, &request.request);
+        if case == "prepared" {
+            commit = commit.with_preparations(policy.preparations());
+        }
+        match CoreChangeExecutor::new().commit(commit).await {
+            Ok(committed) => {
+                if committed.outcome.refusal().map(IdentityRefusal::to_data)
+                    != Some(branch_label_reserved_at(field))
+                {
+                    wrong.push(format!(
+                        "{case}: the create is not refused `reserved_key` at {field}: {:?}",
+                        committed.outcome
+                    ));
+                }
+            }
+            Err(error) => {
+                wrong.push(format!(
+                    "{case}: the create answers no typed refusal: {error:?}"
+                ));
+            }
+        }
+        for created in &specs {
+            let name = created.identity.as_str();
+            if rig.standing(name).is_some()
+                || !matches!(mob.identity_record(&id(name)).await, Ok(None))
+            {
+                wrong.push(format!(
+                    "{case}: Core holds the agent `{name}`: {:?}",
+                    rig.standing(name)
+                ));
+            }
+        }
+        if let Some(recorded) = rig.recorded(&requester, &format!("create-{case}")).await {
+            wrong.push(format!("{case}: the operation committed: {recorded:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    rig.shutdown().await;
+}
+
+/// Row (RED): a create whose agent's name takes the identity prefix Core
+/// reserves for its approval branches is refused `invalid_name` at that
+/// agent's name (`agents[i].name`), and Core holds no agent of the request
+/// afterwards: for a profile whose agent is seated by its create (the
+/// second agent of the request has the name, and the first is not created
+/// either), and for a profile its host prepares first. With the label rows
+/// above, no case of Core's reservation is answered untyped.
+///
+/// RED before the seam named the refusal: Core refuses the create, and the
+/// seam answers its error as no typed refusal, on both profiles.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_whose_name_takes_the_approval_branch_prefix_is_refused_invalid_name() {
+    const PREFIXED: &str = "approval-branch-made-up";
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "preparation": {"worker": {"mode": "required"}},
+        "approval": {"rules": [{"change": ["create"], "outcome": {"kind": "allow"}}]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    let facts = RequesterFacts::host(SURFACE);
+    let mob = rig.mob();
+    let requester = host();
+    let cases = [
+        (
+            "plain",
+            vec![spec("aardvark"), spec(PREFIXED)],
+            "agents[1].name",
+        ),
+        ("prepared", vec![spec(PREFIXED)], "agents[0].name"),
+    ];
+    // Every case is run before the row fails, so one run shows what each
+    // answered.
+    let mut wrong = Vec::new();
+    for (case, specs, field) in cases {
+        let request = create_request(&facts, &specs);
+        let operation_id =
+            OperationId::for_request(&requester.recorded(), &format!("create-{case}"))
+                .expect("a request id");
+        let consent = consent_of_plan(&request.plan).expect("the policy allows the change");
+        let mut commit =
+            ChangeCommit::new(&mob, &operation_id, &requester, consent, &request.request);
+        if case == "prepared" {
+            commit = commit.with_preparations(policy.preparations());
+        }
+        match CoreChangeExecutor::new().commit(commit).await {
+            Ok(committed) => {
+                if committed.outcome.refusal().map(IdentityRefusal::to_data)
+                    != Some(json!({"kind": "invalid_name", "field": field}))
+                {
+                    wrong.push(format!(
+                        "{case}: the create is not refused `invalid_name` at {field}: {:?}",
+                        committed.outcome
+                    ));
+                }
+            }
+            Err(error) => {
+                wrong.push(format!(
+                    "{case}: the create answers no typed refusal: {error:?}"
+                ));
+            }
+        }
+        for created in &specs {
+            let name = created.identity.as_str();
+            if rig.standing(name).is_some()
+                || !matches!(mob.identity_record(&id(name)).await, Ok(None))
+            {
+                wrong.push(format!(
+                    "{case}: Core holds the agent `{name}`: {:?}",
+                    rig.standing(name)
+                ));
+            }
+        }
+        if let Some(recorded) = rig.recorded(&requester, &format!("create-{case}")).await {
+            wrong.push(format!("{case}: the operation committed: {recorded:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    rig.shutdown().await;
+}
+
+/// Row (RED): an update that adds the approval branch's reserved label to
+/// an agent whose record does not carry it is refused `reserved_key`,
+/// naming the key, at `set.labels`, and the agent's record is unchanged
+/// (revision 1, no label). An update of the same agent that sets another
+/// label commits.
+///
+/// RED before Core refused the update: the update commits, and the agent's
+/// record carries a label under which the agent can no longer be seated
+/// again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_that_adds_the_approval_branch_label_is_refused_reserved_key() {
+    /// A launch that configures no agent and whose policy declares no
+    /// authority field: every label is a descriptive one.
+    struct NoAuthorityFields;
+
+    #[async_trait]
+    impl meerkat_meta::identity_creation::AgentSpecs for NoAuthorityFields {
+        async fn configured_spec(
+            &self,
+            _mob: &meerkat_mob::MobHandle,
+            _name: &str,
+        ) -> Option<DurableAgentSpec> {
+            None
+        }
+
+        fn is_authority_field(&self, _key: &str) -> bool {
+            false
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let digest = rig.create(CREATED).await;
+    let facts = RequesterFacts::host(SURFACE);
+    let profiles = BTreeSet::from(["worker".to_owned()]);
+    let peers = BTreeMap::new();
+    let labelled = |labels: Value| {
+        let update: UpdateIdentitySpec = serde_json::from_value(json!({
+            "identity": CREATED,
+            "expected_spec_digest": digest.as_str(),
+            "set": {"descriptive_labels": labels},
+        }))
+        .expect("an update");
+        normalize_update(
+            &allow_all(),
+            &RequestContext {
+                requester: &facts,
+                profiles: &profiles,
+                peers: &peers,
+            },
+            RequestEnvelope::default(),
+            &entry(CREATED, &digest),
+            &update,
+        )
+        .expect("the label change is allowed by the rules")
+    };
+    let requester = host();
+    let mob = rig.mob();
+    // A label update reads which keys are authority fields: the seam is
+    // told, as the family's executor is.
+    let commit = |request_id: &'static str, normalized: NormalizedRequest| {
+        let (mob, requester) = (&mob, &requester);
+        async move {
+            let operation_id =
+                OperationId::for_request(&requester.recorded(), request_id).expect("a request id");
+            let consent = consent_of_plan(&normalized.plan).expect("the policy allows the change");
+            CoreChangeExecutor::new()
+                .with_agent_specs(Arc::new(NoAuthorityFields))
+                .commit(ChangeCommit::new(
+                    mob,
+                    &operation_id,
+                    requester,
+                    consent,
+                    &normalized.request,
+                ))
+                .await
+                .expect("the seam answers a typed outcome")
+        }
+    };
+    let refused_update = commit(
+        "label-keeper",
+        labelled(json!({"team": "alpha", (BRANCH_LABEL): "decision:made-up"})),
+    )
+    .await;
+    assert_eq!(
+        refused_update
+            .outcome
+            .refusal()
+            .map(IdentityRefusal::to_data),
+        Some(branch_label_reserved_at("set.labels")),
+        "{refused_update:?}"
+    );
+    let record = match mob.identity_record(&id(CREATED)).await {
+        Ok(Some(meerkat_mob::CreatedIdentityObservation::Created(record))) => record,
+        other => panic!("the agent's record is read: {other:?}"),
+    };
+    assert_eq!(record.revision, 1, "nothing was written: {record:?}");
+    assert_eq!(
+        record.spec.as_ref().map(|spec| spec.labels.clone()),
+        Some(BTreeMap::new()),
+        "{record:?}"
+    );
+    assert_eq!(
+        rig.recorded(&requester, "label-keeper").await,
+        None,
+        "nothing committed under the operation"
+    );
+    let plain = commit("team-keeper", labelled(json!({"team": "alpha"}))).await;
+    assert!(
+        matches!(plain.outcome, IdentityOutcome::Done { .. }),
+        "an update that sets another label commits: {plain:?}"
+    );
+    rig.shutdown().await;
+}
+
+/// Row (RED): an adoption of an agent whose configured spec carries the
+/// approval branch's reserved label is refused `reserved_key`, naming the
+/// key, at `name` (an adoption names nothing but the agent and the digest
+/// it read), and Core holds no record of the agent: it stays the configured
+/// agent it was, seated. The same agent, configured without the label, is
+/// adopted.
+///
+/// RED before Core refused the adoption: the adoption commits a record
+/// that carries the label.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_adoption_of_an_agent_configured_with_the_approval_branch_label_is_refused_reserved_key()
+{
+    /// What a host configures for its one agent, as the seam is told.
+    struct Configured(DurableAgentSpec);
+
+    #[async_trait]
+    impl meerkat_meta::identity_creation::AgentSpecs for Configured {
+        async fn configured_spec(
+            &self,
+            _mob: &meerkat_mob::MobHandle,
+            name: &str,
+        ) -> Option<DurableAgentSpec> {
+            (self.0.identity.as_str() == name).then(|| self.0.clone())
+        }
+
+        fn is_authority_field(&self, _key: &str) -> bool {
+            false
+        }
+    }
+
+    /// The digest of `configured` as an agent's record holds its spec.
+    fn digest_of(configured: &DurableAgentSpec) -> Sha256Digest {
+        let row = meerkat_mob::CreatedIdentitySpec::new(
+            configured.identity.as_str(),
+            configured.profile.clone(),
+        )
+        .with_labels(configured.labels.clone());
+        Sha256Digest::parse(&row.spec_digest().expect("the spec's digest")).expect("a digest")
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let facts = RequesterFacts::host(SURFACE);
+    let requester = host();
+    let mob = rig.mob();
+    assert!(rig.seated(DECLARED), "{:?}", rig.standing(DECLARED));
+    let adopt = |request_id: &'static str, configured: DurableAgentSpec| {
+        let (mob, requester, facts) = (&mob, &requester, &facts);
+        async move {
+            let digest = digest_of(&configured);
+            let normalized = normalize_adopt(
+                &allow_all(),
+                facts,
+                RequestEnvelope::default(),
+                &IdentityEntryFacts::new(
+                    DECLARED,
+                    digest.clone(),
+                    None,
+                    "worker",
+                    configured.labels.clone(),
+                ),
+                &AdoptIdentitySpec::new(DECLARED, digest),
+            )
+            .expect("the adoption is allowed by the rules");
+            let operation_id =
+                OperationId::for_request(&requester.recorded(), request_id).expect("a request id");
+            let consent = consent_of_plan(&normalized.plan).expect("the policy allows the change");
+            CoreChangeExecutor::new()
+                .with_agent_specs(Arc::new(Configured(configured)))
+                .commit(
+                    ChangeCommit::new(mob, &operation_id, requester, consent, &normalized.request)
+                        .of_configured_target(true),
+                )
+                .await
+                .expect("the seam answers a typed outcome")
+        }
+    };
+    let refused_adoption = adopt("adopt-labelled", spec_with_branch_label(DECLARED)).await;
+    assert_eq!(
+        refused_adoption
+            .outcome
+            .refusal()
+            .map(IdentityRefusal::to_data),
+        Some(branch_label_reserved_at("name")),
+        "{refused_adoption:?}"
+    );
+    assert!(
+        matches!(mob.identity_record(&id(DECLARED)).await, Ok(None)),
+        "Core holds no record of the agent"
+    );
+    assert!(
+        rig.seated(DECLARED),
+        "the agent stays seated: {:?}",
+        rig.standing(DECLARED)
+    );
+    assert_eq!(
+        rig.recorded(&requester, "adopt-labelled").await,
+        None,
+        "nothing committed under the operation"
+    );
+    let adopted = adopt("adopt-plain", spec(DECLARED)).await;
+    assert_eq!(adopted.outcome.token(), "done", "{adopted:?}");
+    rig.shutdown().await;
+}

@@ -20,7 +20,11 @@
 //! meanwhile. A pause, a delete and a create take no `expected_revision`
 //! and no `take_over_sender`, and refuse them rather than ignore them. Each
 //! write answers the schedule as it left it. Who a schedule sends as is
-//! shown only to a caller who may send to its agent.
+//! shown only to a caller who may send to its agent. The list and every
+//! write but a create answer for an agent the console withholds from their
+//! caller, because it is hidden from the caller or because the console does
+//! not know it, as for an agent that does not exist
+//! ([`acts_on_member_schedules`]).
 //!
 //! [`ConsoleSendDoor`] is the Console's own send path for the fires: the
 //! Console's admission of the schedule's sender, then the very send
@@ -61,6 +65,21 @@ const MIN_CONSOLE_INTERVAL_SECONDS: u64 = 60;
 #[cfg(test)]
 pub(super) fn is_write(method: &str) -> bool {
     SCHEDULE_WRITE_METHODS.contains(&method)
+}
+
+/// The method that defines a new console schedule: it names the agent the
+/// schedule is recorded for, and no schedule that exists.
+const SCHEDULE_CREATE_METHOD: &str = "meta/schedule/create";
+
+/// Whether `method` reads or changes the console schedules of the agent it
+/// names: the list, and every write but a create. The console's member
+/// resolution answers such a method for an agent the console withholds from
+/// its caller because it does not know it as for an agent that does not
+/// exist (`console_rpc_resolve_members`): the list is empty, and a schedule
+/// named by id is answered as not found.
+pub(super) fn acts_on_member_schedules(method: &str) -> bool {
+    method == SCHEDULE_LIST_METHOD
+        || (method != SCHEDULE_CREATE_METHOD && SCHEDULE_WRITE_METHODS.contains(&method))
 }
 
 /// The console schedule methods this console offers the caller: the list
@@ -887,6 +906,11 @@ pub(crate) struct ConsoleSendDoor {
 
 #[async_trait::async_trait]
 impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
+    /// As the Console's own configuration says.
+    fn takes_a_persons_decision(&self) -> bool {
+        crate::runtime::console_takes_a_persons_decision(&self.decisions, self.access.as_ref())
+    }
+
     /// A fire is a `/console/send` by the schedule's sender, judged now. The
     /// Console first admits the sender as it admits a live request by it
     /// (`ConsoleScheduleSender::admitted_now`: the sign-in requirement, the

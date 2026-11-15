@@ -770,7 +770,7 @@ They replace the realm's composed `[confinement]` for every launch kind of
 this process. The workspace preset confines each launch to `--context-root`;
 without `--context-root` the server refuses to start with it. A start in which
 a confined process could change the server's realm state or user config
-document is refused (see [the host's own inputs](/concepts/configuration#the-hosts-own-inputs)).
+document is refused (see [the host's own inputs](/concepts/configuration#the-host%E2%80%99s-own-inputs)).
 At startup the server logs each launch kind's requested and effective
 confinement and warns for each required kind its platform cannot confine.
 The bundled binary is stdio-only. If an embedding host publishes these tools
@@ -1144,6 +1144,39 @@ extraction calls.
   After a call created its session, the data also names the session
   (`session_id`, `session_ref`, `session_created`, `resumable`). Read the
   data, never the message.
+
+  A `meerkat_resume` that names the level (this field, set or clear, or the
+  `reasoning_effort` key inside `provider_params`) rebuilds the session, and
+  a rebuild can end a resume that was accepted behind a running turn. So
+  while a turn is running on the session such a resume is not queued: the
+  tool call fails at once with code `-32002` (session busy) and the data
+  `{"kind": "reasoning_effort_change_needs_idle_session"}`, the kind
+  JSON-RPC answers such a turn with. Nothing is retired or stored, and the
+  running turn and the resumes behind it go on. Wait for the running turn's
+  answer, then send the resume again; do not poll. When the running turn is
+  not the caller's (a peer message on a keep-alive session, a scheduled
+  run) there is no answer to wait for: send the resume again later. This is
+  the MCP server's own rule, not the table of the JSON-RPC turn requests
+  ([Model settings on a busy session](/api/rpc#model-settings-on-a-busy-session)):
+  it applies to every resume that names the level while a turn runs,
+  whatever the session holds, a repeat of the session's level and a clear
+  on a session without one included. The level is judged when
+  the session is rebuilt, so on a busy session a level the model does not
+  accept is answered busy first, and its typed refusal when the resume is
+  sent again. With no turn running the resume rebuilds the session at once.
+  Two limits stay (read from the source, not run): a plain resume that
+  starts between the server's check and the level resume's own start runs,
+  but a request queued behind that plain resume can still be ended by the
+  rebuild; and a plain resume sent at the same moment as a level resume,
+  before either turn has started (on an idle session too), runs or ends
+  with `-32003` (`session_resume_required`), depending on which of the two
+  reaches the session first. Send the ended request again. A resume that
+  rebuilds the session for another field (`model`, `max_tokens`,
+  `provider_params` without the level, and the other build fields) is
+  unchanged from 0.9.14: it waits behind the running turn, rebuilds the
+  session and runs. A plain resume queued beside such a resume either runs
+  or, when the rebuild reaches the session first, ends with `-32003`
+  (`session_resume_required`) without running; send it again.
 </ParamField>
 
 <ParamField body="stream" type="bool" default="false">

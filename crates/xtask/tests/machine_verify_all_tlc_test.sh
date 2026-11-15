@@ -904,7 +904,9 @@ fi
 # plus action properties (a member's recorded observation time never
 # decreases; a new incarnation keeps no predecessor's health or failure
 # record; a member runtime destroyed removes only that runtime; the mob is
-# Destroyed only through a destroy it admitted) and three
+# Destroyed only through a destroy it admitted; a cancel of the member's
+# work, by a force cancel or a cancel of all work of its runtime, keeps the
+# mob's phase and its active runs) and three
 # invariants: two check why the remaining member arms cannot fire, and one
 # that a resume's replay of a respawn's abandonment of a generation the
 # identity has moved past (a later incarnation ended) is answered by exactly
@@ -916,7 +918,7 @@ fi
 # TLC coverage and requires every listed arm to fire and a floor of distinct
 # states, requires its seven witnesses reached (one recovers an archived
 # identity's next incarnation, one replays a delayed final of an older
-# generation, one replays a stale abandonment), and refuses ten seeded
+# generation, one replays a stale abandonment), and refuses twelve seeded
 # defects (--mutants): a progress arm
 # without its observation guard, that guard rendered as a plain `<=` between
 # option records, which TLC cannot evaluate, a peer-only retirement-start
@@ -926,7 +928,9 @@ fi
 # respawn, a roster recovery that keeps its predecessor's execution health,
 # a runtime destroy observation that ends the mob, one that leaves its
 # runtime live, and one that resets the mob's run count (the audit also starts
-# and finishes one mob-level run, so the count is not always zero), the
+# and finishes one mob-level run, so the count is not always zero), a force
+# cancel of the member and a cancel of all work of its runtime that reset
+# the mob's run count, the
 # stale abandonment arm dropped, and that arm without its
 # later_generation_recorded guard.
 # A second run of the same audit drops the progress observations, adds the

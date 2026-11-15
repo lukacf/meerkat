@@ -140,6 +140,27 @@ async fn wake(handle: &MobHandle, identity: &AgentIdentity) -> SessionId {
         .expect("a session-backed member")
 }
 
+/// Respawn a member to its terminal result. `respawn` bounds the
+/// predecessor's retirement by the retirement budget (2 s in a test build,
+/// 30 s otherwise) and answers one still running with the typed in-progress
+/// error, which documents the member as retained for retry. The mob does not
+/// finish a respawn by itself today: the predecessor stays retiring until
+/// the call is made again, and the same call then completes it. This repeats
+/// the call on that one answer only; any other answer is the result. Each
+/// call waits out its own budget, and the caller bounds the whole.
+async fn respawn_to_terminal(
+    handle: &MobHandle,
+    identity: &AgentIdentity,
+) -> Result<crate::runtime::handle::MemberRespawnReceipt, crate::runtime::handle::MobRespawnError> {
+    loop {
+        match handle.respawn(identity.clone(), None).await {
+            Err(crate::runtime::handle::MobRespawnError::Mob(error))
+                if is_retirement_in_progress(&error) => {}
+            answer => return answer,
+        }
+    }
+}
+
 /// One running mob over persistent storage in its own directory.
 struct Fixture {
     root: tempfile::TempDir,
@@ -582,9 +603,14 @@ async fn each_binding_carries_the_labels_its_incarnation_was_spawned_with() {
         .await
         .expect("a session-backed member");
 
-    handle
-        .respawn(labelled.clone(), None)
+    // `respawn` bounds its predecessor's retirement by the retirement budget
+    // (2 s in a test build) and answers one still running with a typed
+    // in-progress error, which a starved runner reaches. The repeat of the
+    // call on that one answer is `respawn_to_terminal`, within the row's
+    // wait; the row then reads the whole final state as before.
+    tokio::time::timeout(WAIT, respawn_to_terminal(handle, &labelled))
         .await
+        .expect("the respawn settles")
         .expect("respawn the labelled member");
     let history = handle
         .member_binding_history()
@@ -613,10 +639,14 @@ async fn each_binding_carries_the_labels_its_incarnation_was_spawned_with() {
             .is_empty()
     );
 
-    handle
-        .retire(labelled.clone())
+    // `retire` answers a slow but healthy retirement with a typed
+    // in-progress error once its budget elapses (2 s in a test build), which
+    // a starved runner reaches; the mob keeps the retirement and ends it on
+    // its own. Join the saga to its terminal reply, within the row's wait.
+    tokio::time::timeout(WAIT, retire_to_terminal(handle, &labelled))
         .await
-        .expect("retire the labelled member");
+        .expect("the retirement settles")
+        .expect("retire the labelled member to its terminal");
     let retired = handle
         .last_member_binding(&labelled)
         .await

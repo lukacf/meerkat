@@ -1021,6 +1021,12 @@ pub struct AgentBuildConfig {
     /// Host-issued authority for the one immutable WorkGraph namespace exposed
     /// by `workgraph_tools`. WorkGraph enablement fails closed without it.
     pub workgraph_namespace_grant: Option<meerkat_core::service::WorkGraphNamespaceGrant>,
+    /// Tools of the embedding host's own, composed beside the build's tools
+    /// (see [`SessionBuildOptions::host_tools`], which this carries): one
+    /// more part of the composed tool surface, after the WorkGraph surface
+    /// and before the mob surface, whatever the build's base is. `None`
+    /// composes nothing.
+    pub host_tools: Option<Arc<dyn AgentToolDispatcher>>,
     /// Runtime-injected mob operator authority context.
     ///
     /// Tool visibility may depend on this context being present, but
@@ -1318,6 +1324,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("schedule_tools", &self.schedule_tools.is_some())
             .field("workgraph_tools", &self.workgraph_tools.is_some())
             .field("workgraph_namespace_grant", &self.workgraph_namespace_grant)
+            .field("host_tools", &self.host_tools.is_some())
             .field(
                 "mob_tool_authority_context",
                 &self.mob_tool_authority_context.is_some(),
@@ -1433,6 +1440,7 @@ impl AgentBuildConfig {
             schedule_tools: None,
             workgraph_tools: None,
             workgraph_namespace_grant: None,
+            host_tools: None,
             mob_tool_authority_context: None,
             mob_tools: None,
             preload_skills: None,
@@ -1593,6 +1601,7 @@ impl AgentBuildConfig {
         self.schedule_tools = build.schedule_tools.clone();
         self.workgraph_tools = build.workgraph_tools.clone();
         self.workgraph_namespace_grant = build.workgraph_namespace_grant.clone();
+        self.host_tools = build.host_tools.clone();
         self.mob_tool_authority_context = mob_tool_authority_context;
         self.mob_tools = build.mob_tools.clone();
         self.preload_skills = build.preload_skills.clone();
@@ -1703,6 +1712,7 @@ impl AgentBuildConfig {
             schedule_tools: self.schedule_tools.clone(),
             workgraph_tools: self.workgraph_tools.clone(),
             workgraph_namespace_grant: self.workgraph_namespace_grant.clone(),
+            host_tools: self.host_tools.clone(),
             mob_tool_authority_context: self.mob_tool_authority_context.clone(),
             mob_tools: self.mob_tools.clone(),
             preload_skills: self.preload_skills.clone(),
@@ -10475,6 +10485,33 @@ impl AgentFactory {
             "tool composition: after workgraph gateway"
         );
 
+        // 9c-host. Compose the host's own tools (`host_tools`) as one more
+        // part of the surface, beside whatever the base is and after the
+        // comms, scheduler and WorkGraph surfaces. A sibling, never a
+        // wrapper of the build's external tools: the base keeps the catalog
+        // judgement it has without the host's tools, and the composed
+        // surface is exact only when the base and every part beside it are.
+        // A build that sets none composes nothing here. A name the host's
+        // tools share with the rest of the surface is offered by neither;
+        // the composite logs that once per name, with this label, when it
+        // first lists both (for an MCP server's tool, once it has
+        // connected).
+        if let Some(host_tools) = build_config.host_tools.take() {
+            let tools_of = match build_config.comms_name.as_deref() {
+                Some(comms_name) => format!("session {} ({comms_name})", session.id()),
+                None => format!("session {}", session.id()),
+            };
+            tools = Arc::new(
+                meerkat_core::DynamicToolComposite::new(vec![tools, host_tools])
+                    .with_label(tools_of),
+            );
+        }
+
+        tracing::debug!(
+            tool_count_after_host_tools = tools.tools().len(),
+            "tool composition: after host tools"
+        );
+
         // 9d. Compose tools with mob surface (after comms/scheduler/WorkGraph, so mob
         // gateway wraps the already-composed base capability stack). A build
         // with mob tools disabled mounts no mob surface even when it carries a
@@ -16455,6 +16492,325 @@ mod tests {
             vec![(meerkat_core::BudgetType::Tokens, 60, 100)],
             "the configured threshold must reach the agent"
         );
+    }
+
+    /// The host tool slot (`AgentBuildConfig::host_tools`): a dispatcher of
+    /// the embedding host's own that the factory composes beside the build's
+    /// base tool surface. The builds here have builtins and shell off, so
+    /// their base is what the factory composes for them itself: its MCP
+    /// adapter when the build configures a server (exact, and it may need
+    /// the tool catalog's control tools), the empty dispatcher otherwise
+    /// (not exact).
+    #[cfg(all(
+        feature = "workspace-tests",
+        feature = "mcp",
+        not(target_arch = "wasm32")
+    ))]
+    mod host_tool_slot {
+        use super::*;
+        use meerkat_core::types::ToolDef;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        type CapturedRequest = Arc<std::sync::Mutex<Option<LlmRequest>>>;
+
+        /// The name of the one tool the host mounts in the slot.
+        const HOST_TOOL: &str = "host_probe";
+
+        /// A host's dispatcher of one inline tool, [`HOST_TOOL`], whose
+        /// catalog is `exact` or not.
+        struct HostTool {
+            tools: Arc<[Arc<ToolDef>]>,
+            exact: bool,
+        }
+
+        impl HostTool {
+            fn dispatcher(exact: bool) -> Arc<dyn AgentToolDispatcher> {
+                Arc::new(Self {
+                    tools: vec![Arc::new(ToolDef {
+                        name: HOST_TOOL.into(),
+                        description: "A tool of the host's own".to_string(),
+                        input_schema: serde_json::json!({"type": "object"}),
+                        provenance: None,
+                        audience: Default::default(),
+                    })]
+                    .into(),
+                    exact,
+                })
+            }
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for HostTool {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+                meerkat_core::ToolCatalogCapabilities {
+                    exact_catalog: self.exact,
+                    may_require_catalog_control_plane: false,
+                }
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::ToolError>
+            {
+                Err(meerkat_core::error::ToolError::not_found(call.name))
+            }
+        }
+
+        /// External tools that list nothing and only observe the bindings
+        /// the factory gives a build's external tools; counts each binding
+        /// of the session's mob operator authority.
+        #[derive(Default)]
+        struct Observer {
+            bound: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for Observer {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Vec::<Arc<ToolDef>>::new().into()
+            }
+
+            fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+                meerkat_core::ToolCatalogCapabilities {
+                    exact_catalog: true,
+                    may_require_catalog_control_plane: false,
+                }
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::ToolError>
+            {
+                Err(meerkat_core::error::ToolError::not_found(call.name))
+            }
+
+            fn bind_session_mob_tool_authority(
+                &self,
+                _authority: Option<
+                    Arc<std::sync::RwLock<meerkat_core::service::MobToolAuthorityContext>>,
+                >,
+            ) {
+                self.bound.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn observes_bindings_only(&self) -> bool {
+                true
+            }
+        }
+
+        /// The fixture as the build's one MCP server, `fixture`.
+        fn fixture_server() -> meerkat_core::McpServerConfig {
+            meerkat_core::McpServerConfig::stdio(
+                "fixture",
+                mcp_test_server::fixture_binary()
+                    .to_string_lossy()
+                    .to_string(),
+                Vec::new(),
+                HashMap::new(),
+            )
+        }
+
+        /// What a build offers its model on its first turn.
+        struct FirstTurn {
+            /// The tool names of the provider request, sorted.
+            tools: Vec<String>,
+            /// Whether the system prompt carries the deferred catalog's
+            /// guidance.
+            catalog_guidance: bool,
+        }
+
+        /// The first turn of a session-owned build with builtins and shell
+        /// off, the MCP servers `servers`, the external tools `external` and
+        /// the host tools `host_tools`, built through the factory once its
+        /// servers have connected.
+        async fn first_turn(
+            servers: Vec<meerkat_core::McpServerConfig>,
+            external: Option<Arc<dyn AgentToolDispatcher>>,
+            host_tools: Option<Arc<dyn AgentToolDispatcher>>,
+        ) -> FirstTurn {
+            let temp = tempfile::tempdir().expect("temp root");
+            let factory = AgentFactory::new(temp.path().join("sessions"))
+                .builtins(false)
+                .shell(false);
+            let session = Session::new();
+            let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+            let bindings = runtime
+                .prepare_bindings(session.id().clone())
+                .await
+                .expect("session runtime bindings");
+            let captured = CapturedRequest::default();
+            let mut build = AgentBuildConfig::new("gpt-5.6-sol");
+            build.provider = Some(Provider::OpenAI);
+            build.llm_client_override = Some(Arc::new(CapturingLlmClient {
+                request: Arc::clone(&captured),
+            }));
+            build.resume_session = Some(session);
+            build.resume_session_intent = meerkat_core::SessionBuildIntent::Mint;
+            build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+            build.override_builtins = ToolCategoryOverride::Disable;
+            build.override_shell = ToolCategoryOverride::Disable;
+            build.mcp_servers = servers;
+            build.wait_for_mcp = true;
+            build.external_tools = external;
+            build.host_tools = host_tools;
+            let mut agent = factory
+                .build_agent(build, &Config::default())
+                .await
+                .expect("the build");
+            let catalog_guidance = match agent.session().messages().first() {
+                Some(meerkat_core::Message::System(message)) => {
+                    message.content.contains(deferred_catalog_guidance())
+                }
+                _ => false,
+            };
+            agent.set_runtime_execution_kind(Some(
+                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+            ));
+            agent
+                .run(meerkat_core::ContentInput::Text("first turn".into()))
+                .await
+                .expect("the first turn");
+            let mut tools: Vec<String> = captured
+                .lock()
+                .unwrap()
+                .take()
+                .expect("the first turn's provider request")
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str().to_string())
+                .collect();
+            tools.sort();
+            FirstTurn {
+                tools,
+                catalog_guidance,
+            }
+        }
+
+        fn with_host_tool(tools: &[String]) -> Vec<String> {
+            let mut tools = tools.to_vec();
+            tools.push(HOST_TOOL.to_string());
+            tools.sort();
+            tools
+        }
+
+        /// A build whose base is its own MCP adapter keeps its first-turn
+        /// tool list with a host tool in the slot, the catalog's two control
+        /// tools included, and gains the one tool. Without the slot the
+        /// build is the build it was before the slot existed: the control
+        /// tools and nothing of the server inline (its tools are deferred
+        /// catalog entries).
+        #[tokio::test]
+        async fn a_host_tool_joins_a_build_whose_base_is_its_mcp_adapter() {
+            let without = first_turn(vec![fixture_server()], None, None).await;
+            assert_eq!(
+                without.tools,
+                vec![
+                    "tool_catalog_load".to_string(),
+                    "tool_catalog_search".to_string()
+                ],
+                "a build without the slot lists what it listed before the slot existed"
+            );
+            assert!(without.catalog_guidance);
+
+            let with = first_turn(
+                vec![fixture_server()],
+                None,
+                Some(HostTool::dispatcher(true)),
+            )
+            .await;
+            assert_eq!(
+                with.tools,
+                with_host_tool(&without.tools),
+                "the build's list plus the host's tool, the control tools included"
+            );
+            assert!(with.catalog_guidance);
+        }
+
+        /// A build whose base is the empty dispatcher is not exact with or
+        /// without a host tool: it offers the host's tool alone, and the
+        /// catalog's control tools are not composed for it.
+        #[tokio::test]
+        async fn a_host_tool_joins_a_build_whose_base_is_empty() {
+            let without = first_turn(Vec::new(), None, None).await;
+            assert_eq!(
+                without.tools,
+                Vec::<String>::new(),
+                "a build without the slot lists what it listed before the slot existed"
+            );
+            assert!(!without.catalog_guidance);
+
+            let with = first_turn(Vec::new(), None, Some(HostTool::dispatcher(true))).await;
+            assert_eq!(with.tools, vec![HOST_TOOL.to_string()]);
+            assert!(!with.catalog_guidance);
+        }
+
+        /// The slot's catalog exactness joins the build's as any sibling's
+        /// does: a host dispatcher that does not declare an exact catalog
+        /// makes the composed surface not exact, so every tool is inline
+        /// and the control tools are not composed.
+        #[tokio::test]
+        async fn a_host_dispatcher_that_is_not_exact_makes_the_build_not_exact() {
+            let with = first_turn(
+                vec![fixture_server()],
+                None,
+                Some(HostTool::dispatcher(false)),
+            )
+            .await;
+            assert!(
+                with.tools.iter().any(|tool| tool == HOST_TOOL)
+                    && with.tools.iter().any(|tool| tool == "echo"),
+                "the host's tool and the server's tools are inline: {:?}",
+                with.tools
+            );
+            assert!(
+                !with
+                    .tools
+                    .iter()
+                    .any(|tool| tool.starts_with("tool_catalog_")),
+                "no control tools on a surface that is not exact: {:?}",
+                with.tools
+            );
+            assert!(!with.catalog_guidance);
+        }
+
+        /// External tools that only observe bindings are judged as before
+        /// the slot existed: they are bound, then composed as no external
+        /// tools, with a host tool in the slot or without one.
+        #[tokio::test]
+        async fn observing_external_tools_compose_as_none_beside_a_host_tool() {
+            let observer = Arc::new(Observer::default());
+            let without = first_turn(
+                vec![fixture_server()],
+                Some(Arc::clone(&observer) as Arc<dyn AgentToolDispatcher>),
+                None,
+            )
+            .await;
+            let with = first_turn(
+                vec![fixture_server()],
+                Some(Arc::clone(&observer) as Arc<dyn AgentToolDispatcher>),
+                Some(HostTool::dispatcher(true)),
+            )
+            .await;
+            assert_eq!(
+                without.tools,
+                vec![
+                    "tool_catalog_load".to_string(),
+                    "tool_catalog_search".to_string()
+                ]
+            );
+            assert_eq!(with.tools, with_host_tool(&without.tools));
+            assert_eq!(
+                observer.bound.load(Ordering::SeqCst),
+                2,
+                "the observer is bound in both builds"
+            );
+        }
     }
 
     /// An inherited ceiling naming the MCP tools of a parent that is ready,

@@ -1,9 +1,9 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.9.14
+// Contract version: 0.9.15
 
 import { MeerkatError } from "./errors.js";
 
-export const CONTRACT_VERSION = "0.9.14";
+export const CONTRACT_VERSION = "0.9.15";
 
 export type Value = unknown;
 
@@ -1195,7 +1195,44 @@ export interface WirePresentationAudienceUnknown {
 
 export type WirePresentationAudience = WirePresentationAudienceApprover | WirePresentationAudienceReviewer | WirePresentationAudienceUnknown;
 
+export interface WireAskUserAnswerChoice {
+  choice_id: string;
+  kind: "choice";
+}
+
+export interface WireAskUserAnswerFreeText {
+  kind: "free_text";
+  text: string;
+}
+
+export interface WireAskUserAnswerUnanswered {
+  kind: "unanswered";
+}
+
+export interface WireAskUserAnswerUnknown {
+  kind: "unknown";
+}
+
+export type WireAskUserAnswer = WireAskUserAnswerChoice | WireAskUserAnswerFreeText | WireAskUserAnswerUnanswered | WireAskUserAnswerUnknown;
+
+export interface WireAskUserQuestionAnswer {
+  answer: WireAskUserAnswer;
+  question_id: string;
+}
+
+export interface WireDecisionAnswerAskUser {
+  answers: WireAskUserQuestionAnswer[];
+  kind: "ask_user";
+}
+
+export interface WireDecisionAnswerUnknown {
+  kind: "unknown";
+}
+
+export type WireDecisionAnswer = WireDecisionAnswerAskUser | WireDecisionAnswerUnknown;
+
 export interface WireDecisionEvidenceHuman {
+  answer?: WireDecisionAnswer | null;
   approve: boolean;
   approver_id: string;
   assurance: WireDecisionAssurance;

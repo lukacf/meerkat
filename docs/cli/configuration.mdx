@@ -200,7 +200,7 @@ source.
 
 `rkat` refuses a command whose confined processes could change its realm
 state or user config document (see
-[the host's own inputs](/concepts/configuration#the-hosts-own-inputs)). On
+[the host's own inputs](/concepts/configuration#the-host%E2%80%99s-own-inputs)). On
 macOS the workspace preset protects `<project>/.rkat`, where the default
 realm state lives. On Linux it cannot, so start with `--state-root <dir>`
 outside the project:
@@ -592,8 +592,6 @@ a mob error's `detail:` line) as in text mode. Text and HTML output print no
 failure document, and neither does any command other than `rkat run`.
 
 ### Reasoning effort refusal
-
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 `rkat run --reasoning-effort <LEVEL>` (with or without `--resume`) exits 2
 when the level is refused for the selected model on the route that serves it

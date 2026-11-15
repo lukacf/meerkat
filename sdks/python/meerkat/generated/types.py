@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Generated wire types for Meerkat SDK.
 
-Contract version: 0.9.14
+Contract version: 0.9.15
 """
 
 import sys
@@ -17,7 +17,7 @@ else:
 from .errors import MeerkatError
 
 
-CONTRACT_VERSION = "0.9.14"
+CONTRACT_VERSION = "0.9.15"
 
 
 Value = Any
@@ -1446,9 +1446,45 @@ class WirePresentationAudienceUnknown(TypedDict, total=False):
 
 WirePresentationAudience = WirePresentationAudienceApprover | WirePresentationAudienceReviewer | WirePresentationAudienceUnknown
 
+# The answer to one question an agent asked a person.
+class WireAskUserAnswerChoice(TypedDict, total=False):
+    choice_id: Required[str]
+    kind: Required[Literal['choice']]
+
+class WireAskUserAnswerFreeText(TypedDict, total=False):
+    kind: Required[Literal['free_text']]
+    text: Required[str]
+
+class WireAskUserAnswerUnanswered(TypedDict, total=False):
+    kind: Required[Literal['unanswered']]
+
+class WireAskUserAnswerUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireAskUserAnswer = WireAskUserAnswerChoice | WireAskUserAnswerFreeText | WireAskUserAnswerUnanswered | WireAskUserAnswerUnknown
+
+@dataclass
+class WireAskUserQuestionAnswer:
+    """One question's answer in a [`WireDecisionAnswer::AskUser`]."""
+    answer: WireAskUserAnswer
+    question_id: str
+
+
+# The typed answer a person gave with an approving decision, for a kind
+# that asks one. It is data of the decision's evidence, never text.
+class WireDecisionAnswerAskUser(TypedDict, total=False):
+    answers: Required[list[WireAskUserQuestionAnswer]]
+    kind: Required[Literal['ask_user']]
+
+class WireDecisionAnswerUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireDecisionAnswer = WireDecisionAnswerAskUser | WireDecisionAnswerUnknown
+
 # The durable evidence a decision was decided with. An authentication
 # scope is never projected.
 class WireDecisionEvidenceHuman(TypedDict, total=False):
+    answer: NotRequired[Optional[WireDecisionAnswer]]
     approve: Required[bool]
     approver_id: Required[str]
     assurance: Required[WireDecisionAssurance]

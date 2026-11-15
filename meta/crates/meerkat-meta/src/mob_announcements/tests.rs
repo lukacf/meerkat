@@ -2412,6 +2412,9 @@ pub(super) struct ScriptedNative {
     checks: Mutex<BTreeMap<String, u64>>,
     /// Members whose check panics, as a native read whose task fails.
     panicking: Mutex<BTreeSet<String>>,
+    /// Identities of this mob whose check answers, from now on, that the
+    /// runtime does not know them, whatever `known` holds.
+    unseated: Mutex<BTreeSet<String>>,
 }
 
 /// A member's role and labels, as a scripted roster records them.
@@ -2449,6 +2452,7 @@ impl ScriptedNative {
             wedged: tokio::sync::watch::Sender::new(BTreeSet::new()),
             checks: Mutex::new(BTreeMap::new()),
             panicking: Mutex::new(BTreeSet::new()),
+            unseated: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -2744,6 +2748,9 @@ impl NativeDelivery for ScriptedNative {
                 .await;
         }
         match route {
+            MemberRoute::Local if self.unseated.lock().unwrap().contains(identity) => {
+                Err(MemberProblem::Unknown)
+            }
             MemberRoute::Local if self.unusable.contains(identity) => Err(MemberProblem::Unusable(
                 format!("{identity} is placed on a host"),
             )),
@@ -3168,6 +3175,37 @@ impl SurfaceOwner {
     /// The roster records `identity` with `role`.
     pub(crate) fn give_role(&self, identity: &str, role: &str) {
         self.harness.native.set_roster_facts(identity, role, &[]);
+    }
+
+    /// From now on the check of `identity` answers that the runtime does not
+    /// know it: a put of its subscription, and a role template's child for
+    /// it, is refused.
+    pub(crate) fn unseat(&self, identity: &str) {
+        self.harness
+            .native
+            .unseated
+            .lock()
+            .unwrap()
+            .insert(identity.to_string());
+    }
+
+    /// The check of `identity` answers again as it did before
+    /// [`Self::unseat`].
+    pub(crate) fn seat(&self, identity: &str) {
+        self.harness
+            .native
+            .unseated
+            .lock()
+            .unwrap()
+            .remove(identity);
+    }
+
+    /// A retention pass at `at_ms` with no window: every cancelled or ended
+    /// subscription that holds nothing unsettled is removed, as the
+    /// retention loop removes one past its window.
+    pub(crate) async fn retention_pass_at(&self, at_ms: u64) {
+        self.harness.clock.store(at_ms, Ordering::SeqCst);
+        self.harness.store.prune(at_ms, 0, 1_000).await.unwrap();
     }
 
     /// `identity` is on the roster of [`Self::HOSTED_MOB`].

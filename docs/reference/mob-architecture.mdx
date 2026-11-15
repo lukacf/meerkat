@@ -1395,6 +1395,141 @@ database's shared cross-process fence through runtime construction;
 `update_definition` takes the matching exclusive fence, so an external SQLite
 writer cannot cross the replay-to-actuation interval.
 
+A host that manages its mobs through `MobMcpState` holds no `MobStorage` of
+theirs: the state keeps one store per mob under its persistent root and
+resumes each on the first mob verb. Since 0.9.15 such a host reads and
+replaces a cold mob's stored definition through the state, before that first
+verb:
+
+```rust
+let state = MobMcpState::new(session_service, MobControlPrincipal::Owner)?
+    .try_with_persistent_storage_root(Some(runtime_root))?;
+let stored = state.mob_stored_definition(&mob_id).await?;
+let mut definition = stored.definition().clone();
+// ... edit the definition ...
+let revision = state
+    .mob_update_stored_definition(&mob_id, stored.epoch(), definition)
+    .await?;
+// The first mob verb restores the mob from its store, at the new epoch.
+let mob = state.handle_for(&mob_id).await?;
+```
+
+"Before that first verb" includes what restores on the state's own account.
+The first step of the state's WorkGraph Flow reconciler is the restore, and
+`MobMcpDispatcher::new` and the stock surfaces start that reconciler for a
+state that has a WorkGraph service; a schedule host that delivers to a mob
+restores too. A host makes both calls before it starts any of them: once the
+restore has run the state manages every mob it has, and both calls answer
+`MobStoredDefinitionError::Managed`.
+
+`MobMcpState::mob_stored_definition` answers the stored definition with its
+epoch, the revision the update expects. It reads the store through
+`MobStorage::read_definition_snapshot`, which opens the file read-only: it
+creates no store, migrates nothing, takes no fence and registers no observer.
+The store file is not written. The store is a SQLite database in WAL mode,
+which SQLite reads through its shared-memory index also on a read-only open:
+reading a store whose writer closed cleanly leaves the store's `-wal` and
+`-shm` files beside it (the log empty), so the read needs a directory SQLite
+can create them in.
+A store an older release wrote is read as it is; the update and the restore
+migrate it when they open it.
+
+`MobMcpState::mob_update_stored_definition` opens the one store the state
+keeps for that mob id and forwards to `MobStorage::update_definition`
+unchanged, so the answer is the storage's own: the committed
+`MobDefinitionRevision`, the same revision for an exact retry,
+`SpecRevisionConflict` for a wrong expected revision, `DefinitionError` for a
+definition that does not validate. Neither call starts a restore: no other
+store of the root is opened, and no mob is resumed.
+
+Neither call is a live operation. A mob the state manages (one it created or
+restored, or whose handle its host inserted) is refused with
+`MobStoredDefinitionError::Managed`, and nothing is written. The other hosted
+sets answer as they answer a lookup: a quarantined store `MobQuarantined`, a
+child held before activation its hold; both stores are kept as found, so a
+definition that makes a resume fail is replaced before the restore, not in the
+process that quarantined its store. `MobNotFound` means the state has no store
+for that id: it has no persistent root, the root holds no store of that mob,
+the store or the definition names another mob than the call addresses, or the
+state's restore has already run and none of its hosted sets holds the mob.
+Both calls need the console owner and the state's admission, like a create.
+
+The update runs the state's tool bundle check, which a create runs too, on
+the tool bundles the definition's inline profiles opt into (`tools.bundles`):
+a child mob, known from the stored mob's own creation record, may opt into
+what the host offers to child mobs, any other mob into none, and the refusal
+is the create's `ToolBundleNotOffered`. That check and the storage's
+validation are the update's whole check of a definition. A create's builder
+checks more, and the update runs none of it: the ingress ownership of an
+external supervisor bridge, which the next resume checks again (a definition
+that fails it is stored, fails that resume, and the state quarantines the
+store), and a runtime adapter for `AutonomousHost` profiles, which only a
+create checks. For a child mob a create also refuses an inline profile that
+carries a different descriptor under the name of an MCP server the host makes
+available to child mobs; the update stores it.
+
+What a create adds to a definition is not added by an
+update, and a restore adds none of it either: the mob resumes with the stored
+definition as it is.
+
+| A create adds | Without it |
+|---------------|------------|
+| the realm skill sources its profiles name (`with_realm_skill_sources`) | an inline profile that names a skill without its source is refused by the update (`DefinitionError`, `missing_skill_ref`); a profile that references a realm profile is stored, and its members are seated without that skill |
+| for a child mob, the tool bundles the host makes available to child mobs (`rust_bundles` of each inline profile) | members are built without those bundles |
+| for a child mob, the MCP servers the host makes available to child mobs (`mcp_servers` of each inline profile) | members are built without those servers |
+
+A definition read with `mob_stored_definition` carries what the create added,
+so editing that definition keeps it.
+
+An update is checked against the roster in one case only: the storage
+refuses an update that drops a profile a created agent's row names
+(`DefinitionError`, diagnostic `profile_held_by_identity`), and nothing is
+written. A member seated without such a row is not checked. A definition
+that leaves out its profile is stored, and that member's restore then fails on
+it (`profile not found`). Under the default member restore policy that is the
+member's first delivery (`MemberRestoreFailed`): the member then reads Broken
+and the rest of the mob works. Under a policy that restores every member at
+start it is the resume itself, and the state quarantines the store
+(`MobQuarantined`, class `resume_refused`), which then refuses both calls in
+that process. Either way the next process reads the stored definition and
+writes one that has the profile again.
+
+A mob created from a mobpack stores the pack's identity in its definition
+(`source_identity`), and a repeat create of that pack answers the mob only
+while the stored definition equals the pack's. The update neither clears nor
+checks that identity. After an update that changes the definition, with the
+identity kept or dropped, the repeat create is refused with the duplicate
+mobpack create's `MobError::Internal` (`duplicate mobpack create for mob id
+'...' does not match existing verified pack identity`) instead of answering
+the mob; an update that changes nothing leaves it answering the mob.
+
+A refusal of the definition itself (the tool bundle check, the storage's
+validation, a wrong expected revision) comes after the store was opened for
+writing, and that open migrates a store an older release wrote; no definition
+is written. So does the refusal of a store file under the mob's name that
+holds no mob, or another mob (`MobNotFound`). The other refusals open no
+store.
+
+The update holds the lock the state's restore runs under until the storage
+has answered, and the read holds it while it reads. A first mob verb that
+arrives meanwhile waits and then resumes the mob from the new definition; a
+restore never resumes a mob from the definition an update in flight is
+replacing. An update whose caller went away is not cancelled: it runs to
+the storage's answer. A shared state
+(`MobMcpState::into_shared`) runs the update as its own task, as it runs a
+create and a resume, so a dropped caller cannot release that lock while the
+storage's commit is under way. A first mob verb that takes the lock before
+that task does restores the mob, and the abandoned update is then refused
+(`Managed`) and writes nothing; such a refusal is in the host's log at
+`warn`. A state shared by a plain `Arc::new` runs the
+update in its caller's future; await the call to its answer there.
+Three limits remain. A restore pass whose caller was dropped can
+leave the resume of one store running as the state's own task, outside that
+lock, so the calls are for use before the first mob verb. A handle a host
+builds over the same store itself is not seen until it is inserted. And the
+lock is the state's: a second `MobMcpState`, or another process, over the
+same persistent root is not excluded by it.
+
 Multi-host persistence is deliberately split. The controlling realm stores
 the mob, host bindings, placement, grants, route obligations, flow/work state,
 and merged event position. The owning member-host realm stores each placed

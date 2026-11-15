@@ -411,6 +411,7 @@ export const IDENTITY_REFUSAL_KIND_TOKENS = [
   "owner_read_only",
   "not_adoptable",
   "not_archived",
+  "owns_mobs",
   "declared_apply_open",
   "admission_unsettled",
   "predecessor_mismatch",

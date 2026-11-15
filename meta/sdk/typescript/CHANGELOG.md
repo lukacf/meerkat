@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+## 0.9.15
+
+- `MetaRuntime.compactMember(identity, { floorTokens, timeoutMs })` calls
+  `meta/compact_member`: the member's conversation is compacted now (the
+  older turns summarized, the most recent ones kept) in one maintenance
+  turn, at the cost of one model turn and two in-place rebuilds of the
+  member.
+  A `meta/compact_member` call that is admitted rebuilds the identity,
+  whether it then compacts, compacts nothing or fails. On a 0.9.15 gateway a
+  completed call keeps an identity's listing and management of the mobs it
+  created with its own tools (one run; a call that times out, or completes
+  without compacting, rebuilds by the same step: read from the source, not
+  run), unless the same-session step does not serve its member (see the RPC
+  reference); against a gateway on 0.9.9 through 0.9.14 the call costs it
+  that, and upgrading does not give it back (see the `meta/compact_member`
+  section of the RPC reference). Where the cost applies, have the identity
+  destroy a mob it created before the call if it must not be left running
+  unmanaged.
+  A changed instruction that waits for a compaction (an update answered
+  `applies_after_compaction`) takes effect with it. `floorTokens`
+  is the member's compaction threshold for that turn (gateway default
+  1024): a conversation shorter than it is left as it is, so check the
+  result's `compaction_applied`. `timeoutMs` (gateway default 60000) is how
+  long the gateway watches the turn; the call waits for the reply for
+  `timeoutMs` plus 30 seconds, whatever the transport's request timeout is,
+  because the gateway holds the call past its deadline. Resolves to the
+  gateway's result object. A failure rejects with the RPC error and its
+  `data.kind` (for example `compact_member_busy`,
+  `compact_member_timeout`); a `timeoutMs` that is not a finite number of
+  at least one millisecond rejects with `RangeError` before any request.
 - `MetaRuntime.identities` (`IdentitiesHandle`) calls the long-term agent
   host methods (`meta/identity/*`): `create`, `update`, `archive`,
   `unarchive`, `remove`, `adopt`, `withdraw`, `changesHold`, `list`, `get`,
@@ -15,8 +45,11 @@
   refusal error of those calls: `kind`, `field`, `detail`, `retryable`,
   `details`, `knownKind`, and the `IdentityRefusal` as `refusal`.
   `IdentityRefusalKind`, `IDENTITY_REFUSAL_KINDS` and `isIdentityRefusalKind`
-  are the closed vocabulary (57 kinds); the suite fails when it differs from
-  the gateway's. `IDENTITY_OUTCOMES`, `INSTRUCTION_OUTCOME_KINDS`,
+  are the closed vocabulary (58 kinds); the suite fails when it differs from
+  the gateway's. One of them is `owns_mobs`: an `archive` or a `remove` of an
+  agent that still owns mobs it created is refused, with `details.count`
+  (how many)
+  and, for the host, `details.mobs` (their ids). `IDENTITY_OUTCOMES`, `INSTRUCTION_OUTCOME_KINDS`,
   `INSTRUCTION_NEXT_SESSION_REASONS` and `AGENT_SEATS` are closed too. A
   value newer than the SDK reaches the caller as its token; an outcome token
   the SDK cannot read throws `ContractMismatchError`.
@@ -80,6 +113,19 @@
   and cross-mob delivery between gateways) or in tests that need a provider
   key. The methods for agents created at run time (meta/identity) need a
   0.9.15 gateway: upgrade the gateway before the SDKs that call them.
+- `MobHandle.gatingQuestions()` lists the open question sets agents asked
+  with `ask_user` (`meta/gating/questions`) as `GatingQuestionSet`
+  (`GatingQuestion`, `GatingQuestionChoice`). `MobHandle.gatingAnswer(pendingId,
+  { approverId, presentedDigest, answers })` answers one and
+  `MobHandle.gatingDismiss(pendingId, { approverId, presentedDigest })`
+  dismisses one, both through `meta/gating/decide`; they resolve a
+  `GatingQuestionSetResult` (`outcome`: `answered` or `dismissed`). An answer
+  is a `GatingQuestionAnswer` (a choice, or free text where the question
+  allows it); `gatingAnswer` throws without at least one. `gatingPending()`
+  does not list question sets.
+- The example in the `MetaBuilder` header comment calls
+  `.rosterProvider(myRoster)`; it called `.roster(myRoster)`, which the
+  TypeScript builder does not have.
 
 ## 0.9.14
 

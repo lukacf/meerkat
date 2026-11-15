@@ -185,8 +185,9 @@ impl StoppedMob {
     }
 
     /// Join the lift and answer its result: the unit build's lift observer
-    /// reports a stall after two seconds without progress, and the lift stays
-    /// joinable. The rows read the result last, after the plan's own facts.
+    /// reports a stall after its inactivity window without progress, and the
+    /// lift stays joinable. The rows read the result last, after the plan's
+    /// own facts.
     async fn join_lift(
         &self,
         lift: tokio::task::JoinHandle<Result<(), MobError>>,

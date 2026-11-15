@@ -20,10 +20,69 @@ use crate::approval::ApprovalAssurance;
 use crate::approval::consent::{
     AuthenticatedApprover, ConsentEligibility, HostAuthenticationScope,
 };
+use crate::ask_user::{
+    ASK_USER_FREE_TEXT_MAX_BYTES, ASK_USER_ID_MAX_BYTES, ASK_USER_QUESTIONS_MAX,
+    AskUserQuestionAnswer,
+};
 use crate::{PrincipalKind, PrincipalRef, SessionId};
 
 /// Largest decision reason or review feedback, in bytes.
 pub const DECISION_REASON_MAX_BYTES: usize = 4 * 1024;
+
+/// Largest typed answer of a decision ([`DecisionAnswer`]), in bytes of its
+/// JSON: 32 KiB.
+///
+/// It is sized for the largest set of answers the `ask_user` tool takes, so
+/// answers that are valid for their question set are never refused for
+/// their size. The JSON of that set is 17,741 bytes:
+///
+/// - The wrapper `{"kind":"ask_user","answers":[` and `]}` is 32 bytes.
+/// - A set has at most 10 questions and a person answers each at most once,
+///   so there are at most 10 entries, with 9 commas between them.
+/// - The largest entry is a written answer,
+///   `{"question_id":"ID","answer":{"kind":"free_text","text":"TEXT"}}`: 58
+///   bytes around the id and the text. A choice,
+///   `{"question_id":"ID","answer":{"kind":"choice","choice_id":"ID"}}`,
+///   holds a second id of at most 32 bytes instead of the text and is
+///   smaller.
+/// - A question id is at most 32 bytes of `a-z`, `0-9`, `_` and `-`, none of
+///   which JSON escapes.
+/// - A written answer is at most 280 bytes. JSON writes a quote, a
+///   backslash, a backspace, a tab, a line feed, a form feed and a carriage
+///   return as 2 bytes, and every other control character below U+0020 as
+///   6 (`\u0001`), so 280 one-byte control characters are 1,680 bytes;
+///   every other character is written as it is.
+///
+/// 32 + 10 x (58 + 32 + 6 x 280) + 9 = 17,741. The build fails when the
+/// tool's limits outgrow the bound.
+pub const DECISION_ANSWER_MAX_BYTES: usize = 32 * 1024;
+
+/// The JSON of the largest [`DecisionAnswer::AskUser`] that is valid for a
+/// question set, in bytes: the arithmetic of [`DECISION_ANSWER_MAX_BYTES`]
+/// over the tool's own limits.
+pub(super) const ASK_USER_ANSWER_JSON_MAX_BYTES: usize = 32
+    + ASK_USER_QUESTIONS_MAX * (58 + ASK_USER_ID_MAX_BYTES + 6 * ASK_USER_FREE_TEXT_MAX_BYTES)
+    + (ASK_USER_QUESTIONS_MAX - 1);
+
+// A change of the tool's limits that outgrows the answer's bound fails the
+// build here.
+const _: () = assert!(ASK_USER_ANSWER_JSON_MAX_BYTES <= DECISION_ANSWER_MAX_BYTES);
+
+/// The typed answer a person gave with an approving decision, for a kind
+/// that asks one. It is part of the decision's human evidence, so the
+/// decision's machine binds it through the evidence digest: it is data the
+/// kind's owner reads, never text a surface parses. More kinds may be
+/// added.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DecisionAnswer {
+    /// The answers to a set of questions an agent asked a person (a
+    /// decision of kind `ask_user.questions`): one entry per question the
+    /// person answered. Whether they are valid for the held set is for the
+    /// kind's owner to check when it reads them.
+    AskUser { answers: Vec<AskUserQuestionAnswer> },
+}
 
 /// Who decides a decision. More tiers may be added with new kinds of
 /// evidence.
@@ -84,6 +143,7 @@ pub struct AttestedDecision {
     presentation: Option<PresentationRecord>,
     approve: bool,
     reason: Option<String>,
+    answer: Option<DecisionAnswer>,
 }
 
 impl AttestedDecision {
@@ -129,6 +189,7 @@ impl AttestedDecision {
             presentation: None,
             approve,
             reason: None,
+            answer: None,
         })
     }
 
@@ -146,6 +207,34 @@ impl AttestedDecision {
     /// [`DecisionContractError::TooLarge`] past 4 KiB.
     pub fn with_reason(mut self, reason: impl Into<String>) -> Result<Self, DecisionContractError> {
         self.reason = Some(bounded_text("reason", reason.into())?);
+        Ok(self)
+    }
+
+    /// The typed answer the person gave with this approving decision, for a
+    /// kind that asks one. Its JSON is at most 32 KiB
+    /// ([`DECISION_ANSWER_MAX_BYTES`]), which holds every set of answers
+    /// that is valid for an `ask_user` question set.
+    ///
+    /// # Errors
+    /// [`DecisionContractError::Invalid`] on a rejecting decision (a
+    /// rejection answers nothing), [`DecisionContractError::TooLarge`] past
+    /// 32 KiB, and [`DecisionContractError::Encoding`] when the answer
+    /// cannot be encoded.
+    pub fn with_answer(mut self, answer: DecisionAnswer) -> Result<Self, DecisionContractError> {
+        if !self.approve {
+            return Err(DecisionContractError::Invalid {
+                what: "answer of a rejecting decision",
+            });
+        }
+        let encoded = serde_json::to_vec(&answer)
+            .map_err(|error| DecisionContractError::Encoding(error.to_string()))?;
+        if encoded.len() > DECISION_ANSWER_MAX_BYTES {
+            return Err(DecisionContractError::TooLarge {
+                what: "answer",
+                max_bytes: DECISION_ANSWER_MAX_BYTES,
+            });
+        }
+        self.answer = Some(answer);
         Ok(self)
     }
 
@@ -206,6 +295,12 @@ impl AttestedDecision {
         self.reason.as_deref()
     }
 
+    /// The typed answer the person gave with this decision, if any.
+    #[must_use]
+    pub fn answer(&self) -> Option<&DecisionAnswer> {
+        self.answer.as_ref()
+    }
+
     /// The durable evidence of this decision.
     #[must_use]
     pub fn evidence(&self) -> DecisionEvidence {
@@ -226,6 +321,7 @@ impl AttestedDecision {
             presentation: self.presentation.clone(),
             approve: self.approve,
             reason: self.reason.clone(),
+            answer: self.answer.clone(),
         }
     }
 }
@@ -430,6 +526,12 @@ pub enum DecisionEvidence {
         approve: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        /// The typed answer the person gave with an approving decision, for
+        /// a kind that asks one ([`DecisionAnswer`]). Absent otherwise, and
+        /// in evidence recorded before decisions carried it: such evidence
+        /// decodes, and keeps its bytes and its digest.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<DecisionAnswer>,
     },
     /// A reviewer's attributed verdict.
     Review {

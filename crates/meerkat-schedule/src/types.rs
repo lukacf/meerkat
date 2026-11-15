@@ -1219,8 +1219,12 @@ pub const MOB_MEMBER_IDENTITY_TARGET_PREFIX: &str = "mob_member:";
 
 /// What reading a schedule request answers when `reasoning_effort` is written
 /// directly in a session spec (`create`), the form `session/create` takes.
+/// A parser of a request body appends its position (` at line N column M`),
+/// so the sentence ends before it: the words about a provider's own effort
+/// setting are a parenthesis, not a second clause.
 const REASONING_EFFORT_DIRECTLY_IN_CREATE: &str = "`create.reasoning_effort` is not accepted in a schedule's session settings in this \
-     release; a provider's own effort setting under `create.provider_params.provider_tag` is";
+     release (a provider's own effort setting under `create.provider_params.provider_tag` is \
+     still accepted)";
 
 /// What reading a schedule request answers when `reasoning_effort` is written
 /// directly on a prompt action, the form a turn request takes.
@@ -1333,7 +1337,7 @@ impl SessionTargetBinding {
             return Err(
                 "provider_params.reasoning_effort is not accepted in a schedule's session settings \
                  in this release; a provider's own effort setting under \
-                 provider_params.provider_tag is"
+                 provider_params.provider_tag is still accepted"
                     .to_string(),
             );
         }
@@ -3928,6 +3932,110 @@ mod tests {
             direct_reasoning_effort_refusal("unknown field `reasoning_effort`"),
             None
         );
+    }
+
+    /// The refusal of a level under `provider_params`, as the schedule
+    /// service answers it at create and at update.
+    const NESTED_LEVEL_REFUSAL: &str = "provider_params.reasoning_effort is not accepted in a schedule's session settings \
+         in this release; a provider's own effort setting under \
+         provider_params.provider_tag is still accepted";
+
+    /// The refusal of a `reasoning_effort` member written directly in
+    /// `create`, as the read of the request answers it.
+    const DIRECT_LEVEL_REFUSAL: &str = "`create.reasoning_effort` is not accepted in a schedule's session settings in this \
+         release (a provider's own effort setting under \
+         `create.provider_params.provider_tag` is still accepted)";
+
+    /// The refusal of a `reasoning_effort` member written directly on a
+    /// prompt action.
+    const PROMPT_ACTION_LEVEL_REFUSAL: &str =
+        "`action.reasoning_effort` is not accepted on a schedule's prompt action in this release";
+
+    /// The refusal of a level under `provider_params` is one whole sentence,
+    /// at create and at update: it ends by saying that a provider's own
+    /// effort setting is still accepted.
+    #[test]
+    fn the_refusal_of_a_level_under_provider_params_is_a_whole_sentence() {
+        let request: CreateScheduleRequest = serde_json::from_value(
+            create_request_with_provider_params(serde_json::json!({"reasoning_effort": "high"})),
+        )
+        .unwrap();
+        assert_eq!(
+            request.validate_public_api(),
+            Err(NESTED_LEVEL_REFUSAL.to_string())
+        );
+        assert_eq!(
+            UpdateScheduleRequest {
+                target: Some(request.target),
+                ..Default::default()
+            }
+            .validate_public_api(),
+            Err(NESTED_LEVEL_REFUSAL.to_string())
+        );
+    }
+
+    /// The refusal of a `reasoning_effort` member written directly in
+    /// `create` is one whole sentence, at create and at update, and it stays
+    /// closed when a parser of a request body appends its position: the
+    /// words about a provider's own effort setting sit in a parenthesis, so
+    /// the position follows a finished sentence. The prompt action's refusal
+    /// is a whole sentence too.
+    #[test]
+    fn the_refusal_of_a_level_written_directly_is_a_whole_sentence_before_the_position() {
+        let target = |create: serde_json::Value, action: serde_json::Value| {
+            prompt_targets(create, action).remove(0).1
+        };
+        let prompt = serde_json::json!({"type": "prompt", "prompt": "Check."});
+        let in_create = target(
+            serde_json::json!({"model": "claude-sonnet-4-6", "reasoning_effort": "high"}),
+            prompt,
+        );
+        let on_action = target(
+            serde_json::json!({"model": "claude-sonnet-4-6"}),
+            serde_json::json!({"type": "prompt", "prompt": "Check.", "reasoning_effort": "high"}),
+        );
+
+        // Read from a value: the sentence alone, and what a door answers
+        // for it is the same sentence.
+        for (target, sentence) in [
+            (in_create.clone(), DIRECT_LEVEL_REFUSAL),
+            (on_action.clone(), PROMPT_ACTION_LEVEL_REFUSAL),
+        ] {
+            for refused in create_and_update_parse_errors(target) {
+                let refused = refused.unwrap_or_else(|| panic!("{sentence}: refused"));
+                assert_eq!(refused, sentence);
+                assert_eq!(direct_reasoning_effort_refusal(&refused), Some(sentence));
+            }
+        }
+
+        // Read from text, as a request body is: the parser appends its
+        // position after the sentence and nothing else.
+        for (target, sentence) in [
+            (in_create, DIRECT_LEVEL_REFUSAL),
+            (on_action, PROMPT_ACTION_LEVEL_REFUSAL),
+        ] {
+            let create = serde_json::from_str::<CreateScheduleRequest>(
+                &create_request_on(target.clone()).to_string(),
+            )
+            .unwrap_err()
+            .to_string();
+            let update = serde_json::from_str::<UpdateScheduleRequest>(
+                &serde_json::json!({"target": target}).to_string(),
+            )
+            .unwrap_err()
+            .to_string();
+            for refused in [create, update] {
+                let column = refused
+                    .strip_prefix(sentence)
+                    .and_then(|position| position.strip_prefix(" at line 1 column "))
+                    .unwrap_or_else(|| panic!("{refused}"));
+                assert!(
+                    !column.is_empty() && column.bytes().all(|digit| digit.is_ascii_digit()),
+                    "{refused}"
+                );
+                assert_eq!(direct_reasoning_effort_refusal(&refused), Some(sentence));
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

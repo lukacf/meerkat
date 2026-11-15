@@ -770,7 +770,7 @@ They replace the realm's composed `[confinement]` for every launch kind of
 this process. The workspace preset confines each launch to `--context-root`;
 without `--context-root` the server refuses to start with it. A start in which
 a confined process could change the server's realm state or user config
-document is refused (see [the host's own inputs](/concepts/configuration#the-hosts-own-inputs)).
+document is refused (see [the host's own inputs](/concepts/configuration#the-host%E2%80%99s-own-inputs)).
 At startup the server logs each launch kind's requested and effective
 confinement and warns for each required kind its platform cannot confine.
 The bundled binary is stdio-only. If an embedding host publishes these tools
@@ -1144,6 +1144,13 @@ extraction calls.
   After a call created its session, the data also names the session
   (`session_id`, `session_ref`, `session_created`, `resumable`). Read the
   data, never the message.
+  One case is not recognisable by its data kind: a `meerkat_resume` of, or a
+  `meerkat_comms_send` to, the session of a mob member that is not live,
+  when that member's own build is refused for the level in its profile,
+  answers the generic agent error (`-32013`) with a message that contains
+  the refusal's sentence and no `reasoning_effort_refused` data; a level the
+  resume itself carries is judged after the wake and is answered by the
+  typed refusal as everywhere else.
 
   A `meerkat_resume` that names the level (this field, set or clear, or the
   `reasoning_effort` key inside `provider_params`) rebuilds the session, and
@@ -1168,14 +1175,14 @@ extraction calls.
   starts between the server's check and the level resume's own start runs,
   but a request queued behind that plain resume can still be ended by the
   rebuild; and a plain resume sent at the same moment as a level resume,
-  before either turn has started (on an idle session too), runs or ends
-  with `-32003` (`session_resume_required`), depending on which of the two
-  reaches the session first. Send the ended request again. A resume that
-  rebuilds the session for another field (`model`, `max_tokens`,
+  before either turn has started (also on a session that has no turn running),
+  runs or ends with `-32003` (`session_resume_required`), depending on which
+  of the two reaches the session first. Send the ended request again. A resume
+  that rebuilds the session for another field (`model`, `max_tokens`,
   `provider_params` without the level, and the other build fields) is
   unchanged from 0.9.14: it waits behind the running turn, rebuilds the
-  session and runs. A plain resume queued beside such a resume either runs
-  or, when the rebuild reaches the session first, ends with `-32003`
+  session and runs. A plain resume queued beside such a resume either runs or,
+  when the rebuild reaches the session first, ends with `-32003`
   (`session_resume_required`) without running; send it again.
 </ParamField>
 
@@ -1531,7 +1538,7 @@ Returns the runtime capability set with status resolved against config.
 
 ```json Response
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 14},
+  "contract_version": {"major": 0, "minor": 9, "patch": 15},
   "capabilities": [
     {
       "id": "sessions",
@@ -1598,7 +1605,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 14},
+  "contract_version": {"major": 0, "minor": 9, "patch": 15},
   "providers": [
     {
       "provider": "anthropic",

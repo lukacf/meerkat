@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use serde_json::json;
 
 use super::console_private_side_chat_tests::{
-    ROOT, TestResult, alice_claims, bearer as person_bearer, enforced_console,
-    everyone_drives_every_agent, fork_on_console,
+    ALICE, ROOT, TestResult, alice_claims, bearer as person_bearer, bob_claims, enforced_console,
+    everyone_drives_every_agent, fork_on_console, root_claims,
 };
 use super::console_side_chat_tests::{persistent_gateway_runtime_in, seeded_member};
 use super::console_token_lapse_tests::console_rpc_as;
@@ -877,6 +877,212 @@ async fn an_ended_members_memory_scope_waits_for_the_first_read_of_who_members_a
         !reads_memory_scope_of(&operator, "alpha-side"),
         "and the private member's stays withheld"
     );
+    Ok(())
+}
+
+/// The console schedule methods that read or change a schedule of the member
+/// they name.
+const MEMBER_SCHEDULE_METHODS: [&str; 5] = [
+    "meta/schedule/list",
+    "meta/schedule/update",
+    "meta/schedule/resume",
+    "meta/schedule/pause",
+    "meta/schedule/delete",
+];
+
+/// What `method` answers the holder of `bearer` for the schedule
+/// `schedule_id` of `member`, with the member's name written as `MEMBER`.
+async fn schedule_answer(
+    app: &Router,
+    bearer: &str,
+    method: &str,
+    member: &str,
+    schedule_id: &str,
+) -> String {
+    let mut params = json!({ "identity": member });
+    if method != "meta/schedule/list" {
+        params["schedule_id"] = json!(schedule_id);
+    }
+    if method == "meta/schedule/update" {
+        params["content"] = json!("Changed.");
+    }
+    let answer = console_rpc_as(app, Some(bearer), method, params).await;
+    json!({ "result": answer["result"], "error": answer["error"] })
+        .to_string()
+        .replace(member, "MEMBER")
+}
+
+/// Until the first read of who members are private to has succeeded, the
+/// console schedules of a member that ended are read and changed by nobody
+/// but an administrator: the schedule methods that name the member answer
+/// every other caller as they answer for a member that does not exist. A
+/// member on the roster is withheld from nobody. Once the read has succeeded
+/// the ordinary ended member's schedules are read again, the private
+/// member's are read and changed by the person it was private to, and
+/// another person is still answered as for a member that does not exist.
+#[tokio::test]
+async fn an_ended_members_console_schedules_wait_for_the_first_read_of_who_members_are_private_to()
+-> TestResult {
+    const MOB: &str = "kept-apart-first-read-schedules";
+    const ISSUER: &str = "https://issuer.example.test";
+    let left = state_after_a_console_with_sign_in(MOB).await?;
+    let restarted = persistent_gateway_runtime_in(left.state.path(), MOB, "", "").await?;
+    let runtime = runtime_whose_first_read_failed(&restarted).await;
+
+    // The schedules the console's schedule store holds: one for the member
+    // on the roster and one for each member that ended, each defined while
+    // its member took the console's sends.
+    let service = meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::default()));
+    runtime.console_schedules().attach(
+        service.clone(),
+        crate::schedule_wiring::ScheduleFiringHostBinding::external_driver(),
+    );
+    let mut schedule_of = BTreeMap::new();
+    for member in ["alpha", "alpha-side", "beta"] {
+        let send = crate::console_schedules::ConsoleScheduledSend::new(
+            member.to_string(),
+            format!("scheduled-for-{member}"),
+            crate::console_schedules::ConsoleScheduleSender::Human {
+                principal: ALICE.to_string(),
+                provider: "google_oauth".to_string(),
+                issuer: ISSUER.to_string(),
+                subject: "oidc-sub-alice".to_string(),
+            },
+            1,
+        );
+        let schedule = service
+            .create(meerkat::CreateScheduleRequest {
+                name: None,
+                description: None,
+                trigger: serde_json::from_value(json!({
+                    "type": "interval",
+                    "start_at_utc": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                    "every_seconds": 3600,
+                }))?,
+                target: send.target()?,
+                misfire_policy: meerkat::MisfirePolicy::default(),
+                overlap_policy: meerkat::OverlapPolicy::default(),
+                missing_target_policy: meerkat::MissingTargetPolicy::default(),
+                labels: BTreeMap::new(),
+                planning_horizon_days: None,
+                planning_horizon_occurrences: None,
+            })
+            .await?;
+        schedule_of.insert(member, schedule.schedule_id.to_string());
+    }
+
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.register_runtime_handles_with_policy(
+        "default",
+        "",
+        runtime.clone(),
+        None,
+        crate::unified_runtime::ConsoleEventStore::new(),
+        Arc::new(AllowAllConsoleVisibilityPolicy),
+    );
+    let mut console = enforced_console(&runtime, Some(everyone_drives_every_agent()));
+    console.console_aggregator = Some(aggregator);
+    let app = console_json_router_with_state(console);
+    let alice = person_bearer(alice_claims());
+    let bob = person_bearer(bob_claims());
+    let root = person_bearer(root_claims());
+    // A listing that holds its member's schedule (the member's name is
+    // written as `MEMBER` in an answer).
+    let lists = |answer: &str| answer.contains("scheduled-for-MEMBER");
+
+    // Before the read succeeds: each ended member's schedule is answered to
+    // each person as the same call is answered for a name no member holds.
+    let mut answered = Vec::new();
+    for method in MEMBER_SCHEDULE_METHODS {
+        for (who, bearer) in [
+            ("another person", &bob),
+            ("the person it was private to", &alice),
+        ] {
+            for ended in ["alpha-side", "beta"] {
+                let schedule_id = &schedule_of[ended];
+                let answer = schedule_answer(&app, bearer, method, ended, schedule_id).await;
+                let absent = schedule_answer(&app, bearer, method, "ghost", schedule_id).await;
+                if answer != absent {
+                    answered.push(format!("{method} for {ended} as {who}: {answer}"));
+                }
+            }
+        }
+    }
+    assert!(
+        answered.is_empty(),
+        "before the first read succeeds a console schedule of a member that ended is answered \
+         to nobody but an administrator, and to everyone else as for a member that does not \
+         exist:\n{}",
+        answered.join("\n")
+    );
+    for ended in ["alpha-side", "beta"] {
+        let listed = schedule_answer(
+            &app,
+            &root,
+            "meta/schedule/list",
+            ended,
+            &schedule_of[ended],
+        )
+        .await;
+        assert!(
+            lists(&listed),
+            "an administrator is withheld nothing of {ended}: {listed}"
+        );
+    }
+    let listed = schedule_answer(
+        &app,
+        &bob,
+        "meta/schedule/list",
+        "alpha",
+        &schedule_of["alpha"],
+    )
+    .await;
+    assert!(
+        lists(&listed),
+        "a member on the roster is withheld from nobody: {listed}"
+    );
+
+    // The read succeeds.
+    let handle = runtime.handle();
+    assert!(runtime.private_owners().seeded(&handle).await.landed());
+    for method in MEMBER_SCHEDULE_METHODS {
+        let schedule_id = &schedule_of["alpha-side"];
+        assert_eq!(
+            schedule_answer(&app, &bob, method, "alpha-side", schedule_id).await,
+            schedule_answer(&app, &bob, method, "ghost", schedule_id).await,
+            "once the record is read {method} still answers another person for the private \
+             member as for a member that does not exist"
+        );
+    }
+    let listed = schedule_answer(
+        &app,
+        &bob,
+        "meta/schedule/list",
+        "beta",
+        &schedule_of["beta"],
+    )
+    .await;
+    assert!(
+        lists(&listed),
+        "once the record is read the ordinary ended member's schedules are read: {listed}"
+    );
+    let own = json!({ "identity": "alpha-side", "schedule_id": schedule_of["alpha-side"] });
+    let listed = schedule_answer(
+        &app,
+        &alice,
+        "meta/schedule/list",
+        "alpha-side",
+        &schedule_of["alpha-side"],
+    )
+    .await;
+    assert!(
+        lists(&listed),
+        "and the person the private member was private to reads its schedules: {listed}"
+    );
+    let paused = console_rpc_as(&app, Some(&alice), "meta/schedule/pause", own.clone()).await;
+    assert_eq!(paused["result"]["phase"], json!("paused"), "{paused:#}");
+    let deleted = console_rpc_as(&app, Some(&alice), "meta/schedule/delete", own).await;
+    assert_eq!(deleted["result"]["deleted"], json!(true), "{deleted:#}");
     Ok(())
 }
 
@@ -2236,5 +2442,246 @@ async fn a_run_in_flight_at_a_retire_ends_with_a_record_the_members_viewers_read
     assert!(timeline_frame_visible_to(&admin, &notice));
     drain.abort();
     let _ = runtime.shutdown().await;
+    Ok(())
+}
+
+/// A member seated on a stored session is the member that session was built
+/// for, also after a restart and on a runtime taken from a bare handle,
+/// which has Core's member history alone to read: a private member's ended
+/// session seats a member private to the same person, exempt from the
+/// definition's wiring rules, and an ordinary member's ended session seats
+/// the request unchanged. A session no member history binds is decided by
+/// the session's own stores: one that does not exist seats the request
+/// unchanged where a session service says so, and is not seated where
+/// nothing can be read.
+#[tokio::test]
+async fn a_member_seated_on_a_stored_session_is_the_member_it_was_built_for() -> TestResult {
+    const MOB: &str = "kept-apart-seat-on-stored-session";
+    let left = state_after_a_console_with_sign_in(MOB).await?;
+    let restarted = persistent_gateway_runtime_in(left.state.path(), MOB, "", "").await?;
+    let bare = MobRuntime::from_handle(restarted.handle());
+    assert!(restarted.session_service().is_some() && bare.session_service().is_none());
+    let owner = restarted
+        .handle()
+        .member_binding_for_session(&left.side_chat_session)
+        .await?
+        .and_then(|binding| crate::access::private_owner(binding.labels()).map(str::to_string))
+        .ok_or("the side chat was private to a person")?;
+    let never_ran = meerkat_core::types::SessionId::new();
+    let request = || {
+        SpawnMemberSpec::new(
+            ProfileName::from("worker"),
+            AgentIdentity::from("seated-again"),
+        )
+    };
+    for (runtime, which, of_a_session_nobody_ran_on) in [
+        (&restarted, "a runtime with a session service", Ok(None)),
+        (
+            &bare,
+            "a runtime taken from a bare handle",
+            Err("access denied: the session has no established owner".to_string()),
+        ),
+    ] {
+        let private = seat_on_stored_session(runtime, &left.side_chat_session, request())
+            .await
+            .map_err(|refusal| refusal.message)?;
+        assert_eq!(
+            private
+                .labels
+                .as_ref()
+                .and_then(crate::access::private_owner),
+            Some(owner.as_str()),
+            "{which}: a private member's ended session"
+        );
+        assert!(
+            private.definition_wiring.is_exempt(),
+            "{which}: a private member is seated exempt from the wiring rules"
+        );
+        let shared = seat_on_stored_session(runtime, &left.beta_session, request())
+            .await
+            .map_err(|refusal| refusal.message)?;
+        assert_eq!(
+            shared.labels, None,
+            "{which}: an ordinary ended member's session"
+        );
+        assert_eq!(
+            seat_on_stored_session(runtime, &never_ran, request())
+                .await
+                .map(|spec| spec.labels)
+                .map_err(|refusal| refusal.message),
+            of_a_session_nobody_ran_on,
+            "{which}: a session nobody ran on"
+        );
+    }
+    restarted.handle().shutdown().await?;
+    Ok(())
+}
+
+/// A stored session that is not archived is decided by its stored document
+/// where its served label map names nobody: after a restart, a private
+/// member's session that no member ended is handed out by the resume read
+/// with its member labels, and they name its owner, whether Core's member
+/// history cannot be read, holds no binding of the session, or names nobody
+/// in its newest row.
+#[tokio::test]
+async fn a_stored_session_that_is_not_archived_is_decided_by_its_stored_document() -> TestResult {
+    const MOB: &str = "kept-apart-seat-on-served-session";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(
+        &runtime,
+        Some(everyone_drives_every_agent()),
+    ));
+    let forked = fork_on_console(
+        &app,
+        Some(&person_bearer(alice_claims())),
+        "alpha",
+        "alpha-side",
+    )
+    .await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    drop(app);
+    let session = session_of(&runtime, "alpha-side").await?;
+    let owner = runtime
+        .handle()
+        .get_member(&AgentIdentity::from("alpha-side"))
+        .await?
+        .and_then(|entry| crate::access::private_owner(&entry.labels).map(str::to_string))
+        .ok_or("the side chat is private to a person")?;
+    runtime.handle().shutdown().await?;
+    let _ = runtime
+        .stand_down_child_mobs(std::time::Instant::now() + Duration::from_secs(90))
+        .await;
+    drop(runtime);
+
+    let restarted = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    let service = restarted
+        .session_service()
+        .ok_or("the restarted runtime's session service")?;
+    let served = meerkat_core::service::SessionService::read(service.as_ref(), &session).await?;
+    assert_eq!(
+        crate::access::private_owner(&served.state.labels),
+        None,
+        "Core serves the session with a label map that names nobody"
+    );
+    let document =
+        match meerkat_mob::MobSessionService::load_session_for_resume(service.as_ref(), &session)
+            .await?
+        {
+            meerkat_mob::ResumeSessionLoad::Active(document) => document,
+            other => return Err(format!("the session is not archived: {other:?}").into()),
+        };
+    assert_eq!(
+        stored_document_member_labels(&document)
+            .as_ref()
+            .and_then(crate::access::private_owner),
+        Some(owner.as_str()),
+        "the stored document's member labels name the owner"
+    );
+    let stored = session_stored_member_labels(&restarted, &session).await;
+    assert_eq!(
+        stored.as_ref().and_then(crate::access::private_owner),
+        Some(owner.as_str()),
+        "the session's own stores name the owner"
+    );
+    for (history, what) in [
+        (
+            None,
+            "a member history that cannot be read or holds no binding of the session",
+        ),
+        (
+            Some(BTreeMap::new()),
+            "a newest member row that names nobody",
+        ),
+    ] {
+        assert_eq!(
+            stored_member_labels([history, stored.clone()])
+                .as_ref()
+                .and_then(crate::access::private_owner),
+            Some(owner.as_str()),
+            "{what}: the member is seated private to the document's owner"
+        );
+    }
+    restarted.handle().shutdown().await?;
+    Ok(())
+}
+
+/// The answer of `method` to a caller with no token who seats a member named
+/// `member` on `session`, named under the parameter `key`, with the
+/// session's id replaced by a placeholder.
+async fn seat_answer(
+    app: &Router,
+    method: &str,
+    key: &str,
+    member: &str,
+    session: &meerkat_core::types::SessionId,
+) -> String {
+    let mut params = json!({ "role": "worker", "agent_identity": member });
+    params[key] = json!(session.to_string());
+    console_rpc_as(app, None, method, params)
+        .await
+        .to_string()
+        .replace(&session.to_string(), "<session>")
+}
+
+/// A session the caller may not know of is answered as a session nobody ran
+/// on by both methods that seat a member on a stored session: on a console
+/// that identifies nobody whose read of a stored session fails, an ended
+/// private member's session and a session nobody ran on are answered in the
+/// words a console that reads its sessions answers a session nobody ran on,
+/// and nobody is seated.
+#[tokio::test]
+async fn a_session_the_caller_may_not_know_is_answered_as_one_nobody_ran_on_by_both_methods()
+-> TestResult {
+    const MOB: &str = "kept-apart-seat-unreadable";
+    const MEMBER: &str = "seat-unreadable";
+    let left = state_after_a_console_with_sign_in(MOB).await?;
+    let restarted = persistent_gateway_runtime_in(left.state.path(), MOB, "", "").await?;
+    let handle = restarted.handle();
+    assert!(restarted.private_owners().seeded(&handle).await.landed());
+    let never_ran = meerkat_core::types::SessionId::new();
+    let service = crate::console_aggregator::tests::DelayedHistorySessionService::new(
+        restarted
+            .session_service()
+            .cloned()
+            .ok_or("the restarted runtime keeps its session service")?,
+        Duration::ZERO,
+    );
+    service.refuse_resume_loads();
+    let unreadable = MobRuntime::from_handle(restarted.handle())
+        .with_session_service_for_test(Arc::new(service));
+    assert!(unreadable.private_owners().seeded(&handle).await.landed());
+    let readable_app = console_json_router_with_state(console_that_identifies_nobody(&restarted));
+    let unreadable_app =
+        console_json_router_with_state(console_that_identifies_nobody(&unreadable));
+    for (method, key) in [
+        ("meta/attach_existing_session", "session_id"),
+        ("meta/ensure_member", "resume_session_id"),
+    ] {
+        let unknown = seat_answer(&readable_app, method, key, MEMBER, &never_ran).await;
+        assert!(
+            unknown.contains("\"error\":{"),
+            "{method}: a console that reads its sessions seats nobody on a session nobody ran \
+             on: {unknown}"
+        );
+        for (session, whose) in [
+            (&left.side_chat_session, "an ended private member's session"),
+            (&never_ran, "a session nobody ran on"),
+        ] {
+            assert_eq!(
+                seat_answer(&unreadable_app, method, key, MEMBER, session).await,
+                unknown,
+                "{method}: {whose}"
+            );
+        }
+    }
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from(MEMBER))
+            .await?
+            .is_none(),
+        "nobody is seated"
+    );
     Ok(())
 }

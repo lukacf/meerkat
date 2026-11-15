@@ -820,11 +820,12 @@ async fn a_process_style_restart_seals_an_interrupted_terminal_and_cleans_up() {
             meerkat_mob::store::SqliteTemporaryCouncilStore::open(&path)
                 .expect("open durable council custody"),
         );
-        // Commit order: claim, then per participant {acquire-intent,
-        // capability, seated}, then phase=Running. Index 7 is that last
-        // advance: the first commit whose failure propagates out of the owned
-        // task with two seated members and no sealed result — the crash shape.
-        let store = Arc::new(OneShotFailingCouncilStore::new(inner, 7));
+        // Commit order: claim, the temporary mob's create intent, then per
+        // participant {acquire-intent, capability, seated}, then
+        // phase=Running. Index 8 is that last advance: the first commit
+        // whose failure propagates out of the owned task with two seated
+        // members and no sealed result: the crash shape.
+        let store = Arc::new(OneShotFailingCouncilStore::new(inner, 8));
         let _ = failing_slot.set(store.clone());
         state.with_temporary_council_store(store)
     });
@@ -1856,9 +1857,11 @@ async fn an_owned_task_panic_yields_a_typed_terminal_and_releases_the_registrati
             meerkat_mob::store::SqliteTemporaryCouncilStore::open(&path)
                 .expect("open durable council custody"),
         );
-        // Commit index 7 is the phase=Running advance: two participants are
-        // seated and the temporary mob is live when the task dies.
-        let store = Arc::new(PanicOnceCouncilStore::new(inner, 7));
+        // Commit index 8 is the phase=Running advance (after the claim, the
+        // temporary mob's create intent and three commits per participant):
+        // two participants are seated and the temporary mob is live when
+        // the task dies.
+        let store = Arc::new(PanicOnceCouncilStore::new(inner, 8));
         let _ = panicking_slot.set(store.clone());
         state.with_temporary_council_store(store)
     });
@@ -2080,6 +2083,9 @@ async fn a_remote_capability_acquired_but_never_seated_is_recovered_from_persist
         council_id: council_id.clone(),
         request_fingerprint: fingerprint,
         temporary_mob_id: council_id.temporary_mob_id(),
+        temporary_mob_custody: Some(
+            meerkat_mob::temporary_council::TemporaryCouncilMobCustody::NotCreated,
+        ),
         deadline: now + chrono::Duration::seconds(600),
         machine_state: authority.state().clone(),
         durability: meerkat_mob::temporary_council::TemporaryCouncilDurability::Durable,
@@ -2105,6 +2111,7 @@ async fn a_remote_capability_acquired_but_never_seated_is_recovered_from_persist
         result: None,
         cleanup: None,
         detached_job: None,
+        convener: None,
         revision: 0,
         created_at: now,
         updated_at: now,
@@ -2460,10 +2467,11 @@ async fn a_failed_post_create_custody_commit_is_explicitly_ambiguous_and_still_r
             meerkat_mob::store::SqliteTemporaryCouncilStore::open(&path)
                 .expect("open durable council custody"),
         );
-        // Commit order: 0 claim, 1 p0 acquire-intent, 2 p0 capability. Index 2
-        // is the exact post-create commit: the capability EXISTS and the
-        // coordinator is holding it when custody refuses the write.
-        let store = Arc::new(OneShotFailingCouncilStore::new(inner, 2));
+        // Commit order: 0 claim, 1 the temporary mob's create intent, 2 p0
+        // acquire-intent, 3 p0 capability. Index 3 is the exact post-create
+        // commit: the capability EXISTS and the coordinator is holding it
+        // when custody refuses the write.
+        let store = Arc::new(OneShotFailingCouncilStore::new(inner, 3));
         let _ = failing_slot.set(store.clone());
         state.with_temporary_council_store(store)
     });
@@ -2767,6 +2775,9 @@ async fn restoration_alone_schedules_recovery_for_unfinished_councils() {
             council_id: council_id.clone(),
             request_fingerprint: fingerprint,
             temporary_mob_id: council_id.temporary_mob_id(),
+            temporary_mob_custody: Some(
+                meerkat_mob::temporary_council::TemporaryCouncilMobCustody::NotCreated,
+            ),
             deadline: now + chrono::Duration::seconds(600),
             machine_state: authority.state().clone(),
             durability: meerkat_mob::temporary_council::TemporaryCouncilDurability::Durable,
@@ -2777,6 +2788,7 @@ async fn restoration_alone_schedules_recovery_for_unfinished_councils() {
             result: None,
             cleanup: None,
             detached_job: None,
+            convener: None,
             revision: 0,
             created_at: now,
             updated_at: now,
@@ -3067,6 +3079,124 @@ async fn a_participant_of_an_activated_member_runs_when_the_host_opts_in() {
         outcome.cleanup.settled(),
         "cleanup debt: {:?}",
         outcome.cleanup
+    );
+    fixture.teardown().await;
+}
+
+// ===========================================================================
+// Convener: a council a host runs directly has none
+// ===========================================================================
+
+/// A council a host runs directly has no convener, whichever entry runs it:
+/// `run`, `run_detached` (the job's owner session is no convener), and a
+/// request decoded from JSON that carries convener keys of its own. The
+/// host's create hook is told the mob is that council's, with no convener
+/// session, and the record stores none. Every other mob the state creates is
+/// no council's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_run_council_tells_the_create_hook_its_council_and_no_convener() {
+    let fixture = CouncilFixture::new(role_script);
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&asked);
+    fixture
+        .state
+        .set_before_create(Arc::new(
+            move |request: meerkat_mob_mcp::MobCreateRequest| {
+                recorder.lock().unwrap().push(request);
+                Box::pin(async { Ok(()) })
+            },
+        ))
+        .expect("bind the create hook");
+    fixture.seed_source_mob(&["researcher", "reviewer"]).await;
+    let request =
+        |id: &str| two_participant_request(&fixture, id, MergeBackPolicy::NoMerge, 1, 240);
+
+    let plain = request("host-run");
+    let detached = request("host-run-detached");
+    // The request type has no convener and refuses no key it does not know:
+    // keys that claim one decode to the same request.
+    let claimed_session = meerkat_core::SessionId::new();
+    let mut claimed = serde_json::to_value(request("host-run-claimed")).expect("encode");
+    claimed["convener"] = serde_json::json!({ "session_id": claimed_session });
+    claimed["convener_session_id"] = serde_json::json!(claimed_session);
+    claimed["council"] = serde_json::json!({
+        "council_id": fixture.council_id("host-run-claimed").as_str(),
+        "convener_session_id": claimed_session,
+    });
+    let claimed: TemporaryCouncilRequest =
+        serde_json::from_value(claimed).expect("the request decodes with the claimed keys");
+    assert_eq!(claimed, request("host-run-claimed"));
+
+    let coordinator = fixture.state.temporary_council();
+    coordinator
+        .run(plain.clone())
+        .await
+        .expect("the host-run council reaches a terminal outcome");
+    let job_owner = meerkat_core::SessionId::new();
+    coordinator
+        .run_detached(
+            detached.clone(),
+            meerkat_mob::temporary_council::TemporaryCouncilJobBinding::new(
+                "host-job",
+                job_owner.clone(),
+            ),
+        )
+        .await
+        .expect("the detached host-run council reaches a terminal outcome");
+    coordinator
+        .run(claimed.clone())
+        .await
+        .expect("the council decoded from JSON reaches a terminal outcome");
+
+    let asked = asked.lock().unwrap().clone();
+    let mut council_mobs = Vec::new();
+    for council in [&plain, &detached, &claimed] {
+        let id = &council.council_id;
+        let mob_id = id.temporary_mob_id();
+        let requests: Vec<_> = asked
+            .iter()
+            .filter(|request| request.mob_id == mob_id)
+            .collect();
+        assert_eq!(
+            requests.len(),
+            1,
+            "the create hook is asked once for the mob of {id}: {requests:?}"
+        );
+        let origin = requests[0].council.as_ref().unwrap_or_else(|| {
+            panic!(
+                "the create hook is told the mob is a council's: {:?}",
+                requests[0]
+            )
+        });
+        assert_eq!(&origin.council_id, id);
+        assert_eq!(
+            origin.convener_session_id, None,
+            "no agent convened the council {id}"
+        );
+        assert!(requests[0].owner_bridge_session_id.is_some());
+        assert_ne!(
+            requests[0].owner_bridge_session_id.as_ref(),
+            Some(&job_owner)
+        );
+        let record = coordinator
+            .load(id)
+            .await
+            .expect("load")
+            .expect("record present");
+        assert_eq!(record.convener, None, "the record of {id} has no convener");
+        council_mobs.push(mob_id);
+    }
+    let others: Vec<_> = asked
+        .iter()
+        .filter(|request| !council_mobs.contains(&request.mob_id))
+        .collect();
+    assert!(
+        !others.is_empty(),
+        "the source mob's create asked the hook too"
+    );
+    assert!(
+        others.iter().all(|request| request.council.is_none()),
+        "a mob that is no council's names no council: {others:?}"
     );
     fixture.teardown().await;
 }

@@ -85,7 +85,7 @@ They replace the realm's composed `[confinement]` for every launch kind of
 this process. The workspace preset confines each launch to `--context-root`;
 without `--context-root` the server refuses to start with it. A start in which
 a confined process could change the server's realm state or user config
-document is refused (see [the host's own inputs](/concepts/configuration#the-hosts-own-inputs)).
+document is refused (see [the host's own inputs](/concepts/configuration#the-host%E2%80%99s-own-inputs)).
 At startup the server logs each launch kind's requested and effective
 confinement and warns for each required kind its platform cannot confine.
 
@@ -232,7 +232,7 @@ of this full catalog.
 | `mob/fork_helper` | Mob | `MobForkHelperParams` | `MobHelperResult` | Fork a helper from an existing member and wait for its result (mob feature) |
 | `mob/fork_member` | Mob | `MobForkMemberParams` | `MobForkMemberResult` | Fork a member's session at a message boundary into a new member (mob feature) |
 | `mob/force_cancel` | Mob | `MobMemberParams` | `MobForceCancelResult` | Force-cancel a member's active work (mob feature) |
-| `mob/turn_start` | Mob | `MobTurnStartParams` | `WireRunResult` | Start a turn on a mob member by identity (mob feature) |
+| `mob/turn_start` | Mob | `MobTurnStartParams` | `WireRunResult` | Start a turn on a `turn_driven` mob member by identity. A member in `autonomous_host` mode (the default) is refused with `-32602` (`mob/turn_start is only valid for turn_driven members; autonomous member '<id>' is driven by mob kickoff and mob/member_send`): send it work with `mob/member_send`, or start a turn with `turn/start` and the member's session id (`current_session_id` in the answer to `mob/member_status`) (mob feature) |
 | `mob/member_status` | Mob | `MobMemberParams` | `MobMemberStatusResult` | Read canonical status for a specific member (mob feature) |
 | `mob/snapshot` | Mob | `MobIdParams` | `MobSnapshotResult` | Point-in-time aggregate of mob status plus member list (mob feature) |
 | `mob/destroy` | Mob | `MobIdParams` | `MobDestroyResult` | Destroy a mob and surface the structured MobDestroyReport (mob feature) |
@@ -522,7 +522,7 @@ the effect and answers a repeat from that record; see
 
 Since 0.9.11 a request also carries `requester` when the run the call serves
 has an original requester (see
-[Authorization](/concepts/authorization#sources%2C-peers%2C-and-knowledge-services)):
+[Authorization](/concepts/authorization#sources-peers-and-knowledge-services)):
 `{"principal": {"kind": "human", "id": "...", "qualification": {"kind":
 "qualified", "trust_domain_id": "..."}}}`, with `"carried": true` when the
 run's work reached its agent through another actor, such as a peer hop. The
@@ -636,9 +636,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.9.14"
+      "version": "0.9.15"
     },
-    "contract_version": "0.9.14",
+    "contract_version": "0.9.15",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -968,7 +968,7 @@ Trajectory Interchange Format) v1.7 trajectory document.
   "params": {
     "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "agent_name": "meerkat",
-    "agent_version": "0.9.14",
+    "agent_version": "0.9.15",
     "model_name": "claude-opus-5"
   }
 }
@@ -1811,9 +1811,9 @@ Only a mechanical failure is `-32603`.
   `reasoning_effort_change_needs_idle_session`) and nothing is stored. The
   cases are in the table under
   [Model settings on a busy session](#model-settings-on-a-busy-session).
-  `mob/turn_start` takes the same field and is answered the same; a member
-  built from a profile whose `provider_params` carry a level holds that
-  level.
+  `mob/turn_start` (valid for `turn_driven` members) takes the same field
+  and is answered the same; a member built from a profile whose
+  `provider_params` carry a level holds that level.
 </ParamField>
 
 <ParamField body="auth_binding" type="TurnMetadataOverride | null" default="preserve">
@@ -1993,7 +1993,24 @@ Queue a runtime-backed external event for an existing session.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "outcome_type": "accepted"
+    "outcome_type": "accepted",
+    "input_id": "01a1dea8-...",
+    "state": {
+      "input_id": "01a1dea8-...",
+      "current_state": "queued",
+      "attempt_count": 0,
+      "recovery_count": 0,
+      "history": [
+        {
+          "timestamp": "2026-11-15T10:02:18.495319354+00:00",
+          "from": "accepted",
+          "to": "queued",
+          "reason": "QueueAccepted"
+        }
+      ],
+      "created_at": "2026-11-15T10:02:18.494970884+00:00",
+      "updated_at": "2026-11-15T10:02:18.495319354+00:00"
+    }
   }
 }
 ```
@@ -2035,6 +2052,18 @@ input answers `already_terminal` with `coalesced` and withdraws nothing.
 `selector` names the input exactly as `session/input_status` does: by the
 `input_id` the submit answered, or by the `idempotency_key` you submitted it
 under.
+
+A client can name only an input whose submit has answered: `mob/member_send`
+names the member's session and the admitted input in its answer
+(`admission`, or a keyed send's `continuation` status), and
+`session/external_event` answers its `input_id` when the event is admitted,
+which is at once on a session with no turn running (the event then waits
+queued for the session's next turn) and only after the running turn has
+ended on a session with one; until then its idempotency key finds no input
+(`session/input_status` answers an empty object). A `turn/start` that waits
+behind a running turn takes no idempotency key and answers nothing until its
+own turn ends, so no call names its input: withdraw it by cancelling its
+request (see [Request cancellation](#request-cancellation)).
 
 <CodeGroup>
 ```json Request
@@ -2139,6 +2168,10 @@ There is no REST route for the recall, and no mob-level method that reaches
 a member hosted on another host: call `session/recall_input` on the host that
 serves the session (for a mob member, its member session, with the `input_id`
 the send answered).
+
+A send to an autonomous member answers no `input_id`, on 0.9.14 as on 0.9.15
+(by reading the code, not run): see
+[mob/member_send admission](#mob%2Fmember_send-admission).
 
 <ParamField body="session_id" type="string" required>
   Session ID.
@@ -4096,7 +4129,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 14},
+    "contract_version": {"major": 0, "minor": 9, "patch": 15},
     "providers": [
       {
         "provider": "anthropic",
@@ -4160,7 +4193,7 @@ synthesized with that status.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 14},
+    "contract_version": {"major": 0, "minor": 9, "patch": 15},
     "capabilities": [
       {
         "id": "sessions",
@@ -4794,8 +4827,6 @@ and `data`, never on the message text.
 
 ### Reasoning effort refusal data
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 A `reasoning_effort` level that the model's route does not accept is refused
 with `-32602` (invalid params) and this `error.data`:
 
@@ -4829,10 +4860,16 @@ route accepts, or the source cannot be read now. A conflict also names
 model list is not loaded): the same request can succeed later with no change.
 Meerkat does not retry a refused level for the caller.
 
-The answer is the same wherever the level is refused, with one exception:
+The answer is the same wherever the level is refused, with two exceptions:
 a schedule's `create` spec and its prompt action refuse the key itself, with
 the schedule's invalid-params answer and no typed refusal data (see
-[Scheduling](/guides/scheduling#session-targets)). A session's level is
+[Scheduling](/guides/scheduling#session-targets)). Second, through the MCP
+server a `meerkat_resume` of, or a `meerkat_comms_send` to, the session of a
+mob member that is not live, when that member's own build is refused for the
+level in its profile, answers the generic agent error (`-32013`) with a
+message that contains the refusal's sentence and no `reasoning_effort_refused`
+data; a level the resume itself carries is judged after the wake and is
+answered by the typed refusal as everywhere else. A session's level is
 checked when its agent is built: `session/create` answers the refusal (a
 deferred create reports it at its first `turn/start`), and so does the build
 of a resumed or recovered session, whose stored identity stays as it was. A
@@ -4871,40 +4908,56 @@ planned to change this). What can still be refused at its start: a
 deferred create's
 first turn; a turn on a stored session that is not live whose level cannot
 be judged yet (`supported_levels_unavailable`); a request sent without
-waiting for another one, when it reaches admission in the time between
-that other turn's admission on an idle session and its start (on a stored
-session that is not live: until that turn's rebuild ends); a
+waiting for another one, when it reaches admission in the time between that
+other turn's admission on a session that has no turn running and its start
+(on a stored session that is not live: until that turn's rebuild ends); a
 model-identity change carried by an input that enters through the runtime
 without a turn request (a mob's own send, or a member turn an in-process
-Rust host starts with such an option); and a turn admitted on an idle
-session whose
-model, level or route is changed by something else (a host's
+Rust host starts with such an option); and a turn
+admitted while no turn was running, on a session whose model, level or route
+is changed by something else (a host's
 reconfiguration of a mob member, a config reload, an account's model list)
 between its admission and its start. A run that fails for the refusal
 reports it in `run_failed` as the `error_report` reason
 `{"reason_type": "reasoning_effort_refused", "refusal": {...}}` with class
 `config`. No provider request is made for a refused level. The MCP server
 answers a refused level on `meerkat_run` and `meerkat_resume` as a tool
-error with the same code and data.
+error with the same code and data, except when the session is that of a mob
+member that is not live and that member's own build is refused for the level
+in its profile: that case is answered the generic agent error (`-32013`)
+with no typed data (the second exception
+[above](#reasoning-effort-refusal-data)).
 
 ### Model settings on a busy session
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 On a session that holds a provider-neutral reasoning effort level, anything
-that changes the model identity needs an idle session; plain turns and true
-repeats of the level queue. On a session that holds none, only setting a
-level needs an idle session; everything else queues as on 0.9.14. "Busy" in
-the table is `-32002` (`SESSION_BUSY`) with `error.data`
-`{"kind": "reasoning_effort_change_needs_idle_session"}`,
+that changes the model identity needs a session with no unfinished work; plain
+turns and true repeats of the level queue. On a session that holds none, only
+setting a level needs a session with no unfinished work; everything else
+queues as on 0.9.14. "Busy" in the table is `-32002` (`SESSION_BUSY`) with
+`error.data` `{"kind": "reasoning_effort_change_needs_idle_session"}`,
 answered at once, with nothing stored. It applies to `turn/start` and
-`mob/turn_start` while the session has an unfinished turn or queued input,
-and on a deferred session while its first turn is still building it.
+`mob/turn_start` while the session has an unfinished turn or queued input, and
+on a deferred session while its first turn is still building it.
 
 | The session | A plain turn | Repeats its level with `reasoning_effort` | Sets or changes the level | Clears the level | Changes the model, the provider, the self-hosted server, the provider params or the auth binding |
 |---|---|---|---|---|---|
 | holds a provider-neutral level | queued | queued | busy | busy | busy |
 | holds none | queued | nothing to repeat | busy | queued | queued |
+
+On an autonomous mob member (`runtime_mode` `autonomous_host`, the default)
+the unfinished work can be the member's own: a turn it started for its
+kickoff or on what its peers sent it, or a peer input queued on it. The
+caller cannot know when such a member is idle, and a plain turn first does
+not help against the member's own turns. Two ways on: send the request
+again (in two runs it was taken after 5 s and after 21 s; a member whose
+peers keep sending may stay busy for longer), or set the level in the
+member's profile or at its spawn, which does not depend on the member's
+traffic. `is_active: false` from `session/read` does not promise the
+change is taken (seen in a run). An autonomous member is addressed by
+`turn/start` with the member's session id: `mob/turn_start` is only valid
+for `turn_driven` members and is refused for an autonomous one with
+`-32602` before this rule is reached (seen in a run).
 
 - The model identity is the model, the provider, the self-hosted server,
   the provider params, the auth binding, and the level itself (set, change,
@@ -4926,11 +4979,14 @@ and on a deferred session while its first turn is still building it.
 - The price of holding a level: a client that sets a level once and then
   varies `provider_params` per turn (a temperature, say) is answered busy
   whenever another turn of the session runs or is queued, and so is a
-  `mob/turn_start` with a model override on a busy member built from a
-  profile with a level. Wait for the running turn's answer, then send the
-  request again; do not poll. A session with standing work may never be
-  idle for such a request: stop sending, let its queue drain, then make
-  the change.
+  `mob/turn_start` with a model override on a busy `turn_driven` member
+  built from a profile with a level. Wait for the running turn's answer,
+  then send the request again; do not poll (an autonomous mob member is
+  the exception: see the paragraph under the table). A session with
+  standing work may never be idle for such a request: stop sending, let
+  its queue drain, then make the change. On an autonomous mob member the
+  standing work is not the caller's to stop: send the request again, or
+  set the level in the member's profile or at its spawn.
 - The one `kind` names the level in every busy cell, also when the request
   only changed the model.
 - No flow step, kickoff, peer message, member send, scheduled delivery or
@@ -4938,14 +4994,20 @@ and on a deferred session while its first turn is still building it.
   A model-identity change carried by such an input, or by a member turn
   an in-process Rust host starts with a model, provider, params or
   binding option, is queued and judged only when its turn starts.
-- Unfinished work is not only a running turn: an event queued on an idle
-  session counts. A session that received a `session/external_event`
-  while idle (confirmed by a test of this change), or one configured with
-  silent comms intents that holds an unread silent request (by reading the
-  code, not run), counts that input as unfinished work until its next
-  turn, and a turn from a busy cell is answered busy there. Nothing is
-  running to wait for: send a plain turn first, then the change, or set
-  the level when the session is created. The busy answer's text says so.
+- Unfinished work is not only a running turn: an event queued on a session
+  that has no turn running counts. A session that received a
+  `session/external_event` while no turn was running (confirmed by a test),
+  or one configured with silent comms intents that holds an unread silent
+  request (by reading the code, not run), counts that input as unfinished
+  work until its next turn, and a turn from a busy cell is answered busy
+  there. Nothing is running to wait for. Three ways on: send a plain turn
+  first, then the change (confirmed by a test); or recall the event's input
+  with `session/recall_input` (its `input_id` is in the answer to
+  `session/external_event`), which answers `abandoned` and withdraws the
+  event: the session never receives it; then send the change (seen in a
+  run); or set the level when the session is created. The busy answer's text
+  names the first and the third. On an autonomous mob member the unfinished
+  work can be the member's own: see the paragraph under the table.
 - A later release is planned to queue these turns.
 
 ### comms/send error data

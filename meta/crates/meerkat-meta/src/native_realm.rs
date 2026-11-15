@@ -1561,7 +1561,9 @@ impl MemberBuildGuard {
 /// this same gate to prepare the construction for the host's decision and
 /// finish it after, instead of completing it in one step. A build that runs
 /// on no registration, or on one without a gate, is completed in one step.
-fn built_through_surface_gate(build: &meerkat_core::service::SessionBuildOptions) -> bool {
+pub(crate) fn built_through_surface_gate(
+    build: &meerkat_core::service::SessionBuildOptions,
+) -> bool {
     match &build.runtime_build_mode {
         meerkat_core::RuntimeBuildMode::SessionOwned(bindings) => {
             bindings.tool_surface_gate().is_some()

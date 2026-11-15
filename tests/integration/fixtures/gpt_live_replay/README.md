@@ -23,7 +23,9 @@ One JSON line per adapter crossing:
 | `server_frame`    | A server frame as the provider sent it (lossless `raw`) |
 | `receiver_end`    | The sideband ended (`error` set when it failed)          |
 | `marker`          | A test-driven step: `play_at:<fixture>`, `queue:<a,b>`,  |
-|                   | `disconnect:<graceful\|hard>`, recorded before it runs  |
+|                   | `disconnect:<graceful\|hard>`, `play:<fixture>` (a      |
+|                   | direct play), `typed_turn`, `playback_complete`,         |
+|                   | `truncate`, recorded before it runs                      |
 
 Each line also carries `seq` (global order), `channel_ordinal` (the journal's
 channel) and `elapsed_ms` (informational only; replay never keys on time).
@@ -31,7 +33,22 @@ channel) and `elapsed_ms` (informational only; replay never keys on time).
 Markers make replay causal without a clock: a frame recorded after a client
 event is served only once Meerkat sent that event (matched on event type and
 deterministic `event_id`), and a frame recorded after a marker only once the
-replaying test reached that step.
+replaying test reached that step. A `typed_turn` made between two channels is
+recorded on the closed channel: after its `receiver_end` when the recording
+has one, and as the channel's last line, before any end, when it has none (a
+host close whose transport was already gone, as on the first channel of the
+S104 recording). In both positions no provider frame of that channel follows
+it, and that is how a replay knows it: such a marker holds nothing, the
+channel's end included, and only tells the replay that a typed turn was made
+there. A `typed_turn` followed by provider frames was made while its channel
+was up; the replay driver cannot make one yet and stops with an error on such
+a tape. Three scenarios type while a channel is up (S98, S99 and S105), so
+their captures cannot be replayed until the driver can make such a turn. The
+two committed recordings were made before `play`, `typed_turn`,
+`playback_complete` and `truncate` existed and do not carry them; for that
+reason the driver checks a tape's count of typed turns against the replay
+script only when the tape marks one. Once no committed recording predates
+the marker, that check should be made exact.
 
 A raw recording that lost a line is renamed `provider-stream.jsonl.incomplete`
 at journal finish and is never a fixture.
@@ -39,7 +56,7 @@ at journal finish and is never a fixture.
 ## Re-capture (one command)
 
 ```bash
-OPENAI_API_KEY=... scripts/gpt-live-recapture-replay-fixture S104   # or S106
+OPENAI_API_KEY=... scripts/gpt-live-recapture-replay-fixture S104   # any of S97 to S107
 ```
 
 It builds the live e2e binary, runs the scenario once against gpt-live-1, and
@@ -75,10 +92,10 @@ It re-checks its output and refuses to write if anything forbidden remains.
 `scripts/gpt-live-scrub-provider-stream check DIR` is the committed-fixture
 gate: it exits nonzero on any finding and prints only `file:line: rule`, never
 the matched text. It runs as the `gpt-live-replay-fixture-scrubbed`
-pre-commit hook on every fixture here. In PR CI,
+pre-commit hook on every fixture here. In CI, on the push to `main`,
 `gpt_live_replay::replay_fixtures_are_scrubbed` applies the credential, SDP,
 home-path and voice-audio rules to every embedded fixture, so an unscrubbed
-fixture fails the lane.
+fixture fails the lane; before the merge the pre-commit hook is the check.
 
 Scenario content (instructions, transcripts, injected context) is synthetic
 test fixture text, so it is kept: replay needs it.
@@ -94,9 +111,26 @@ shared exact-receipt live host with a concurrent bootstrap summary.
 cargo test -p meerkat-integration-tests --features gpt-live-replay --test gpt_live_replay
 ```
 
-PR CI runs it as the `gpt-live-replay` integration suite
-(`scripts/ci-cargo-lanes.mjs`) whenever a package on the public Live path,
-this directory or the harness changes.
+CI runs it as the `gpt-live-replay` integration suite
+(`scripts/ci-cargo-lanes.mjs`) on the push to `main`, whenever a package on
+the public Live path, this directory or the harness changed. A pull request
+does not run it: the suite compiles the mob chain, which the planner leaves
+to the push. Run the command above before pushing such a change.
+
+The target also compiles the live gate's own file, so that its judge rows run
+keyless. Its eleven live scenarios are there as ignored rows: without a
+provider key each stops at its first line, with one it runs against the
+provider. No lane runs this target's ignored rows. Never run it with ignored
+rows included (`--run-ignored`, `-- --ignored`, `-- --include-ignored`) on a
+host that holds a provider key.
+
+Some rows replay a constructed tape instead of a whole recording: a tape
+built in memory by a named function (`Fixture::constructed`,
+`Fixture::with_step_marked_after`) from the lines of a committed recording,
+cut at a test step by its name, with test steps and the host's own close
+added and no provider frame invented, reordered or edited. A tape that needs
+an invented, reordered or edited provider frame is not built that way: it is
+a committed, named file here that states the recording it derives from.
 
 - **Provider:** `support/gpt_live_replay.rs`'s `Cassette` serves the fixture
   as a local public Live API, reached through

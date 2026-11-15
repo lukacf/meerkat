@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.9.15] - 2026-11-15
+
 ### Breaking
 
 - Behaviour-only (not measured by the gate): `meerkat-core`, `rkat`: on Unix
@@ -63,6 +65,23 @@ them.
   dropped, and the new `meerkat_schedule::direct_reasoning_effort_refusal`
   tells a door whether a failed read was this refusal. A mob target does not
   refuse the member yet. See Known limitations.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`:
+  `MobHandle::create_store_owned_identities`,
+  `MobHandle::update_store_owned_identity` and `MobHandle::adopt_identity`
+  refuse `MobError::ApprovalBranchReserved` for a record that would take
+  an approval branch's label `decision.approval_branch` or its identity
+  prefix `approval-branch-`. 0.9.11 through 0.9.14 accepted such a record
+  from these three calls (from a create, for an identity it leaves
+  unseated). See Fixed and the Upgrade notes.
+
+- Behaviour-only (not measured by the gate): `@rkat/web`: the provider proxy
+  (`npx @rkat/web proxy`, `startProxy`) listens on `127.0.0.1` by default,
+  and the proxy and `createProxyHandler` refuse a request from an origin
+  that is not allowed: loopback origins only, unless one is named. A proxy
+  reached from another machine, through a container's published port, or
+  from a page on another origin needs `--host` or `--cors-origin`
+  (`allowOrigin`). See Security and the Upgrade notes.
 
 - Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
   `meerkat-machine-kernels`: the schedule lifecycle machine gains a state
@@ -232,6 +251,58 @@ them.
   so a host's rule about a member's durable labels holds for a member the
   host did not build in this process. An implementation adds the two
   parameters; one that decides by identity alone ignores them.
+
+- `meerkat-core`, `meerkat-contracts`: a person's decision can carry a typed
+  answer (see Added: `ask_user`). `DecisionEvidence::Human` in `meerkat-core`
+  and `WireDecisionEvidence::Human` in `meerkat-contracts` gain an optional
+  field `answer`. An answer's JSON is at most 32 KiB
+  (`DECISION_ANSWER_MAX_BYTES`), which holds every set of answers valid for
+  an `ask_user` question set; a decision's reason keeps its 4 KiB limit.
+  Source only: code that builds either variant names the
+  field, and a pattern that lists the variant's fields needs it or `..`.
+  The stored rows and the wire output of a decision without an answer are
+  unchanged. Rollback: a build older than this one cannot read a decision
+  row that carries an answer and reports that one row unreadable; other rows
+  are unaffected.
+
+- Rust API of `meerkat-core` and `meerkat`: a build can carry tools of the
+  embedding host's own (see Added: host tools). `SessionBuildOptions`
+  (`meerkat_core::service`) and `AgentBuildConfig` (`meerkat`) gain the
+  public field `host_tools: Option<Arc<dyn AgentToolDispatcher>>`. Source
+  only: code that builds either struct with a literal that names every field
+  adds `host_tools: None`, which keeps the build it had; code that starts
+  from `SessionBuildOptions::default()`, from `AgentBuildConfig::new` or
+  from a `..` rest is unaffected. Nothing changes on the wire, in a schema
+  or in a stored form: the field is a dispatcher of the host's process, and
+  no session record carries it.
+
+- Rust API of `meerkat-schedule`: `ScheduleTickReport` gains the field
+  `executor_lockout` and is now `#[non_exhaustive]`, so later report fields
+  are additions. Code outside the crate that builds a report with a struct
+  literal starts from `ScheduleTickReport::default()` and assigns the
+  fields it needs; a pattern that names its fields ends with `..`. See
+  Added.
+
+- Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
+  `meerkat-machine-kernels`: the occurrence lifecycle machine gains one
+  input, and its public types follow.
+  `meerkat_schedule::OccurrenceLifecycleInput` gains the variant
+  `ReleaseClaimBeforeDispatch { admission_evidence, at_utc }`
+  (`admission_evidence`: what the occurrence's receipt history proves about
+  earlier attempts; `at_utc`: the store's time of the release). In
+  `meerkat-machine-schema`
+  (`catalog::dsl::occurrence_lifecycle`), `OccurrenceLifecycleInput` and
+  `OccurrenceLifecycleInputVariant` gain `ReleaseClaimBeforeDispatch`. In
+  `meerkat-machine-kernels` (`generated::occurrence_lifecycle`), `Input`,
+  `InputKind` and `OccurrenceLifecycleInputVariant` gain
+  `ReleaseClaimBeforeDispatch`, and `TransitionId` gains
+  `ReleaseClaimBeforeDispatchFromClaimed` and
+  `ReleaseClaimBeforeDispatchAfterSupersession`. In all three crates every
+  new variant is appended last, so no existing variant's implicit
+  discriminant moves. The machine gains no state field, phase,
+  effect, receipt stage or failure class, and no stored occurrence or
+  receipt changes shape: the input name is carried by no stored row.
+  Exhaustive matches must add the new variants. See Fixed.
 
 - `meerkat-core`: `OpenAiProviderTag` gains the public field
   `reasoning_effort_resolved: bool`, a request-local marker for the
@@ -421,7 +492,107 @@ them.
   LayerDecision schema that adaptive mob packs bundle does not carry the
   value, so the schema stays the released one.
 
+- Behaviour-only (not measured by the gate): `meerkat-mob`,
+  `meerkat-machine-schema`: a stop of a mob sent after a force cancel of a
+  member, or after a cancel of all work of a member, while a flow run of
+  the mob is still active is refused until the run is terminal, where
+  0.9.14 admitted it (read from its source, not run on the published
+  binary). The door's answer: `mob/lifecycle` with `action: "stop"` answers
+  JSON-RPC error `-32602` with the message `invalid state transition:
+  Running -> Stopped` and no error data; `MobHandle::stop` answers
+  `MobError::InvalidTransition` from `Running` to `Stopped`. What a host
+  does instead: cancel the run with `mob/flow_cancel`
+  (`MobHandle::cancel_flow`; the run id is the one `mob/flow_run` or
+  `mob/run` returned), wait for `mob/flow_status` to report it terminal,
+  send the stop, and send it again if it is refused once more (the run
+  turns terminal a moment before the mob stops counting it). No public
+  item of the machine schema or the kernels crate changes, and the
+  MobMachine's version is unchanged at 2. See Changed (the surfaces of the
+  cancel), Fixed, the Upgrade notes and Known limitations.
+
+- Behaviour only: a mob id that starts with `council--` belongs to
+  temporary councils (a council's own mob is `council--<council_id>`), and
+  creating an ordinary mob under such an id is now refused, before anything
+  of the mob exists. Every create refuses it: the agent tool `mob_create`,
+  JSON-RPC `mob/create`, public MCP `meerkat_mob_create`, the Web runtime's
+  `mob_create`, a mobpack create (`rkat mob run <pack>`,
+  `rkat mob deploy <pack>` on both of its surfaces,
+  `MobMcpState::mob_create_from_mobpack`) and the Rust entries
+  `MobMcpState::mob_create_definition`,
+  `mob_create_definition_with_member_external_tools`,
+  `mob_create_definition_with_claim_verifier` and
+  `mob_create_definition_with_owner_bridge_session`. The refusal is the one
+  an invalid definition gets: `MobError::DefinitionError` with the
+  diagnostic `reserved_system_identifier` at `id`, which JSON-RPC and public
+  MCP answer as invalid params (`-32602`) and the agent tool as a failed
+  call. No signature changes and no new error kind. Two ways in are
+  unchanged: a host that builds a mob itself with `MobBuilder` and inserts
+  its handle (`MobMcpState::mob_insert_handle`, `try_mob_insert_handle`),
+  and the restore of a stored mob. `rkat mob run <pack>` and
+  `mob_create_from_mobpack` that name a mob already managed under the id
+  with the same verified pack still answer that mob; `rkat mob deploy`
+  builds its mob anew each time and is refused.
+  See Upgrade notes for a mob an earlier release created under such an id.
+
+- `meerkat-mob`: `store::TemporaryCouncilRecord` gains the field
+  `temporary_mob_custody: Option<TemporaryCouncilMobCustody>` (see Fixed),
+  and `temporary_council` gains the enum `TemporaryCouncilMobCustody` and
+  the functions `is_temporary_council_mob_id`,
+  `reserved_temporary_council_mob_id_refusal` (the refusal every create
+  gives) and `TemporaryCouncilId::of_temporary_mob_id`. Code that builds a
+  `TemporaryCouncilRecord` with a struct literal sets the new field: `None`
+  is what a record written by an earlier release reads as, and
+  `Some(TemporaryCouncilMobCustody::NotCreated)` is what a new council
+  starts with.
+
+- `meerkat-mob`: `meerkat_mob::store::TemporaryCouncilRecord` gains the
+  public field `convener: Option<TemporaryCouncilConvener>` (constructible
+  struct adds field; struct literals must set it, and `None` records no
+  convener). See Added.
+
+- `meerkat-mob-mcp`: `MobCreateRequest`, what a host's `MobBeforeCreate`
+  hook (`MobMcpState::set_before_create`) is told, gains the public field
+  `council: Option<MobCreateCouncilOrigin>` (see Added). The struct is
+  non-exhaustive and only the create path builds it, so no embedder code
+  stops compiling, and a hook that does not read the field decides as
+  before. A hook that told a council's mob by the form of its id, or by an
+  owner session that matches no member, can read `council` instead.
+
 ### Added
+
+- `meerkat-schedule`, `meerkat`: a schedule driver that is locked out
+  behind its own executor lease says so. When a reply on the executor
+  lease is lost (the store committed an acquisition or a renewal and the
+  driver saw an error), a tick is dropped while its acquisition or
+  renewal is in flight, or a release fails after the driver gave its
+  witness up, the store holds the firing lease under that driver's own
+  executor owner id and the driver has nothing to renew or release it
+  with. Until that lease expired, every tick reported a healthy standby,
+  and occurrences due in the gap misfired under the default policy with
+  nothing logged as a fault. Such a tick now carries
+  `ScheduleTickReport::executor_lockout`, a
+  `ScheduleExecutorLockout` with the driver's own executor owner id as
+  the store names it, the lease's expiry, and its acquisition time when
+  the store's lease view (`ScheduleStore::observe_executor_lease`) shows
+  it. The schedule host logs it as the incident class
+  `executor_lease_self_lockout`: an error when it starts, a rate-limited
+  warning while it lasts, and the recovery. This is a report only: the
+  tick still succeeds with `executor_authorized` false, the lease is not
+  taken back and ends by expiry as before, and a standby's tick pacing is
+  unchanged. A driver behind another executor's lease, a restarted host
+  behind the lease of its previous incarnation included, stays a plain
+  standby, and the report names no other holder.
+
+- `meerkat-mob`: a member binding answers where its chain of same-session
+  successors began. `MemberBinding::same_session_lineage_start(LineageSteps)`
+  is the first generation of the unbroken chain of same-session successor
+  steps that seated the binding's incarnation on its session (its own
+  generation when no such step seated it), read from the journal rows of
+  those steps alone; `LineageSteps::same_session_successors()` follows the
+  steps that kept the member's role, and `.with_role_migrations(true)` the
+  ones that seated the successor under another role too. It answers `None`
+  once the mob's journal holds a mob reset. Like the binding it is a history
+  fact and authorizes nothing by itself.
 
 - `meerkat-runtime`, `meerkat-contracts`, `meerkat-rpc`,
   `meerkat-web-runtime` and the Python, TypeScript and Web SDKs: recall of
@@ -475,11 +646,23 @@ them.
     a malformed input id are `-32602`; an unknown session is `-32001`; a
     session with no live runtime whose input has not ended is `-32003`. No
     error code is added and no existing vocabulary gains a token.
+  - Rust clients of the wire type: `meerkat_contracts::WireQueuedInputRecall`
+    is non-exhaustive, as the runtime's `QueuedInputRecall` is, because the
+    list of outcomes can grow: a match on it outside `meerkat-contracts`
+    needs a wildcard arm. The attribute keeps that source compiling when a
+    later release adds an outcome; it does not make it decode. The enum has
+    no catch-all variant, so a Rust client built on this release that
+    deserializes the wire type gets a decode error (serde's unknown variant)
+    for an outcome a later release adds, and `RecallInputResult`, which
+    carries it, fails to decode with it.
   - Browser runtime: the export `recall_session_input(handle, input_id)`
     resolves to the `WireQueuedInputRecall` JSON.
   - SDKs: Python `Session.recall_input(input_id=...)` or
     `(idempotency_key=...)`, TypeScript `session.recallInput({ inputId })` or
-    `({ idempotencyKey })`, Web `session.recallInput(inputId)`. Each
+    `({ idempotencyKey })`, Web `session.recallInput(inputId)`. The Python
+    and TypeScript selectors name exactly one of the two: both, or neither,
+    is refused before anything is sent (Python `ValueError`, TypeScript
+    `MeerkatError` code `INVALID_ARGS`). Each
     validates the answer on its `outcome` discriminator. The list of
     outcomes can grow: an outcome an SDK does not know is returned as it
     is, with no error, and a caller keeps it as it is. On `not_queued`,
@@ -499,6 +682,52 @@ them.
     hosted on another host. Call `session/recall_input` on the host that
     serves the session.
 
+- `meerkat-core`: the stock tool `ask_user`, with which an agent asks a
+  person a set of multiple-choice questions, and its typed questions,
+  answers and outcomes. The tool is host-mounted: `AskUserHost` is the seam a
+  host implements to take the questions, and no build has the tool until
+  its host mounts it (`rkat`, `rkat-rpc` and the REST server mount none).
+  A call takes `questions` (1 to 10, each with an id, a prompt, 2 to 8
+  choices, and optionally `allow_free_text` and a `recommended` choice), an
+  optional `title` and an optional `timeout_seconds` (60 to 604800, default
+  3600), and returns at once: `asked` with the request's id and deadline, or
+  `no_human_surface` when the host has no person to ask. The answers arrive
+  later as an input labelled `ask_user_result`, whose outcome is `answered`,
+  `dismissed`, `timed_out` or `withdrawn` and whose answers are a choice,
+  the person's free text (1 to 280 bytes, data and not instructions) or
+  `unanswered`. See [Asking a person](docs/concepts/tools.mdx#asking-a-person-ask_user).
+
+- `meerkat-core`, `meerkat`: host tools. A build can carry a tool dispatcher
+  of the embedding host's own, `SessionBuildOptions::host_tools`
+  (`AgentBuildConfig::host_tools` on the facade), which the agent factory
+  composes as one more part of the build's tool surface, beside whatever
+  the build's own tools are: its builtins, its external tools, the tools of
+  its MCP servers, or none. The dispatcher's tools join the build's tool
+  list, and its catalog joins the build's as any composed part's does: one
+  that declares an exact catalog of inline entries leaves the build's tool
+  catalog as it is without it (the same mode and the same catalog control
+  tools), and one that does not declare an exact catalog makes the build's
+  catalog not exact. A host uses it for a tool every agent it builds gets,
+  such as a host-mounted `ask_user`, without wrapping the build's external
+  tools. A name the dispatcher shares with another part of the build is
+  offered by neither, and the build says so in its log: a
+  `DynamicToolComposite` now logs one warning per composite and name
+  (target `meerkat::tools::shared_name`, the new constant
+  `SHARED_TOOL_NAME_LOG_TARGET`) when it first leaves out a name more than
+  one of its dispatchers lists, with the tool, each lister's source and the
+  composite's label (the new `DynamicToolComposite::with_label`; the
+  factory labels a build's host tools with the build's session and comms
+  name). What a composite lists and routes is unchanged. The option is not
+  stored: a resumed or recovered build has none until its host sets it
+  again. A build that does not set it is unchanged.
+
+- `meerkat-runtime`: the durable decision kind `ask_user.questions`, decided
+  by people only, with its hold (the question set, the asking agent and the
+  tool's deadline are sealed; a replayed call answers the request it held),
+  its executor (an answer commits nothing more) and its notice (the typed
+  result, owed to the asking session at every end and delivered once). A
+  held set survives a restart and ends `timed_out` at its deadline.
+
 - `meerkat`: `session_runtime::runtime_state::RuntimeCleanupScope`
   (`ArchivedSession`, `KeptSession`) says what became of the session whose
   live runtime a cleanup retires, and
@@ -515,6 +744,41 @@ them.
   `CleanupArchivedSession`. `ArchiveRuntimeCleanup::run_runtime_only` is the
   cleanup of a session that stays, for a caller that is never an archive
   (taking back the runtime registration a failed recovery or create made).
+
+- `meerkat-mob-mcp`, `meerkat-mob`: a temporary council records who convened
+  it, and the host's create hook (`MobMcpState::set_before_create`) is told.
+  `MobCreateRequest` gains `council: Option<MobCreateCouncilOrigin>`. It is
+  `Some` only for the mob a temporary council creates for itself, so a hook
+  tells a council's mob from every other create without reading the form of
+  its id; an agent's `mob_create`, the implicit delegation mob and a host's
+  definition or mobpack create report `None`. `MobCreateCouncilOrigin`
+  carries the `council_id` and `convener_session_id`: the session whose
+  `council` tool call convened the council (the session that tool's surface
+  is bound to), on the detached route and on the blocking one. A council a
+  host runs directly (`TemporaryCouncilCoordinator::run`, `run_detached`) has
+  `convener_session_id: None`. The mob's `owner_bridge_session_id` is
+  unchanged: for a council it is still a session of the council's own.
+  The council keeps the fact in its durable record,
+  `meerkat_mob::store::TemporaryCouncilRecord::convener`
+  (`meerkat_mob::temporary_council::TemporaryCouncilConvener { session_id }`,
+  built with `TemporaryCouncilConvener::new`),
+  written once with the record's first write, outside the request
+  fingerprint and the lifecycle machine. A replay, a second caller that
+  presents the same council id and request, the seal and a recovery after a
+  restart leave it as written.
+  Nothing a caller supplies sets either: the `council` tool has no convener
+  argument and ignores one, `TemporaryCouncilRequest` has no such field,
+  neither `MobCreateRequest` nor `MobCreateCouncilOrigin` can be
+  deserialized, JSON-RPC `mob/create` and the public MCP tool
+  `meerkat_mob_create` refuse a `council` or `convener` key as invalid
+  parameters (as they refuse any unknown key), and an agent's `mob_create`
+  ignores such a key beside the definition and refuses it inside.
+  The stored form is one optional key, `convener`, in the council record's
+  JSON: no migration, and no schema, SDK or wire change. Records written
+  before this release decode with no convener. An earlier release reads a
+  record that carries the key and ignores it; if it writes that record back
+  (a recovery seal or a cleanup) the key is dropped and nothing else
+  changes, so the council then counts as one with no convener.
 
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
   requests themselves (see Security).
@@ -833,6 +1097,106 @@ them.
   registration whose inbox already left the registry through its own
   runtime (see Changed). Nothing is registered. `RegistrationRejection` is
   non-exhaustive, so code that matches it compiles unchanged.
+
+- `meerkat-mob-mcp`: `MobMcpState::mob_stored_definition(mob_id)`,
+  `MobMcpState::mob_update_stored_definition(mob_id, expected_revision,
+  definition)` and `MobStoredDefinitionError`. A host that manages its mobs
+  through the state, and so holds no `MobStorage` of theirs, reads and
+  replaces the stored definition of a cold mob before the first mob verb
+  restores it. The read answers the stored definition with its epoch, the
+  revision the update expects, and does not write the store file (it uses
+  `MobStorage::read_definition_snapshot`, below). The update opens the one
+  store the state keeps for that id under its persistent root and forwards
+  to `MobStorage::update_definition` unchanged, so the answers are the
+  storage's own (the committed `MobDefinitionRevision`, the same revision
+  for an exact retry, `SpecRevisionConflict` for a wrong expected revision);
+  before it, it runs a create's check of the tool bundles the definition's
+  profiles opt into (`ToolBundleNotOffered`). Neither call starts a restore
+  or resumes a mob; the first mob verb then resumes the mob from the new
+  definition, and waits for an update in flight. A shared state
+  (`MobMcpState::into_shared`) runs the update as its own task, as it runs a
+  create, so an update whose caller went away is not cancelled: it runs to
+  the storage's answer, and a refusal of it is logged at `warn`. Neither is
+  a live operation: a mob the state manages is refused with
+  `MobStoredDefinitionError::Managed` and nothing is written, a quarantined
+  store answers `MobQuarantined`, and an id the state has no store for
+  answers `MobNotFound`. An update stores the definition as given: what a
+  create adds to a definition (realm skill sources, a child mob's host tool
+  bundles and MCP servers) is not added, and a restore does not add it
+  either. It is checked against the roster in one case only: the storage
+  refuses an update that drops a profile a created agent's row names
+  (`DefinitionError`, `profile_held_by_identity`; see Changed). A member
+  seated without such a row is not checked: a definition that leaves
+  out its profile is stored, and that member's restore
+  then fails (`profile not found`). Rust API only; see "Durable definition
+  updates" in the mob architecture reference.
+
+- `meerkat-mob`: `MobStorage::read_definition_snapshot(path)` and
+  `MobDefinitionSnapshotReadError`. It reads the current definition of a mob
+  store file, with its epoch and event cursor (the `MobDefinitionSnapshot`
+  an opened storage mints), with no running mob and without opening the
+  store for writing: a missing file is not created (`StoreMissing`), a store
+  an older release wrote is read as it is and not migrated, a file that is
+  not a mob store this build reads is refused (`ForeignSchema`), and the
+  process takes no fence and registers no observer for the path. The store
+  file is not written; reading a store in WAL mode, which every persistent
+  mob store is, leaves SQLite's `-wal` and `-shm` files beside it when its
+  writer had closed cleanly, so the read needs a directory SQLite can
+  create them in.
+
+- `meerkat-mob`: a mob handle says which lifecycle intent the mob still
+  owes. `MobLifecycleObservation::owed_intent` (from
+  `MobHandle::lifecycle_observation` and `MobReadHandle::lifecycle_observation`)
+  is the Stop, Complete, Reset, retirement of every member or Destroy that
+  was durably begun and has not landed, read from the mob machine's
+  published state without asking the actor; it is `None` when that state
+  owes nothing, so a Stopped mob owes no Stop.
+  `MobHandle::wait_until_no_lifecycle_intent_is_owed` waits until nothing is
+  owed and returns the phase of that same state. It has no bound of its own
+  (the caller owns the bound). When the actor ends first, a waiter gets the
+  fail-stop cause or the closed-actor error `status` reports; an actor that
+  ended in a terminal phase with the intent still owed answers
+  `ActorCommandChannelClosed` although `status` answers the phase; and a
+  graceful Shutdown over an owed Stop answers `Stopped`, as `status` does
+  (the Shutdown leaves that ended actor Stopped; the Stop has not landed
+  durably, and the next resume reports and drives it). Inside a
+  pre-activation hook of a resume the read handle does not yet report an
+  intent the log leaves open: read it from the handle the resume returns.
+  A resume hands a mob back after a short bounded wait for the first
+  attempt at a recovered Stop or Complete, so the phase read right after it
+  can still be `Running` with the Stop owed: a host that acts on the phase
+  (lifting a Stopped mob, for example) waits with this method instead of
+  reading the mob's event history. The resume's own recovery decides what
+  it drives by the same rule. `MobLifecycleObservation` is non-exhaustive,
+  so code that reads it compiles unchanged.
+
+- `meerkat-mob`: `MobHandle::has_member_tool_audience()` answers whether
+  the mob's host installed a member tool audience
+  (`MobBuilder::with_member_tool_audience`). The agent mob tools read it to
+  decide how a mob's refusal is answered (see Security).
+
+- `meerkat-core`, `meerkat-mob`: the session-service seam of a same-identity
+  member rewind (a mob member continuing on a durable fork of its own
+  session). No surface calls it yet. `meerkat_core::service` gains
+  `MemberRewindForkRequest`, `MemberRewindSource`, `MemberRewindForkEvidence`
+  (with `verify_child`), `MemberRewindChildObservation`,
+  `MemberRewindEvidenceField`, `MemberRewindChildConflict` and
+  `MemberRewindLineageRead`. `MobSessionService` gains four provided methods,
+  `preflight_member_rewind_fork`, `fork_member_rewind_child`,
+  `observe_member_rewind_child` and `read_member_rewind_lineage_session`;
+  their defaults refuse as a service without durable transcript fork
+  authority does, so an implementation that wraps a durable service must
+  forward them before a member rewind can run through it. The two fork
+  methods take a `meerkat_mob::MemberRewindFork` and the lineage read takes
+  a `meerkat_mob::MemberRewindLineageWitness`; only the mob runtime can
+  build either, so a caller outside `meerkat-mob` cannot ask a
+  `MobSessionService` for a member rewind fork, and an implementation reads
+  what is asked from `MemberRewindFork::request`. `SessionError` gains the
+  typed cause `member_rewind_source_audit_incomplete` (with
+  `MEMBER_REWIND_SOURCE_AUDIT_INCOMPLETE_KIND` and
+  `is_member_rewind_source_audit_incomplete`): an archived source whose
+  transcript rewrites are not all audited is refused, and its audit log is
+  not repaired.
 
 - `meerkat-core`, `meerkat-llm-core`: the vocabulary of a provider-neutral
   `reasoning_effort` option. The entries below are built from these types:
@@ -1733,6 +2097,15 @@ them.
   inbox just before the member left cannot put a route to it back. An
   inbox that is only closed for peer ingress has not left and still
   registers.
+- `meerkat-mob`: a mob's start decodes its event log once. A resume
+  (`MobBuilder::resume`) used to decode the whole log four times (its first
+  read, its remote-turn custody reload, the actor's index seed and the
+  first member binding history read), the lift of a stopped mob
+  (`MobHandle::resume`) once more and once per member it rebuilt, and every
+  Stop once. After the resume's first read, each of those now reads only
+  the events appended since, so the CPU a start spends on the log no longer
+  multiplies with the log's length or with the members it rebuilds. What
+  each read sees is unchanged.
 
 - `meerkat-core`: a turn's reasoning-effort preference is judged by the
   route of the client that serves the request where that route states
@@ -1772,6 +2145,18 @@ them.
   writes the summary. A summary that a bound controller writes does not
   carry the level.
 
+- `meerkat-mob`, `meerkat-machine-schema`: the stop of a mob stays refused
+  while a flow run is active on another member, also after one member's
+  work was cancelled; Breaking has the stop's answer and what a host does
+  instead. It holds on every surface of the cancel. A force cancel of a
+  member: JSON-RPC `mob/force_cancel` and `mob/hard_cancel_member`, REST
+  `POST /mob/{id}/members/{agent_identity}/cancel`, `rkat mob force-cancel`,
+  the MCP tools `mob_force_cancel` and `meerkat_mob_force_cancel`, the
+  `force_cancel_member` member tool, Meta's `meta/force_cancel_member`,
+  `MobHandle::force_cancel_member` and `MobHandle::hard_cancel_member`. A
+  cancel of all work of one member: `mob/cancel_all_work` and
+  `MobHandle::cancel_all_work`. No wire type and no stored form changes.
+
 ### Deprecated
 
 - `meerkat`:
@@ -1779,6 +2164,16 @@ them.
   It is the cleanup of an archived session and destroys the mobs the session
   owns; a completion cleanup says what became of the session with
   `run_after_runtime_termination_scoped`.
+
+- Rust (`meerkat-core`), announced for a later release: two public enum
+  variants that are unit variants in this release gain fields,
+  `AccountLevelStatement::ListUnavailable` and
+  `ReasoningLevelFacts::Unavailable`, and
+  `ReasoningEffortRefusalReason::is_transient()` moves to the refusal, as
+  `ReasoningEffortRefusal::is_transient()`. Both are breaking changes for
+  Rust embedders: a match on either variant will need `{ .. }`, and
+  `is_transient()` will be called on the refusal, not on its reason. Neither
+  is in this release.
 
 ### Fixed
 
@@ -1816,6 +2211,116 @@ them.
   a provider's own effort parameter (`provider_tag`) included. Measured by
   tests of this change, with the level named in `reasoning_effort` and
   inside `provider_params`.
+
+- `meerkat-schedule`: one transient fault between a claim and its dispatch
+  start no longer costs the occurrence under the default settings. When the
+  schedule driver had claimed an occurrence and then could not start its
+  dispatch (the schedule could not be read, the target probe failed, or the
+  write that records the dispatch start failed), it returned the error and
+  left the occurrence claimed for the rest of its lease. With the default
+  60 second claim lease and the 30 second `skip` grace that lapse is always
+  past the misfire deadline, so the occurrence ended `misfired`. The driver
+  now gives the claim back at once, through the occurrence machine's new
+  input `ReleaseClaimBeforeDispatch` (legal only while nothing is
+  dispatched, and only for an occurrence with no recorded dispatch): the
+  occurrence is pending again, and the next tick claims and delivers it
+  while its misfire window is open. The release itself counts no attempt;
+  the claim that follows does, as every claim does. The release is
+  recorded as a `lease_expired` receipt with
+  failure class `lease_lost` and the detail `claim released because
+  dispatch could not start`. What does not change: the misfire window is
+  not widened (a claim given back past its deadline ends `misfired`, and
+  is not reclaimed), the tick that met the fault still fails and the host
+  still logs it, and a store outage longer than the window still ends the
+  occurrence `misfired`. The driver tries the release once and remembers
+  nothing: it reads the occurrence's receipt history and then writes the
+  release, and if that read or that write fails too, the claim lapses with
+  its lease as before, so one transient fault is covered, not two in a row. An
+  occurrence that fails before dispatch on every tick is given back on
+  every tick while its window is open and gains one `lease_expired`
+  receipt per failed tick, at the pace of the host's failure backoff.
+  Each of those claims counts an attempt, and the five attempts an
+  occurrence with a recorded dispatch has past its misfire deadline count
+  them too: an occurrence given back four times inside its window and
+  then admitted has no reclaim left if that run loses its executor past
+  the deadline. A reclaim of an occurrence whose earlier attempt recorded
+  its dispatch is not given back: the machine refuses the release, the
+  claim lapses with its lease as before, and those attempts are still
+  spent one per claim lease.
+
+- `meerkat-mob-mcp`: a member that created mobs with the agent mob tools
+  keeps managing them after its member is replaced by a same-session
+  successor, once or several times in a row
+  (`MobHandle::respawn_member`, a declared role migration, a runtime-mode
+  restamp, `MobHandle::respawn` of an identity entry's member). The
+  creator's manage grant was re-derived only for the member generation the
+  mob's creation record names, so a successor's session no longer listed
+  the mobs it had created and its calls on them (`mob_list_members`,
+  `mob_check_member`, `mob_retire_member`, `mob_destroy`) were refused as
+  `access_denied`, in the same process and after a restart, while those mobs
+  went on running. A same-session successor now keeps that management,
+  through any number of such steps, in the same process and after a restart;
+  the steps below say which changes of a member keep it and which end it.
+  A mob created on an earlier release is covered with no call when its
+  creator was replaced there by these same steps. On 0.9.9 through 0.9.14
+  four steps write the two journal rows this release follows:
+  `MobHandle::respawn_member` (run), a declared role migration (run), a
+  runtime-mode restamp (run), and `MobHandle::respawn` of an identity
+  entry's member (run; that `mob/respawn` makes this call is read from the
+  source). Each run is of 0.9.14: a build of the 0.9.14 tag made the step,
+  and this release's reader answered the successor's chain from the
+  generation that created the mob out of the journal that build wrote. No
+  host was upgraded in those runs, and 0.9.9 through 0.9.13 are read from
+  the source. A respawn made through a Meerkat Meta gateway on 0.9.9
+  through 0.9.14 (`meta/respawn`, the Console's respawn), and a completed
+  `meta/compact_member` there, are not among these steps and are not
+  covered: see "Not brought back" below. The session's create
+  capability and its current role's tools decide each call as before.
+  - Keeps the creator's management: `MobHandle::respawn_member`, once or
+    many times; a declared role migration and a runtime-mode restamp of an
+    identity entry's member, a store-owned identity's profile move and
+    runtime-mode change among them; `MobHandle::respawn` of an identity
+    entry's member; and every other request that seats the member's
+    successor on its own session. A wake of the member, a restart of the
+    host and an adoption of the member change nothing.
+  - Still ends it, as before: a reset onto a fresh session
+    (`rotate_member`) and a worker's respawn, which takes a fresh session;
+    a member that was retired and later seated again on its kept session,
+    whatever seated it (a spawn or `ensure_member` that resumes the session,
+    an unlisted identity listed again, an archived identity unarchived); a
+    session binding recovery that moves the member to another session;
+    every later generation of a member of a mob that was ever reset.
+  - Not covered: a member whose own mob is stored in custom stores without
+    the built-in identity and member store. Its member history cannot be
+    read, so its successor keeps nothing, as before.
+  - Not brought back: a creator that was retired and seated again on its
+    session before the upgrade stays without its management of the mobs it
+    created; upgrading does not give back a management lost that way. A
+    respawn through a Meerkat Meta gateway on 0.9.9 through 0.9.14 is that
+    case: Meta respawned an agent there by retiring its member and seating
+    it again on its session (`meta/respawn`, the Console's respawn), not
+    by the same-session step (read from the source at each tag). After the
+    upgrade such an agent still lists none of the mobs it created before
+    that respawn, and its calls on them are refused (run for
+    `meta/respawn`: the published Meta 0.9.14, then this release on the
+    same state; the Console's respawn makes the same call, read from the
+    source). A further respawn of that agent on this release does not give
+    them back either (run); the mobs it created after that respawn are
+    managed and stay so (read from the source). A `meta/compact_member` on
+    0.9.9 through 0.9.14 is the same case, a completed call or one that
+    failed or timed out after its first rebuild: each rebuild retired the
+    member and seated it again as those releases' respawn did (read from
+    the source at each tag). After a completed call the agent listed none
+    of its mobs there (a run on the published Meta 0.9.14), and the
+    upgrade does not give them back after it (one run); for a call that
+    failed or timed out after its first rebuild that is read from the
+    source, not run. Those
+    mobs end as before, with the session that owns them (see the Upgrade
+    notes, and Meerkat Meta's changelog, "Not brought back", for a Meta
+    host).
+  The 0.9.4 Known limitation about a member "reset to its next generation,
+  over the same session" described this case; it no longer applies to a
+  same-session successor.
 
 - `meerkat-runtime`, `meerkat-rpc`, `meerkat-rest`, `meerkat-mcp-server`:
   ending one queued input of a session no longer ends the session's other
@@ -1863,14 +2368,19 @@ them.
   the retained sealed-intent reconciliation slice" on every reconcile pass,
   a change committed for it stayed at its desired revision with the earlier
   revision active, and no call cleared it: the pass held the agent to every
-  edge recorded as incident to it, the other agent's edge included. The pass
-  now holds each agent to the edges its own declaration owns, so such an
-  agent converges again and its owner's changes become active. The edge
-  stays in the store, and the agent whose declaration owns it is still held
-  to it (see Known limitations). An agent under the default custody was not
-  affected by this. Nothing stored and no request or answer changes.
-  Affected: 0.8.26 through 0.9.14 (run on Core and Meta 0.9.14; earlier
-  versions read from the source).
+  edge recorded as incident to it, the other agent's edge included. On
+  0.9.14 such an agent also refused delivered messages (`mob/member_send`)
+  (from runs on the published 0.9.14). A pair that was wired before an
+  adoption that owns its edge could no longer message each other: that
+  defect has its own entry in this section (the one that begins "after an
+  agent's identity declaration was adopted"), with the remedies for a
+  released version. The pass now holds each agent to the edges its own
+  declaration owns, so such an agent converges again and its owner's changes
+  become active. The edge stays in the store, and the agent whose
+  declaration owns it is still held to it (see Known limitations). An agent
+  under the default custody was not affected by this. Nothing stored and no
+  request or answer changes. Affected: 0.8.26 through 0.9.14 (run on Core
+  and Meta 0.9.14; earlier versions read from the source).
 
 - `meerkat-rpc`, `meerkat-rest`, `meerkat`: a session that was cleaned up
   without being archived no longer loses the agents it created to the
@@ -1939,6 +2449,73 @@ them.
   only from 0.9.5 (the version ranges and this are read from the released
   sources). Mobs that were destroyed this way are not restored by upgrading
   (read from the source).
+
+- `meerkat-mob`: after an agent's identity declaration was adopted
+  (`mob/adopt_member_identity_declaration`) or changed
+  (`mob/apply_member_tool_declaration`), or after a blocked one of them was
+  resolved (`mob/resolve_identity_convergence_block`), the agent and the
+  agents it was wired to could no longer message each other: a send answered
+  that the peer was not found or not trusted. How to see it: the two agents
+  no longer list each other among their peers (the `peers` list of an agent
+  with no other edge is empty), although the member list still shows the
+  pair wired (`wired_to`); the member list is not evidence of delivery.
+  Under the default wiring custody the agent's status read `converged`;
+  under identity-owned custody the agent whose declaration owns the edge
+  read `repair_blocked`, and every other agent read `converged`. A later
+  tool declaration did not restore the pair. The reconcile pass rebuilds
+  such an agent on its session, and the rebuilt agent came back without the
+  trust of its wiring edges while the agents it was wired to had dropped
+  theirs. The rebuild now restores, on both ends, the trust of every edge
+  the mob holds for the agent, as a respawn does and as wiring the same pair
+  again does, so the agents keep their wiring. It adds no edge: a pair that
+  was unwired stays unwired. An edge whose restore fails does not fail the
+  rebuild; the mob retries it. A wiring call for the agent that is still in
+  flight settles before the pass rebuilds the agent. An agent adopted under
+  identity-owned custody owning an edge that a wiring call made first now
+  converges. An agent changed by a rotation or a respawn was not affected.
+  On a released version the remedy depends on the host (from runs on the
+  published 0.9.14 binaries). On a Core host, wire the pair again:
+  `mob/wire` for each wired edge of the agent, with params `{"mob_id": ...,
+  "member": ..., "peer": {"local": ...}}` naming the same two agents; it
+  adds no second edge (run on Core 0.9.14 after an adoption and after a
+  declaration change). A restart of a Core host restores the pair too (run
+  after both). On a Meta gateway no call wires a member pair (`mob/wire` is
+  not served there); the remedy is a restart (run on Meta 0.9.14 after an
+  adoption and after a declaration change, two independent runs for each).
+  On a released version the remedy is needed after every adoption and every
+  declaration change, not once: each later declaration change silences the
+  pair again until the next restart (Meta) or the next `mob/wire` of the
+  edge (Core); one such change after a restored adoption was tried, in one
+  run on Meta 0.9.14. Meta's `reconcile_edges()` does not repair the pair
+  (two independent runs after an adoption; not run after a declaration
+  change) and is unchanged: it reads the edges the mob holds, never the
+  agents' trust of each other, so it finds nothing to wire; seating both
+  agents again does not repair it either (run on Meta 0.9.14). Nothing
+  stored and no request or answer changes. Affected: 0.8.26 through 0.9.14
+  (run on Core and Meta 0.9.14; earlier versions read from the source).
+
+- `meerkat-mob`: the record of a store-owned identity takes no approval
+  branch's reservation. A create
+  (`MobHandle::create_store_owned_identities`) of an identity that takes
+  the label `decision.approval_branch` or the identity prefix
+  `approval-branch-`, whether the create seats the identity or leaves it
+  unseated; an update (`MobHandle::update_store_owned_identity`) whose
+  labels add the label to a record that does not carry it; and an adoption
+  (`MobHandle::adopt_identity`) of a spec that takes either, or of an open
+  approval branch, are each refused `MobError::ApprovalBranchReserved`
+  (`approval_branch_reserved`), with nothing written. Every seat refuses
+  the label and the prefix, so no seat could follow such a record. A
+  record that carries the label already is untouched and stays changeable:
+  an update that keeps the label is admitted, and an update that removes
+  it commits, after which the agent can be seated again (for a record
+  pending its preparation, the host's settle then succeeds). A pending record that
+  holds a reserved name has its removal as its only way out. To find the
+  records that carry the label in a mob's store: `sqlite3 -readonly
+  <store> "SELECT mob_id, agent_identity FROM mob_identity_intents WHERE
+  json_extract(CAST(record_json AS TEXT),
+  '$.spec.labels.\"decision.approval_branch\"') IS NOT NULL;"`. Affected
+  releases, for each of the three calls: 0.9.11 through 0.9.14 (by reading
+  their code: the adoption is the same in all four).
 
 - `meerkat-core`: a turn that fails because a provider failure outlasted the
   retries now says what failed. Its typed turn error (`error.data.error` of
@@ -2092,6 +2669,17 @@ them.
   a seat a start owes, or a respawn of its member
   (`MobHandle::respawn_member`), which keeps the conversation.
 
+- Examples: `examples/005-streaming-events-rs` now gives one event channel
+  to the model adapter and to the run, and prints streamed text (a live run
+  printed none); `examples/009-budget-and-retry-rs` reads
+  `terminal_cause_kind` before the text and uses a token budget above its
+  own first call (its first part printed an empty answer).
+- Examples: the `web-runtime`, `shell` and `web` targets of
+  `make -C examples`, and so `make -C examples verify`, which runs them, no
+  longer fail in the browser-runtime build step when `CARGO_TARGET_DIR` is
+  not set and no runtime has been built yet. Seen on 0.9.14; earlier
+  releases were not checked.
+
 - `meerkat`, `meerkat-mob` (0.5.1 through 0.9.14): a session keeps the
   instruction sections it was built with. A session's durable build state
   records the `additional_instructions` of its build, and every build wrote
@@ -2202,6 +2790,28 @@ them.
     to Dormant keeps its pending notices: they are still true of it, and
     their send wakes nothing.
 
+- `meerkat-mob`: a mob lift that follows a lift whose wait for a member's
+  retirement ran out no longer answers with that earlier lift's stale "still
+  in progress" result once the retirement has ended. A lift
+  (`MobHandle::resume`, the resume of `mob/lifecycle`) that has to retire a
+  member's old live actor first (the member's auth binding changed while the
+  mob was stopped, or the mob was reopened over an attachment an earlier
+  handle left) and waits for that longer than its 30 second budget answers a
+  retryable refusal (`LifecycleOperationProgressStalled`) while its attempt
+  goes on, and the attempt ends a moment later with
+  `LifecycleOperationPending` (`explicit_resume_attachment_retirement:<session>`).
+  The handle kept that late answer for the next caller, with no age limit:
+  the next lift, even long after the retirement had ended, was answered "mob
+  lifecycle operation is still in progress" at once and did nothing, and only
+  the lift after that one ran. A lift that finds a kept answer which is
+  itself a retryable refusal (its structured data says `retryable: true`) now
+  drops it and runs an attempt of its own: it lifts the mob once the
+  retirement has ended, and while the retirement is still running it waits
+  for it within its own budget and answers its own refusal. A kept success
+  and a kept error that is not retryable are still returned to the lift that
+  finds them, and a lift that joins an attempt still in flight still gets
+  that attempt's answer. Affects 0.8.22 through 0.9.14.
+
 - `meerkat-mob`: a member that was being woken could not be wired, messaged
   or notified for a short span of its wake (0.9.7 through 0.9.14: since
   members are woken on demand). A wake creates the member's session, and
@@ -2304,6 +2914,24 @@ them.
   [0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
   says what to do on an affected release.
 
+- `meerkat-mob`: `MobHandle::retire` (and each step of
+  `MobHandle::retire_at_scope`) no longer answers
+  `SharedRetirementFailure(StaleMemberOperatorAuthority)` ("retire command no
+  longer matches the exact roster transport incarnation") when it meets a
+  retirement of the same member that the mob already runs: its own re-drive
+  of a started retirement once a store serves again or after a resume, or a
+  batch retirement. The member was retired all the same and a second retire
+  answered `Ok(())`; only that first answer was wrong (through 0.9.14).
+  Such a retire now joins the retirement: it waits within its own budget and
+  answers `Ok(())` once the member is retired, and the retirement's own
+  outcome when that retirement does not complete. When its budget ends first
+  it answers `MemberRetirementInProgress` if the retirement it met is
+  durably started, and `MemberRetirementAdmissionPending` if it is not yet
+  (a member of a batch retirement before its start, for one). A request that
+  names an incarnation the mob no longer holds, a retire, or a descendant
+  step of a scoped retire, held behind a respawn or a rotation of the member
+  included, is still refused with `StaleMemberOperatorAuthority`.
+
 - `meerkat-copilot` (GitHub Copilot device sign-in): an account no longer
   keeps the model list and the API base of an earlier sign-in after a new
   sign-in whose token exchange is temporarily unavailable. Through 0.9.14
@@ -2380,6 +3008,49 @@ them.
   suite). No SDK code changes; the SDK pages name the kind, the turns it
   covers and the advice (wait for the running turn's answer, then send the
   turn again).
+
+- `meerkat-mob`, `meerkat-machine-schema`: a force cancel of one member no
+  longer clears the mob's count of active flow runs, and neither does a
+  cancel of all work of one member. Both cancel the work of that one member
+  only; both also set the mob-wide count to zero before this change. A mob
+  with a flow run still active on another member then accepted a stop as if
+  nothing ran: it went `Stopped` with that run still running inside it, no
+  longer counted. Each run's own end lowers the count now, as it always did
+  for a run that no cancel touched, so the stop is refused until the run
+  ends or is cancelled. This sets right the entry on the mob's active run
+  count in 0.9.5, which named force cancel and cancel all work among the
+  arms that end every run of the mob: each ends one member's work. That
+  entry also said that a stop admitted under an active run cancelled the
+  run at a boundary. A stop does not cancel flow runs: the run was left to
+  go on inside the stopped mob, no longer counted.
+
+- A temporary council's cleanup acts only on the mob that council created.
+  The council looked its temporary mob up by id when it seated, and again
+  when it cleaned up, and never checked which mob it found. So a council
+  convened under a council id whose mob id an ordinary mob already held
+  seated its participants in that mob and destroyed it when it ended, and a
+  cleanup that ran late (a retry of cleanup debt, or the recovery of a
+  council whose process died after it destroyed its mob and before it stored
+  the receipt) retired the members named like its seats in whatever mob
+  held the id by then and destroyed that mob. The council now records the
+  incarnation of the mob its own create made
+  (`TemporaryCouncilRecord::temporary_mob_custody`), before it seats
+  anyone. Seating uses a mob found under the id only when it is that
+  incarnation; otherwise the council ends with
+  `ParticipantSeatingFailed` for participant 0 and touches nothing. Cleanup
+  retires seats in, and destroys, that incarnation only (the destroy itself
+  is refused for any other), and reads any other mob under the id as "the
+  council's mob is gone". A record that names no incarnation (one written
+  by an earlier release, or one whose council stopped, or whose create
+  failed, between issuing the create and recording the mob) is cleaned up
+  by id: its cleanup leaves the mob alone when its last receipt
+  already says the temporary mob is destroyed, and otherwise destroys the
+  mob found under the id only when every member of it runs on a session the
+  record holds for a seat (or it has no member); a mob with a member the
+  record does not know is left untouched, the council keeps its cleanup
+  debt and logs a warning, and it settles once that mob is gone. Limit: such
+  a record still destroys a mob with no members that took the id.
+  Affected: 0.8.42 through 0.9.14.
 
 ### Security
 
@@ -2585,6 +3256,29 @@ them.
   signatures. If a pack that left your machine holds its signing key, the
   key is exposed: see the Upgrade notes. Affects 0.4.1 through 0.9.14.
 
+- `rkat`, `meerkat-mob-pack`: a signed pack is signed with the same read of
+  the key file that it leaves out. `rkat mob pack --sign <key>` opens the
+  key file once, before it reads the mob directory, and takes from that one
+  open both the file it leaves out and the key it signs with: on Linux and
+  macOS the file left out is the opened file, by its identity, and on
+  Windows the file with the name the path resolved to at that open. A
+  `--sign` path that names no file is refused before the directory is read,
+  with the exit status (1) and the message it had
+  (`Error: mob pack failed: I/O error: <system error>`); where the mob
+  directory has a fault of its own as well, this message is now the one
+  printed, not the directory's. No output file is written. The archive
+  format and the signature are unchanged. In Rust, `pack_directory` and
+  `pack_directory_with_excludes` return that `PackValidationError::Io`
+  before they read the directory. Affects 0.4.1 through 0.9.14, by a reading
+  of the source, not by a run: there the key is left out by its path as
+  written and read a second time, by that path, to sign. A pack made from a
+  directory that nothing changed while the command ran is not affected
+  beyond the entry above. Only where the key file was inside the mob
+  directory and was renamed or replaced while the command ran could such a
+  pack hold a key file, or be signed with another key than the one left out.
+  Keep the key outside the mob directory, and check a pack with `rkat mob
+  inspect <pack>`.
+
 - Mob: a `mob_destroy` refused by the mob tells an agent nothing of a
   member the host's member tool audience
   (`MobBuilder::with_member_tool_audience`) hides from that agent. Before,
@@ -2599,6 +3293,71 @@ them.
   host. The host's own destroy is answered as before. The member lists of
   the report `mob_destroy` answers an agent hold only members the agent
   was shown when the destroy started. Affects 0.9.11 through 0.9.14.
+
+- Mob: an agent's own mob tools tell it less of a mob it holds no authority
+  over. A tool that names a mob by id (`mob_destroy`, `mob_list_members`,
+  `mob_check_member`, `mob_retire_member`, `mob_wire`, `mob_unwire`,
+  `mob_spawn_member`, `council`), a `mob_create` under an id such a mob
+  holds, and a `delegate` whose own implicit mob did not restore, answered
+  a quarantined mob's refusal with the cause of its failed restore, and a
+  held child mob's refusal with the session that owns it.
+  The cause can name a member, its session and a path on the host. An agent
+  is now answered the same kinds with `mob_id`, `class` (a quarantine) or
+  `reason` (a hold), `retryable` and `content_retained`, and no longer with
+  `cause`, `cause_data` or `owner_session_id`; the quarantine answer also
+  loses `code`, which was the code of the cause. A lookup that fails in any
+  other way is answered as a fixed text and logged whole on the host. Such
+  a call also started the restore re-attempt of a quarantined store for any
+  agent: it now starts it only when the agent's authority names the mob (a
+  manage grant, a spawn profile scope or a recorded incarnation under the
+  id) or the agent's session is the creator the mob's creation record
+  names. A refusal the tools' own state answers an agent's `mob_destroy`
+  before the mob is asked (a mob that is quarantined or held by then, a
+  store's error, the ids of active WorkGraph bindings, a path on the host)
+  is answered as the destroy's fixed text and logged whole. A `mob_create`,
+  a `delegate` or the seating of a `council` that the host cannot admit
+  because of a mob the call did not name was answered that mob's id: it
+  is now answered the reason without the id, also in the council's
+  recorded outcome, and the host's log names the mob. The host's own
+  surfaces (RPC, REST, MCP) and the SDKs' error helpers are answered as
+  before. Affects 0.9.0 through 0.9.14 for the owner session, 0.9.9
+  through 0.9.14 for the quarantine and 0.9.4 through 0.9.14 for the id
+  of a mob the call did not name. The destroy's own refusals affect
+  releases through 0.9.14: the text with the binding ids is older than
+  0.9.0, the text with the storage path dates from 0.9.0.
+
+- Mob: for a mob whose host installs a member tool audience
+  (`MobBuilder::with_member_tool_audience`), a refusal the mob answers one
+  of the agent mob tools listed here carries no free text and no cause
+  about a member the audience hides from that agent. Before, such a
+  refusal was passed on as the mob returned it, and some carry a free text
+  or another error (a member's retirement that is stuck, with its cause).
+  `mob_spawn_member`, `fork_off`, `council`,
+  `conclude_objective`, `mob_check_member`, `mob_retire_member`,
+  `mob_list_members`, `mob_wire` and `mob_unwire` now pass a refusal of
+  such a mob on whole only when its type shows that it names nothing but
+  the mob and the members the call itself names. Any other is answered as
+  `the mob refused the call. The host's log has the cause.` and is logged
+  whole at `warn` on the host. When the refusal has a class that describes
+  the refused operation (`wiring_error`, `session_error`, `storage_error`
+  and the like, the vocabulary of a `mob/spawn_many` failure's `cause`),
+  the answer names it, as `Refusal class: <class>.` after the fixed text
+  and as `class` in its data; it carries no free text. Two typed facts
+  that name no member are kept: a provider authentication failure is
+  answered with its kind, provider, realm and binding, and a retirement
+  still in progress says `retryable: true`. The outcome of a `fork_off`
+  run follows the same rule, and so does the error of a `council` that
+  could not run, in both delivery modes. A `council` that started and then
+  failed answers an outcome, which keeps the mob's own texts (see Known
+  limitations). A mob
+  with no audience answers these tools as before, with one exception on
+  every host: a failed read of the calling session's own seat (`fork_off`,
+  `conclude_objective`) is answered as a fixed text unless its type names
+  nothing. A `delegate` acts in the session's own implicit mob, which has
+  no audience. The member operator
+  tools a profile gives a member (`spawn_member`, `retire_member`,
+  `wire_members` and the others) are not changed by this entry. Affects
+  0.9.11 through 0.9.14.
 
 - `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486, in
   Cargo.lock and in the example workspaces' lockfiles. Releases through
@@ -2637,7 +3396,90 @@ them.
   on the 0.9.14 release page:
   https://github.com/lukacf/meerkat/releases/tag/v0.9.14
 
+- `@rkat/web`: the provider proxy (`npx @rkat/web proxy`, and `startProxy`
+  and `createProxyHandler` of `@rkat/web/proxy`) listens on the loopback
+  interface by default and compares a request's origin before it calls the
+  provider. The standalone proxy binds `127.0.0.1`; `--host <address>`
+  (`startProxy({ host })`) binds another address, and the proxy prints the
+  address it bound, with a warning when that is not a loopback address. A
+  request that carries an `Origin` header is served only when the origin is
+  allowed and is answered 403 otherwise, preflights included, with no
+  provider call: loopback origins by default (`localhost`, any `127.x.x.x`
+  address and `[::1]`, http or https, any port), the one origin
+  `--cors-origin <origin>` (`allowOrigin`) names, or any origin with `*`; an
+  `Origin` of `null` only with `*`. While it is bound to a loopback address
+  the standalone proxy also refuses a request whose `Host` header is not a
+  loopback name or address; `createProxyHandler` offers that check as
+  `loopbackHostOnly`, off by default. Through 0.9.14 the standalone proxy
+  bound every interface, every origin was allowed by default, and
+  `--cors-origin` set the response header without comparing the request's
+  origin. A caller that reached the port over the network, or a web page
+  open in a browser on the same machine, could send requests to the
+  providers with the proxy's keys. A server that mounts `createProxyHandler`
+  itself had the same missing origin check in 0.4.1 through 0.9.14, so a
+  web page on any origin that reached that server could do the same. A
+  request without an `Origin` header is forwarded as before, except one a
+  browser marks `Sec-Fetch-Site: cross-site`, which is answered 403 unless
+  `*` allows every origin. The proxy does not check who calls it, and one
+  that listens on another address belongs behind your own authentication
+  (see Known limitations). Affects 0.4.1 through 0.9.14.
+
 ### Upgrade notes
+
+- Mob: `MobHandle::create_store_owned_identities`,
+  `MobHandle::update_store_owned_identity` and `MobHandle::adopt_identity`
+  refuse `MobError::ApprovalBranchReserved` for a record that would take
+  an approval branch's label `decision.approval_branch` or its identity
+  prefix `approval-branch-` (see Fixed): a host that asks for one gets a
+  refusal now. Nothing stored moves. A record that carries the label
+  already stays as it is until an update removes the label; remove it
+  before a rollback too, since the restamp such a record owes cannot be
+  settled while it carries the label (its respawn is refused). A host
+  that adopts an identity whose roster spec carries the label gets the
+  refusal from `MobHandle::adopt_identity` now: take the label out of the
+  roster's spec (no seat could carry it) and adopt again. An identity
+  whose name takes the prefix is not adopted: declare it under another
+  name. An identity that was adopted under the label on 0.9.11 through
+  0.9.14 keeps its record, which is read, updated and removed as any
+  other: an update that keeps the label is admitted, and an update that
+  removes it lets the agent be seated again. One adopted under a reserved
+  name stays as it is until it is removed.
+
+- A member that created mobs with the agent mob tools on an earlier release
+  and was replaced there by a same-session successor manages those mobs
+  again after the upgrade, with no call: it lists them and its calls on them
+  are admitted. The steps of 0.9.9 through 0.9.14 that leave such a
+  successor are Meerkat's own: `MobHandle::respawn_member` (run), a
+  declared role migration (run), a runtime-mode restamp (run), and
+  `MobHandle::respawn` of an identity entry's member (run), the call behind
+  `mob/respawn` (read from the source). The runs are of 0.9.14; Fixed says
+  what they cover.
+  A respawn made through a Meerkat Meta gateway on 0.9.9 through 0.9.14
+  (`meta/respawn`, the Console's respawn) is NOT one of them (read from the
+  source at each tag). It leaves the agent without the mobs it created
+  before that respawn, and the upgrade does not give them back: the agent
+  lists none of them and its calls on them are refused (run for
+  `meta/respawn` on 0.9.14; see Fixed, "Not brought back", and Meerkat
+  Meta's changelog). A further respawn of that agent on 0.9.15 does not
+  give them back either (run): a mob's record names the member generation
+  that created it, and no later step reaches back past that respawn. A
+  `meta/compact_member` on 0.9.9 through 0.9.14, a completed call or one
+  that failed or timed out after its first rebuild, leaves an agent in the
+  same state, and the upgrade does not give those mobs back either (one
+  run, of a completed call on 0.9.14; for a call that failed or timed out
+  after its first rebuild, read from the source; not run). Mobs the agent
+  created after that respawn or compact call are not affected: it manages
+  them, and keeps them through its respawns on 0.9.15 (read from the
+  source). What is left for the earlier mobs is to end them: a reset or
+  a delete of the agent (`meta/reset`, `meta/delete_identity`), then the
+  gateway's next start (read from the source). That ends the agent's
+  conversation, and every mob its session owns, the ones it still manages
+  among them, is removed with its members and its store.
+  The upgrade does not bring back the management of any creator that was
+  retired and seated again on its session before it: such a mob stays
+  unlisted for its creator and goes on running until the session that owns
+  it is archived (a reset or a removal of the member) and the host starts
+  again, or until the host destroys it.
 
 - A configuration document an earlier release wrote keeps its mode until
   the engine next rewrites it. To make the existing ones owner-only now, run
@@ -2665,6 +3507,31 @@ them.
   accounts never get write access through the document's mode, and nothing
   is readable by others. The admission fence file keeps its own rule:
   `admission.lock` is 0640 with its directory's group in every directory.
+
+- A wired pair that stopped messaging on an earlier version, after one of
+  its agents was adopted (`mob/adopt_member_identity_declaration`) or had
+  its declaration changed (`mob/apply_member_tool_declaration`), or after a
+  blocked one of them was resolved
+  (`mob/resolve_identity_convergence_block`), is not repaired by a running
+  host on its own. The store kept the edge; only the running agents' trust
+  of each other was lost, so their `peers` lists no longer hold each other
+  while the member list still shows the pair wired (`wired_to`). What
+  restores the pair depends on the host. On a Core host, wire the pair
+  again: `mob/wire` for each wired edge of the agent, with params
+  `{"mob_id": ..., "member": ..., "peer": {"local": ...}}` naming the same
+  two agents (run on Core 0.9.14 after an adoption and after a declaration
+  change); a restart restores it too (run after both). On a Meta gateway no
+  call wires a member pair (`mob/wire` is not served there); the remedy is a
+  restart (run on Meta 0.9.14 after an adoption and after a declaration
+  change, two independent runs for each). On an earlier version the remedy
+  is needed after every adoption and every declaration change, not once:
+  each later declaration change silences the pair again until the next
+  restart (Meta) or the next `mob/wire` of the edge (Core); one such change
+  was tried, in one run on Meta 0.9.14. Meta's `reconcile_edges()` does not
+  repair the pair (run twice after an adoption), nor does seating its agents
+  again. From this version on a declaration change no longer silences the
+  pair, and a pair that is silent has its wiring back at the adopted agent's
+  next declaration change (by a test).
 
 - `rkat run --comms-binding-out <PATH>` no longer writes into what is
   already at the path: it removes the file there and creates a new one that
@@ -2778,6 +3645,32 @@ them.
   its row is otherwise refused the member's build, naming the label keys
   that differ.
 
+- An agent under identity-owned wiring custody that another agent's
+  declaration wires to read `repair_blocked` through 0.9.14, with its
+  owner's changes committed and not active (see Fixed). From 0.9.15 such an
+  agent converges again and its owner's changes become active, including
+  changes committed while it was blocked: they become active at the first
+  reconcile pass after the upgrade, which the host's start runs, and the
+  operator does nothing for it (confirmed by a test on a store carried over
+  a restart). To see beforehand which changes will take effect, read each
+  such agent with `mob/member_tool_declaration` (listed in the Meerkat RPC
+  reference's method overview; a Meta gateway serves the same call) and
+  compare the answer's top-level `desired_intent_revision` with
+  `convergence.active_intent_revision`: a desired revision above the active
+  one, or an absent active revision on an agent whose `convergence.decision`
+  reads repair-blocked, is a change that takes effect at the upgrade (an
+  agent blocked with nothing newer to apply reads the same: treat it as
+  changed and check it after the upgrade). If
+  `convergence.active_intent_revision` is absent, this host process has not
+  recorded an applied revision for the member since it last started (that
+  record is kept in memory only). Read again after the next reconcile pass:
+  it gets a value once a pass converges the member. If it stays absent, read
+  `convergence.decision` and `convergence.detail`: a member in backoff,
+  repair-blocked or quarantined keeps it absent, even when an earlier
+  revision was applied before a restart and may still be in effect. Do not
+  compare the two revisions inside `convergence` with each other. The edge
+  itself stays in the store.
+
 - Mob, rollback: releases 0.9.9 through 0.9.14 read a row that carries
   `label_restamp_owed` as unreadable, for that one identity (its name is
   reserved, and nothing acts on it), until the owed restamp is settled.
@@ -2790,11 +3683,21 @@ them.
   its runtime mode. A label update never seats the member again, so
   every seated identity whose labels were updated owes the restamp until
   its next seat row, and a retry of the update or a later update of other
-  fields does not settle it. The respawn seats the member again on the
-  same session and cancels a turn in flight, and an agent that created
-  mobs with its own tools then no longer lists or manages them: have it
-  destroy such a mob first, or leave that identity unsettled (it is out
-  of service while rolled back, and nothing of it is lost). A member no same-session
+  fields does not settle it. No turn, wake, build or restart settles it
+  either. The respawn seats the member again on the same session and
+  cancels a turn in flight; an agent that created mobs with its own
+  tools goes on listing and managing them (see Fixed), though not while
+  an earlier release runs: 0.9.9 through 0.9.14 give that management
+  only to the member generation that created the mob, and the return
+  restores it with no call. An identity left unsettled is out of service
+  while rolled back, and nothing of it is lost. Or set the identity's
+  labels back to the labels its member was seated with, and apply the
+  label change again after the return: for an idle member that update
+  lets the key go without seating the member again, so the agent manages
+  the mobs it created on the earlier release as well; a member that
+  holds work at that update is answered `deferred` and keeps the key
+  until the same update is sent again once it is idle. A member no
+  same-session
   successor can serve (placed, wired to a placed member, or on a session
   service that keeps no durable sessions) is settled by none of these:
   rotate it (`MobHandle::rotate_member`), or archive or remove its
@@ -2995,6 +3898,33 @@ them.
   active, and `rkat run --skill <id>` loads the built-in, not the copy,
   without a message. The copy can be removed.
 
+- Mob: on a host that installs a member tool audience, an agent whose mob
+  tool (`mob_spawn_member`, `fork_off`, `council`,
+  `conclude_objective`, `mob_check_member`, `mob_retire_member`,
+  `mob_list_members`, `mob_wire`, `mob_unwire`) is refused by the mob for a
+  reason carried as a free text now reads `the mob refused the call. The
+  host's log has the cause.` in place of that text: why a wire, a spawn or
+  a retire was refused is no longer in the agent's answer. When
+  the refusal has a class that describes the operation, the answer ends
+  with `Refusal class: <class>.` (`wiring_error`, `session_error`,
+  `storage_error` and the like) and carries the same value as `class` in
+  its data. A provider authentication failure keeps its typed data, and a
+  retirement still in progress keeps `retryable: true`. The host reads the
+  whole refusal in its log, at `warn`, with
+  the mob's id and the tool's name. A refusal with a type of its own (a
+  member or a profile not found, a member that already exists, a scope
+  denial) is passed on as before, and so is every refusal of a mob with no
+  audience. On every host, an agent's `mob_destroy` that the tools' own
+  state refuses before the mob is asked, for a reason carried as a text
+  (active WorkGraph bindings, a storage path, a store's error), reads the
+  destroy's fixed text; the host's log has the reason. When the seating of
+  a `council` cannot be admitted because of a mob the call did not name
+  (see Security), a Rust host that runs the council through
+  `MobMcpState::temporary_council()` reads the same reason without the
+  mob's id in the outcome and in the council's record; its log names the
+  mob. The host's own creates answer `MobError::ProvenanceUnavailable`
+  with the id as before.
+
 - A configuration or a mob definition that defines `gemini-4-hydrogen`
   itself (`[models.gemini-4-hydrogen]`) must drop that entry when upgrading:
   the catalog now has the id, and a second definition is refused with
@@ -3003,26 +3933,141 @@ them.
   when one of its members is built (the mob definition case was read from
   the source, not run). See Added.
 
+- A host that force cancels a member, or cancels all work of a member, and
+  then stops the mob gets the stop refused while a flow run of the mob is
+  still active: Breaking has the answer and what to do instead. A host
+  that already handles this refusal of a stop under an active flow run
+  needs no change. The mob's count of active flow runs is not stored: every
+  start rebuilds it from the run store (read from the source). A mob that
+  an earlier release stopped while one of its flow runs was still active
+  holds that run as not terminal; at its first start under this release
+  recovery ends the run as `Canceled` and the mob starts with no run
+  counted (read from the source; the recovery of a run without a live task
+  is confirmed by a test for a mob that resumes running). This holds for a
+  run on a member this host runs. A run whose step was owed by a member
+  placed on another host is not ended at the start (see Known
+  limitations); by the source, the start of a mob stopped over such a run
+  is refused while that run is counted (not confirmed by a run). Rollback:
+  this change stores nothing new and changes no stored form, so 0.9.14
+  reads a store written with it as it reads its own (read from the
+  source).
+
+- A deployment may hold an ordinary mob under a `council--` id, created by
+  0.9.14 or earlier: those releases refused no mob id of this form, so an
+  agent's `mob_create`, `mob/create`, `meerkat_mob_create`, a pack
+  (`rkat mob run`, `rkat mob deploy`) or a host's own definition could
+  make one. Nothing is migrated and no stored mob refuses to start. The
+  mob is restored and managed as before: it is listed, its members run,
+  members are spawned and retired, flows run, and it can be stopped,
+  resumed and destroyed; a mobpack run that names it still answers it. At
+  restore (and when a host inserts such a mob) the mob state logs one
+  warning per mob and process that names the mob id and says its id has the
+  form reserved for temporary councils. What changes for it: once it is
+  destroyed, no mob can be created under that id again; and a temporary
+  council whose council id matches (the mob id without `council--`) can no
+  longer be convened while the mob exists (it ends at seating and leaves the
+  mob untouched; before, it ran inside the mob and destroyed it). A pack
+  whose definition has such an id can no longer be deployed with
+  `rkat mob deploy`, which builds its mob anew each time. The mob's owner
+  has nothing to do to keep the stored mob running. To keep using an id of
+  that form for new mobs, pick another id; a definition's id is the only
+  thing to change.
+
+- Downgrade: a release through 0.9.14 reads a council record written by
+  this release and ignores the two keys it does not know,
+  `temporary_mob_custody` and `convener`. When it commits such a record (it
+  seals an interrupted council or records a cleanup) it writes the record
+  without them, so back on this release that council's later cleanup treats
+  the record as one an earlier release wrote (see Fixed) and the council
+  has no convener. What is lost with the custody is the fence: while
+  rolled back, the earlier release seats and cleans up by id alone, so a
+  council can again retire seats in, and destroy, another mob that holds
+  its mob id; and after the return a record the earlier release wrote again
+  is cleaned up by id under the two guards, so it can still destroy a mob
+  with no members that took the id. Losing the convener changes nothing
+  Meerkat does itself (no create follows a seal or a cleanup); a host that
+  reads the record sees no convener. This release reads
+  `temporary_mob_custody` strictly: a
+  record whose custody holds a state it does not know does not decode, and
+  the council's recovery cannot read it. This release writes three states
+  (`not_created`, `creating`, `created`).
+
+- `@rkat/web` provider proxy (see Security). Nothing changes for a page
+  served from `localhost`, `127.0.0.1` or `[::1]` that calls a proxy on the
+  same machine, or for a tool on that machine that sends no `Origin` header.
+  Otherwise pass what applies:
+  - The proxy is reached from another machine or through a container's
+    published port: `--host <address>` (`0.0.0.0` for every interface;
+    `startProxy({ host })`). Every user and process of the machine reaches
+    a loopback address. On any other address a caller on the network that
+    sends no `Origin` header is forwarded with no check, and the `Host`
+    header is not checked: put the proxy behind your own authentication.
+  - The page that calls the proxy is not on a loopback origin:
+    `--cors-origin https://app.example.com` (`allowOrigin`).
+    `--cors-origin '*'` allows every origin, as every release through 0.9.14
+    did by default, and is the only setting that serves a page opened from
+    a file or a sandboxed frame (`Origin: null`).
+  - A server that embeds `createProxyHandler` without `allowOrigin` served
+    every origin and now serves loopback origins only. That refuses the
+    site's own pages too: a page sends an `Origin` on its POSTs to its own
+    server, so a same-origin request gets 403 until the site's origin is
+    passed as `allowOrigin` (or `allowOrigin: '*'` for the earlier
+    behaviour). `allowOrigin` is one origin as a string; a list, a pattern
+    or a function allows no origin. An `allowOrigin` the server already
+    passes is now compared with each request, so a page on any other origin
+    gets 403. The handler answers a preflight itself and no longer passes
+    the provider's `access-control-*` headers on. A dependency range such
+    as `^0.9.14` takes 0.9.15 at the next install.
+  - A client that reaches a loopback-bound standalone proxy under another
+    host name (a hosts-file alias, a local reverse proxy that keeps the
+    original `Host`) gets 403: call it as `localhost` or `127.0.0.1`. A
+    client that resolves `localhost` to `::1` only does not connect: use
+    `127.0.0.1`.
+  - The proxy prints the address and port it bound
+    (`http://127.0.0.1:3100`), and `--port 0` asks the system for a free
+    port.
+
 ### Known limitations
 
-- Do not use identity-owned wiring custody (`wiring_custody:
-  identity_owned`) for an agent that has, or will get, a wiring edge. Under
+- Under identity-owned wiring custody (`wiring_custody: identity_owned`),
+  state in an agent's declaration exactly the edges in which it is the
+  smaller-named end, and wire each before the adoption. Under
   identity-owned custody an agent answers for every edge in which it is the
-  smaller-named end: an edge its declaration owns must be realized, and no
-  release realizes one; an edge a wiring call made that its declaration
+  smaller-named end: an edge its declaration owns must be realized, which a
+  wiring call does and no reconcile step does; an edge a wiring call made
+  that its declaration
   does not own counts as a difference. So after this release an agent under
   that custody still reads `repair_blocked` ("generated obligation
   ReconcileWiring has no actuator in the retained sealed-intent
   reconciliation slice"): from its adoption on when its declaration owns an
-  edge, whether or not the edge was wired before; and from its next
+  edge that no wiring call has made (an agent adopted owning an edge that
+  was wired first converges); and from its next
   reconcile pass on (the periodic scan, a start, or its owner's next change)
   when a wiring call has joined it to a larger-named agent. While it reads
-  so, its owner's changes are committed and do not become active. An agent
-  under that custody whose edges all lead to smaller-named agents converges
-  (rows `an_identity_wired_to_a_smaller_named_member_converges_at_its_next_change`,
+  so, its owner's changes are committed and do not become active. A host
+  delivery to it (`mob/member_send`) is refused meanwhile (the identity's
+  admission is closed); its wired peers still reach it, and it them (by a
+  test); a turn the host starts (`mob/turn_start`) still runs (read from the
+  source). An agent under that custody whose edges all lead to smaller-named
+  agents converges (rows
+  `an_identity_wired_to_a_smaller_named_member_converges_at_its_next_change`,
   `an_identity_wired_to_a_larger_named_member_is_held_at_its_next_change`,
   `an_adopter_whose_owned_edge_is_not_realized_stays_blocked`,
-  `an_adopter_whose_owned_edge_was_wired_first_stays_blocked`).
+  `an_adopter_whose_owned_edge_was_wired_first_converges`).
+
+- Mob: on a host that installs a member tool audience, a call that seats
+  a member (`mob_spawn_member`, `fork_off`) tells whether a member, shown
+  or not, holds the name it seats under. A seat cannot be given twice, so
+  this stays.
+
+- Mob: on a host that installs a member tool audience, the outcome a
+  `council` answers its convener's agent keeps the texts of its source
+  mobs. A council that started and then failed (a participant that could
+  not be seated, a wiring or an exchange that failed) answers an outcome,
+  in both delivery modes, that carries the reason it ended and its cleanup
+  report as the source mob gave them, and either can hold a text about a
+  member that agent is not shown. Only the error of a council that could
+  not run is answered as the fixed text.
 
 - An input queued behind a turn that fails at its start is not run. The
   failed start retires the session's runtime registration, and an input
@@ -3056,6 +4101,14 @@ them.
   id (the archive removes the mobs bound to an id even when no session is
   stored under it; read from the source), or destroy the mob itself.
 
+- Mob: `MobHandle::import_created_identities`, a host operator's Rust
+  call, restores an export's records as written, so a record of the
+  export that carries the label `decision.approval_branch` or a name with
+  the prefix `approval-branch-` is restored with it. No seat follows such
+  a record; clean it as for any record that carries the label (see
+  Fixed). A restored record that holds a reserved name has its removal
+  as its only way out.
+
 - The owner-only rule of this release (see Security) covers the
   configuration documents, the comms binding file and `identity.key`. Two
   other files that can hold a token still take their mode from the umask
@@ -3072,13 +4125,16 @@ them.
   pack is not signed with (an unsigned pack, or another key) and a pack
   written earlier under another name are packed like every other file in
   the mob directory. On Windows the two files are recognized by their
-  resolved paths only, so a hard link to the key under another name is
-  packed there. Whether Windows recognizes a key or an output typed in
-  another case than it is stored is not established: the standard library
-  resolves a path there by opening it and asking the system for the final
-  path of the handle, and what case that answer has was neither run nor
-  found in the sources at hand. Keep keys and packs outside the mob
-  directory, and check a pack with `rkat mob inspect <pack>`.
+  resolved paths only (the key's as resolved when the command opens it),
+  so the key under any other name in the mob directory is packed there: a
+  hard link, or the key file itself when it has another name while the
+  command reads the directory. Whether Windows recognizes a key or an
+  output typed in another case than it is stored is not established: the
+  standard library resolves a path there by opening it and asking the
+  system for the final path of the handle, and what case that answer has
+  was neither run nor found in the sources at hand. Keep keys and packs
+  outside the mob directory, and check a pack with
+  `rkat mob inspect <pack>`.
 
 - Mob: an explicit resume of a stopped mob (`MobHandle::resume`) rebuilds
   each member from its seat as the host's spawn customizer makes it and
@@ -3103,6 +4159,24 @@ them.
 
 - Mob: the schedule tools are not checked against the member tool audience
   on a host that mounts them itself.
+
+- `@rkat/web` provider proxy: the proxy does not authenticate its callers
+  (see Security for what it checks). Every user and process of the machine
+  reaches a proxy bound to a loopback address, and so does a page served
+  from any loopback origin. A proxy bound to another address with `--host`
+  forwards a caller on the network that sends no `Origin` header; it does
+  not check the `Host` header, so a GET from a page whose host name points
+  at the proxy is forwarded and the page reads the answer; and a cross-site
+  GET that carries no `Sec-Fetch-Site` header is forwarded, which is every
+  such GET over plain http to an address that is not loopback, because a
+  browser sends that header only to https and loopback addresses. On a
+  loopback-bound proxy the same holds for a browser that sends no
+  `Sec-Fetch-Site` header at all: its cross-site GET without `Origin` is
+  forwarded, and the page cannot read the answer. A tunnel or reverse proxy
+  that rewrites `Host` to a loopback name has the same effect on a
+  loopback-bound proxy. A request without `Origin` that a browser marks
+  `same-site` is forwarded. The proxy keeps no record of the requests it
+  forwards. Put the proxy behind your own authentication in those uses.
 
 - `meerkat-mob`: a spawn rollback that is still owed when the mob is
   stopped (the refused spawn answered `rollback remains owned for retry`)
@@ -3129,6 +4203,78 @@ them.
   stopped mob when it starts (the Meta gateways do) always meets this: retire
   the member, then restart the host.
 
+- `meerkat-mob`: a failed `mob/wire` can keep its edge: the call answers an
+  error, yet the member list shows the pair wired. This happens only when an
+  end of the pair was retired or being rebuilt while the wire was in flight;
+  an ordinary failed wire between two seated members reverts its edge.
+  Remedy: unwire the pair and wire it again; a second wire alone restores
+  messaging only until the next start. Affects 0.7.0 through this release,
+  read from the source.
+
+- A schedule a mob member created for itself is kept when the member is
+  retired, and fires into a later member that is given the same name in the
+  same mob: its prompt is delivered to that member as a message. Delete a
+  member's own schedules before retiring it for good. To find the ones left
+  behind, list the schedules (`schedule/list`) and the mob's members
+  (`mob/members`), and delete (`schedule/delete`) each schedule whose
+  `target.identity` begins with `mob_member:` and names a `mob_id` and a
+  `member` that is not among that mob's `agent_identity` values. A member
+  that is only away and will be seated again under the same name keeps its
+  schedule in this way, so delete only for a member that is gone for good.
+  Affects 0.7.12 through this release (the firing and the three calls by a
+  run on this release's code; earlier releases read from the source).
+
+- A message one mob member sends another can be lost when the receiver's
+  host is at its session limit. The sender is answered that the message was
+  accepted; at the receiver the input is tried three times at once, each try
+  fails with "Max sessions reached", and it is then abandoned. Nothing
+  retries it later and the sender is not told. The receiver's host logs one
+  WARN for each such input, with the input's id: from 0.8.49 `input
+  abandoned by generated staged rollback resolution` (with
+  `MaxAttemptsExhausted { attempts: 3 }`), in 0.8.23 through 0.8.48 `input
+  abandoned after generated max stage attempts decision`. The input's status
+  shows it as abandoned after three attempts, and not the reason:
+  `meta/send_status` on a Meta gateway, `session/input_status` on a Core
+  host. Both are asked with the receiver's session and the input's id; the
+  sender's receipt gives neither, the WARN line gives the input's id. The
+  limit is 16 sessions by default on Meta's rpc gateway
+  (`runtime_options.max_sessions`) and 64, not settable, on Meta's Console
+  gateway; a Core host's default is 100,000. Keep it at or above the number
+  of agent sessions (members, helpers and scheduled runs included) that can
+  be awake on the host at once, not only those with a turn running. Affects
+  0.8.23 through this release (by runs on Meta 0.9.14 and on a gateway built
+  from this release's code; earlier releases read from the source).
+
+- `delegate`: a helper is not cancelled or retired when the call that
+  started it ends without the helper's result. That happens at the tool
+  call's time limit (ten minutes by default; `[tools.tool_timeouts]
+  delegate` sets it), where the call answers the generic tool timeout (`Tool
+  'delegate' timed out after 600000ms`), and at a hard interrupt of the
+  calling turn. The helper finishes its turn and then stays seated until its
+  owner's session is archived through a surface (for an owner that is a mob
+  member retired by its mob: until the host's next start); on a Meta gateway
+  the idle sweep retires it once it has been idle for 300 seconds
+  (`implicit_delegate_idle_retire_secs`). A cancel of the calling member's
+  work (the mob's force cancel or cancel-all-work) does not end the call:
+  the member goes on waiting until the tool call's time limit.
+  `spawn_helper` and `fork_helper` do retire a seated helper when their
+  caller is dropped. The 0.8.43 entry names `delegate` among the calls that
+  do so; that was not true of `delegate`: no release retired a delegate
+  helper on a dropped call. Affects every release that has `delegate` (by
+  runs on this release's code; 0.8.29 through 0.9.14 read from the source).
+  The fix is not in this release.
+
+- Mob: a member that another member seated with its member tools
+  (`spawn_member`, `spawn_many_members`, `mob_spawn_member`) keeps its seat
+  when that member is retired, but turns dispatched to it are then refused
+  (`operation owner is retired`) until the host restarts. A turn started for
+  it as a turn-driven member and a scheduled delivery fail; a message from a
+  peer and a turn a person starts are still taken. A `delegate` helper, and
+  a member that a host or an operator method seated, are not affected.
+  Retire such members before the member that seated them, or restart the
+  host. Affects 0.7.29 through this release (the refused scheduled delivery
+  by a run on this release's code; the rest read from the source).
+
 - A turn that asks for a reasoning effort level its session's route refuses
   is answered with the typed refusal and makes no provider request. Through
   the JSON-RPC session runtime a turn is refused before its input is
@@ -3138,10 +4284,11 @@ them.
   A JSON-RPC turn (`turn/start`, `mob/turn_start`) that would change the
   session's model settings beside a provider-neutral level is not queued
   behind unfinished work. On a session that holds a provider-neutral
-  level, anything that changes the model identity needs an idle session;
-  plain turns and true repeats of the level queue. On a session that holds
-  none, only setting a level needs an idle session; everything else queues
-  as on 0.9.14. "Busy" is `-32002` (`SESSION_BUSY`) with `data.kind`
+  level, anything that changes the model identity needs a session with no
+  unfinished work; plain turns and true repeats of the level queue. On a
+  session that holds none, only setting a level needs a session with no
+  unfinished work; everything else queues as on 0.9.14. "Busy" is `-32002`
+  (`SESSION_BUSY`) with `data.kind`
   `reasoning_effort_change_needs_idle_session`, answered at once, with
   nothing stored, while the session has an unfinished turn or queued input
   (a deferred session: while its first turn is still building it):
@@ -3167,19 +4314,38 @@ them.
   client that sets a level once and then varies `provider_params` per turn
   is answered busy whenever another turn runs or is queued. The one `kind`
   names the level also for a request that only changed the model. Wait for
-  the running turn's answer, then send the request again; do not poll. A
-  session with standing work may never be idle for such a request: stop
-  sending, let the queue drain, then make the change. Unfinished work is
-  not only a running turn: an event queued on an idle session counts. A
-  session that received a `session/external_event` while idle (confirmed
-  by a test of this change), or one configured with silent comms intents
-  that holds an unread silent request (by reading the code, not run),
-  counts that input as unfinished work until its next turn and is answered
-  busy. Nothing is running to wait for: send a plain turn first, then the
-  change, or set the level when the session is created; the busy answer's
-  text says so. A later release
-  is planned to queue these turns. (Confirmed by tests of this change, on
-  a session, on a mob member's session and through the JSON-RPC router.)
+  the running turn's answer, then send the request again; do not poll (an
+  autonomous mob member is the exception: see below). A session with
+  standing work may never be idle for such a request: stop sending, let the
+  queue drain, then make the change. Unfinished work is not only a running
+  turn: an event queued on a session that has no turn running counts. A
+  session that received a `session/external_event` while no turn was running
+  (confirmed by a test of this change), or one configured with silent comms
+  intents that holds an unread silent request (by reading the code, not
+  run), counts that input as unfinished work until its next turn and is
+  answered busy. Nothing is running to wait for: send a plain turn first,
+  then the change; or recall the event's input with `session/recall_input`
+  (its `input_id` is in the answer to `session/external_event`), which
+  answers `abandoned` and withdraws the event: the session never receives
+  it; then send the change (seen in a run on a build of this change); or set
+  the level when the session is created. The busy answer's text names the
+  first and the third. On an autonomous mob member (the default runtime
+  mode) the unfinished work can be the member's own: a turn it started for
+  its kickoff or on what its peers sent it, or a peer input queued on it.
+  The caller cannot know when such a member is idle, the standing work is
+  not the caller's to stop, and a plain turn first does not help against the
+  member's own turns: send the request again (in two runs on a build of this
+  change it was taken after 5 s and after 21 s; a member whose peers keep
+  sending may stay busy for longer), or set the level in the member's
+  profile or at its spawn, which does not depend on the member's traffic.
+  `is_active: false` from `session/read` does not promise the change is
+  taken (seen in a run on a build of this change). An autonomous member is
+  addressed by `turn/start` with the member's session id: `mob/turn_start`
+  is refused for it with `-32602` before the rule is reached (seen in a run
+  on a build of this change). A later release is planned to queue these
+  turns. (The rule is confirmed by tests of this change, on a session, on a
+  turn-driven mob member's session and through the JSON-RPC router; the
+  autonomous member's case by the runs named above, not by a test.)
 
   The reason: a level is judged again when its turn starts, and a level
   refused at a turn's start is still a failed start, which ends the
@@ -3191,24 +4357,22 @@ them.
   (`supported_levels_unavailable`: an account's model list that is not
   loaded; confirmed by a test of this change); a request sent without
   waiting for another one, when it reaches admission in the time between
-  that other turn's admission on an idle session and its start (on a
-  stored session that is not live: until that turn's rebuild ends); a
-  model-identity change carried by an input that enters through the
+  that other turn's admission on a session that has no turn running and its
+  start (on a stored session that is not live: until that turn's rebuild
+  ends); a model-identity change carried by an input that enters through the
   runtime without a turn request (a mob's own send, or a member turn an
   in-process Rust host starts with a model, provider, params or binding
   option), which is queued and judged only when it starts; and a turn
-  admitted on an idle session whose
-  model, level or route is changed by something else (a host's
-  reconfiguration of a mob member, a config reload, an account's model
-  list) between its admission and its start (these three read from the
-  source). The
-  refused start costs the session
-  that one turn and nothing it owns: its mobs and their members stay. The
-  runtime retires the session's live runtime (its registration and its
-  MCP adapter) after the refused start, and the next turn builds it again
-  from the stored session; an input queued on that registration behind the
-  refused turn ends with it, without a run, and its sender sends it again.
-  The refusal reason is in the typed details of the answer
+  admitted while no turn was running, on a session whose model, level or
+  route is changed by something else (a host's reconfiguration of a mob
+  member, a config reload, an account's model list) between its admission
+  and its start (these three read from the source). The refused start costs
+  the session that one turn and nothing it owns: its mobs and their members
+  stay. The runtime retires the session's live runtime (its registration and
+  its MCP adapter) after the refused start, and the next turn builds it
+  again from the stored session; an input queued on that registration behind
+  the refused turn ends with it, without a run, and its sender sends it
+  again. The refusal reason is in the typed details of the answer
   (`reasoning_effort_refusal`).
 
 - MCP server: `meerkat_resume` rebuilds the session whenever it names a
@@ -3253,18 +4417,26 @@ them.
   queued behind that plain resume can still be ended by the level resume's
   rebuild. It then answers `-32003` (`session_resume_required`) without
   running; send it again. Second, a plain resume sent at the same moment
-  as a level resume, before either turn has started (on an idle session
-  too), runs or ends with that same answer, depending on which of the two
-  reaches the session first. Third, "wait for the running turn's answer"
-  assumes the running turn is the caller's: when it is not (a peer message
-  on a keep-alive session, a scheduled run), there is no answer to wait
-  for; send the resume again later. The second limit holds, as on
+  as a level resume, before either turn has started (also on a session that
+  has no turn running), runs or ends with that same answer, depending on
+  which of the two reaches the session first. Third, "wait for the running
+  turn's answer" assumes the running turn is the caller's: when it is not (a
+  peer message on a keep-alive session, a scheduled run), there is no answer
+  to wait for; send the resume again later. The second limit holds, as on
   0.9.14, for a plain resume queued beside a resume that rebuilds the
   session for another field (`model`, `max_tokens` and the other build
-  fields): it runs, or it ends with that answer when the rebuild reaches
-  the session first (confirmed by a test of this change for `max_tokens`;
-  the retire before a rebuild is the same code as on 0.9.14, read from the
+  fields): it runs, or it ends with that answer when the rebuild reaches the
+  session first (confirmed by a test of this change for `max_tokens`; the
+  retire before a rebuild is the same code as on 0.9.14, read from the
   source).
+
+- MCP server: a `meerkat_resume` of, or a `meerkat_comms_send` to, the
+  session of a mob member that is not live, when that member's own build is
+  refused for the level in its profile, answers the generic agent error
+  (`-32013`) with a message that contains the refusal's sentence and no
+  `reasoning_effort_refused` data; a level the resume itself carries is
+  judged after the wake and is answered by the typed refusal as everywhere
+  else (read from the source).
 
 - A schedule's session spec is the one surface where the reasoning effort
   level is not accepted in this release. A schedule request that writes
@@ -3330,6 +4502,13 @@ them.
   for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in
   either direction: it rests on the version requirements Connect 0.9.14
   published.
+
+- `meerkat-mob`: a flow run that `mob/flow_cancel` does not bring to a
+  terminal status keeps the stop of its mob refused; complete, reset or
+  destroy the mob instead. Read from the source, not confirmed by a run: a
+  run that a restart of the host recovered while its step was owed by a
+  member placed on another host is such a run until that member's turn is
+  settled.
 
 ## [0.9.14] - 2026-11-11
 
@@ -51455,7 +52634,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.14...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.15...HEAD
+[0.9.15]: https://github.com/lukacf/meerkat/compare/v0.9.14...v0.9.15
 [0.9.14]: https://github.com/lukacf/meerkat/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/lukacf/meerkat/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/lukacf/meerkat/compare/v0.9.11...v0.9.12

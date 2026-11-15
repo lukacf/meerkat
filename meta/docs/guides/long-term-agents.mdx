@@ -4,8 +4,6 @@ description: "Move an agent your configuration declares to run-time changes, the
 icon: "users-gear"
 ---
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 Available from Meerkat Meta 0.9.15.
 
 A long-term agent is a durable, named member of the mob. It keeps its own
@@ -319,8 +317,9 @@ on following its earlier instructions. To bring the change into effect,
 reset the agent, which discards its conversation; **Instructions** below has
 it.
 
-One cost to know before you archive an agent: an archive removes the mobs
-the agent created at the gateway's next start (**Archive and unarchive**
+One thing to know before you archive or remove an agent: an archive and a
+removal of an agent that still owns mobs it created are refused
+`owns_mobs`, until the agent has destroyed them (**Archive and unarchive**
 below). The agent in this block has created none.
 
 <CodeGroup>
@@ -439,9 +438,10 @@ is already in the agent's record.
   change moves the agent
   to that profile's model and tools on the same conversation. The move
   seats the agent again, and so does a change of `runtime_mode_override`:
-  an agent that created mobs with its own tools then no longer lists or
-  manages them (see
-  [Moving a profile](/guides/agents-create-agents#moving-a-profile)).
+  an agent that created mobs with its own tools goes on listing and
+  managing them (see
+  [Moving a profile](/guides/agents-create-agents#moving-a-profile) for
+  what still ends that).
   `addressability` and `runtime_mode_override` take the values they take on
   a create and are the change class `capability` of your policy; an update
   sets a runtime mode and cannot return the agent to its profile's.
@@ -462,7 +462,7 @@ is already in the agent's record.
   recorded and not yet followed; `{"state": "effective"}` is followed. Right
   after the update the reason is `delivery_owed` for a moment: the change is
   not in the agent's conversation yet (the other values are on the
-  [roster page](/concepts/roster#changing-an-agents-instructions)). A reset
+  [roster page](/concepts/roster#changing-an-agent%E2%80%99s-instructions)). A reset
   (`runtime.reset("editor")`; in the Console, the roster's reset action where
   the console configuration shows it, `show_reset`, and the viewer may reset
   the agent) starts a new conversation led by the current instructions, and
@@ -471,6 +471,14 @@ is already in the agent's record.
   also takes effect at the agent's next compaction at the start of a run. A
   respawn does not bring the change into effect, and neither does an archive
   followed by an unarchive.
+  The SDKs can also compact the agent's conversation, which brings a waiting
+  instruction into effect on the same conversation:
+  `runtime.compact_member("editor")` in Python,
+  `runtime.compactMember("editor")` in TypeScript; before you use it on an
+  agent that created mobs, read the SDK reference
+  ([Python](/sdks/python#compacting-a-member%E2%80%99s-conversation),
+  [TypeScript](/sdks/typescript#compacting-a-member%E2%80%99s-conversation)):
+  against a gateway before 0.9.15 the call costs the agent those mobs.
 - **Archive and unarchive.** An archived agent keeps its name, record,
   conversation and memory, and messages to it are refused. Like any agent
   that leaves, it is owed the harvest and distillation of its last
@@ -479,18 +487,29 @@ is already in the agent's record.
   promised between them and the archive's answer. Unarchive
   brings it back on the same conversation. While it is archived the
   identity's status (`runtime.status(name)`) reads `archived` true; the
-  member is left out otherwise. Archiving an agent removes the mobs it
-  created. They stay until the gateway next starts; then each of those mobs
-  is removed with its store, and unarchiving the agent does not bring them
-  back. Have the agent destroy its mobs before you archive it. Do not
-  archive an agent whose mobs must stay.
+  member is left out otherwise. An archive of an agent that still owns
+  mobs it created is refused `owns_mobs`, and nothing is changed: the
+  refusal says how many mobs there are, and names them to the host and to
+  an administrator. Have the agent destroy its mobs (`mob_destroy`) and
+  archive it then, or keep the agent. When the agent can no longer manage
+  a mob its session owns, no Meta host method destroys that mob, and the
+  agent's archive and its removal are refused through Meta while its
+  session owns it; on a gateway the way out is a reset of the agent, which
+  costs its conversation and, by the gateway's next start, those mobs (the
+  RPC reference lists the cases and the refusal's limits, under
+  `meta/identity/archive`). The
+  refusal is Meta's: a Rust host that calls Core's `archive_identity` or
+  `remove_identity` itself is not refused, and there the mobs the agent
+  created are removed with their stores when the host next starts, and
+  unarchiving the agent does not bring them back.
 - **Remove.** Removal is permanent: the name is never available again
   (`name_taken`). The agent's conversation and memory are kept, and no
   other agent can reach them. A removal owes what an archive owes (the
   harvest, the exit interview, the retirement hook); a removal of an
-  archived agent owes nothing more. Archive an agent that may be needed
-  later, once it has destroyed the mobs it created (**Archive and
-  unarchive** above).
+  archived agent owes nothing more. A removal of an agent that still owns
+  mobs it created is refused `owns_mobs`, as its archive is. Archive an
+  agent that may be needed later, once it has destroyed the mobs it
+  created (**Archive and unarchive** above).
 - **Schedules.** The schedules that target an agent follow these three
   changes, so that none keeps firing at an agent that takes no delivery: an
   archive pauses its Active schedules, an unarchive resumes exactly the

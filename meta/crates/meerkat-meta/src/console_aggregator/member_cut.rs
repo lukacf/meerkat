@@ -88,7 +88,8 @@ impl MemberCut {
 
     /// The members [`member_sources_for_entry`] lists: the primary mob's,
     /// then the implicit delegates' only while the policy includes them. The
-    /// delegates are not listed for it otherwise.
+    /// delegates are not listed for it otherwise, and a council participant
+    /// is among them on no policy (see `council`).
     pub(super) async fn unhidden(&self) -> impl Iterator<Item = &CutMember> {
         let primary = self.primary().await;
         let delegates: &[CutMember] = if self.lists_delegates() {
@@ -96,7 +97,11 @@ impl MemberCut {
         } else {
             &[]
         };
-        primary.iter().chain(delegates)
+        primary.iter().chain(
+            delegates
+                .iter()
+                .filter(|member| !member.resolved.council_participant),
+        )
     }
 
     /// Whether the listings [`Self::unhidden`] reads are taken already.
@@ -141,9 +146,35 @@ impl CutMember {
 pub(super) struct FrameVisibilityRead {
     pub(super) identities: HashMap<(String, String), CachedIdentityVisibility>,
     cuts: HashMap<String, Arc<MemberCut>>,
+    /// [`council::council_frames_of_source`] of each (runtime key, captured
+    /// source mob) the read decided.
+    council_sources: HashMap<(String, String), council::CouncilFrames>,
 }
 
 impl FrameVisibilityRead {
+    /// Whether the stored `frame` of `entry`'s runtime, with its captured
+    /// `provenance`, was written by a council participant. The frame's
+    /// source mob is decided once per read.
+    pub(super) async fn council_wrote_frame(
+        &mut self,
+        entry: &RuntimeEntry,
+        frame: &ConsoleFrame,
+        provenance: &ConsoleFrameMemberProvenance,
+    ) -> bool {
+        let key = (entry.runtime_key.clone(), provenance.source_mob_id.clone());
+        if let Some(decided) = self.council_sources.get(&key) {
+            return decided.wrote(frame, provenance);
+        }
+        let decided = Box::pin(council::council_frames_of_source(
+            entry,
+            &provenance.source_mob_id,
+        ))
+        .await;
+        let wrote = decided.wrote(frame, provenance);
+        self.council_sources.insert(key, decided);
+        wrote
+    }
+
     /// Whether the read decided a frame of an identity the identity read
     /// model does not know.
     pub(super) fn decided_unknown_identity(&self) -> bool {

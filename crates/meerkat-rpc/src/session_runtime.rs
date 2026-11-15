@@ -7714,7 +7714,21 @@ impl SessionRuntime {
                 needs_idle_session: false,
             });
         }
-        let live = matches!(self.service.has_live_session(session_id).await, Ok(true));
+        // A session whose task ended with the host's runtime it ran on is
+        // not live, and the live read asks the lost actor and fails: that is
+        // asked first, without the actor, as `refuse_cold_help_session`
+        // asks it. Any other failure of the live read is the caller's
+        // answer: a session whose liveness cannot be read is not judged as
+        // one that is not live.
+        let live = !self
+            .service
+            .session_task_ended_with_its_runtime(session_id)
+            .await
+            && self
+                .service
+                .has_live_session(session_id)
+                .await
+                .map_err(session_error_to_rpc)?;
         let staged = !live && self.staged_sessions.contains(session_id).await;
         let Some(ov) = names_the_identity else {
             return Ok(TurnLevelAdmission {

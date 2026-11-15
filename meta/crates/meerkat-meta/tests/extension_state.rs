@@ -2281,8 +2281,9 @@ async fn extension_mob_id_reuse_is_refused_for_an_audience_entry_until_it_is_rem
 /// as for a model change, keeps the documents its id owns, also after a
 /// restart restored it with its owner session. A foreign create cannot
 /// claim that id, neither as an explicit mob nor with the implicit flag for
-/// another session, and a temporary council's model-chosen id is checked
-/// like any other.
+/// another session. An ordinary create under a council's id is refused as
+/// the reserved form, and a temporary council's own create under its
+/// model-chosen id is checked like any other.
 #[tokio::test(flavor = "multi_thread")]
 async fn extension_mob_id_reuse_keeps_the_sessions_implicit_mob_and_checks_councils() {
     let dir = tempfile::tempdir().unwrap();
@@ -2393,7 +2394,9 @@ async fn extension_mob_id_reuse_keeps_the_sessions_implicit_mob_and_checks_counc
         )
         .await
         .unwrap();
-    // A temporary council creates its mob for a session of its own.
+    // No ordinary create makes a mob under a council's id: Meerkat reserves
+    // the form and refuses the create as an invalid definition, before the
+    // host is asked.
     let refused = state
         .mob_create_definition_with_owner_bridge_session(
             child_definition(&council),
@@ -2402,8 +2405,64 @@ async fn extension_mob_id_reuse_keeps_the_sessions_implicit_mob_and_checks_counc
             false,
         )
         .await
-        .expect_err("a council's model-chosen id is checked");
-    assert_refused_with_remedy(&refused, &council);
+        .expect_err("an ordinary create under a council's id is refused");
+    assert!(
+        matches!(
+            &refused,
+            meerkat_mob::MobError::DefinitionError(diagnostics) if diagnostics.iter().any(
+                |diagnostic| matches!(
+                    diagnostic.code,
+                    meerkat_mob::DiagnosticCode::ReservedSystemIdentifier
+                )
+            )
+        ),
+        "{refused}"
+    );
+    // A temporary council creates its mob for a session of its own, and
+    // that create is checked: the council ends at seating with the refusal
+    // and its remedy, and no mob exists under its id.
+    let outcome = state
+        .temporary_council()
+        .run(
+            meerkat_mob_mcp::TemporaryCouncilRequest::new(
+                meerkat_mob::temporary_council::TemporaryCouncilId::new("model-chosen").unwrap(),
+                child_definition(&council),
+                vec![meerkat_mob_mcp::TemporaryCouncilParticipantSpec::new(
+                    0,
+                    "worker",
+                    definition(dir.path()).id,
+                    foreign.agent_identity.clone(),
+                    AgentIdentity::from("council-seat"),
+                    meerkat_mob::ProfileName::from("worker"),
+                )],
+                "This exchange must never begin.",
+                meerkat_mob_mcp::TemporaryCouncilBounds::relative(Duration::from_mins(2), 1, 4096),
+                meerkat_mob_mcp::MergeBackPolicy::NoMerge,
+            )
+            .process_bound(),
+        )
+        .await
+        .expect("the council reaches a terminal outcome");
+    match &outcome.result.exit_reason {
+        meerkat_mob::temporary_council::TemporaryCouncilExitReason::ParticipantSeatingFailed {
+            participant_order: 0,
+            detail,
+        } => {
+            for expected in [
+                council.as_str(),
+                "mob create refused",
+                "Choose another mob id",
+                "remove or replace each Audience::Mob grant or deny",
+            ] {
+                assert!(detail.contains(expected), "{expected:?} missing: {detail}");
+            }
+        }
+        other => panic!("a council's model-chosen id is checked: {other:?}"),
+    }
+    assert!(
+        state.handle_for(&council).await.is_err(),
+        "the refused council created no mob"
+    );
     drop(state);
     reopened.shutdown().await;
 }

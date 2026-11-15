@@ -686,6 +686,20 @@ pub(crate) enum SessionCreateCaller {
     Session,
 }
 
+/// Whether a create may make a mob under an id of the form temporary
+/// councils own (`meerkat_mob::temporary_council::is_temporary_council_mob_id`).
+/// Every create passes [`MobMcpState::admit_create`] with one of these, so
+/// the form is decided in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReservedMobIdUse {
+    /// Any create but a council's own: refused under an id of the form.
+    Ordinary,
+    /// A council creating its own temporary mob
+    /// ([`MobMcpState::create_temporary_council_mob`]), the one create that
+    /// uses the form.
+    TemporaryCouncil,
+}
+
 /// The provenance a create by `session_id` records, from the complete
 /// lookup of the hosted rosters that name that session
 /// ([`MobMcpState::session_member_matches`]): the member when exactly one
@@ -1694,6 +1708,30 @@ pub struct MobCreateRequest {
     /// ([`MobDefinition::implicit`]). Never set for a mob a caller names,
     /// whatever its id.
     pub implicit_delegation_mob: bool,
+    /// The temporary council this mob is created for. `None` for every
+    /// other mob: a council's mob is told from any other create by this
+    /// field, never by the form of its id.
+    pub council: Option<MobCreateCouncilOrigin>,
+}
+
+/// The temporary council a [`MobCreateRequest`] creates a mob for.
+///
+/// Built by the council's own create from its durable record. No public
+/// function, tool argument or wire request sets it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MobCreateCouncilOrigin {
+    /// The council the mob is created for.
+    pub council_id: meerkat_mob::temporary_council::TemporaryCouncilId,
+    /// The session that convened the council through the agent-facing
+    /// `council` tool: the session that tool's surface is bound to, as the
+    /// council recorded it at its first admission. `None` when no agent
+    /// convened it (a host ran the council directly) and for a council whose
+    /// record was written before conveners were recorded.
+    ///
+    /// The mob's `owner_bridge_session_id` is still a session of the
+    /// council's own and names no member.
+    pub convener_session_id: Option<SessionId>,
 }
 
 /// Host admission hook for the mobs a [`MobMcpState`] creates: `Ok(())` lets
@@ -1896,6 +1934,9 @@ pub struct MobMcpState {
     /// Set once the automatic post-restore recovery sweep has been scheduled.
     /// Also what keeps the sweep from re-entering `ensure_restored`.
     temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool,
+    /// The mobs whose operator was already told that their id has the form
+    /// temporary councils own; see [`MobMcpState::note_reserved_form_mob`].
+    reserved_form_mobs_noted: std::sync::Mutex<BTreeSet<MobId>>,
     /// Every background task this state starts on its own, and whether it
     /// still admits work; see [`MobMcpState::stand_down`].
     pub(crate) state_tasks: state_tasks::StateTasks,
@@ -2072,6 +2113,7 @@ impl MobMcpState {
                     .unwrap_or(30_000),
             ),
             temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool::new(false),
+            reserved_form_mobs_noted: std::sync::Mutex::new(BTreeSet::new()),
             state_tasks: state_tasks::StateTasks::new(),
             // Detached delivery needs a runtime to admit completions, so the
             // default follows the runtime's presence: a host built without one
@@ -3292,6 +3334,73 @@ impl MobMcpState {
         TemporaryCouncilCoordinator::new(self.clone())
     }
 
+    /// Tell the operator, once per mob, that a mob this state manages
+    /// without having created it (a restored one, or one a host inserted)
+    /// holds an id of the form temporary councils own and is no council's.
+    ///
+    /// No create makes such a mob, but a release that did not reserve the
+    /// form could, and a host can still build one itself. It is kept as it
+    /// is: nothing here refuses, changes or hides it. A council's own mob
+    /// says nothing: its record names this incarnation, or names none yet
+    /// while the council is unfinished. A council store that cannot be read
+    /// says nothing either.
+    async fn note_reserved_form_mob(
+        &self,
+        mob_id: &MobId,
+        incarnation: meerkat_core::service::MobIncarnationId,
+        origin: &'static str,
+    ) {
+        use meerkat_mob::temporary_council::{
+            TemporaryCouncilId, TemporaryCouncilMobCustody, is_temporary_council_mob_id,
+        };
+        if !is_temporary_council_mob_id(mob_id) {
+            return;
+        }
+        if let Some(council_id) = TemporaryCouncilId::of_temporary_mob_id(mob_id) {
+            match self.temporary_council_store().load(&council_id).await {
+                Ok(None) => {}
+                Ok(Some(record)) => {
+                    let council_owns = match record.temporary_mob_custody {
+                        Some(TemporaryCouncilMobCustody::Created { incarnation: own }) => {
+                            own == incarnation
+                        }
+                        Some(TemporaryCouncilMobCustody::NotCreated) => false,
+                        // The record cannot name its mob: while the council
+                        // is unfinished the mob may be its own.
+                        Some(_) | None => record.is_unfinished(),
+                    };
+                    if council_owns {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        mob_id = %mob_id,
+                        error = %error,
+                        "council custody could not be read for a mob under the council id form"
+                    );
+                    return;
+                }
+            }
+        }
+        if !self
+            .reserved_form_mobs_noted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(mob_id.clone())
+        {
+            return;
+        }
+        tracing::warn!(
+            mob_id = %mob_id,
+            origin,
+            "this mob's id has the form reserved for temporary councils ('council--...') and no \
+             council owns the mob; it keeps loading and running as an ordinary mob, but no mob \
+             can be created under this id again, and no council can be convened under the \
+             matching council id while it exists"
+        );
+    }
+
     /// Schedule the automatic post-restore council sweep: recovery, the
     /// detached-council re-link, and a retry after the lease of every record
     /// a previous process's claim still held (see [`crate::council_relink`]).
@@ -3726,7 +3835,10 @@ impl MobMcpState {
     /// gets a [`MobCreateRequest`] and answers `Ok(())` to let the create
     /// proceed or `Err(reason)` to refuse it. Every create path asks it: an
     /// agent's `mob_create`, the implicit delegation mob, a temporary
-    /// council, a host's definition or mobpack create. Restoring a persisted
+    /// council (whose request names the council and, when an agent's
+    /// `council` call convened it, that agent's session:
+    /// [`MobCreateRequest::council`]), a host's definition or mobpack
+    /// create. Restoring a persisted
     /// mob creates nothing and never asks it, and neither does a handle a
     /// host registers itself ([`Self::mob_insert_handle`],
     /// [`Self::try_mob_insert_handle`]).
@@ -3770,10 +3882,28 @@ impl MobMcpState {
         })
     }
 
-    /// Ask the host's create hook, if one is bound, whether the mob
-    /// `request` describes may be created. Runs before anything of the mob
-    /// exists; see [`Self::set_before_create`].
-    async fn admit_create(&self, request: MobCreateRequest) -> Result<(), MobError> {
+    /// Admit or refuse the create `request` describes, before anything of
+    /// the mob exists. Every create of this state passes here, and no
+    /// restore or host insert does.
+    ///
+    /// First the reserved id form: an id of the form temporary councils own
+    /// is refused unless the create is a council's own (`reserved_id_use`).
+    /// Then the host's create hook, if one is bound; see
+    /// [`Self::set_before_create`].
+    async fn admit_create(
+        &self,
+        request: MobCreateRequest,
+        reserved_id_use: ReservedMobIdUse,
+    ) -> Result<(), MobError> {
+        if reserved_id_use == ReservedMobIdUse::Ordinary
+            && meerkat_mob::temporary_council::is_temporary_council_mob_id(&request.mob_id)
+        {
+            return Err(
+                meerkat_mob::temporary_council::reserved_temporary_council_mob_id_refusal(
+                    &request.mob_id,
+                ),
+            );
+        }
         let Some(hook) = self.before_create.get() else {
             return Ok(());
         };
@@ -4828,6 +4958,7 @@ impl MobMcpState {
         on_managed: Option<MemberExternalToolsOnManaged>,
     ) -> Result<MobId, MobError> {
         let mob_id = handle.definition().id.clone();
+        let incarnation = handle.incarnation();
         let refused = {
             let _moves = self.set_moves.write().await;
             let refused = {
@@ -4874,6 +5005,10 @@ impl MobMcpState {
             let _ = handle.destroy().await;
             return Err(error);
         }
+        // A stored mob is restored whatever its id: one under the council
+        // id form that no council owns is only named to the operator. Boxed:
+        // the read of council custody stays out of the restore's frame.
+        Box::pin(self.note_reserved_form_mob(&mob_id, incarnation, "restore")).await;
         Ok(mob_id)
     }
 
@@ -5895,9 +6030,16 @@ impl MobMcpState {
         &self,
         definition: MobDefinition,
     ) -> Result<MobId, MobError> {
-        self.mob_create_definition_inner(definition, None, None, None)
-            .await
-            .map(|created| created.mob_id)
+        self.mob_create_definition_inner(
+            definition,
+            None,
+            None,
+            None,
+            ReservedMobIdUse::Ordinary,
+            None,
+        )
+        .await
+        .map(|created| created.mob_id)
     }
 
     /// [`Self::mob_create_definition`] whose members build with
@@ -5911,9 +6053,16 @@ impl MobMcpState {
         definition: MobDefinition,
         member_external_tools: meerkat_mob::ExternalToolsProvider,
     ) -> Result<MobId, MobError> {
-        self.mob_create_definition_inner(definition, None, Some(member_external_tools), None)
-            .await
-            .map(|created| created.mob_id)
+        self.mob_create_definition_inner(
+            definition,
+            None,
+            Some(member_external_tools),
+            None,
+            ReservedMobIdUse::Ordinary,
+            None,
+        )
+        .await
+        .map(|created| created.mob_id)
     }
 
     /// [`Self::mob_create_definition`] for a creator that will hold the
@@ -5934,6 +6083,8 @@ impl MobMcpState {
             None,
             member_external_tools,
             Some(claim_verifier),
+            ReservedMobIdUse::Ordinary,
+            None,
         )
         .await
         .map(|created| created.mob_id)
@@ -6093,11 +6244,15 @@ impl MobMcpState {
         }
         // The host admits or refuses the create before anything of the mob
         // exists. A mobpack is the host's own create: no owner session.
-        self.admit_create(MobCreateRequest {
-            mob_id: mob_id.clone(),
-            owner_bridge_session_id: None,
-            implicit_delegation_mob: false,
-        })
+        self.admit_create(
+            MobCreateRequest {
+                mob_id: mob_id.clone(),
+                owner_bridge_session_id: None,
+                implicit_delegation_mob: false,
+                council: None,
+            },
+            ReservedMobIdUse::Ordinary,
+        )
         .await?;
         let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
         let (member_external_tools, on_managed) = self.member_external_tools_for(&mob_id, None);
@@ -6161,6 +6316,9 @@ impl MobMcpState {
     /// for it (`MobMcpState::session_is_recorded_creator`). Only a session's
     /// own create with its create capability (the agent mob tools'
     /// `mob_create`) makes it the creator whose grant is re-derived.
+    ///
+    /// The mob is no temporary council's: the create hook is told
+    /// `council: None` ([`MobCreateRequest::council`]).
     #[doc(hidden)]
     pub async fn mob_create_definition_with_owner_bridge_session(
         &self,
@@ -6183,6 +6341,10 @@ impl MobMcpState {
     /// [`Self::mob_create_definition_with_owner_bridge_session`] made by
     /// `caller`, answering the incarnation of the mob this create built: the
     /// only incarnation a mob operator grant for the create may name.
+    ///
+    /// The mob is no temporary council's ([`MobCreateRequest::council`] is
+    /// `None`): a council creates its mob through
+    /// [`Self::create_temporary_council_mob`] alone.
     pub(crate) async fn create_mob_for_owner_bridge_session(
         &self,
         definition: MobDefinition,
@@ -6201,6 +6363,46 @@ impl MobMcpState {
             )),
             None,
             None,
+            ReservedMobIdUse::Ordinary,
+            None,
+        )
+        .await
+    }
+
+    /// A temporary council's create of its own mob: the one create that
+    /// makes a mob under an id of the council form, and only under the id
+    /// `council_id` derives. Otherwise it is the host's create for a session
+    /// of its own that
+    /// [`Self::mob_create_definition_with_owner_bridge_session`] makes. It
+    /// answers the incarnation the create minted, which the council records
+    /// as the only mob it may seat in and clean up.
+    ///
+    /// It is also the one create that names a council to the host's create
+    /// hook ([`MobCreateRequest::council`]): the origin is built here, from
+    /// the council's id and `convener_session_id`, which the coordinator
+    /// reads from the council's durable record.
+    pub(crate) async fn create_temporary_council_mob(
+        &self,
+        council_id: &meerkat_mob::temporary_council::TemporaryCouncilId,
+        convener_session_id: Option<SessionId>,
+        definition: MobDefinition,
+    ) -> Result<CreatedMob, MobError> {
+        if definition.id != council_id.temporary_mob_id() {
+            return Err(MobError::Internal(format!(
+                "temporary council {council_id} does not create a mob under the id '{}'",
+                definition.id
+            )));
+        }
+        self.mob_create_definition_inner(
+            definition,
+            Some((SessionId::new(), false, false, SessionCreateCaller::Host)),
+            None,
+            None,
+            ReservedMobIdUse::TemporaryCouncil,
+            Some(MobCreateCouncilOrigin {
+                council_id: council_id.clone(),
+                convener_session_id,
+            }),
         )
         .await
     }
@@ -6211,6 +6413,8 @@ impl MobMcpState {
         owner_bridge_session_authority: Option<(SessionId, bool, bool, SessionCreateCaller)>,
         member_external_tools: Option<meerkat_mob::ExternalToolsProvider>,
         claim_verifier: Option<meerkat_mob::MobClaimVerifier>,
+        reserved_id_use: ReservedMobIdUse,
+        council: Option<MobCreateCouncilOrigin>,
     ) -> Result<CreatedMob, MobError> {
         // (b) gate, ADJ-P5-11: no per-mob grant can authorize creating a
         // mob that does not exist yet.
@@ -6235,6 +6439,8 @@ impl MobMcpState {
                             owner_bridge_session_authority,
                             member_external_tools,
                             claim_verifier,
+                            reserved_id_use,
+                            council,
                         )
                         .await
                 })
@@ -6246,6 +6452,8 @@ impl MobMcpState {
             owner_bridge_session_authority,
             member_external_tools,
             claim_verifier,
+            reserved_id_use,
+            council,
         )
         .await
     }
@@ -6278,6 +6486,8 @@ impl MobMcpState {
         owner_bridge_session_authority: Option<(SessionId, bool, bool, SessionCreateCaller)>,
         member_external_tools: Option<meerkat_mob::ExternalToolsProvider>,
         claim_verifier: Option<meerkat_mob::MobClaimVerifier>,
+        reserved_id_use: ReservedMobIdUse,
+        council: Option<MobCreateCouncilOrigin>,
     ) -> Result<CreatedMob, MobError> {
         self.hydrate_definition_skill_sources(&mut definition)
             .await?;
@@ -6314,20 +6524,25 @@ impl MobMcpState {
         // exists, told what this path knows: the owner session and whether
         // this is that session's implicit delegation mob. Only the implicit
         // path sets the flag, and only under the id it derives from the
-        // owner session does it count.
-        self.admit_create(MobCreateRequest {
-            mob_id: mob_id.clone(),
-            owner_bridge_session_id: owner_bridge_session_authority
-                .as_ref()
-                .map(|(owner_bridge_session_id, _, _, _)| owner_bridge_session_id.clone()),
-            implicit_delegation_mob: owner_bridge_session_authority.as_ref().is_some_and(
-                |(owner_bridge_session_id, _, implicit_delegation_mob, _)| {
-                    *implicit_delegation_mob
-                        && MobDefinition::implicit(&owner_bridge_session_id.to_string(), "").id
-                            == mob_id
-                },
-            ),
-        })
+        // owner session does it count. Only a temporary council's own
+        // create names a council.
+        self.admit_create(
+            MobCreateRequest {
+                mob_id: mob_id.clone(),
+                owner_bridge_session_id: owner_bridge_session_authority
+                    .as_ref()
+                    .map(|(owner_bridge_session_id, _, _, _)| owner_bridge_session_id.clone()),
+                implicit_delegation_mob: owner_bridge_session_authority.as_ref().is_some_and(
+                    |(owner_bridge_session_id, _, implicit_delegation_mob, _)| {
+                        *implicit_delegation_mob
+                            && MobDefinition::implicit(&owner_bridge_session_id.to_string(), "").id
+                                == mob_id
+                    },
+                ),
+                council,
+            },
+            reserved_id_use,
+        )
         .await?;
         let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
         let child = owner_bridge_session_authority.as_ref().is_some_and(
@@ -6458,6 +6673,7 @@ impl MobMcpState {
         handle: MobHandle,
     ) -> Result<(), MobError> {
         let _admission = self.admit("mob insert")?;
+        let incarnation = handle.incarnation();
         {
             let mut mobs = self.mobs.write().await;
             if self.destroy_cleanup_owed(&mob_id) {
@@ -6471,6 +6687,10 @@ impl MobMcpState {
             );
         }
         self.note_mob_set_changed();
+        // A host's own handle is inserted whatever its id (this is also how
+        // a host resumes its mobs): one under the council id form that no
+        // council owns is only named to the operator.
+        Box::pin(self.note_reserved_form_mob(&mob_id, incarnation, "host insert")).await;
         // A host that restores mobs by inserting their handles (Meta) gets
         // the council sweep (when its council store is durable) and the
         // fork_off re-link for each restored mob here.
@@ -19918,6 +20138,141 @@ mod tests {
         );
     }
 
+    /// The council id form is decided in one place for every create: each
+    /// allocation of storage for a new mob follows an `admit_create`, every
+    /// `admit_create` but one is an ordinary create's, and the one that is a
+    /// council's is reached only through `create_temporary_council_mob`,
+    /// which the council coordinator alone calls. A create entry that passes
+    /// itself off as a council's, or a new create that skips the admission,
+    /// fails here.
+    #[test]
+    fn only_a_councils_own_create_may_use_the_council_id_form() {
+        fn shipped(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+            for entry in std::fs::read_dir(dir).expect("read the crate's sources") {
+                let path = entry.expect("a source entry").path();
+                if path.is_dir() {
+                    // A `tests` directory holds test-only module files.
+                    if path.file_name().is_some_and(|name| name == "tests") {
+                        continue;
+                    }
+                    shipped(&path, out);
+                    continue;
+                }
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                if !name.ends_with(".rs") || name == "tests.rs" || name.ends_with("_tests.rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read a source file");
+                let code = source.split("\nmod tests {").next().unwrap_or_default();
+                out.push((path, code.to_string()));
+            }
+        }
+        // Read when the test runs, not when it is compiled: an archived
+        // test runs where the builder's checkout does not exist.
+        let src = std::path::PathBuf::from(
+            std::env::var_os("CARGO_MANIFEST_DIR")
+                .expect("CARGO_MANIFEST_DIR is set for test processes"),
+        )
+        .join("src");
+        let mut sources = Vec::new();
+        shipped(&src, &mut sources);
+        let count = |needle: &str| -> Vec<(String, usize)> {
+            sources
+                .iter()
+                .map(|(path, code)| {
+                    let name = path
+                        .strip_prefix(&src)
+                        .unwrap_or(path)
+                        .display()
+                        .to_string();
+                    (name, code.matches(needle).count())
+                })
+                .filter(|(_, found)| *found > 0)
+                .collect()
+        };
+        let in_lib = |found: usize| vec![("lib.rs".to_string(), found)];
+
+        // Two creates allocate storage for a new mob (a definition's and a
+        // mobpack's), and each is admitted first.
+        assert_eq!(count("self.storage_for_new_mob("), in_lib(2));
+        assert_eq!(count("self.admit_create("), in_lib(2));
+        // Those two are the only places a new mob is built: a create that
+        // built on storage of its own would allocate none here.
+        assert_eq!(count("MobBuilder::new("), in_lib(2));
+        // One entry passes a council's use, and the coordinator alone calls
+        // it.
+        assert_eq!(count("ReservedMobIdUse::TemporaryCouncil"), in_lib(1));
+        let lib = &sources
+            .iter()
+            .find(|(path, _)| path == &src.join("lib.rs"))
+            .expect("the crate root is shipped code")
+            .1;
+        let door = lib
+            .find("pub(crate) async fn create_temporary_council_mob(")
+            .expect("the council's create entry");
+        let door_end = door + lib[door..].find("\n    }\n").expect("the entry ends");
+        let council_use = lib
+            .find("ReservedMobIdUse::TemporaryCouncil")
+            .expect("the council's use");
+        assert!(
+            (door..door_end).contains(&council_use),
+            "the council's use is passed by the council's create entry only"
+        );
+        assert_eq!(
+            count(".create_temporary_council_mob("),
+            vec![("temporary_council.rs".to_string(), 1)],
+            "only the council coordinator creates a mob under the council id form"
+        );
+        // The same entry is the one place a create is told to be a council's:
+        // a council origin is built once, there, and every other create
+        // passes none.
+        assert_eq!(count("MobCreateCouncilOrigin {"), in_lib(2));
+        assert_eq!(count("Some(MobCreateCouncilOrigin {"), in_lib(1));
+        let council_origin = lib
+            .find("Some(MobCreateCouncilOrigin {")
+            .expect("the council origin");
+        assert!(
+            (door..door_end).contains(&council_origin),
+            "a council origin is built by the council's create entry only"
+        );
+    }
+
+    /// The dispatcher's `mob_create` makes no ordinary mob under an id of the
+    /// form temporary councils own: the call fails naming the reserved
+    /// identifier, and no mob is managed under the id. One hyphen is an
+    /// ordinary id.
+    #[tokio::test]
+    async fn the_dispatchers_mob_create_refuses_an_id_of_the_council_form() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
+        let d = MobMcpDispatcher::new(state.clone());
+        let definition = |id: &str| json!({"definition":{"id":id,"profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}});
+
+        let error = call_tool_err(&d, "mob_create", definition("council--from-a-dispatcher")).await;
+        let text = error.to_string();
+        assert!(
+            text.contains("reserved_system_identifier")
+                && text.contains("council--from-a-dispatcher"),
+            "the refusal names the reserved id: {text}"
+        );
+        assert!(
+            state
+                .handle_for(&MobId::from("council--from-a-dispatcher"))
+                .await
+                .is_err(),
+            "no mob is created"
+        );
+
+        let created = call_tool(&d, "mob_create", definition("council-from-a-dispatcher")).await;
+        assert_eq!(created["mob_id"], "council-from-a-dispatcher");
+    }
+
     /// Every managed-set entry is built by the one helper that sets the
     /// host-insert latch, and only `try_mob_insert_handle` inserts as the
     /// host. An insert path that builds its entry itself, or a second
@@ -24021,6 +24376,17 @@ mod tests {
             )
             .await
             .expect("the hook admits the flagged create");
+        // A mobpack is the host's own create too.
+        let pack = state
+            .mob_create_from_mobpack(
+                explicit_definition("admitted-pack"),
+                BTreeMap::new(),
+                meerkat_mob::MobDefinitionSourceIdentity::mobpack("a".repeat(64), Vec::new()),
+            )
+            .await
+            .expect("the hook admits the mobpack create");
+        // None of these is a temporary council's mob: no create but a
+        // council's own names a council.
         assert_eq!(
             *asked
                 .lock()
@@ -24030,24 +24396,51 @@ mod tests {
                     mob_id: refused_id,
                     owner_bridge_session_id: None,
                     implicit_delegation_mob: false,
+                    council: None,
                 },
                 MobCreateRequest {
                     mob_id: child,
                     owner_bridge_session_id: Some(owner.clone()),
                     implicit_delegation_mob: false,
+                    council: None,
                 },
                 MobCreateRequest {
                     mob_id: implicit,
                     owner_bridge_session_id: Some(owner.clone()),
                     implicit_delegation_mob: true,
+                    council: None,
                 },
                 MobCreateRequest {
                     mob_id: flagged,
                     owner_bridge_session_id: Some(owner),
                     implicit_delegation_mob: false,
+                    council: None,
+                },
+                MobCreateRequest {
+                    mob_id: pack,
+                    owner_bridge_session_id: None,
+                    implicit_delegation_mob: false,
+                    council: None,
                 },
             ]
         );
+    }
+
+    /// A create request is built by the create path and by nothing else:
+    /// neither it nor the council origin it carries can be decoded from a
+    /// wire form, so no caller of any surface can hand one in.
+    #[test]
+    fn a_create_request_cannot_be_decoded_from_a_wire_form() {
+        trait NotDecodable<Marker> {
+            fn pinned() {}
+        }
+        impl<T: ?Sized> NotDecodable<()> for T {}
+        struct Decodable;
+        impl<T: serde::de::DeserializeOwned> NotDecodable<Decodable> for T {}
+        // Each line stops compiling, its marker ambiguous, once the type
+        // can be deserialized.
+        <MobCreateRequest as NotDecodable<_>>::pinned();
+        <MobCreateCouncilOrigin as NotDecodable<_>>::pinned();
     }
 
     /// The create hook fails closed: a panic while it is called, or in the

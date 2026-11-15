@@ -17668,6 +17668,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn temporary_council_convener_survives_insert_load_and_commit() {
+        let (_dir, store) = sqlite_temporary_council_store();
+        temporary_council_contract::convener_survives_insert_load_and_commit(&store).await;
+    }
+
+    /// The council row is plain JSON with no digest over it: a row as an
+    /// earlier release wrote it (no `convener` key, no
+    /// `temporary_mob_custody` key) loads as a council with no convener that
+    /// names no mob of its own, and a key this release does not know is
+    /// ignored. Everything else in the row is read as stored.
+    #[tokio::test]
+    async fn temporary_council_row_without_the_new_keys_and_with_an_unknown_key_loads() {
+        let (_dir, path) = temp_db_path();
+        let _stores = SqliteMobStores::open(&path).expect("open");
+        let store = SqliteTemporaryCouncilStore::open(&path).expect("open council store");
+        let mut record = temporary_council_contract::record("older-row");
+        record.convener = Some(crate::temporary_council::TemporaryCouncilConvener::new(
+            meerkat_core::SessionId::new(),
+        ));
+        let stored = store.insert_new(&record).await.expect("insert");
+        {
+            let conn = open_connection(&path).expect("raw connection");
+            let bytes: Vec<u8> = conn
+                .query_row(
+                    "SELECT record_json FROM mob_temporary_councils WHERE council_id = ?1",
+                    params![record.council_id.as_str()],
+                    |row| row.get(0),
+                )
+                .expect("read the stored row");
+            let mut row: serde_json::Value = serde_json::from_slice(&bytes).expect("row json");
+            let object = row.as_object_mut().expect("the row is an object");
+            assert!(
+                object.remove("convener").is_some(),
+                "the stored row carries the convener key"
+            );
+            assert!(
+                object.remove("temporary_mob_custody").is_some(),
+                "the stored row carries the custody key"
+            );
+            object.insert(
+                "a_key_of_a_later_release".to_string(),
+                serde_json::json!({ "anything": true }),
+            );
+            let changed = conn
+                .execute(
+                    "UPDATE mob_temporary_councils SET record_json = ?1 WHERE council_id = ?2",
+                    params![
+                        serde_json::to_vec(&row).expect("encode the row"),
+                        record.council_id.as_str()
+                    ],
+                )
+                .expect("rewrite the stored row");
+            assert_eq!(changed, 1);
+        }
+        let loaded = store
+            .load(&record.council_id)
+            .await
+            .expect("load")
+            .expect("present");
+        let mut expected = stored;
+        expected.convener = None;
+        expected.temporary_mob_custody = None;
+        assert_eq!(loaded, expected);
+    }
+
+    #[tokio::test]
     async fn temporary_council_shares_the_realm_custody_database_with_capabilities() {
         let (_dir, path) = temp_db_path();
         let stores = SqliteMobStores::open(&path).expect("open");

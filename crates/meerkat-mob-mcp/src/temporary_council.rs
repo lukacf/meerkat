@@ -68,12 +68,12 @@ use meerkat_mob::temporary_council::{
     TEMPORARY_COUNCIL_FINGERPRINT_VERSION, TemporaryCouncilAcquisition,
     TemporaryCouncilArtifactClaim, TemporaryCouncilCapabilityProvenance,
     TemporaryCouncilCleanupDebt, TemporaryCouncilCleanupReceipt, TemporaryCouncilCleanupStatus,
-    TemporaryCouncilDurability, TemporaryCouncilExchangeOutcome, TemporaryCouncilExchangeReceipt,
-    TemporaryCouncilExitReason, TemporaryCouncilId, TemporaryCouncilJobBinding,
-    TemporaryCouncilMergeOutcome, TemporaryCouncilMergePolicyKind,
-    TemporaryCouncilParticipantCustody, TemporaryCouncilParticipantProvenance,
-    TemporaryCouncilResult, TemporaryCouncilSelectedExchange,
-    TemporaryCouncilStructuredContractIdentity,
+    TemporaryCouncilConvener, TemporaryCouncilDurability, TemporaryCouncilExchangeOutcome,
+    TemporaryCouncilExchangeReceipt, TemporaryCouncilExitReason, TemporaryCouncilId,
+    TemporaryCouncilJobBinding, TemporaryCouncilMergeOutcome, TemporaryCouncilMergePolicyKind,
+    TemporaryCouncilMobCustody, TemporaryCouncilParticipantCustody,
+    TemporaryCouncilParticipantProvenance, TemporaryCouncilResult,
+    TemporaryCouncilSelectedExchange, TemporaryCouncilStructuredContractIdentity,
 };
 use meerkat_mob::{
     AgentIdentity, MobDefinition, MobError, MobHandle, MobId, MobStoreError, ProfileBinding,
@@ -1219,21 +1219,30 @@ impl TemporaryCouncilCoordinator {
     /// absolute deadline and performs cleanup. Presenting the same id with the
     /// same request joins that task or replays its sealed result; presenting a
     /// different request under a bound id is rejected.
+    ///
+    /// A council run through this entry has no convener
+    /// ([`TemporaryCouncilRecord::convener`]): only the agent-facing
+    /// `council` tool records one, from the session its surface is bound to.
     pub async fn run(
         &self,
         request: TemporaryCouncilRequest,
     ) -> Result<TemporaryCouncilOutcome, TemporaryCouncilError> {
-        self.run_with_host_bootstrap(request, TemporaryCouncilAttempt::default(), None)
+        self.run_with_host_bootstrap(request, TemporaryCouncilAttempt::default(), None, None)
             .await
     }
 
     /// [`Self::run`] for a convener admitted to each participant's source
     /// mob at `sources`: a participant whose source mob is another
     /// incarnation by its seating is refused.
+    ///
+    /// `convener` is the session the `council` tool's surface is bound to. A
+    /// NEW council records it with its first durable write; a replay or a
+    /// joined call leaves an existing record's convener as it is.
     pub(crate) async fn run_admitted(
         &self,
         request: TemporaryCouncilRequest,
         sources: TemporaryCouncilAdmittedSources,
+        convener: TemporaryCouncilConvener,
     ) -> Result<TemporaryCouncilOutcome, TemporaryCouncilError> {
         self.run_with_host_bootstrap(
             request,
@@ -1242,6 +1251,7 @@ impl TemporaryCouncilCoordinator {
                 admitted_sources: sources,
             },
             None,
+            Some(convener),
         )
         .await
     }
@@ -1253,22 +1263,28 @@ impl TemporaryCouncilCoordinator {
     /// host can still deliver the sealed (or typed interrupted) outcome to
     /// the convener; see [`crate::council_relink`]. A replay or a joined call
     /// leaves an existing record's binding as it is.
+    ///
+    /// Like [`Self::run`], this entry records no convener: the session `job`
+    /// names receives the outcome and is not recorded as who convened the
+    /// council.
     pub async fn run_detached(
         &self,
         request: TemporaryCouncilRequest,
         job: TemporaryCouncilJobBinding,
     ) -> Result<TemporaryCouncilOutcome, TemporaryCouncilError> {
-        self.run_with_host_bootstrap(request, TemporaryCouncilAttempt::default(), Some(job))
+        self.run_with_host_bootstrap(request, TemporaryCouncilAttempt::default(), Some(job), None)
             .await
     }
 
     /// [`Self::run_detached`] for a convener admitted to each participant's
-    /// source mob at `sources` (see [`Self::run_admitted`]).
+    /// source mob at `sources`, recording `convener` as
+    /// [`Self::run_admitted`] does.
     pub(crate) async fn run_detached_admitted(
         &self,
         request: TemporaryCouncilRequest,
         job: TemporaryCouncilJobBinding,
         sources: TemporaryCouncilAdmittedSources,
+        convener: TemporaryCouncilConvener,
     ) -> Result<TemporaryCouncilOutcome, TemporaryCouncilError> {
         self.run_with_host_bootstrap(
             request,
@@ -1277,6 +1293,7 @@ impl TemporaryCouncilCoordinator {
                 admitted_sources: sources,
             },
             Some(job),
+            Some(convener),
         )
         .await
     }
@@ -1288,11 +1305,17 @@ impl TemporaryCouncilCoordinator {
     /// Both belong to the ATTEMPT, not to the council identity: a replay or a
     /// joined caller reuses the owning task's and this one is ignored, and
     /// nothing from it is fingerprinted or persisted.
+    ///
+    /// `detached_job` and `convener` are taken only by a NEW council, into
+    /// its first record: a replay or a joined caller leaves the stored ones
+    /// as they are, and neither is fingerprinted. No later write assigns the
+    /// convener.
     async fn run_with_host_bootstrap(
         &self,
         request: TemporaryCouncilRequest,
         attempt: TemporaryCouncilAttempt,
         detached_job: Option<TemporaryCouncilJobBinding>,
+        convener: Option<TemporaryCouncilConvener>,
     ) -> Result<TemporaryCouncilOutcome, TemporaryCouncilError> {
         // Shape validation only. Deadline resolution is deliberately NOT done
         // here: a replay of a lost response may legitimately arrive after the
@@ -1330,6 +1353,7 @@ impl TemporaryCouncilCoordinator {
                     &validated,
                     attempt,
                     detached_job,
+                    convener,
                     key,
                     owner_tx.clone(),
                     completion.clone(),
@@ -1374,11 +1398,13 @@ impl TemporaryCouncilCoordinator {
     }
 
     /// Admission body for a caller that owns the process-local reservation.
+    #[allow(clippy::too_many_arguments)]
     async fn admit_owned(
         &self,
         validated: &ValidatedRequest,
         attempt: TemporaryCouncilAttempt,
         detached_job: Option<TemporaryCouncilJobBinding>,
+        convener: Option<TemporaryCouncilConvener>,
         key: String,
         tx: tokio::sync::watch::Sender<Option<CouncilPublish>>,
         rx: tokio::sync::watch::Receiver<Option<CouncilPublish>>,
@@ -1419,6 +1445,9 @@ impl TemporaryCouncilCoordinator {
                     council_id: council_id.clone(),
                     request_fingerprint: validated.fingerprint.clone(),
                     temporary_mob_id: validated.temporary_mob_id.clone(),
+                    // No create was issued yet: a mob found under the id
+                    // before this council's own create is not its mob.
+                    temporary_mob_custody: Some(TemporaryCouncilMobCustody::NotCreated),
                     deadline,
                     durability: validated.request.durability,
                     claim_lease_expires_at: now,
@@ -1428,6 +1457,9 @@ impl TemporaryCouncilCoordinator {
                     result: None,
                     cleanup: None,
                     detached_job,
+                    // The one write of the convener: no later commit of
+                    // this record assigns it.
+                    convener,
                     revision: 0,
                     created_at: now,
                     updated_at: now,
@@ -2306,35 +2338,92 @@ impl CouncilRun {
         within_council_deadline(&self.state, self.record.deadline, fut).await
     }
 
+    /// The council's own temporary mob: the mob under the council's mob id
+    /// that runs at the incarnation the record names as created by this
+    /// council. Any other mob under the id (one that was there before, or
+    /// one that took the id after the council's mob was destroyed) is not
+    /// found.
     async fn temporary_handle(&self) -> Result<MobHandle, MobError> {
-        self.state.handle_for(&self.record.temporary_mob_id).await
+        let handle = self.state.handle_for(&self.record.temporary_mob_id).await?;
+        match self.record.temporary_mob_custody {
+            Some(TemporaryCouncilMobCustody::Created { incarnation })
+                if incarnation == handle.incarnation() =>
+            {
+                Ok(handle)
+            }
+            _ => Err(MobError::MobNotFound(self.record.temporary_mob_id.clone())),
+        }
+    }
+
+    /// Create the council's temporary mob, or find the one an earlier
+    /// executor of this record created.
+    ///
+    /// A mob that already holds the id is used only when the record names
+    /// its incarnation as the one this council created. Any other mob under
+    /// the id is left alone and the council ends at seating: it is an
+    /// ordinary mob (stored under the id before the form was reserved, or
+    /// built by a host), or one the record cannot tell from its own.
+    ///
+    /// The intent to create is persisted before the create is issued, so a
+    /// crash in between leaves `Creating` (a mob may exist) and never
+    /// `NotCreated`. The incarnation the create answers is written into the
+    /// record at once and made durable by the record's next commit, which
+    /// precedes every seat.
+    async fn create_temporary_mob(&mut self) -> Result<(), TemporaryCouncilExitReason> {
+        let seating_failed =
+            |detail: String| TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                participant_order: 0,
+                detail,
+            };
+        if let Ok(found) = self.state.handle_for(&self.record.temporary_mob_id).await {
+            return match self.record.temporary_mob_custody {
+                Some(TemporaryCouncilMobCustody::Created { incarnation })
+                    if incarnation == found.incarnation() =>
+                {
+                    Ok(())
+                }
+                _ => Err(seating_failed(format!(
+                    "temporary mob id {} is held by a mob this council did not create",
+                    self.record.temporary_mob_id
+                ))),
+            };
+        }
+        let before = self.record.temporary_mob_custody;
+        self.record.temporary_mob_custody = Some(TemporaryCouncilMobCustody::Creating);
+        if let Err(error) = self.commit().await {
+            // The create was never issued: nothing can exist yet.
+            self.record.temporary_mob_custody = before;
+            return Err(seating_failed(format!(
+                "temporary mob creation intent could not be persisted: {error}"
+            )));
+        }
+        // The temporary mob is an ordinary explicit mob created from the
+        // caller's own definition template, through the one create that may
+        // use the council id form. The host's create hook is told that it is
+        // this council's mob and, from the durable record, who convened the
+        // council.
+        let created = self
+            .state
+            .create_temporary_council_mob(
+                &self.record.council_id,
+                self.record
+                    .convener
+                    .as_ref()
+                    .map(|convener| convener.session_id.clone()),
+                self.validated.definition.clone(),
+            )
+            .await
+            .map_err(|error| seating_failed(format!("temporary mob creation failed: {error}")))?;
+        self.record.temporary_mob_custody = Some(TemporaryCouncilMobCustody::Created {
+            incarnation: created.incarnation.incarnation(),
+        });
+        Ok(())
     }
 
     /// 2. Create the real temporary mob, then acquire and seat each capability.
     async fn seat_participants(&mut self) -> Result<(), TemporaryCouncilExitReason> {
         let mut bound_hosts = BTreeSet::new();
-        // The temporary mob is an ordinary explicit mob created from the
-        // caller's own definition template through the ordinary path.
-        if self
-            .state
-            .handle_for(&self.record.temporary_mob_id)
-            .await
-            .is_err()
-            && let Err(error) = self
-                .state
-                .mob_create_definition_with_owner_bridge_session(
-                    self.validated.definition.clone(),
-                    SessionId::new(),
-                    false,
-                    false,
-                )
-                .await
-        {
-            return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
-                participant_order: 0,
-                detail: format!("temporary mob creation failed: {error}"),
-            });
-        }
+        self.create_temporary_mob().await?;
 
         // Bind the caller-declared hosts BEFORE any seating: a HOST-owned
         // capability is refused on an unbound target before any bridge
@@ -3637,6 +3726,95 @@ fn settled_receipt(state: &MobMcpState) -> TemporaryCouncilCleanupReceipt {
     }
 }
 
+/// What a cleanup finds under the council's temporary mob id.
+enum CouncilMob {
+    /// The council's own mob: cleanup retires its seats and destroys it.
+    Own(MobHandle),
+    /// The council's own mob is not there: it was never created, it is
+    /// destroyed, or the mob under the id is another one.
+    Gone,
+    /// A mob holds the id, and the record can neither call it its own nor
+    /// rule that out. It is left untouched and the council keeps its debt.
+    Unknown,
+    /// The lookup failed.
+    LookupFailed(String),
+}
+
+/// Decide which mob, if any, a cleanup of `record` may act on.
+///
+/// A mob id is free again once its mob is destroyed, and an ordinary mob can
+/// hold an id of the council form (one stored before the form was reserved,
+/// or one a host built itself), so the id never decides. What decides is the
+/// mob's incarnation, the fact its create minted and its handle reports,
+/// against the one the record names as created by this council.
+///
+/// A record that names no incarnation (written by a release that recorded
+/// none, or left `Creating` by a crash between the create and the next
+/// commit) falls back to the id, under two guards. A receipt that already
+/// says the temporary mob is destroyed is believed: whatever holds the id
+/// now is not the council's. Otherwise the mob is the council's only when
+/// it carries the council's own marks: every member of it runs on a session
+/// the record holds for a seat, or it has no member at all.
+async fn council_mob(state: &Arc<MobMcpState>, record: &TemporaryCouncilRecord) -> CouncilMob {
+    let custody = record.temporary_mob_custody;
+    if matches!(custody, Some(TemporaryCouncilMobCustody::NotCreated)) {
+        return CouncilMob::Gone;
+    }
+    let found = match state.handle_for(&record.temporary_mob_id).await {
+        Ok(handle) => handle,
+        Err(MobError::MobNotFound(_)) => return CouncilMob::Gone,
+        Err(error) => return CouncilMob::LookupFailed(error.to_string()),
+    };
+    if let Some(TemporaryCouncilMobCustody::Created { incarnation }) = custody {
+        return if found.incarnation() == incarnation {
+            CouncilMob::Own(found)
+        } else {
+            CouncilMob::Gone
+        };
+    }
+    if record
+        .cleanup
+        .as_ref()
+        .is_some_and(|receipt| receipt.temporary_mob_destroyed)
+    {
+        return CouncilMob::Gone;
+    }
+    if holds_only_council_seats(&found, record).await {
+        CouncilMob::Own(found)
+    } else {
+        CouncilMob::Unknown
+    }
+}
+
+/// Whether every member of `mob` runs on a session `record` holds for one
+/// of its seats (the session a seat resumed, or the fork session of a
+/// capability it acquired). A mob with no member qualifies. Read from the
+/// mob's roster projection: no store read and no actor round trip.
+async fn holds_only_council_seats(mob: &MobHandle, record: &TemporaryCouncilRecord) -> bool {
+    let seat_sessions: BTreeSet<&SessionId> = record
+        .participants
+        .iter()
+        .flat_map(|participant| {
+            participant.seated_session_id.iter().chain(
+                participant
+                    .capability_ref
+                    .as_ref()
+                    .map(ForkedParticipantRef::fork_session_id),
+            )
+        })
+        .collect();
+    for member in mob.list_members_observation_snapshot().await {
+        let known = mob
+            .resolve_bridge_session_id_observation(&member.agent_identity)
+            .await
+            .is_some_and(|session| seat_sessions.contains(&session));
+        if !known {
+            return false;
+        }
+    }
+    true
+}
+
 async fn cleanup_council(
     state: &Arc<MobMcpState>,
     record: &TemporaryCouncilRecord,
@@ -3660,16 +3838,32 @@ async fn cleanup_council(
     let mut debts = Vec::new();
     let mut budget_exhausted = false;
 
-    let (temporary, temporary_lookup_error) = match state.handle_for(&record.temporary_mob_id).await
-    {
-        Ok(handle) => (Some(handle), None),
-        Err(MobError::MobNotFound(_)) => (None, None),
-        Err(error) => (None, Some(error.to_string())),
+    // Everything below that touches a mob touches the council's own, and no
+    // other mob that holds the same id.
+    let (temporary, temporary_lookup_error, unknown_mob) = match council_mob(state, record).await {
+        CouncilMob::Own(handle) => (Some(handle), None, false),
+        CouncilMob::Gone => (None, None, false),
+        CouncilMob::Unknown => (None, None, true),
+        CouncilMob::LookupFailed(error) => (None, Some(error), false),
     };
     if let Some(error) = temporary_lookup_error.as_ref() {
         debts.push(TemporaryCouncilCleanupDebt {
             subject: format!("mob:{}", record.temporary_mob_id),
             detail: format!("temporary mob lookup failed: {error}"),
+        });
+    }
+    if unknown_mob {
+        tracing::warn!(
+            council_id = %record.council_id,
+            mob_id = %record.temporary_mob_id,
+            "a mob with members this council's record does not know holds the council's \
+             temporary mob id; cleanup left it untouched and keeps its debt"
+        );
+        debts.push(TemporaryCouncilCleanupDebt {
+            subject: format!("mob:{}", record.temporary_mob_id),
+            detail: "a mob with members this council's record does not know holds the temporary \
+                     mob id; it was left untouched"
+                .to_string(),
         });
     }
 
@@ -3890,28 +4084,57 @@ async fn cleanup_council(
         }
     }
 
-    let temporary_present = temporary.is_some();
+    // The incarnation of the council's own mob, read from the mob found
+    // above: the only one this cleanup destroys.
+    let own_incarnation = temporary.as_ref().map(MobHandle::incarnation);
     // The destroy drains the temporary mob's database observer, which a
     // handle held here would still own: release it first.
     drop(temporary);
     // A temporary mob this state no longer manages may be one it destroyed
     // whose storage cleanup is still owed. Only that same (console) destroy
-    // continues it; it is never read as the mob being gone.
-    let retained = if temporary_present || temporary_lookup_error.is_some() {
+    // continues it; it is never read as the mob being gone. A council that
+    // never issued its create has no such destroy.
+    let never_created = matches!(
+        record.temporary_mob_custody,
+        Some(TemporaryCouncilMobCustody::NotCreated)
+    );
+    let retained = if own_incarnation.is_some()
+        || temporary_lookup_error.is_some()
+        || unknown_mob
+        || never_created
+    {
         crate::RetiredDestroyLookup::Ordinary
     } else {
         state
             .retired_destroy_lookup(&record.temporary_mob_id, &crate::MobDestroyCaller::Console)
             .await
     };
-    let temporary_mob_destroyed = if temporary_present
-        || matches!(retained, crate::RetiredDestroyLookup::Caller(_))
-    {
+    // A retained destroy is the council's to continue when it destroyed the
+    // incarnation the record names; a record that names none continues the
+    // console's retained destroy under the id, as before.
+    let retained_own = match (&retained, record.temporary_mob_custody) {
+        (
+            crate::RetiredDestroyLookup::Caller(retired),
+            Some(TemporaryCouncilMobCustody::Created { incarnation }),
+        ) => (retired.incarnation == incarnation).then_some(incarnation),
+        (crate::RetiredDestroyLookup::Caller(retired), _) => Some(retired.incarnation),
+        _ => None,
+    };
+    let temporary_mob_destroyed = if let Some(incarnation) = own_incarnation.or(retained_own) {
         // Per-mob storage removal is owned by MobMcpState destroy semantics.
+        // The destroy is admitted for that one incarnation: a mob that took
+        // the id in the meantime is refused, not destroyed.
         match budget_remaining(state, budget) {
             Some(remaining) => {
-                match tokio::time::timeout(remaining, state.mob_destroy(&record.temporary_mob_id))
-                    .await
+                match tokio::time::timeout(
+                    remaining,
+                    state.mob_destroy_for(
+                        &record.temporary_mob_id,
+                        crate::MobDestroyCaller::Console,
+                        Some(incarnation),
+                    ),
+                )
+                .await
                 {
                     Ok(Ok(_)) => true,
                     Ok(Err(error)) => {
@@ -3941,7 +4164,7 @@ async fn cleanup_council(
                 false
             }
         }
-    } else if temporary_lookup_error.is_some() {
+    } else if temporary_lookup_error.is_some() || unknown_mob {
         false
     } else if matches!(retained, crate::RetiredDestroyLookup::OtherCaller) {
         debts.push(TemporaryCouncilCleanupDebt {
@@ -3951,6 +4174,11 @@ async fn cleanup_council(
         });
         false
     } else {
+        // The council's own mob is gone: it was never created, it was
+        // destroyed, or the mob under the id now is another one (which this
+        // cleanup never touched). `handle_for` performs durable restoration
+        // before returning `MobNotFound`, and this state owes no cleanup of
+        // the council's mob, so the absence is authoritative.
         // `handle_for` performs durable restoration before returning
         // `MobNotFound`, and this state owes no cleanup of it; authoritative
         // absence therefore proves the mob was already destroyed or never

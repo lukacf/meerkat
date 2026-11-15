@@ -532,6 +532,11 @@ Security, Upgrade and Changed.
   is not built. Before upgrading, unwire the ones you do not want
   (`meta/cross_mob/unwire`).
 
+- Python Meta SDK: the return type of `build()` and the return or parameter
+  types of twelve `MobHandle` methods are now visible to type checkers; a
+  project that runs mypy or pyright may report errors that were hidden
+  before. Nothing changes at run time.
+
 - No backfill is done. A timeline frame stored without member attributes is
   shown to administrators only, whichever release through 0.9.14 stored it
   and whatever its kind: member memory events, spawn initial messages,

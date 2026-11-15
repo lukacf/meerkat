@@ -22,6 +22,15 @@ from urllib.error import HTTPError, URLError
 
 if TYPE_CHECKING:
     from .identity_first_models import RegisteredSpec
+    # Named by annotations below; the methods import them when they run.
+    from .types import (
+        EventQuery,
+        HelperResult,
+        MobRun,
+        MobRunSnapshot,
+        PersistedEvent,
+        RichMemberSnapshot,
+    )
 
 _log = logging.getLogger("meerkat_meta")
 

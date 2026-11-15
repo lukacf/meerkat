@@ -141,6 +141,19 @@ All notable changes to the Python SDK are documented here.
   question allows it) or its wire form; `gating_answer` raises `ValueError`
   without at least one. `gating_pending()` does not list question sets.
 
+- A type checker now sees what `MetaBuilder.build()` returns. Its annotation
+  named `MetaRuntime` without importing it for type checkers, so the result
+  of `await Meta.builder()....build()` was unknown to pyright and mypy and
+  no call on the runtime was checked, although the package is typed
+  (`py.typed`). The same held for the return or parameter types of twelve
+  `MobHandle` methods: `query_events`, `query_mob_events`,
+  `subscribe_mob_events`, `member_status`, `spawn_helper`, `fork_helper`,
+  `attach_session`, `flow_status`, `list_runs`, `collect_completed`,
+  `wait_one` and `wait_all`. Nothing changes at run time. Code that was
+  never checked is checked now, so a type checker can report errors it
+  did not report before. Present in 0.9.14 as well (read from the released
+  source).
+
 ## 0.9.14
 
 No SDK API changes; released with Meta 0.9.14.

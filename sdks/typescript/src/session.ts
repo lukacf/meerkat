@@ -150,10 +150,14 @@ export class Session {
    * (the input was queued and is now withdrawn: its terminal is `cancelled`
    * and no run will take it), `not_queued` (a run holds it: nothing was
    * touched and the run is not interrupted) or `already_terminal`. An input
-   * this session does not hold is refused as invalid params.
+   * this session does not hold is refused as invalid params. Throws
+   * `INVALID_ARGS`, before anything is sent, unless the selector names
+   * exactly one of `inputId` and `idempotencyKey`.
    */
   async recallInput(
-    selector: { inputId: string } | { idempotencyKey: string },
+    selector:
+      | { inputId: string; idempotencyKey?: never }
+      | { idempotencyKey: string; inputId?: never },
   ): Promise<RecallInputResult> {
     return this._client._recallInput(this._id, selector);
   }
@@ -443,10 +447,14 @@ export class DeferredSession {
    * (the input was queued and is now withdrawn: its terminal is `cancelled`
    * and no run will take it), `not_queued` (a run holds it: nothing was
    * touched and the run is not interrupted) or `already_terminal`. An input
-   * this session does not hold is refused as invalid params.
+   * this session does not hold is refused as invalid params. Throws
+   * `INVALID_ARGS`, before anything is sent, unless the selector names
+   * exactly one of `inputId` and `idempotencyKey`.
    */
   async recallInput(
-    selector: { inputId: string } | { idempotencyKey: string },
+    selector:
+      | { inputId: string; idempotencyKey?: never }
+      | { idempotencyKey: string; inputId?: never },
   ): Promise<RecallInputResult> {
     return this._client._recallInput(this._id, selector);
   }

@@ -488,7 +488,10 @@ them.
     resolves to the `WireQueuedInputRecall` JSON.
   - SDKs: Python `Session.recall_input(input_id=...)` or
     `(idempotency_key=...)`, TypeScript `session.recallInput({ inputId })` or
-    `({ idempotencyKey })`, Web `session.recallInput(inputId)`. Each
+    `({ idempotencyKey })`, Web `session.recallInput(inputId)`. The Python
+    and TypeScript selectors name exactly one of the two: both, or neither,
+    is refused before anything is sent (Python `ValueError`, TypeScript
+    `MeerkatError` code `INVALID_ARGS`). Each
     validates the answer on its `outcome` discriminator. The list of
     outcomes can grow: an outcome an SDK does not know is returned as it
     is, with no error, and a caller keeps it as it is. On `not_queued`,

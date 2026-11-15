@@ -2452,6 +2452,25 @@ fn candidate_launch_refused(method: &str, response_id: Value) -> JsonRpcResponse
     }
 }
 
+/// Whether the stdio dispatch gives `method` to the live arm: every
+/// `meta/live/*` method, and on an `openai-live` build the WebRTC answer
+/// method `live/webrtc/answer`, the one live method outside `meta/`.
+fn is_stdio_live_method(method: &str) -> bool {
+    method.starts_with("meta/live/")
+        || cfg!(feature = "openai-live") && method == "live/webrtc/answer"
+}
+
+/// Whether the stdio dispatch gives `method` to the loaded-module arm, as a
+/// call of the module its first segment names: a method with a slash that is
+/// outside `meta/` and is not a live method ([`is_stdio_live_method`]).
+/// `live/webrtc/answer` has a module call's shape, and the exclusion keeps
+/// the module arm from taking it as a call of a module named `live`. The
+/// two arms' guards are disjoint, so their order in the match decides
+/// nothing.
+fn is_stdio_module_method(method: &str) -> bool {
+    method.contains('/') && !method.starts_with("meta/") && !is_stdio_live_method(method)
+}
+
 async fn handle_unified_rpc_json_inner(
     runtime: &UnifiedRuntime,
     runtime_owner: Option<&Arc<UnifiedRuntime>>,
@@ -6744,7 +6763,7 @@ async fn handle_unified_rpc_json_inner(
         }
         // A candidate launch calls no loaded module: a module call is opaque
         // and can act, as a tool call can.
-        method if method.contains('/') && !method.starts_with("meta/") => {
+        method if is_stdio_module_method(method) => {
             if !runtime.speaks_for_composition() {
                 return if is_notification {
                     String::new()
@@ -6800,10 +6819,9 @@ async fn handle_unified_rpc_json_inner(
                 },
             }
         }
-        method
-            if method.starts_with("meta/live/")
-                || cfg!(feature = "openai-live") && method == "live/webrtc/answer" =>
-        {
+        method if is_stdio_live_method(method) => {
+            // A gateway with no live handler answers every live method with
+            // the typed `live_unavailable` refusal.
             match live {
                 None => crate::live_wiring::live_unavailable_response(response_id),
                 Some(live) => {
@@ -10255,6 +10273,119 @@ shell = true
             "a stdio live/webrtc/answer must reach the live answer handler: {response}"
         );
         Ok(())
+    }
+
+    /// The loaded-module arm of the stdio dispatch still takes every other
+    /// method with a slash outside `meta/`, a name under `live/` that is not
+    /// a live method included: with no such module loaded each answers
+    /// `-32601` naming the module.
+    #[tokio::test]
+    async fn stdio_module_calls_still_reach_the_loaded_module_arm()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&temp_dir, "rpc-module-arm").await?;
+        let mut answers = Vec::new();
+        for method in ["calendar/list", "live/status"] {
+            let response: Value = serde_json::from_str(
+                &handle_unified_rpc_json(
+                    &runtime,
+                    &json!({"jsonrpc": "2.0", "id": 3, "method": method, "params": {}}).to_string(),
+                    Duration::from_secs(1),
+                    None,
+                    None,
+                )
+                .await,
+            )?;
+            answers.push(response["error"].clone());
+        }
+        let _ = runtime.mob_handle().stop().await;
+        assert_eq!(
+            answers,
+            [
+                json!({"code": -32601, "message": "Module 'calendar' not loaded"}),
+                json!({"code": -32601, "message": "Module 'live' not loaded"}),
+            ]
+        );
+        Ok(())
+    }
+
+    /// The stdio dispatch gives a method with a slash to one arm only: a
+    /// live method to the live arm, any other method outside `meta/` to the
+    /// loaded-module arm. `live/webrtc/answer` is a live method on an
+    /// `openai-live` build and a module call on a build without it.
+    #[test]
+    fn the_stdio_dispatch_gives_a_live_method_to_the_live_arm_only() {
+        let answer_is_live = cfg!(feature = "openai-live");
+        assert_eq!(
+            super::is_stdio_live_method("live/webrtc/answer"),
+            answer_is_live
+        );
+        assert_eq!(
+            super::is_stdio_module_method("live/webrtc/answer"),
+            !answer_is_live
+        );
+        for method in [
+            "meta/live/open",
+            "meta/live/status",
+            "meta/live/playback_owner/register",
+        ] {
+            assert!(super::is_stdio_live_method(method), "{method}");
+            assert!(!super::is_stdio_module_method(method), "{method}");
+        }
+        for method in [
+            "calendar/list",
+            "live/status",
+            "live/webrtc",
+            "live/webrtc/answer/extra",
+        ] {
+            assert!(super::is_stdio_module_method(method), "{method}");
+            assert!(!super::is_stdio_live_method(method), "{method}");
+        }
+        for method in ["meta/status", "meta/send", "status"] {
+            assert!(!super::is_stdio_module_method(method), "{method}");
+            assert!(!super::is_stdio_live_method(method), "{method}");
+        }
+    }
+
+    /// Source guard: the stdio dispatch decides its loaded-module arm and
+    /// its live arm by the two predicates alone. An inline test of a
+    /// method's slash, or of a live method's name, in the dispatch could
+    /// claim a live method as a module call again.
+    #[test]
+    fn the_stdio_dispatch_guards_its_module_and_live_arms_by_the_predicates() {
+        let source = include_str!("rpc.rs");
+        let start = source
+            .find("\nasync fn handle_unified_rpc_json_inner(")
+            .expect("the stdio dispatch");
+        let rest = &source[start..];
+        // The function ends at its closing brace in the first column.
+        let end = rest.find("\n}\n").expect("the stdio dispatch ends");
+        let dispatch = &rest[..end];
+        assert_eq!(
+            dispatch
+                .matches("method if is_stdio_module_method(method) =>")
+                .count(),
+            1,
+            "the loaded-module arm is guarded by is_stdio_module_method"
+        );
+        assert_eq!(
+            dispatch
+                .matches("method if is_stdio_live_method(method) =>")
+                .count(),
+            1,
+            "the live arm is guarded by is_stdio_live_method"
+        );
+        for inline in [
+            "method.contains('/')",
+            "method.starts_with(\"meta/live/\")",
+            "\"live/webrtc/answer\"",
+        ] {
+            assert!(
+                !dispatch.contains(inline),
+                "the stdio dispatch tests `{inline}` inline; decide it in is_stdio_live_method \
+                 or is_stdio_module_method"
+            );
+        }
     }
 
     /// The console treats frames under `_system` and `__console__` as the

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A `live/webrtc/answer` sent to the stdio gateway of a build with
+  `openai-live` reaches the gateway's live handler. The stdio dispatch
+  gives a method with a slash outside `meta/` to the loaded module its
+  first segment names, and this is the one live method outside `meta/`, so
+  it was taken as a call of a module named `live`: the host got `-32601`
+  "Module 'live' not loaded" with no `data`, the live handler was never
+  called, and a WebRTC live channel could not be answered over stdio. The
+  Python SDK's `live_webrtc_answer` and `live_webrtc_answer_pending` and
+  the TypeScript SDK's `liveWebrtcAnswer` and `liveWebrtcAnswerPending`
+  send this request. Every Meta release had this, from 0.9.0 on. The
+  method now answers as the `meta/live/*` methods do: with the live
+  handler's answer, or with `-32050` `live_unavailable` on a gateway that
+  has no live handler. The Console's own door was not affected: it hands
+  the method to its voice controller and never to this dispatch. Nothing
+  else changes: a candidate launch still refuses the method (`-32047`
+  `candidate_launch`), and a build without `openai-live`, which has no
+  such live method, still treats the name as a module call.
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without

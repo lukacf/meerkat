@@ -7001,6 +7001,269 @@ mod tests {
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
     }
 
+    /// A live handler over `dispatch` alone: no capability, no channel
+    /// custody.
+    #[cfg(feature = "openai-live")]
+    fn scripted_live_rpc_handler(dispatch: LiveRpcDispatch) -> LiveRpcHandler {
+        let custody_read: LiveCustodyRead = Arc::new(
+            |_channel: LiveChannelId,
+             _receipt: String|
+             -> futures::future::BoxFuture<
+                'static,
+                Result<meerkat::surface::ExperimentalLiveChannelCustodyStatus, String>,
+            > {
+                Box::pin(async { Err("a scripted handler holds no channel custody".to_string()) })
+            },
+        );
+        LiveRpcHandler {
+            dispatch,
+            capability_provider: LiveCapabilityProvider::disabled(),
+            custody_read,
+        }
+    }
+
+    /// A live handler whose every method ends as the strict open handler
+    /// ends: it hands the outer RPC writer the custody of the response's
+    /// publication and answers `{"published": true}`, or it answers the
+    /// refusal of a dispatch that has no such writer.
+    #[cfg(feature = "openai-live")]
+    fn open_publication_handler(cleanup_calls: Arc<AtomicUsize>) -> LiveRpcHandler {
+        let dispatch: LiveRpcDispatch = Arc::new(
+            move |_authority: LiveSurfaceAuthority,
+                  _resolved_session: Option<SessionId>,
+                  _canonical_target_identity: Option<String>,
+                  _method: String,
+                  _params: Value,
+                  rpc_id: Value|
+                  -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = JsonRpcResponse> + Send>,
+            > {
+                let cleanup: Arc<dyn LiveOpenPublicationCleanup> =
+                    Arc::new(CountingOpenPublicationCleanup {
+                        calls: Arc::clone(&cleanup_calls),
+                    });
+                Box::pin(async move {
+                    let custody = LiveOpenResponseDeliveryCustody::new(cleanup);
+                    if let Err(error) = retain_live_open_response_delivery(custody).await {
+                        live_error(rpc_id, INTERNAL_ERROR_CODE, error)
+                    } else {
+                        live_success(rpc_id, serde_json::json!({ "published": true }))
+                    }
+                })
+            },
+        );
+        scripted_live_rpc_handler(dispatch)
+    }
+
+    /// One request through the stdio gateway's delivery-aware dispatch, as
+    /// its loop makes it: the answer, printed under `row`, and the delivery
+    /// the loop settles after its write.
+    #[cfg(feature = "openai-live")]
+    async fn stdio_live_request(
+        member: &crate::rpc::IdentityFirstLiveMember,
+        handler: &LiveRpcHandler,
+        row: &str,
+        method: &str,
+        params: Value,
+    ) -> (Value, crate::rpc::SerializedRpcResponseDelivery) {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        })
+        .to_string();
+        let delivery = crate::rpc::handle_unified_rpc_json_with_live_arc_delivery(
+            &member.runtime,
+            &request,
+            std::time::Duration::from_secs(5),
+            None,
+            Some(&member.identity_ctx),
+            Some(handler),
+        )
+        .await;
+        println!("{row}: {}", delivery.response);
+        let answer = serde_json::from_str(&delivery.response).expect("a JSON-RPC answer");
+        (answer, delivery)
+    }
+
+    /// A stdio live `method` whose handler hands the gateway's writer the
+    /// custody of its response's publication: the request is answered with
+    /// the handler's result, and once the writer has written it the
+    /// publication stands (its cleanup never runs). `names_the_member`
+    /// sends the request for an identity-first member, by its `identity`.
+    #[cfg(feature = "openai-live")]
+    async fn stdio_publication_row(row: &str, method: &str, names_the_member: bool) {
+        let member = crate::rpc::identity_first_live_member_for_test(row)
+            .await
+            .expect("an identity-first member");
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let handler = open_publication_handler(Arc::clone(&cleanup_calls));
+        let params = if names_the_member {
+            serde_json::json!({ "identity": member.identity })
+        } else {
+            serde_json::json!({})
+        };
+        let (answer, mut delivery) =
+            stdio_live_request(&member, &handler, row, method, params).await;
+        let settled = delivery.settle_delivery(true).await;
+        let cleanups = cleanup_calls.load(Ordering::SeqCst);
+        let _ = member.runtime.mob_handle().stop().await;
+        assert_eq!(
+            (answer, settled, cleanups),
+            (
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"published": true}}),
+                Ok(()),
+                0
+            ),
+            "{row}: the gateway's writer must hold the publication custody of a stdio {method}"
+        );
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn a_stdio_live_open_naming_no_member_keeps_its_publication_custody() {
+        stdio_publication_row("stdio-live-open-no-member", "meta/live/open", false).await;
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn a_stdio_live_open_for_an_identity_first_member_keeps_its_publication_custody() {
+        stdio_publication_row("stdio-live-open-identity-member", "meta/live/open", true).await;
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn a_stdio_live_webrtc_answer_naming_no_member_keeps_its_publication_custody() {
+        stdio_publication_row("stdio-live-answer-no-member", "live/webrtc/answer", false).await;
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn a_stdio_live_webrtc_answer_for_an_identity_first_member_keeps_its_publication_custody()
+    {
+        stdio_publication_row(
+            "stdio-live-answer-identity-member",
+            "live/webrtc/answer",
+            true,
+        )
+        .await;
+    }
+
+    /// A live handler that ends as the WebRTC answer handler ends, over an
+    /// answer already coordinated with the provider: it hands the outer RPC
+    /// writer the answer's delivery custody and answers its SDP, or it
+    /// answers the refusal of a dispatch that has no such writer.
+    #[cfg(feature = "openai-live-test")]
+    fn answer_delivery_handler(
+        answer: meerkat::surface::CoordinatedLiveWebrtcAnswer,
+    ) -> LiveRpcHandler {
+        let answer = Arc::new(StdMutex::new(Some(answer)));
+        let dispatch: LiveRpcDispatch = Arc::new(
+            move |_authority: LiveSurfaceAuthority,
+                  _resolved_session: Option<SessionId>,
+                  _canonical_target_identity: Option<String>,
+                  _method: String,
+                  _params: Value,
+                  rpc_id: Value|
+                  -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = JsonRpcResponse> + Send>,
+            > {
+                let answer = answer
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                Box::pin(async move {
+                    let Some(answer) = answer else {
+                        return live_error(
+                            rpc_id,
+                            INTERNAL_ERROR_CODE,
+                            "the scripted answer was already given",
+                        );
+                    };
+                    let value = serde_json::json!({ "answer_sdp": answer.answer_sdp });
+                    match retain_live_webrtc_answer_delivery(answer.delivery_custody).await {
+                        Ok(()) => live_success(rpc_id, value),
+                        Err(error) => live_error(rpc_id, INTERNAL_ERROR_CODE, error),
+                    }
+                })
+            },
+        );
+        scripted_live_rpc_handler(dispatch)
+    }
+
+    /// A stdio `live/webrtc/answer` over an answer the receipt answer
+    /// transport gave: the request is answered with the SDP, and once the
+    /// gateway's writer has written it the transport's answer is accepted,
+    /// never rejected. `names_the_member` sends the request as the strict
+    /// SDK call does, for an identity-first member and under its receipts.
+    #[cfg(feature = "openai-live-test")]
+    async fn stdio_receipt_answer_row(row: &str, names_the_member: bool) {
+        let member = crate::rpc::identity_first_live_member_for_test(row)
+            .await
+            .expect("an identity-first member");
+        let (
+            answer,
+            transport,
+            _activator,
+            _committed,
+            _rolled_back,
+            _machine,
+            _session_id,
+            channel_id,
+            readiness,
+        ) = coordinated_receipt_answer_fixture(row).await;
+        let handler = answer_delivery_handler(answer);
+        let params = if names_the_member {
+            serde_json::json!({
+                "identity": member.identity,
+                "channel_id": channel_id.as_str(),
+                "pending_receipt": readiness.pending_receipt(),
+                "readiness_receipt": readiness.readiness_id(),
+                "token": row,
+                "offer_sdp": "receipt-offer",
+            })
+        } else {
+            serde_json::json!({
+                "channel_id": channel_id.as_str(),
+                "token": row,
+                "offer_sdp": "receipt-offer",
+            })
+        };
+        let (answer, mut delivery) =
+            stdio_live_request(&member, &handler, row, "live/webrtc/answer", params).await;
+        let settled = delivery.settle_delivery(true).await;
+        let accepted = transport.accepted.load(Ordering::SeqCst);
+        let rejected = transport.rejected.load(Ordering::SeqCst);
+        let _ = member.runtime.mob_handle().stop().await;
+        assert_eq!(
+            (answer, settled, accepted, rejected),
+            (
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"answer_sdp": "receipt-answer"},
+                }),
+                Ok(()),
+                1,
+                0
+            ),
+            "{row}: the gateway's writer must hold the delivery custody of a stdio WebRTC answer"
+        );
+    }
+
+    #[cfg(feature = "openai-live-test")]
+    #[tokio::test]
+    async fn a_stdio_receipt_answer_naming_no_member_is_accepted_after_the_write() {
+        stdio_receipt_answer_row("stdio-receipt-answer-no-member", false).await;
+    }
+
+    #[cfg(feature = "openai-live-test")]
+    #[tokio::test]
+    async fn a_stdio_receipt_answer_for_an_identity_first_member_is_accepted_after_the_write() {
+        stdio_receipt_answer_row("stdio-receipt-answer-identity-member", true).await;
+    }
+
     #[cfg(feature = "openai-live")]
     fn test_session_id() -> SessionId {
         SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap()

@@ -8503,6 +8503,12 @@ fn serialize_response(response: &JsonRpcResponse) -> String {
 )]
 mod turn_ticket_rpc_tests;
 
+/// Test-only: the identity-first member fixture of this module's tests, for
+/// the live wiring rows that drive a stdio live method through the gateway's
+/// delivery-aware dispatch.
+#[cfg(all(test, feature = "openai-live"))]
+pub(crate) use tests::{IdentityFirstLiveMember, identity_first_live_member_for_test};
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -10159,6 +10165,86 @@ shell = true
                 .build(),
         )
         .await?)
+    }
+
+    /// A gateway runtime with one identity-first member, for a row that
+    /// drives a stdio live method which names the member: `identity` is
+    /// registered with the identity runtime `identity_ctx` carries and bound
+    /// to its roster row's session, so the live arm of the stdio dispatch
+    /// takes the member's identity authority for the request.
+    #[cfg(feature = "openai-live")]
+    pub(crate) struct IdentityFirstLiveMember {
+        pub(crate) runtime: Arc<UnifiedRuntime>,
+        pub(crate) identity_ctx: IdentityFirstContext,
+        pub(crate) identity: &'static str,
+        _state: tempfile::TempDir,
+    }
+
+    /// [`IdentityFirstLiveMember`] in a mob of its own, under `namespace`.
+    #[cfg(feature = "openai-live")]
+    pub(crate) async fn identity_first_live_member_for_test(
+        namespace: &str,
+    ) -> Result<IdentityFirstLiveMember, Box<dyn std::error::Error + Send + Sync>> {
+        let state = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&state, namespace).await?;
+        let identity = "review:live-member";
+        spawn_identity_projection_fixture(
+            &runtime,
+            SpawnMemberSpec::from_wire(
+                "worker".to_string(),
+                identity.to_string(),
+                None,
+                None,
+                None,
+            )
+            .with_labels(BTreeMap::from([(
+                "agent_identity".to_string(),
+                identity.to_string(),
+            )])),
+        )
+        .await?;
+        let core_bridge = Arc::new(CoreReadsBridge::default());
+        let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: namespace.to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(core_bridge.clone()),
+            default_timeout: None,
+        }));
+        let session = runtime
+            .mob_handle()
+            .resolve_bridge_session_id(&crate::member_comms_id::mob_member_id(identity))
+            .await
+            .ok_or("the member's roster row has a bridge session")?;
+        register_live(
+            &identity_runtime,
+            &core_bridge.core,
+            rpc_durable_spec(identity, "worker"),
+            1,
+            session,
+        )
+        .await?;
+        let identity_ctx = IdentityFirstContext {
+            runtime: crate::identity_first::PublicIdentityRuntime::new(
+                identity_runtime,
+                runtime.mob_runtime().clone(),
+            ),
+            roster_provider: Arc::new(EmptyRosterProvider),
+            topology_provider: None,
+            customizer: None,
+            agent_memory_provider: None,
+            mob_definition: Some(runtime.mob_handle().definition().clone()),
+            transcript_edit_service: None,
+            compaction_floors: None,
+        };
+        Ok(IdentityFirstLiveMember {
+            runtime: Arc::new(runtime),
+            identity_ctx,
+            identity,
+            _state: state,
+        })
     }
 
     /// An `openai-live` gateway with no live handler answers a stdio

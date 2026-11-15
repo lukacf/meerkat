@@ -115531,8 +115531,7 @@ mob_ForceCancelRunning(arg_agent_identity) ==
        /\ ((packet.payload.agent_identity \in DOMAIN mob_identity_to_runtime) /\ ((IF ((mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN mob_member_state_markers) THEN Some((IF (mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN mob_member_state_markers THEN mob_member_state_markers[(mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
        /\ (IF ((packet.payload.agent_identity \in DOMAIN mob_member_placement) = FALSE) THEN TRUE ELSE mob__mob_machine_placed_carrier_binding_active(mob_member_placement, mob_current_placed_spawn_host_binding_generations, mob_host_bind_phase, mob_host_binding_generations, packet.payload.agent_identity))
        /\ mob_phase' = "Running"
-       /\ mob_active_run_count' = 0
-       /\ UnchangedFrame_5efd8bb47a658566
+       /\ UnchangedFrame_9ffca9352268874f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -121553,8 +121552,7 @@ mob_CancelAllWorkRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_tok
        /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN mob_runtime_fence_tokens THEN mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))
        /\ mob_phase' = "Running"
-       /\ mob_active_run_count' = 0
-       /\ UnchangedFrame_5efd8bb47a658566
+       /\ UnchangedFrame_9ffca9352268874f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes

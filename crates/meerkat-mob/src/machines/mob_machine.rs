@@ -10474,6 +10474,84 @@ mod tests {
         }
     }
 
+    /// A cancel of one member's work, by a force cancel of the member or by
+    /// a cancel of all work of its runtime, leaves the mob's active runs:
+    /// another member's run stays counted, so the Stop quiesce is refused
+    /// until the run finishes. Both cancel arms used to reset the mob-wide
+    /// count.
+    #[test]
+    fn a_member_force_cancel_keeps_the_mobs_active_runs() {
+        a_member_work_cancel_keeps_the_mobs_active_runs(false);
+    }
+
+    /// The same for a cancel of all work of one member's runtime.
+    #[test]
+    fn a_member_cancel_of_all_work_keeps_the_mobs_active_runs() {
+        a_member_work_cancel_keeps_the_mobs_active_runs(true);
+    }
+
+    fn a_member_work_cancel_keeps_the_mobs_active_runs(cancel_all_work: bool) {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("cancelled-member");
+        let runtime_id = AgentRuntimeId::from("cancelled-member:0");
+        seed_live_member(&mut authority, &identity, &runtime_id);
+        seed_live_member(
+            &mut authority,
+            &AgentIdentity::from("running-member"),
+            &AgentRuntimeId::from("running-member:0"),
+        );
+        authority
+            .apply_signal(MobMachineSignal::StartRun)
+            .expect("the mob starts a run");
+        let cancel = if cancel_all_work {
+            MobMachineInput::CancelAllWork {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: live_fence(&authority, &runtime_id),
+            }
+        } else {
+            MobMachineInput::ForceCancel {
+                agent_identity: identity.clone(),
+            }
+        };
+
+        let cancelled = MobMachineMutator::apply(&mut authority, cancel).unwrap_or_else(|error| {
+            panic!(
+                "the member's work cancel is admitted (cancel all work: {cancel_all_work}): {error}"
+            )
+        });
+
+        assert!(
+            cancelled
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, MobMachineEffect::FlowTerminalized)),
+            "the active cancel arm authorizes the member's interrupt (cancel all work: {cancel_all_work})"
+        );
+        assert_eq!(
+            authority.state().active_run_count,
+            1,
+            "the other member's run stays active (cancel all work: {cancel_all_work})"
+        );
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::BeginPlacedCompletionLifecycleQuiesce {
+                    intent: PlacedCompletionLifecycleIntentKind::Stop,
+                },
+            )
+            .is_err(),
+            "the Stop waits for the run (cancel all work: {cancel_all_work})"
+        );
+        authority
+            .apply_signal(MobMachineSignal::FinishRun)
+            .expect("the run finishes");
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Stop,
+        );
+    }
+
     // -----------------------------------------------------------------
     // Archive-only retirement, destroy beats rotation,
     // Dormant external wiring, the endpoint at a wake's close and

@@ -396,6 +396,24 @@ them.
   LayerDecision schema that adaptive mob packs bundle does not carry the
   value, so the schema stays the released one.
 
+- Behaviour-only (not measured by the gate): `meerkat-mob`,
+  `meerkat-machine-schema`: a stop of a mob sent after a force cancel of a
+  member, or after a cancel of all work of a member, while a flow run of
+  the mob is still active is refused until the run is terminal, where
+  0.9.14 admitted it (read from its source, not run on the published
+  binary). The door's answer: `mob/lifecycle` with `action: "stop"` answers
+  JSON-RPC error `-32602` with the message `invalid state transition:
+  Running -> Stopped` and no error data; `MobHandle::stop` answers
+  `MobError::InvalidTransition` from `Running` to `Stopped`. What a host
+  does instead: cancel the run with `mob/flow_cancel`
+  (`MobHandle::cancel_flow`; the run id is the one `mob/flow_run` or
+  `mob/run` returned), wait for `mob/flow_status` to report it terminal,
+  send the stop, and send it again if it is refused once more (the run
+  turns terminal a moment before the mob stops counting it). No public
+  item of the machine schema or the kernels crate changes, and the
+  MobMachine's version is unchanged at 2. See Changed (the surfaces of the
+  cancel), Fixed, the Upgrade notes and Known limitations.
+
 ### Added
 
 - `meerkat-runtime`, `meerkat-contracts`, `meerkat-rpc`,
@@ -1751,6 +1769,18 @@ them.
   writes the summary. A summary that a bound controller writes does not
   carry the level.
 
+- `meerkat-mob`, `meerkat-machine-schema`: the stop of a mob stays refused
+  while a flow run is active on another member, also after one member's
+  work was cancelled; Breaking has the stop's answer and what a host does
+  instead. It holds on every surface of the cancel. A force cancel of a
+  member: JSON-RPC `mob/force_cancel` and `mob/hard_cancel_member`, REST
+  `POST /mob/{id}/members/{agent_identity}/cancel`, `rkat mob force-cancel`,
+  the MCP tools `mob_force_cancel` and `meerkat_mob_force_cancel`, the
+  `force_cancel_member` member tool, Meta's `meta/force_cancel_member`,
+  `MobHandle::force_cancel_member` and `MobHandle::hard_cancel_member`. A
+  cancel of all work of one member: `mob/cancel_all_work` and
+  `MobHandle::cancel_all_work`. No wire type and no stored form changes.
+
 ### Deprecated
 
 - `meerkat`:
@@ -2251,6 +2281,21 @@ them.
   could be served in that window before either. The
   account also no longer holds the earlier sign-in's token in that window
   (it was refused there and served no request).
+
+- `meerkat-mob`, `meerkat-machine-schema`: a force cancel of one member no
+  longer clears the mob's count of active flow runs, and neither does a
+  cancel of all work of one member. Both cancel the work of that one member
+  only; both also set the mob-wide count to zero before this change. A mob
+  with a flow run still active on another member then accepted a stop as if
+  nothing ran: it went `Stopped` with that run still running inside it, no
+  longer counted. Each run's own end lowers the count now, as it always did
+  for a run that no cancel touched, so the stop is refused until the run
+  ends or is cancelled. This sets right the entry on the mob's active run
+  count in 0.9.5, which named force cancel and cancel all work among the
+  arms that end every run of the mob: each ends one member's work. That
+  entry also said that a stop admitted under an active run cancelled the
+  run at a boundary. A stop does not cancel flow runs: the run was left to
+  go on inside the stopped mob, no longer counted.
 
 ### Security
 
@@ -2937,6 +2982,25 @@ them.
     (`http://127.0.0.1:3100`), and `--port 0` asks the system for a free
     port.
 
+- A host that force cancels a member, or cancels all work of a member, and
+  then stops the mob gets the stop refused while a flow run of the mob is
+  still active: Breaking has the answer and what to do instead. A host
+  that already handles this refusal of a stop under an active flow run
+  needs no change. The mob's count of active flow runs is not stored: every
+  start rebuilds it from the run store (read from the source). A mob that
+  an earlier release stopped while one of its flow runs was still active
+  holds that run as not terminal; at its first start under this release
+  recovery ends the run as `Canceled` and the mob starts with no run
+  counted (read from the source; the recovery of a run without a live task
+  is confirmed by a test for a mob that resumes running). This holds for a
+  run on a member this host runs. A run whose step was owed by a member
+  placed on another host is not ended at the start (see Known
+  limitations); by the source, the start of a mob stopped over such a run
+  is refused while that run is counted (not confirmed by a run). Rollback:
+  this change stores nothing new and changes no stored form, so 0.9.14
+  reads a store written with it as it reads its own (read from the
+  source).
+
 ### Known limitations
 
 - An input queued behind a turn that fails at its start is not run. The
@@ -3158,6 +3222,13 @@ them.
   for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in
   either direction: it rests on the version requirements Connect 0.9.14
   published.
+
+- `meerkat-mob`: a flow run that `mob/flow_cancel` does not bring to a
+  terminal status keeps the stop of its mob refused; complete, reset or
+  destroy the mob instead. Read from the source, not confirmed by a run: a
+  run that a restart of the host recovered while its step was owed by a
+  member placed on another host is such a run until that member's turn is
+  settled.
 
 ## [0.9.14] - 2026-11-11
 

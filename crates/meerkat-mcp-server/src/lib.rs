@@ -7419,6 +7419,205 @@ mod tests {
         assert!(owners.retract(&parsed, &Arc::downgrade(&owner)));
     }
 
+    /// What a mob says, after "could not be woken: ", of a dormant member
+    /// whose build was refused for its reasoning effort level: the text the
+    /// mob crate's row
+    /// `a_session_keyed_wake_whose_build_is_refused_for_its_level_answers`
+    /// observed, with this member and session.
+    #[cfg(unix)]
+    fn mob_wake_failure_text(session_id: &str) -> String {
+        format!(
+            "member worker-1 failed to restore session {session_id}: failed to restore durable \
+             session '{session_id}': session error: agent error: reasoning effort 'max' is not \
+             supported by anthropic model 'test-anthropic-default' on anthropic_api/messages; \
+             supported: low, medium, high"
+        )
+    }
+
+    /// The owner of a mob member's session whose wake fails the way a mob
+    /// reports a member it could not wake to a session-keyed caller: an
+    /// internal agent error whose text names the cause (a refusal that can
+    /// be retried is answered session busy instead; not this case).
+    #[cfg(unix)]
+    struct FailingSessionOwner;
+
+    #[cfg(unix)]
+    impl meerkat_core::session_owner_wake::SessionOwnerWaker for FailingSessionOwner {
+        fn wake_session_owner(
+            &self,
+            session_id: &meerkat::SessionId,
+        ) -> meerkat_core::session_owner_wake::SessionOwnerWakeFuture {
+            let session_id = session_id.clone();
+            Box::pin(async move {
+                Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "the member owning session {session_id} could not be woken: {}",
+                        mob_wake_failure_text(&session_id.to_string())
+                    )),
+                ))
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    fn answer_lines(answer: &Result<Value, ToolCallError>) -> String {
+        match answer {
+            Ok(value) => format!("Ok({value})"),
+            Err(error) => format!(
+                "code={} message={:?} data={}",
+                error.code,
+                error.message,
+                error
+                    .data
+                    .as_ref()
+                    .map_or_else(|| "none".to_string(), Value::to_string)
+            ),
+        }
+    }
+
+    /// The session of a mob member that is not live, owned by a mob in this
+    /// process: what `meerkat_resume` answers when it carries a reasoning
+    /// effort level the route does not take, and what `meerkat_comms_send`
+    /// answers, for an owner whose wake succeeds and for one whose wake
+    /// fails.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dormant_members_session_with_a_refused_level_answers() {
+        let member = meerkat_core::MobMemberBinding {
+            mob_id: "mob".into(),
+            role: "worker".into(),
+            member: "worker-1".into(),
+        };
+        let owners = meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global();
+        let calls = [
+            ("meerkat_resume direct", json!({"reasoning_effort": "high"})),
+            (
+                "meerkat_resume nested",
+                json!({"provider_params": {"reasoning_effort": "high"}}),
+            ),
+            ("meerkat_resume plain", json!({})),
+            ("meerkat_comms_send", json!(null)),
+        ];
+        for wake in ["ready", "fails"] {
+            for (call, level) in &calls {
+                // A fresh state and session for each call.
+                let (state, session_id) = state_with_persisted_session_for(
+                    Arc::new(TestClient::for_provider(Provider::Anthropic)),
+                    Some(member.clone()),
+                )
+                .await;
+                let parsed = meerkat::SessionId::parse(&session_id).expect("valid session id");
+                let owner: Arc<dyn meerkat_core::session_owner_wake::SessionOwnerWaker> =
+                    if wake == "ready" {
+                        Arc::new(HoldingSessionOwner)
+                    } else {
+                        Arc::new(FailingSessionOwner)
+                    };
+                owners.publish(parsed.clone(), Arc::downgrade(&owner));
+                let live_before = state.service.has_live_session(&parsed).await;
+                let answer = if *call == "meerkat_comms_send" {
+                    Box::pin(handle_tools_call(
+                        &state,
+                        "meerkat_comms_send",
+                        &json!({
+                            "session_id": session_id,
+                            "kind": "peer_message",
+                            "to": "550e8400-e29b-41d4-a716-446655440000",
+                            "body": "hi",
+                        }),
+                    ))
+                    .await
+                } else {
+                    let mut input = json!({ "session_id": session_id, "prompt": "level turn" });
+                    for (key, value) in level.as_object().expect("an object") {
+                        input[key.as_str()] = value.clone();
+                    }
+                    Box::pin(handle_tools_call(&state, "meerkat_resume", &input)).await
+                };
+                let live_after = state.service.has_live_session(&parsed).await.ok();
+                println!(
+                    "OBSERVED [owner wake {wake}] {call}: {} (live before: {live_before:?}, \
+                     after: {live_after:?})",
+                    answer_lines(&answer)
+                );
+                assert_eq!(
+                    live_before.ok(),
+                    Some(false),
+                    "{wake}, {call}: the member's session is not live"
+                );
+                let names_a_level = level.as_object().is_some_and(|level| !level.is_empty());
+                match (wake, *call) {
+                    // The wake answered ready: the resume's own build judges
+                    // the level it carries, and refuses it typed.
+                    ("ready", _) if names_a_level => {
+                        let refused = answer.expect_err("the route takes no level");
+                        let data = refused.data.clone().unwrap_or_default();
+                        assert_eq!(
+                            (
+                                refused.code,
+                                data["kind"].as_str(),
+                                data["reasoning_effort_refusal"]["requested"].as_str(),
+                                data["reasoning_effort_refusal"]["reason"].as_str(),
+                                data["retryable"].as_bool(),
+                                live_after,
+                            ),
+                            (
+                                -32602,
+                                Some("reasoning_effort_refused"),
+                                Some("high"),
+                                Some("supported_levels_unknown"),
+                                Some(false),
+                                Some(false),
+                            ),
+                            "{call}: (code, kind, requested, reason, retryable, live after): \
+                             {refused:?}"
+                        );
+                    }
+                    ("ready", "meerkat_resume plain") => {
+                        assert!(answer.is_ok(), "{call}: {answer:?}");
+                        assert_eq!(
+                            live_after,
+                            Some(true),
+                            "{call}: the resume built the session"
+                        );
+                    }
+                    // The scripted owner built nothing, so no comms runtime
+                    // exists: this arm says nothing of a mob that builds its
+                    // member when it wakes it.
+                    ("ready", _) => {
+                        let refused = answer.expect_err("no comms runtime");
+                        let data = refused.data.clone().unwrap_or_default();
+                        assert_eq!(
+                            (refused.code, data["code"].as_str()),
+                            (-32603, Some("session_not_found_or_comms_disabled")),
+                            "{call}: {refused:?}"
+                        );
+                    }
+                    // The wake failed: every call is answered the wake's
+                    // failure, a text with no data, whatever it carries.
+                    _ => {
+                        let refused = answer.expect_err("the owner's wake failed");
+                        assert_eq!(
+                            (refused.code, refused.data.clone(), live_after),
+                            (-32013, None, Some(false)),
+                            "{wake}, {call}: (code, data, live after): {refused:?}"
+                        );
+                        assert_eq!(
+                            refused.message,
+                            format!(
+                                "agent error: Internal error: the member owning session \
+                                 {session_id} could not be woken: {}",
+                                mob_wake_failure_text(&session_id)
+                            ),
+                            "{wake}, {call}"
+                        );
+                    }
+                }
+                assert!(owners.retract(&parsed, &Arc::downgrade(&owner)));
+            }
+        }
+    }
+
     /// A standalone resume of a mob member's session that no mob in this
     /// process owns is refused, typed: the member is its mob's to
     /// materialize, through its wake. Nothing of it is built here.

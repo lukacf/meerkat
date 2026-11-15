@@ -847,6 +847,7 @@ impl UnifiedRuntime {
             persistent_metadata.clone(),
             mob_runtime.implicit_delegate_retirement_overrides(),
             mob_runtime.private_owners().clone(),
+            mob_runtime.speaks_for_composition(),
         );
         // The probe starts at construction while the error hook is installed
         // later (`set_error_hook`), so it holds the late-bound slot and reads
@@ -1010,6 +1011,7 @@ impl UnifiedRuntime {
             crate::mob_handle_runtime::ImplicitDelegateRetirementOverrides,
         >,
         private_owners: crate::private_owners::PrivateOwners,
+        speaks_for_composition: bool,
     ) -> Option<JoinHandle<()>> {
         let runtime_handle = tokio::runtime::Handle::try_current().ok()?;
         Some(runtime_handle.spawn(run_mob_events_subscription(
@@ -1018,6 +1020,7 @@ impl UnifiedRuntime {
             persistent_metadata,
             idle_retire_overrides,
             private_owners,
+            speaks_for_composition,
         )))
     }
 
@@ -4401,12 +4404,13 @@ async fn subscribe_agent_events_for_console_forwarder(
 ///
 /// Exits when the upstream `event_rx` closes (machine destroyed) or
 /// when subscription setup fails after a stale-cursor fallback.
-async fn run_mob_events_subscription(
+pub(crate) async fn run_mob_events_subscription(
     handle: MobHandle,
     store: MobEventsStore,
     persistent_metadata: Arc<dyn PersistentMetadataStore>,
     idle_retire_overrides: Option<crate::mob_handle_runtime::ImplicitDelegateRetirementOverrides>,
     private_owners: crate::private_owners::PrivateOwners,
+    speaks_for_composition: bool,
 ) {
     let mob_id = handle.mob_id().as_str().to_string();
     let resume_cursor = match persistent_metadata.get_subscription_cursor(&mob_id).await {
@@ -4469,6 +4473,11 @@ async fn run_mob_events_subscription(
         },
     };
 
+    // A launch that does not speak for its composition installs no follower
+    // of the ends of private members: once it has only held one, it writes
+    // the cursor no further, so the launch that does speak is shown that
+    // event again at its next start.
+    let mut cursor_kept_for_a_held_end = false;
     while let Some(event) = subscription.event_rx.recv().await {
         let envelope = store.project_mob_event(&event).await;
         // Idle-retire opt-ins follow the members they were set for: a
@@ -4481,7 +4490,20 @@ async fn run_mob_events_subscription(
         // held for the composition's follower, before the cursor moves past
         // the event: a durable cursor shows the event again after a stop in
         // between.
-        private_owners.observe_mob_event(&handle, &event).await;
+        let held = private_owners.observe_mob_event(&handle, &event).await;
+        if held && !speaks_for_composition && !cursor_kept_for_a_held_end {
+            cursor_kept_for_a_held_end = true;
+            tracing::info!(
+                mob_id = %mob_id,
+                cursor = envelope.cursor,
+                "mob_events subscription: this launch does not speak for its composition and \
+                 follows no end of a member private to a person; its cursor stays before the \
+                 first such end"
+            );
+        }
+        if cursor_kept_for_a_held_end {
+            continue;
+        }
         if let Err(err) = persistent_metadata
             .set_subscription_cursor(&mob_id, envelope.cursor)
             .await

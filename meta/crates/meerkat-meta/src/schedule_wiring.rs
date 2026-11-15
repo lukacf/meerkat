@@ -1130,11 +1130,43 @@ impl crate::identity_creation::AgentSchedules for MobAgentSchedules {
 ///
 /// A schedule targets the member when it names it in any form a schedule
 /// names a member ([`Self::targets`]), whoever made it: the member itself,
-/// its person on the Console (a deferred send), or a host. A schedule of a
-/// member private to no one is left as it is.
+/// its person on the Console (a deferred send), or a host. A schedule
+/// created after the member's end is not the ended member's, whatever it
+/// names, and is left as it is; so is a schedule of a member private to no
+/// one.
 #[derive(Clone)]
 pub(crate) struct EndedPrivateMemberSchedules {
-    service: ScheduleService,
+    schedules: Arc<dyn EndedMemberSchedules>,
+}
+
+/// The two calls [`EndedPrivateMemberSchedules`] makes on a launch's
+/// schedules.
+#[async_trait]
+pub(crate) trait EndedMemberSchedules: Send + Sync {
+    /// The schedules that are not deleted, and how many stored schedule
+    /// rows could not be read (each is left out).
+    async fn listed(&self) -> Result<(Vec<Schedule>, usize), meerkat::ScheduleDomainError>;
+
+    /// Delete one schedule, through its own lifecycle.
+    async fn delete(
+        &self,
+        schedule_id: &meerkat::ScheduleId,
+    ) -> Result<(), meerkat::ScheduleDomainError>;
+}
+
+#[async_trait]
+impl EndedMemberSchedules for ScheduleService {
+    async fn listed(&self) -> Result<(Vec<Schedule>, usize), meerkat::ScheduleDomainError> {
+        let (schedules, unreadable) = self.list_with_row_faults().await?;
+        Ok((schedules, unreadable.len()))
+    }
+
+    async fn delete(
+        &self,
+        schedule_id: &meerkat::ScheduleId,
+    ) -> Result<(), meerkat::ScheduleDomainError> {
+        ScheduleService::delete(self, schedule_id).await.map(|_| ())
+    }
 }
 
 impl EndedPrivateMemberSchedules {
@@ -1142,21 +1174,27 @@ impl EndedPrivateMemberSchedules {
     const ATTEMPTS: u32 = 3;
 
     pub(crate) fn new(service: ScheduleService) -> Self {
-        Self { service }
+        Self::over(Arc::new(service))
+    }
+
+    /// The follower over `schedules`.
+    pub(crate) fn over(schedules: Arc<dyn EndedMemberSchedules>) -> Self {
+        Self { schedules }
     }
 
     /// The form in which `target` names the ended member, when it does: a
     /// member target of it, a fork helper whose source it is, an identity
-    /// target naming it, a session target naming the session it held at its
-    /// end, or a Console caller's deferred send to it.
+    /// target naming it (by its roster id or by the name that id spells), a
+    /// session target naming the session it held at its end, or a Console
+    /// caller's deferred send to it.
     fn targets(
         target: &TargetBinding,
         ended: &crate::private_owners::EndedPrivateMember,
     ) -> Option<&'static str> {
+        let alias = crate::member_comms_id::runtime_alias_str(&ended.member);
         if let Some(send) = crate::console_schedules::ConsoleScheduledSend::of_target(target) {
-            return (send.identity == ended.member
-                || send.identity == crate::member_comms_id::runtime_alias_str(&ended.member))
-            .then_some("console_send");
+            return (send.identity == ended.member || send.identity == alias)
+                .then_some("console_send");
         }
         match target {
             TargetBinding::Mob(binding) => match binding.as_ref() {
@@ -1174,7 +1212,7 @@ impl EndedPrivateMemberSchedules {
             TargetBinding::Identity(binding) => {
                 let names = match parse_mob_member_schedule_identity(binding.identity()) {
                     Some(named) => named.mob_id == ended.mob_id && named.member == ended.member,
-                    None => binding.identity() == ended.member,
+                    None => binding.identity() == ended.member || binding.identity() == alias,
                 };
                 names.then_some("identity")
             }
@@ -1185,18 +1223,31 @@ impl EndedPrivateMemberSchedules {
         }
     }
 
-    /// Delete every schedule that targets `ended` and is not deleted. Each
-    /// delete is logged with the schedule's id and the form of its target,
-    /// never with what the schedule sends.
+    /// Delete every schedule that targets `ended`, is not deleted and was
+    /// created before its end. Each delete is logged with the schedule's id
+    /// and the form of its target, never with what the schedule sends.
     async fn delete_targeting(
         &self,
         ended: &crate::private_owners::EndedPrivateMember,
     ) -> Result<(), meerkat::ScheduleDomainError> {
-        for schedule in self.service.list().await? {
+        let (schedules, unreadable) = self.schedules.listed().await?;
+        if unreadable > 0 {
+            tracing::warn!(
+                mob_id = %ended.mob_id,
+                target_member = %ended.member,
+                unreadable,
+                "stored schedule rows could not be read: one that targets an ended member \
+                 private to a person stays as it is"
+            );
+        }
+        for schedule in schedules {
+            if schedule.config.created_at_utc > ended.ended_at {
+                continue;
+            }
             let Some(names_it_as) = Self::targets(&schedule.target, ended) else {
                 continue;
             };
-            self.service.delete(&schedule.schedule_id).await?;
+            self.schedules.delete(&schedule.schedule_id).await?;
             tracing::info!(
                 mob_id = %ended.mob_id,
                 schedule_id = %schedule.schedule_id,
@@ -1221,6 +1272,7 @@ impl crate::private_owners::PrivateMemberEndFollower for EndedPrivateMemberSched
                 tracing::warn!(
                     %error,
                     mob_id = %ended.mob_id,
+                    target_member = %ended.member,
                     "the schedules that target an ended member private to a person could not \
                      all be deleted: the ones left stay as they are"
                 );

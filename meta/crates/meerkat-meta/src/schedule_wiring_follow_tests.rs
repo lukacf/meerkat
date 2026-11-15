@@ -312,6 +312,7 @@ async fn the_end_of_a_private_member_deletes_every_schedule_that_names_it() {
         mob_id: MOB.to_owned(),
         member: "side".to_owned(),
         session: Some(held.to_string()),
+        ended_at: chrono::Utc::now(),
     };
     for pass in ["the end", "the end handed over again"] {
         following.member_ended(&end).await;
@@ -322,4 +323,170 @@ async fn the_end_of_a_private_member_deletes_every_schedule_that_names_it() {
             assert_eq!(state(&service, id).await, (Active, false), "{pass}: {name}");
         }
     }
+
+    // An identity target that names the member by the name its roster id
+    // spells (`desk:front`) is the member's too.
+    let by_name = schedule(&service, "by name", identity_target("desk:front")).await;
+    let another = schedule(&service, "another name", identity_target("desk:back")).await;
+    following
+        .member_ended(&EndedPrivateMember {
+            mob_id: MOB.to_owned(),
+            member: crate::member_comms_id::mob_member_id_str("desk:front").into_owned(),
+            session: None,
+            ended_at: chrono::Utc::now(),
+        })
+        .await;
+    assert_eq!(state(&service, &by_name).await.0, Deleted, "by name");
+    assert_eq!(
+        state(&service, &another).await,
+        (Active, false),
+        "another name"
+    );
+}
+
+/// A schedule created after a member's end is not the ended member's,
+/// though it names the same member: the end deletes the schedules that were
+/// there when the member ended, and leaves the later one as it is.
+#[tokio::test]
+async fn a_schedule_created_after_a_private_members_end_is_not_deleted_with_it() {
+    use crate::private_owners::{EndedPrivateMember, PrivateMemberEndFollower};
+    use SchedulePhase::{Active, Deleted};
+
+    let service = ScheduleService::new(Arc::new(MemoryScheduleStore::new()));
+    let following = super::EndedPrivateMemberSchedules::new(service.clone());
+    let earlier = schedule(&service, "earlier", member_target("side")).await;
+    let ended_at = chrono::Utc::now();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let later = schedule(&service, "later", member_target("side")).await;
+
+    following
+        .member_ended(&EndedPrivateMember {
+            mob_id: MOB.to_owned(),
+            member: "side".to_owned(),
+            session: None,
+            ended_at,
+        })
+        .await;
+    assert_eq!(state(&service, &earlier).await.0, Deleted, "earlier");
+    assert_eq!(state(&service, &later).await, (Active, false), "later");
+}
+
+/// A launch's schedules whose every delete fails, as a schedule store that
+/// refuses the write does.
+struct RefusedDeletes {
+    service: ScheduleService,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl super::EndedMemberSchedules for RefusedDeletes {
+    async fn listed(
+        &self,
+    ) -> Result<(Vec<meerkat::Schedule>, usize), meerkat::ScheduleDomainError> {
+        Ok((self.service.list().await?, 0))
+    }
+
+    async fn delete(&self, _schedule_id: &ScheduleId) -> Result<(), meerkat::ScheduleDomainError> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(meerkat::ScheduleDomainError::Internal(
+            "the store refuses the write".to_owned(),
+        ))
+    }
+}
+
+/// The log lines a row's own thread writes.
+#[derive(Clone, Default)]
+struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CapturedLog {
+    fn contents(&self) -> String {
+        String::from_utf8_lossy(
+            &self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+        .into_owned()
+    }
+}
+
+impl std::io::Write for CapturedLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+    type Writer = CapturedLog;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// When the schedules that target an ended private member cannot be
+/// deleted, the delete is tried three times, the schedules stay as they
+/// are, and one warning names the member they target.
+#[tokio::test]
+async fn schedules_that_cannot_be_deleted_stay_and_the_warning_names_their_member() {
+    use crate::private_owners::{EndedPrivateMember, PrivateMemberEndFollower};
+
+    let service = ScheduleService::new(Arc::new(MemoryScheduleStore::new()));
+    let aimed = schedule(&service, "aimed", member_target("side")).await;
+    let refused = Arc::new(RefusedDeletes {
+        service: service.clone(),
+        asked: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let following = super::EndedPrivateMemberSchedules::over(refused.clone());
+
+    let log = CapturedLog::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_ansi(false)
+        .finish();
+    // A second registered Dispatch keeps callsite interest from being
+    // cached `never` by threads without a subscriber.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let logged = tracing::subscriber::set_default(subscriber);
+    following
+        .member_ended(&EndedPrivateMember {
+            mob_id: MOB.to_owned(),
+            member: "side".to_owned(),
+            session: None,
+            ended_at: chrono::Utc::now(),
+        })
+        .await;
+    drop(logged);
+
+    assert_eq!(
+        refused.asked.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "the delete is tried three times"
+    );
+    assert_eq!(
+        state(&service, &aimed).await,
+        (SchedulePhase::Active, false),
+        "the schedule stays as it is"
+    );
+    let log = log.contents();
+    let warning = log
+        .lines()
+        .find(|line| {
+            line.contains(
+                "the schedules that target an ended member private to a person could not all \
+                 be deleted",
+            )
+        })
+        .unwrap_or_else(|| panic!("the failure is logged: {log}"));
+    assert!(warning.contains("WARN"), "{warning}");
+    assert!(warning.contains("target_member=side"), "{warning}");
+    assert!(warning.contains("mob_id=follow-mob"), "{warning}");
 }

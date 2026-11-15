@@ -426,6 +426,23 @@ pub(crate) enum CommittedAuditArchive {
     AuditAhead,
 }
 
+/// What the machine's `AbandonQueuedInput` answered for one input
+/// ([`EphemeralRuntimeDriver::resolve_queued_input_abandon`],
+/// [`EphemeralRuntimeDriver::preview_queued_input_abandon`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueuedInputAbandon {
+    /// The input was queued and is abandoned. `attempt_count` is the number
+    /// of earlier runs that took it and returned it to the queue.
+    Abandoned { attempt_count: u32 },
+    /// A run holds the input (`Staged`, `Applied` or
+    /// `AppliedPendingConsumption`): nothing changed.
+    NotQueued { phase: InputLifecycleState },
+    /// The input already ended in `phase`: nothing changed.
+    AlreadyTerminal { phase: InputLifecycleState },
+    /// The machine does not hold the input: nothing changed.
+    Untracked,
+}
+
 struct DslAuthority(SharedIngressDslAuthority);
 
 impl Clone for DslAuthority {
@@ -7138,39 +7155,131 @@ impl EphemeralRuntimeDriver {
     /// Atomically abandon one exact queued input. Staged/applied work is not
     /// touched here because its run owns cancellation; callers use the
     /// run-fenced interrupt path for those phases.
+    ///
+    /// The machine decides (`AbandonQueuedInput`, guarded on the input being
+    /// queued): `true` only for its abandoning arm. An input a run holds, a
+    /// terminal one and one the machine does not hold answer `false` with
+    /// nothing changed.
     pub(crate) fn abandon_queued_input(
         &mut self,
         input_id: &InputId,
         reason: InputAbandonReason,
     ) -> Result<bool, RuntimeDriverError> {
-        if self.input_phase(input_id) != Some(InputLifecycleState::Queued) {
-            return Ok(false);
-        }
-        let from_phase =
-            self.input_phase_required(input_id, "before exact queued-input abandonment")?;
-        let attempt_count = u64::from(self.input_attempt_count(input_id));
-        self.dsl_apply(
-            mm_dsl::MeerkatMachineInput::AbandonInput {
+        Ok(matches!(
+            self.resolve_queued_input_abandon(input_id, reason)?,
+            QueuedInputAbandon::Abandoned { .. }
+        ))
+    }
+
+    /// Apply the machine's `AbandonQueuedInput` for `input_id` and realize
+    /// its answer: for the abandoning arm the terminal projection and the
+    /// abandoned lifecycle event; nothing for the other arms.
+    pub(crate) fn resolve_queued_input_abandon(
+        &mut self,
+        input_id: &InputId,
+        reason: InputAbandonReason,
+    ) -> Result<QueuedInputAbandon, RuntimeDriverError> {
+        let from_phase = self.input_phase(input_id);
+        let effects = self.dsl_apply_effects(
+            mm_dsl::MeerkatMachineInput::AbandonQueuedInput {
                 input_id: Self::dsl_key(input_id),
                 reason: mm_dsl::InputAbandonReason::from(&reason),
-                attempt_count,
             },
-            "AbandonInput(TrackedCancel)",
+            "AbandonQueuedInput",
         )?;
-        self.sync_terminal_projection_from_machine(
-            input_id,
-            from_phase,
-            InputLifecycleState::Abandoned,
-            "TrackedCancel",
+        let answer = self.queued_input_abandon_answer(input_id, &effects)?;
+        if let QueuedInputAbandon::Abandoned { .. } = answer {
+            let from_phase = from_phase.ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "generated input lifecycle phase missing before the queued abandon of input {input_id}"
+                ))
+            })?;
+            self.sync_terminal_projection_from_machine(
+                input_id,
+                from_phase,
+                InputLifecycleState::Abandoned,
+                "TrackedCancel",
+            )?;
+            self.events
+                .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                    InputLifecycleEvent::Abandoned {
+                        input_id: input_id.clone(),
+                        reason,
+                    },
+                )));
+        }
+        Ok(answer)
+    }
+
+    /// What the machine's `AbandonQueuedInput` would answer for `input_id`,
+    /// asked on a fork of the authority: nothing changes. A caller that
+    /// holds this driver from the preview to the apply gets the same arm
+    /// from both, and may stage what only the abandoning arm needs (the
+    /// input's terminal receipt) in between.
+    ///
+    /// The fork copies the whole machine state. That is fine for one input
+    /// per call; a path that abandons many inputs should not preview each.
+    pub(crate) fn preview_queued_input_abandon(
+        &self,
+        input_id: &InputId,
+        reason: InputAbandonReason,
+    ) -> Result<QueuedInputAbandon, RuntimeDriverError> {
+        let effects = self.dsl_preview(
+            mm_dsl::MeerkatMachineInput::AbandonQueuedInput {
+                input_id: Self::dsl_key(input_id),
+                reason: mm_dsl::InputAbandonReason::from(&reason),
+            },
+            "AbandonQueuedInput(preview)",
         )?;
-        self.events
-            .push(self.make_envelope(RuntimeEvent::InputLifecycle(
-                InputLifecycleEvent::Abandoned {
-                    input_id: input_id.clone(),
-                    reason,
-                },
-            )));
-        Ok(true)
+        self.queued_input_abandon_answer(input_id, &effects)
+    }
+
+    /// Read the machine's `QueuedInputAbandonResolved` for `input_id` out of
+    /// the effects of one `AbandonQueuedInput`. The attempt count of the
+    /// abandoning arm is the machine's own (`input_attempt_counts`, which
+    /// the transition records as the abandon's and does not change).
+    fn queued_input_abandon_answer(
+        &self,
+        input_id: &InputId,
+        effects: &[mm_dsl::MeerkatMachineEffect],
+    ) -> Result<QueuedInputAbandon, RuntimeDriverError> {
+        let key = Self::dsl_key(input_id);
+        let (disposition, phase) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                mm_dsl::MeerkatMachineEffect::QueuedInputAbandonResolved {
+                    input_id,
+                    disposition,
+                    phase,
+                } if *input_id == key => Some((*disposition, *phase)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "AbandonQueuedInput committed without QueuedInputAbandonResolved for input {input_id}"
+                ))
+            })?;
+        let held_phase = || {
+            phase.map(Self::input_phase_to_lifecycle).ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "QueuedInputAbandonResolved({disposition:?}) carries no phase for input {input_id}"
+                ))
+            })
+        };
+        Ok(match disposition {
+            mm_dsl::QueuedInputAbandonDisposition::Abandoned => QueuedInputAbandon::Abandoned {
+                attempt_count: self.input_attempt_count(input_id),
+            },
+            mm_dsl::QueuedInputAbandonDisposition::NotQueued => QueuedInputAbandon::NotQueued {
+                phase: held_phase()?,
+            },
+            mm_dsl::QueuedInputAbandonDisposition::AlreadyTerminal => {
+                QueuedInputAbandon::AlreadyTerminal {
+                    phase: held_phase()?,
+                }
+            }
+            mm_dsl::QueuedInputAbandonDisposition::Untracked => QueuedInputAbandon::Untracked,
+        })
     }
 
     /// Mark `run_id` resumable (`MarkRunResumable`). False, with nothing

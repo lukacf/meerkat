@@ -2377,11 +2377,18 @@ pub enum RuntimeCompletionLiveSessionObservation {
 }
 
 /// Generated cleanup action for runtime completion side effects.
+///
+/// The machine also says WHICH cleanup: `CleanupRuntime` retires the
+/// session's runtime and leaves the session what it owns;
+/// `CleanupArchivedSession` is the cleanup of an archived session, which
+/// also ends the mobs the session owns. A surface matches the action and
+/// never chooses the cleanup itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RuntimeCompletionCleanupAction {
     #[default]
     RetainRuntime,
     CleanupRuntime,
+    CleanupArchivedSession,
 }
 
 /// Generated authority for whether completion cleanup may release a surface
@@ -3015,8 +3022,8 @@ pub enum LiveContextRowDisposition {
 }
 
 pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
-    CompactionRequestVerdict, EmptyResumeRetirementVerdict, RetainedRunSettleVerdict,
-    SessionResidencyOwner,
+    CompactionRequestVerdict, EmptyResumeRetirementVerdict, QueuedInputAbandonDisposition,
+    RetainedRunSettleVerdict, SessionResidencyOwner,
 };
 pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
     DurableRecoveryOwnership, LiveContextDeliveryReadiness, LiveContextPayloadAvailability,

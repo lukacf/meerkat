@@ -1739,19 +1739,22 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveRuntimeCompletionCleanupRuntimeTerminatedInitializing`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRuntimeTerminatedRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRuntimeTerminatedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionCleanupInputTerminatedWhileServingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionCleanupInputTerminatedWhileServingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionCleanupInputTerminatedWhileServingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionCleanupInputTerminatedWhileDrainingRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupFinalizationFailedInitializing`
@@ -8522,6 +8525,84 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ConsumeCompactionRequestInertDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AbandonQueuedInputIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputNotQueuedInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputNotQueuedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputNotQueuedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputNotQueuedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputNotQueuedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputNotQueuedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputNotQueuedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputAlreadyTerminalInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputAlreadyTerminalIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputAlreadyTerminalAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputAlreadyTerminalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputAlreadyTerminalRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputAlreadyTerminalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputAlreadyTerminalDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputUntrackedInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputUntrackedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputUntrackedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputUntrackedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputUntrackedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputUntrackedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonQueuedInputUntrackedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `RuntimeBound`
@@ -9320,6 +9401,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `CompactionRequestConsumed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `QueuedInputAbandonResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

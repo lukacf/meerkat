@@ -349,6 +349,35 @@ store:
   lineage. Write the records again, at a new revision, with
   `include_forks`; they then select the forks seated from then on.
 
+### Ending one queued request ends only that request; `session/recall_input`
+
+- **Rust hosts.** The exhaustive enums named under Breaking in the changelog
+  gain variants, appended last: the MeerkatMachine's `MeerkatMachineInput`,
+  `MeerkatMachineEffect` and their variant enums,
+  `MeerkatMachineRuntimeInternalInput`, the kernel's `Input`, `InputKind`,
+  `Effect`, `EffectKind` and `TransitionId`,
+  `RuntimeCompletionCleanupAction`, and the code generator's
+  `MachineKernelRenderError`. An exhaustive match on one of them needs the
+  new arms, or a wildcard arm.
+  `RuntimeCompletionCleanupAuthority::requires_runtime_cleanup()` is
+  removed: match the authority's `action`, or hand it to
+  `RuntimeCleanupScope::of_completion_action`.
+- **Every client.** A request cancelled while its turn is queued behind a
+  running turn (the JSON-RPC cancel notification, a connection closed with a
+  turn still queued on a shared runtime, REST `POST /requests/{id}/cancel`)
+  now ends only that request. On 0.9.14 the running turn's request and the
+  session's other queued requests were answered an internal error (`-32603`;
+  REST `500`) and were not completed, and the cancelled REST request was
+  answered only once the running turn had ended. A client that relied on
+  those answers, or on that order, now sees the running turn and the other
+  queued requests answered their results, and the cancelled REST request
+  answered at once.
+- **The new call.** `session/recall_input`, and the SDK methods over it,
+  need a 0.9.15 server. A 0.9.14 server answers method not found (`-32601`)
+  and changes nothing; the Python and TypeScript methods surface that as
+  `MeerkatError` with the code `"-32601"` and read nothing of the server
+  first.
+
 ### Reasoning effort is one setting for every provider
 
 0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
@@ -838,6 +867,11 @@ enabled policy and under `approval.timeouts_ms` of a disabled one; the other
 combinations and `adopt` were read from the source). **Do:** before a
 rollback, remove those keys and values from
 `runtime_options.identity_creation`; add them again after the return.
+
+**A recalled input.** An input withdrawn with `session/recall_input` is
+stored as a cancelled input: the stored row and completion record a
+cancelled queued request has left since 0.8.0. 0.9.14 reads it as it reads
+any cancelled input (read from the 0.9.14 source, not run).
 
 **Agents created at run time.** A 0.9.14 gateway starts on a state that holds
 agents created on 0.9.15, and a send through the gateway (`meta/send`) reaches

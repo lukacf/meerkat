@@ -5384,20 +5384,24 @@ impl SessionRuntime {
                     // The machine-owned unregister coordinator can remove the
                     // entry before completion waiters are delivered, after
                     // the executor's external-only cleanup discarded the live
-                    // session. The
-                    // runtime-minted, session-bound RuntimeTerminated
-                    // observation plus independently observed absent live
-                    // session is the narrow proof that lets the relay finish
-                    // the remaining surface anchors without weakening
-                    // ordinary cleanup. The archive read above is the fact the
-                    // generated authority would have been given: a session
-                    // that is not archived keeps what it owns.
+                    // session. The runtime-minted, session-bound observation
+                    // that an input ended as runtime-terminated, together
+                    // with the registration gone and the independently
+                    // observed absent live session, is the narrow proof that
+                    // lets the relay finish the remaining surface anchors
+                    // without weakening ordinary cleanup (the observation
+                    // alone proves no runtime's end: an input taken back on
+                    // a serving runtime is answered the same class). No generated authority named a
+                    // cleanup here, so this is never the archive's: an
+                    // archived session whose registration is gone returned
+                    // above, and a session that is not archived keeps what
+                    // it owns.
                     return match self
                         .archive_runtime_cleanup()
                         .run_after_runtime_termination_scoped(
                             session_id,
                             &runtime_termination_proof,
-                            RuntimeCleanupScope::of_completion_cleanup(archived_now),
+                            RuntimeCleanupScope::KeptSession,
                         )
                         .await
                     {
@@ -5426,15 +5430,15 @@ impl SessionRuntime {
                 });
             }
         };
-        if cleanup_authority.requires_runtime_cleanup() {
-            // A cleanup the authority asks for is the session's archive only
-            // when the authority says the session is archived. A turn start,
-            // a recovery or another apply step that failed retires the
-            // session's live runtime, which its next turn builds again, and
-            // leaves the session what it owns: its mobs are destroyed by its
-            // archive, never by a failed turn.
-            let scope =
-                RuntimeCleanupScope::of_completion_cleanup(cleanup_authority.archived_by_authority);
+        // The machine names the cleanup: none, the runtime's only, or the
+        // archive's. This surface hands the action to the one exhaustive
+        // mapping every surface shares and chooses nothing. A
+        // turn start, a recovery or another apply step that failed retires
+        // the session's live runtime, which its next turn builds again, and
+        // leaves the session what it owns: its mobs are destroyed by its
+        // archive, never by a failed turn.
+        let cleanup_scope = RuntimeCleanupScope::of_completion_action(cleanup_authority.action);
+        if let Some(scope) = cleanup_scope {
             let discard_error = match self.service.discard_live_session(session_id).await {
                 Ok(()) | Err(SessionError::NotFound { .. }) => None,
                 Err(error) => Some(error),
@@ -6193,7 +6197,7 @@ impl SessionRuntime {
 
     /// Take back the runtime registration a failed recovery or create
     /// registered itself. The session was not archived: it keeps what it
-    /// owns ([`RuntimeCleanupScope::KeptSession`]).
+    /// owns (the runtime-only cleanup, never the archive's).
     async fn cleanup_recovered_runtime_if_new(
         &self,
         session_id: &SessionId,
@@ -6203,7 +6207,7 @@ impl SessionRuntime {
             return Ok(());
         }
         self.archive_runtime_cleanup()
-            .run_scoped(session_id, RuntimeCleanupScope::KeptSession)
+            .run_runtime_only(session_id)
             .await
     }
 
@@ -12643,6 +12647,106 @@ impl SessionRuntime {
             .stop_run(session_id, run_id, reason)
             .await
             .map_err(runtime_driver_error_to_rpc)
+    }
+
+    /// Withdraw one input of the given session, only while it is still
+    /// queued ([`meerkat_runtime::MeerkatMachine::recall_queued_input`]).
+    /// `selector` names the input as `session/input_status` does: by its
+    /// runtime input id, or by the idempotency key its caller submitted it
+    /// under (read in the caller namespace first, then as given).
+    ///
+    /// A run that has taken the input is never interrupted: the answer says
+    /// so. An input the session does not hold (another session's input, an
+    /// unknown key) is invalid params, as a malformed input id is; an unknown
+    /// or archived session is not found. The recall never loads or wakes a
+    /// session: one with no live runtime in this process answers from its
+    /// stored row when that row is terminal, and is otherwise refused as not
+    /// running.
+    pub async fn recall_queued_input(
+        &self,
+        session_id: &SessionId,
+        selector: &meerkat_contracts::SessionInputStateSelector,
+    ) -> Result<meerkat_runtime::QueuedInputRecall, RpcError> {
+        use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+
+        let staged = self
+            .staged_sessions
+            .info(session_id)
+            .await
+            .map_err(|err| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("staged session lifecycle error: {err}"),
+                data: None,
+            })?
+            .is_some();
+        if !staged {
+            match committed_source_archived(&self.service, session_id)
+                .await
+                .map_err(session_error_to_rpc)?
+            {
+                None => return Err(Self::session_not_found_rpc(session_id)),
+                Some(true) => return Err(Self::archived_session_not_found_rpc(session_id)),
+                Some(false) => {}
+            }
+        }
+        let unknown_input = |named: String| RpcError {
+            code: error::INVALID_PARAMS,
+            message: format!("session {session_id} holds no input {named}"),
+            data: None,
+        };
+        let recall_error = |error: meerkat_runtime::RuntimeDriverError| match error {
+            // The input's phase lives in a machine that is not loaded here.
+            meerkat_runtime::RuntimeDriverError::NotReady {
+                state: meerkat_runtime::RuntimeState::Destroyed,
+            } => RpcError {
+                code: error::SESSION_NOT_RUNNING,
+                message: format!(
+                    "session {session_id} has no live runtime in this process; a recall never \
+                     loads or wakes a session"
+                ),
+                data: None,
+            },
+            other => runtime_driver_error_to_rpc(other),
+        };
+        let input_id = match selector {
+            meerkat_contracts::SessionInputStateSelector::InputId(raw) => {
+                meerkat::surface::parse_wire_input_id(raw).map_err(|message| RpcError {
+                    code: error::INVALID_PARAMS,
+                    message,
+                    data: None,
+                })?
+            }
+            meerkat_contracts::SessionInputStateSelector::IdempotencyKey(key) => {
+                // The key resolution of `session/input_status`: a wire
+                // caller's key is stored in the caller namespace, a host's
+                // key as given. The binding of a key to its input never
+                // changes, so resolving it before the recall decides nothing.
+                let by_caller = match meerkat_runtime::IdempotencyKey::caller(key) {
+                    Ok(caller) => self
+                        .runtime_adapter
+                        .input_state_by_idempotency_key(session_id, &caller.0)
+                        .await
+                        .map_err(recall_error)?,
+                    Err(_) => None,
+                };
+                let stored = match by_caller {
+                    Some(stored) => Some(stored),
+                    None => self
+                        .runtime_adapter
+                        .input_state_by_idempotency_key(session_id, key)
+                        .await
+                        .map_err(recall_error)?,
+                };
+                stored
+                    .map(|stored| stored.state.input_id)
+                    .ok_or_else(|| unknown_input(format!("under the idempotency key '{key}'")))?
+            }
+        };
+        self.runtime_adapter
+            .recall_queued_input(session_id, &input_id)
+            .await
+            .map_err(recall_error)?
+            .ok_or_else(|| unknown_input(input_id.to_string()))
     }
 
     /// Ask the session's next compaction check to compact, without a
@@ -44258,17 +44362,14 @@ mod tests {
              after one of the queued requests was cancelled; the first request was answered \
              {first:?}, the other queued request {other:?}"
         );
-        // The present contract, pinned so that a change of it is seen: the
-        // cancelled input's cleanup still retires the runtime registration
-        // the other requests were on, so neither the running turn nor the
-        // other queued request completes, and each is answered with the
-        // JSON-RPC internal error.
-        let internal_error = format!("{} ", error::INTERNAL_ERROR);
+        // The cancelled input's cleanup keeps the runtime registration the
+        // other requests are on: the running turn and the other queued
+        // request both complete and are answered their results.
         for (request, answer) in [("running", &first), ("other queued", &other)] {
-            assert!(
-                matches!(answer, Err(text) if text.starts_with(&internal_error)),
-                "the {request} request does not complete and is answered with an internal \
-                 error: {answer:?}"
+            assert_eq!(
+                answer,
+                &Ok(()),
+                "the {request} request completes and is answered its result"
             );
         }
         let next = session.spawn_turn("next", None);
@@ -44567,40 +44668,51 @@ mod tests {
     /// that asks for it (a turn that could not be applied, a result that
     /// could not be saved, a turn abandoned or cancelled with no live
     /// session, a runtime that ended): its scope comes from the cleanup
-    /// authority's archive fact alone. For a session that is not archived
-    /// it retires the live runtime and keeps what the session owns; for an
-    /// archived one it destroys the session's mobs. This row runs that
-    /// cleanup at the relay's own call, with the rule's answer for each
-    /// archive fact, and reads the mob state.
+    /// authority's ACTION alone, which the machine answers. `RetainRuntime`
+    /// runs no cleanup; `CleanupRuntime` retires the live runtime and keeps
+    /// what the session owns; `CleanupArchivedSession` also destroys the
+    /// session's mobs. This row runs the relay's own steps for each action,
+    /// with the mapping the relay uses, and reads the mob state.
     #[cfg(all(feature = "mob", feature = "mcp"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn only_an_archived_sessions_cleanup_destroys_what_the_session_owns() {
-        for (archived_by_authority, after_the_cleanup) in [
-            (false, (true, 1, true, true, false, false, true)),
-            (true, (false, 0, false, false, false, false, true)),
+        use meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionCleanupAction as Action;
+
+        for (action, after_the_cleanup) in [
+            (
+                Action::RetainRuntime,
+                (true, 1, true, true, true, true, true),
+            ),
+            (
+                Action::CleanupRuntime,
+                (true, 1, true, true, false, false, true),
+            ),
+            (
+                Action::CleanupArchivedSession,
+                (false, 0, false, false, false, false, true),
+            ),
         ] {
             let session = FailedStartSession::materialized().await;
-            session
-                .runtime
-                .service
-                .discard_live_session(&session.session_id)
-                .await
-                .expect("the relay discards the live session first");
-            session
-                .runtime
-                .archive_runtime_cleanup()
-                .run_scoped(
-                    &session.session_id,
-                    RuntimeCleanupScope::of_completion_cleanup(archived_by_authority),
-                )
-                .await
-                .expect("the completion cleanup runs");
+            if let Some(scope) = RuntimeCleanupScope::of_completion_action(action) {
+                session
+                    .runtime
+                    .service
+                    .discard_live_session(&session.session_id)
+                    .await
+                    .expect("the relay discards the live session first");
+                session
+                    .runtime
+                    .archive_runtime_cleanup()
+                    .run_scoped(&session.session_id, scope)
+                    .await
+                    .expect("the completion cleanup runs");
+            }
             assert_eq!(
                 session.holdings().await,
                 after_the_cleanup,
                 "(child mob, its members, its member's session, implicit mob, MCP adapter, \
-                 runtime registration, stored session) after a completion cleanup whose \
-                 authority says archived = {archived_by_authority}"
+                 runtime registration, stored session) after the completion cleanup of the \
+                 action {action:?}"
             );
         }
     }
@@ -46929,6 +47041,1357 @@ mod tests {
         assert!(
             !matches!(parked, Err(SessionError::Busy { .. })),
             "the parked projection was never refused as released: {parked:?}"
+        );
+    }
+
+    /// A model client that holds each model request until a row releases it.
+    #[cfg(feature = "mob")]
+    #[derive(Default)]
+    struct HeldModelLlmClient {
+        calls: AtomicUsize,
+        release: Notify,
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl LlmClient for HeldModelLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            Box::pin(async_stream::stream! {
+                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                self.release.notified().await;
+                yield Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "Released response".to_string(),
+                    meta: None,
+                });
+                yield Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                });
+                yield Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::success(StopReason::EndTurn),
+                });
+            })
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Anthropic
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    type HeldTurnRequest = tokio::task::JoinHandle<Result<RunResult, RpcError>>;
+
+    /// Start a turn request on `session_id` in its own task.
+    #[cfg(feature = "mob")]
+    fn spawn_held_turn(
+        runtime: &Arc<SessionRuntime>,
+        session_id: &SessionId,
+        prompt: &'static str,
+    ) -> HeldTurnRequest {
+        let runtime = Arc::clone(runtime);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            let (event_tx, _event_rx) = mpsc::channel(100);
+            runtime
+                .start_turn_via_runtime(
+                    &session_id,
+                    prompt.into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        })
+    }
+
+    /// Whether the client's `expected`th model request started in time.
+    #[cfg(feature = "mob")]
+    async fn held_request_entered(client: &HeldModelLlmClient, expected: usize) -> bool {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while client.calls.load(AtomicOrdering::SeqCst) < expected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// A turn request's answer: `Ok` for a result, the error's code and
+    /// message otherwise.
+    #[cfg(feature = "mob")]
+    async fn held_turn_answer(request: HeldTurnRequest, description: &str) -> Result<(), String> {
+        tokio::time::timeout(Duration::from_secs(20), request)
+            .await
+            .unwrap_or_else(|_| panic!("{description} is answered"))
+            .expect("the request task")
+            .map(|_| ())
+            .map_err(|error| format!("{} {}", error.code, error.message))
+    }
+
+    /// A running turn past its first round commit with `queued` turn requests
+    /// queued behind it, one after the other. Returns the running request,
+    /// then each queued request with its input, in the order they queued.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn a_running_turn_with_queued_requests(
+        session: &FailedStartSession,
+        queued: usize,
+    ) -> (FailedStartTurn, Vec<(FailedStartTurn, InputId)>) {
+        let running = session
+            .start_turn_past_its_first_round("the running turn")
+            .await;
+        let mut known = session
+            .runtime
+            .runtime_adapter
+            .list_active_inputs(&session.session_id)
+            .await
+            .expect("list the active inputs");
+        let mut requests = Vec::new();
+        for index in 0..queued {
+            let request = session.spawn_turn("a queued request", None);
+            session.wait_for_active_inputs(index + 2).await;
+            let input = session
+                .runtime
+                .runtime_adapter
+                .list_active_inputs(&session.session_id)
+                .await
+                .expect("list the active inputs")
+                .into_iter()
+                .find(|input| !known.contains(input))
+                .expect("the queued request's input");
+            known.push(input.clone());
+            requests.push((request, input));
+        }
+        (running, requests)
+    }
+
+    /// What became of a session's other work after one of its queued turn
+    /// requests ended: whether the ended request was refused, the running
+    /// request's answer, the other queued requests' answers, what the session
+    /// holds, and whether its next turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    type AfterOneQueuedRequestEnded = (
+        bool,
+        Result<(), String>,
+        Vec<Result<(), String>>,
+        (bool, usize, bool, bool, bool, bool, bool),
+        Result<(), String>,
+    );
+
+    /// Serve the model from here on and collect
+    /// [`AfterOneQueuedRequestEnded`].
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn after_one_queued_request_ended(
+        session: &FailedStartSession,
+        ended: FailedStartTurn,
+        running: FailedStartTurn,
+        others: Vec<FailedStartTurn>,
+    ) -> AfterOneQueuedRequestEnded {
+        let serving = session.serve_model_requests();
+        let ended = FailedStartSession::turn_answer(ended).await;
+        let running = FailedStartSession::turn_answer(running).await;
+        let mut other_answers = Vec::new();
+        for other in others {
+            other_answers.push(FailedStartSession::turn_answer(other).await);
+        }
+        let holdings = session.holdings().await;
+        let next = FailedStartSession::turn_answer(session.spawn_turn("next", None)).await;
+        serving.abort();
+        (ended.is_err(), running, other_answers, holdings, next)
+    }
+
+    /// What [`AfterOneQueuedRequestEnded`] is when ending one queued request
+    /// ends nothing else: the request is refused, the running turn and the
+    /// `others` queued requests are answered their results, the session
+    /// keeps its child mob with its member, its implicit mob, its MCP
+    /// adapter, its runtime registration and its stored session, and its
+    /// next turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    fn only_the_one_request_ended(others: usize) -> AfterOneQueuedRequestEnded {
+        (
+            true,
+            Ok(()),
+            vec![Ok(()); others],
+            (true, 1, true, true, true, true, true),
+            Ok(()),
+        )
+    }
+
+    /// A request cancelled while its turn is queued behind a running turn
+    /// ends that one request: the running turn completes and its request is
+    /// answered its result, and the session keeps everything it holds.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_queued_request_leaves_the_other_request_to_its_turn() {
+        let session = FailedStartSession::materialized().await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 1).await;
+        let (cancelled, cancelled_input) = queued.remove(0);
+        session
+            .runtime
+            .runtime_adapter
+            .cancel_input_if_present(
+                &session.session_id,
+                &cancelled_input,
+                "RPC request cancelled",
+            )
+            .await
+            .expect("the queued request's input is cancelled");
+        assert_eq!(
+            after_one_queued_request_ended(&session, cancelled, running, Vec::new()).await,
+            only_the_one_request_ended(0),
+            "(the cancelled request refused, the running request, the other queued requests, \
+             (child mob, its members, its member's session, implicit mob, MCP adapter, runtime \
+             registration, stored session), the next turn)"
+        );
+    }
+
+    /// What a turn that waits on its queued input is answered when that input
+    /// is cancelled by its exact input (as a request's cancel does it, with
+    /// the cancel's reason), and when it is recalled: the turn-failure code
+    /// with the text that the runtime ended the input before a run.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    const CANCELLED_QUEUED_REQUEST_ANSWER: &str =
+        "-32603 runtime terminated: RPC request cancelled";
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    const RECALLED_QUEUED_REQUEST_ANSWER: &str =
+        "-32603 runtime terminated: input recalled before it started";
+
+    /// What a row reads after the middle one of three queued turn requests
+    /// ended: the ended request's answer (code and message, session ids
+    /// replaced), its input's stored phase and terminal, the running
+    /// request's answer, the answers of the two other queued requests (the
+    /// one queued before the ended one, then the one queued after it), the
+    /// order in which the three were answered, how many model requests were
+    /// made from the moment the model was served again until the other
+    /// requests were answered, what the session holds, and whether its next
+    /// turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    type AfterTheMiddleQueuedRequestEnded = (
+        String,
+        String,
+        Result<(), String>,
+        (Result<(), String>, Result<(), String>),
+        Vec<&'static str>,
+        usize,
+        (bool, usize, bool, bool, bool, bool, bool),
+        Result<(), String>,
+    );
+
+    /// Serve the model from here on and collect
+    /// [`AfterTheMiddleQueuedRequestEnded`].
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn after_the_middle_queued_request_ended(
+        session: &FailedStartSession,
+        ended: FailedStartTurn,
+        ended_input: &InputId,
+        running: FailedStartTurn,
+        before: FailedStartTurn,
+        after: FailedStartTurn,
+    ) -> AfterTheMiddleQueuedRequestEnded {
+        let model_requests_before = session.client.calls.load(AtomicOrdering::SeqCst);
+        let answered = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let watch = |label: &'static str, turn: FailedStartTurn| {
+            let answered = Arc::clone(&answered);
+            tokio::spawn(async move {
+                let answer = FailedStartSession::turn_answer(turn).await;
+                answered
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(label);
+                answer
+            })
+        };
+        let running = watch("the running request", running);
+        let before = watch("the request queued before", before);
+        let after = watch("the request queued after", after);
+        let serving = session.serve_model_requests();
+        let ended = match without_session_ids(FailedStartSession::turn_answer(ended).await) {
+            Ok(()) => "its result".to_string(),
+            Err(text) => text,
+        };
+        let running = running.await.expect("the running request's watcher");
+        let before = before
+            .await
+            .expect("the watcher of the request queued before");
+        let after = after
+            .await
+            .expect("the watcher of the request queued after");
+        let model_requests =
+            session.client.calls.load(AtomicOrdering::SeqCst) - model_requests_before;
+        let ended_input = stored_input(session, ended_input).await;
+        let holdings = session.holdings().await;
+        let next = FailedStartSession::turn_answer(session.spawn_turn("next", None)).await;
+        serving.abort();
+        let answered = answered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        (
+            ended,
+            phase_and_terminal(&ended_input).to_string(),
+            running,
+            (before, after),
+            answered,
+            model_requests,
+            holdings,
+            next,
+        )
+    }
+
+    /// What [`AfterTheMiddleQueuedRequestEnded`] is when ending one queued
+    /// request ends nothing else. The ended request is answered
+    /// `ended_answer` and its input is stored as cancelled; the running turn
+    /// and the two other queued requests are answered their results, in the
+    /// order they were queued; one model request is made for each of the two
+    /// other requests and none for the ended one; the session keeps its
+    /// child mob with its member, its implicit mob, its MCP adapter, its
+    /// runtime registration and its stored session; and its next turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    fn only_the_middle_request_ended(ended_answer: &str) -> AfterTheMiddleQueuedRequestEnded {
+        (
+            ended_answer.to_string(),
+            "Abandoned, terminal Some(Abandoned { reason: Cancelled })".to_string(),
+            Ok(()),
+            (Ok(()), Ok(())),
+            vec![
+                "the running request",
+                "the request queued before",
+                "the request queued after",
+            ],
+            2,
+            (true, 1, true, true, true, true, true),
+            Ok(()),
+        )
+    }
+
+    /// The middle one of three turn requests queued behind a running turn
+    /// is cancelled by its exact input: that request's turn is answered that
+    /// the runtime ended its input, its input is stored as cancelled, no
+    /// model request is made for it, the running
+    /// turn completes and is answered its result, the two other queued
+    /// requests run after it in the order they were queued and are answered
+    /// their results, and the session keeps everything it holds.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_queued_request_leaves_the_running_turn_and_the_other_queued_request() {
+        let session = FailedStartSession::materialized().await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 3).await;
+        let (before, _before_input) = queued.remove(0);
+        let (cancelled, cancelled_input) = queued.remove(0);
+        let (after, _after_input) = queued.remove(0);
+        session
+            .runtime
+            .runtime_adapter
+            .cancel_input_if_present(
+                &session.session_id,
+                &cancelled_input,
+                "RPC request cancelled",
+            )
+            .await
+            .expect("the queued request's input is cancelled");
+        let measured = after_the_middle_queued_request_ended(
+            &session,
+            cancelled,
+            &cancelled_input,
+            running,
+            before,
+            after,
+        )
+        .await;
+        println!("the middle of three queued requests cancelled: {measured:?}");
+        assert_eq!(
+            measured,
+            only_the_middle_request_ended(CANCELLED_QUEUED_REQUEST_ANSWER),
+            "(the cancelled request's answer, its input's stored phase and terminal, the \
+             running request, (the request queued before, the request queued after), the order \
+             they were answered in, model requests made, (child mob, its members, its member's \
+             session, implicit mob, MCP adapter, runtime registration, stored session), the \
+             next turn)"
+        );
+    }
+
+    /// The middle one of three turn requests queued behind a running turn
+    /// is recalled by its input, as `session/recall_input` recalls it: that
+    /// request is answered that the runtime ended its input before a run and
+    /// its input is stored as cancelled, no model request is made for it,
+    /// the running turn completes and is answered its result, the two other
+    /// queued requests run after it in the order they were queued and are
+    /// answered their results, and the session keeps everything it holds.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recall_of_a_queued_turn_leaves_the_running_turn_and_the_other_queued_request() {
+        let session = FailedStartSession::materialized().await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 3).await;
+        let (before, _before_input) = queued.remove(0);
+        let (recalled, recalled_input) = queued.remove(0);
+        let (after, _after_input) = queued.remove(0);
+        recall_the_queued_request(&session, &recalled_input).await;
+        let measured = after_the_middle_queued_request_ended(
+            &session,
+            recalled,
+            &recalled_input,
+            running,
+            before,
+            after,
+        )
+        .await;
+        println!("the middle of three queued requests recalled: {measured:?}");
+        assert_eq!(
+            measured,
+            only_the_middle_request_ended(RECALLED_QUEUED_REQUEST_ANSWER),
+            "(the recalled request's answer, its input's stored phase and terminal, the \
+             running request, (the request queued before, the request queued after), the order \
+             they were answered in, model requests made, (child mob, its members, its member's \
+             session, implicit mob, MCP adapter, runtime registration, stored session), the \
+             next turn)"
+        );
+    }
+
+    /// What a member's session answers after `mob/cancel_all_work` ended the
+    /// member's running run: whether a turn request that was queued on the
+    /// member's session (when there was one) was refused, whether the
+    /// member's session is still registered, and the answers of the member's
+    /// next two turns (an error's text without its session id).
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    type AfterAMembersWorkWasCancelled =
+        (Option<bool>, bool, Result<(), String>, Result<(), String>);
+
+    /// A turn answer with every session id in its error text replaced, so
+    /// that the answers of two sessions can be compared.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    fn without_session_ids(answer: Result<(), String>) -> Result<(), String> {
+        answer.map_err(|text| {
+            text.split(' ')
+                .map(|word| {
+                    let bare = word.trim_matches(|c: char| !c.is_alphanumeric());
+                    if uuid::Uuid::parse_str(bare).is_ok() {
+                        word.replace(bare, "<session>")
+                    } else {
+                        word.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+    }
+
+    /// A run the member's mob admitted is in flight on the member, past its
+    /// first round commit; with `queued_request`, a turn request on the
+    /// member's session queues behind it. Then `mob/cancel_all_work` on the
+    /// member. Collects [`AfterAMembersWorkWasCancelled`].
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn after_a_members_work_was_cancelled(
+        queued_request: bool,
+    ) -> AfterAMembersWorkWasCancelled {
+        let session = FailedStartSession::materialized().await;
+        let member_session = session.child_member_session.clone();
+        let turn_on_the_member = |prompt: &'static str| {
+            let runtime = Arc::clone(&session.runtime);
+            let member_session = member_session.clone();
+            tokio::spawn(async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &member_session,
+                        prompt.into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+            })
+        };
+
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        session
+            .client
+            .answer_a_tool_call_next
+            .store(true, AtomicOrdering::SeqCst);
+        session
+            .mob_state
+            .mob_member_send(
+                &session.child_mob,
+                meerkat_mob::AgentIdentity::from("worker-1"),
+                "the member's running turn".into(),
+                meerkat_core::types::HandlingMode::Queue,
+                None,
+            )
+            .await
+            .expect("the member admits the turn");
+        assert!(
+            session
+                .request_entered(requests + 2, Duration::from_mins(1))
+                .await,
+            "the member's running turn reaches its second model request"
+        );
+        let queued = if queued_request {
+            let queued = turn_on_the_member("the queued request");
+            let mut member_inputs = 0;
+            for _ in 0..1200 {
+                member_inputs = session
+                    .runtime
+                    .runtime_adapter
+                    .list_active_inputs(&member_session)
+                    .await
+                    .map(|inputs| inputs.len())
+                    .unwrap_or(0);
+                if member_inputs == 2 || queued.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert_eq!(
+                (member_inputs, queued.is_finished()),
+                (2, false),
+                "(the member session's active inputs, the request already answered): the turn \
+                 request is admitted and queued behind the member's running turn"
+            );
+            Some(queued)
+        } else {
+            None
+        };
+
+        let (member_runtime, member_fence) = session
+            .mob_state
+            .mob_member_binding_for_cancel(
+                &session.child_mob,
+                &meerkat_mob::AgentIdentity::from("worker-1"),
+            )
+            .await
+            .expect("the member's binding, as `mob/cancel_all_work` resolves it");
+        session
+            .mob_state
+            .mob_cancel_all_work(&session.child_mob, member_runtime, member_fence)
+            .await
+            .expect("cancel all of the member's work");
+        let serving = session.serve_model_requests();
+        let refused = match queued {
+            Some(queued) => Some(FailedStartSession::turn_answer(queued).await.is_err()),
+            None => None,
+        };
+        let registered =
+            still_registered_after(&session.runtime, &member_session, Duration::from_secs(2)).await;
+        let next = FailedStartSession::turn_answer(turn_on_the_member("next")).await;
+        let after_next = FailedStartSession::turn_answer(turn_on_the_member("after next")).await;
+        serving.abort();
+        (
+            refused,
+            registered,
+            without_session_ids(next),
+            without_session_ids(after_next),
+        )
+    }
+
+    /// `mob/cancel_all_work` on a member whose session holds a queued turn
+    /// request ends the member's work and nothing else: the queued request
+    /// is refused, the member's session keeps its runtime registration, and
+    /// the member's next turns are answered exactly as they are after a
+    /// `mob/cancel_all_work` with no request queued.
+    ///
+    /// The row pins that equality, and it pins today's answers as measured,
+    /// not as wanted: after a member's running run was cancelled, the first
+    /// turn a client starts on the member's session is answered an internal
+    /// error and is not run, and the turn after it runs (the changelog's
+    /// Known limitations). A change of either answer fails the row.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_all_work_on_a_member_keeps_the_members_registration() {
+        let (_, registered_plain, next_plain, after_next_plain) =
+            after_a_members_work_was_cancelled(false).await;
+        let with_a_queued_request = after_a_members_work_was_cancelled(true).await;
+        println!(
+            "no request queued: registered {registered_plain}, next turn {next_plain:?}, the \
+             turn after it {after_next_plain:?}; with a request queued: {with_a_queued_request:?}"
+        );
+        assert!(
+            registered_plain,
+            "a member's session stays registered after its work was cancelled"
+        );
+        let first_turn = match &next_plain {
+            Ok(()) => "its result",
+            Err(text) => text.as_str(),
+        };
+        assert!(
+            first_turn.starts_with("-32603 turn abandoned"),
+            "the first turn after a member's work was cancelled, with no request queued: \
+             {first_turn}"
+        );
+        assert_eq!(
+            after_next_plain,
+            Ok(()),
+            "the turn after it, with no request queued"
+        );
+        assert_eq!(
+            with_a_queued_request,
+            (Some(true), true, next_plain, after_next_plain),
+            "(the queued request refused, the member's session still registered, the member's \
+             next turn, the turn after it) with a turn request queued on the member"
+        );
+    }
+
+    /// The relay runs the cleanup the machine names, end to end, in an
+    /// arrangement where the machine names the cleanup of an archived
+    /// session and no archive call runs that cleanup itself (an archive
+    /// would hide the relay's). The row asserts the end state after the
+    /// relays ran, as measured. A control row that tells the relay apart
+    /// from the other readers of the same rule is tracked as a follow-up.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_relay_runs_the_archive_cleanup_when_the_machine_names_it() {
+        use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+
+        let session = FailedStartSession::materialized().await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 1).await;
+        let (queued_request, _queued_input) = queued.remove(0);
+
+        let retired = session
+            .runtime
+            .runtime_adapter
+            .retire_runtime(&session.session_id)
+            .await
+            .expect("the runtime is retired");
+        let serving = session.serve_model_requests();
+        let running = FailedStartSession::turn_answer(running).await;
+        let queued_request = FailedStartSession::turn_answer(queued_request).await;
+        let mut registered = true;
+        for _ in 0..200 {
+            registered = session
+                .runtime
+                .runtime_adapter
+                .contains_session(&session.session_id)
+                .await;
+            if !registered {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        serving.abort();
+        let (child_mob, members, _member_session, implicit_mob, _adapter, _registration, _) =
+            session.holdings().await;
+        println!(
+            "the runtime's end answered {retired:?}; the running request {running:?}, the queued \
+             request {queued_request:?}; registered afterwards: {registered}; child mob \
+             {child_mob}, its members {members}, implicit mob {implicit_mob}"
+        );
+        assert_eq!(
+            (registered, child_mob, members, implicit_mob),
+            (false, false, 0, false),
+            "(runtime registration, child mob, its members, implicit mob) after the relays ran \
+             the cleanup the machine named; the running request was answered {running:?}, the \
+             queued one {queued_request:?}"
+        );
+    }
+
+    /// A client that closes its connection to a runtime other connections
+    /// share, while its turn request is queued behind a running turn,
+    /// withdraws that one request and nothing else: the running turn
+    /// completes and its request is answered its result, and the session
+    /// keeps everything it holds.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_closed_connection_withdraws_its_queued_request_and_nothing_else() {
+        use tokio::io::{AsyncWriteExt, BufReader};
+
+        let session = FailedStartSession::materialized().await;
+        let running = session
+            .start_turn_past_its_first_round("the running turn")
+            .await;
+
+        // A second connection to the same runtime sends a turn request,
+        // which queues behind the running turn.
+        let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+            meerkat_core::MemoryConfigStore::new(Config::default(), meerkat_models::canonical()),
+        );
+        let (server_reader, mut client_writer) = tokio::io::duplex(65_536);
+        let (client_reader, server_writer) = tokio::io::duplex(65_536);
+        let server_runtime = Arc::clone(&session.runtime);
+        let connection = tokio::spawn(async move {
+            let mut server = crate::server::RpcServer::new(
+                BufReader::new(server_reader),
+                server_writer,
+                server_runtime,
+                config_store,
+            )
+            .expect("construct runtime authority");
+            // A connection to a shared runtime: its end is no shutdown of
+            // the runtime.
+            server.skip_shutdown_on_eof = true;
+            server.run().await.map_err(|error| error.to_string())
+        });
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "turn/start",
+            "params": {
+                "session_id": session.session_id.to_string(),
+                "prompt": "the queued request",
+            },
+        });
+        client_writer
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .expect("write the turn request");
+        client_writer.flush().await.expect("flush the turn request");
+        session.wait_for_active_inputs(2).await;
+
+        // The client goes away.
+        drop(client_writer);
+        drop(client_reader);
+        let connection_end = tokio::time::timeout(Duration::from_secs(30), connection)
+            .await
+            .expect("the connection ends")
+            .expect("the connection task");
+
+        let serving = session.serve_model_requests();
+        let running = FailedStartSession::turn_answer(running).await;
+        let holdings = session.holdings().await;
+        let next = FailedStartSession::turn_answer(session.spawn_turn("next", None)).await;
+        serving.abort();
+        assert_eq!(
+            (running, holdings, next),
+            (Ok(()), (true, 1, true, true, true, true, true), Ok(())),
+            "(the running request, (child mob, its members, its member's session, implicit mob, \
+             MCP adapter, runtime registration, stored session), the next turn) after the \
+             connection with the queued request closed; the connection ended {connection_end:?}"
+        );
+    }
+
+    /// The completion handle of an input a session holds queued on a runtime
+    /// no executor serves.
+    #[cfg(feature = "mob")]
+    async fn a_queued_inputs_completion_handle(
+        adapter: &Arc<meerkat_runtime::meerkat_machine::MeerkatMachine>,
+        session_id: &SessionId,
+    ) -> (InputId, meerkat_runtime::CompletionHandle) {
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("test machine should register runtime authority");
+        let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            "queued input fixture",
+            None,
+        ));
+        let queued_input = input.id().clone();
+        let (_outcome, handle) = adapter
+            .accept_input_with_completion(session_id, input)
+            .await
+            .expect("test machine should accept the queued input");
+        (
+            queued_input,
+            handle.expect("the queued input returns a completion handle"),
+        )
+    }
+
+    /// The surface's relay of an input that was taken back while its runtime
+    /// serves (by a recall of the one input, or by a reset of the runtime)
+    /// answers the request and cleans nothing up: the runtime registration
+    /// stays, and the request's admission is released.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn a_relay_of_an_input_taken_back_keeps_the_runtime_registration() {
+        use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+
+        for taken_back_by in ["recall", "reset"] {
+            let temp = tempfile::tempdir().unwrap();
+            let runtime = make_runtime(temp_factory(&temp), 1);
+            let session_id = SessionId::new();
+            runtime
+                .runtime_adapter
+                .prepare_bindings(session_id.clone())
+                .await
+                .expect("prepare runtime bindings");
+            let relayed_input = InputId::new();
+            let admission = runtime
+                .service
+                .reserve_create_session_admission()
+                .await
+                .expect("reserve active turn");
+            runtime
+                .insert_runtime_pre_admission(session_id.clone(), relayed_input.clone(), admission)
+                .expect("insert pre-admission");
+
+            let (queued_input, handle) =
+                a_queued_inputs_completion_handle(&runtime.runtime_adapter, &session_id).await;
+            if taken_back_by == "recall" {
+                let recall = runtime
+                    .runtime_adapter
+                    .recall_queued_input(&session_id, &queued_input)
+                    .await
+                    .expect("the recall answers");
+                assert!(
+                    matches!(
+                        recall,
+                        Some(meerkat_runtime::QueuedInputRecall::Abandoned { .. })
+                    ),
+                    "the queued input is recalled: {recall:?}"
+                );
+            } else {
+                runtime
+                    .runtime_adapter
+                    .reset_runtime(&session_id)
+                    .await
+                    .expect("the runtime is reset");
+            }
+            let outcome = runtime
+                .spawn_runtime_pre_admission_cleanup_with_outcome(
+                    session_id.clone(),
+                    relayed_input,
+                    handle,
+                )
+                .await
+                .expect("cleanup task should report completion")
+                .expect("completion waiter should resolve");
+            assert!(
+                matches!(
+                    outcome,
+                    meerkat_runtime::CompletionOutcome::RuntimeTerminated { .. }
+                ),
+                "{taken_back_by}: the input taken back is answered terminated: {outcome:?}"
+            );
+            assert!(
+                still_registered_after(&runtime, &session_id, Duration::from_millis(500)).await,
+                "{taken_back_by}: the relay leaves the serving runtime registered"
+            );
+            runtime
+                .create_session(mock_build_config(), None, None, Vec::new())
+                .await
+                .expect("the relay releases the request's admission");
+        }
+    }
+
+    /// Recall the queued turn request's input, as `session/recall_input`
+    /// recalls it.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn recall_the_queued_request(session: &FailedStartSession, input: &InputId) {
+        let recall = session
+            .runtime
+            .recall_queued_input(
+                &session.session_id,
+                &meerkat_contracts::SessionInputStateSelector::InputId(input.to_string()),
+            )
+            .await
+            .expect("the recall answers");
+        assert!(
+            recall.abandoned(),
+            "the queued request's input is withdrawn: {recall:?}"
+        );
+    }
+
+    /// Withdrawing one queued turn request of a session is no archive of the
+    /// session: the child mob the session owns keeps its member, its implicit
+    /// mob stays, the session stays stored, and its next turn runs. The
+    /// request is queued behind a running turn and recalled by its input.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recall_of_a_queued_turn_keeps_the_mob_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 1).await;
+        let (recalled, recalled_input) = queued.remove(0);
+        recall_the_queued_request(&session, &recalled_input).await;
+        let (recalled_refused, running, _others, holdings, next) =
+            after_one_queued_request_ended(&session, recalled, running, Vec::new()).await;
+        let (child_mob, members, member_session, implicit_mob, _, _, stored) = holdings;
+        assert_eq!(
+            (
+                recalled_refused,
+                child_mob,
+                members,
+                member_session,
+                implicit_mob,
+                stored,
+                next
+            ),
+            (true, true, 1, true, true, true, Ok(())),
+            "(the recalled request refused, child mob, its members, its member's session, \
+             implicit mob, stored session, the next turn) after the queued turn was recalled; \
+             the running request was answered {running:?}"
+        );
+    }
+
+    /// Withdrawing one queued turn request leaves the session's other
+    /// request to its turn: the turn that was running when the queued one was
+    /// recalled completes and its request is answered its result, and the
+    /// session keeps everything it holds, its runtime registration and its
+    /// MCP adapter included.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recall_of_a_queued_turn_leaves_the_other_request_to_its_turn() {
+        let session = FailedStartSession::materialized().await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 1).await;
+        let (recalled, recalled_input) = queued.remove(0);
+        recall_the_queued_request(&session, &recalled_input).await;
+        assert_eq!(
+            after_one_queued_request_ended(&session, recalled, running, Vec::new()).await,
+            only_the_one_request_ended(0),
+            "(the recalled request refused, the running request, the other queued requests, \
+             (child mob, its members, its member's session, implicit mob, MCP adapter, runtime \
+             registration, stored session), the next turn)"
+        );
+    }
+
+    /// An input's stored record: phase, terminal, and whether a stop kept
+    /// it for the session's next start.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn stored_input(session: &FailedStartSession, input: &InputId) -> String {
+        use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+
+        match session
+            .runtime
+            .runtime_adapter
+            .input_state(&session.session_id, input)
+            .await
+        {
+            Err(error) => format!("read failed: {error}"),
+            Ok(None) => "no row".to_string(),
+            Ok(Some(stored)) => format!(
+                "{:?}, terminal {:?}, kept for the next start {}",
+                stored.seed.phase,
+                stored.seed.terminal_outcome,
+                stored.state.stop_requeue.is_some()
+            ),
+        }
+    }
+
+    /// The phase and terminal of a [`stored_input`] row, without the stop's
+    /// keep mark.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    fn phase_and_terminal(row: &str) -> &str {
+        row.split(", kept for the next start").next().unwrap_or(row)
+    }
+
+    /// A turn request's answer in short: its result, the answer of a request
+    /// a stop kept queued for the next start, or the error's text.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    fn answer_in_short(answer: Result<(), String>) -> String {
+        match without_session_ids(answer) {
+            Ok(()) => "its result".to_string(),
+            Err(text)
+                if text.starts_with("-32003 the input stays queued across the runtime stop") =>
+            {
+                "kept across the stop (-32003)".to_string()
+            }
+            Err(text) => text,
+        }
+    }
+
+    /// Stop the session's runtime with a requeue of its queued inputs, as a
+    /// graceful shutdown does, in a task of its own.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn a_requeue_stop(
+        session: &FailedStartSession,
+    ) -> tokio::task::JoinHandle<Result<bool, String>> {
+        let adapter = Arc::clone(&session.runtime.runtime_adapter);
+        let witness = adapter
+            .current_session_registration_witness(&session.session_id)
+            .await
+            .expect("the session's runtime is registered");
+        tokio::spawn(async move {
+            adapter
+                .unregister_session_registration_until_terminal_with_queued_inputs_if_current(
+                    &witness,
+                    meerkat_runtime::UnregisterQueuedInputs::Requeue {
+                        max_age: Duration::from_hours(1),
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    /// What a bounded task answered, in short.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn joined<T, E: std::fmt::Display>(
+        task: tokio::task::JoinHandle<Result<T, E>>,
+        done: impl FnOnce(T) -> String,
+    ) -> String {
+        match tokio::time::timeout(Duration::from_secs(30), task).await {
+            Err(_) => "did not return".to_string(),
+            Ok(joined) => match joined.expect("the task") {
+                Ok(value) => done(value),
+                Err(error) => format!("failed: {error}"),
+            },
+        }
+    }
+
+    /// An archive that comes after a requeue stop ends every input the stop
+    /// kept. The stop finds a turn held at the model and a turn request
+    /// queued behind it: it does not wait for the turn, it keeps both inputs
+    /// queued for the session's next start, and both requests are answered
+    /// that their input stays queued. The archive then ends both stored
+    /// inputs as retired, and ends what the session owns, as an archive
+    /// does. No input of the archived session stays without a terminal.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_archive_after_a_requeue_stop_ends_the_inputs_the_stop_kept() {
+        let session = FailedStartSession::materialized().await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 1).await;
+        let (queued_request, queued_input) = queued.remove(0);
+        let running_input = session
+            .runtime
+            .runtime_adapter
+            .list_active_inputs(&session.session_id)
+            .await
+            .expect("list the active inputs")
+            .into_iter()
+            .find(|input| input != &queued_input)
+            .expect("the running turn's input");
+
+        let stop = a_requeue_stop(&session).await;
+        let stopped = joined(stop, |done| format!("returned {done}")).await;
+        assert_eq!(
+            (
+                stopped.as_str(),
+                answer_in_short(FailedStartSession::turn_answer(running).await),
+                answer_in_short(FailedStartSession::turn_answer(queued_request).await),
+                stored_input(&session, &running_input).await,
+                stored_input(&session, &queued_input).await,
+            ),
+            (
+                "returned true",
+                "kept across the stop (-32003)".to_string(),
+                "kept across the stop (-32003)".to_string(),
+                "Staged, terminal None, kept for the next start true".to_string(),
+                "Queued, terminal None, kept for the next start true".to_string(),
+            ),
+            "after the stop: (the stop, the running request, the queued request, the running \
+             turn's stored input, the queued request's stored input)"
+        );
+
+        session
+            .runtime
+            .archive_session(&session.session_id)
+            .await
+            .expect("the session is archived");
+        // Phase and terminal are asserted. The stop's keep mark on a row
+        // that has ended is printed, not asserted.
+        let running_after = stored_input(&session, &running_input).await;
+        let queued_after = stored_input(&session, &queued_input).await;
+        println!(
+            "after the archive: the running turn's stored input: {running_after}; the queued \
+             request's stored input: {queued_after}"
+        );
+        let retired = "Abandoned, terminal Some(Abandoned { reason: Retired })";
+        assert_eq!(
+            (
+                phase_and_terminal(&running_after),
+                phase_and_terminal(&queued_after),
+                session.holdings().await,
+            ),
+            (
+                retired,
+                retired,
+                (false, 0, false, false, false, false, false),
+            ),
+            "after the archive: (the running turn's stored input, the queued request's stored \
+             input, (child mob, its members, its member's session, implicit mob, MCP adapter, \
+             runtime registration, stored session))"
+        );
+    }
+
+    /// An archive asked while a requeue stop of the session's runtime is in
+    /// progress. The fixture holds the stop in progress; the held turn's
+    /// input is the session's only input.
+    ///
+    /// Asserted, because it must hold whatever the first archive call
+    /// answers: the stop completes, the held turn's input reaches a
+    /// terminal, and the session is archived with everything it holds
+    /// ended, at the latest when the archive is asked again. Printed and not
+    /// asserted: what the first archive call answers and the state that
+    /// depends on that answer. That answer is tracked as a follow-up; read
+    /// this row again when it is settled.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_archive_that_joins_a_requeue_stop_in_progress() {
+        let session = FailedStartSession::materialized().await;
+        session
+            .runtime
+            .service
+            .discard_live_session(&session.session_id)
+            .await
+            .expect("the session is stored and no longer live");
+        let held = session
+            .start_turn_held_in_its_apply("held in its apply", None)
+            .await;
+        let held_input = session
+            .runtime
+            .runtime_adapter
+            .list_active_inputs(&session.session_id)
+            .await
+            .expect("list the active inputs")
+            .into_iter()
+            .next()
+            .expect("the held turn's input");
+
+        let stop = a_requeue_stop(&session).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let stop_in_progress = !stop.is_finished();
+        let input_while_the_stop_waits = stored_input(&session, &held_input).await;
+        let archive = {
+            let runtime = Arc::clone(&session.runtime);
+            let session_id = session.session_id.clone();
+            tokio::spawn(async move { runtime.archive_session(&session_id).await })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        println!(
+            "while the stop is in progress: the archive returned {}, the stop returned {}",
+            archive.is_finished(),
+            stop.is_finished()
+        );
+        assert_eq!(
+            (stop_in_progress, input_while_the_stop_waits.as_str()),
+            (true, "Staged, terminal None, kept for the next start false"),
+            "(the stop in progress when the archive is asked, the held turn's stored input then)"
+        );
+
+        session
+            .client
+            .provider_read_released
+            .store(true, AtomicOrdering::SeqCst);
+        let serving = session.serve_model_requests();
+        let stopped = joined(stop, |done| format!("returned {done}")).await;
+        let archived = match tokio::time::timeout(Duration::from_secs(30), archive).await {
+            Err(_) => "did not return".to_string(),
+            Ok(joined) => match joined.expect("the archive task") {
+                Ok(()) => "done".to_string(),
+                Err(error) => format!("refused: {} {}", error.code, error.message),
+            },
+        };
+        let held_answer = answer_in_short(FailedStartSession::turn_answer(held).await);
+        serving.abort();
+        let held_row = stored_input(&session, &held_input).await;
+        println!(
+            "the first archive call answered: {archived}; the held turn's request: \
+             {held_answer}; its stored input: {held_row}; (child mob, its members, its member's \
+             session, implicit mob, MCP adapter, runtime registration, stored session): {:?}",
+            session.holdings().await
+        );
+        assert_eq!(
+            (stopped.as_str(), held_row.contains("terminal Some(")),
+            ("returned true", true),
+            "(the stop, the held turn's stored input has a terminal: {held_row})"
+        );
+
+        // The session is archived with everything it holds ended: by the
+        // first call, or by the archive asked again with the stop over.
+        let last_archive = if archived == "done" {
+            archived
+        } else {
+            match session.runtime.archive_session(&session.session_id).await {
+                Ok(()) => "done".to_string(),
+                Err(error) => format!("refused: {} {}", error.code, error.message),
+            }
+        };
+        assert_eq!(
+            (last_archive.as_str(), session.holdings().await),
+            ("done", (false, 0, false, false, false, false, false)),
+            "the archive, asked again when its first call did not archive: (its answer, (child \
+             mob, its members, its member's session, implicit mob, MCP adapter, runtime \
+             registration, stored session))"
+        );
+    }
+
+    /// A stored session after its first turn, on a runtime whose model client
+    /// holds every request until the row releases it.
+    #[cfg(feature = "mob")]
+    async fn a_session_after_its_first_turn() -> (
+        tempfile::TempDir,
+        Arc<SessionRuntime>,
+        Arc<HeldModelLlmClient>,
+        SessionId,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let client = Arc::new(HeldModelLlmClient::default());
+        runtime.set_default_llm_client(Some(Arc::clone(&client) as Arc<dyn LlmClient>));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig::new("claude-sonnet-4-5"),
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .expect("create the session");
+        let first = spawn_held_turn(&runtime, &session_id, "first");
+        assert!(
+            held_request_entered(&client, 1).await,
+            "the first turn reaches the model"
+        );
+        client.release.notify_one();
+        first.await.unwrap().expect("the first turn runs");
+        (temp, runtime, client, session_id)
+    }
+
+    /// Whether the session still has a runtime registration after `wait`.
+    #[cfg(feature = "mob")]
+    async fn still_registered_after(
+        runtime: &SessionRuntime,
+        session_id: &SessionId,
+        wait: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            if !runtime.runtime_adapter.contains_session(session_id).await {
+                return false;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// Whether the session's next turn reaches the model and is answered its
+    /// result.
+    #[cfg(feature = "mob")]
+    async fn the_next_turn_runs(
+        runtime: &Arc<SessionRuntime>,
+        client: &HeldModelLlmClient,
+        session_id: &SessionId,
+    ) -> Result<(), String> {
+        let requests = client.calls.load(AtomicOrdering::SeqCst);
+        let next = spawn_held_turn(runtime, session_id, "next");
+        if !held_request_entered(client, requests + 1).await {
+            return Err("the next turn did not reach the model".to_string());
+        }
+        client.release.notify_one();
+        held_turn_answer(next, "the next turn").await
+    }
+
+    /// A runtime that is stopped while an external event this surface
+    /// admitted is still pending keeps its session usable: the stop
+    /// succeeds, the stopped runtime stays registered (no request waits on
+    /// the event, so nothing retires it), the session stays stored and not
+    /// archived, and its next turn runs.
+    #[cfg(feature = "mob")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_runtime_stopped_with_an_event_pending_serves_the_next_turn() {
+        let (_temp, runtime, client, session_id) = a_session_after_its_first_turn().await;
+        let admitted = tokio::time::timeout(
+            Duration::from_secs(10),
+            runtime.accept_external_event_via_runtime(
+                &session_id,
+                "inbox.item".to_string(),
+                serde_json::json!({ "body": "pending at the stop" }),
+                None,
+            ),
+        )
+        .await
+        .expect("the admission returns")
+        .expect("the event is admitted");
+        assert!(
+            matches!(admitted, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+            "the event is accepted: {admitted:?}"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "the session is registered while its event is pending"
+        );
+
+        let stopped = tokio::time::timeout(
+            Duration::from_secs(30),
+            runtime
+                .runtime_adapter
+                .stop_runtime_executor(&session_id, "the host stops"),
+        )
+        .await
+        .expect("the stop returns");
+        let registered =
+            still_registered_after(&runtime, &session_id, Duration::from_secs(5)).await;
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        let archived = runtime
+            .authoritative_session_archived(&session_id)
+            .await
+            .unwrap_or(true);
+        let next = the_next_turn_runs(&runtime, &client, &session_id).await;
+        println!(
+            "stop answered {stopped:?}; registered afterwards: {registered}; stored: {stored}; \
+             archived: {archived}; the next turn: {next:?}"
+        );
+        assert!(stopped.is_ok(), "the stop succeeds: {stopped:?}");
+        assert_eq!(
+            (registered, stored, archived, next),
+            (true, true, false, Ok(())),
+            "(registered, stored, archived, the next turn) after a stop with an event pending"
+        );
+    }
+
+    /// A stop that comes while a turn request this surface admitted is held
+    /// at the model does not take the turn's answer away: the request is
+    /// answered its result once the model answers, the session stays stored
+    /// and not archived, and its next turn runs.
+    #[cfg(feature = "mob")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stop_with_a_turn_in_flight_leaves_the_turn_to_its_answer() {
+        let (_temp, runtime, client, session_id) = a_session_after_its_first_turn().await;
+        let in_flight = spawn_held_turn(&runtime, &session_id, "in flight");
+        assert!(
+            held_request_entered(&client, 2).await,
+            "the turn in flight reaches the model"
+        );
+
+        let stopped = tokio::time::timeout(
+            Duration::from_secs(30),
+            runtime
+                .runtime_adapter
+                .stop_runtime_executor(&session_id, "the host stops"),
+        )
+        .await
+        .expect("the stop returns");
+        client.release.notify_one();
+        let answered = held_turn_answer(in_flight, "the request in flight").await;
+        let registered =
+            still_registered_after(&runtime, &session_id, Duration::from_secs(3)).await;
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        let archived = runtime
+            .authoritative_session_archived(&session_id)
+            .await
+            .unwrap_or(true);
+        let next = the_next_turn_runs(&runtime, &client, &session_id).await;
+        println!(
+            "stop answered {stopped:?}; the request in flight: {answered:?}; registered \
+             afterwards: {registered}; stored: {stored}; archived: {archived}; the next turn: \
+             {next:?}"
+        );
+        assert_eq!(
+            (answered, stored, archived, next),
+            (Ok(()), true, false, Ok(())),
+            "(the request in flight, stored, archived, the next turn) after a stop with a turn \
+             in flight; the stop answered {stopped:?}, registered afterwards: {registered}"
         );
     }
 

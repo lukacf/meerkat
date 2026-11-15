@@ -1371,11 +1371,18 @@ pub enum RuntimeCompletionLiveSessionObservation {
 }
 
 /// Generated cleanup action for runtime completion side effects.
+///
+/// The machine also says WHICH cleanup: `CleanupRuntime` retires the
+/// session's runtime and leaves the session what it owns;
+/// `CleanupArchivedSession` is the cleanup of an archived session, which
+/// also ends the mobs the session owns. A surface matches the action and
+/// never chooses the cleanup itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RuntimeCompletionCleanupAction {
     #[default]
     RetainRuntime,
     CleanupRuntime,
+    CleanupArchivedSession,
 }
 
 /// Generated authority for whether completion cleanup may release a surface
@@ -2929,6 +2936,20 @@ pub enum CompactionRequestVerdict {
     AlreadyRequested,
     #[default]
     NotServing,
+}
+
+/// What `AbandonQueuedInput` did with one input: abandoned (the input was
+/// queued and is now abandoned with the given reason), not queued (a run
+/// holds it: staged or applied; nothing changed), already terminal (nothing
+/// changed), or untracked (the machine does not hold the input: never
+/// admitted here, or archived after its durable terminal; nothing changed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum QueuedInputAbandonDisposition {
+    Abandoned,
+    NotQueued,
+    AlreadyTerminal,
+    #[default]
+    Untracked,
 }
 
 /// What an unregister does with inputs still queued behind the session's
@@ -7518,6 +7539,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             // request: the machine answers whether this check compacts at
             // the host's request.
             ConsumeCompactionRequest { run_id: RunId },
+            // Abandon one input with `reason`, only while it is still
+            // queued: the machine answers what it did
+            // (`QueuedInputAbandonResolved`). A run that has taken the input
+            // keeps it; `AbandonInput` stays the unconditional terminal of
+            // the bulk and teardown paths.
+            AbandonQueuedInput {
+                input_id: String,
+                reason: Enum<InputAbandonReason>,
+            },
         }
 
         surface_only [
@@ -8912,6 +8942,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             // the check compacts without asking the compactor's trigger, or,
             // with nothing to compact, skips and says so.
             CompactionRequestConsumed { run_id: RunId },
+            // The answer to `AbandonQueuedInput`: what the machine did with
+            // the input, and the phase it holds the input in (none for an
+            // input it does not hold).
+            QueuedInputAbandonResolved {
+                input_id: String,
+                disposition: Enum<QueuedInputAbandonDisposition>,
+                phase: Option<Enum<InputPhase>>,
+            },
         }
 
         // =====================================================================
@@ -9205,6 +9243,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         // The agent's compaction check reads the consumption from its own
         // transition, as it reads TurnCheckCompaction.
         disposition CompactionRequestConsumed => local seam NoOwnerRealization,
+        // The driver that asks the machine to abandon a queued input reads
+        // the answer from its own transition.
+        disposition QueuedInputAbandonResolved => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Helpers
@@ -17385,13 +17426,26 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
             emit RuntimeCompletionCleanupResolved {
                 session_id: session_id,
-                action: RuntimeCompletionCleanupAction::CleanupRuntime,
+                action: RuntimeCompletionCleanupAction::CleanupArchivedSession,
                 pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission
             }
         }
 
+        // One terminated input on a runtime that never started or no longer
+        // serves: the runtime is cleaned up. Every way of ending a runtime
+        // (a stop, a retire, an unregister) answers its waiters after its
+        // lifecycle commit moved the phase out of the serving phases, so this
+        // arm holds the cleanups that follow a runtime's end.
+        //
+        // The arm is declared once per phase, in the order its three
+        // generated names were published, because only its Retired cell
+        // reads the machine's queue state: a retired runtime still drains
+        // its queued inputs, one run at a time (`DrainQueuedRunRetired`), so
+        // it is cleaned up only when nothing is left to drain. A guard on
+        // one shared `per_phase` arm would bind Stopped too, where a stop
+        // that requeues leaves inputs queued for the next start.
         transition ResolveRuntimeCompletionCleanupRuntimeTerminated {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            per_phase [Initializing]
             on input ResolveRuntimeCompletionCleanup {
                 session_id, observation_session_id, observation_agent_runtime_id,
                 observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome,
@@ -17411,6 +17465,128 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit RuntimeCompletionCleanupResolved {
                 session_id: session_id,
                 action: RuntimeCompletionCleanupAction::CleanupRuntime,
+                pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission
+            }
+        }
+        transition ResolveRuntimeCompletionCleanupRuntimeTerminated {
+            per_phase [Retired]
+            on input ResolveRuntimeCompletionCleanup {
+                session_id, observation_session_id, observation_agent_runtime_id,
+                observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome,
+                archived_by_authority, live_session
+            }
+            guard "observation_matches_session" { observation_session_id == session_id }
+            guard "observation_matches_runtime_binding" {
+                self.active_runtime_id == observation_agent_runtime_id
+                && self.active_fence_token == observation_fence_token
+                && self.active_runtime_generation == observation_runtime_generation
+                && self.active_runtime_epoch_id == observation_runtime_epoch_id
+            }
+            guard "not_archived" { archived_by_authority == false }
+            guard "runtime_terminated" { outcome == RuntimeCompletionObservedOutcome::RuntimeTerminated }
+            guard "nothing_left_to_drain" {
+                self.current_run_id == None
+                && !exists(input_id in self.input_phases.keys(),
+                    self.input_phases.get_cloned(input_id) == Some(InputPhase::Queued))
+            }
+            update {}
+            to Idle
+            emit RuntimeCompletionCleanupResolved {
+                session_id: session_id,
+                action: RuntimeCompletionCleanupAction::CleanupRuntime,
+                pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission
+            }
+        }
+        transition ResolveRuntimeCompletionCleanupRuntimeTerminated {
+            per_phase [Stopped]
+            on input ResolveRuntimeCompletionCleanup {
+                session_id, observation_session_id, observation_agent_runtime_id,
+                observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome,
+                archived_by_authority, live_session
+            }
+            guard "observation_matches_session" { observation_session_id == session_id }
+            guard "observation_matches_runtime_binding" {
+                self.active_runtime_id == observation_agent_runtime_id
+                && self.active_fence_token == observation_fence_token
+                && self.active_runtime_generation == observation_runtime_generation
+                && self.active_runtime_epoch_id == observation_runtime_epoch_id
+            }
+            guard "not_archived" { archived_by_authority == false }
+            guard "runtime_terminated" { outcome == RuntimeCompletionObservedOutcome::RuntimeTerminated }
+            update {}
+            to Idle
+            emit RuntimeCompletionCleanupResolved {
+                session_id: session_id,
+                action: RuntimeCompletionCleanupAction::CleanupRuntime,
+                pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission
+            }
+        }
+
+        // One terminated input on a runtime that serves: the input ended (it
+        // was taken back while queued: recalled, cancelled, or reset away),
+        // the runtime did not. The runtime is kept, with the turn it runs,
+        // its other queued inputs and what its surface holds for the
+        // session; only the request's pre-admission is released. The phase
+        // is the fact that tells this from a runtime's end, and it is a
+        // `per_phase` split because schema lowering strips lifecycle-phase
+        // predicates out of guards.
+        transition ResolveRuntimeCompletionCleanupInputTerminatedWhileServing {
+            per_phase [Idle, Attached, Running]
+            on input ResolveRuntimeCompletionCleanup {
+                session_id, observation_session_id, observation_agent_runtime_id,
+                observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome,
+                archived_by_authority, live_session
+            }
+            guard "observation_matches_session" { observation_session_id == session_id }
+            guard "observation_matches_runtime_binding" {
+                self.active_runtime_id == observation_agent_runtime_id
+                && self.active_fence_token == observation_fence_token
+                && self.active_runtime_generation == observation_runtime_generation
+                && self.active_runtime_epoch_id == observation_runtime_epoch_id
+            }
+            guard "not_archived" { archived_by_authority == false }
+            guard "runtime_terminated" { outcome == RuntimeCompletionObservedOutcome::RuntimeTerminated }
+            update {}
+            to Idle
+            emit RuntimeCompletionCleanupResolved {
+                session_id: session_id,
+                action: RuntimeCompletionCleanupAction::RetainRuntime,
+                pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission
+            }
+        }
+
+        // One terminated input on a retired runtime that still has work to
+        // drain: a run is bound, or an input is queued. The input ended (it
+        // was taken back while queued, or it ended with the run the retire
+        // ended); the drain did not. The runtime is kept, so the inputs
+        // still queued run and are answered. The guard is the complement of
+        // the Retired cleanup arm's, over the machine's own state.
+        transition ResolveRuntimeCompletionCleanupInputTerminatedWhileDraining {
+            per_phase [Retired]
+            on input ResolveRuntimeCompletionCleanup {
+                session_id, observation_session_id, observation_agent_runtime_id,
+                observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome,
+                archived_by_authority, live_session
+            }
+            guard "observation_matches_session" { observation_session_id == session_id }
+            guard "observation_matches_runtime_binding" {
+                self.active_runtime_id == observation_agent_runtime_id
+                && self.active_fence_token == observation_fence_token
+                && self.active_runtime_generation == observation_runtime_generation
+                && self.active_runtime_epoch_id == observation_runtime_epoch_id
+            }
+            guard "not_archived" { archived_by_authority == false }
+            guard "runtime_terminated" { outcome == RuntimeCompletionObservedOutcome::RuntimeTerminated }
+            guard "work_left_to_drain" {
+                self.current_run_id != None
+                || exists(input_id in self.input_phases.keys(),
+                    self.input_phases.get_cloned(input_id) == Some(InputPhase::Queued))
+            }
+            update {}
+            to Idle
+            emit RuntimeCompletionCleanupResolved {
+                session_id: session_id,
+                action: RuntimeCompletionCleanupAction::RetainRuntime,
                 pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission
             }
         }
@@ -41654,6 +41830,131 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input ConsumeCompactionRequest { run_id }
             update {}
             to Idle
+        }
+
+        // AbandonQueuedInput: abandon one input, only while it is still
+        // queued. Withdrawing an input is safe exactly until a run takes it:
+        // from then on ending it belongs to that run. `StageForRun` and the
+        // live-boundary join take an input on the same fact this guard reads
+        // (`InputPhase::Queued`), and every input of a session's machine is
+        // applied under that session's driver, so exactly one of "a run
+        // takes the input" and "this abandons it" commits. The queued check
+        // is the machine's: no shell code reads the phase and then applies
+        // the unconditional `AbandonInput`, which stays the terminal of the
+        // bulk and teardown paths (retire, reset, stop, destroy), where
+        // in-flight inputs end too.
+        //
+        // The machine owns the answer (`QueuedInputAbandonResolved`), one
+        // arm per case. In the five runtime phases that hold inputs (the
+        // phases of admission, of `RecoverInputLifecycle` and of
+        // `AbandonInput`) the arms are total over the input: each of its
+        // eight phases, and its absence.
+        //
+        // - Abandoned: the input is queued. It becomes Abandoned with
+        //   `reason`, exactly as `AbandonInput` records it, with the
+        //   machine's own attempt count. Only in the phases that hold
+        //   inputs, as `AbandonInput`.
+        // - NotQueued: a run holds the input (Staged, Applied or
+        //   AppliedPendingConsumption). Nothing changes: the run is not
+        //   touched.
+        // - AlreadyTerminal: the input already ended. Nothing changes.
+        // - Untracked: the machine does not hold the input (never admitted
+        //   here, or archived after its durable terminal; the store owns
+        //   that history). Nothing changes.
+        //
+        // Initializing and Destroyed have only the three arms that change
+        // nothing. An input that is Queued there matches no arm: the
+        // machine refuses the input, as it refuses `AbandonInput` there,
+        // and the shell reports that as an error, not as an answer about
+        // the input. That is right in both phases. No transition writes
+        // `input_phases` in Initializing (admission and recovery exist only
+        // in the five phases), so no queued input exists to ask about. A
+        // Destroyed runtime has ended: its teardown abandons what it holds
+        // before `Destroy`, and an input it left queued is not a caller's
+        // to withdraw from a runtime that no longer serves.
+        transition AbandonQueuedInput {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AbandonQueuedInput { input_id, reason }
+            guard "input_queued" {
+                self.input_phases.get_cloned(input_id) == Some(InputPhase::Queued)
+            }
+            update {
+                self.input_phases.insert(input_id, InputPhase::Abandoned);
+                self.input_controller_holds.remove(input_id);
+                self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
+                self.input_terminal_kind.insert(input_id, InputTerminalKind::Abandoned);
+                self.input_abandon_reason.insert(input_id, reason);
+                if self.input_attempt_counts.contains_key(input_id) {
+                    self.input_abandon_attempt_count.insert(
+                        input_id,
+                        self.input_attempt_counts.get(input_id).get("value")
+                    );
+                } else {
+                    self.input_abandon_attempt_count.insert(input_id, 0);
+                }
+                self.input_superseded_by.remove(input_id);
+                self.input_aggregate_id.remove(input_id);
+                self.input_live_boundary_delivery.remove(input_id);
+                self.input_live_boundary_join_run.remove(input_id);
+                self.input_live_boundary_join_phase.remove(input_id);
+            }
+            to Idle
+            emit RecordTerminalOutcome
+            emit QueuedInputAbandonResolved {
+                input_id: input_id,
+                disposition: QueuedInputAbandonDisposition::Abandoned,
+                phase: Some(InputPhase::Abandoned)
+            }
+        }
+
+        transition AbandonQueuedInputNotQueued {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input AbandonQueuedInput { input_id, reason }
+            guard "input_held_by_a_run" {
+                self.input_phases.get_cloned(input_id) == Some(InputPhase::Staged)
+                || self.input_phases.get_cloned(input_id) == Some(InputPhase::Applied)
+                || self.input_phases.get_cloned(input_id)
+                    == Some(InputPhase::AppliedPendingConsumption)
+            }
+            update {}
+            to Idle
+            emit QueuedInputAbandonResolved {
+                input_id: input_id,
+                disposition: QueuedInputAbandonDisposition::NotQueued,
+                phase: self.input_phases.get_cloned(input_id)
+            }
+        }
+
+        transition AbandonQueuedInputAlreadyTerminal {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input AbandonQueuedInput { input_id, reason }
+            guard "input_terminal" {
+                self.input_phases.get_cloned(input_id) == Some(InputPhase::Consumed)
+                || self.input_phases.get_cloned(input_id) == Some(InputPhase::Superseded)
+                || self.input_phases.get_cloned(input_id) == Some(InputPhase::Coalesced)
+                || self.input_phases.get_cloned(input_id) == Some(InputPhase::Abandoned)
+            }
+            update {}
+            to Idle
+            emit QueuedInputAbandonResolved {
+                input_id: input_id,
+                disposition: QueuedInputAbandonDisposition::AlreadyTerminal,
+                phase: self.input_phases.get_cloned(input_id)
+            }
+        }
+
+        transition AbandonQueuedInputUntracked {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input AbandonQueuedInput { input_id, reason }
+            guard "input_untracked" { !self.input_phases.contains_key(input_id) }
+            update {}
+            to Idle
+            emit QueuedInputAbandonResolved {
+                input_id: input_id,
+                disposition: QueuedInputAbandonDisposition::Untracked,
+                phase: None
+            }
         }
     }
         }

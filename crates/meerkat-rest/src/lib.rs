@@ -1523,7 +1523,7 @@ async fn discard_rebuilt_rest_session_after_api_error_locked(
 
 /// Take back the runtime of a session whose create failed after it was
 /// registered. The session was not archived, so this is the cleanup of a
-/// session that stays ([`RuntimeCleanupScope::KeptSession`]): it destroys no
+/// session that stays ([`cleanup_kept_session_runtime`]): it destroys no
 /// mob.
 async fn cleanup_rest_session_after_api_error(
     state: &AppState,
@@ -1531,13 +1531,7 @@ async fn cleanup_rest_session_after_api_error(
     primary: ApiError,
     operation: &str,
 ) -> ApiError {
-    match cleanup_rest_session_runtime_until_terminal(
-        state,
-        session_id,
-        RuntimeCleanupScope::KeptSession,
-    )
-    .await
-    {
+    match cleanup_kept_session_runtime(state, session_id).await {
         Ok(()) => primary,
         Err(cleanup) => ApiError::Internal(runtime_cleanup_failure_message(
             api_error_message(&primary),
@@ -1774,14 +1768,15 @@ async fn cleanup_rest_runtime_after_completion_outcome(
             if runtime_termination_cleanup
                 && !state.runtime_adapter.contains_session(session_id).await =>
         {
-            // No cleanup authority was generated; the archive read above is
-            // the fact it would have been given. A session that is not
-            // archived keeps what it owns.
+            // No generated authority named a cleanup here, so this is never
+            // the archive's: an archived session whose registration is gone
+            // returned above, and a session that is not archived keeps what
+            // it owns.
             cleanup_rest_runtime_after_verified_termination(
                 state,
                 session_id,
                 &runtime_termination_proof,
-                RuntimeCleanupScope::of_completion_cleanup(archived_now),
+                RuntimeCleanupScope::KeptSession,
             )
             .await?;
             return Ok(true);
@@ -1792,14 +1787,14 @@ async fn cleanup_rest_runtime_after_completion_outcome(
             )));
         }
     };
-    if cleanup_authority.requires_runtime_cleanup() {
-        // A cleanup the authority asks for is the session's archive only when
-        // the authority says the session is archived. A turn whose apply
-        // failed retires the session's live runtime, which its next turn
-        // builds again, and leaves the session what it owns: its mobs are
-        // destroyed by its archive, never by a failed turn.
-        let scope =
-            RuntimeCleanupScope::of_completion_cleanup(cleanup_authority.archived_by_authority);
+    // The machine names the cleanup: none, the runtime's only, or the
+    // archive's. This surface hands the action to the one exhaustive mapping
+    // every surface shares and chooses nothing. A turn
+    // whose apply failed retires the session's live runtime, which its next
+    // turn builds again, and leaves the session what it owns: its mobs are
+    // destroyed by its archive, never by a failed turn.
+    let cleanup_scope = RuntimeCleanupScope::of_completion_action(cleanup_authority.action);
+    if let Some(scope) = cleanup_scope {
         match state.session_service.discard_live_session(session_id).await {
             Ok(()) | Err(SessionError::NotFound { .. }) => {}
             Err(error) => return Err(error),
@@ -8897,6 +8892,17 @@ async fn cleanup_archived_session_runtime(
         RuntimeCleanupScope::ArchivedSession,
     )
     .await
+}
+
+/// The cleanup of a session that stays: the runtime's teardown and the
+/// surface steps that follow it, and never the destroy of the mobs the
+/// session owns. The entry point for a cleanup that is never an archive.
+async fn cleanup_kept_session_runtime(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<(), SessionError> {
+    cleanup_rest_session_runtime_until_terminal(state, session_id, RuntimeCleanupScope::KeptSession)
+        .await
 }
 
 /// [`cleanup_archived_session_runtime`] for a completed turn's cleanup: join
@@ -16268,16 +16274,17 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
     /// cancels it: the real route, by the request's id, whose cancel action
     /// abandons the request's exact queued input. That input ends as a
     /// runtime termination, and the request's completion cleanup answers
-    /// that outcome by retiring the session's runtime. The session keeps the
-    /// child mob it owns and its implicit mob, stays stored and not archived,
-    /// and runs its next turn.
+    /// that outcome by keeping the session's runtime, which still serves.
+    /// The session keeps the child mob it owns and its implicit mob, stays
+    /// stored and not archived, and runs its next turn.
     ///
     /// The completion cleanup takes the session's runtime registration lock
     /// first. The row holds that lock from before the cancel until the turn
-    /// ahead of the queued request has ended, so the cleanup retires a
+    /// ahead of the queued request has ended, so the cleanup runs on a
     /// runtime with no turn in flight: the row measures what the cleanup
-    /// does to the session's mobs, not what becomes of a turn whose runtime
-    /// is retired under it. That turn's own answer is not asserted.
+    /// does to the session's mobs and its runtime. The row below measures
+    /// what becomes of a turn that is still running when the cleanup runs.
+    /// That turn's own answer is not asserted here.
     ///
     /// The fixture's model never holds a turn, so the row first unloads the
     /// session (its live session and its runtime registration, as for a
@@ -16415,10 +16422,10 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             "only the running turn reached the model: the cancelled request never ran"
         );
         // The cleanup under test ran to its end: the cancelled input's
-        // outcome retired the session's runtime. Nothing else here does.
+        // outcome kept the session's runtime, which serves on.
         assert!(
-            !state.runtime_adapter.contains_session(&session_id).await,
-            "the cancelled request's completion cleanup retired the session's runtime"
+            state.runtime_adapter.contains_session(&session_id).await,
+            "the cancelled request's completion cleanup kept the session's runtime"
         );
 
         assert_eq!(
@@ -16434,6 +16441,9 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             session.stored_and_not_archived().await,
             "the session is still stored, and not archived, after the cancelled queued request"
         );
+        // The kept runtime still calls the gated model: its next requests
+        // are served.
+        model_gate.add_permits(64);
         let next = session.continue_turn("the next turn").await;
         assert!(
             matches!(next, RequestTerminal::Publish(Ok(_))),
@@ -16442,6 +16452,156 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         assert!(
             session.model_requests() > requests_before + 1,
             "the next turn reached the model"
+        );
+    }
+
+    /// A caller's cancel of a request whose input is queued behind a running
+    /// turn ends that one request and nothing else. Set up as the row above,
+    /// but without holding the registration lock: the running turn is still
+    /// held at the model when the queued request is cancelled and its
+    /// completion cleanup runs. The running turn then completes and its
+    /// request is answered its result, the session's runtime stays
+    /// registered, the session keeps its mobs and stays stored, and its next
+    /// turn runs.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn a_cancelled_queued_request_leaves_the_running_turn_of_a_rest_session() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
+        const CANCELLED_REQUEST: &str = "cancelled-request-behind-a-running-turn";
+
+        let session = RestSessionWithOwnedMobs::live().await;
+        let session_id = session.session_id.clone();
+
+        session
+            .state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live session");
+        unregister_rest_runtime_session_until_terminal_for_test(&session.state, &session_id).await;
+        let model_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut state = session.state.clone();
+        state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&session.llm_calls),
+            release: Arc::clone(&model_gate),
+        }));
+        let requests_before = session.model_requests();
+
+        // The running turn: it attaches the session again and is held at the
+        // model.
+        let running = spawn_tracked_rest_continue(
+            &state,
+            &session_id,
+            "running-turn-ahead-of-the-cancelled-request",
+            "the running turn",
+        );
+        wait_for_rest_llm_calls(
+            &session.llm_calls,
+            requests_before + 1,
+            "the running turn reaches the model",
+        )
+        .await;
+        let ahead = state
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("the running turn's inputs");
+        assert!(
+            !ahead.is_empty(),
+            "the running turn's input is an active input of the session"
+        );
+
+        // The request under test: admitted to the runtime, its input queued
+        // behind the running turn. Its handler holds the registration lock
+        // until it has installed its cancel action and attached its
+        // completion cleanup: taking the lock once waits for that.
+        let cancelled =
+            spawn_tracked_rest_continue(&state, &session_id, CANCELLED_REQUEST, "the queued turn");
+        let _queued_input = wait_for_rest_queued_input(&state, &session_id, &ahead).await;
+        {
+            let registration_lock = rest_runtime_registration_lock(&state, &session_id);
+            drop(registration_lock.mutex().lock().await);
+        }
+
+        let response = tokio::time::timeout(
+            FAILURE_BOUND,
+            router(state.clone()).oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/requests/{CANCELLED_REQUEST}/cancel"))
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("the cancel of a queued request does not wait for the running turn")
+        .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::OK, "the cancel answers: {payload}");
+        assert_eq!(payload["cancelled"], true, "{payload}");
+        // The cancelled request is answered while the running turn is still
+        // held at the model. If it is not, the row lets the model answer so
+        // that both requests end, and says so.
+        let mut cancelled = cancelled;
+        let answered_while_the_turn_runs =
+            tokio::time::timeout(std::time::Duration::from_secs(5), &mut cancelled).await;
+        let cancelled_before_the_turn_ended = answered_while_the_turn_runs.is_ok();
+        // The model answers now, and every later model request is served.
+        model_gate.add_permits(64);
+        let (cancelled_status, cancelled_body) = match answered_while_the_turn_runs {
+            Ok(answered) => answered.expect("cancelled request task"),
+            Err(_) => tokio::time::timeout(FAILURE_BOUND, cancelled)
+                .await
+                .expect("the cancelled request is answered")
+                .expect("cancelled request task"),
+        };
+        let (running_status, running_body) = tokio::time::timeout(FAILURE_BOUND, running)
+            .await
+            .expect("the running turn's request is answered")
+            .expect("running turn task");
+        let mut registered = true;
+        for _ in 0..40 {
+            registered = state.runtime_adapter.contains_session(&session_id).await;
+            if !registered {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            (
+                cancelled_before_the_turn_ended,
+                cancelled_status,
+                running_status,
+                registered,
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+                session.stored_and_not_archived().await,
+            ),
+            (
+                true,
+                StatusCode::from_u16(499).expect("499 is a valid status"),
+                StatusCode::OK,
+                true,
+                true,
+                true,
+                true
+            ),
+            "(the cancelled request answered while the turn ahead of it still runs, its answer, \
+             the running turn's answer, the session's runtime registered, child mob, implicit \
+             mob, stored session) after the queued request was cancelled; the cancelled request \
+             was answered {cancelled_body}, the running turn {running_body}"
+        );
+        let next = session.continue_turn("the next turn").await;
+        assert!(
+            matches!(next, RequestTerminal::Publish(Ok(_))),
+            "the session's next turn runs: {next:?}"
         );
     }
 

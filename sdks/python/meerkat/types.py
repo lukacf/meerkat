@@ -100,6 +100,8 @@ from .generated.types import (
     CompactSessionResult as CompactSessionResult,
     MobCompactMemberResult as MobCompactMemberResult,
     WireCompactionRequestOutcome as WireCompactionRequestOutcome,
+    RecallInputResult as RecallInputResult,
+    WireQueuedInputRecall as WireQueuedInputRecall,
     ToolDispatchSettlementFailure as ToolDispatchSettlementFailure,
     WireRunStopContributor as WireRunStopContributor,
     WireRunStopReceipt as WireRunStopReceipt,

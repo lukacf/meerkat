@@ -342,6 +342,11 @@ pub use meerkat_core::{
 pub use meerkat_client::{
     FactoryError, LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse,
 };
+/// A helper of the REST door, not an API of this crate: whether a failed
+/// read of a schedule request was the refusal of a `reasoning_effort` member
+/// written directly in a schedule spec.
+#[doc(hidden)]
+pub use meerkat_schedule::direct_reasoning_effort_refusal;
 pub use meerkat_schedule::{
     CalendarFieldSpec, CalendarTriggerSpec, ClaimDueRequest, ClaimDueResult, CreateScheduleRequest,
     DeliveryCompletion, DeliveryDispatch, DeliveryFailureReason, DeliveryReceipt,

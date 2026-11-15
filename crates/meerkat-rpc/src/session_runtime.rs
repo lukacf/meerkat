@@ -44153,12 +44153,6 @@ mod tests {
         /// past its first round commit is admitted and queued behind it.
         answer_a_tool_call_next: AtomicBool,
         hold_next_provider_read: AtomicBool,
-        /// How many reads of the provider pass before the armed hold takes
-        /// one. A turn that names a reasoning effort level reads the
-        /// provider before its input is admitted (the judge builds the
-        /// client), so a row that holds such a turn in its apply lets those
-        /// reads pass.
-        provider_reads_before_the_hold: AtomicUsize,
         held_read_answers_another_provider: AtomicBool,
         provider_read_held: AtomicBool,
         provider_read_released: AtomicBool,
@@ -44262,16 +44256,6 @@ mod tests {
         }
 
         fn provider(&self) -> meerkat_core::Provider {
-            if self.hold_next_provider_read.load(AtomicOrdering::SeqCst)
-                && self
-                    .provider_reads_before_the_hold
-                    .fetch_update(AtomicOrdering::SeqCst, AtomicOrdering::SeqCst, |left| {
-                        left.checked_sub(1)
-                    })
-                    .is_ok()
-            {
-                return meerkat_core::Provider::Anthropic;
-            }
             if self
                 .hold_next_provider_read
                 .swap(false, AtomicOrdering::SeqCst)
@@ -46646,24 +46630,24 @@ mod tests {
     /// A turn that names a reasoning effort level is judged before its
     /// input is admitted and again when it starts. When the route's answer
     /// changes in between (here the route stops stating the level while the
-    /// turn's apply is held), the turn is refused at its start, after its
-    /// input was admitted. That is a refusal of that one request: it is
-    /// answered the typed refusal, the session's live runtime stays (its
-    /// registration and its MCP adapter), the input queued behind the turn
-    /// through the runtime (as a peer message or a scheduled delivery is
-    /// queued, with no turn request waiting on it) runs, and the next turn
-    /// runs.
+    /// turn's run is staged and has not started), the turn is refused at
+    /// its start, after its input was admitted. That is a refusal of that
+    /// one request: it is answered the typed refusal, the session's live
+    /// runtime stays (its registration and its MCP adapter), the input
+    /// queued behind the turn through the runtime (as a peer message or a
+    /// scheduled delivery is queued, with no turn request waiting on it)
+    /// runs, and the next turn runs.
     ///
-    /// The fixture's hold is taken by the first read of the client's
-    /// provider it is armed for. A turn that names a level reads the
-    /// provider before its input is admitted (the judge builds the client,
-    /// once early and once under the registration lock), so the row lets
-    /// those two reads pass and holds the read the turn's apply makes.
+    /// The turn's run is parked where the runtime has staged it and has not
+    /// yet handed it to the session, so every state the row reads before it
+    /// lets the turn start stands until then: the turn's input is admitted,
+    /// the queued input is admitted behind it, and neither can end.
     #[cfg(all(feature = "mob", feature = "mcp"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_level_refused_at_the_start_of_an_admitted_turn_costs_no_queued_input() {
         use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
         use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_runtime::input::{Input, PromptInput};
 
         let session = FailedStartSession::materialized().await;
         // The route states `high`: the turn's level is taken at admission.
@@ -46671,26 +46655,55 @@ mod tests {
             .client
             .route_states_level
             .store(1, AtomicOrdering::SeqCst);
-        session
-            .client
-            .provider_reads_before_the_hold
-            .store(2, AtomicOrdering::SeqCst);
         let requests = session.client.calls.load(AtomicOrdering::SeqCst);
-        let refused = session
-            .start_turn_held_in_its_apply(
-                "names a level the route states",
-                Some(level_overrides(TurnMetadataOverride::Set(
-                    EffortLevel::High,
-                ))),
-            )
-            .await;
-        // The route stops stating `high` while the turn's apply is held,
-        // and an input queues behind the turn.
+        let (staged, start) = session
+            .runtime
+            .runtime_adapter
+            .arm_runtime_loop_before_executor_apply_test_hook(session.session_id.clone());
+        let refused = session.spawn_turn(
+            "names a level the route states",
+            Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))),
+        );
+        tokio::time::timeout(Duration::from_mins(1), staged)
+            .await
+            .expect("the turn's run is staged")
+            .expect("the turn's run reaches its start");
+        assert_eq!(
+            session.active_inputs().await,
+            1,
+            "the turn's input was admitted, and its run has not started"
+        );
+        // The route stops stating `high` before the turn starts, and an
+        // input queues behind the turn.
         session
             .client
             .route_states_level
             .store(2, AtomicOrdering::SeqCst);
-        let queued = session.queue_input_behind_the_current_turn().await;
+        let (_, queued) = tokio::time::timeout(
+            Duration::from_mins(1),
+            session
+                .runtime
+                .runtime_adapter
+                .accept_input_with_completion(
+                    &session.session_id,
+                    Input::Prompt(PromptInput::from_content_input(
+                        FAILED_START_QUEUED_INPUT.into(),
+                        SessionRuntime::typed_text_turn(None),
+                    )),
+                ),
+        )
+        .await
+        .expect("the runtime answers the queued input's admission")
+        .expect("the runtime admits the queued input");
+        let queued = queued.expect("an admitted prompt has a completion waiter");
+        assert_eq!(
+            session.active_inputs().await,
+            2,
+            "the input is queued behind the turn, whose run has not started"
+        );
+        start.send(()).expect("the staged run is waiting to start");
         let refused = refused
             .await
             .unwrap()

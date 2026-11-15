@@ -4,7 +4,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 \* Generated semantic machine model for MeerkatMachine.
 
 \* RustU64Max is the TLA boundary for Expr::U64Max; production generated Rust renders u64::MAX.
-CONSTANTS AdmissionContinuationKindValues, AdmissionExistingQueuedActionKindValues, AdmissionIdempotencyResultKindValues, AdmissionInputKindValues, AdmissionInputOriginKindValues, AdmissionPeerResponseTerminalApplyIntentValues, AdmissionPlanKindValues, AdmissionPolicyApplyModeValues, AdmissionPolicyConsumePointValues, AdmissionPolicyDrainPolicyValues, AdmissionPolicyQueueModeValues, AdmissionPolicyWakeModeValues, AdmissionQueueActionKindValues, AdmissionRejectReasonKindValues, AdmissionRoutingDispositionValues, AdmissionRunApplyBoundaryValues, AdmissionRuntimeExecutionKindValues, AdmissionTurnAppendShapeValues, AdmissionValidationResultKindValues, AgentIdentityValues, AgentRuntimeIdValues, BooleanValues, CallTimeoutSourceValues, CallTimeoutVerdictValues, CommsRuntimeIdValues, CompactionRequestVerdictValues, ContentShapeValues, DrainExitReasonValues, DrainModeValues, DrainPhaseValues, DurableRecoveryInputEvidenceValues, DurableRecoveryObservedLifecycleValues, DurableRecoveryObservedRunValues, DurableRecoveryOwnershipValues, DurableRecoveryPriorCommitValues, DurableTailRecoveryClassValues, DurableTailRecoveryDispositionValues, EmptyResumeRetirementVerdictValues, ExternalToolSurfaceBaseStateValues, ExternalToolSurfaceDeltaOperationValues, ExternalToolSurfaceDeltaPhaseValues, ExternalToolSurfaceFailureCauseValues, FenceTokenValues, GenerationValues, InboundPeerRequestStateValues, InputAbandonReasonValues, InputDurabilityKindValues, InputIdValues, InputLaneValues, InputPhaseValues, InputPublicLifecycleStateValues, InputPublicTerminalOutcomeValues, InputTerminalKindValues, InteractionStreamAbandonReasonValues, InteractionStreamStateValues, LiveAssistantTurnOriginValues, LiveBoundaryDeliveryValues, LiveBoundaryJoinObservationValues, LiveBoundaryJoinPhaseValues, LiveBridgeCancellationReasonValues, LiveBridgeEffectKindValues, LiveBridgeEffectOutcomeValues, LiveBridgeOperationPhaseValues, LiveBridgeOutputKindValues, LiveBridgeSubmissionObservationValues, LiveBridgeSubmissionStateValues, LiveChannelDegradationReasonValues, LiveChannelPublicStatusValues, LiveChannelRequestPublicKindValues, LiveChannelRequestRejectionPublicErrorClassValues, LiveChannelRequestRejectionReasonValues, LiveClosePublicStatusValues, LiveCommandPublicKindValues, LiveCommandRejectionPublicErrorClassValues, LiveCommandRejectionReasonValues, LiveContextAppendObservationValues, LiveContextDeliveryReadinessValues, LiveContextPayloadAvailabilityValues, LiveContextPreparationFailureValues, LiveContextPreparationPhaseValues, LiveContextRowAuthorValues, LiveContextRowDispositionValues, LiveContextRowSourceValues, LiveConversationStartCauseValues, LiveDelegationCancellationOutcomeValues, LiveDelegationCancellationReasonValues, LiveDelegationNarrationKindValues, LiveDelegationReconciliationValues, LiveDelegationResultDeliveryObservationValues, LiveDelegationResultDispositionValues, LiveDelegationResultSpeechDispositionValues, LiveDelegationScheduleStateValues, LiveDelegationWorkerOwnershipValues, LiveDelegationWorkerPhaseValues, LiveDelegationWorkerTerminalKindValues, LiveExecutionChannelPhaseValues, LiveExecutionModeValues, LiveMemberTurnReasoningValues, LiveOpenAdmissionRejectionValues, LiveRefreshPublicStatusValues, LiveWebrtcAnswerAdmissionRejectionValues, LiveWebrtcAnswerPublicStatusValues, LiveWebsocketTokenAdmissionPublicErrorClassValues, LiveWebsocketTokenAdmissionRejectionValues, LlmFailureRecoveryKindValues, LlmRetryFailureKindValues, McpServerIdValues, McpServerStateValues, MeerkatExecutionTerminalValues, MobIdValues, MobIncarnationIdValues, MobOperatorAccessRequestKindValues, MobPeerOverlayCommandKindValues, MobToolCallerProvenanceValues, ModelRoutingHandoffRecordValues, NatValues, OpLifecycleActionKindValues, OpLifecycleRejectReasonKindValues, OpRegistrationAdmissionResultKindValues, OpRegistrationRejectReasonKindValues, OpTerminalPayloadValues, OpaquePrincipalTokenValues, OperationCompletionFeedClassValues, OperationCompletionWakeClassValues, OperationDurabilityClassValues, OperationIdValues, OperationKindValues, OperationPublicResultClassValues, OperationSourceValues, OperationStatusValues, OperationTerminalOutcomeKindValues, OutboundPeerRequestStateValues, PeerCorrelationIdValues, PeerEndpointValues, PeerIdValues, PeerIngressAdmissionDiagnosticClassValues, PeerIngressAdmittedKindValues, PeerIngressAuthClassValues, PeerIngressAuthorityPhaseClassValues, PeerIngressEnvelopeClassValues, PeerIngressInputClassValues, PeerIngressLifecycleClassValues, PeerIngressOwnerKindValues, PeerIngressReceiveOutcomeClassValues, PeerIngressRequestClassValues, PeerIngressResponseStatusValues, PeerIngressResponseTerminalityValues, PeerResponseAddresseeVerdictValues, PeerResponseSenderVerdictValues, PeerResponseTerminalObservedStatusValues, PeerTerminalDispositionValues, PostAdmissionSignalKindValues, PreRunPhaseValues, ProviderValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptRoleKindValues, RecoveredInputKindValues, RecoveredInputNormalizationReasonKindValues, RecoveredInputObservedPhaseValues, RecoveredInputRecoveryDispositionValues, RecoveredPeerResponseTerminalApplyIntentValues, RecoveredRunApplyBoundaryValues, RecoveredRuntimeExecutionKindValues, RecoveredTerminalCompletionDispositionValues, RecoveredTerminalCompletionUnrecoverableReasonKindValues, RegistrationPhaseValues, RetainedRunSettleVerdictValues, RoutingApprovalParentKindValues, RoutingApprovalPhaseValues, RoutingDenialReasonValues, RoutingImageApprovalReasonValues, RoutingImageOperationPhaseValues, RoutingImagePlanDenialReasonValues, RoutingImageProviderErrorCodeValues, RoutingImageTerminalObservationValues, RoutingImageTerminalValues, RoutingProviderTextDispositionValues, RoutingSwitchApprovalReasonValues, RoutingSwitchTurnPhaseValues, RoutingSwitchTurnTerminalValues, RpcEventStreamTerminalErrorCodeValues, RpcEventStreamTerminalObservationKindValues, RpcEventStreamTerminalReasonValues, RunFailureSourceKindValues, RunIdValues, RunStartHoldReasonValues, RunSuspensionCauseValues, RuntimeApplyFailureCauseValues, RuntimeAuthorityObservationKindValues, RuntimeAuthorityReconcileDecisionValues, RuntimeCompletionCleanupActionValues, RuntimeCompletionFinalizationObservationValues, RuntimeCompletionLiveSessionObservationValues, RuntimeCompletionObservedOutcomeValues, RuntimeCompletionPreAdmissionActionValues, RuntimeCompletionResultClassValues, RuntimeCompletionTerminalObservationValues, RuntimeCompletionWaitFailureObservationValues, RuntimeCompletionWaitFailurePublicErrorClassValues, RuntimeCompletionWaitFailurePublicReasonValues, RuntimeEffectKindValues, RuntimeEpochIdValues, RuntimeEventKindValues, RuntimeIngressAdmissionValues, RuntimeInputAdmissionValues, RuntimeLifecycleObservedStateValues, RuntimeLifecycleTerminalityValues, RuntimeLoopRunBindingValues, RuntimeNoticeKindValues, RuntimeOpsLifecycleDurabilityActionValues, RuntimePrepareAdmissionValues, RuntimeQueueAdmissionValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionRegistrationRejectReasonKindValues, SessionResidencyOwnerValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfOperationIdValues, SetOfPeerCorrelationIdValues, SetOfPeerEndpointValues, SetOfRunStartHoldReasonValues, SetOfStringValues, SetOfToolNameValues, SetOfU64Values, StagedSessionPhaseValues, StopInputDispositionValues, StringValues, SupervisorAuthorizeAdmissionResultKindValues, SupervisorAuthorizeRejectionKindValues, SupervisorBindAdmissionResultKindValues, SupervisorBindMaterialAdmissionKindValues, SupervisorBindRejectionKindValues, SupervisorBindingKindValues, SupervisorBridgeCommandAdmissionResultKindValues, SupervisorBridgeCommandRejectionKindValues, SupervisorCleanupCommandKindValues, SupervisorRotationObservationStatusKindValues, SupervisorRotationPhaseValues, SupervisorRotationRejectionKindValues, SupervisorRotationSubmissionResultKindValues, SurfacePendingOpValues, SurfacePhaseValues, SurfaceRequestPhaseValues, SurfaceRequestTerminalPolicyValues, SurfaceResultClassValues, SurfaceStagedOpValues, TerminalCauseClassValues, TerminalCompletionCorrelationValues, ToolFilterValues, ToolNameValues, ToolVisibilityWitnessValues, TranscriptEditAdmissionKindValues, TurnCancellationReasonValues, TurnPhaseValues, TurnPrimitiveKindValues, TurnTerminalCauseKindValues, TurnTerminalOutcomeValues, UnregisterQueuedInputsDispositionValues, UserInterruptObservationKindValues, UserInterruptPublicResultKindValues, WaitAllAdmissionResultKindValues, WaitAllRejectReasonKindValues, WaitRequestIdValues, WorkIdValues, WorkOriginValues, RustU64Max
+CONSTANTS AdmissionContinuationKindValues, AdmissionExistingQueuedActionKindValues, AdmissionIdempotencyResultKindValues, AdmissionInputKindValues, AdmissionInputOriginKindValues, AdmissionPeerResponseTerminalApplyIntentValues, AdmissionPlanKindValues, AdmissionPolicyApplyModeValues, AdmissionPolicyConsumePointValues, AdmissionPolicyDrainPolicyValues, AdmissionPolicyQueueModeValues, AdmissionPolicyWakeModeValues, AdmissionQueueActionKindValues, AdmissionRejectReasonKindValues, AdmissionRoutingDispositionValues, AdmissionRunApplyBoundaryValues, AdmissionRuntimeExecutionKindValues, AdmissionTurnAppendShapeValues, AdmissionValidationResultKindValues, AgentIdentityValues, AgentRuntimeIdValues, BooleanValues, CallTimeoutSourceValues, CallTimeoutVerdictValues, CommsRuntimeIdValues, CompactionRequestVerdictValues, ContentShapeValues, DrainExitReasonValues, DrainModeValues, DrainPhaseValues, DurableRecoveryInputEvidenceValues, DurableRecoveryObservedLifecycleValues, DurableRecoveryObservedRunValues, DurableRecoveryOwnershipValues, DurableRecoveryPriorCommitValues, DurableTailRecoveryClassValues, DurableTailRecoveryDispositionValues, EmptyResumeRetirementVerdictValues, ExternalToolSurfaceBaseStateValues, ExternalToolSurfaceDeltaOperationValues, ExternalToolSurfaceDeltaPhaseValues, ExternalToolSurfaceFailureCauseValues, FenceTokenValues, GenerationValues, InboundPeerRequestStateValues, InputAbandonReasonValues, InputDurabilityKindValues, InputIdValues, InputLaneValues, InputPhaseValues, InputPublicLifecycleStateValues, InputPublicTerminalOutcomeValues, InputTerminalKindValues, InteractionStreamAbandonReasonValues, InteractionStreamStateValues, LiveAssistantTurnOriginValues, LiveBoundaryDeliveryValues, LiveBoundaryJoinObservationValues, LiveBoundaryJoinPhaseValues, LiveBridgeCancellationReasonValues, LiveBridgeEffectKindValues, LiveBridgeEffectOutcomeValues, LiveBridgeOperationPhaseValues, LiveBridgeOutputKindValues, LiveBridgeSubmissionObservationValues, LiveBridgeSubmissionStateValues, LiveChannelDegradationReasonValues, LiveChannelPublicStatusValues, LiveChannelRequestPublicKindValues, LiveChannelRequestRejectionPublicErrorClassValues, LiveChannelRequestRejectionReasonValues, LiveClosePublicStatusValues, LiveCommandPublicKindValues, LiveCommandRejectionPublicErrorClassValues, LiveCommandRejectionReasonValues, LiveContextAppendObservationValues, LiveContextDeliveryReadinessValues, LiveContextPayloadAvailabilityValues, LiveContextPreparationFailureValues, LiveContextPreparationPhaseValues, LiveContextRowAuthorValues, LiveContextRowDispositionValues, LiveContextRowSourceValues, LiveConversationStartCauseValues, LiveDelegationCancellationOutcomeValues, LiveDelegationCancellationReasonValues, LiveDelegationNarrationKindValues, LiveDelegationReconciliationValues, LiveDelegationResultDeliveryObservationValues, LiveDelegationResultDispositionValues, LiveDelegationResultSpeechDispositionValues, LiveDelegationScheduleStateValues, LiveDelegationWorkerOwnershipValues, LiveDelegationWorkerPhaseValues, LiveDelegationWorkerTerminalKindValues, LiveExecutionChannelPhaseValues, LiveExecutionModeValues, LiveMemberTurnReasoningValues, LiveOpenAdmissionRejectionValues, LiveRefreshPublicStatusValues, LiveWebrtcAnswerAdmissionRejectionValues, LiveWebrtcAnswerPublicStatusValues, LiveWebsocketTokenAdmissionPublicErrorClassValues, LiveWebsocketTokenAdmissionRejectionValues, LlmFailureRecoveryKindValues, LlmRetryFailureKindValues, McpServerIdValues, McpServerStateValues, MeerkatExecutionTerminalValues, MobIdValues, MobIncarnationIdValues, MobOperatorAccessRequestKindValues, MobPeerOverlayCommandKindValues, MobToolCallerProvenanceValues, ModelRoutingHandoffRecordValues, NatValues, OpLifecycleActionKindValues, OpLifecycleRejectReasonKindValues, OpRegistrationAdmissionResultKindValues, OpRegistrationRejectReasonKindValues, OpTerminalPayloadValues, OpaquePrincipalTokenValues, OperationCompletionFeedClassValues, OperationCompletionWakeClassValues, OperationDurabilityClassValues, OperationIdValues, OperationKindValues, OperationPublicResultClassValues, OperationSourceValues, OperationStatusValues, OperationTerminalOutcomeKindValues, OutboundPeerRequestStateValues, PeerCorrelationIdValues, PeerEndpointValues, PeerIdValues, PeerIngressAdmissionDiagnosticClassValues, PeerIngressAdmittedKindValues, PeerIngressAuthClassValues, PeerIngressAuthorityPhaseClassValues, PeerIngressEnvelopeClassValues, PeerIngressInputClassValues, PeerIngressLifecycleClassValues, PeerIngressOwnerKindValues, PeerIngressReceiveOutcomeClassValues, PeerIngressRequestClassValues, PeerIngressResponseStatusValues, PeerIngressResponseTerminalityValues, PeerResponseAddresseeVerdictValues, PeerResponseSenderVerdictValues, PeerResponseTerminalObservedStatusValues, PeerTerminalDispositionValues, PostAdmissionSignalKindValues, PreRunPhaseValues, ProviderValues, QueuedInputAbandonDispositionValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptRoleKindValues, RecoveredInputKindValues, RecoveredInputNormalizationReasonKindValues, RecoveredInputObservedPhaseValues, RecoveredInputRecoveryDispositionValues, RecoveredPeerResponseTerminalApplyIntentValues, RecoveredRunApplyBoundaryValues, RecoveredRuntimeExecutionKindValues, RecoveredTerminalCompletionDispositionValues, RecoveredTerminalCompletionUnrecoverableReasonKindValues, RegistrationPhaseValues, RetainedRunSettleVerdictValues, RoutingApprovalParentKindValues, RoutingApprovalPhaseValues, RoutingDenialReasonValues, RoutingImageApprovalReasonValues, RoutingImageOperationPhaseValues, RoutingImagePlanDenialReasonValues, RoutingImageProviderErrorCodeValues, RoutingImageTerminalObservationValues, RoutingImageTerminalValues, RoutingProviderTextDispositionValues, RoutingSwitchApprovalReasonValues, RoutingSwitchTurnPhaseValues, RoutingSwitchTurnTerminalValues, RpcEventStreamTerminalErrorCodeValues, RpcEventStreamTerminalObservationKindValues, RpcEventStreamTerminalReasonValues, RunFailureSourceKindValues, RunIdValues, RunStartHoldReasonValues, RunSuspensionCauseValues, RuntimeApplyFailureCauseValues, RuntimeAuthorityObservationKindValues, RuntimeAuthorityReconcileDecisionValues, RuntimeCompletionCleanupActionValues, RuntimeCompletionFinalizationObservationValues, RuntimeCompletionLiveSessionObservationValues, RuntimeCompletionObservedOutcomeValues, RuntimeCompletionPreAdmissionActionValues, RuntimeCompletionResultClassValues, RuntimeCompletionTerminalObservationValues, RuntimeCompletionWaitFailureObservationValues, RuntimeCompletionWaitFailurePublicErrorClassValues, RuntimeCompletionWaitFailurePublicReasonValues, RuntimeEffectKindValues, RuntimeEpochIdValues, RuntimeEventKindValues, RuntimeIngressAdmissionValues, RuntimeInputAdmissionValues, RuntimeLifecycleObservedStateValues, RuntimeLifecycleTerminalityValues, RuntimeLoopRunBindingValues, RuntimeNoticeKindValues, RuntimeOpsLifecycleDurabilityActionValues, RuntimePrepareAdmissionValues, RuntimeQueueAdmissionValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionRegistrationRejectReasonKindValues, SessionResidencyOwnerValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfOperationIdValues, SetOfPeerCorrelationIdValues, SetOfPeerEndpointValues, SetOfRunStartHoldReasonValues, SetOfStringValues, SetOfToolNameValues, SetOfU64Values, StagedSessionPhaseValues, StopInputDispositionValues, StringValues, SupervisorAuthorizeAdmissionResultKindValues, SupervisorAuthorizeRejectionKindValues, SupervisorBindAdmissionResultKindValues, SupervisorBindMaterialAdmissionKindValues, SupervisorBindRejectionKindValues, SupervisorBindingKindValues, SupervisorBridgeCommandAdmissionResultKindValues, SupervisorBridgeCommandRejectionKindValues, SupervisorCleanupCommandKindValues, SupervisorRotationObservationStatusKindValues, SupervisorRotationPhaseValues, SupervisorRotationRejectionKindValues, SupervisorRotationSubmissionResultKindValues, SurfacePendingOpValues, SurfacePhaseValues, SurfaceRequestPhaseValues, SurfaceRequestTerminalPolicyValues, SurfaceResultClassValues, SurfaceStagedOpValues, TerminalCauseClassValues, TerminalCompletionCorrelationValues, ToolFilterValues, ToolNameValues, ToolVisibilityWitnessValues, TranscriptEditAdmissionKindValues, TurnCancellationReasonValues, TurnPhaseValues, TurnPrimitiveKindValues, TurnTerminalCauseKindValues, TurnTerminalOutcomeValues, UnregisterQueuedInputsDispositionValues, UserInterruptObservationKindValues, UserInterruptPublicResultKindValues, WaitAllAdmissionResultKindValues, WaitAllRejectReasonKindValues, WaitRequestIdValues, WorkIdValues, WorkOriginValues, RustU64Max
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -125,6 +125,7 @@ OptionFenceTokenValues == {None} \cup {Some(x) : x \in FenceTokenValues}
 OptionGenerationValues == {None} \cup {Some(x) : x \in GenerationValues}
 OptionInputAbandonReasonValues == {None} \cup {Some(x) : x \in InputAbandonReasonValues}
 OptionInputLaneValues == {None} \cup {Some(x) : x \in InputLaneValues}
+OptionInputPhaseValues == {None} \cup {Some(x) : x \in InputPhaseValues}
 OptionInputPublicTerminalOutcomeValues == {None} \cup {Some(x) : x \in InputPublicTerminalOutcomeValues}
 OptionInputTerminalKindValues == {None} \cup {Some(x) : x \in InputTerminalKindValues}
 OptionInteractionStreamAbandonReasonValues == {None} \cup {Some(x) : x \in InteractionStreamAbandonReasonValues}
@@ -8503,45 +8504,13 @@ ResolveRuntimeCompletionCleanupRuntimeTerminatedInitializing(arg_session_id, obs
     /\ UnchangedFrame_13f21d7b87bb884e
 
 
-ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session) ==
-    /\ phase = "Idle"
-    /\ (observation_session_id = arg_session_id)
-    /\ ((active_runtime_id = observation_agent_runtime_id) /\ (active_fence_token = observation_fence_token) /\ (active_runtime_generation = observation_runtime_generation) /\ (active_runtime_epoch_id = observation_runtime_epoch_id))
-    /\ (archived_by_authority = FALSE)
-    /\ (outcome = "RuntimeTerminated")
-    /\ phase' = "Idle"
-    /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_13f21d7b87bb884e
-
-
-ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session) ==
-    /\ phase = "Attached"
-    /\ (observation_session_id = arg_session_id)
-    /\ ((active_runtime_id = observation_agent_runtime_id) /\ (active_fence_token = observation_fence_token) /\ (active_runtime_generation = observation_runtime_generation) /\ (active_runtime_epoch_id = observation_runtime_epoch_id))
-    /\ (archived_by_authority = FALSE)
-    /\ (outcome = "RuntimeTerminated")
-    /\ phase' = "Attached"
-    /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_13f21d7b87bb884e
-
-
-ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session) ==
-    /\ phase = "Running"
-    /\ (observation_session_id = arg_session_id)
-    /\ ((active_runtime_id = observation_agent_runtime_id) /\ (active_fence_token = observation_fence_token) /\ (active_runtime_generation = observation_runtime_generation) /\ (active_runtime_epoch_id = observation_runtime_epoch_id))
-    /\ (archived_by_authority = FALSE)
-    /\ (outcome = "RuntimeTerminated")
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_13f21d7b87bb884e
-
-
 ResolveRuntimeCompletionCleanupRuntimeTerminatedRetired(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session) ==
     /\ phase = "Retired"
     /\ (observation_session_id = arg_session_id)
     /\ ((active_runtime_id = observation_agent_runtime_id) /\ (active_fence_token = observation_fence_token) /\ (active_runtime_generation = observation_runtime_generation) /\ (active_runtime_epoch_id = observation_runtime_epoch_id))
     /\ (archived_by_authority = FALSE)
     /\ (outcome = "RuntimeTerminated")
+    /\ ((current_run_id = None) /\ ~((\E input_id \in DOMAIN input_phases : ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued")))))
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_13f21d7b87bb884e
@@ -8554,6 +8523,51 @@ ResolveRuntimeCompletionCleanupRuntimeTerminatedStopped(arg_session_id, observat
     /\ (archived_by_authority = FALSE)
     /\ (outcome = "RuntimeTerminated")
     /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+ResolveRuntimeCompletionCleanupInputTerminatedWhileServingIdle(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session) ==
+    /\ phase = "Idle"
+    /\ (observation_session_id = arg_session_id)
+    /\ ((active_runtime_id = observation_agent_runtime_id) /\ (active_fence_token = observation_fence_token) /\ (active_runtime_generation = observation_runtime_generation) /\ (active_runtime_epoch_id = observation_runtime_epoch_id))
+    /\ (archived_by_authority = FALSE)
+    /\ (outcome = "RuntimeTerminated")
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+ResolveRuntimeCompletionCleanupInputTerminatedWhileServingAttached(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session) ==
+    /\ phase = "Attached"
+    /\ (observation_session_id = arg_session_id)
+    /\ ((active_runtime_id = observation_agent_runtime_id) /\ (active_fence_token = observation_fence_token) /\ (active_runtime_generation = observation_runtime_generation) /\ (active_runtime_epoch_id = observation_runtime_epoch_id))
+    /\ (archived_by_authority = FALSE)
+    /\ (outcome = "RuntimeTerminated")
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+ResolveRuntimeCompletionCleanupInputTerminatedWhileServingRunning(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session) ==
+    /\ phase = "Running"
+    /\ (observation_session_id = arg_session_id)
+    /\ ((active_runtime_id = observation_agent_runtime_id) /\ (active_fence_token = observation_fence_token) /\ (active_runtime_generation = observation_runtime_generation) /\ (active_runtime_epoch_id = observation_runtime_epoch_id))
+    /\ (archived_by_authority = FALSE)
+    /\ (outcome = "RuntimeTerminated")
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+ResolveRuntimeCompletionCleanupInputTerminatedWhileDrainingRetired(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, archived_by_authority, live_session) ==
+    /\ phase = "Retired"
+    /\ (observation_session_id = arg_session_id)
+    /\ ((active_runtime_id = observation_agent_runtime_id) /\ (active_fence_token = observation_fence_token) /\ (active_runtime_generation = observation_runtime_generation) /\ (active_runtime_epoch_id = observation_runtime_epoch_id))
+    /\ (archived_by_authority = FALSE)
+    /\ (outcome = "RuntimeTerminated")
+    /\ (IF (current_run_id # None) THEN TRUE ELSE (\E input_id \in DOMAIN input_phases : ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued"))))
+    /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_13f21d7b87bb884e
 
@@ -39393,6 +39407,274 @@ ConsumeCompactionRequestInertDestroyed(run_id) ==
     /\ UnchangedFrame_13f21d7b87bb884e
 
 
+AbandonQueuedInputIdle(input_id, reason) ==
+    /\ phase = "Idle"
+    /\ ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued"))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ input_phases' = MapSet(input_phases, input_id, "Abandoned")
+    /\ input_terminal_kind' = MapSet(input_terminal_kind, input_id, "Abandoned")
+    /\ input_superseded_by' = MapRemove(input_superseded_by, input_id)
+    /\ input_aggregate_id' = MapRemove(input_aggregate_id, input_id)
+    /\ input_abandon_reason' = MapSet(input_abandon_reason, input_id, reason)
+    /\ input_abandon_attempt_count' = IF (input_id \in DOMAIN input_attempt_counts) THEN MapSet(input_abandon_attempt_count, input_id, (IF input_id \in DOMAIN input_attempt_counts THEN input_attempt_counts[input_id] ELSE 0)) ELSE MapSet(input_abandon_attempt_count, input_id, 0)
+    /\ input_lane' = MapRemove(input_lane, input_id)
+    /\ input_recovery_lanes' = MapRemove(input_recovery_lanes, input_id)
+    /\ input_live_boundary_delivery' = MapRemove(input_live_boundary_delivery, input_id)
+    /\ input_live_boundary_join_run' = MapRemove(input_live_boundary_join_run, input_id)
+    /\ input_live_boundary_join_phase' = MapRemove(input_live_boundary_join_phase, input_id)
+    /\ input_controller_holds' = (input_controller_holds \ {input_id})
+    /\ UnchangedFrame_cc225f12003a2993
+
+
+AbandonQueuedInputAttached(input_id, reason) ==
+    /\ phase = "Attached"
+    /\ ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued"))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ input_phases' = MapSet(input_phases, input_id, "Abandoned")
+    /\ input_terminal_kind' = MapSet(input_terminal_kind, input_id, "Abandoned")
+    /\ input_superseded_by' = MapRemove(input_superseded_by, input_id)
+    /\ input_aggregate_id' = MapRemove(input_aggregate_id, input_id)
+    /\ input_abandon_reason' = MapSet(input_abandon_reason, input_id, reason)
+    /\ input_abandon_attempt_count' = IF (input_id \in DOMAIN input_attempt_counts) THEN MapSet(input_abandon_attempt_count, input_id, (IF input_id \in DOMAIN input_attempt_counts THEN input_attempt_counts[input_id] ELSE 0)) ELSE MapSet(input_abandon_attempt_count, input_id, 0)
+    /\ input_lane' = MapRemove(input_lane, input_id)
+    /\ input_recovery_lanes' = MapRemove(input_recovery_lanes, input_id)
+    /\ input_live_boundary_delivery' = MapRemove(input_live_boundary_delivery, input_id)
+    /\ input_live_boundary_join_run' = MapRemove(input_live_boundary_join_run, input_id)
+    /\ input_live_boundary_join_phase' = MapRemove(input_live_boundary_join_phase, input_id)
+    /\ input_controller_holds' = (input_controller_holds \ {input_id})
+    /\ UnchangedFrame_cc225f12003a2993
+
+
+AbandonQueuedInputRunning(input_id, reason) ==
+    /\ phase = "Running"
+    /\ ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued"))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ input_phases' = MapSet(input_phases, input_id, "Abandoned")
+    /\ input_terminal_kind' = MapSet(input_terminal_kind, input_id, "Abandoned")
+    /\ input_superseded_by' = MapRemove(input_superseded_by, input_id)
+    /\ input_aggregate_id' = MapRemove(input_aggregate_id, input_id)
+    /\ input_abandon_reason' = MapSet(input_abandon_reason, input_id, reason)
+    /\ input_abandon_attempt_count' = IF (input_id \in DOMAIN input_attempt_counts) THEN MapSet(input_abandon_attempt_count, input_id, (IF input_id \in DOMAIN input_attempt_counts THEN input_attempt_counts[input_id] ELSE 0)) ELSE MapSet(input_abandon_attempt_count, input_id, 0)
+    /\ input_lane' = MapRemove(input_lane, input_id)
+    /\ input_recovery_lanes' = MapRemove(input_recovery_lanes, input_id)
+    /\ input_live_boundary_delivery' = MapRemove(input_live_boundary_delivery, input_id)
+    /\ input_live_boundary_join_run' = MapRemove(input_live_boundary_join_run, input_id)
+    /\ input_live_boundary_join_phase' = MapRemove(input_live_boundary_join_phase, input_id)
+    /\ input_controller_holds' = (input_controller_holds \ {input_id})
+    /\ UnchangedFrame_cc225f12003a2993
+
+
+AbandonQueuedInputRetired(input_id, reason) ==
+    /\ phase = "Retired"
+    /\ ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued"))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ input_phases' = MapSet(input_phases, input_id, "Abandoned")
+    /\ input_terminal_kind' = MapSet(input_terminal_kind, input_id, "Abandoned")
+    /\ input_superseded_by' = MapRemove(input_superseded_by, input_id)
+    /\ input_aggregate_id' = MapRemove(input_aggregate_id, input_id)
+    /\ input_abandon_reason' = MapSet(input_abandon_reason, input_id, reason)
+    /\ input_abandon_attempt_count' = IF (input_id \in DOMAIN input_attempt_counts) THEN MapSet(input_abandon_attempt_count, input_id, (IF input_id \in DOMAIN input_attempt_counts THEN input_attempt_counts[input_id] ELSE 0)) ELSE MapSet(input_abandon_attempt_count, input_id, 0)
+    /\ input_lane' = MapRemove(input_lane, input_id)
+    /\ input_recovery_lanes' = MapRemove(input_recovery_lanes, input_id)
+    /\ input_live_boundary_delivery' = MapRemove(input_live_boundary_delivery, input_id)
+    /\ input_live_boundary_join_run' = MapRemove(input_live_boundary_join_run, input_id)
+    /\ input_live_boundary_join_phase' = MapRemove(input_live_boundary_join_phase, input_id)
+    /\ input_controller_holds' = (input_controller_holds \ {input_id})
+    /\ UnchangedFrame_cc225f12003a2993
+
+
+AbandonQueuedInputStopped(input_id, reason) ==
+    /\ phase = "Stopped"
+    /\ ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued"))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ input_phases' = MapSet(input_phases, input_id, "Abandoned")
+    /\ input_terminal_kind' = MapSet(input_terminal_kind, input_id, "Abandoned")
+    /\ input_superseded_by' = MapRemove(input_superseded_by, input_id)
+    /\ input_aggregate_id' = MapRemove(input_aggregate_id, input_id)
+    /\ input_abandon_reason' = MapSet(input_abandon_reason, input_id, reason)
+    /\ input_abandon_attempt_count' = IF (input_id \in DOMAIN input_attempt_counts) THEN MapSet(input_abandon_attempt_count, input_id, (IF input_id \in DOMAIN input_attempt_counts THEN input_attempt_counts[input_id] ELSE 0)) ELSE MapSet(input_abandon_attempt_count, input_id, 0)
+    /\ input_lane' = MapRemove(input_lane, input_id)
+    /\ input_recovery_lanes' = MapRemove(input_recovery_lanes, input_id)
+    /\ input_live_boundary_delivery' = MapRemove(input_live_boundary_delivery, input_id)
+    /\ input_live_boundary_join_run' = MapRemove(input_live_boundary_join_run, input_id)
+    /\ input_live_boundary_join_phase' = MapRemove(input_live_boundary_join_phase, input_id)
+    /\ input_controller_holds' = (input_controller_holds \ {input_id})
+    /\ UnchangedFrame_cc225f12003a2993
+
+
+AbandonQueuedInputNotQueuedInitializing(input_id, reason) ==
+    /\ phase = "Initializing"
+    /\ (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption"))))
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputNotQueuedIdle(input_id, reason) ==
+    /\ phase = "Idle"
+    /\ (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption"))))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputNotQueuedAttached(input_id, reason) ==
+    /\ phase = "Attached"
+    /\ (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption"))))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputNotQueuedRunning(input_id, reason) ==
+    /\ phase = "Running"
+    /\ (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption"))))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputNotQueuedRetired(input_id, reason) ==
+    /\ phase = "Retired"
+    /\ (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption"))))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputNotQueuedStopped(input_id, reason) ==
+    /\ phase = "Stopped"
+    /\ (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption"))))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputNotQueuedDestroyed(input_id, reason) ==
+    /\ phase = "Destroyed"
+    /\ (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption"))))
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputAlreadyTerminalInitializing(input_id, reason) ==
+    /\ phase = "Initializing"
+    /\ (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Abandoned")))))
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputAlreadyTerminalIdle(input_id, reason) ==
+    /\ phase = "Idle"
+    /\ (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Abandoned")))))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputAlreadyTerminalAttached(input_id, reason) ==
+    /\ phase = "Attached"
+    /\ (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Abandoned")))))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputAlreadyTerminalRunning(input_id, reason) ==
+    /\ phase = "Running"
+    /\ (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Abandoned")))))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputAlreadyTerminalRetired(input_id, reason) ==
+    /\ phase = "Retired"
+    /\ (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Abandoned")))))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputAlreadyTerminalStopped(input_id, reason) ==
+    /\ phase = "Stopped"
+    /\ (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Abandoned")))))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputAlreadyTerminalDestroyed(input_id, reason) ==
+    /\ phase = "Destroyed"
+    /\ (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Abandoned")))))
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputUntrackedInitializing(input_id, reason) ==
+    /\ phase = "Initializing"
+    /\ ~((input_id \in DOMAIN input_phases))
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputUntrackedIdle(input_id, reason) ==
+    /\ phase = "Idle"
+    /\ ~((input_id \in DOMAIN input_phases))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputUntrackedAttached(input_id, reason) ==
+    /\ phase = "Attached"
+    /\ ~((input_id \in DOMAIN input_phases))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputUntrackedRunning(input_id, reason) ==
+    /\ phase = "Running"
+    /\ ~((input_id \in DOMAIN input_phases))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputUntrackedRetired(input_id, reason) ==
+    /\ phase = "Retired"
+    /\ ~((input_id \in DOMAIN input_phases))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputUntrackedStopped(input_id, reason) ==
+    /\ phase = "Stopped"
+    /\ ~((input_id \in DOMAIN input_phases))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+AbandonQueuedInputUntrackedDestroyed(input_id, reason) ==
+    /\ phase = "Destroyed"
+    /\ ~((input_id \in DOMAIN input_phases))
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
 Next ==
     \/ Initialize
     \/ (phase = "Idle") /\ \E arg_session_id \in SessionIdValues : \E candidate_id \in StringValues : \E candidate_run_id \in RunIdValues : \E class \in DurableTailRecoveryClassValues : \E observed_lifecycle \in DurableRecoveryObservedLifecycleValues : \E observed_current_run \in DurableRecoveryObservedRunValues : \E last_committed_sequence \in 0..2 : \E prior_commit \in DurableRecoveryPriorCommitValues : \E input_evidence \in DurableRecoveryInputEvidenceValues : \E ownership \in DurableRecoveryOwnershipValues : AuthorizeDurableTailRecoveryCommitIdle(arg_session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, ownership)
@@ -39965,11 +40247,12 @@ Next ==
     \/ (phase = "Retired") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupArchivedRetired(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, TRUE, live_session)
     \/ (phase = "Stopped") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupArchivedStopped(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, TRUE, live_session)
     \/ (phase = "Initializing") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupRuntimeTerminatedInitializing(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, FALSE, live_session)
-    \/ (phase = "Idle") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, FALSE, live_session)
-    \/ (phase = "Attached") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, FALSE, live_session)
-    \/ (phase = "Running") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, FALSE, live_session)
     \/ (phase = "Retired") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupRuntimeTerminatedRetired(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, FALSE, live_session)
     \/ (phase = "Stopped") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupRuntimeTerminatedStopped(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, FALSE, live_session)
+    \/ (phase = "Idle") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupInputTerminatedWhileServingIdle(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, FALSE, live_session)
+    \/ (phase = "Attached") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupInputTerminatedWhileServingAttached(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, FALSE, live_session)
+    \/ (phase = "Running") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupInputTerminatedWhileServingRunning(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, FALSE, live_session)
+    \/ (phase = "Retired") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupInputTerminatedWhileDrainingRetired(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, FALSE, live_session)
     \/ (phase = "Initializing") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupFinalizationFailedInitializing(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, FALSE, live_session)
     \/ (phase = "Idle") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupFinalizationFailedIdle(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, FALSE, live_session)
     \/ (phase = "Attached") /\ \E arg_session_id \in SessionIdValues : \E observation_session_id \in SessionIdValues : \E observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E observation_fence_token \in OptionFenceTokenValues : \E observation_runtime_generation \in OptionGenerationValues : \E observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E outcome \in RuntimeCompletionObservedOutcomeValues : \E live_session \in RuntimeCompletionLiveSessionObservationValues : ResolveRuntimeCompletionCleanupFinalizationFailedAttached(arg_session_id, observation_session_id, observation_agent_runtime_id, observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome, FALSE, live_session)
@@ -42226,6 +42509,32 @@ Next ==
     \/ (phase = "Attached") /\ \E run_id \in RunIdValues : ConsumeCompactionRequestInertAttached(run_id)
     \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : ConsumeCompactionRequestInertStopped(run_id)
     \/ (phase = "Destroyed") /\ \E run_id \in RunIdValues : ConsumeCompactionRequestInertDestroyed(run_id)
+    \/ (phase = "Idle") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputIdle(input_id, reason)
+    \/ (phase = "Attached") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputAttached(input_id, reason)
+    \/ (phase = "Running") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputRunning(input_id, reason)
+    \/ (phase = "Retired") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputRetired(input_id, reason)
+    \/ (phase = "Stopped") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputStopped(input_id, reason)
+    \/ (phase = "Initializing") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputNotQueuedInitializing(input_id, reason)
+    \/ (phase = "Idle") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputNotQueuedIdle(input_id, reason)
+    \/ (phase = "Attached") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputNotQueuedAttached(input_id, reason)
+    \/ (phase = "Running") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputNotQueuedRunning(input_id, reason)
+    \/ (phase = "Retired") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputNotQueuedRetired(input_id, reason)
+    \/ (phase = "Stopped") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputNotQueuedStopped(input_id, reason)
+    \/ (phase = "Destroyed") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputNotQueuedDestroyed(input_id, reason)
+    \/ (phase = "Initializing") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputAlreadyTerminalInitializing(input_id, reason)
+    \/ (phase = "Idle") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputAlreadyTerminalIdle(input_id, reason)
+    \/ (phase = "Attached") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputAlreadyTerminalAttached(input_id, reason)
+    \/ (phase = "Running") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputAlreadyTerminalRunning(input_id, reason)
+    \/ (phase = "Retired") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputAlreadyTerminalRetired(input_id, reason)
+    \/ (phase = "Stopped") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputAlreadyTerminalStopped(input_id, reason)
+    \/ (phase = "Destroyed") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputAlreadyTerminalDestroyed(input_id, reason)
+    \/ (phase = "Initializing") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputUntrackedInitializing(input_id, reason)
+    \/ (phase = "Idle") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputUntrackedIdle(input_id, reason)
+    \/ (phase = "Attached") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputUntrackedAttached(input_id, reason)
+    \/ (phase = "Running") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputUntrackedRunning(input_id, reason)
+    \/ (phase = "Retired") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputUntrackedRetired(input_id, reason)
+    \/ (phase = "Stopped") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputUntrackedStopped(input_id, reason)
+    \/ (phase = "Destroyed") /\ \E input_id \in StringValues : \E reason \in InputAbandonReasonValues : AbandonQueuedInputUntrackedDestroyed(input_id, reason)
     \/ TerminalStutter
 
 live_delegation_steer_records_are_authorized_and_single == ((DOMAIN live_delegation_steer_digest_by_continuation = DOMAIN live_delegation_steer_operation_by_continuation) /\ (DOMAIN live_delegation_steer_reconciliation_by_continuation = DOMAIN live_delegation_steer_operation_by_continuation) /\ (\A continuation_id \in DOMAIN live_delegation_steer_delivered_by_continuation : (continuation_id \in DOMAIN live_delegation_steer_operation_by_continuation)))

@@ -105012,6 +105012,10 @@ mod host_outage_recovery;
 /// commits hold the mob database's write lock across a slow fsync.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod identity_fence_contention;
+/// Identity reconciliation holds an identity to the wiring it owns, not to
+/// the edges another identity's declaration owns.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod identity_owned_wiring_reconcile;
 /// A mob's lifecycle as its handles observe it without asking its actor.
 #[cfg(not(target_arch = "wasm32"))]
 mod lifecycle_observation;

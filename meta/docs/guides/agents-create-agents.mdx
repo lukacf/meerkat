@@ -116,7 +116,7 @@ first message. A call that reaches the tools anyway is refused
 | Tool | Arguments | What it does |
 | --- | --- | --- |
 | `identity_create` | `agents: [{name, profile, display_name?, instructions?, context?, labels?, first_message?, peers?}]`, `request_id?` | Creates 1 to 256 agents, all together or not at all. They may name each other as peers. |
-| `identity_update` | `name`, `expected_spec_digest`, `set {display_name?, instructions?, context?, labels?, labels_remove?, profile?}`, `peers_add?`, `peers_remove?`, `request_id?` | Changes one agent. A member left out of `set` stays as it is. |
+| `identity_update` | `name`, `expected_spec_digest`, `set {display_name?, instructions?, context?, labels?, labels_remove?, profile?}`, `peers_add?`, `peers_remove?`, `request_id?` | Changes one agent. A member left out of `set` stays as it is. A label change keeps the agent's member (see [Changing labels](#changing-labels)); a profile move seats the agent again (see [Moving a profile](#moving-a-profile)). |
 | `identity_archive` | `name`, `expected_spec_digest`, `request_id?` | Stops an agent and keeps it: name, record, conversation and memory stay, its last conversation is harvested as for any agent that leaves, and messages to it are refused. Its schedules are paused with it. |
 | `identity_unarchive` | `name`, `expected_spec_digest`, `request_id?` | Brings an archived agent back on the conversation it had. The schedules its archive paused are resumed. |
 | `identity_remove` | `name`, `expected_spec_digest`, `request_id?` | Removes an agent for good. Its name is never available again; its last conversation is harvested as for any agent that leaves. Its schedules are ended. |
@@ -137,6 +137,8 @@ another mob, placement, binding, backend, addressability or runtime mode.
 Grants and schedules for a new agent are separate calls. An agent's
 addressability and runtime mode are set by the host (`meta/identity/create`,
 `meta/identity/update`); `identity_list` and `identity_get` read them back.
+A host's change of the runtime mode seats the agent again, as a profile move
+does (see [Moving a profile](#moving-a-profile)).
 There is no reset tool; a host resets an agent with its own methods.
 
 ### What a model is told
@@ -218,6 +220,79 @@ An update of an agent that waits changes its record only, and the agent still
 waits. An update that moves an agent into a profile the host prepares is
 refused `unsupported` at `set.profile`: the agent is created in that profile
 instead. Only a create answers `pending_preparation`.
+
+## Changing labels
+
+A label change (`set.labels`, `set.labels_remove`) is applied at once and
+does not seat the agent again. The agent keeps its member and its
+conversation, and it goes on listing and managing the mobs it created.
+
+- **The roster and what decides by a label use the new labels at once.**
+  The mob's roster reads them from the update on. An access rule's
+  `match_labels` decides on them at the next call (an open event stream at
+  its next read of the roster, within 20 seconds), and the identity
+  policy's rules read the agent's record. A label that was removed stops
+  deciding there at once.
+- **The agent's next build uses them.** An idle agent is released by the
+  update, so its next delivery builds it again: your customizer is handed
+  the new labels, and a label that was removed is not among them. An agent
+  that is busy is not interrupted, and going idle builds nothing: it keeps
+  what it was built with until it is next released. That is a later update
+  of it once it is idle, a retire (`meta/retire`), an idle retirement, or
+  a restart. The update's answer does not say that the agent was busy.
+  Until the agent is next seated, any later update of it releases it when
+  it is idle: one more build at its next delivery, nothing else.
+- **Agents that a label change does not release.** Three kinds of agent
+  stay live through a label update and keep what they were built with: an
+  agent of a host whose sessions are not durable (a release releases
+  nothing there; it takes new labels when it is rotated onto a fresh
+  conversation or the process restarts), a placed agent (its member host
+  owns its build), and an agent wired to a placed agent. The roster and
+  the access rules use their new labels at once all the same.
+- **What its peers read of it.** A build adds the agent's labels to the
+  peer metadata of its conversation and takes none away, so a removed
+  label stays in what its peers read of it until the agent starts a new
+  conversation. Nothing is decided on it.
+- **The seat's own journal row trails.** The record of the agent's seat in
+  the mob's journal keeps the labels the agent was seated with until the
+  agent is next seated (a respawn, a profile move, a runtime-mode change, a
+  reset). It decides nothing an update can change. It is what an earlier
+  release that serves the same store reads, so it matters before a
+  rollback: Meerkat's upgrade guide says how to find such agents. The only
+  way to bring it in line is to seat the agent again (`meta/respawn`),
+  which costs an agent that created mobs their listing and management:
+  there is no way that keeps both.
+- **A broken agent is the exception.** An agent whose build was refused for
+  good is `broken` and serves nothing. Once its labels have changed since
+  it was last seated, any update of it seats it again, the update that
+  changes them included, and its next send is served. So the update that
+  corrects the labels of an agent refused for them (its row lacked a label
+  your customizer sets) gets it built; and an agent whose labels were
+  changed earlier and that broke later for another reason is seated again
+  by its next update, whatever that update changes. If it had created mobs
+  before it broke, it no longer lists or manages them, as after a profile
+  move.
+
+## Moving a profile
+
+A profile move (`set.profile`) seats the agent again on the same
+conversation, once it is idle: it goes on under the new profile's model,
+tools and skills. A host's change of the runtime mode
+(`set.runtime_mode_override` of `meta/identity/update`) seats the agent
+again in the same way.
+
+An agent that is seated again no longer lists or manages the mobs it
+created with its own tools: its mob tools answer no such mob, and its calls
+that name one are refused. The mobs and their members stay as they are. So
+have the agent destroy such a mob before its profile is moved, or leave the
+profile and the runtime mode of an agent that must go on managing its mobs
+as they are.
+
+Who can do this to an agent: another agent of the mob that the host's rules
+let change it, through `identity_update` (a profile move), and a host,
+through `meta/identity/update` (a profile move or a runtime-mode change).
+An agent cannot do it to itself: a change that names the caller is refused
+`self_change_refused`, and no tool takes a runtime mode.
 
 ## Changing instructions
 

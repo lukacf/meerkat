@@ -9,7 +9,7 @@ import type {
   AppendSystemContextOptions,
   AppendSystemContextResult,
 } from './types.js';
-import type { WireRunStopReceipt } from './generated/session.js';
+import type { WireQueuedInputRecall, WireRunStopReceipt } from './generated/session.js';
 
 // WASM function signatures (bound at construction)
 type StartTurnFn = (handle: number, prompt: string, optionsJson?: string) => Promise<string>;
@@ -18,6 +18,7 @@ type DestroySessionFn = (handle: number) => Promise<void>;
 type InterruptSessionFn = (handle: number) => Promise<void>;
 type WirePeerFn = (handle: number, peerHandle: number) => Promise<void>;
 type StopSessionRunFn = (handle: number, runId: string, reason: string) => Promise<string>;
+type RecallSessionInputFn = (handle: number, inputId: string) => Promise<string>;
 type PollEventsFn = (handle: number) => string;
 type AppendSystemContextFn = (
   handle: number,
@@ -161,6 +162,7 @@ export class Session {
   private interruptFn: InterruptSessionFn;
   private wirePeerFn: WirePeerFn;
   private stopRunFn?: StopSessionRunFn;
+  private recallInputFn?: RecallSessionInputFn;
 
   /** @internal — use MeerkatRuntime.createSession() instead. */
   constructor(
@@ -173,6 +175,7 @@ export class Session {
     interruptFn: InterruptSessionFn,
     wirePeerFn: WirePeerFn,
     stopRunFn?: StopSessionRunFn,
+    recallInputFn?: RecallSessionInputFn,
   ) {
     this.handle = handle;
     this.startTurnFn = startTurnFn;
@@ -183,6 +186,7 @@ export class Session {
     this.interruptFn = interruptFn;
     this.wirePeerFn = wirePeerFn;
     this.stopRunFn = stopRunFn;
+    this.recallInputFn = recallInputFn;
   }
 
   /**
@@ -320,6 +324,28 @@ export class Session {
     return parseRunStopReceipt(JSON.parse(json));
   }
 
+  /**
+   * Withdraw one input of this session, only while it is still queued.
+   * `inputId` is the runtime input id of the admitted input. The answer's
+   * `outcome` is `abandoned` (the input was queued and is now withdrawn: its
+   * terminal is `cancelled` and no run will take it), `not_queued` (a run
+   * holds it: nothing was touched and the run is not interrupted) or
+   * `already_terminal`. An input this session does not hold rejects with
+   * `invalid_params`.
+   */
+  async recallInput(inputId: string): Promise<WireQueuedInputRecall> {
+    if (!this.recallInputFn) {
+      throw new MeerkatError('CAPABILITY_UNAVAILABLE', 'this runtime binding has no queued-input recall');
+    }
+    let json: string;
+    try {
+      json = await this.recallInputFn(this.handle, inputId);
+    } catch (error) {
+      throw MeerkatError.fromWasm(error);
+    }
+    return parseQueuedInputRecall(JSON.parse(json));
+  }
+
   /** Interrupt active work through the runtime's cancellation owner. */
   async interrupt(): Promise<void> {
     try {
@@ -418,4 +444,51 @@ export function parseRunStopReceipt(value: unknown): WireRunStopReceipt {
       throw new MeerkatError('INVALID_RESPONSE', `unknown run-stop receipt outcome ${String(receipt.outcome)}`);
   }
   return receipt as unknown as WireRunStopReceipt;
+}
+
+/**
+ * Validate a queued-input recall answer from the WASM runtime. The answer is
+ * a tagged union on `outcome`: `abandoned` carries the attempt count,
+ * `not_queued` the input's phase (and the run that holds it), and
+ * `already_terminal` the terminal class.
+ */
+export function parseQueuedInputRecall(value: unknown): WireQueuedInputRecall {
+  if (typeof value !== 'object' || value === null) {
+    throw new MeerkatError('INVALID_RESPONSE', 'queued-input recall answer must be an object');
+  }
+  const recall = value as Record<string, unknown>;
+  if (typeof recall.input_id !== 'string') {
+    throw new MeerkatError('INVALID_RESPONSE', 'queued-input recall input_id must be a string');
+  }
+  switch (recall.outcome) {
+    case 'abandoned': {
+      const attempts = recall.attempt_count ?? 0;
+      if (typeof attempts !== 'number' || !Number.isInteger(attempts) || attempts < 0) {
+        throw new MeerkatError('INVALID_RESPONSE', 'abandoned recall attempt_count must be a non-negative integer');
+      }
+      recall.attempt_count = attempts;
+      break;
+    }
+    case 'not_queued':
+      if (typeof recall.phase !== 'string') {
+        throw new MeerkatError('INVALID_RESPONSE', 'not_queued recall needs a phase');
+      }
+      if (recall.run_id !== undefined && recall.run_id !== null && typeof recall.run_id !== 'string') {
+        throw new MeerkatError('INVALID_RESPONSE', 'not_queued recall run_id must be a string');
+      }
+      break;
+    case 'already_terminal':
+      if (typeof recall.terminal !== 'string') {
+        throw new MeerkatError('INVALID_RESPONSE', 'already_terminal recall needs a terminal');
+      }
+      break;
+    default:
+      if (typeof recall.outcome !== 'string' || recall.outcome.length === 0) {
+        throw new MeerkatError('INVALID_RESPONSE', 'queued-input recall outcome must be a string');
+      }
+      // An outcome this SDK does not know is kept as it is: the list of
+      // outcomes can grow, and the caller reads the string it got.
+      break;
+  }
+  return recall as unknown as WireQueuedInputRecall;
 }

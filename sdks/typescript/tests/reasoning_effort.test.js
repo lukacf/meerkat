@@ -370,6 +370,37 @@ describe("reasoningEffortRefusal", () => {
     assert.equal(reasoningEffortRefusal(new Error("no details")), undefined);
     assert.equal(parseReasoningEffortRefusal("not an object"), undefined);
   });
+
+  it("a level change on a busy session is a busy error, not a level refusal", async () => {
+    // The data of the busy answer (JSON-RPC -32002) to a turn that sets or
+    // changes the provider-neutral level, or changes the model of a session
+    // that holds one, while the session has unfinished work.
+    const needsIdleSession = { kind: "reasoning_effort_change_needs_idle_session" };
+    const client = new MeerkatClient();
+    const requestId = 4101;
+    const response = client.registerRequest(requestId);
+    client.handleLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: requestId,
+        error: { code: -32002, message: "session is busy", data: needsIdleSession },
+      }),
+    );
+    // The server's answer, read off the wire: the general error with the
+    // busy code and the data as sent, which the refusal helper does not
+    // read as a level refusal. Wait for the running turn's answer and send
+    // the turn again.
+    await assert.rejects(response, (error) => {
+      assert.equal(error.constructor, MeerkatError);
+      assert.equal(error.code, "-32002");
+      assert.deepEqual(error.details, needsIdleSession);
+      assert.equal(reasoningEffortRefusal(error), undefined);
+      return true;
+    });
+    // The same data on the refusal's own code is still no level refusal:
+    // the helper reads the kind, never the code or the text.
+    assert.equal(reasoningEffortRefusal(refused(needsIdleSession)), undefined);
+  });
 });
 
 // The `reasoning_effort` block of a run result after a model fallback switch.

@@ -73,6 +73,7 @@ RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
     "session/peer_response_terminal": (MeerkatClient, "send_peer_response_terminal"),
     "session/inject_context": (MeerkatClient, "inject_context"),
     "session/input_status": (MeerkatClient, "input_state"),
+    "session/recall_input": (Session, "recall_input"),
     "session/compact": (Session, "compact"),
     "turn/start": (Session, "turn"),
     "turn/interrupt": (Session, "interrupt"),

@@ -96,6 +96,8 @@ from .generated.types import (
     CompactSessionParams,
     CompactSessionResult,
     WireCompactionRequestOutcome,
+    RecallInputResult,
+    WireQueuedInputRecall,
     ToolDispatchAdmissionSource,
     ToolDispatchSettlementFailure,
     ToolDispatchTerminalErrorKind,
@@ -5804,6 +5806,78 @@ class MeerkatClient:
                 f"{context}: outcome must be 'requested' or 'already_requested'",
             )
         return raw
+
+    async def _recall_input(
+        self,
+        session_id: str,
+        *,
+        input_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> RecallInputResult:
+        if (input_id is None) == (idempotency_key is None):
+            raise ValueError(
+                "exactly one of input_id or idempotency_key must be provided"
+            )
+        selector = (
+            {"by": "input_id", "value": input_id}
+            if input_id is not None
+            else {"by": "idempotency_key", "value": idempotency_key}
+        )
+        result = await self._request(
+            "session/recall_input", {"session_id": session_id, "selector": selector}
+        )
+        context = "Invalid session/recall_input response"
+        return RecallInputResult(
+            session_id=self._require_string_field(result, "session_id", context),
+            recall=self._parse_queued_input_recall(result.get("recall"), context),
+        )
+
+    @staticmethod
+    def _parse_queued_input_recall(raw: Any, context: str) -> WireQueuedInputRecall:
+        """Validate the recall answer's discriminator and required fields.
+
+        The answer is a tagged union on ``outcome``: ``abandoned`` carries the
+        attempt count, ``not_queued`` the input's phase (and the run that
+        holds it), and ``already_terminal`` the terminal class.
+        """
+        if not isinstance(raw, dict):
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: recall must be an object")
+        if not isinstance(raw.get("input_id"), str):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: recall.input_id must be a string"
+            )
+        outcome = raw.get("outcome")
+        if outcome == "abandoned":
+            attempts = raw.get("attempt_count", 0)
+            if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: attempt_count must be a non-negative integer",
+                )
+            raw.setdefault("attempt_count", 0)
+        elif outcome == "not_queued":
+            if not isinstance(raw.get("phase"), str):
+                raise MeerkatError(
+                    "INVALID_RESPONSE", f"{context}: a not_queued recall needs a phase"
+                )
+            run_id = raw.get("run_id")
+            if run_id is not None and not isinstance(run_id, str):
+                raise MeerkatError(
+                    "INVALID_RESPONSE", f"{context}: run_id must be a string"
+                )
+        elif outcome == "already_terminal":
+            if not isinstance(raw.get("terminal"), str):
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: an already_terminal recall needs a terminal",
+                )
+        elif not isinstance(outcome, str) or not outcome:
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: recall.outcome must be a string"
+            )
+        # An outcome this SDK does not know is kept as it is: the list of
+        # outcomes can grow, and the caller reads the string it got.
+        return cast(WireQueuedInputRecall, raw)
 
     @staticmethod
     def _parse_run_stop_receipt(raw: Any, context: str) -> WireRunStopReceipt:

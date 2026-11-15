@@ -4758,6 +4758,7 @@ mod tests {
         for model in [
             "gemini-4-carbon",
             "gemini-4-argon",
+            "gemini-4-hydrogen",
             "gemini-3.8-flash",
             "gemini-3.7-flash",
             "gemini-3.1-pro-preview",
@@ -4789,6 +4790,9 @@ mod tests {
             ("gemini-3.8-flash", GeminiThinkingLevel::Low, "low"),
             ("gemini-4-argon", GeminiThinkingLevel::High, "high"),
             ("gemini-4-carbon", GeminiThinkingLevel::High, "high"),
+            ("gemini-4-hydrogen", GeminiThinkingLevel::Low, "low"),
+            ("gemini-4-hydrogen", GeminiThinkingLevel::Medium, "medium"),
+            ("gemini-4-hydrogen", GeminiThinkingLevel::High, "high"),
             (
                 "gemini-3.5-flash-lite",
                 GeminiThinkingLevel::Minimal,
@@ -4958,15 +4962,57 @@ mod tests {
         Ok(())
     }
 
+    /// Google documents a fourth thinking level, `xhigh`, for Gemini 4
+    /// Hydrogen only. The Gemini thinking level has no such value in this
+    /// release: a Gemini provider tag that names it does not parse, in the
+    /// flat field or in the nested config, so no request can carry it. The
+    /// levels the type has parse and are sent in lower case.
+    #[test]
+    fn the_gemini_tag_has_no_xhigh_thinking_level() {
+        for tag in [
+            serde_json::json!({"provider": "gemini", "thinking_level": "xhigh"}),
+            serde_json::json!({"provider": "gemini", "thinking": {"thinking_level": "xhigh"}}),
+        ] {
+            let error = match serde_json::from_value::<ProviderTag>(tag.clone()) {
+                Err(error) => error.to_string(),
+                Ok(parsed) => panic!("{tag}: expected no such level, parsed {parsed:?}"),
+            };
+            assert!(error.contains("xhigh"), "{tag}: {error}");
+        }
+
+        let client = GeminiClient::new("test-key".to_string());
+        for level in ["low", "medium", "high"] {
+            let tag: ProviderTag = serde_json::from_value(
+                serde_json::json!({"provider": "gemini", "thinking_level": level}),
+            )
+            .unwrap_or_else(|error| panic!("{level}: {error}"));
+            let mut request = LlmRequest::new(
+                "gemini-4-hydrogen",
+                vec![Message::User(UserMessage::text("test".to_string()))],
+            );
+            request.provider_params = Some(tag);
+            let body = client
+                .build_request_body(&request)
+                .unwrap_or_else(|error| panic!("{level}: {error}"));
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"],
+                serde_json::json!({"thinkingLevel": level}),
+                "{level}"
+            );
+        }
+    }
+
     /// Gemini 4 Argon and Gemini 4 Carbon ignore sampling parameters, do not
     /// support explicit context caching, and think at their default level
-    /// (`medium`) unless the caller picks one: a default request carries none
-    /// of those fields and keeps the caller's output budget.
+    /// (`medium`) unless the caller picks one. Gemini 4 Hydrogen's row is
+    /// theirs under its own identity, and its default level is `high`. A
+    /// default request carries none of those fields and keeps the caller's
+    /// output budget.
     #[test]
     fn test_gemini_4_default_request_sends_no_sampling_caching_or_thinking_override()
     -> Result<(), Box<dyn std::error::Error>> {
         let client = GeminiClient::new("test-key".to_string());
-        for model in ["gemini-4-argon", "gemini-4-carbon"] {
+        for model in ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"] {
             let mut request = LlmRequest::new(
                 model,
                 vec![Message::User(UserMessage::text("test".to_string()))],

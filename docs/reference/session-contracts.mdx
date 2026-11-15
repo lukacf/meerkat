@@ -100,7 +100,7 @@ Committed create failure must not be silently rewritten to “cancelled” or cl
   settled that run.
 - Committed success must not be rewritten to cancellation.
 - Runtime-backed surfaces may hot-swap supported live settings on an existing session where the surface contract says that is allowed.
-- Runtime-backed surfaces do not race `start_turn`: they admit each turn through the session's runtime queue, so a surface turn that arrives while another is running waits behind it and then runs.
+- Runtime-backed surfaces do not race `start_turn`: they admit each turn through the session's runtime queue, so a surface turn that arrives while another is running waits behind it and then runs. From 0.9.15 one kind of JSON-RPC turn is the exception: a turn that would change the session's model settings beside a provider-neutral reasoning effort level is answered `SESSION_BUSY` at once while the session has unfinished work (see [Reasoning effort](/concepts/providers#reasoning-effort)).
 
 <Warning>
 The runtime may coalesce multiple queued `Steer` inputs into one agent turn.
@@ -1398,6 +1398,72 @@ is written exactly once. Arrival order holds within each delivery class: a
 follow-up-only steer (for example a directed peer message) admitted before a
 plain peer message still lands after it, because the plain one joins the
 running turn and the directed one takes the follow-up turn.
+
+### Withdrawing one queued input
+
+From 0.9.15. `MeerkatMachine::recall_queued_input(session_id, input_id)` withdraws
+exactly one input, and only while no run has taken it. It is the
+counterpart of the calls below that end started work: a recall never
+interrupts a run.
+
+- The machine decides in one transition (`AbandonQueuedInput`) guarded on the
+  input's phase being `Queued`, under the session mutation gate and the
+  session's driver. A run takes an input on the same fact (`StageForRun`, and
+  a durable steer's join of a running turn), so exactly one of "a run takes
+  the input" and "the recall withdraws it" commits, and concurrent recalls
+  withdraw it once.
+- `QueuedInputRecall::Abandoned { attempt_count }`: the input was queued. It
+  is now `Abandoned` with reason `Cancelled` (public terminal `cancelled`),
+  committed durably on a persistent machine in the same commit as its
+  runtime-termination receipt; its completion waiter is answered
+  `RuntimeTerminated`. `attempt_count` is the machine's count of run attempts
+  for the input (a failed attempt that returned it to the queue); `0` means
+  no attempt was counted, which is not proof that no run ever saw the input:
+  a steer that joined a running turn and went back to the queue because the
+  turn discarded what it had appended counts no attempt.
+- `QueuedInputRecall::NotQueued { phase, run_id }`: a run holds the input
+  (`Staged`, `Applied` or `AppliedPendingConsumption`). Nothing changes.
+  `run_id` is the run that holds it, when the runtime has one.
+- The list of outcomes can grow (`QueuedInputRecall` is non-exhaustive):
+  keep an outcome you do not know as it is.
+- `QueuedInputRecall::AlreadyTerminal { terminal }`: the input already ended.
+  Nothing changes. A second recall answers this, from the live ledger or,
+  once the terminal row is archived and after a restart, from the store.
+- `Ok(None)`: the session holds no such input, an input of another session
+  included, as the per-input reads answer.
+- The call never loads, wakes or attaches a session. With no registration in
+  the process, a terminal stored row still answers `AlreadyTerminal`; a row
+  that is not terminal is refused `NotReady` (its phase lives in a machine
+  that is not loaded), and an input a graceful stop kept queued is recalled
+  once the session serves again. A machine without a store answers from its
+  live registration only, and refuses a session it has not registered as
+  `NotReady`.
+- The recall is session-level. Any caller that can act on the session can
+  recall any queued input of it, whoever submitted it; on the wire also by an
+  idempotency key the caller did not mint. Recalling an input withdraws
+  everything the queue coalesced into it: an earlier input that a later one
+  took in is already terminal (`Coalesced`, naming the later input), and a
+  recall of the later input withdraws both contents. The answer names only
+  the recalled input; it does not say that other content went with it.
+- An error is not an outcome. When the durable commit of the abandon fails,
+  or a step after it does, the call returns that error, the session needs a
+  reload, and it refuses a recall until then. The store decides what
+  happened: after the reload (or a restart) the input is either queued
+  again, and can run or be recalled, or terminal and never taken by a run.
+  No call reloads the session: the runtime reloads it from its store the
+  next time it prepares the session for a turn, and at a restart. So after a
+  durability refusal, start the session's next turn or restart, then read
+  the input's status. Until the reload the per-input read answers the live machine's
+  row, which can be ahead of the store (the abandon applied, its commit
+  failed): it is not the recall's answer.
+- A recall can land while the submit of the same input is still preparing to
+  hand it to a running turn. The recall wins: the input is withdrawn and
+  nothing is delivered, and that submit call can answer an error in place of
+  its admission.
+
+On the wire this is `session/recall_input` (JSON-RPC, with the input named
+by id or by idempotency key) and the SDK wrappers; there is no REST route and
+no mob-level route to a member on another host.
 
 ### Stopping one run
 

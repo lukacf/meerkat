@@ -1912,6 +1912,9 @@ async fn console_rpc_answer(
     auth_context: &ConsoleHttpAuthContext,
     mut parsed_request: JsonRpcRequest,
 ) -> (StatusCode, Value) {
+    if let Some(refusal) = malformed_params_refusal(&parsed_request) {
+        return (StatusCode::OK, refusal);
+    }
     let request_method = parsed_request.method.clone();
     let expected_caller_scope = match take_expected_caller_scope(&mut parsed_request.params) {
         Ok(scope) => scope,
@@ -2475,6 +2478,9 @@ async fn handle_console_voice_rpc(
     auth: &ConsoleHttpAuthContext,
     request: JsonRpcRequest,
 ) -> Value {
+    if let Some(refusal) = malformed_params_refusal(&request) {
+        return refusal;
+    }
     let method = request.method.clone();
     let channel_id = request
         .params
@@ -4097,6 +4103,10 @@ mod console_private_side_chat_tests;
 #[cfg(test)]
 #[path = "console_private_audience_tests.rs"]
 mod console_private_audience_tests;
+
+#[cfg(test)]
+#[path = "console_malformed_params_tests.rs"]
+mod console_malformed_params_tests;
 
 #[cfg(test)]
 #[path = "console_frame_witness_tests.rs"]
@@ -6530,6 +6540,17 @@ const SUBSCRIBED_MEMBER: &[ConsoleMemberField] = &[subject(&["member", "identity
 /// The member a WorkGraph goal or attention binding aims at.
 const TARGET_MEMBER: &[ConsoleMemberField] = &[recorded(&["target", "identity"])];
 
+/// The member an adoption adopts, under the subject spellings, and the
+/// ends of the wiring edges the adoption records as its own.
+const ADOPTED_MEMBER: &[ConsoleMemberField] = &[
+    SUBJECT_MEMBER[0],
+    SUBJECT_MEMBER[1],
+    SUBJECT_MEMBER[2],
+    SUBJECT_MEMBER[3],
+    recorded(&["owned_wiring", "*", "a"]),
+    recorded(&["owned_wiring", "*", "b"]),
+];
+
 /// The member fields of a console method's params, the one table the
 /// console's member resolution ([`console_rpc_resolve_members`]) and its
 /// access requirements ([`console_rpc_access_requirements`]) read; `None`
@@ -6650,6 +6671,9 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
         {
             SUBJECT_MEMBER
         }
+        // An adoption names its subject `agent_identity` and records the
+        // wiring edges it owns.
+        crate::rpc::mob_methods::ADOPT_MEMBER_IDENTITY_DECLARATION => ADOPTED_MEMBER,
         // The member declaration family names its subject `agent_identity`.
         method if crate::rpc::mob_methods::is_member_declaration_method(method) => SUBJECT_MEMBER,
         // Methods that name no member: lists the handlers filter row by row,
@@ -6713,7 +6737,9 @@ fn console_method_member_fields_or_subject(method: &str) -> &'static [ConsoleMem
 }
 
 /// Every string a field at `path` names in `value` (`*` stands for every
-/// entry of an object or an array), for `visit` to read or replace.
+/// entry of an object or an array), for `visit` to read or replace. A
+/// value on the way, or at the name itself, that is malformed
+/// ([`member_field_malformed`]) is refused as invalid params.
 fn visit_member_field(
     value: &mut Value,
     path: &[&str],
@@ -6722,8 +6748,10 @@ fn visit_member_field(
     let Some((head, rest)) = path.split_first() else {
         return if value.is_string() {
             visit(value)
-        } else {
+        } else if value.is_null() {
             Ok(())
+        } else {
+            Err(malformed_params_error())
         };
     };
     match (*head, value) {
@@ -6737,7 +6765,29 @@ fn visit_member_field(
             Some(entry) => visit_member_field(entry, rest, visit),
             None => Ok(()),
         },
-        _ => Ok(()),
+        (_, Value::Null) => Ok(()),
+        _ => Err(malformed_params_error()),
+    }
+}
+
+/// Whether `value` is malformed on the way to the member a field at `path`
+/// names, or at the name itself: a name is a string, or absent.
+fn member_field_malformed(value: &Value, path: &[&str]) -> bool {
+    let Some((head, rest)) = path.split_first() else {
+        return !matches!(value, Value::Null | Value::String(_));
+    };
+    match (*head, value) {
+        ("*", Value::Object(entries)) => entries
+            .values()
+            .any(|entry| member_field_malformed(entry, rest)),
+        ("*", Value::Array(entries)) => entries
+            .iter()
+            .any(|entry| member_field_malformed(entry, rest)),
+        (key, Value::Object(entries)) => entries
+            .get(key)
+            .is_some_and(|entry| member_field_malformed(entry, rest)),
+        (_, Value::Null) => false,
+        _ => true,
     }
 }
 
@@ -7135,6 +7185,9 @@ fn console_announcement_member_refusal(method: &str, params: &Value) -> Option<J
     if method != "meta/mob_announcements/subscriptions/put" {
         return None;
     }
+    if member_field_malformed(params, &["member", "identity"]) {
+        return Some(malformed_params_error());
+    }
     let identity = params.get("member")?.get("identity")?.as_str()?.trim();
     crate::console_contracts::is_runtime_plane_identity(identity).then(|| {
         JsonRpcError::new(
@@ -7178,6 +7231,12 @@ pub(crate) fn console_rpc_access_violation(
     params: &Value,
 ) -> Option<JsonRpcError> {
     let view = view.filter(|view| view.enforced())?;
+    if console_method_member_fields_or_subject(method)
+        .iter()
+        .any(|field| member_field_malformed(params, field.path))
+    {
+        return Some(malformed_params_error());
+    }
     if crate::rpc::identity_methods::answers_an_unviewed_agent_itself(method)
         && console_method_members(method, params)
             .first()
@@ -9935,6 +9994,9 @@ async fn console_rpc_multipart_answer(
     mut parsed_request: JsonRpcRequest,
     files: std::collections::BTreeMap<String, MultipartImageUpload>,
 ) -> (StatusCode, Value) {
+    if let Some(refusal) = malformed_params_refusal(&parsed_request) {
+        return (StatusCode::OK, refusal);
+    }
     let response_id = parsed_request.id.clone().unwrap_or(Value::Null);
     if let Err(message) =
         crate::member_comms_id::validate_public_rpc_member_aliases(&parsed_request.params)
@@ -10981,6 +11043,32 @@ fn invalid_params(id: Value, message: impl Into<String>) -> Value {
             data: None,
         }),
     )
+}
+
+/// The invalid-params error of malformed params.
+fn malformed_params_error() -> JsonRpcError {
+    JsonRpcError {
+        code: -32602,
+        message: "Invalid params".to_string(),
+        data: None,
+    }
+}
+
+/// The refusal of a request on the console's request routes whose params
+/// are malformed: invalid params, whatever the method, before any method
+/// runs. The request routes and each dispatcher behind them ask it first.
+fn malformed_params_refusal(request: &JsonRpcRequest) -> Option<Value> {
+    let malformed = !matches!(request.params, Value::Null | Value::Object(_))
+        || console_method_member_fields_or_subject(&request.method)
+            .iter()
+            .any(|field| member_field_malformed(&request.params, field.path));
+    malformed.then(|| {
+        response_value(
+            request.id.clone().unwrap_or(Value::Null),
+            None,
+            Some(malformed_params_error()),
+        )
+    })
 }
 
 /// A decision the owner could not record for lack of gate identities is an
@@ -12342,6 +12430,61 @@ pub(crate) fn unknown_identity_rpc_error(identity: &str) -> JsonRpcError {
     }
 }
 
+/// The refusal of an adoption on the console that names, as an end of a
+/// wiring edge it owns, a name that is not a member its caller may view:
+/// one answer, an unknown identity's, whether a member the caller may not
+/// view holds the name or no member does. The ends are judged in one pass,
+/// in the order the request gives them, and the first such end is the one
+/// the answer names. Asked before the member resolution and the access
+/// check, so every caller is answered alike for both. `None` for every
+/// other method and for an adoption whose edge ends are all members the
+/// caller may view.
+async fn adoption_wiring_refusal(
+    handle: &meerkat_mob::MobHandle,
+    view: Option<&AccessView>,
+    method: &str,
+    params: &Value,
+) -> Option<JsonRpcError> {
+    if method != crate::rpc::mob_methods::ADOPT_MEMBER_IDENTITY_DECLARATION {
+        return None;
+    }
+    let edges: Vec<&Value> = match params.get("owned_wiring") {
+        Some(Value::Array(edges)) => edges.iter().collect(),
+        Some(Value::Object(edges)) => edges.values().collect(),
+        None | Some(Value::Null) => Vec::new(),
+        Some(_) => return Some(malformed_params_error()),
+    };
+    for edge in edges {
+        for end in ["a", "b"] {
+            // An end is a name, or absent; any other value is malformed.
+            let name = match edge {
+                Value::Object(ends) => match ends.get(end) {
+                    None | Some(Value::Null) => continue,
+                    Some(Value::String(name)) => name.trim(),
+                    Some(_) => return Some(malformed_params_error()),
+                },
+                Value::Null => continue,
+                _ => return Some(malformed_params_error()),
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let seated = handle
+                .get_member(&crate::member_comms_id::mob_member_id(name))
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            let viewable =
+                view.is_none_or(|view| !view.hides_agent(name) && view.can_view_agent(name));
+            if !seated || !viewable {
+                return Some(unknown_identity_rpc_error(name));
+            }
+        }
+    }
+    None
+}
+
 fn identity_status_visible_to_console(
     visibility_policy: &dyn ConsoleVisibilityPolicy,
     status: &crate::identity_first::IdentityStatus,
@@ -12784,6 +12927,9 @@ async fn handle_console_aggregator_rpc(
     send_scope: &ConsoleSendScope,
     sender: Option<&crate::console_aggregator::ConsoleSender>,
 ) -> Value {
+    if let Some(refusal) = malformed_params_refusal(&request) {
+        return refusal;
+    }
     let response_id = request.id.clone().unwrap_or(Value::Null);
     if let Err(message) =
         crate::member_comms_id::validate_public_rpc_member_aliases(&request.params)
@@ -13350,6 +13496,9 @@ async fn handle_console_runtime_rpc_with_visibility(
     governance: &ConsoleSendGovernance,
     topology_apply_scope: &crate::topology_control::TopologyApplyScope,
 ) -> Value {
+    if let Some(refusal) = malformed_params_refusal(&request) {
+        return refusal;
+    }
     let response_id = request.id.clone().unwrap_or(Value::Null);
     if let Err(message) =
         crate::member_comms_id::validate_public_rpc_member_aliases(&request.params)
@@ -13402,6 +13551,19 @@ async fn handle_console_runtime_rpc_with_visibility(
     }
     if let Some(response) = handle_access_admin_rpc(access, access_view, &request) {
         return response;
+    }
+    // An adoption's wiring is judged first, in one pass over its edge ends,
+    // so every caller is answered alike for an end it may not view and for
+    // a name no member holds ([`adoption_wiring_refusal`]).
+    if let Some(refusal) = adoption_wiring_refusal(
+        &runtime.handle(),
+        access_view,
+        request.method.as_str(),
+        &request.params,
+    )
+    .await
+    {
+        return response_value(response_id, None, Some(refusal));
     }
     // Every member the request names is resolved through the caller's
     // audience before any rule or handler reads it: a member hidden from the

@@ -640,11 +640,12 @@ under `## [0.9.15]`.
   gateway keeps such a subscription pending and stores such a source, as
   before. **Do:** a client that applies announcement declarations or puts
   an announcement source through the Console seats the member first, or
-  applies them over the stdio gateway. Where live announcement
-  subscriptions deliver into agents private to a person, the first start
-  after the upgrade logs one WARN line under the target
-  `meerkat_meta::mob_announcements::private_member_subscriptions`; the
-  Upgrade section of `meta/CHANGELOG.md` says what to review.
+  applies them over the stdio gateway.
+- At each start, a gateway with mob announcements logs one WARN line
+  (target `meerkat_meta::mob_announcements::private_member_subscriptions`)
+  while live subscriptions deliver into agents private to a person.
+  **Do:** list and review them as the Upgrade section of
+  `meta/CHANGELOG.md` says.
 - `meta/compact_member`: a call whose maintenance turn ended for good
   without completing (`completion_type` `abandoned`,
   `abandoned_with_error`, `cancelled` or `completed_without_result`) now

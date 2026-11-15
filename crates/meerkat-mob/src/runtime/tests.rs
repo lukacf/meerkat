@@ -220,6 +220,15 @@ async fn retire_to_terminal(handle: &MobHandle, identity: &AgentIdentity) -> Res
         .await
 }
 
+/// How long a row waits for a caller answer that arrives when a test-build
+/// retire or resume window ends (`MEMBER_RETIRE_TOTAL_TIMEOUT`,
+/// `EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT`, `EXPLICIT_RESUME_PROGRESS_TIMEOUT`
+/// in `provisioner.rs`): the window, then slack for a loaded run. It only
+/// turns a hang into a failure, and it follows the window's value.
+const fn past_window(window: Duration) -> Duration {
+    window.saturating_add(Duration::from_secs(20))
+}
+
 struct TestPeerProjectionAuthorityState {
     dsl: TestMeerkatMachineAuthority,
 }
@@ -52034,7 +52043,7 @@ async fn test_retire_fanout_notifies_150_peers_with_bounded_parallelism() {
         .await;
 
     // Join the saga to its terminal reply: a plain `retire` answers typed
-    // `MemberRetirementInProgress` once its 2 s test budget elapses while the
+    // `MemberRetirementInProgress` once its test-build budget elapses while the
     // saga keeps running, which a loaded threaded run reaches.
     let started = Instant::now();
     retire_to_terminal(&handle, &retiring)
@@ -57331,17 +57340,19 @@ async fn test_retire_member_bounds_finalization_boundary_and_retry_keeps_authori
     let gate = service.install_non_reentrant_turn_finalization_gate();
     let held_gate = Arc::clone(&gate).lock_owned().await;
     let started = Instant::now();
+    // The row tests the deadline path of `retire_member_until`, so it passes
+    // its own two-second deadline instead of the retire window of the build.
     let error = provisioner
         .retire_member_until(
             &member_ref,
             &AgentIdentity::from("retiring"),
-            Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT,
+            Instant::now() + Duration::from_secs(2),
         )
         .await
         .expect_err("wedged B acquisition must return a typed retry outcome");
     assert!(
         started.elapsed() < Duration::from_secs(3),
-        "retire must return within its one test budget"
+        "retire must return at its caller's deadline"
     );
     assert!(matches!(
         &error,
@@ -57670,11 +57681,13 @@ async fn test_retire_member_bounds_wedged_exact_control_and_retry_converges() {
         .and_then(|snapshot| snapshot.control.current_run_id)
         .expect("fixture must expose exact active run");
 
+    // The row tests the deadline path of `retire_member_until`, so it passes
+    // its own two-second deadline instead of the retire window of the build.
     let error = provisioner
         .retire_member_until(
             &member_ref,
             &AgentIdentity::from("retiring"),
-            Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT,
+            Instant::now() + Duration::from_secs(2),
         )
         .await
         .expect_err("wedged exact control must return retirement-in-progress");
@@ -58766,11 +58779,14 @@ async fn test_retire_publishes_retiring_before_wedged_control_and_retry_is_bound
         "Retiring must fence new member work while control callback is wedged"
     );
 
-    let first_error = tokio::time::timeout(Duration::from_secs(3), first_retire)
-        .await
-        .expect("first retire must honor the test owner deadline")
-        .expect("retire task should not panic")
-        .expect_err("wedged control must return retirement-in-progress");
+    let first_error = tokio::time::timeout(
+        past_window(super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT),
+        first_retire,
+    )
+    .await
+    .expect("first retire must honor the test owner deadline")
+    .expect("retire task should not panic")
+    .expect_err("wedged control must return retirement-in-progress");
     assert!(
         is_retirement_in_progress(&first_error),
         "wedged exact control must retain typed retirement authority: {first_error:?}"
@@ -58784,7 +58800,7 @@ async fn test_retire_publishes_retiring_before_wedged_control_and_retry_is_bound
     assert_eq!(service.archive_call_count(&session_id).await, 0);
 
     let retry_error = tokio::time::timeout(
-        Duration::from_secs(3),
+        past_window(super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT),
         handle.retire(AgentIdentity::from(member_id.as_str())),
     )
     .await
@@ -58894,11 +58910,14 @@ async fn test_retire_deadline_after_archive_commit_retains_anchor_and_retry_conv
         "durable archive must already hold before the injected callback wedge"
     );
 
-    let first_error = tokio::time::timeout(Duration::from_secs(3), first)
-        .await
-        .expect("retire must return within its owner deadline")
-        .expect("retire task should not panic")
-        .expect_err("post-commit callback wedge must return retirement-in-progress");
+    let first_error = tokio::time::timeout(
+        past_window(super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT),
+        first,
+    )
+    .await
+    .expect("retire must return within its owner deadline")
+    .expect("retire task should not panic")
+    .expect_err("post-commit callback wedge must return retirement-in-progress");
     assert!(
         is_retirement_in_progress(&first_error),
         "post-commit archive wedge must retain typed retirement authority: {first_error:?}"
@@ -58915,7 +58934,7 @@ async fn test_retire_deadline_after_archive_commit_retains_anchor_and_retry_conv
     );
 
     let retry_error = tokio::time::timeout(
-        Duration::from_secs(3),
+        past_window(super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT),
         handle.retire(AgentIdentity::from(member_id.as_str())),
     )
     .await
@@ -70863,7 +70882,13 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
         assert_eq!(data["authority_retained"], true);
     };
 
-    let first = tokio::time::timeout(Duration::from_secs(3), resumed.resume())
+    // A wedged takeover answers when a resume window of the build ends: the
+    // caller deadline or the observer's inactivity window, whichever is first.
+    let resume_answer_bound = past_window(
+        super::provisioner::EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT
+            .max(super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT),
+    );
+    let first = tokio::time::timeout(resume_answer_bound, resumed.resume())
         .await
         .expect("first explicit resume must remain caller-bounded")
         .expect_err("wedged exact takeover must report retained authority");
@@ -70874,7 +70899,7 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
         "one process-owned exact takeover must remain blocked behind B"
     );
 
-    let second = tokio::time::timeout(Duration::from_secs(3), resumed.resume())
+    let second = tokio::time::timeout(resume_answer_bound, resumed.resume())
         .await
         .expect("level-trigger retry must remain caller-bounded")
         .expect_err("retry must join the retained takeover");
@@ -70886,7 +70911,7 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
     );
 
     drop(held_gate);
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(resume_answer_bound, async {
         loop {
             match resumed.resume().await {
                 Ok(()) => break,
@@ -71062,8 +71087,12 @@ async fn test_explicit_resume_host_materialization_uses_typed_host_terminality()
             panic!("expected ResumeLifecycle command");
         };
         admission.admit();
+        // The host-owned stage outlasts the observer's inactivity window.
         for (member_id, delay) in [
-            (AgentIdentity::from("slow-a"), Duration::from_millis(2_200)),
+            (
+                AgentIdentity::from("slow-a"),
+                super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT + Duration::from_millis(200),
+            ),
             (AgentIdentity::from("slow-b"), Duration::from_millis(100)),
         ] {
             progress.awaiting_member(
@@ -71080,7 +71109,7 @@ async fn test_explicit_resume_host_materialization_uses_typed_host_terminality()
     });
 
     tokio::time::timeout(
-        Duration::from_secs(4),
+        past_window(super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT),
         shared_handle.resume_until_for_test(Instant::now() + Duration::from_millis(100)),
     )
     .await
@@ -71144,7 +71173,11 @@ async fn test_explicit_resume_member_preparation_progress_rearms_inactivity_watc
 
     let boundary_baseline = service.turn_finalization_acquire_counts();
     let materialization_baseline = service.recorded_create_requests().await.len();
-    let per_member_delay = Duration::from_millis(550);
+    // Each member's preparation stays inside one resume window; the five
+    // together outlast it.
+    let per_member_delay = super::provisioner::EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT
+        / u32::try_from(MEMBER_COUNT).expect("member count fits")
+        + Duration::from_millis(150);
     for session_id in session_ids {
         service
             .delay_next_turn_finalization_acquire(session_id, per_member_delay)
@@ -71152,10 +71185,13 @@ async fn test_explicit_resume_member_preparation_progress_rearms_inactivity_watc
     }
 
     let started = Instant::now();
-    tokio::time::timeout(Duration::from_secs(5), resumed.resume())
-        .await
-        .expect("cumulative explicit Resume stays within the test harness bound")
-        .expect("each member owns a fresh retirement budget after Resume admission");
+    tokio::time::timeout(
+        past_window(super::provisioner::EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT),
+        resumed.resume(),
+    )
+    .await
+    .expect("cumulative explicit Resume stays within the test harness bound")
+    .expect("each member owns a fresh retirement budget after Resume admission");
     let elapsed = started.elapsed();
     let pending_delays = service.turn_finalization_delays_once.read().await.len();
     assert_eq!(
@@ -71217,7 +71253,7 @@ async fn test_explicit_resume_progress_stall_names_member_and_remains_joinable()
     });
 
     let error = tokio::time::timeout(
-        Duration::from_secs(3),
+        past_window(super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT),
         shared_handle.resume_until_for_test(Instant::now() + Duration::from_millis(100)),
     )
     .await
@@ -71338,15 +71374,23 @@ async fn explicit_resume_successor_scan_reports_progress_and_scans_realm_once() 
         .map(|session_id| service.persisted_session_metadata_reads_for(session_id))
         .collect();
 
-    // 21+ realm sessions at 120 ms each: the single scan alone outlasts the
-    // 2 s test inactivity watchdog, so only per-session progress keeps it
-    // alive. A per-member rescan would additionally triple the reads.
-    service.set_persisted_session_metadata_delay_ms(120);
+    // 21+ realm sessions, each read a little over a 21st of the inactivity
+    // watchdog's window: the single scan alone outlasts the window, so only
+    // per-session progress keeps it alive. A per-member rescan would
+    // additionally triple the reads.
+    let per_read =
+        super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT / 21 + Duration::from_millis(25);
+    service.set_persisted_session_metadata_delay_ms(
+        u64::try_from(per_read.as_millis()).expect("the read delay fits"),
+    );
     let started = Instant::now();
-    tokio::time::timeout(Duration::from_secs(30), handle.resume())
-        .await
-        .expect("slow successor scan completes within the harness bound")
-        .expect("a scan that keeps reporting progress must not stall the resume");
+    tokio::time::timeout(
+        super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT * 2 + Duration::from_secs(30),
+        handle.resume(),
+    )
+    .await
+    .expect("slow successor scan completes within the harness bound")
+    .expect("a scan that keeps reporting progress must not stall the resume");
     let elapsed = started.elapsed();
     service.set_persisted_session_metadata_delay_ms(0);
     assert!(
@@ -78575,7 +78619,7 @@ async fn test_retire_saturated_actor_queue_reports_not_admitted_without_authorit
     };
 
     let error = tokio::time::timeout(
-        Duration::from_secs(3),
+        past_window(super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT),
         blocked_handle.retire(identity.clone()),
     )
     .await

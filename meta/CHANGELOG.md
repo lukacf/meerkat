@@ -18,6 +18,37 @@ Security, Upgrade and Changed.
   variants `Archive` (an archive and an unarchive) and `Adopt`. A match on it
   needs both arms.
 
+- Behaviour-only (not measured by the gate): on the Console,
+  `meta/mob_announcements/declarations/apply` refuses a declared
+  subscription of one member that the applied declarations do not already
+  hold unchanged when it names a member that is not seated, or is private
+  to another person: `-32047` `unknown_member`, and nothing is applied. A
+  member this gateway does not serve, and a member of a peer that cannot
+  be used, are not seated. While the member's check cannot be read, the
+  apply is refused for now: `-32047` `native_unavailable`, nothing is
+  applied, and the same apply can be made again later.
+  Seat the member first, or apply the declarations over the stdio gateway
+  (or declare them in the gateway's options or its sidecar), where a
+  subscription for a member that is not seated yet is kept pending. A
+  subscription the applied declarations already hold unchanged is carried
+  as it is, and role-selected subscriptions are declared as before.
+
+- Behaviour-only (not measured by the gate): on the Console,
+  `meta/mob_announcements/sources/put` refuses a source that names, in an
+  audience member grant, a triage route, a forward audience or its
+  conversation members, a member that is not seated, or is private to
+  another person: `-32047` `unknown_member`, and nothing is written. A
+  member this gateway does not serve, and a member of a peer that cannot
+  be used, are not seated. While a named member's check cannot be read,
+  the put is refused for now: `-32047` `native_unavailable`, nothing is
+  written, and the same put can be made again later. The
+  same holds for a source declared through
+  `meta/mob_announcements/declarations/apply` on the Console, unless the
+  applied declarations already hold it unchanged. Seat the member first, or
+  put or declare the source over the stdio gateway (or in the gateway's
+  options or its sidecar), which stores it as before. A member of a mob on
+  another gateway is named as before.
+
 - Rust API of `meerkat-meta`, `identity_creation`: `NameTakenBy` loses the
   variants `Declared` and `Created` and gains `Identity`. A `name_taken`
   refusal names its holder as `identity`, `removed`, `worker` or `unreadable`.
@@ -317,6 +348,12 @@ Security, Upgrade and Changed.
   0.9.14 such an agent was built from its record at once.
   `UnifiedRuntimeBuilder` and both gateway binaries complete the bootstrap
   themselves.
+
+- If a client of yours applies announcement declarations or puts an
+  announcement source through the Console: a declared subscription for a
+  member that is not seated yet, and a source that names such a member, are
+  refused there (see Breaking). Seat the member first, or use the stdio
+  gateway.
 
 - Hosts whose customizer has side effects: see Known limitations, respawn
   during a pending role move.
@@ -1456,6 +1493,29 @@ Security, Upgrade and Changed.
 - Console sidebar: the Workbench section now sits between **Needs you** and
   the roster, so the roster's search and view controls are directly above
   the roster list.
+
+- On the Console, the mob announcement methods (`meta/mob_announcements/*`)
+  keep an agent private to another person, and its records, from a caller
+  who is not its owner, as the Console's other methods do. A subscription,
+  a delivery, a declared subscription and an escalation of such an agent
+  are answered as ones that do not exist and are left out of listings,
+  whose pages are filled from the other rows. An id that such a record
+  holds is answered as taken. An answer about a source, and a refusal, name
+  no such agent. A declarations apply leaves the declared subscriptions of
+  such agents as they are. A member is judged as the agent the view speaks
+  of when this gateway's runtime holds its mob; every member is judged
+  while that cannot be said, and only a member of a mob that is positively
+  another gateway's (one the contact directory files a peer under) is
+  judged as itself. The stdio gateway, whose caller is the host, answers as
+  before.
+
+- At every start, a gateway with mob announcements logs one WARN line
+  under the target
+  `meerkat_meta::mob_announcements::private_member_subscriptions` while
+  live subscriptions deliver into agents private to a person
+  (`console.private_to`): how many there are (active or paused), and how
+  many of those do not have the id form the agent's own tool gives. The
+  line names no agent and no subscription.
 
 ### Fixed
 
